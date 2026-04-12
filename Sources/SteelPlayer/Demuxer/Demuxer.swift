@@ -71,15 +71,22 @@ final class Demuxer {
         return ctx.pointee.streams[Int(index)]
     }
 
-    /// Read the next packet from the container. Returns nil at EOF.
-    func readPacket() -> UnsafeMutablePointer<AVPacket>? {
+    /// Read the next packet from the container.
+    /// Returns the packet on success, nil at EOF.
+    /// Throws on read errors (network failure, corrupt data, etc).
+    func readPacket() throws -> UnsafeMutablePointer<AVPacket>? {
         guard let ctx = formatContext else { return nil }
         var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
         guard packet != nil else { return nil }
         let ret = av_read_frame(ctx, packet)
         if ret < 0 {
             av_packet_free(&packet)
-            return nil  // EOF or error
+            // AVERROR_EOF is negative; any other negative value is an error
+            let isEOF = (ret == -541478725)  // AVERROR_EOF = FFERRTAG(0xF8,'E','O','F')
+            if isEOF {
+                return nil
+            }
+            throw DemuxerError.readFailed(code: ret)
         }
         return packet
     }
@@ -88,7 +95,12 @@ final class Demuxer {
     func seek(to seconds: Double) {
         guard let ctx = formatContext else { return }
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
-        av_seek_frame(ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD)
+        let ret = av_seek_frame(ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD)
+        if ret < 0 {
+            #if DEBUG
+            print("[Demuxer] Seek to \(seconds)s failed: \(ret)")
+            #endif
+        }
     }
 
     /// Close the format context and release resources.
@@ -107,4 +119,5 @@ final class Demuxer {
 enum DemuxerError: Error {
     case openFailed(code: Int32)
     case streamInfoFailed(code: Int32)
+    case readFailed(code: Int32)
 }

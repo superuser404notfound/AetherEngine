@@ -67,20 +67,28 @@ public final class SteelPlayer: ObservableObject {
     private var displayTimer: Timer?
     #endif
 
-    /// Controls whether the demux loop is actively reading packets.
-    private var isPlaying = false
+    /// Thread-safe playback control flags. These are written from the
+    /// main thread (play/pause/stop) and read from the demux queue.
+    /// Using NSLock instead of bare Bool to prevent data races.
+    private let flagsLock = NSLock()
+    private var _isPlaying = false
+    private var _stopRequested = false
 
-    /// Set to true to signal the demux loop to exit.
-    private var stopRequested = false
+    private var isPlaying: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
+        set { flagsLock.lock(); defer { flagsLock.unlock() }; _isPlaying = newValue }
+    }
+    private var stopRequested: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _stopRequested }
+        set { flagsLock.lock(); defer { flagsLock.unlock() }; _stopRequested = newValue }
+    }
 
     // MARK: - Init
 
-    public init() {
-        do {
-            self.renderer = try MetalRenderer()
-        } catch {
-            fatalError("SteelPlayer: Metal initialization failed: \(error)")
-        }
+    /// Initialize the player. Can fail if the Metal device or shader
+    /// library is not available (shouldn't happen on real Apple hardware).
+    public init() throws {
+        self.renderer = try MetalRenderer()
     }
 
     // MARK: - Public API
@@ -126,7 +134,11 @@ public final class SteelPlayer: ObservableObject {
         // 2b. Find the audio stream and open the audio decoder
         let audioIdx = demuxer.audioStreamIndex
         if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
-            try? audioDecoder.open(stream: audioStream)
+            do {
+                try audioDecoder.open(stream: audioStream)
+            } catch {
+                print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
+            }
         }
 
         // 3. Activate AVAudioSession (required on tvOS/iOS for audio output)
@@ -136,9 +148,7 @@ public final class SteelPlayer: ObservableObject {
             try session.setCategory(.playback, mode: .moviePlayback)
             try session.setActive(true)
         } catch {
-            #if DEBUG
             print("[SteelPlayer] AVAudioSession error: \(error)")
-            #endif
         }
         #endif
 
@@ -269,12 +279,24 @@ public final class SteelPlayer: ObservableObject {
                 }
 
                 // Read the next packet from the container
-                guard let packet = self.demuxer.readPacket() else {
+                let packet: UnsafeMutablePointer<AVPacket>?
+                do {
+                    packet = try self.demuxer.readPacket()
+                } catch {
+                    // Read error (network, corrupt data, etc)
+                    print("[SteelPlayer] Demuxer read error: \(error)")
+                    Task { @MainActor [weak self] in
+                        self?.state = .error("Playback error: \(error)")
+                    }
+                    break
+                }
+
+                guard let packet = packet else {
                     // EOF — flush remaining frames
                     self.videoDecoder.flush()
                     self.audioDecoder.flush()
-                    DispatchQueue.main.async {
-                        self.state = .idle
+                    Task { @MainActor [weak self] in
+                        self?.state = .idle
                     }
                     break
                 }
@@ -292,7 +314,7 @@ public final class SteelPlayer: ObservableObject {
                     }
                     // Start the synchronizer once we have first audio data
                     if !audioStarted && !sampleBuffers.isEmpty {
-                        DispatchQueue.main.async {
+                        Task { @MainActor in
                             audioOutput.start()
                         }
                         audioStarted = true
