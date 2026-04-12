@@ -39,8 +39,25 @@ final class SoftwareVideoDecoder {
             throw VideoDecoderError.noCodecParameters
         }
 
+        // Force pure software decode — prevent FFmpeg from trying
+        // VideoToolbox hwaccel internally (fails on A15 for AV1).
+        ctx.pointee.get_format = { ctx, fmts in
+            // Return the first non-hwaccel format (usually YUV420P)
+            guard let fmts = fmts else { return AV_PIX_FMT_NONE }
+            var i = 0
+            while fmts[i] != AV_PIX_FMT_NONE {
+                let fmt = fmts[i]
+                // Skip hardware formats (VideoToolbox, etc.)
+                if fmt != AV_PIX_FMT_VIDEOTOOLBOX {
+                    return fmt
+                }
+                i += 1
+            }
+            return AV_PIX_FMT_YUV420P
+        }
+
         // Use all available CPU cores for software decode
-        ctx.pointee.thread_count = 0  // auto-detect
+        ctx.pointee.thread_count = 4
         ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
 
         guard avcodec_open2(ctx, codec, nil) >= 0 else {
