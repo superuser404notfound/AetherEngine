@@ -26,6 +26,12 @@ final class AudioOutput {
         #endif
     }
 
+    /// Add the video display layer to the synchronizer so Apple handles
+    /// A/V sync and frame pacing automatically.
+    func addVideoRenderer(_ displayLayer: AVSampleBufferDisplayLayer) {
+        synchronizer.addRenderer(displayLayer)
+    }
+
     /// Start audio playback at the given time. Call after enqueueing first samples.
     func start(at time: CMTime = .zero) {
         lock.lock()
