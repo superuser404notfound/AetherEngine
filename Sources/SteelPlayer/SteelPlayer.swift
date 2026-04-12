@@ -196,11 +196,12 @@ public final class SteelPlayer: ObservableObject {
         let target = max(0, seconds)
         state = .seeking
 
-        // Flush everything: frame queue, decoders, audio renderer
+        // Flush everything: frame queue, decoders, audio renderer, texture cache
         frameQueue.flush()
         videoDecoder.flush()
         audioDecoder.flush()
         audioOutput.flush()
+        renderer.flushTextureCache()
 
         // Seek the demuxer to the new position
         demuxer.seek(to: target)

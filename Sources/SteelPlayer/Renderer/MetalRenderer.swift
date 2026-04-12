@@ -7,14 +7,9 @@ import QuartzCore
 /// via a Metal render pipeline. Handles:
 ///
 /// - CVMetalTextureCache for zero-copy pixel buffer → Metal texture
-/// - Full-screen triangle vertex + passthrough fragment shader
+/// - NV12 (BiPlanar YCbCr) → RGB conversion via BT.709 shader
 /// - Aspect-fit viewport calculation (letterbox/pillarbox)
 /// - Triple-buffered in-flight semaphore
-///
-/// The actual tone mapping (HDR → SDR) will be added in Phase 4. For
-/// Phase 1, we render the decoded frame as-is (which is already in the
-/// native pixel format VideoToolbox outputs — typically NV12 YCbCr or
-/// BGRA depending on settings).
 final class MetalRenderer {
 
     // MARK: - Output
@@ -31,6 +26,9 @@ final class MetalRenderer {
 
     /// Triple-buffer guard so the GPU doesn't fall unboundedly behind.
     private let inflightSemaphore = DispatchSemaphore(value: 3)
+
+    /// Counter for periodic texture cache flush.
+    private var renderCount: Int = 0
 
     // MARK: - Init
 
@@ -59,8 +57,8 @@ final class MetalRenderer {
         guard let vertexFn = library.makeFunction(name: "steel_fullscreen_vertex") else {
             throw MetalRendererError.noShaderFunction("steel_fullscreen_vertex")
         }
-        guard let fragmentFn = library.makeFunction(name: "steel_passthrough_fragment") else {
-            throw MetalRendererError.noShaderFunction("steel_passthrough_fragment")
+        guard let fragmentFn = library.makeFunction(name: "steel_yuv_fragment") else {
+            throw MetalRendererError.noShaderFunction("steel_yuv_fragment")
         }
 
         let descriptor = MTLRenderPipelineDescriptor()
@@ -84,33 +82,45 @@ final class MetalRenderer {
 
     // MARK: - Render
 
-    /// Render a single decoded frame to the Metal layer's drawable.
-    /// Call this from the display link callback with the latest frame.
+    /// Render a single decoded NV12 frame to the Metal layer's drawable.
     func render(pixelBuffer: CVPixelBuffer) {
         // Triple-buffer: drop frame if GPU is 3+ frames behind
         if inflightSemaphore.wait(timeout: .now()) == .timedOut {
             return
         }
 
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
+        // Periodic texture cache flush to reclaim stale textures
+        renderCount += 1
+        if renderCount % 30 == 0 {
+            CVMetalTextureCacheFlush(textureCache, 0)
+        }
 
-        // Wrap the decoded BGRA pixel buffer as a Metal texture
-        var cvTexture: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            textureCache,
-            pixelBuffer,
-            nil,
-            .bgra8Unorm,
-            width,
-            height,
-            0,
-            &cvTexture
+        // Create Y plane texture (full resolution, single channel)
+        let yWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let yHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        var cvTextureY: CVMetalTexture?
+        var status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
+            .r8Unorm, yWidth, yHeight, 0, &cvTextureY
         )
         guard status == kCVReturnSuccess,
-              let cv = cvTexture,
-              let sourceTexture = CVMetalTextureGetTexture(cv) else {
+              let cvY = cvTextureY,
+              let textureY = CVMetalTextureGetTexture(cvY) else {
+            inflightSemaphore.signal()
+            return
+        }
+
+        // Create CbCr plane texture (half resolution, two channels)
+        let cbcrWidth = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1)
+        let cbcrHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
+        var cvTextureCbCr: CVMetalTexture?
+        status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, textureCache, pixelBuffer, nil,
+            .rg8Unorm, cbcrWidth, cbcrHeight, 1, &cvTextureCbCr
+        )
+        guard status == kCVReturnSuccess,
+              let cvCbCr = cvTextureCbCr,
+              let textureCbCr = CVMetalTextureGetTexture(cvCbCr) else {
             inflightSemaphore.signal()
             return
         }
@@ -135,24 +145,31 @@ final class MetalRenderer {
         encoder.setRenderPipelineState(pipelineState)
 
         let viewport = Self.aspectFitViewport(
-            source: CGSize(width: width, height: height),
+            source: CGSize(width: yWidth, height: yHeight),
             drawable: CGSize(width: drawable.texture.width, height: drawable.texture.height)
         )
         encoder.setViewport(viewport)
-        encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentTexture(textureY, index: 0)
+        encoder.setFragmentTexture(textureCbCr, index: 1)
 
         // Full-screen triangle: 3 vertices, no vertex buffer
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 
-        // Hold CVMetalTexture until GPU is done with it
+        // Hold CVMetalTexture refs until GPU is done
         cmdBuffer.addCompletedHandler { [inflightSemaphore] _ in
-            _ = cv
+            _ = cvY
+            _ = cvCbCr
             inflightSemaphore.signal()
         }
 
         cmdBuffer.present(drawable)
         cmdBuffer.commit()
+    }
+
+    /// Flush the texture cache (call on seek or when freeing memory).
+    func flushTextureCache() {
+        CVMetalTextureCacheFlush(textureCache, 0)
     }
 
     // MARK: - Viewport

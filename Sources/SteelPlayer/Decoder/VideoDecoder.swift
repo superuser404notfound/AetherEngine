@@ -222,11 +222,12 @@ final class VideoDecoder {
     private func createDecompressionSession(
         formatDescription: CMVideoFormatDescription
     ) throws -> VTDecompressionSession {
-        // Request BGRA pixel buffers that are Metal-compatible + IOSurface-backed.
-        // BGRA is requested so the Metal renderer can sample them directly
-        // without a YCbCr→RGB conversion shader (Phase 1 simplification).
+        // Request NV12 (BiPlanar YCbCr 4:2:0) — this is VideoToolbox's native
+        // output format. Requesting BGRA would force an extra CPU/GPU conversion
+        // and use 2.5x more memory per frame (31 MB vs 12 MB at 4K).
+        // The Metal shader handles YUV→RGB conversion on the GPU.
         let pixelBufferAttrs: NSDictionary = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
         ]
