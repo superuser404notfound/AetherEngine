@@ -46,29 +46,22 @@ final class AudioOutput {
     }
 
     /// Enqueue a decoded audio CMSampleBuffer for playback.
+    /// Always enqueues — the renderer buffers internally. Checking
+    /// isReadyForMoreMediaData caused early samples to be dropped
+    /// before the synchronizer started, resulting in silence.
     func enqueue(sampleBuffer: CMSampleBuffer) {
-        if renderer.isReadyForMoreMediaData {
-            renderer.enqueue(sampleBuffer)
-            #if DEBUG
-            enqueueCount += 1
-            if enqueueCount <= 3 {
-                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-                print("[AudioOutput] Enqueued sample #\(enqueueCount), pts=\(CMTimeGetSeconds(pts))s")
-            }
-            #endif
-        } else {
-            #if DEBUG
-            dropCount += 1
-            if dropCount <= 3 {
-                print("[AudioOutput] Renderer not ready — dropped audio sample")
-            }
-            #endif
+        renderer.enqueue(sampleBuffer)
+        #if DEBUG
+        enqueueCount += 1
+        if enqueueCount <= 3 {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            print("[AudioOutput] Enqueued sample #\(enqueueCount), pts=\(CMTimeGetSeconds(pts))s")
         }
+        #endif
     }
 
     #if DEBUG
     private var enqueueCount = 0
-    private var dropCount = 0
     #endif
 
     /// The current playback time according to the audio synchronizer.

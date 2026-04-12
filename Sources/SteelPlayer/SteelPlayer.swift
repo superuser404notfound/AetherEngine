@@ -360,11 +360,11 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start the synchronizer once we have first audio data
+                    // Start the synchronizer once we have first audio data.
+                    // Called directly (not via Task/@MainActor) because
+                    // setRate() is thread-safe and delaying causes drops.
                     if !audioStarted && !sampleBuffers.isEmpty {
-                        Task { @MainActor in
-                            audioOutput.start()
-                        }
+                        audioOutput.start()
                         audioStarted = true
                     }
                 }
