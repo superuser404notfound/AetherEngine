@@ -10,16 +10,26 @@ struct VideoFrame {
     let pts: Double
 }
 
-/// Thread-safe FIFO queue for decoded video frames. The decoder pushes
-/// frames from VideoToolbox's callback thread, and the render loop
-/// pulls them on the display link thread.
+/// Thread-safe PTS-sorted queue for decoded video frames with semaphore-based
+/// back-pressure. The decoder pushes frames from VideoToolbox's callback thread,
+/// and the render loop pulls them on the display link thread.
+///
+/// Instead of busy-waiting when the queue is full, producers block on
+/// `waitForSpace()` and are woken when a frame is consumed.
 final class FrameQueue: @unchecked Sendable {
     private var frames: [VideoFrame] = []
     private let lock = NSLock()
     private let capacity: Int
 
+    /// Signaled when a frame is consumed, allowing a blocked producer to proceed.
+    private let spaceAvailable: DispatchSemaphore
+
+    /// Signaled when the demux loop should wake up (play/resume/stop).
+    let wakeUp = DispatchSemaphore(value: 0)
+
     init(capacity: Int = 8) {
         self.capacity = capacity
+        self.spaceAvailable = DispatchSemaphore(value: capacity)
     }
 
     /// Number of buffered frames.
@@ -36,25 +46,34 @@ final class FrameQueue: @unchecked Sendable {
         return frames.count < capacity
     }
 
-    /// Push a decoded frame. Drops the frame silently if the queue is full.
-    /// Inserts in PTS-sorted order so pop/peek are O(1).
+    /// Block until there's space in the queue, or until the timeout expires.
+    /// Returns true if space is available, false on timeout.
+    func waitForSpace(timeout: DispatchTime = .now() + .milliseconds(50)) -> Bool {
+        if spaceAvailable.wait(timeout: timeout) == .success {
+            return true
+        }
+        return false
+    }
+
+    /// Push a decoded frame. Maintains PTS-sorted order (binary search insert).
+    /// Caller should have previously called `waitForSpace()`.
     func push(_ frame: VideoFrame) {
         lock.lock()
         defer { lock.unlock() }
         guard frames.count < capacity else { return }
-        // Binary search for insertion point to maintain PTS order.
-        // Frames from VideoToolbox usually arrive in order, so the
-        // common case is appending at the end (O(1) amortized).
         let insertIdx = frames.firstIndex(where: { $0.pts > frame.pts }) ?? frames.endIndex
         frames.insert(frame, at: insertIdx)
     }
 
     /// Pull the next frame (earliest PTS). Returns nil if empty.
+    /// Signals the space semaphore so a blocked producer can proceed.
     func pop() -> VideoFrame? {
         lock.lock()
         defer { lock.unlock() }
         guard !frames.isEmpty else { return nil }
-        return frames.removeFirst()
+        let frame = frames.removeFirst()
+        spaceAvailable.signal()
+        return frame
     }
 
     /// Peek at the next frame (earliest PTS) without removing it.
@@ -64,10 +83,15 @@ final class FrameQueue: @unchecked Sendable {
         return frames.first
     }
 
-    /// Remove all frames.
+    /// Remove all frames and reset the space semaphore.
     func flush() {
         lock.lock()
-        defer { lock.unlock() }
+        let count = frames.count
         frames.removeAll()
+        lock.unlock()
+        // Restore semaphore to full capacity
+        for _ in 0..<count {
+            spaceAvailable.signal()
+        }
     }
 }

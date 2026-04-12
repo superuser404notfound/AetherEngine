@@ -67,20 +67,33 @@ public final class SteelPlayer: ObservableObject {
     private var displayTimer: Timer?
     #endif
 
-    /// Thread-safe playback control flags. These are written from the
-    /// main thread (play/pause/stop) and read from the demux queue.
-    /// Using NSLock instead of bare Bool to prevent data races.
+    /// Thread-safe playback control flags.
     private let flagsLock = NSLock()
     private var _isPlaying = false
     private var _stopRequested = false
 
+    /// Whether the audio stream was successfully opened.
+    private var audioAvailable = false
+
     private var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
-        set { flagsLock.lock(); defer { flagsLock.unlock() }; _isPlaying = newValue }
+        set {
+            flagsLock.lock()
+            _isPlaying = newValue
+            flagsLock.unlock()
+            // Wake up the demux loop if resuming
+            if newValue { frameQueue.wakeUp.signal() }
+        }
     }
     private var stopRequested: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _stopRequested }
-        set { flagsLock.lock(); defer { flagsLock.unlock() }; _stopRequested = newValue }
+        set {
+            flagsLock.lock()
+            _stopRequested = newValue
+            flagsLock.unlock()
+            // Wake up demux loop so it can exit
+            if newValue { frameQueue.wakeUp.signal() }
+        }
     }
 
     // MARK: - Init
@@ -104,70 +117,76 @@ public final class SteelPlayer: ObservableObject {
         progress = 0
         audioTracks = []
         subtitleTracks = []
+        audioAvailable = false
         stopRequested = false
 
         #if DEBUG
         print("[SteelPlayer] Loading: \(url.absoluteString)")
         #endif
 
-        // 1. Open the container with FFmpeg
-        try demuxer.open(url: url)
-        duration = demuxer.duration
-
-        // 2. Find the video stream and open the hardware decoder
-        let videoIdx = demuxer.videoStreamIndex
-        guard videoIdx >= 0, let videoStream = demuxer.stream(at: videoIdx) else {
-            throw SteelPlayerError.noVideoStream
-        }
-
-        try videoDecoder.open(stream: videoStream) { [weak self] pixelBuffer, pts in
-            // This callback fires on VideoToolbox's internal thread
-            guard let self = self else { return }
-            let seconds = CMTimeGetSeconds(pts)
-            let frame = VideoFrame(
-                pixelBuffer: pixelBuffer,
-                pts: seconds.isFinite ? seconds : 0
-            )
-            self.frameQueue.push(frame)
-        }
-
-        // 2b. Find the audio stream and open the audio decoder
-        let audioIdx = demuxer.audioStreamIndex
-        if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
-            do {
-                try audioDecoder.open(stream: audioStream)
-            } catch {
-                print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
-            }
-        }
-
-        // 3. Activate AVAudioSession (required on tvOS/iOS for audio output)
-        #if os(iOS) || os(tvOS)
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
+            // 1. Open the container with FFmpeg
+            try demuxer.open(url: url)
+            duration = demuxer.duration
+
+            // 2. Find the video stream and open the hardware decoder
+            let videoIdx = demuxer.videoStreamIndex
+            guard videoIdx >= 0, let videoStream = demuxer.stream(at: videoIdx) else {
+                throw SteelPlayerError.noVideoStream
+            }
+
+            try videoDecoder.open(stream: videoStream) { [weak self] pixelBuffer, pts in
+                guard let self = self else { return }
+                let seconds = CMTimeGetSeconds(pts)
+                let frame = VideoFrame(
+                    pixelBuffer: pixelBuffer,
+                    pts: seconds.isFinite ? seconds : 0
+                )
+                self.frameQueue.push(frame)
+            }
+
+            // 2b. Find the audio stream and open the audio decoder
+            let audioIdx = demuxer.audioStreamIndex
+            if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
+                do {
+                    try audioDecoder.open(stream: audioStream)
+                    audioAvailable = true
+                } catch {
+                    print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
+                }
+            }
+
+            // 3. Activate AVAudioSession (required on tvOS/iOS for audio output)
+            #if os(iOS) || os(tvOS)
+            do {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+                try session.setActive(true)
+            } catch {
+                print("[SteelPlayer] AVAudioSession error: \(error)")
+            }
+            #endif
+
+            // 4. Seek to start position if requested
+            if let start = startPosition, start > 0 {
+                demuxer.seek(to: start)
+            }
+
+            // 5. Start the display link (render loop)
+            startDisplayLink()
+
+            // 6. Start the demux→decode loop on a background thread
+            isPlaying = true
+            state = .playing
+            startDemuxLoop(videoStreamIndex: videoIdx, audioStreamIndex: audioIdx)
+
+            #if DEBUG
+            print("[SteelPlayer] Playback started (duration=\(String(format: "%.1f", duration))s)")
+            #endif
         } catch {
-            print("[SteelPlayer] AVAudioSession error: \(error)")
+            state = .error("Failed to load: \(error.localizedDescription)")
+            throw error
         }
-        #endif
-
-        // 4. Seek to start position if requested
-        if let start = startPosition, start > 0 {
-            demuxer.seek(to: start)
-        }
-
-        // 5. Start the display link (render loop)
-        startDisplayLink()
-
-        // 6. Start the demux→decode loop on a background thread
-        isPlaying = true
-        state = .playing
-        startDemuxLoop(videoStreamIndex: videoIdx, audioStreamIndex: audioIdx)
-
-        #if DEBUG
-        print("[SteelPlayer] Playback started (duration=\(String(format: "%.1f", duration))s)")
-        #endif
     }
 
     public func play() {
@@ -207,8 +226,9 @@ public final class SteelPlayer: ObservableObject {
         demuxer.seek(to: target)
         currentTime = target
 
-        // Restart audio from the new position
-        audioOutput.start()
+        // Set the audio clock to the seek target (not .zero!)
+        let seekTime = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
+        audioOutput.start(at: seekTime)
 
         // Resume playing
         isPlaying = true
@@ -250,32 +270,33 @@ public final class SteelPlayer: ObservableObject {
         audioDecoder.close()
         demuxer.close()
         frameQueue.flush()
+        audioAvailable = false
     }
 
     // MARK: - Demux Loop
 
     /// Runs on `demuxQueue`. Reads packets from the demuxer and feeds
-    /// them to the video decoder. The decoder's callback pushes decoded
-    /// frames into the frame queue. Audio packets are ignored for now
-    /// (Phase 2).
+    /// them to the appropriate decoders. Uses semaphore-based back-pressure
+    /// instead of busy-waiting.
     private func startDemuxLoop(videoStreamIndex: Int32, audioStreamIndex: Int32) {
         let audioOutput = self.audioOutput
         let audioDecoder = self.audioDecoder
+        let audioAvailable = self.audioAvailable
         var audioStarted = false
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }
 
             while !self.stopRequested {
-                // Wait if paused
+                // Wait if paused — blocks until wakeUp is signaled
                 if !self.isPlaying {
-                    Thread.sleep(forTimeInterval: 0.01)
+                    _ = self.frameQueue.wakeUp.wait(timeout: .now() + .milliseconds(100))
                     continue
                 }
 
-                // Back-pressure: wait if the video frame queue is full
-                if !self.frameQueue.hasSpace {
-                    Thread.sleep(forTimeInterval: 0.005)
+                // Back-pressure: block until the frame queue has space
+                if !self.frameQueue.waitForSpace(timeout: .now() + .milliseconds(50)) {
+                    // Check stop/pause flags while waiting
                     continue
                 }
 
@@ -284,7 +305,6 @@ public final class SteelPlayer: ObservableObject {
                 do {
                     packet = try self.demuxer.readPacket()
                 } catch {
-                    // Read error (network, corrupt data, etc)
                     print("[SteelPlayer] Demuxer read error: \(error)")
                     Task { @MainActor [weak self] in
                         self?.state = .error("Playback error: \(error)")
@@ -305,10 +325,8 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // Video packet → hardware decode
                     self.videoDecoder.decode(packet: packet)
-                } else if streamIdx == audioStreamIndex {
-                    // Audio packet → software decode → enqueue for playback
+                } else if streamIdx == audioStreamIndex && audioAvailable {
                     let sampleBuffers = audioDecoder.decode(packet: packet)
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
@@ -362,17 +380,17 @@ public final class SteelPlayer: ObservableObject {
 ///
 /// Implements A/V sync: peeks at the next video frame's PTS and compares
 /// it to the audio synchronizer's current time. Renders only when the
-/// frame is "due" (within a small tolerance). Drops frames that are too
-/// late, and waits for frames that are too early.
+/// frame is "due" (within tolerance). Drops late frames, waits for early ones.
 private class DisplayLinkTarget {
     let renderer: MetalRenderer
     let frameQueue: FrameQueue
     let audioOutput: AudioOutput
     weak var player: SteelPlayer?
 
-    /// Tolerance: render a frame if it's within this many seconds of
-    /// the current audio time. Accounts for display refresh jitter.
-    private let syncTolerance: Double = 0.04  // 40ms ≈ 2.5 frames at 60Hz
+    /// Render a frame if it's within 20ms of the audio clock.
+    private let earlyThreshold: Double = 0.020
+    /// Drop a frame if it's more than 40ms behind the audio clock.
+    private let lateThreshold: Double = 0.040
 
     init(renderer: MetalRenderer, frameQueue: FrameQueue, audioOutput: AudioOutput, player: SteelPlayer) {
         self.renderer = renderer
@@ -394,7 +412,7 @@ private class DisplayLinkTarget {
     private func renderNextFrame() {
         let clockTime = audioOutput.currentTimeSeconds
 
-        // If audio hasn't started yet (clock = 0), just render the first
+        // If audio hasn't started yet (clock = 0), render the first
         // available frame so the user sees something immediately.
         if clockTime <= 0 {
             guard let frame = frameQueue.pop() else { return }
@@ -407,13 +425,13 @@ private class DisplayLinkTarget {
         while let frame = frameQueue.peek() {
             let delta = frame.pts - clockTime
 
-            if delta < -syncTolerance {
+            if delta < -lateThreshold {
                 // Frame is late — drop it and try the next one
                 _ = frameQueue.pop()
                 continue
             }
 
-            if delta > syncTolerance {
+            if delta > earlyThreshold {
                 // Frame is early — wait for the next display link tick
                 break
             }

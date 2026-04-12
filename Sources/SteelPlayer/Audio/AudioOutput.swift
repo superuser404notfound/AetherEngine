@@ -13,7 +13,8 @@ final class AudioOutput {
     let renderer: AVSampleBufferAudioRenderer
     let synchronizer: AVSampleBufferRenderSynchronizer
 
-    private var isStarted = false
+    private let lock = NSLock()
+    private var _isStarted = false
 
     init() {
         renderer = AVSampleBufferAudioRenderer()
@@ -25,11 +26,13 @@ final class AudioOutput {
         #endif
     }
 
-    /// Start audio playback. Call after enqueueing the first audio samples.
-    func start() {
-        guard !isStarted else { return }
-        synchronizer.setRate(1.0, time: .zero)
-        isStarted = true
+    /// Start audio playback at the given time. Call after enqueueing first samples.
+    func start(at time: CMTime = .zero) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !_isStarted else { return }
+        synchronizer.setRate(1.0, time: time)
+        _isStarted = true
     }
 
     /// Pause audio (and the master clock).
@@ -50,8 +53,6 @@ final class AudioOutput {
     }
 
     /// The current playback time according to the audio synchronizer.
-    /// This is the **master clock** — video frames should be rendered
-    /// when their PTS matches this value.
     var currentTime: CMTime {
         synchronizer.currentTime()
     }
@@ -64,14 +65,18 @@ final class AudioOutput {
 
     /// Flush the audio renderer (call on seek).
     func flush() {
+        lock.lock()
+        defer { lock.unlock() }
         renderer.flush()
-        isStarted = false
+        _isStarted = false
     }
 
     /// Stop and tear down.
     func stop() {
+        lock.lock()
+        defer { lock.unlock() }
         synchronizer.setRate(0.0, time: .zero)
         renderer.flush()
-        isStarted = false
+        _isStarted = false
     }
 }

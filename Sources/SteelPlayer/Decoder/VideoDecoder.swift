@@ -20,7 +20,15 @@ final class VideoDecoder {
 
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
-    fileprivate var onFrame: DecodedFrameHandler?
+
+    /// Thread-safe access to the frame callback. Written on the main thread
+    /// (open/close), read on VideoToolbox's internal callback thread.
+    private let onFrameLock = NSLock()
+    private var _onFrame: DecodedFrameHandler?
+    fileprivate var onFrame: DecodedFrameHandler? {
+        get { onFrameLock.lock(); defer { onFrameLock.unlock() }; return _onFrame }
+        set { onFrameLock.lock(); defer { onFrameLock.unlock() }; _onFrame = newValue }
+    }
 
     /// The stream's time base as a rational number, used to convert
     /// PTS from FFmpeg's int64 to CMTime.
