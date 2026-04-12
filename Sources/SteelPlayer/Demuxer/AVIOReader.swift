@@ -3,17 +3,14 @@ import Libavformat
 import Libavutil
 
 /// Custom AVIO context that feeds data to FFmpeg via URLSession HTTP Range
-/// requests. This replaces FFmpeg's built-in network stack (which is disabled
-/// in FFmpegBuild) while keeping file:// URLs handled natively by FFmpeg.
+/// requests. Replaces FFmpeg's built-in network stack (disabled in FFmpegBuild).
 ///
-/// Usage:
-/// ```swift
-/// let reader = AVIOReader(url: httpURL)
-/// try reader.open()          // HEAD request to get file size
-/// let avio = reader.avioContext
-/// formatCtx.pointee.pb = avio
-/// avformat_open_input(...)   // FFmpeg reads through our callbacks
-/// ```
+/// Features:
+/// - **Read-ahead buffer**: Fetches 2 MB chunks per HTTP request, serves
+///   FFmpeg's smaller reads from memory. Reduces HTTP round-trips by ~30x.
+/// - **Retry with backoff**: Transient network errors are retried up to 3 times.
+/// - **Timeout protection**: Semaphore-based sync with 30s timeout to prevent
+///   deadlocks if the session is invalidated while a request is in flight.
 ///
 /// Thread safety: Callbacks are invoked on the demux queue — no concurrent access.
 final class AVIOReader: @unchecked Sendable {
@@ -29,12 +26,28 @@ final class AVIOReader: @unchecked Sendable {
     /// Buffer allocated with av_malloc — owned by AVIOContext after creation.
     private var buffer: UnsafeMutablePointer<UInt8>?
 
-    private static let bufferSize: Int32 = 64 * 1024  // 64 KB
+    // MARK: - Read-Ahead Buffer
+
+    /// How much data to fetch per HTTP request (amortizes RTT overhead).
+    private static let httpChunkSize = 2 * 1024 * 1024  // 2 MB
+
+    /// AVIO buffer size — how much FFmpeg requests per read callback.
+    private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
+
+    /// Cached data from the last HTTP chunk fetch.
+    private var readAheadBuffer = Data()
+    /// File offset where readAheadBuffer starts.
+    private var readAheadOffset: Int64 = 0
+
+    private static let maxRetries = 3
 
     init(url: URL) {
         self.url = url
-        // Ephemeral session — no caching, no cookies, no disk persistence.
-        self.session = URLSession(configuration: .ephemeral)
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 60
+        config.httpMaximumConnectionsPerHost = 2
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        self.session = URLSession(configuration: config)
     }
 
     /// Probe the remote resource (HTTP HEAD) and allocate the AVIO context.
@@ -43,17 +56,16 @@ final class AVIOReader: @unchecked Sendable {
         fileSize = try probeFileSize()
 
         // 2. Allocate the AVIO read buffer
-        guard let buf = av_malloc(Int(Self.bufferSize)) else {
+        guard let buf = av_malloc(Int(Self.avioBufferSize)) else {
             throw AVIOReaderError.allocationFailed
         }
         buffer = buf.assumingMemoryBound(to: UInt8.self)
 
         // 3. Create the AVIO context with our read/seek callbacks.
-        //    The opaque pointer carries `self` into the C callbacks.
         let opaque = Unmanaged.passUnretained(self).toOpaque()
         guard let ctx = avio_alloc_context(
             buffer,
-            Self.bufferSize,
+            Self.avioBufferSize,
             0,          // write_flag = 0 (read-only)
             opaque,
             readCallback,
@@ -71,11 +83,11 @@ final class AVIOReader: @unchecked Sendable {
     /// Release the AVIO context and session.
     func close() {
         if context != nil {
-            // avio_context_free frees both the context and the internal buffer
             avio_context_free(&context)
         }
         context = nil
         buffer = nil
+        readAheadBuffer = Data()
         session.invalidateAndCancel()
     }
 
@@ -85,11 +97,11 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// HTTP HEAD request to get Content-Length. Blocks the calling thread.
+    /// HTTP HEAD request to get Content-Length.
     private func probeFileSize() throws -> Int64 {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        request.timeoutInterval = 15
+        request.timeoutInterval = 10
 
         let (_, response) = try syncRequest(request)
         guard let http = response as? HTTPURLResponse,
@@ -105,46 +117,92 @@ final class AVIOReader: @unchecked Sendable {
         return length
     }
 
-    /// Synchronous HTTP Range GET. Returns bytes read (0 = EOF, <0 = error).
+    /// Read data for FFmpeg. Serves from the read-ahead buffer when possible,
+    /// fetches a new chunk from the network when needed.
     fileprivate func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         let requestSize = Int(size)
-        let rangeStart = position
-        let rangeEnd = rangeStart + Int64(requestSize) - 1
+        var totalRead = 0
 
+        while totalRead < requestSize {
+            // Check if current position is within the read-ahead buffer
+            let bufferEnd = readAheadOffset + Int64(readAheadBuffer.count)
+            if position >= readAheadOffset && position < bufferEnd {
+                // Serve from buffer
+                let offsetInBuffer = Int(position - readAheadOffset)
+                let available = readAheadBuffer.count - offsetInBuffer
+                let toCopy = min(available, requestSize - totalRead)
+
+                readAheadBuffer.withUnsafeBytes { raw in
+                    let src = raw.baseAddress!.advanced(by: offsetInBuffer)
+                        .assumingMemoryBound(to: UInt8.self)
+                    buf.advanced(by: totalRead).update(from: src, count: toCopy)
+                }
+                position += Int64(toCopy)
+                totalRead += toCopy
+            } else {
+                // Fetch a new chunk from the network
+                let chunkSize: Int
+                if fileSize > 0 {
+                    chunkSize = min(Self.httpChunkSize, Int(fileSize - position))
+                } else {
+                    chunkSize = Self.httpChunkSize
+                }
+
+                if chunkSize <= 0 {
+                    // EOF
+                    break
+                }
+
+                guard let data = fetchChunk(from: position, size: chunkSize) else {
+                    return totalRead > 0 ? Int32(totalRead) : -1
+                }
+
+                if data.isEmpty {
+                    break  // EOF
+                }
+
+                readAheadOffset = position
+                readAheadBuffer = data
+            }
+        }
+
+        return totalRead > 0 ? Int32(totalRead) : 0  // 0 = EOF
+    }
+
+    /// Fetch a chunk of data from the HTTP server with retry logic.
+    private func fetchChunk(from offset: Int64, size: Int) -> Data? {
+        let rangeEnd = offset + Int64(size) - 1
         var request = URLRequest(url: url)
-        request.setValue("bytes=\(rangeStart)-\(rangeEnd)", forHTTPHeaderField: "Range")
-        request.timeoutInterval = 30
+        request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
+        request.timeoutInterval = 15
 
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try syncRequest(request)
-        } catch {
-            #if DEBUG
-            print("[AVIOReader] Read error at offset \(position): \(error)")
-            #endif
-            return -1  // AVERROR(EIO)
+        var lastError: Error?
+        for attempt in 0..<Self.maxRetries {
+            do {
+                let (data, response) = try syncRequest(request)
+
+                if let http = response as? HTTPURLResponse,
+                   http.statusCode != 200 && http.statusCode != 206 {
+                    #if DEBUG
+                    print("[AVIOReader] HTTP \(http.statusCode) at offset \(offset)")
+                    #endif
+                    return nil
+                }
+
+                return data
+            } catch {
+                lastError = error
+                if attempt < Self.maxRetries - 1 {
+                    // Exponential backoff: 0.5s, 1s, 2s
+                    Thread.sleep(forTimeInterval: Double(1 << attempt) * 0.5)
+                }
+            }
         }
 
-        // Server may return 200 (full body) or 206 (partial content)
-        if let http = response as? HTTPURLResponse,
-           http.statusCode != 200 && http.statusCode != 206 {
-            #if DEBUG
-            print("[AVIOReader] HTTP \(http.statusCode) at offset \(position)")
-            #endif
-            return -1
-        }
-
-        if data.isEmpty {
-            return 0  // EOF
-        }
-
-        let bytesRead = min(data.count, requestSize)
-        data.withUnsafeBytes { raw in
-            buf.update(from: raw.baseAddress!.assumingMemoryBound(to: UInt8.self), count: bytesRead)
-        }
-        position += Int64(bytesRead)
-        return Int32(bytesRead)
+        #if DEBUG
+        print("[AVIOReader] Read failed after \(Self.maxRetries) retries at offset \(offset): \(lastError?.localizedDescription ?? "unknown")")
+        #endif
+        return nil
     }
 
     /// Handle seek requests from FFmpeg.
@@ -158,20 +216,24 @@ final class AVIOReader: @unchecked Sendable {
             guard fileSize >= 0 else { return -1 }
             position = fileSize + offset
         case AVSEEK_SIZE:
-            // FFmpeg asks for the total size
             return fileSize
         default:
             return -1
         }
+
+        // Invalidate read-ahead buffer if seeking outside it
+        let bufferEnd = readAheadOffset + Int64(readAheadBuffer.count)
+        if position < readAheadOffset || position >= bufferEnd {
+            readAheadBuffer = Data()
+            readAheadOffset = position
+        }
+
         return position
     }
 
-    /// Blocking URLSession helper using a semaphore. Safe because this is
-    /// only called from the demux background queue, never from main.
+    /// Blocking URLSession helper with timeout protection.
     private func syncRequest(_ request: URLRequest) throws -> (Data, URLResponse) {
         let semaphore = DispatchSemaphore(value: 0)
-        // nonisolated(unsafe): safe because semaphore guarantees
-        // the closure completes before we read these values.
         nonisolated(unsafe) var result: (Data, URLResponse)?
         nonisolated(unsafe) var error: Error?
 
@@ -186,7 +248,12 @@ final class AVIOReader: @unchecked Sendable {
             semaphore.signal()
         }
         task.resume()
-        semaphore.wait()
+
+        // Timeout prevents deadlock if session is invalidated during request
+        if semaphore.wait(timeout: .now() + .seconds(35)) == .timedOut {
+            task.cancel()
+            throw AVIOReaderError.requestTimeout
+        }
 
         if let error = error { throw error }
         guard let result = result else { throw AVIOReaderError.noResponse }
@@ -196,7 +263,6 @@ final class AVIOReader: @unchecked Sendable {
 
 // MARK: - C Callbacks
 
-/// Read callback for avio_alloc_context. Called by FFmpeg's av_read_frame.
 private func readCallback(
     opaque: UnsafeMutableRawPointer?,
     buf: UnsafeMutablePointer<UInt8>?,
@@ -207,7 +273,6 @@ private func readCallback(
     return reader.read(into: buf, size: size)
 }
 
-/// Seek callback for avio_alloc_context. Called by FFmpeg for seeking.
 private func seekCallback(
     opaque: UnsafeMutableRawPointer?,
     offset: Int64,
@@ -224,12 +289,14 @@ enum AVIOReaderError: Error, CustomStringConvertible {
     case allocationFailed
     case httpError(code: Int)
     case noResponse
+    case requestTimeout
 
     var description: String {
         switch self {
         case .allocationFailed: "AVIO buffer/context allocation failed"
         case .httpError(let code): "HTTP error \(code)"
         case .noResponse: "No response from server"
+        case .requestTimeout: "HTTP request timed out"
         }
     }
 }
