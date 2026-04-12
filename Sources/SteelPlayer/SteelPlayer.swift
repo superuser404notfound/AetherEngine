@@ -500,10 +500,17 @@ private class DisplayLinkTarget {
     let audioOutput: AudioOutput
     weak var player: SteelPlayer?
 
-    /// Render a frame if it's within 20ms of the audio clock.
-    private let earlyThreshold: Double = 0.020
-    /// Drop a frame if it's more than 40ms behind the audio clock.
-    private let lateThreshold: Double = 0.040
+    /// Render a frame if it's within this many seconds ahead of the clock.
+    private let earlyThreshold: Double = 0.030
+    /// Drop a frame if it's more than this many seconds behind the clock.
+    /// 100ms = ~2.5 frames at 24fps — tolerant enough for decode jitter
+    /// while still catching up on significant lag.
+    private let lateThreshold: Double = 0.100
+
+    #if DEBUG
+    private var dropCount = 0
+    private var renderCount = 0
+    #endif
 
     init(renderer: MetalRenderer, frameQueue: FrameQueue, audioOutput: AudioOutput, player: SteelPlayer) {
         self.renderer = renderer
@@ -541,6 +548,12 @@ private class DisplayLinkTarget {
             if delta < -lateThreshold {
                 // Frame is late — drop it and try the next one
                 _ = frameQueue.pop()
+                #if DEBUG
+                dropCount += 1
+                if dropCount <= 10 || dropCount % 100 == 0 {
+                    print("[Sync] DROPPED frame pts=\(String(format: "%.3f", frame.pts))s, clock=\(String(format: "%.3f", clockTime))s, delta=\(String(format: "%.1f", delta*1000))ms (total drops: \(dropCount))")
+                }
+                #endif
                 continue
             }
 
@@ -553,6 +566,12 @@ private class DisplayLinkTarget {
             let frame = frameQueue.pop()!
             renderer.render(pixelBuffer: frame.pixelBuffer)
             updatePlayer(pts: frame.pts)
+            #if DEBUG
+            renderCount += 1
+            if renderCount <= 5 || renderCount % 500 == 0 {
+                print("[Sync] Rendered #\(renderCount) pts=\(String(format: "%.3f", frame.pts))s, clock=\(String(format: "%.3f", clockTime))s, delta=\(String(format: "%.1f", delta*1000))ms, queue=\(frameQueue.count)")
+            }
+            #endif
             break
         }
     }
