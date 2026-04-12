@@ -360,13 +360,9 @@ public final class SteelPlayer: ObservableObject {
                     continue
                 }
 
-                // Back-pressure: block until the frame queue has space
-                if !self.frameQueue.waitForSpace(timeout: .now() + .milliseconds(50)) {
-                    // Check stop/pause flags while waiting
-                    continue
-                }
-
-                // Read the next packet from the container
+                // Read the next packet from the container.
+                // No back-pressure here — audio and subtitle packets must
+                // flow freely. Video-only throttling happens below.
                 let packet: UnsafeMutablePointer<AVPacket>?
                 do {
                     packet = try self.demuxer.readPacket()
@@ -395,6 +391,14 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
+                    // Back-pressure: wait for frame queue space ONLY for video.
+                    // This ensures audio/subtitle packets keep flowing while
+                    // the video queue is full.
+                    while !self.frameQueue.hasSpace && !self.stopRequested {
+                        _ = self.frameQueue.waitForSpace(timeout: .now() + .milliseconds(10))
+                    }
+                    if self.stopRequested { av_packet_free_safe(packet); break }
+
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.decode(packet: packet)
                     } else {

@@ -16,6 +16,9 @@ final class SoftwareVideoDecoder {
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
+    #if DEBUG
+    private var decodeCount = 0
+    #endif
 
     func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
         self.onFrame = onFrame
@@ -83,6 +86,12 @@ final class SoftwareVideoDecoder {
         guard let f = frame else { return }
 
         while avcodec_receive_frame(ctx, f) >= 0 {
+            #if DEBUG
+            if decodeCount < 2 {
+                print("[SWDecoder] Frame pix_fmt=\(f.pointee.format), \(f.pointee.width)x\(f.pointee.height)")
+            }
+            decodeCount += 1
+            #endif
             guard let pixelBuffer = convertFrameToPixelBuffer(f) else { continue }
 
             let pts = f.pointee.pts
