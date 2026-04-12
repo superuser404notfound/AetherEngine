@@ -26,17 +26,12 @@ let package = Package(
         .target(
             name: "SteelPlayer",
             dependencies: [
-                // Core FFmpeg libraries
-                .product(name: "Libavformat", package: "FFmpegKit"),
-                .product(name: "Libavcodec", package: "FFmpegKit"),
-                .product(name: "Libavutil", package: "FFmpegKit"),
-                .product(name: "Libswresample", package: "FFmpegKit"),
-                .product(name: "Libswscale", package: "FFmpegKit"),
-                // Crypto/TLS deps from our FFmpegKit fork
-                .product(name: "gmp", package: "FFmpegKit"),
-                .product(name: "nettle", package: "FFmpegKit"),
-                .product(name: "hogweed", package: "FFmpegKit"),
-                .product(name: "gnutls", package: "FFmpegKit"),
+                // Full FFmpegKit includes all prebuilt dependencies
+                // (gmp, gnutls, libdav1d, libsrt, lcms2, libzvbi, etc.)
+                // that the individual Libav* xcframeworks link against.
+                // Our fork fixes the libshaderc_combined CFBundleIdentifier
+                // that breaks Xcode 26's strict embed validation.
+                .product(name: "FFmpegKit", package: "FFmpegKit"),
             ],
             resources: [
                 .process("Renderer/Shaders.metal"),
