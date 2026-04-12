@@ -132,7 +132,10 @@ final class VideoDecoder {
         // Send to VideoToolbox for hardware decoding.
         // Using the OutputHandler variant for cleaner Swift integration
         // (no C function pointer needed).
-        let decodeFlags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
+        let decodeFlags: VTDecodeFrameFlags = [
+            ._EnableAsynchronousDecompression,
+            ._EnableTemporalProcessing,  // Let VT handle B-frame reordering
+        ]
         var infoFlags: VTDecodeInfoFlags = []
         VTDecompressionSessionDecodeFrame(
             session,

@@ -102,7 +102,7 @@ final class MetalRenderer {
             print("[MetalRenderer] Render #\(renderCount): format=\(fmt), planes=\(planes), layer=\(layerSize)")
         }
         #endif
-        if renderCount % 30 == 0 {
+        if renderCount % 300 == 0 {
             CVMetalTextureCacheFlush(textureCache, 0)
         }
 

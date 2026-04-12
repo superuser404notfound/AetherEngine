@@ -29,7 +29,8 @@ final class AVIOReader: @unchecked Sendable {
     // MARK: - Read-Ahead Buffer
 
     /// How much data to fetch per HTTP request (amortizes RTT overhead).
-    private static let httpChunkSize = 2 * 1024 * 1024  // 2 MB
+    /// 4 MB balances memory use vs. network round-trips for 4K content.
+    private static let httpChunkSize = 4 * 1024 * 1024  // 4 MB
 
     /// AVIO buffer size — how much FFmpeg requests per read callback.
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB

@@ -59,7 +59,7 @@ public final class SteelPlayer: ObservableObject {
     private let audioDecoder = AudioDecoder()
     private let audioOutput = AudioOutput()
     private let renderer: MetalRenderer
-    private let frameQueue = FrameQueue(capacity: 8)
+    private let frameQueue = FrameQueue(capacity: 16)
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
