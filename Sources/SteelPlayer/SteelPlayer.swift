@@ -169,12 +169,25 @@ public final class SteelPlayer: ObservableObject {
             do {
                 try videoDecoder.open(stream: videoStream, onFrame: frameCallback)
                 usingSoftwareDecode = false
+                #if DEBUG
+                print("[SteelPlayer] Using VideoToolbox hardware decode")
+                #endif
             } catch {
                 #if DEBUG
-                print("[SteelPlayer] VT failed (\(error)) — trying software decode")
+                print("[SteelPlayer] VT failed: \(error) — trying software decode")
                 #endif
-                try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
-                usingSoftwareDecode = true
+                do {
+                    try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
+                    usingSoftwareDecode = true
+                    #if DEBUG
+                    print("[SteelPlayer] Using FFmpeg software decode")
+                    #endif
+                } catch {
+                    #if DEBUG
+                    print("[SteelPlayer] Software decode also failed: \(error)")
+                    #endif
+                    throw error
+                }
             }
 
             // 2b. Find the audio stream and open the audio decoder
