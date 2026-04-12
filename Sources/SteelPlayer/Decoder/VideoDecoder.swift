@@ -196,9 +196,6 @@ final class VideoDecoder {
             codecType = kCMVideoCodecType_HEVC
             atomKey = "hvcC"
         case AV_CODEC_ID_AV1:
-            guard VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1) else {
-                throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
-            }
             codecType = kCMVideoCodecType_AV1
             atomKey = "av1C"
         default:

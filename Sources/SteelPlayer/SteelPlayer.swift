@@ -56,7 +56,11 @@ public final class SteelPlayer: ObservableObject {
 
     private let demuxer = Demuxer()
     private let videoDecoder = VideoDecoder()
+    private let softwareDecoder = SoftwareVideoDecoder()
     private let audioDecoder = AudioDecoder()
+
+    /// True if the current stream uses software decoding (FFmpeg) instead of VT.
+    private var usingSoftwareDecode = false
     private let audioOutput = AudioOutput()
     private let renderer: MetalRenderer
     private let frameQueue = FrameQueue(capacity: 16)
@@ -143,7 +147,7 @@ public final class SteelPlayer: ObservableObject {
                 throw SteelPlayerError.noVideoStream
             }
 
-            try videoDecoder.open(stream: videoStream) { [weak self] pixelBuffer, pts in
+            let frameCallback: DecodedFrameHandler = { [weak self] pixelBuffer, pts in
                 guard let self = self else { return }
                 let seconds = CMTimeGetSeconds(pts)
                 let frame = VideoFrame(
@@ -152,14 +156,25 @@ public final class SteelPlayer: ObservableObject {
                 )
                 self.frameQueue.push(frame)
                 #if DEBUG
-                let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
-                let w = CVPixelBufferGetWidth(pixelBuffer)
-                let h = CVPixelBufferGetHeight(pixelBuffer)
-                let planes = CVPixelBufferGetPlaneCount(pixelBuffer)
                 if self.frameQueue.count <= 2 {
-                    print("[VT] Frame decoded: \(w)x\(h), format=\(fmt), planes=\(planes), pts=\(String(format: "%.3f", frame.pts))s")
+                    let w = CVPixelBufferGetWidth(pixelBuffer)
+                    let h = CVPixelBufferGetHeight(pixelBuffer)
+                    print("[Decode] Frame: \(w)x\(h), pts=\(String(format: "%.3f", frame.pts))s")
                 }
                 #endif
+            }
+
+            // Try VideoToolbox hardware decode first, fall back to FFmpeg
+            // software decode for codecs without HW support (AV1 on A15, etc.)
+            do {
+                try videoDecoder.open(stream: videoStream, onFrame: frameCallback)
+                usingSoftwareDecode = false
+            } catch {
+                #if DEBUG
+                print("[SteelPlayer] VT failed (\(error)) — trying software decode")
+                #endif
+                try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
+                usingSoftwareDecode = true
             }
 
             // 2b. Find the audio stream and open the audio decoder
@@ -240,7 +255,11 @@ public final class SteelPlayer: ObservableObject {
 
         // Flush everything: frame queue, decoders, audio renderer, texture cache
         frameQueue.flush()
-        videoDecoder.flush()
+        if usingSoftwareDecode {
+            softwareDecoder.flush()
+        } else {
+            videoDecoder.flush()
+        }
         audioDecoder.flush()
         audioOutput.flush()
         renderer.flushTextureCache()
@@ -288,8 +307,13 @@ public final class SteelPlayer: ObservableObject {
         isPlaying = false
         stopDisplayLink()
         audioOutput.stop()
-        videoDecoder.flush()
-        videoDecoder.close()
+        if usingSoftwareDecode {
+            softwareDecoder.flush()
+            softwareDecoder.close()
+        } else {
+            videoDecoder.flush()
+            videoDecoder.close()
+        }
         audioDecoder.close()
         demuxer.close()
         frameQueue.flush()
@@ -343,7 +367,11 @@ public final class SteelPlayer: ObservableObject {
 
                 guard let packet = packet else {
                     // EOF — flush remaining frames
-                    self.videoDecoder.flush()
+                    if self.usingSoftwareDecode {
+                        self.softwareDecoder.flush()
+                    } else {
+                        self.videoDecoder.flush()
+                    }
                     self.audioDecoder.flush()
                     Task { @MainActor [weak self] in
                         self?.state = .idle
@@ -354,7 +382,11 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    self.videoDecoder.decode(packet: packet)
+                    if self.usingSoftwareDecode {
+                        self.softwareDecoder.decode(packet: packet)
+                    } else {
+                        self.videoDecoder.decode(packet: packet)
+                    }
                 } else if streamIdx == audioStreamIndex && audioAvailable {
                     let sampleBuffers = audioDecoder.decode(packet: packet)
                     for sb in sampleBuffers {
