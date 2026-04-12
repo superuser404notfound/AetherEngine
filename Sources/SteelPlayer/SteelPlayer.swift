@@ -379,12 +379,13 @@ public final class SteelPlayer: ObservableObject {
                 }
 
                 guard let packet = packet else {
-                    // EOF — flush remaining frames
+                    // EOF — flush decoder and drain reorder buffer
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.flush()
                     } else {
                         self.videoDecoder.flush()
                     }
+                    self.videoRenderer.drainReorderBuffer()
                     self.audioDecoder.flush()
                     Task { @MainActor [weak self] in
                         self?.state = .idle
