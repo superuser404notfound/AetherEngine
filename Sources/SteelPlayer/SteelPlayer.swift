@@ -11,23 +11,28 @@ import Libavutil
 import UIKit
 #endif
 
-/// SteelPlayer — Open-source FFmpeg + Metal video player engine.
+/// SteelPlayer — Open-source FFmpeg + VideoToolbox video player engine.
 ///
 /// A cross-platform (iOS, tvOS, macOS) media player that handles
-/// demuxing, hardware-accelerated decoding, Metal rendering with
-/// HDR tone mapping, and audio output. No UIKit/AppKit dependency —
-/// the host app provides its own UI and simply embeds the player's
-/// `metalLayer` in a view.
+/// demuxing, hardware-accelerated decoding via VideoToolbox, and
+/// audio/video output via Apple's AVSampleBuffer infrastructure.
+/// No UIKit/AppKit dependency — the host app provides its own UI
+/// and simply embeds the player's `videoLayer` in a view.
+///
+/// ## Architecture
+///
+/// ```
+/// URL → AVIO (URLSession) → FFmpeg Demuxer → AVPackets
+///   ├─ Video → VideoToolbox HW Decode → CVPixelBuffer → AVSampleBufferDisplayLayer
+///   └─ Audio → FFmpeg SW Decode → CMSampleBuffer → AVSampleBufferAudioRenderer
+///   └─ Both synced via AVSampleBufferRenderSynchronizer (master clock)
+/// ```
 ///
 /// ## Quick Start
 ///
 /// ```swift
-/// let player = SteelPlayer()
-///
-/// // Add player.metalLayer to your view hierarchy
-/// myView.layer.addSublayer(player.metalLayer)
-///
-/// // Load and play
+/// let player = try SteelPlayer()
+/// myView.layer.addSublayer(player.videoLayer)
 /// try await player.load(url: myVideoURL)
 /// player.play()
 /// ```

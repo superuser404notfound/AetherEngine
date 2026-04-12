@@ -26,14 +26,10 @@ let package = Package(
             dependencies: [
                 .product(name: "FFmpegBuild", package: "FFmpegBuild"),
             ],
-            resources: [
-                .process("Renderer/Shaders.metal"),
-            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
-                .linkedFramework("Metal"),
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("AudioToolbox"),
             ]
