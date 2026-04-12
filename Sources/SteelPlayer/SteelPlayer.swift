@@ -500,8 +500,6 @@ private class DisplayLinkTarget {
     let audioOutput: AudioOutput
     weak var player: SteelPlayer?
 
-    /// Render a frame if it's within this many seconds ahead of the clock.
-    private let earlyThreshold: Double = 0.030
     /// Drop a frame if it's more than this many seconds behind the clock.
     /// 100ms = ~2.5 frames at 24fps — tolerant enough for decode jitter
     /// while still catching up on significant lag.
@@ -546,23 +544,25 @@ private class DisplayLinkTarget {
             let delta = frame.pts - clockTime
 
             if delta < -lateThreshold {
-                // Frame is late — drop it and try the next one
+                // Frame is too late — drop it and try the next one
                 _ = frameQueue.pop()
                 #if DEBUG
                 dropCount += 1
                 if dropCount <= 10 || dropCount % 100 == 0 {
-                    print("[Sync] DROPPED frame pts=\(String(format: "%.3f", frame.pts))s, clock=\(String(format: "%.3f", clockTime))s, delta=\(String(format: "%.1f", delta*1000))ms (total drops: \(dropCount))")
+                    print("[Sync] DROPPED pts=\(String(format: "%.3f", frame.pts))s, clock=\(String(format: "%.3f", clockTime))s, delta=\(String(format: "%.1f", delta*1000))ms (total: \(dropCount))")
                 }
                 #endif
                 continue
             }
 
-            if delta > earlyThreshold {
-                // Frame is early — wait for the next display link tick
+            if delta > 0 {
+                // Frame is in the future — wait for next display tick.
+                // No earlyThreshold: we render the frame as soon as its
+                // PTS has arrived, giving the smoothest possible cadence.
                 break
             }
 
-            // Frame is on time — render it
+            // Frame PTS has passed (delta <= 0) but within lateThreshold — render it
             let frame = frameQueue.pop()!
             renderer.render(pixelBuffer: frame.pixelBuffer)
             updatePlayer(pts: frame.pts)

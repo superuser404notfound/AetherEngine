@@ -39,17 +39,14 @@ final class SoftwareVideoDecoder {
             throw VideoDecoderError.noCodecParameters
         }
 
-        // Force pure software decode — prevent FFmpeg from trying
-        // VideoToolbox hwaccel internally (fails on A15 for AV1).
-        ctx.pointee.get_format = { ctx, fmts in
-            // Return the first non-hwaccel format (usually YUV420P)
+        // Force pure software decode — disable all hardware acceleration.
+        // FFmpeg's AV1 decoder tries VideoToolbox internally and fails on A15.
+        ctx.pointee.get_format = { _, fmts in
             guard let fmts = fmts else { return AV_PIX_FMT_NONE }
             var i = 0
             while fmts[i] != AV_PIX_FMT_NONE {
-                let fmt = fmts[i]
-                // Skip hardware formats (VideoToolbox, etc.)
-                if fmt != AV_PIX_FMT_VIDEOTOOLBOX {
-                    return fmt
+                if fmts[i] != AV_PIX_FMT_VIDEOTOOLBOX {
+                    return fmts[i]
                 }
                 i += 1
             }
@@ -60,9 +57,15 @@ final class SoftwareVideoDecoder {
         ctx.pointee.thread_count = 4
         ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
 
-        guard avcodec_open2(ctx, codec, nil) >= 0 else {
+        // Disable hwaccel via codec options — some decoders ignore get_format
+        var opts: OpaquePointer?
+        av_dict_set(&opts, "hwaccel", "none", 0)
+
+        guard avcodec_open2(ctx, codec, &opts) >= 0 else {
+            av_dict_free(&opts)
             throw VideoDecoderError.sessionCreationFailed(status: -2)
         }
+        av_dict_free(&opts)
 
         #if DEBUG
         print("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count)")
