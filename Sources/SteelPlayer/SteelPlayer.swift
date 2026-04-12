@@ -360,12 +360,16 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start the synchronizer once we have first audio data.
-                    // Called directly (not via Task/@MainActor) because
-                    // setRate() is thread-safe and delaying causes drops.
-                    if !audioStarted && !sampleBuffers.isEmpty {
+                    // Start the synchronizer only after we have video frames
+                    // buffered. If we start audio immediately, the clock
+                    // runs ahead while VT is still decoding the first frames,
+                    // causing all initial video frames to be "late" and dropped.
+                    if !audioStarted && !sampleBuffers.isEmpty && self.frameQueue.count >= 2 {
                         audioOutput.start()
                         audioStarted = true
+                        #if DEBUG
+                        print("[SteelPlayer] Audio started (video buffer: \(self.frameQueue.count) frames)")
+                        #endif
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets

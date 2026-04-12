@@ -195,14 +195,18 @@ final class VideoDecoder {
         case AV_CODEC_ID_HEVC:
             codecType = kCMVideoCodecType_HEVC
             atomKey = "hvcC"
+        case AV_CODEC_ID_AV1:
+            codecType = kCMVideoCodecType_AV1
+            atomKey = "av1C"
         default:
-            throw VideoDecoderError.unsupportedCodec
+            throw VideoDecoderError.unsupportedCodec(
+                id: codecpar.pointee.codec_id.rawValue
+            )
         }
 
-        // Build the extensions dictionary with the codec-specific atoms.
-        // FFmpeg stores H.264/HEVC extradata in avcC/hvcC format when
-        // the source is mp4/mkv (not Annex B), which is exactly what
-        // CMVideoFormatDescription expects.
+        // Build CMVideoFormatDescription. For H.264/HEVC, FFmpeg stores
+        // extradata in avcC/hvcC format (from mp4/mkv), which is exactly
+        // what CMVideoFormatDescription expects. AV1 uses av1C.
         guard let extradata = codecpar.pointee.extradata,
               codecpar.pointee.extradata_size > 0 else {
             throw VideoDecoderError.noExtradata
@@ -263,10 +267,20 @@ final class VideoDecoder {
 
 // MARK: - Errors
 
-enum VideoDecoderError: Error {
+enum VideoDecoderError: Error, LocalizedError {
     case noCodecParameters
-    case unsupportedCodec
+    case unsupportedCodec(id: UInt32)
     case noExtradata
     case formatDescriptionFailed(status: OSStatus)
     case sessionCreationFailed(status: OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .noCodecParameters: "No codec parameters"
+        case .unsupportedCodec(let id): "Unsupported video codec (id: \(id))"
+        case .noExtradata: "Missing codec extradata"
+        case .formatDescriptionFailed(let s): "Format description failed (\(s))"
+        case .sessionCreationFailed(let s): "Decoder session failed (\(s))"
+        }
+    }
 }
