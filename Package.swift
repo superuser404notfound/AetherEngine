@@ -31,6 +31,9 @@ let package = Package(
                 .product(name: "Libswresample", package: "FFmpegKit"),
                 .product(name: "Libswscale", package: "FFmpegKit"),
             ],
+            resources: [
+                .process("Renderer/Shaders.metal"),
+            ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
