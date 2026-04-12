@@ -2,6 +2,7 @@ import Foundation
 import QuartzCore
 import CoreMedia
 import CoreVideo
+import AVFoundation
 import Libavformat
 import Libavcodec
 import Libavutil

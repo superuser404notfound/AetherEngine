@@ -3,10 +3,10 @@
     {
       "identity" : "ffmpegkit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/kingslay/FFmpegKit",
+      "location" : "https://github.com/superuser404notfound/FFmpegKit",
       "state" : {
-        "revision" : "85b77c589de0360c111de16752db86b60496d70b",
-        "version" : "6.1.3"
+        "branch" : "main",
+        "revision" : "c6ea4bbbfd819037d0a9f530acacd0b686d70c16"
       }
     }
   ],
