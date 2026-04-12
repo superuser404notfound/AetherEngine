@@ -7,6 +7,10 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 /// SteelPlayer — Open-source FFmpeg + Metal video player engine.
 ///
 /// A cross-platform (iOS, tvOS, macOS) media player that handles
@@ -102,6 +106,11 @@ public final class SteelPlayer: ObservableObject {
     /// library is not available (shouldn't happen on real Apple hardware).
     public init() throws {
         self.renderer = try MetalRenderer()
+        setupLifecycleObservers()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - Public API
@@ -358,6 +367,39 @@ public final class SteelPlayer: ObservableObject {
         // macOS fallback: Timer at ~60 Hz
         displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { _ in
             target.tick()
+        }
+        #endif
+    }
+
+    // MARK: - App Lifecycle
+
+    private func setupLifecycleObservers() {
+        #if os(iOS) || os(tvOS)
+        let nc = NotificationCenter.default
+
+        // Pause when entering background — Metal rendering is not allowed,
+        // and VTDecompressionSession becomes invalid in background.
+        nc.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.state == .playing else { return }
+            self.pause()
+            #if DEBUG
+            print("[SteelPlayer] Paused (entered background)")
+            #endif
+        }
+
+        // Handle memory pressure — flush texture cache and drop queued frames
+        nc.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            self.renderer.flushTextureCache()
+            #if DEBUG
+            print("[SteelPlayer] Memory warning — flushed texture cache")
+            #endif
         }
         #endif
     }
