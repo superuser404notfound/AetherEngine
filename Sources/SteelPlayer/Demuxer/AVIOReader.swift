@@ -95,15 +95,28 @@ final class AVIOReader: @unchecked Sendable {
         }
     }
 
+    private var isClosed = false
+
     func close() {
+        guard !isClosed else { return }
+        isClosed = true
         if context != nil {
             avio_context_free(&context)
         }
         context = nil
         buffer = nil
+
+        bufferLock.lock()
         currentBuffer = Data()
         prefetchBuffer = nil
-        session.invalidateAndCancel()
+        bufferLock.unlock()
+
+        // Don't invalidateAndCancel — the demux loop may still be in a
+        // read callback. Let the session be cleaned up on dealloc instead.
+        // getAllTasks + cancel is safe even during active reads.
+        session.getAllTasks { tasks in
+            tasks.forEach { $0.cancel() }
+        }
     }
 
     deinit {
@@ -113,6 +126,7 @@ final class AVIOReader: @unchecked Sendable {
     // MARK: - Read (called by FFmpeg on demux thread)
 
     fileprivate func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
+        guard !isClosed else { return -1 }
         let requestSize = Int(size)
         var totalRead = 0
 
