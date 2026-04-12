@@ -10,26 +10,26 @@ struct VideoFrame {
     let pts: Double
 }
 
-/// Thread-safe PTS-sorted queue for decoded video frames with semaphore-based
-/// back-pressure. The decoder pushes frames from VideoToolbox's callback thread,
-/// and the render loop pulls them on the display link thread.
+/// Thread-safe PTS-sorted queue for decoded video frames.
 ///
-/// Instead of busy-waiting when the queue is full, producers block on
-/// `waitForSpace()` and are woken when a frame is consumed.
+/// Uses a lock for thread-safe array access and a semaphore purely as
+/// a wake-up signal (not for counting). The demux loop checks `hasSpace`
+/// under the lock; if full, it blocks on the semaphore until `pop()`
+/// signals that space freed up.
 final class FrameQueue: @unchecked Sendable {
     private var frames: [VideoFrame] = []
     private let lock = NSLock()
     private let capacity: Int
 
-    /// Signaled when a frame is consumed, allowing a blocked producer to proceed.
-    private let spaceAvailable: DispatchSemaphore
+    /// Signaled by pop() to wake a blocked waitForSpace() caller.
+    /// Value starts at 0 — only used as a notification, not for counting.
+    private let spaceAvailable = DispatchSemaphore(value: 0)
 
     /// Signaled when the demux loop should wake up (play/resume/stop).
     let wakeUp = DispatchSemaphore(value: 0)
 
     init(capacity: Int = 8) {
         self.capacity = capacity
-        self.spaceAvailable = DispatchSemaphore(value: capacity)
     }
 
     /// Number of buffered frames.
@@ -47,16 +47,20 @@ final class FrameQueue: @unchecked Sendable {
     }
 
     /// Block until there's space in the queue, or until the timeout expires.
-    /// Returns true if space is available, false on timeout.
+    /// Checks the actual count under lock — the semaphore is only used as
+    /// a wake-up signal, not for slot tracking.
     func waitForSpace(timeout: DispatchTime = .now() + .milliseconds(50)) -> Bool {
-        if spaceAvailable.wait(timeout: timeout) == .success {
+        lock.lock()
+        if frames.count < capacity {
+            lock.unlock()
             return true
         }
-        return false
+        lock.unlock()
+        // Queue is full — wait for pop() to signal
+        return spaceAvailable.wait(timeout: timeout) == .success
     }
 
-    /// Push a decoded frame. Maintains PTS-sorted order (binary search insert).
-    /// Caller should have previously called `waitForSpace()`.
+    /// Push a decoded frame. Maintains PTS-sorted order.
     func push(_ frame: VideoFrame) {
         lock.lock()
         defer { lock.unlock() }
@@ -66,7 +70,7 @@ final class FrameQueue: @unchecked Sendable {
     }
 
     /// Pull the next frame (earliest PTS). Returns nil if empty.
-    /// Signals the space semaphore so a blocked producer can proceed.
+    /// Signals spaceAvailable so a blocked waitForSpace() can proceed.
     func pop() -> VideoFrame? {
         lock.lock()
         defer { lock.unlock() }
@@ -83,17 +87,13 @@ final class FrameQueue: @unchecked Sendable {
         return frames.first
     }
 
-    /// Remove all frames and reset the space semaphore.
+    /// Remove all frames.
     func flush() {
         lock.lock()
-        let count = frames.count
         frames.removeAll()
-        // Signal inside the lock to prevent race with pop() double-signaling
-        for _ in 0..<count {
-            spaceAvailable.signal()
-        }
         lock.unlock()
-        // Wake demux loop in case it's paused
+        // Wake up blocked waitForSpace() and paused demux loop
+        spaceAvailable.signal()
         wakeUp.signal()
     }
 }

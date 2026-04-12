@@ -105,17 +105,11 @@ public final class SteelPlayer: ObservableObject {
     /// Initialize the player. Can fail if the Metal device or shader
     /// library is not available (shouldn't happen on real Apple hardware).
     /// Lifecycle notification observers — stored for cleanup.
-    private nonisolated(unsafe) var lifecycleObservers: [Any] = []
+    private var lifecycleObservers: [Any] = []
 
     public init() throws {
         self.renderer = try MetalRenderer()
         setupLifecycleObservers()
-    }
-
-    deinit {
-        for observer in lifecycleObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
     }
 
     // MARK: - Public API
@@ -300,6 +294,12 @@ public final class SteelPlayer: ObservableObject {
         demuxer.close()
         frameQueue.flush()
         audioAvailable = false
+
+        // Remove lifecycle observers
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        lifecycleObservers.removeAll()
     }
 
     // MARK: - Demux Loop

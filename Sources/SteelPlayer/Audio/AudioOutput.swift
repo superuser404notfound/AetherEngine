@@ -49,8 +49,27 @@ final class AudioOutput {
     func enqueue(sampleBuffer: CMSampleBuffer) {
         if renderer.isReadyForMoreMediaData {
             renderer.enqueue(sampleBuffer)
+            #if DEBUG
+            enqueueCount += 1
+            if enqueueCount <= 3 {
+                let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                print("[AudioOutput] Enqueued sample #\(enqueueCount), pts=\(CMTimeGetSeconds(pts))s")
+            }
+            #endif
+        } else {
+            #if DEBUG
+            dropCount += 1
+            if dropCount <= 3 {
+                print("[AudioOutput] Renderer not ready — dropped audio sample")
+            }
+            #endif
         }
     }
+
+    #if DEBUG
+    private var enqueueCount = 0
+    private var dropCount = 0
+    #endif
 
     /// The current playback time according to the audio synchronizer.
     var currentTime: CMTime {
