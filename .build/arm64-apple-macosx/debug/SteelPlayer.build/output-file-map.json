@@ -1,0 +1,61 @@
+{
+  "": {
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/primary.swiftdeps"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Audio/Audio.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Decoder/Decoder.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Demuxer/Demuxer.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/PlayerState.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Renderer/Renderer.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/SteelPlayer.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Subtitles/Subtitles.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.dia"
+  },
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Sync/Sync.swift": {
+    "dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.d",
+    "object": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.swift.o",
+    "swiftmodule": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync~partial.swiftmodule",
+    "swift-dependencies": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.swiftdeps",
+    "diagnostics": "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.dia"
+  }
+}

@@ -1,0 +1,47 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "PackageStructure": ["<PackageStructure>"]
+  "SteelPlayer-arm64-apple-macosx-debug.module": ["<SteelPlayer-arm64-apple-macosx-debug.module>"]
+  "main": ["<SteelPlayer-arm64-apple-macosx-debug.module>"]
+  "test": ["<SteelPlayer-arm64-apple-macosx-debug.module>"]
+default: "main"
+nodes:
+  "/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Audio/Audio.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Decoder/Decoder.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Demuxer/Demuxer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/PlayerState.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Renderer/Renderer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/SteelPlayer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Subtitles/Subtitles.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Sync/Sync.swift"]
+    outputs: ["/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/sources"]
+    description: "Write auxiliary file /Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/sources"
+
+  "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"]
+    outputs: ["/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+
+  "<SteelPlayer-arm64-apple-macosx-debug.module>":
+    tool: phony
+    inputs: ["/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/Modules/SteelPlayer.swiftmodule"]
+    outputs: ["<SteelPlayer-arm64-apple-macosx-debug.module>"]
+
+  "C.SteelPlayer-arm64-apple-macosx-debug.module":
+    tool: shell
+    inputs: ["/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Audio/Audio.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Decoder/Decoder.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Demuxer/Demuxer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/PlayerState.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Renderer/Renderer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/SteelPlayer.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Subtitles/Subtitles.swift","/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/Sync/Sync.swift","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/sources"]
+    outputs: ["/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Audio.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Decoder.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Demuxer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/PlayerState.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Renderer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/SteelPlayer.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Subtitles.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/Sync.swift.o","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/Modules/SteelPlayer.swiftmodule"]
+    description: "Compiling Swift Module 'SteelPlayer' (8 sources)"
+    args: ["/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc","-module-name","SteelPlayer","-emit-dependencies","-emit-module","-emit-module-path","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/Modules/SteelPlayer.swiftmodule","-output-file-map","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/output-file-map.json","-parse-as-library","-incremental","-c","@/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/sources","-I","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx13.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j8","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-parse-as-library","-emit-objc-header","-emit-objc-header-path","/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/include/SteelPlayer-Swift.h","-swift-version","5","-plugin-path","/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing","-sdk","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk","-F","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-I","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-L","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib","-g","-Xcc","-isysroot","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk","-Xcc","-F","-Xcc","/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks","-Xcc","-fPIC","-Xcc","-g","-package-name","steelplayer"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/vincentherbst/Dev/SteelPlayer/Sources/SteelPlayer/","/Users/vincentherbst/Dev/SteelPlayer/Package.swift","/Users/vincentherbst/Dev/SteelPlayer/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

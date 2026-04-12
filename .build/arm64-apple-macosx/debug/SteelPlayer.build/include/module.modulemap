@@ -1,0 +1,3 @@
+module SteelPlayer {
+    header "/Users/vincentherbst/Dev/SteelPlayer/.build/arm64-apple-macosx/debug/SteelPlayer.build/include/SteelPlayer-Swift.h"
+}
