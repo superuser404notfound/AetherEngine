@@ -452,21 +452,6 @@ public final class SteelPlayer: ObservableObject {
         #if os(iOS) || os(tvOS) || os(visionOS)
         let link = CADisplayLink(target: target, selector: #selector(DisplayLinkTarget.tick(_:)))
 
-        // Match display refresh to content frame rate for smooth cadence.
-        // e.g. 25fps → 50Hz (2:2 pulldown), 24fps → 48Hz or 24Hz (1:1).
-        // Apple TV supports 24/25/30/50/60Hz natively.
-        if videoFrameRate > 0 {
-            let fps = Float(videoFrameRate)
-            link.preferredFrameRateRange = CAFrameRateRange(
-                minimum: fps,
-                maximum: fps * 2,  // Allow up to 2x (e.g. 50Hz for 25fps)
-                preferred: fps
-            )
-            #if DEBUG
-            print("[SteelPlayer] Display link preferred: \(fps) fps")
-            #endif
-        }
-
         link.add(to: .main, forMode: .common)
         displayLink = link
         #else
