@@ -37,28 +37,31 @@ final class FrameQueue: @unchecked Sendable {
     }
 
     /// Push a decoded frame. Drops the frame silently if the queue is full.
+    /// Inserts in PTS-sorted order so pop/peek are O(1).
     func push(_ frame: VideoFrame) {
         lock.lock()
         defer { lock.unlock() }
         guard frames.count < capacity else { return }
-        frames.append(frame)
+        // Binary search for insertion point to maintain PTS order.
+        // Frames from VideoToolbox usually arrive in order, so the
+        // common case is appending at the end (O(1) amortized).
+        let insertIdx = frames.firstIndex(where: { $0.pts > frame.pts }) ?? frames.endIndex
+        frames.insert(frame, at: insertIdx)
     }
 
-    /// Pull the next frame (lowest PTS). Returns nil if the queue is empty.
+    /// Pull the next frame (earliest PTS). Returns nil if empty.
     func pop() -> VideoFrame? {
         lock.lock()
         defer { lock.unlock() }
         guard !frames.isEmpty else { return nil }
-        // Pop the earliest frame by PTS
-        let idx = frames.indices.min(by: { frames[$0].pts < frames[$1].pts }) ?? 0
-        return frames.remove(at: idx)
+        return frames.removeFirst()
     }
 
-    /// Peek at the next frame without removing it.
+    /// Peek at the next frame (earliest PTS) without removing it.
     func peek() -> VideoFrame? {
         lock.lock()
         defer { lock.unlock() }
-        return frames.min(by: { $0.pts < $1.pts })
+        return frames.first
     }
 
     /// Remove all frames.

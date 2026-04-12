@@ -79,13 +79,15 @@ final class VideoDecoder {
             cmPTS = .invalid
         }
 
-        // Wrap packet data in a CMBlockBuffer (no copy — just a reference)
+        // Copy packet data into a CoreMedia-managed CMBlockBuffer.
+        // We must copy because VTDecompressionSession decodes asynchronously
+        // and the FFmpeg AVPacket may be freed before decoding completes.
         var blockBuffer: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
-            memoryBlock: UnsafeMutableRawPointer(mutating: data),
+            memoryBlock: nil,
             blockLength: packetSize,
-            blockAllocator: kCFAllocatorNull,  // we don't own this memory — FFmpeg does
+            blockAllocator: kCFAllocatorDefault,
             customBlockSource: nil,
             offsetToData: 0,
             dataLength: packetSize,
@@ -93,6 +95,10 @@ final class VideoDecoder {
             blockBufferOut: &blockBuffer
         )
         guard status == kCMBlockBufferNoErr, let block = blockBuffer else { return }
+        status = CMBlockBufferReplaceDataBytes(
+            with: data, blockBuffer: block, offsetIntoDestination: 0, dataLength: packetSize
+        )
+        guard status == kCMBlockBufferNoErr else { return }
 
         // Build CMSampleBuffer with timing info
         var sampleBuffer: CMSampleBuffer?
@@ -143,6 +149,9 @@ final class VideoDecoder {
     /// Close the decoder and release resources.
     func close() {
         if let session = decompressionSession {
+            // Wait for all in-flight frames before invalidating, otherwise
+            // pending output callbacks may fire after onFrame is cleared.
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
         }
         decompressionSession = nil

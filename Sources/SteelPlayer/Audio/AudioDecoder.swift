@@ -36,7 +36,7 @@ final class AudioDecoder {
         timeBase = stream.pointee.time_base
         sampleRate = codecpar.pointee.sample_rate
         channels = codecpar.pointee.ch_layout.nb_channels
-        if channels == 0 { channels = 2 }  // fallback stereo
+        if channels <= 0 || channels > 8 { channels = 2 }  // fallback stereo
 
         // Find the decoder
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
@@ -122,16 +122,13 @@ final class AudioDecoder {
 
     /// Set up libswresample to convert decoded audio to interleaved Float32.
     private func setupResampler(ctx: UnsafeMutablePointer<AVCodecContext>) throws {
-        let swr = swr_alloc()
-        guard let swr = swr else {
-            throw AudioDecoderError.resamplerFailed
-        }
-
         // Output: interleaved Float32 at source sample rate
         var outLayout = AVChannelLayout()
         av_channel_layout_default(&outLayout, channels)
 
-        swr_alloc_set_opts2(
+        // swr_alloc_set_opts2 allocates the SwrContext internally —
+        // do NOT call swr_alloc() first or the pre-allocated context leaks.
+        let ret = swr_alloc_set_opts2(
             &swrContext,
             &outLayout,
             AV_SAMPLE_FMT_FLT,  // interleaved float32
@@ -142,8 +139,12 @@ final class AudioDecoder {
             0,
             nil
         )
+        guard ret >= 0, swrContext != nil else {
+            throw AudioDecoderError.resamplerFailed
+        }
 
         guard swr_init(swrContext) >= 0 else {
+            swr_free(&swrContext)
             throw AudioDecoderError.resamplerFailed
         }
     }
@@ -190,22 +191,29 @@ final class AudioDecoder {
         let numSamples = Int(frame.pointee.nb_samples)
         guard numSamples > 0 else { return nil }
 
+        // Ask libswresample how many output samples to expect (accounts
+        // for sample rate conversion producing more/fewer samples).
+        let maxOutputSamples = Int(swr_get_out_samples(swr, frame.pointee.nb_samples))
+        guard maxOutputSamples > 0 else { return nil }
+
         // Allocate output buffer for resampled audio
         let bytesPerSample = Int(channels) * 4  // Float32 per channel
-        let bufferSize = numSamples * bytesPerSample
+        let bufferSize = maxOutputSamples * bytesPerSample
         let outputBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { outputBuffer.deallocate() }
 
         // Resample / convert
         var outPtr: UnsafeMutablePointer<UInt8>? = outputBuffer
-        let srcData = UnsafeMutablePointer<UnsafePointer<UInt8>?>(
-            OpaquePointer(frame.pointee.extended_data)
-        )
         let convertedSamples = withUnsafeMutablePointer(to: &outPtr) { outBuf in
-            swr_convert(
+            // extended_data is UnsafeMutablePointer<UnsafeMutablePointer<UInt8>?>
+            // swr_convert wants UnsafePointer<UnsafePointer<UInt8>?> — bridge via OpaquePointer
+            let srcData = UnsafePointer<UnsafePointer<UInt8>?>(
+                OpaquePointer(frame.pointee.extended_data)
+            )
+            return swr_convert(
                 swr,
                 outBuf,
-                Int32(numSamples),
+                Int32(maxOutputSamples),
                 srcData,
                 frame.pointee.nb_samples
             )
