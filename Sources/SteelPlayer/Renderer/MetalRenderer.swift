@@ -156,10 +156,12 @@ final class MetalRenderer {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 
-        // Hold CVMetalTexture refs until GPU is done
-        cmdBuffer.addCompletedHandler { [inflightSemaphore] _ in
-            _ = cvY
-            _ = cvCbCr
+        // CVMetalTexture objects must stay alive until the GPU finishes
+        // rendering — their underlying IOSurface gets recycled on release.
+        // Capture them explicitly in the completion handler.
+        let textures = (cvY, cvCbCr)
+        cmdBuffer.addCompletedHandler { [inflightSemaphore, textures] _ in
+            withExtendedLifetime(textures) {}
             inflightSemaphore.signal()
         }
 

@@ -88,10 +88,12 @@ final class FrameQueue: @unchecked Sendable {
         lock.lock()
         let count = frames.count
         frames.removeAll()
-        lock.unlock()
-        // Restore semaphore to full capacity
+        // Signal inside the lock to prevent race with pop() double-signaling
         for _ in 0..<count {
             spaceAvailable.signal()
         }
+        lock.unlock()
+        // Wake demux loop in case it's paused
+        wakeUp.signal()
     }
 }

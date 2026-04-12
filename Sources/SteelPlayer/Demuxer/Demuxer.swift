@@ -3,6 +3,10 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
+/// AVERROR_EOF — FFmpeg's end-of-file sentinel. The C macro can't be
+/// imported into Swift, so we define it inline: FFERRTAG(0xF8,'E','O','F').
+private let STEEL_AVERROR_EOF: Int32 = -541478725
+
 /// FFmpeg AVFormatContext wrapper. Opens a media URL, reads the stream
 /// info, and produces demuxed `AVPacket`s for the decoder.
 ///
@@ -135,8 +139,7 @@ final class Demuxer {
         let ret = av_read_frame(ctx, packet)
         if ret < 0 {
             av_packet_free(&packet)
-            // AVERROR_EOF is negative; any other negative value is an error
-            let isEOF = (ret == -541478725)  // AVERROR_EOF = FFERRTAG(0xF8,'E','O','F')
+            let isEOF = (ret == STEEL_AVERROR_EOF)
             if isEOF {
                 return nil
             }

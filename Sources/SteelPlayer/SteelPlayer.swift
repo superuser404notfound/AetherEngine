@@ -165,6 +165,12 @@ public final class SteelPlayer: ObservableObject {
                 }
             }
 
+            // For video-only files (or failed audio), start the synchronizer
+            // as a free-running clock so video frame sync still works.
+            if !audioAvailable {
+                audioOutput.start()
+            }
+
             // 3. Activate AVAudioSession (required on tvOS/iOS for audio output)
             #if os(iOS) || os(tvOS)
             do {
@@ -221,7 +227,7 @@ public final class SteelPlayer: ObservableObject {
     }
 
     public func seek(to seconds: Double) async {
-        let target = max(0, seconds)
+        let target = max(0, min(seconds, duration))
         state = .seeking
 
         // Flush everything: frame queue, decoders, audio renderer, texture cache
