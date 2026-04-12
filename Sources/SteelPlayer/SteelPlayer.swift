@@ -509,6 +509,8 @@ private class DisplayLinkTarget {
     /// while still catching up on significant lag.
     private let lateThreshold: Double = 0.100
 
+    private var hasRenderedFirstFrame = false
+
     #if DEBUG
     private var dropCount = 0
     private var renderCount = 0
@@ -534,12 +536,16 @@ private class DisplayLinkTarget {
     private func renderNextFrame() {
         let clockTime = audioOutput.currentTimeSeconds
 
-        // If audio hasn't started yet (clock = 0), render the first
-        // available frame so the user sees something immediately.
+        // If audio hasn't started yet (clock = 0), render only the FIRST
+        // frame so the user sees something immediately. Don't drain the
+        // queue — those frames are needed once the audio clock starts.
         if clockTime <= 0 {
-            guard let frame = frameQueue.pop() else { return }
-            renderer.render(pixelBuffer: frame.pixelBuffer)
-            updatePlayer(pts: frame.pts)
+            if !hasRenderedFirstFrame {
+                guard let frame = frameQueue.pop() else { return }
+                renderer.render(pixelBuffer: frame.pixelBuffer)
+                updatePlayer(pts: frame.pts)
+                hasRenderedFirstFrame = true
+            }
             return
         }
 
