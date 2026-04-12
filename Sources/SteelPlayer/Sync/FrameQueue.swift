@@ -61,10 +61,25 @@ final class FrameQueue: @unchecked Sendable {
     }
 
     /// Push a decoded frame. Maintains PTS-sorted order.
+    /// If the queue is full and the new frame has an earlier PTS than the
+    /// latest queued frame, evict the latest to make room (B-frame reordering).
+    /// This prevents HEVC B-frames from being silently dropped.
     func push(_ frame: VideoFrame) {
         lock.lock()
         defer { lock.unlock() }
-        guard frames.count < capacity else { return }
+
+        if frames.count >= capacity {
+            // Queue is full. If new frame belongs BEFORE the latest frame
+            // (B-frame with earlier PTS), evict the latest to make room.
+            if let last = frames.last, frame.pts < last.pts {
+                frames.removeLast()
+            } else {
+                // New frame is later than everything — drop it (it would
+                // be at the end anyway, and the queue is full).
+                return
+            }
+        }
+
         let insertIdx = frames.firstIndex(where: { $0.pts > frame.pts }) ?? frames.endIndex
         frames.insert(frame, at: insertIdx)
     }
