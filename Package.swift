@@ -19,8 +19,10 @@ let package = Package(
         // FFmpeg core libraries (prebuilt xcframeworks via kingslay/FFmpegKit).
         // We only pull the individual Libav* products, NOT the full FFmpegKit
         // target which bundles MoltenVK, libass, gnutls, smbclient, etc.
-        // Our fork of FFmpegKit that exposes gmp/gnutls as individual products
-        .package(url: "https://github.com/superuser404notfound/FFmpegKit", branch: "main"),
+        // Local path to our FFmpegKit fork (with fixed libshaderc bundle ID).
+        // Using local path avoids SPM's slow git checkout of the large
+        // xcframework binaries checked into the repo.
+        .package(path: "../FFmpegKit-fork"),
     ],
     targets: [
         .target(
@@ -31,7 +33,7 @@ let package = Package(
                 // that the individual Libav* xcframeworks link against.
                 // Our fork fixes the libshaderc_combined CFBundleIdentifier
                 // that breaks Xcode 26's strict embed validation.
-                .product(name: "FFmpegKit", package: "FFmpegKit"),
+                .product(name: "FFmpegKit", package: "FFmpegKit-fork"),
             ],
             resources: [
                 .process("Renderer/Shaders.metal"),
