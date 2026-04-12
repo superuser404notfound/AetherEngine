@@ -83,6 +83,9 @@ public final class SteelPlayer: ObservableObject {
     /// Whether the audio stream was successfully opened.
     private var audioAvailable = false
 
+    /// Detected video frame rate (for display link matching).
+    private var videoFrameRate: Double = 0
+
     private var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
@@ -189,6 +192,20 @@ public final class SteelPlayer: ObservableObject {
                     throw error
                 }
             }
+
+            // Detect video frame rate for display link matching
+            let avgFR = videoStream.pointee.avg_frame_rate
+            if avgFR.den > 0 && avgFR.num > 0 {
+                videoFrameRate = Double(avgFR.num) / Double(avgFR.den)
+            } else {
+                let rFR = videoStream.pointee.r_frame_rate
+                if rFR.den > 0 && rFR.num > 0 {
+                    videoFrameRate = Double(rFR.num) / Double(rFR.den)
+                }
+            }
+            #if DEBUG
+            print("[SteelPlayer] Video frame rate: \(String(format: "%.3f", videoFrameRate)) fps")
+            #endif
 
             // 2b. Find the audio stream and open the audio decoder
             let audioIdx = demuxer.audioStreamIndex
@@ -434,6 +451,22 @@ public final class SteelPlayer: ObservableObject {
         let target = DisplayLinkTarget(renderer: renderer, frameQueue: frameQueue, audioOutput: audioOutput, player: self)
         #if os(iOS) || os(tvOS) || os(visionOS)
         let link = CADisplayLink(target: target, selector: #selector(DisplayLinkTarget.tick(_:)))
+
+        // Match display refresh to content frame rate for smooth cadence.
+        // e.g. 25fps → 50Hz (2:2 pulldown), 24fps → 48Hz or 24Hz (1:1).
+        // Apple TV supports 24/25/30/50/60Hz natively.
+        if videoFrameRate > 0 {
+            let fps = Float(videoFrameRate)
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: fps,
+                maximum: fps * 2,  // Allow up to 2x (e.g. 50Hz for 25fps)
+                preferred: fps
+            )
+            #if DEBUG
+            print("[SteelPlayer] Display link preferred: \(fps) fps")
+            #endif
+        }
+
         link.add(to: .main, forMode: .common)
         displayLink = link
         #else
