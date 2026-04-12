@@ -30,6 +30,10 @@ final class MetalRenderer {
     /// Counter for periodic texture cache flush.
     private var renderCount: Int = 0
 
+    #if DEBUG
+    private var lastRenderWallTime: Double = 0
+    #endif
+
     // MARK: - Init
 
     init() throws {
@@ -87,10 +91,19 @@ final class MetalRenderer {
         // Triple-buffer: drop frame if GPU is 3+ frames behind
         if inflightSemaphore.wait(timeout: .now()) == .timedOut {
             #if DEBUG
-            if renderCount < 5 { print("[MetalRenderer] Semaphore timeout — dropping frame") }
+            print("[MetalRenderer] GPU behind — drawable drop #\(renderCount)")
             #endif
             return
         }
+
+        #if DEBUG
+        let wallNow = CACurrentMediaTime()
+        let wallDelta = lastRenderWallTime > 0 ? (wallNow - lastRenderWallTime) * 1000 : 0
+        lastRenderWallTime = wallNow
+        if renderCount >= 3 && renderCount < 30 {
+            print("[MetalRenderer] Wall interval: \(String(format: "%.1f", wallDelta))ms")
+        }
+        #endif
 
         // Periodic texture cache flush to reclaim stale textures
         renderCount += 1
