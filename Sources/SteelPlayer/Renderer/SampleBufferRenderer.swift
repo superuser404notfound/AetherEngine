@@ -17,7 +17,7 @@ final class SampleBufferRenderer {
     /// display layer in ascending PTS order.
     private let reorderLock = NSLock()
     private var reorderBuffer: [(CVPixelBuffer, CMTime)] = []
-    private let reorderDepth = 4  // Hold up to 4 frames for reordering
+    private let reorderDepth = 2  // Minimal reorder for B-frames (~80ms latency)
 
     init() {
         displayLayer = AVSampleBufferDisplayLayer()
