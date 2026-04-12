@@ -6,14 +6,34 @@ import Libavutil
 /// FFmpeg AVFormatContext wrapper. Opens a media URL, reads the stream
 /// info, and produces demuxed `AVPacket`s for the decoder.
 ///
+/// For HTTP(S) URLs, uses a custom AVIO context backed by URLSession
+/// (since FFmpegBuild has no built-in network stack). File URLs are
+/// handled directly by FFmpeg's file protocol.
+///
 /// Thread safety: all calls must happen on the demux serial queue.
 final class Demuxer {
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
+    /// Retained while the format context is open for HTTP streams.
+    private var avioReader: AVIOReader?
+
     /// Open a media URL and probe its streams.
     func open(url: URL) throws {
+        let isHTTP = url.scheme == "http" || url.scheme == "https"
+
+        if isHTTP {
+            try openHTTP(url: url)
+        } else {
+            try openLocal(url: url)
+        }
+    }
+
+    // MARK: - Open Strategies
+
+    /// Open a local file URL via FFmpeg's built-in file protocol.
+    private func openLocal(url: URL) throws {
         var ctx: UnsafeMutablePointer<AVFormatContext>?
-        let urlString = url.absoluteString
+        let urlString = url.isFileURL ? url.path : url.absoluteString
 
         let ret = avformat_open_input(&ctx, urlString, nil, nil)
         guard ret == 0, let ctx = ctx else {
@@ -21,13 +41,47 @@ final class Demuxer {
         }
         formatContext = ctx
 
+        try probeStreams(ctx)
+    }
+
+    /// Open an HTTP(S) URL via custom AVIO context + URLSession.
+    private func openHTTP(url: URL) throws {
+        // 1. Create and open the AVIO reader (performs HEAD request)
+        let reader = AVIOReader(url: url)
+        try reader.open()
+        avioReader = reader
+
+        // 2. Allocate an empty AVFormatContext and attach our AVIO
+        guard let ctx = avformat_alloc_context() else {
+            throw DemuxerError.openFailed(code: -1)
+        }
+        ctx.pointee.pb = reader.context
+        formatContext = ctx
+
+        // 3. Open input — pass nil for URL since pb is already set
+        var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
+        let ret = avformat_open_input(&ctxPtr, nil, nil, nil)
+        guard ret == 0 else {
+            formatContext = nil
+            avioReader?.close()
+            avioReader = nil
+            throw DemuxerError.openFailed(code: ret)
+        }
+        // avformat_open_input may reallocate, update our reference
+        formatContext = ctxPtr
+
+        try probeStreams(ctxPtr!)
+    }
+
+    /// Common stream probing after open.
+    private func probeStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>) throws {
         let findRet = avformat_find_stream_info(ctx, nil)
         guard findRet >= 0 else {
             throw DemuxerError.streamInfoFailed(code: findRet)
         }
 
         #if DEBUG
-        print("[Demuxer] Opened: \(ctx.pointee.nb_streams) streams, duration=\(ctx.pointee.duration) µs")
+        print("[Demuxer] Opened: \(ctx.pointee.nb_streams) streams, duration=\(ctx.pointee.duration) us")
         for i in 0..<Int(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[i],
                   let codecpar = stream.pointee.codecpar else { continue }
@@ -109,6 +163,8 @@ final class Demuxer {
             avformat_close_input(&formatContext)
         }
         formatContext = nil
+        avioReader?.close()
+        avioReader = nil
     }
 
     deinit {
