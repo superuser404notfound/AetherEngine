@@ -4,7 +4,7 @@ Open-source FFmpeg + Metal video player engine for Apple platforms.
 
 [![License: LGPL v3](https://img.shields.io/badge/License-LGPL%20v3-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-iOS%2016%2B%20%7C%20tvOS%2016%2B%20%7C%20macOS%2014%2B-lightgrey)]()
-[![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange)]()
+[![Swift](https://img.shields.io/badge/Swift-6.0%2B-orange)]()
 
 A cross-platform media player library that handles demuxing, hardware-accelerated decoding, and Metal rendering. No UIKit/AppKit dependency — your app provides the UI, SteelPlayer provides the engine.
 
@@ -129,10 +129,10 @@ URL → FFmpeg demuxer → AVPackets
 
 | Platform | Minimum Version |
 |----------|----------------|
-| iOS      | 16.0           |
-| tvOS     | 16.0           |
-| macOS    | 14.0           |
-| Swift    | 5.9            |
+| iOS      | 16.0+          |
+| tvOS     | 16.0+          |
+| macOS    | 14.0+          |
+| Swift    | 6.0+           |
 
 ## License
 
