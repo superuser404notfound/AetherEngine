@@ -395,6 +395,12 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
+                    // Back-pressure: wait if display layer isn't ready
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                        Thread.sleep(forTimeInterval: 0.005)
+                    }
+                    if self.stopRequested { av_packet_free_safe(packet); break }
+
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.decode(packet: packet)
                     } else {

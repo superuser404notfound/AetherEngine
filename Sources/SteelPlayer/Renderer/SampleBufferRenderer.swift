@@ -30,9 +30,7 @@ final class SampleBufferRenderer {
         guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
             return
         }
-        if displayLayer.isReadyForMoreMediaData {
-            displayLayer.enqueue(sampleBuffer)
-        }
+        displayLayer.enqueue(sampleBuffer)
     }
 
     /// Flush pending frames (call on seek).
