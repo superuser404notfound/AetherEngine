@@ -132,10 +132,10 @@ final class VideoDecoder {
         // Send to VideoToolbox for hardware decoding.
         // Using the OutputHandler variant for cleaner Swift integration
         // (no C function pointer needed).
-        let decodeFlags: VTDecodeFrameFlags = [
-            ._EnableAsynchronousDecompression,
-            ._EnableTemporalProcessing,  // Let VT handle B-frame reordering
-        ]
+        // Async decode only — no temporal processing. Our FrameQueue
+        // handles PTS-sorted output. VT's temporal processing was holding
+        // back frames and reducing effective frame rate by ~50%.
+        let decodeFlags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
         var infoFlags: VTDecodeInfoFlags = []
         VTDecompressionSessionDecodeFrame(
             session,
