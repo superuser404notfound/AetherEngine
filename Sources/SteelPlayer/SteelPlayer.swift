@@ -104,13 +104,18 @@ public final class SteelPlayer: ObservableObject {
 
     /// Initialize the player. Can fail if the Metal device or shader
     /// library is not available (shouldn't happen on real Apple hardware).
+    /// Lifecycle notification observers — stored for cleanup.
+    private nonisolated(unsafe) var lifecycleObservers: [Any] = []
+
     public init() throws {
         self.renderer = try MetalRenderer()
         setupLifecycleObservers()
     }
 
     deinit {
-        NotificationCenter.default.removeObserver(self)
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     // MARK: - Public API
@@ -152,6 +157,15 @@ public final class SteelPlayer: ObservableObject {
                     pts: seconds.isFinite ? seconds : 0
                 )
                 self.frameQueue.push(frame)
+                #if DEBUG
+                let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                let w = CVPixelBufferGetWidth(pixelBuffer)
+                let h = CVPixelBufferGetHeight(pixelBuffer)
+                let planes = CVPixelBufferGetPlaneCount(pixelBuffer)
+                if self.frameQueue.count <= 2 {
+                    print("[VT] Frame decoded: \(w)x\(h), format=\(fmt), planes=\(planes), pts=\(String(format: "%.3f", frame.pts))s")
+                }
+                #endif
             }
 
             // 2b. Find the audio stream and open the audio decoder
@@ -385,7 +399,7 @@ public final class SteelPlayer: ObservableObject {
 
         // Pause when entering background — Metal rendering is not allowed,
         // and VTDecompressionSession becomes invalid in background.
-        nc.addObserver(
+        let bgObserver = nc.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
@@ -395,9 +409,10 @@ public final class SteelPlayer: ObservableObject {
             print("[SteelPlayer] Paused (entered background)")
             #endif
         }
+        lifecycleObservers.append(bgObserver)
 
         // Handle memory pressure — flush texture cache and drop queued frames
-        nc.addObserver(
+        let memObserver = nc.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
@@ -407,6 +422,7 @@ public final class SteelPlayer: ObservableObject {
             print("[SteelPlayer] Memory warning — flushed texture cache")
             #endif
         }
+        lifecycleObservers.append(memObserver)
         #endif
     }
 

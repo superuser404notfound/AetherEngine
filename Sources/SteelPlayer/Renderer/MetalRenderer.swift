@@ -86,11 +86,22 @@ final class MetalRenderer {
     func render(pixelBuffer: CVPixelBuffer) {
         // Triple-buffer: drop frame if GPU is 3+ frames behind
         if inflightSemaphore.wait(timeout: .now()) == .timedOut {
+            #if DEBUG
+            if renderCount < 5 { print("[MetalRenderer] Semaphore timeout — dropping frame") }
+            #endif
             return
         }
 
         // Periodic texture cache flush to reclaim stale textures
         renderCount += 1
+        #if DEBUG
+        if renderCount <= 3 {
+            let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            let planes = CVPixelBufferGetPlaneCount(pixelBuffer)
+            let layerSize = metalLayer.bounds.size
+            print("[MetalRenderer] Render #\(renderCount): format=\(fmt), planes=\(planes), layer=\(layerSize)")
+        }
+        #endif
         if renderCount % 30 == 0 {
             CVMetalTextureCacheFlush(textureCache, 0)
         }
