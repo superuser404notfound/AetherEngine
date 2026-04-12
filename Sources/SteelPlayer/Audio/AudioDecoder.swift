@@ -35,8 +35,16 @@ final class AudioDecoder {
 
         timeBase = stream.pointee.time_base
         sampleRate = codecpar.pointee.sample_rate
-        channels = codecpar.pointee.ch_layout.nb_channels
-        if channels <= 0 || channels > 8 { channels = 2 }  // fallback stereo
+        let sourceChannels = codecpar.pointee.ch_layout.nb_channels
+        // Force stereo output — AVSampleBufferAudioRenderer handles
+        // 5.1→stereo downmix poorly, causing clock jitter and video stutter.
+        // TODO: investigate proper multi-channel passthrough
+        channels = 2
+        #if DEBUG
+        if sourceChannels != channels {
+            print("[AudioDecoder] Downmixing \(sourceChannels)ch → \(channels)ch")
+        }
+        #endif
 
         // Find the decoder
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
