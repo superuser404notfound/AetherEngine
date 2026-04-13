@@ -152,18 +152,8 @@ public final class SteelPlayer: ObservableObject {
             }
 
             let videoRenderer = self.videoRenderer
-            var frameCount = 0
             let frameCallback: DecodedFrameHandler = { pixelBuffer, pts in
                 videoRenderer.enqueue(pixelBuffer: pixelBuffer, pts: pts)
-                #if DEBUG
-                frameCount += 1
-                if frameCount <= 3 {
-                    let w = CVPixelBufferGetWidth(pixelBuffer)
-                    let h = CVPixelBufferGetHeight(pixelBuffer)
-                    let s = CMTimeGetSeconds(pts)
-                    print("[Decode] Frame #\(frameCount): \(w)x\(h), pts=\(String(format: "%.3f", s))s")
-                }
-                #endif
             }
 
             // Try VideoToolbox hardware decode first, fall back to FFmpeg
@@ -423,9 +413,6 @@ public final class SteelPlayer: ObservableObject {
                     if !audioStarted && !sampleBuffers.isEmpty {
                         audioOutput.start()
                         audioStarted = true
-                        #if DEBUG
-                        print("[SteelPlayer] Audio started")
-                        #endif
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets
@@ -475,9 +462,6 @@ public final class SteelPlayer: ObservableObject {
         ) { [weak self] _ in
             guard let self = self, self.state == .playing else { return }
             self.pause()
-            #if DEBUG
-            print("[SteelPlayer] Paused (entered background)")
-            #endif
         }
         lifecycleObservers.append(bgObserver)
 

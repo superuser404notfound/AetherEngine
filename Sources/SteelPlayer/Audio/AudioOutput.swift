@@ -20,10 +20,6 @@ final class AudioOutput {
         renderer = AVSampleBufferAudioRenderer()
         synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
-
-        #if DEBUG
-        print("[AudioOutput] Initialized")
-        #endif
     }
 
     /// Add the video display layer to the synchronizer so Apple handles
@@ -57,18 +53,7 @@ final class AudioOutput {
     /// before the synchronizer started, resulting in silence.
     func enqueue(sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
-        #if DEBUG
-        enqueueCount += 1
-        if enqueueCount <= 3 {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            print("[AudioOutput] Enqueued sample #\(enqueueCount), pts=\(CMTimeGetSeconds(pts))s")
-        }
-        #endif
     }
-
-    #if DEBUG
-    private var enqueueCount = 0
-    #endif
 
     /// The current playback time according to the audio synchronizer.
     var currentTime: CMTime {
