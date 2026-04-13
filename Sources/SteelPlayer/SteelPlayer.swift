@@ -275,6 +275,11 @@ public final class SteelPlayer: ObservableObject {
         let target = max(0, min(seconds, duration))
         state = .seeking
 
+        // Pause the demux loop so it stops calling readPacket().
+        // The Demuxer's accessLock serializes seek vs. any in-flight read,
+        // but pausing first avoids decoding stale packets after flush.
+        isPlaying = false
+
         // Flush everything: display layer, decoders, audio renderer
         videoRenderer.flush()
         if usingSoftwareDecode {
@@ -285,7 +290,8 @@ public final class SteelPlayer: ObservableObject {
         audioDecoder.flush()
         audioOutput.flush()
 
-        // Seek the demuxer to the new position
+        // Seek the demuxer — accessLock inside Demuxer ensures we wait
+        // if a readPacket() call is still in-flight on the demux queue.
         demuxer.seek(to: target)
         currentTime = target
 
@@ -293,7 +299,7 @@ public final class SteelPlayer: ObservableObject {
         let seekTime = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
         audioOutput.start(at: seekTime)
 
-        // Resume playing
+        // Resume playing from new position
         isPlaying = true
         state = .playing
     }

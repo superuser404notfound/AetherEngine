@@ -14,9 +14,16 @@ private let STEEL_AVERROR_EOF: Int32 = -541478725
 /// (since FFmpegBuild has no built-in network stack). File URLs are
 /// handled directly by FFmpeg's file protocol.
 ///
-/// Thread safety: all calls must happen on the demux serial queue.
+/// Thread safety: `readPacket()` and `seek()` are serialized via an
+/// internal lock, so `seek()` can safely be called from any thread
+/// (e.g. main actor) while the demux loop reads on a background queue.
 final class Demuxer {
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
+
+    /// Serializes access to formatContext between readPacket() (demux queue)
+    /// and seek() (main actor) — prevents concurrent AVFormatContext access
+    /// that triggers assertion failures in matroskadec.c.
+    private let accessLock = NSLock()
 
     /// Retained while the format context is open for HTTP streams.
     private var avioReader: AVIOReader?
@@ -203,6 +210,8 @@ final class Demuxer {
     /// Returns the packet on success, nil at EOF.
     /// Throws on read errors (network failure, corrupt data, etc).
     func readPacket() throws -> UnsafeMutablePointer<AVPacket>? {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         guard let ctx = formatContext else { return nil }
         var packet: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
         guard packet != nil else { return nil }
@@ -223,6 +232,8 @@ final class Demuxer {
     /// for MKV containers (av_seek_frame triggers assertion failures
     /// in matroskadec.c with nested elements).
     func seek(to seconds: Double) {
+        accessLock.lock()
+        defer { accessLock.unlock() }
         guard let ctx = formatContext else { return }
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
