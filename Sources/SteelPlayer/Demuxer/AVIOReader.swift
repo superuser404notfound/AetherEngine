@@ -59,7 +59,7 @@ final class AVIOReader: @unchecked Sendable {
     }
 
     func open() throws {
-        fileSize = try probeFileSize()
+        fileSize = probeFileSize()
 
         guard let buf = av_malloc(Int(Self.avioBufferSize)) else {
             throw AVIOReaderError.allocationFailed
@@ -420,23 +420,34 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Network (seekable mode)
 
-    private func probeFileSize() throws -> Int64 {
+    private func probeFileSize() -> Int64 {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        request.timeoutInterval = 10
+        request.timeoutInterval = 5
 
-        let (_, response) = try syncRequest(request)
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode) else {
-            throw AVIOReaderError.httpError(
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1
-            )
+        do {
+            let (_, response) = try syncRequest(request)
+            guard let http = response as? HTTPURLResponse,
+                  (200...299).contains(http.statusCode) else {
+                #if DEBUG
+                print("[AVIOReader] HEAD failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)) → streaming mode")
+                #endif
+                return -1
+            }
+            let length = http.expectedContentLength
+            #if DEBUG
+            print("[AVIOReader] File size: \(length) bytes\(length <= 0 ? " (streaming mode)" : "")")
+            #endif
+            return length
+        } catch {
+            // HEAD timeout or network error — fall back to streaming mode.
+            // This is expected for live transcode URLs where the server
+            // needs to start transcoding before responding.
+            #if DEBUG
+            print("[AVIOReader] HEAD probe failed: \(error.localizedDescription) → streaming mode")
+            #endif
+            return -1
         }
-        let length = http.expectedContentLength
-        #if DEBUG
-        print("[AVIOReader] File size: \(length) bytes\(length <= 0 ? " (streaming mode)" : "")")
-        #endif
-        return length
     }
 
     private func fetchChunk(from offset: Int64, size: Int) -> Data? {
