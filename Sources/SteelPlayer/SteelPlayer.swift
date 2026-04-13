@@ -229,9 +229,16 @@ public final class SteelPlayer: ObservableObject {
             }
             #endif
 
-            // 4. Seek to start position if requested
+            // 4. Seek to start position if requested.
+            // Pre-start the audio clock at the seek time so the synchronizer
+            // doesn't reject video frames whose PTS is far ahead of time 0.
+            // The demux loop's audioOutput.start() becomes a no-op since
+            // _isStarted is already true.
             if let start = startPosition, start > 0 {
                 demuxer.seek(to: start)
+                currentTime = start
+                let seekTime = CMTimeMakeWithSeconds(start, preferredTimescale: 90000)
+                audioOutput.start(at: seekTime)
             }
 
             // 5. Start the demux→decode loop and time updates
