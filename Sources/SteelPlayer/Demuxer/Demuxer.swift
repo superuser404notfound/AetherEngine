@@ -219,10 +219,13 @@ final class Demuxer {
     }
 
     /// Seek to a position in seconds.
+    /// Uses avformat_seek_file instead of av_seek_frame — more robust
+    /// for MKV containers (av_seek_frame triggers assertion failures
+    /// in matroskadec.c with nested elements).
     func seek(to seconds: Double) {
         guard let ctx = formatContext else { return }
         let timestamp = Int64(seconds * Double(AV_TIME_BASE))
-        let ret = av_seek_frame(ctx, -1, timestamp, AVSEEK_FLAG_BACKWARD)
+        let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
         if ret < 0 {
             #if DEBUG
             print("[Demuxer] Seek to \(seconds)s failed: \(ret)")
