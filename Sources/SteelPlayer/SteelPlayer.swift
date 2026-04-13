@@ -196,8 +196,13 @@ public final class SteelPlayer: ObservableObject {
             print("[SteelPlayer] Video frame rate: \(String(format: "%.3f", videoFrameRate)) fps")
             #endif
 
+            // Populate track metadata from the demuxer
+            audioTracks = demuxer.audioTrackInfos()
+            subtitleTracks = demuxer.subtitleTrackInfos()
+
             // 2b. Find the audio stream and open the audio decoder
             let audioIdx = demuxer.audioStreamIndex
+            activeAudioStreamIndex = audioIdx
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
                 do {
                     try audioDecoder.open(stream: audioStream)
@@ -300,8 +305,31 @@ public final class SteelPlayer: ObservableObject {
         progress = 0
     }
 
+    /// The currently active audio stream index.
+    private var activeAudioStreamIndex: Int32 = -1
+
     public func selectAudioTrack(index: Int) {
-        // TODO: Phase 2 — audio track switching
+        let streamIndex = Int32(index)
+        guard streamIndex != activeAudioStreamIndex,
+              let stream = demuxer.stream(at: streamIndex) else { return }
+
+        // Close old decoder, open new one on the selected stream
+        audioDecoder.flush()
+        audioDecoder.close()
+        audioOutput.flush()
+
+        do {
+            try audioDecoder.open(stream: stream)
+            activeAudioStreamIndex = streamIndex
+
+            // Restart synchronizer at current position
+            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            audioOutput.start(at: seekTime)
+        } catch {
+            #if DEBUG
+            print("[SteelPlayer] Audio track switch failed: \(error)")
+            #endif
+        }
     }
 
     public func selectSubtitleTrack(index: Int) {
@@ -402,7 +430,7 @@ public final class SteelPlayer: ObservableObject {
                     } else {
                         self.videoDecoder.decode(packet: packet)
                     }
-                } else if streamIdx == audioStreamIndex && audioAvailable {
+                } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     let sampleBuffers = audioDecoder.decode(packet: packet)
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)

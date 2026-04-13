@@ -121,6 +121,76 @@ final class Demuxer {
         return av_find_best_stream(ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
     }
 
+    /// Extract metadata for all audio streams.
+    func audioTrackInfos() -> [TrackInfo] {
+        guard let ctx = formatContext else { return [] }
+        var tracks: [TrackInfo] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i],
+                  let codecpar = stream.pointee.codecpar,
+                  codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO else { continue }
+            tracks.append(trackInfo(from: stream, index: i))
+        }
+        return tracks
+    }
+
+    /// Extract metadata for all subtitle streams.
+    func subtitleTrackInfos() -> [TrackInfo] {
+        guard let ctx = formatContext else { return [] }
+        var tracks: [TrackInfo] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i],
+                  let codecpar = stream.pointee.codecpar,
+                  codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE else { continue }
+            tracks.append(trackInfo(from: stream, index: i))
+        }
+        return tracks
+    }
+
+    /// Build TrackInfo from an AVStream's metadata.
+    private func trackInfo(from stream: UnsafeMutablePointer<AVStream>, index: Int) -> TrackInfo {
+        let codecpar = stream.pointee.codecpar!
+
+        // Codec name
+        let codecName: String
+        if let codec = avcodec_find_decoder(codecpar.pointee.codec_id) {
+            codecName = String(cString: codec.pointee.name)
+        } else {
+            codecName = "unknown"
+        }
+
+        // Language and title from stream metadata
+        let language = metadataValue(stream.pointee.metadata, key: "language")
+        let title = metadataValue(stream.pointee.metadata, key: "title")
+
+        // Build display name
+        let name: String
+        if let title = title, !title.isEmpty {
+            name = title
+        } else if let lang = language {
+            name = "\(lang.uppercased()) (\(codecName))"
+        } else {
+            name = "Track \(index) (\(codecName))"
+        }
+
+        let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+
+        return TrackInfo(
+            id: index,
+            name: name,
+            codec: codecName,
+            language: language,
+            isDefault: isDefault
+        )
+    }
+
+    /// Read a metadata value from an AVDictionary.
+    private func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
+        guard let dict = dict else { return nil }
+        guard let entry = av_dict_get(dict, key, nil, 0) else { return nil }
+        return String(cString: entry.pointee.value)
+    }
+
     /// Access an AVStream by index.
     func stream(at index: Int32) -> UnsafeMutablePointer<AVStream>? {
         guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams else {
