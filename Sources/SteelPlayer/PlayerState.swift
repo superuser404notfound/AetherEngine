@@ -20,14 +20,17 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let codec: String
     /// BCP-47 language tag if available (e.g. "en", "de", "ja").
     public let language: String?
+    /// Number of audio channels (2=stereo, 6=5.1, 8=7.1). 0 for non-audio.
+    public let channels: Int
     /// True if this track is marked as default in the container.
     public let isDefault: Bool
 
-    public init(id: Int, name: String, codec: String, language: String?, isDefault: Bool) {
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, isDefault: Bool) {
         self.id = id
         self.name = name
         self.codec = codec
         self.language = language
+        self.channels = channels
         self.isDefault = isDefault
     }
 }

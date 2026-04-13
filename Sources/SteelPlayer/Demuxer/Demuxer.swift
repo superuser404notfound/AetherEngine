@@ -181,12 +181,14 @@ final class Demuxer {
         }
 
         let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+        let channels = Int(codecpar.pointee.ch_layout.nb_channels)
 
         return TrackInfo(
             id: index,
             name: name,
             codec: codecName,
             language: language,
+            channels: channels,
             isDefault: isDefault
         )
     }
