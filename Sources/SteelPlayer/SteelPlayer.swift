@@ -238,6 +238,7 @@ public final class SteelPlayer: ObservableObject {
                 demuxer.seek(to: start)
                 currentTime = start
                 let seekTime = CMTimeMakeWithSeconds(start, preferredTimescale: 90000)
+                videoRenderer.setSkipThreshold(seekTime)
                 audioOutput.start(at: seekTime)
             }
 
