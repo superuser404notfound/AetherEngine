@@ -231,6 +231,9 @@ final class Demuxer {
             print("[Demuxer] Seek to \(seconds)s failed: \(ret)")
             #endif
         }
+        // Flush internal parser state after seek — prevents assertion
+        // failures in matroskadec.c when reading the next packet.
+        avformat_flush(ctx)
     }
 
     /// Close the format context and release resources.
