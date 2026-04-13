@@ -19,16 +19,38 @@ final class SampleBufferRenderer {
     private var reorderBuffer: [(CVPixelBuffer, CMTime)] = []
     private let reorderDepth = 4  // B-frame reorder (handles up to 3 consecutive B-frames)
 
+    /// After a seek, frames decoded between the keyframe and the actual
+    /// seek target should be dropped to prevent visual "fast forward".
+    /// Set via `setSkipThreshold(_:)`, cleared automatically.
+    private var skipUntilPTS: CMTime?
+
     init() {
         displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.preventsDisplaySleepDuringVideoPlayback = true
     }
 
+    /// After seek, drop frames with PTS before the target to prevent
+    /// the visual "fast forward" effect from keyframe to seek target.
+    func setSkipThreshold(_ time: CMTime?) {
+        reorderLock.lock()
+        skipUntilPTS = time
+        reorderLock.unlock()
+    }
+
     /// Enqueue a decoded video frame. Frames are buffered and reordered
     /// by PTS before being sent to the display layer.
     func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime) {
         reorderLock.lock()
+
+        // Drop pre-seek frames (between keyframe and actual seek target)
+        if let threshold = skipUntilPTS {
+            if CMTimeCompare(pts, threshold) < 0 {
+                reorderLock.unlock()
+                return
+            }
+            skipUntilPTS = nil
+        }
 
         // Insert into reorder buffer, sorted by PTS
         let ptsSeconds = CMTimeGetSeconds(pts)
@@ -48,15 +70,15 @@ final class SampleBufferRenderer {
         reorderLock.unlock()
     }
 
-    /// Flush all buffered frames to the display layer (call on seek/stop).
+    /// Discard all buffered and displayed frames (call on seek/stop).
+    /// Uses flushAndRemoveImage to clear the currently visible frame
+    /// immediately — prevents showing stale content after seeking.
     func flush() {
         reorderLock.lock()
-        let remaining = reorderBuffer
         reorderBuffer.removeAll()
         reorderLock.unlock()
 
-        // Don't enqueue remaining frames — they're stale after seek
-        displayLayer.flush()
+        displayLayer.flushAndRemoveImage()
     }
 
     /// Flush the reorder buffer and send all frames to the display layer

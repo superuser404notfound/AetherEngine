@@ -302,8 +302,12 @@ public final class SteelPlayer: ObservableObject {
         demuxer.seek(to: target)
         currentTime = target
 
-        // Set the audio clock to the seek target (not .zero!)
+        // Drop decoded frames between the keyframe and the seek target
+        // to prevent the visual "fast forward" effect.
         let seekTime = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
+        videoRenderer.setSkipThreshold(seekTime)
+
+        // Set the audio clock to the seek target (not .zero!)
         audioOutput.start(at: seekTime)
 
         // Resume playing from new position
