@@ -2,19 +2,16 @@ import Foundation
 import Libavformat
 import Libavutil
 
-/// Custom AVIO context that feeds data to FFmpeg via URLSession HTTP Range
-/// requests with asynchronous double-buffering.
+/// Custom AVIO context that feeds data to FFmpeg via URLSession.
 ///
-/// Architecture:
-/// - Two buffers: `current` (being read by FFmpeg) and `prefetch` (being
-///   downloaded in background). When `current` is exhausted, we swap.
-/// - A background GCD queue continuously prefetches the next chunk so
-///   network I/O never blocks the demux thread.
-/// - For seeks, both buffers are invalidated and refilled.
+/// Two modes:
+/// - **Seekable** (file size known): HTTP Range requests with double-buffering.
+///   Used for direct play of complete files.
+/// - **Streaming** (file size unknown/-1): Single GET request, sequential reads.
+///   Used for live transcoded streams from Jellyfin.
 ///
-/// Thread safety: AVIO callbacks run on the demux queue. Prefetch runs
-/// on a dedicated background queue. Access to shared state is protected
-/// by `bufferLock`.
+/// Thread safety: AVIO callbacks run on the demux queue. Prefetch/streaming
+/// runs on a dedicated background queue. Shared state protected by locks.
 final class AVIOReader: @unchecked Sendable {
 
     private let url: URL
@@ -22,35 +19,35 @@ final class AVIOReader: @unchecked Sendable {
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
 
+    /// True when the source is a live stream (no Content-Length).
+    private var isStreaming: Bool { fileSize <= 0 }
+
     private(set) var context: UnsafeMutablePointer<AVIOContext>?
     private var buffer: UnsafeMutablePointer<UInt8>?
 
-    // MARK: - Double Buffer
+    // MARK: - Seekable Mode (Range requests)
 
     private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
 
-    /// Lock protecting buffer state shared between demux and prefetch threads.
     private let bufferLock = NSLock()
-
-    /// The buffer currently being served to FFmpeg.
     private var currentBuffer = Data()
     private var currentOffset: Int64 = 0
-
-    /// Pre-fetched next chunk, ready to swap in.
     private var prefetchBuffer: Data?
     private var prefetchOffset: Int64 = 0
-
-    /// Whether a prefetch is in progress.
     private var isPrefetching = false
-
-    /// Signaled when prefetch completes (so read() can stop waiting).
     private let prefetchReady = DispatchSemaphore(value: 0)
-
-    /// Background queue for async prefetch.
     private let prefetchQueue = DispatchQueue(label: "com.steelplayer.avio.prefetch", qos: .userInitiated)
-
     private static let maxRetries = 3
+
+    // MARK: - Streaming Mode (sequential GET)
+
+    /// Growing buffer fed by the streaming task, read by FFmpeg.
+    private var streamBuffer = Data()
+    private var streamBytesRead: Int64 = 0
+    private var streamEnded = false
+    private let streamLock = NSLock()
+    private let streamDataReady = DispatchSemaphore(value: 0)
 
     init(url: URL) {
         self.url = url
@@ -86,12 +83,19 @@ final class AVIOReader: @unchecked Sendable {
 
         context = ctx
 
-        // Pre-fill the first chunk synchronously so demuxer can start immediately
-        if let data = fetchChunk(from: 0, size: Self.chunkSize) {
-            currentBuffer = data
-            currentOffset = 0
-            // Start prefetching the second chunk
-            triggerPrefetch(from: Int64(data.count))
+        if isStreaming {
+            // Streaming mode: start a continuous GET request in background.
+            // Data accumulates in streamBuffer, read() serves from it.
+            startStreamingDownload()
+            // Wait for initial data before returning
+            _ = streamDataReady.wait(timeout: .now() + .seconds(15))
+        } else {
+            // Seekable mode: pre-fill the first chunk with a Range request
+            if let data = fetchChunk(from: 0, size: Self.chunkSize) {
+                currentBuffer = data
+                currentOffset = 0
+                triggerPrefetch(from: Int64(data.count))
+            }
         }
     }
 
@@ -111,22 +115,26 @@ final class AVIOReader: @unchecked Sendable {
         prefetchBuffer = nil
         bufferLock.unlock()
 
-        // Don't invalidateAndCancel — the demux loop may still be in a
-        // read callback. Let the session be cleaned up on dealloc instead.
-        // getAllTasks + cancel is safe even during active reads.
+        streamLock.lock()
+        streamEnded = true
+        streamLock.unlock()
+        streamDataReady.signal()
+
         session.getAllTasks { tasks in
             tasks.forEach { $0.cancel() }
         }
-    }
-
-    deinit {
-        close()
     }
 
     // MARK: - Read (called by FFmpeg on demux thread)
 
     fileprivate func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         guard !isClosed else { return -1 }
+        return isStreaming ? readStreaming(into: buf, size: size) : readSeekable(into: buf, size: size)
+    }
+
+    // MARK: - Seekable Read (Range-based)
+
+    private func readSeekable(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         let requestSize = Int(size)
         var totalRead = 0
 
@@ -137,7 +145,6 @@ final class AVIOReader: @unchecked Sendable {
             bufferLock.unlock()
 
             if inRange {
-                // Serve from current buffer
                 bufferLock.lock()
                 let offsetInBuffer = Int(position - currentOffset)
                 let available = currentBuffer.count - offsetInBuffer
@@ -151,7 +158,6 @@ final class AVIOReader: @unchecked Sendable {
                 position += Int64(toCopy)
                 totalRead += toCopy
 
-                // When we've consumed >50% of the current buffer, start prefetching next
                 let consumed = Double(position - currentOffset) / Double(currentBuffer.count)
                 let nextPrefetchOffset = currentOffset + Int64(currentBuffer.count)
                 let needsPrefetch = consumed > 0.5 && !isPrefetching && prefetchBuffer == nil
@@ -161,24 +167,20 @@ final class AVIOReader: @unchecked Sendable {
                     triggerPrefetch(from: nextPrefetchOffset)
                 }
             } else {
-                // Current buffer exhausted or position outside it — swap in prefetch
                 bufferLock.lock()
                 if let prefetch = prefetchBuffer, position >= prefetchOffset &&
                     position < prefetchOffset + Int64(prefetch.count) {
-                    // Prefetch buffer covers our position — swap it in
                     currentBuffer = prefetch
                     currentOffset = prefetchOffset
                     prefetchBuffer = nil
                     bufferLock.unlock()
-                    continue  // Re-enter loop, now served from new current buffer
+                    continue
                 }
                 let hasPrefetchInFlight = isPrefetching
                 bufferLock.unlock()
 
                 if hasPrefetchInFlight {
-                    // Wait for in-flight prefetch to complete
                     _ = prefetchReady.wait(timeout: .now() + .seconds(15))
-                    // Re-check after wake
                     bufferLock.lock()
                     if let prefetch = prefetchBuffer, position >= prefetchOffset &&
                         position < prefetchOffset + Int64(prefetch.count) {
@@ -191,7 +193,6 @@ final class AVIOReader: @unchecked Sendable {
                     bufferLock.unlock()
                 }
 
-                // No prefetch available — synchronous fetch as last resort
                 let chunkSize: Int
                 if fileSize > 0 {
                     chunkSize = min(Self.chunkSize, Int(fileSize - position))
@@ -199,12 +200,11 @@ final class AVIOReader: @unchecked Sendable {
                     chunkSize = Self.chunkSize
                 }
 
-                if chunkSize <= 0 { break }  // EOF
+                if chunkSize <= 0 { break }
 
                 guard let data = fetchChunk(from: position, size: chunkSize) else {
-                    return totalRead > 0 ? Int32(totalRead) : -1
+                    break
                 }
-                if data.isEmpty { break }
 
                 bufferLock.lock()
                 currentBuffer = data
@@ -214,10 +214,146 @@ final class AVIOReader: @unchecked Sendable {
             }
         }
 
-        return totalRead > 0 ? Int32(totalRead) : 0
+        return totalRead > 0 ? Int32(totalRead) : AVERROR_EOF_VALUE
     }
 
-    // MARK: - Prefetch (background thread)
+    // MARK: - Streaming Read (sequential GET)
+
+    private func readStreaming(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
+        let requestSize = Int(size)
+        var totalRead = 0
+
+        while totalRead < requestSize {
+            streamLock.lock()
+            let posInBuffer = Int(position - streamBytesRead)
+            let available = streamBuffer.count - posInBuffer
+            let ended = streamEnded
+            streamLock.unlock()
+
+            if available > 0 && posInBuffer >= 0 {
+                let toCopy = min(available, requestSize - totalRead)
+
+                streamLock.lock()
+                streamBuffer.withUnsafeBytes { raw in
+                    let src = raw.baseAddress!.advanced(by: posInBuffer)
+                        .assumingMemoryBound(to: UInt8.self)
+                    buf.advanced(by: totalRead).update(from: src, count: toCopy)
+                }
+                streamLock.unlock()
+
+                position += Int64(toCopy)
+                totalRead += toCopy
+
+                // Trim consumed data to prevent unbounded memory growth
+                // Keep last 1MB for potential small backward seeks
+                streamLock.lock()
+                let consumed = Int(position - streamBytesRead)
+                let trimThreshold = 1024 * 1024
+                if consumed > trimThreshold {
+                    let trimAmount = consumed - trimThreshold
+                    streamBuffer.removeFirst(trimAmount)
+                    streamBytesRead += Int64(trimAmount)
+                }
+                streamLock.unlock()
+            } else if ended {
+                break
+            } else {
+                // Wait for more data from the streaming task
+                let timeout = streamDataReady.wait(timeout: .now() + .seconds(15))
+                if timeout == .timedOut { break }
+            }
+        }
+
+        return totalRead > 0 ? Int32(totalRead) : AVERROR_EOF_VALUE
+    }
+
+    // MARK: - Streaming Download (background)
+
+    private func startStreamingDownload() {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60
+
+        let task = session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self, let data, !self.isClosed else {
+                self?.streamLock.lock()
+                self?.streamEnded = true
+                self?.streamLock.unlock()
+                self?.streamDataReady.signal()
+                return
+            }
+
+            if let http = response as? HTTPURLResponse,
+               !(200...299).contains(http.statusCode) {
+                #if DEBUG
+                print("[AVIOReader] Stream HTTP error: \(http.statusCode)")
+                #endif
+                self.streamLock.lock()
+                self.streamEnded = true
+                self.streamLock.unlock()
+                self.streamDataReady.signal()
+                return
+            }
+
+            self.streamLock.lock()
+            self.streamBuffer.append(data)
+            self.streamLock.unlock()
+            self.streamDataReady.signal()
+        }
+
+        // Use delegate-based streaming for large responses
+        // Actually, dataTask completion gives ALL data at once.
+        // For streaming, we need URLSession delegate. Let me use
+        // a simpler approach with synchronous chunked reading.
+        task.cancel()
+
+        // Use a background thread with synchronous streaming
+        prefetchQueue.async { [weak self] in
+            self?.streamDownloadSync()
+        }
+    }
+
+    private func streamDownloadSync() {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 0  // No timeout for live streams
+
+        let semaphore = DispatchSemaphore(value: 0)
+
+        let delegate = StreamingDelegate { [weak self] data in
+            guard let self, !self.isClosed else { return }
+            self.streamLock.lock()
+            self.streamBuffer.append(data)
+            self.streamLock.unlock()
+            self.streamDataReady.signal()
+        } onComplete: { [weak self] in
+            self?.streamLock.lock()
+            self?.streamEnded = true
+            self?.streamLock.unlock()
+            self?.streamDataReady.signal()
+            semaphore.signal()
+        }
+
+        let streamSession = URLSession(
+            configuration: .ephemeral,
+            delegate: delegate,
+            delegateQueue: nil
+        )
+        let task = streamSession.dataTask(with: request)
+        task.resume()
+
+        #if DEBUG
+        print("[AVIOReader] Streaming started: \(url.lastPathComponent)")
+        #endif
+
+        // Wait until stream ends or reader is closed
+        semaphore.wait()
+
+        #if DEBUG
+        print("[AVIOReader] Streaming ended")
+        #endif
+        streamSession.invalidateAndCancel()
+    }
+
+    // MARK: - Prefetch (background, seekable mode only)
 
     private func triggerPrefetch(from offset: Int64) {
         if fileSize > 0 && offset >= fileSize { return }
@@ -266,21 +402,23 @@ final class AVIOReader: @unchecked Sendable {
             return -1
         }
 
-        // Invalidate buffers if seeking outside current range
-        bufferLock.lock()
-        let inCurrent = position >= currentOffset &&
-            position < currentOffset + Int64(currentBuffer.count)
-        if !inCurrent {
-            currentBuffer = Data()
-            currentOffset = position
-            prefetchBuffer = nil
+        if !isStreaming {
+            // Seekable mode: invalidate buffers if outside current range
+            bufferLock.lock()
+            let inCurrent = position >= currentOffset &&
+                position < currentOffset + Int64(currentBuffer.count)
+            if !inCurrent {
+                currentBuffer = Data()
+                currentOffset = position
+                prefetchBuffer = nil
+            }
+            bufferLock.unlock()
         }
-        bufferLock.unlock()
 
         return position
     }
 
-    // MARK: - Network
+    // MARK: - Network (seekable mode)
 
     private func probeFileSize() throws -> Int64 {
         var request = URLRequest(url: url)
@@ -296,7 +434,7 @@ final class AVIOReader: @unchecked Sendable {
         }
         let length = http.expectedContentLength
         #if DEBUG
-        print("[AVIOReader] File size: \(length) bytes")
+        print("[AVIOReader] File size: \(length) bytes\(length <= 0 ? " (streaming mode)" : "")")
         #endif
         return length
     }
@@ -358,7 +496,37 @@ final class AVIOReader: @unchecked Sendable {
     }
 }
 
+// MARK: - Streaming Delegate
+
+/// URLSession delegate that delivers data chunks incrementally
+/// instead of buffering the entire response.
+private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
+    let onData: (Data) -> Void
+    let onComplete: () -> Void
+
+    init(onData: @escaping (Data) -> Void, onComplete: @escaping () -> Void) {
+        self.onData = onData
+        self.onComplete = onComplete
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        onData(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        #if DEBUG
+        if let error {
+            print("[AVIOReader] Stream error: \(error.localizedDescription)")
+        }
+        #endif
+        onComplete()
+    }
+}
+
 // MARK: - C Callbacks
+
+/// FFmpeg AVERROR_EOF — the C macro can't be imported into Swift.
+private let AVERROR_EOF_VALUE: Int32 = -541478725
 
 private func readCallback(
     opaque: UnsafeMutableRawPointer?,
@@ -390,10 +558,10 @@ enum AVIOReaderError: Error, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .allocationFailed: "AVIO buffer/context allocation failed"
-        case .httpError(let code): "HTTP error \(code)"
-        case .noResponse: "No response from server"
-        case .requestTimeout: "HTTP request timed out"
+        case .allocationFailed: return "Failed to allocate AVIO buffer"
+        case .httpError(let code): return "HTTP error \(code)"
+        case .noResponse: return "No response from server"
+        case .requestTimeout: return "Request timed out"
         }
     }
 }
