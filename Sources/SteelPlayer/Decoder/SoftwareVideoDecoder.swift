@@ -1,20 +1,21 @@
 import Foundation
 import CoreMedia
 import CoreVideo
-import Accelerate
 import Libavformat
 import Libavcodec
 import Libavutil
+import Libswscale
 
 /// FFmpeg software video decoder fallback for codecs without
-/// VideoToolbox hardware support (e.g. AV1 on A15, VP8/VP9).
+/// VideoToolbox hardware support (e.g. AV1 on Apple TV).
 ///
-/// Decodes to AVFrame (YUV420P) and converts to CVPixelBuffer (NV12)
-/// for the Metal renderer. Slower than hardware decode but works for
-/// any codec FFmpeg supports.
+/// Uses sws_scale (SIMD-optimized) for YUV→NV12/P010 conversion
+/// instead of manual per-pixel loops. This is critical for AV1
+/// where decode + conversion must hit 24fps at 1080p.
 final class SoftwareVideoDecoder {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
+    private var swsContext: OpaquePointer?
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
@@ -45,7 +46,6 @@ final class SoftwareVideoDecoder {
         }
 
         // Force pure software decode — disable all hardware acceleration.
-        // FFmpeg's AV1 decoder tries VideoToolbox internally and fails on A15.
         ctx.pointee.get_format = { _, fmts in
             guard let fmts = fmts else { return AV_PIX_FMT_NONE }
             var i = 0
@@ -59,8 +59,6 @@ final class SoftwareVideoDecoder {
         }
 
         // Use all available CPU cores for software decode.
-        // 0 = auto-detect (uses ProcessInfo.processInfo.activeProcessorCount).
-        // A15 in Apple TV 4K has 6 cores — all should be used for AV1.
         ctx.pointee.thread_count = Int32(ProcessInfo.processInfo.activeProcessorCount)
         ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
 
@@ -129,6 +127,10 @@ final class SoftwareVideoDecoder {
             avcodec_free_context(&codecContext)
         }
         codecContext = nil
+        if swsContext != nil {
+            sws_freeContext(swsContext)
+            swsContext = nil
+        }
         lock.unlock()
         onFrame = nil
     }
@@ -137,29 +139,32 @@ final class SoftwareVideoDecoder {
         close()
     }
 
-    // MARK: - AVFrame → CVPixelBuffer
+    // MARK: - AVFrame → CVPixelBuffer (sws_scale)
 
-    /// Convert a decoded AVFrame to a CVPixelBuffer.
-    /// Supports both 8-bit (YUV420P → NV12) and 10-bit (YUV420P10 → P010).
+    /// Convert a decoded AVFrame to an NV12 CVPixelBuffer using sws_scale.
+    /// sws_scale is SIMD-optimized (NEON on ARM) — much faster than
+    /// manual per-pixel loops, critical for AV1 at 1080p.
     private func convertFrameToPixelBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CVPixelBuffer? {
         let width = Int(frame.pointee.width)
         let height = Int(frame.pointee.height)
         guard width > 0, height > 0 else { return nil }
 
-        let pixFmt = frame.pointee.format
-        let is10Bit = (pixFmt == AV_PIX_FMT_YUV420P10LE.rawValue ||
-                       pixFmt == AV_PIX_FMT_YUV420P10BE.rawValue)
+        let srcFmt = AVPixelFormat(rawValue: frame.pointee.format)
 
-        if is10Bit {
-            return convert10BitFrame(frame, width: width, height: height)
-        } else {
-            return convert8BitFrame(frame, width: width, height: height)
-        }
-    }
+        // Always convert to NV12 8-bit — AVSampleBufferDisplayLayer
+        // handles it natively and it avoids 10-bit rendering complexity.
+        let dstFmt = AV_PIX_FMT_NV12
 
-    // MARK: - 8-bit YUV420P → NV12
+        // Get or create sws context (cached for same dimensions/format)
+        swsContext = sws_getCachedContext(
+            swsContext,
+            Int32(width), Int32(height), srcFmt,
+            Int32(width), Int32(height), dstFmt,
+            SWS_BILINEAR, nil, nil, nil
+        )
+        guard swsContext != nil else { return nil }
 
-    private func convert8BitFrame(_ frame: UnsafeMutablePointer<AVFrame>, width: Int, height: Int) -> CVPixelBuffer? {
+        // Create destination CVPixelBuffer
         var pixelBuffer: CVPixelBuffer?
         let attrs: NSDictionary = [
             kCVPixelBufferMetalCompatibilityKey: true,
@@ -175,96 +180,45 @@ final class SoftwareVideoDecoder {
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
 
-        // Y plane
-        let yDst = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
-        let yDstStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-        let ySrc = frame.pointee.data.0!
-        let ySrcStride = Int(frame.pointee.linesize.0)
+        // Set up destination pointers for NV12 (2 planes: Y + CbCr)
+        let yPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
+            .assumingMemoryBound(to: UInt8.self)
+        let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
+            .assumingMemoryBound(to: UInt8.self)
 
-        for row in 0..<height {
-            memcpy(yDst.advanced(by: row * yDstStride),
-                   ySrc.advanced(by: row * ySrcStride), width)
-        }
+        var dstData: (UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?,
+                      UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?)
+        dstData.0 = yPlane
+        dstData.1 = cbcrPlane
+        dstData.2 = nil
+        dstData.3 = nil
 
-        // Interleave U + V → CbCr — optimized row-by-row memcpy
-        // (vImage doesn't have a 2-channel planar→chunky, so we use
-        // a tight loop that the compiler auto-vectorizes with NEON)
-        let cbcrDst = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
-        let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-        let uSrc = frame.pointee.data.1!
-        let vSrc = frame.pointee.data.2!
-        let uStride = Int(frame.pointee.linesize.1)
-        let vStride = Int(frame.pointee.linesize.2)
-        let halfW = width / 2
+        var dstLinesize: (Int32, Int32, Int32, Int32, Int32, Int32, Int32, Int32) = (0, 0, 0, 0, 0, 0, 0, 0)
+        dstLinesize.0 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 0))
+        dstLinesize.1 = Int32(CVPixelBufferGetBytesPerRowOfPlane(pb, 1))
 
-        for row in 0..<(height / 2) {
-            let dst = cbcrDst.advanced(by: row * cbcrStride).assumingMemoryBound(to: UInt8.self)
-            let u = uSrc.advanced(by: row * uStride)
-            let v = vSrc.advanced(by: row * vStride)
-            // Process 2 pixels at a time for better auto-vectorization
-            var col = 0
-            while col < halfW {
-                dst[col &* 2]       = u[col]
-                dst[col &* 2 &+ 1]  = v[col]
-                col &+= 1
-            }
-        }
+        // sws_scale: SIMD-optimized conversion (handles 8-bit, 10-bit, any format → NV12)
+        withUnsafePointer(to: &frame.pointee.data) { srcDataPtr in
+            withUnsafePointer(to: &frame.pointee.linesize) { srcLinesizePtr in
+                withUnsafeMutablePointer(to: &dstData) { dstPtr in
+                    withUnsafeMutablePointer(to: &dstLinesize) { dstLsPtr in
+                        let srcSlice = UnsafeRawPointer(srcDataPtr)
+                            .assumingMemoryBound(to: UnsafePointer<UInt8>?.self)
+                        let srcLs = UnsafeRawPointer(srcLinesizePtr)
+                            .assumingMemoryBound(to: Int32.self)
+                        let dstSlice = UnsafeMutableRawPointer(dstPtr)
+                            .assumingMemoryBound(to: UnsafeMutablePointer<UInt8>?.self)
+                        let dstLs = UnsafeMutableRawPointer(dstLsPtr)
+                            .assumingMemoryBound(to: Int32.self)
 
-        return pb
-    }
-
-    // MARK: - 10-bit YUV420P10 → P010
-
-    private func convert10BitFrame(_ frame: UnsafeMutablePointer<AVFrame>, width: Int, height: Int) -> CVPixelBuffer? {
-        var pixelBuffer: CVPixelBuffer?
-        let attrs: NSDictionary = [
-            kCVPixelBufferMetalCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
-        ]
-        // P010: 10-bit bi-planar, 16-bit per component (upper 10 bits used)
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault, width, height,
-            kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-            attrs, &pixelBuffer
-        )
-        guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
-
-        CVPixelBufferLockBaseAddress(pb, [])
-        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-
-        // Y plane: 16-bit per sample.
-        // libdav1d outputs 10-bit values (0-1023). P010 uses upper 10 bits
-        // of a 16-bit word, so we shift left by 6.
-        let yDstRaw = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
-        let yDstStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
-        let ySrcRaw = UnsafeRawPointer(frame.pointee.data.0!)
-        let ySrcStride = Int(frame.pointee.linesize.0)
-
-        for row in 0..<height {
-            let dst = yDstRaw.advanced(by: row * yDstStride).bindMemory(to: UInt16.self, capacity: width)
-            let src = ySrcRaw.advanced(by: row * ySrcStride).assumingMemoryBound(to: UInt16.self)
-            for col in 0..<width {
-                dst[col] = src[col] << 6
-            }
-        }
-
-        // CbCr plane: interleave U + V, each 16-bit
-        let cbcrDstRaw = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
-        let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
-        let uRaw = UnsafeRawPointer(frame.pointee.data.1!)
-        let vRaw = UnsafeRawPointer(frame.pointee.data.2!)
-        let uStride = Int(frame.pointee.linesize.1)
-        let vStride = Int(frame.pointee.linesize.2)
-        let halfW = width / 2
-        let halfH = height / 2
-
-        for row in 0..<halfH {
-            let dst = cbcrDstRaw.advanced(by: row * cbcrStride).bindMemory(to: UInt16.self, capacity: halfW * 2)
-            let u = uRaw.advanced(by: row * uStride).assumingMemoryBound(to: UInt16.self)
-            let v = vRaw.advanced(by: row * vStride).assumingMemoryBound(to: UInt16.self)
-            for col in 0..<halfW {
-                dst[col * 2]     = u[col] << 6
-                dst[col * 2 + 1] = v[col] << 6
+                        sws_scale(
+                            swsContext,
+                            srcSlice, srcLs,
+                            0, Int32(height),
+                            dstSlice, dstLs
+                        )
+                    }
+                }
             }
         }
 
