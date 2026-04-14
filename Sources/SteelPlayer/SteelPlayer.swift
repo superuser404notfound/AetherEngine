@@ -234,6 +234,7 @@ public final class SteelPlayer: ObservableObject {
             // doesn't reject video frames whose PTS is far ahead of time 0.
             // The demux loop's audioOutput.start() becomes a no-op since
             // _isStarted is already true.
+            var initialAudioTime: CMTime = .zero
             if let start = startPosition, start > 0 {
                 demuxer.seek(to: start)
                 currentTime = start
@@ -242,14 +243,17 @@ public final class SteelPlayer: ObservableObject {
                 if usingSoftwareDecode {
                     softwareDecoder.skipUntilPTS = seekTime
                 }
-                audioOutput.start(at: seekTime)
+                initialAudioTime = seekTime
+                // DON'T start audioOutput here — the clock would advance
+                // while the demux loop hasn't produced any frames yet.
+                // Instead, pass the time to the demux loop.
             }
 
             // 5. Start the demux→decode loop and time updates
             isPlaying = true
             state = .playing
             startTimeUpdates()
-            startDemuxLoop(videoStreamIndex: videoIdx, audioStreamIndex: audioIdx)
+            startDemuxLoop(videoStreamIndex: videoIdx, audioStreamIndex: audioIdx, initialAudioTime: initialAudioTime)
 
             #if DEBUG
             print("[SteelPlayer] Playback started (duration=\(String(format: "%.1f", duration))s)")
@@ -391,7 +395,7 @@ public final class SteelPlayer: ObservableObject {
     /// Runs on `demuxQueue`. Reads packets from the demuxer and feeds
     /// them to the appropriate decoders. Uses semaphore-based back-pressure
     /// instead of busy-waiting.
-    private func startDemuxLoop(videoStreamIndex: Int32, audioStreamIndex: Int32) {
+    private func startDemuxLoop(videoStreamIndex: Int32, audioStreamIndex: Int32, initialAudioTime: CMTime = .zero) {
         let audioOutput = self.audioOutput
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
@@ -459,9 +463,12 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start the synchronizer once we have first audio data.
+                    // Start the synchronizer when first audio data arrives.
+                    // Starting HERE (not in load/seek) ensures the clock
+                    // doesn't advance while the decoder is still producing
+                    // the first frame — eliminates "fast forward" on resume.
                     if !audioStarted && !sampleBuffers.isEmpty {
-                        audioOutput.start()
+                        audioOutput.start(at: initialAudioTime)
                         audioStarted = true
                     }
                 }
