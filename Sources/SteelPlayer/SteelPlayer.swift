@@ -239,6 +239,9 @@ public final class SteelPlayer: ObservableObject {
                 currentTime = start
                 let seekTime = CMTimeMakeWithSeconds(start, preferredTimescale: 90000)
                 videoRenderer.setSkipThreshold(seekTime)
+                if usingSoftwareDecode {
+                    softwareDecoder.skipUntilPTS = seekTime
+                }
                 audioOutput.start(at: seekTime)
             }
 
@@ -307,6 +310,9 @@ public final class SteelPlayer: ObservableObject {
         // to prevent the visual "fast forward" effect.
         let seekTime = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
         videoRenderer.setSkipThreshold(seekTime)
+        if usingSoftwareDecode {
+            softwareDecoder.skipUntilPTS = seekTime
+        }
 
         // Set the audio clock to the seek target (not .zero!)
         audioOutput.start(at: seekTime)

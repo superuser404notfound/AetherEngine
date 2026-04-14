@@ -19,6 +19,10 @@ final class SoftwareVideoDecoder {
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
+    /// After a seek, skip frames before this PTS to avoid the
+    /// "fast forward" effect. Decoded for reference but not converted.
+    var skipUntilPTS: CMTime?
+
     /// Protects codecContext from concurrent access between the demux
     /// thread (decode) and the main thread (close/flush).
     private let lock = NSLock()
@@ -94,6 +98,20 @@ final class SoftwareVideoDecoder {
             let ret = avcodec_receive_frame(ctx, f)
             lock.unlock()
             guard ret >= 0 else { break }
+
+            // Skip pre-seek frames — decoded for reference but not converted.
+            // This avoids the expensive sws_scale + display for frames the
+            // renderer would drop anyway via skipUntilPTS.
+            if let threshold = skipUntilPTS, f.pointee.pts != Int64.min {
+                let framePTS = CMTimeMake(
+                    value: f.pointee.pts * Int64(timeBase.num),
+                    timescale: Int32(timeBase.den)
+                )
+                if CMTimeCompare(framePTS, threshold) < 0 {
+                    continue
+                }
+                skipUntilPTS = nil
+            }
 
             guard let pixelBuffer = convertFrameToPixelBuffer(f) else { continue }
 
