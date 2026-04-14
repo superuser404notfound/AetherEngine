@@ -29,6 +29,7 @@ final class AVIOReader: @unchecked Sendable {
 
     private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
+    private static let streamTrimThreshold = 1024 * 1024  // 1 MB — keep for small backward seeks
 
     private let bufferLock = NSLock()
     private var currentBuffer = Data()
@@ -248,9 +249,8 @@ final class AVIOReader: @unchecked Sendable {
                 // Keep last 1MB for potential small backward seeks
                 streamLock.lock()
                 let consumed = Int(position - streamBytesRead)
-                let trimThreshold = 1024 * 1024
-                if consumed > trimThreshold {
-                    let trimAmount = consumed - trimThreshold
+                if consumed > Self.streamTrimThreshold {
+                    let trimAmount = consumed - Self.streamTrimThreshold
                     streamBuffer.removeFirst(trimAmount)
                     streamBytesRead += Int64(trimAmount)
                 }
@@ -270,43 +270,6 @@ final class AVIOReader: @unchecked Sendable {
     // MARK: - Streaming Download (background)
 
     private func startStreamingDownload() {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 60
-
-        let task = session.dataTask(with: request) { [weak self] data, response, error in
-            guard let self, let data, !self.isClosed else {
-                self?.streamLock.lock()
-                self?.streamEnded = true
-                self?.streamLock.unlock()
-                self?.streamDataReady.signal()
-                return
-            }
-
-            if let http = response as? HTTPURLResponse,
-               !(200...299).contains(http.statusCode) {
-                #if DEBUG
-                print("[AVIOReader] Stream HTTP error: \(http.statusCode)")
-                #endif
-                self.streamLock.lock()
-                self.streamEnded = true
-                self.streamLock.unlock()
-                self.streamDataReady.signal()
-                return
-            }
-
-            self.streamLock.lock()
-            self.streamBuffer.append(data)
-            self.streamLock.unlock()
-            self.streamDataReady.signal()
-        }
-
-        // Use delegate-based streaming for large responses
-        // Actually, dataTask completion gives ALL data at once.
-        // For streaming, we need URLSession delegate. Let me use
-        // a simpler approach with synchronous chunked reading.
-        task.cancel()
-
-        // Use a background thread with synchronous streaming
         prefetchQueue.async { [weak self] in
             self?.streamDownloadSync()
         }
@@ -512,10 +475,10 @@ final class AVIOReader: @unchecked Sendable {
 /// URLSession delegate that delivers data chunks incrementally
 /// instead of buffering the entire response.
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
-    let onData: (Data) -> Void
-    let onComplete: () -> Void
+    let onData: @Sendable (Data) -> Void
+    let onComplete: @Sendable () -> Void
 
-    init(onData: @escaping (Data) -> Void, onComplete: @escaping () -> Void) {
+    init(onData: @escaping @Sendable (Data) -> Void, onComplete: @escaping @Sendable () -> Void) {
         self.onData = onData
         self.onComplete = onComplete
     }
@@ -537,6 +500,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
 // MARK: - C Callbacks
 
 /// FFmpeg AVERROR_EOF — the C macro can't be imported into Swift.
+/// FFERRTAG(0xF8,'E','O','F') = -541478725
 private let AVERROR_EOF_VALUE: Int32 = -541478725
 
 private func readCallback(

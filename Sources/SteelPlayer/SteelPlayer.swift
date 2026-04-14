@@ -60,23 +60,27 @@ public final class SteelPlayer: ObservableObject {
 
     // MARK: - Internal Pipeline
 
-    private let demuxer = Demuxer()
-    private let videoDecoder = VideoDecoder()
-    private let softwareDecoder = SoftwareVideoDecoder()
+    /// Pipeline components — accessed from both main actor and demux queue.
+    /// Each has internal locking for thread safety.
+    nonisolated(unsafe) private let demuxer = Demuxer()
+    nonisolated(unsafe) private let videoDecoder = VideoDecoder()
+    nonisolated(unsafe) private let softwareDecoder = SoftwareVideoDecoder()
     private let audioDecoder = AudioDecoder()
 
     /// True if the current stream uses software decoding (FFmpeg) instead of VT.
-    private var usingSoftwareDecode = false
+    /// Set during load(), read during demux loop — effectively immutable during playback.
+    nonisolated(unsafe) private var usingSoftwareDecode = false
     private let audioOutput = AudioOutput()
-    private let videoRenderer = SampleBufferRenderer()
+    nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
 
     /// Thread-safe playback control flags.
+    /// Accessed from both main actor and demux queue — protected by flagsLock.
     private let flagsLock = NSLock()
-    private var _isPlaying = false
-    private var _stopRequested = false
+    nonisolated(unsafe) private var _isPlaying = false
+    nonisolated(unsafe) private var _stopRequested = false
 
     /// Whether the audio stream was successfully opened.
     private var audioAvailable = false
@@ -87,7 +91,7 @@ public final class SteelPlayer: ObservableObject {
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
-    private var isPlaying: Bool {
+    nonisolated private var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
             flagsLock.lock()
@@ -96,7 +100,7 @@ public final class SteelPlayer: ObservableObject {
             if newValue { demuxCondition.broadcast() }
         }
     }
-    private var stopRequested: Bool {
+    nonisolated private var stopRequested: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _stopRequested }
         set {
             flagsLock.lock()
@@ -334,7 +338,8 @@ public final class SteelPlayer: ObservableObject {
     }
 
     /// The currently active audio stream index.
-    private var activeAudioStreamIndex: Int32 = -1
+    /// Accessed from demux queue — protected by single-writer (main actor).
+    nonisolated(unsafe) private var activeAudioStreamIndex: Int32 = -1
 
     public func selectAudioTrack(index: Int) {
         let streamIndex = Int32(index)
@@ -399,7 +404,7 @@ public final class SteelPlayer: ObservableObject {
         let audioOutput = self.audioOutput
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
-        var audioStarted = false
+        nonisolated(unsafe) var audioStarted = false
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }

@@ -13,7 +13,7 @@ import Libswresample
 /// Internally uses libswresample to convert whatever FFmpeg decoded
 /// (planar float, int16, etc.) to interleaved Float32 at the source
 /// sample rate — which is what AVSampleBufferAudioRenderer expects.
-final class AudioDecoder {
+final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
     private var swrContext: OpaquePointer?  // SwrContext
@@ -103,10 +103,10 @@ final class AudioDecoder {
 
     /// Close the decoder and release resources.
     func close() {
-        if let ctx = codecContext {
+        if codecContext != nil {
             avcodec_free_context(&codecContext)
         }
-        if let swr = swrContext {
+        if swrContext != nil {
             swr_free(&swrContext)
         }
         codecContext = nil

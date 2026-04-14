@@ -8,7 +8,7 @@ import CoreMedia
 /// video frames check `synchronizer.currentTime()` to decide when to
 /// present. Audio is enqueued ahead of time and the synchronizer drives
 /// playback timing.
-final class AudioOutput {
+final class AudioOutput: @unchecked Sendable {
 
     let renderer: AVSampleBufferAudioRenderer
     let synchronizer: AVSampleBufferRenderSynchronizer
