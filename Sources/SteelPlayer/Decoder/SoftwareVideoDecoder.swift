@@ -118,67 +118,128 @@ final class SoftwareVideoDecoder {
         close()
     }
 
-    // MARK: - AVFrame → CVPixelBuffer (NV12)
+    // MARK: - AVFrame → CVPixelBuffer
 
-    /// Convert a decoded YUV420P AVFrame to an NV12 CVPixelBuffer.
-    /// Y plane is copied directly. U and V planes are interleaved
-    /// into the CbCr plane.
+    /// Convert a decoded AVFrame to a CVPixelBuffer.
+    /// Supports both 8-bit (YUV420P → NV12) and 10-bit (YUV420P10 → P010).
     private func convertFrameToPixelBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CVPixelBuffer? {
         let width = Int(frame.pointee.width)
         let height = Int(frame.pointee.height)
         guard width > 0, height > 0 else { return nil }
 
-        // Create CVPixelBuffer in NV12 format (matches our Metal shader)
+        let pixFmt = frame.pointee.format
+        let is10Bit = (pixFmt == AV_PIX_FMT_YUV420P10LE.rawValue ||
+                       pixFmt == AV_PIX_FMT_YUV420P10BE.rawValue)
+
+        if is10Bit {
+            return convert10BitFrame(frame, width: width, height: height)
+        } else {
+            return convert8BitFrame(frame, width: width, height: height)
+        }
+    }
+
+    // MARK: - 8-bit YUV420P → NV12
+
+    private func convert8BitFrame(_ frame: UnsafeMutablePointer<AVFrame>, width: Int, height: Int) -> CVPixelBuffer? {
         var pixelBuffer: CVPixelBuffer?
         let attrs: NSDictionary = [
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
         ]
         let status = CVPixelBufferCreate(
-            kCFAllocatorDefault,
-            width, height,
+            kCFAllocatorDefault, width, height,
             kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-            attrs,
-            &pixelBuffer
+            attrs, &pixelBuffer
         )
         guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
 
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
 
-        // Copy Y plane (plane 0)
+        // Y plane
         let yDst = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
         let yDstStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
         let ySrc = frame.pointee.data.0!
         let ySrcStride = Int(frame.pointee.linesize.0)
 
         for row in 0..<height {
-            memcpy(
-                yDst.advanced(by: row * yDstStride),
-                ySrc.advanced(by: row * ySrcStride),
-                width
-            )
+            memcpy(yDst.advanced(by: row * yDstStride),
+                   ySrc.advanced(by: row * ySrcStride), width)
         }
 
-        // Interleave U + V → CbCr plane (plane 1)
+        // Interleave U + V → CbCr
         let cbcrDst = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
-        let cbcrDstStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
         let uSrc = frame.pointee.data.1!
         let vSrc = frame.pointee.data.2!
         let uStride = Int(frame.pointee.linesize.1)
         let vStride = Int(frame.pointee.linesize.2)
-        let halfHeight = height / 2
-        let halfWidth = width / 2
 
-        for row in 0..<halfHeight {
-            let dstRow = cbcrDst.advanced(by: row * cbcrDstStride)
-                .assumingMemoryBound(to: UInt8.self)
-            let uRow = uSrc.advanced(by: row * uStride)
-            let vRow = vSrc.advanced(by: row * vStride)
+        for row in 0..<(height / 2) {
+            let dst = cbcrDst.advanced(by: row * cbcrStride).assumingMemoryBound(to: UInt8.self)
+            let u = uSrc.advanced(by: row * uStride)
+            let v = vSrc.advanced(by: row * vStride)
+            for col in 0..<(width / 2) {
+                dst[col * 2]     = u[col]
+                dst[col * 2 + 1] = v[col]
+            }
+        }
 
-            for col in 0..<halfWidth {
-                dstRow[col * 2]     = uRow[col]  // Cb
-                dstRow[col * 2 + 1] = vRow[col]  // Cr
+        return pb
+    }
+
+    // MARK: - 10-bit YUV420P10 → P010
+
+    private func convert10BitFrame(_ frame: UnsafeMutablePointer<AVFrame>, width: Int, height: Int) -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: NSDictionary = [
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+        ]
+        // P010: 10-bit bi-planar, 16-bit per component (upper 10 bits used)
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, width, height,
+            kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            attrs, &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
+
+        CVPixelBufferLockBaseAddress(pb, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+
+        // Y plane: 16-bit per sample.
+        // libdav1d outputs 10-bit values (0-1023). P010 uses upper 10 bits
+        // of a 16-bit word, so we shift left by 6.
+        let yDstRaw = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
+        let yDstStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let ySrcRaw = UnsafeRawPointer(frame.pointee.data.0!)
+        let ySrcStride = Int(frame.pointee.linesize.0)
+
+        for row in 0..<height {
+            let dst = yDstRaw.advanced(by: row * yDstStride).bindMemory(to: UInt16.self, capacity: width)
+            let src = ySrcRaw.advanced(by: row * ySrcStride).assumingMemoryBound(to: UInt16.self)
+            for col in 0..<width {
+                dst[col] = src[col] << 6
+            }
+        }
+
+        // CbCr plane: interleave U + V, each 16-bit
+        let cbcrDstRaw = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
+        let cbcrStride = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        let uRaw = UnsafeRawPointer(frame.pointee.data.1!)
+        let vRaw = UnsafeRawPointer(frame.pointee.data.2!)
+        let uStride = Int(frame.pointee.linesize.1)
+        let vStride = Int(frame.pointee.linesize.2)
+        let halfW = width / 2
+        let halfH = height / 2
+
+        for row in 0..<halfH {
+            let dst = cbcrDstRaw.advanced(by: row * cbcrStride).bindMemory(to: UInt16.self, capacity: halfW * 2)
+            let u = uRaw.advanced(by: row * uStride).assumingMemoryBound(to: UInt16.self)
+            let v = vRaw.advanced(by: row * vStride).assumingMemoryBound(to: UInt16.self)
+            for col in 0..<halfW {
+                dst[col * 2]     = u[col] << 6
+                dst[col * 2 + 1] = v[col] << 6
             }
         }
 
