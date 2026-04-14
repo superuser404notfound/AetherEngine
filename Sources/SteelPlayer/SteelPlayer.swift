@@ -77,7 +77,6 @@ public final class SteelPlayer: ObservableObject {
     private let flagsLock = NSLock()
     private var _isPlaying = false
     private var _stopRequested = false
-    private var _pendingSeekTime: CMTime?
 
     /// Whether the audio stream was successfully opened.
     private var audioAvailable = false
@@ -105,11 +104,6 @@ public final class SteelPlayer: ObservableObject {
             flagsLock.unlock()
             if newValue { demuxCondition.broadcast() }
         }
-    }
-    /// Thread-safe pending seek time — set in seek(), consumed by demux loop.
-    private var pendingSeekTime: CMTime? {
-        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _pendingSeekTime }
-        set { flagsLock.lock(); _pendingSeekTime = newValue; flagsLock.unlock() }
     }
 
     // MARK: - Init
@@ -320,12 +314,8 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // DON'T start the synchronizer here — it would advance the clock
-        // while dav1d is still decoding the first frame, causing a
-        // "fast forward" effect when frames arrive behind the clock.
-        // Instead, store the seek time and let the demux loop start
-        // the synchronizer when the first audio packet arrives.
-        pendingSeekTime = seekTime
+        // Set the audio clock to the seek target (not .zero!)
+        audioOutput.start(at: seekTime)
 
         // Resume playing from new position
         isPlaying = true
@@ -405,7 +395,7 @@ public final class SteelPlayer: ObservableObject {
         let audioOutput = self.audioOutput
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
-        nonisolated(unsafe) var audioStarted = false
+        var audioStarted = false
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }
@@ -469,17 +459,10 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start (or restart) the synchronizer when first audio
-                    // arrives. After seek(), pendingSeekTime holds the target.
-                    // Starting here (not in seek) avoids clock drift from
-                    // decode latency — the clock starts when data is ready.
-                    if !sampleBuffers.isEmpty {
-                        let seekTime = self.pendingSeekTime
-                        if seekTime != nil || !audioStarted {
-                            self.pendingSeekTime = nil
-                            audioStarted = true
-                            audioOutput.start(at: seekTime ?? .zero)
-                        }
+                    // Start the synchronizer once we have first audio data.
+                    if !audioStarted && !sampleBuffers.isEmpty {
+                        audioOutput.start()
+                        audioStarted = true
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets
