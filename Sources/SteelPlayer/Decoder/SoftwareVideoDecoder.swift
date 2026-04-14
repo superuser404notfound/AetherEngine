@@ -18,6 +18,10 @@ final class SoftwareVideoDecoder {
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
+    /// Protects codecContext from concurrent access between the demux
+    /// thread (decode) and the main thread (close/flush).
+    private let lock = NSLock()
+
     func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
         self.onFrame = onFrame
 
@@ -76,22 +80,28 @@ final class SoftwareVideoDecoder {
     }
 
     func decode(packet: UnsafeMutablePointer<AVPacket>) {
-        guard let ctx = codecContext else { return }
+        lock.lock()
+        guard let ctx = codecContext else { lock.unlock(); return }
 
         let sendRet = avcodec_send_packet(ctx, packet)
-        guard sendRet >= 0 else { return }
+        guard sendRet >= 0 else { lock.unlock(); return }
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-        defer { av_frame_free(&frame) }
-        guard let f = frame else { return }
+        guard let f = frame else { lock.unlock(); return }
+        lock.unlock()
 
-        while avcodec_receive_frame(ctx, f) >= 0 {
+        while true {
+            lock.lock()
+            guard codecContext != nil else { lock.unlock(); break }
+            let ret = avcodec_receive_frame(ctx, f)
+            lock.unlock()
+            guard ret >= 0 else { break }
+
             guard let pixelBuffer = convertFrameToPixelBuffer(f) else { continue }
 
             let pts = f.pointee.pts
-            let avNoPTS: Int64 = Int64.min
             let cmPTS: CMTime
-            if pts != avNoPTS {
+            if pts != Int64.min {
                 cmPTS = CMTimeMake(
                     value: pts * Int64(timeBase.num),
                     timescale: Int32(timeBase.den)
@@ -102,18 +112,24 @@ final class SoftwareVideoDecoder {
 
             onFrame?(pixelBuffer, cmPTS)
         }
+
+        av_frame_free(&frame)
     }
 
     func flush() {
+        lock.lock()
+        defer { lock.unlock() }
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
     }
 
     func close() {
+        lock.lock()
         if codecContext != nil {
             avcodec_free_context(&codecContext)
         }
         codecContext = nil
+        lock.unlock()
         onFrame = nil
     }
 
