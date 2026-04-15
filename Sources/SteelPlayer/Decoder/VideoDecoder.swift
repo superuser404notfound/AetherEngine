@@ -180,6 +180,12 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
+                // On SDR displays, override HDR color metadata to BT.709
+                // so AVSampleBufferDisplayLayer doesn't try to display PQ
+                // on an SDR output — which causes completely wrong colors.
+                if !self.use10Bit {
+                    self.forceSDRColorSpace(on: pixelBuffer)
+                }
                 self.onFrame?(pixelBuffer, pts)
             }
         )
@@ -206,6 +212,20 @@ final class VideoDecoder: @unchecked Sendable {
 
     deinit {
         close()
+    }
+
+    // MARK: - Color Space Override
+
+    /// Override HDR color metadata on pixel buffers to BT.709/SDR.
+    /// Called when display is SDR to prevent AVSampleBufferDisplayLayer
+    /// from interpreting pixel data with PQ transfer function.
+    private func forceSDRColorSpace(on pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
     }
 
     // MARK: - VideoToolbox Setup
