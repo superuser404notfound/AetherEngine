@@ -693,21 +693,27 @@ public final class SteelPlayer: ObservableObject {
 
                 if streamIdx == videoStreamIndex {
                     // Back-pressure: wait if display layer isn't ready.
-                    // EXCEPTION: during HLS audio buffering, skip the wait
-                    // so the demux loop keeps feeding audio packets to HLS.
+                    // During HLS buffering: use a short timeout (50ms) so the
+                    // demux loop can still feed audio packets. Without timeout,
+                    // the loop blocks forever (audio starves → HLS can't buffer).
+                    // Without any wait, VideoToolbox queues grow → OOM crash.
                     let hlsBuffering = (self.audioMode == .hls && !(self.hlsAudioEngine?.isPlayerPlaying ?? true))
-                    if !hlsBuffering {
-                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                            Thread.sleep(forTimeInterval: 0.005)
-                        }
+                    var waitCycles = 0
+                    let maxCycles = hlsBuffering ? 10 : Int.max  // 10 × 5ms = 50ms timeout
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waitCycles < maxCycles {
+                        Thread.sleep(forTimeInterval: 0.005)
+                        waitCycles += 1
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
-                    // Decode video (display layer may drop frames if buffer is full)
-                    if self.usingSoftwareDecode {
-                        self.softwareDecoder.decode(packet: packet)
-                    } else {
-                        self.videoDecoder.decode(packet: packet)
+                    // Only decode if display layer can accept — skip frame otherwise
+                    // to prevent VideoToolbox memory buildup during HLS buffering.
+                    if self.videoRenderer.displayLayer.isReadyForMoreMediaData {
+                        if self.usingSoftwareDecode {
+                            self.softwareDecoder.decode(packet: packet)
+                        } else {
+                            self.videoDecoder.decode(packet: packet)
+                        }
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
