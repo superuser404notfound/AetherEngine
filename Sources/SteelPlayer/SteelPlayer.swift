@@ -562,18 +562,26 @@ public final class SteelPlayer: ObservableObject {
         let colorTRC = codecpar.pointee.color_trc
         let colorPrimaries = codecpar.pointee.color_primaries
 
-        // Check for Dolby Vision via codec parameters side data
+        // Check for Dolby Vision via codec parameters side data.
+        // Only report .dolbyVision if the display actually supports it —
+        // otherwise report .hdr10 (DV Profile 8 is HDR10-compatible).
         if codecId == AV_CODEC_ID_HEVC {
-            // DV Profile 5/8 uses HEVC with specific signaling.
-            // Check coded_side_data for DOVI configuration record.
             let nbSideData = Int(codecpar.pointee.nb_coded_side_data)
             if let sideData = codecpar.pointee.coded_side_data {
                 for i in 0..<nbSideData {
                     if sideData[i].type == AV_PKT_DATA_DOVI_CONF {
-                        #if DEBUG
-                        print("[SteelPlayer] Detected Dolby Vision stream")
+                        #if os(tvOS) || os(iOS)
+                        if AVPlayer.availableHDRModes.contains(.dolbyVision) {
+                            #if DEBUG
+                            print("[SteelPlayer] DV stream → Dolby Vision (display supports DV)")
+                            #endif
+                            return .dolbyVision
+                        }
                         #endif
-                        return .dolbyVision
+                        #if DEBUG
+                        print("[SteelPlayer] DV stream → HDR10 fallback")
+                        #endif
+                        return .hdr10
                     }
                 }
             }
