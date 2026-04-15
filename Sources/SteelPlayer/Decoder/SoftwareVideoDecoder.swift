@@ -22,6 +22,11 @@ final class SoftwareVideoDecoder {
     /// True when the source stream is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false
 
+    /// Pixel buffer pool — reuses allocations instead of creating per frame.
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var poolWidth = 0
+    private var poolHeight = 0
+
     /// After a seek, skip frames before this PTS to avoid the
     /// "fast forward" effect. Decoded for reference but not converted.
     var skipUntilPTS: CMTime?
@@ -156,6 +161,9 @@ final class SoftwareVideoDecoder {
             sws_freeContext(swsContext)
             swsContext = nil
         }
+        pixelBufferPool = nil
+        poolWidth = 0
+        poolHeight = 0
         lock.unlock()
         onFrame = nil
     }
@@ -189,21 +197,29 @@ final class SoftwareVideoDecoder {
         )
         guard swsContext != nil else { return nil }
 
-        // Create destination CVPixelBuffer — 10-bit P010 or 8-bit NV12
+        // Get pixel buffer from pool (or create pool on first call / resolution change)
         let cvPixelFormat: OSType = use10Bit
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
+        if pixelBufferPool == nil || poolWidth != width || poolHeight != height {
+            pixelBufferPool = nil
+            let poolAttrs: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: 6]
+            let pbAttrs: NSDictionary = [
+                kCVPixelBufferPixelFormatTypeKey: cvPixelFormat,
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+            ]
+            CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttrs, pbAttrs, &pixelBufferPool)
+            poolWidth = width
+            poolHeight = height
+        }
+
         var pixelBuffer: CVPixelBuffer?
-        let attrs: NSDictionary = [
-            kCVPixelBufferMetalCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
-        ]
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault, width, height,
-            cvPixelFormat,
-            attrs, &pixelBuffer
-        )
+        guard let pool = pixelBufferPool else { return nil }
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer)
         guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
 
         // Attach color space metadata from FFmpeg so AVSampleBufferDisplayLayer

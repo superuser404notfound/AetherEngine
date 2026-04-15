@@ -438,15 +438,34 @@ public final class SteelPlayer: ObservableObject {
                 }
 
                 // Read the next packet from the container.
-                // No back-pressure here — audio and subtitle packets must
-                // flow freely. Video-only throttling happens below.
+                // Retry transient errors (network hiccups) up to 3 times
+                // with exponential backoff before giving up.
                 let packet: UnsafeMutablePointer<AVPacket>?
-                do {
-                    packet = try self.demuxer.readPacket()
-                } catch {
-                    print("[SteelPlayer] Demuxer read error: \(error)")
+                var readError: Error?
+                var retries = 0
+                let maxRetries = 3
+                while true {
+                    do {
+                        packet = try self.demuxer.readPacket()
+                        readError = nil
+                        break
+                    } catch {
+                        retries += 1
+                        if retries >= maxRetries || self.stopRequested {
+                            readError = error
+                            packet = nil
+                            break
+                        }
+                        #if DEBUG
+                        print("[SteelPlayer] Read error (retry \(retries)/\(maxRetries)): \(error)")
+                        #endif
+                        Thread.sleep(forTimeInterval: Double(1 << retries) * 0.2)
+                    }
+                }
+                if let readError {
+                    print("[SteelPlayer] Demuxer read failed after \(retries) retries: \(readError)")
                     Task { @MainActor [weak self] in
-                        self?.state = .error("Playback error: \(error)")
+                        self?.state = .error("Playback error: \(readError)")
                     }
                     break
                 }
