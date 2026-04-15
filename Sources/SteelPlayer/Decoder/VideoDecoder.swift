@@ -5,6 +5,9 @@ import VideoToolbox
 import Libavformat
 import Libavcodec
 import Libavutil
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Callback type for decoded video frames.
 typealias DecodedFrameHandler = (CVPixelBuffer, CMTime) -> Void
@@ -50,23 +53,31 @@ final class VideoDecoder: @unchecked Sendable {
         let tb = stream.pointee.time_base
         timeBase = CMTime(value: CMTimeValue(tb.num), timescale: CMTimeScale(tb.den))
 
-        // Only use 10-bit output for content that actually needs it.
-        // 8-bit HEVC SDR stays NV12 — forcing P010 on 8-bit causes color errors
-        // (e.g. red appears yellow because of wrong range interpretation).
+        // Only use 10-bit output when:
+        // 1. The content IS HDR (Main10 profile, PQ/HLG transfer, or >8bps)
+        // 2. AND the display supports HDR (EDR headroom > 1.0)
         //
-        // Detection strategy (multiple signals, any one triggers 10-bit):
-        // 1. bits_per_raw_sample > 8 (explicit from container)
-        // 2. HEVC Main10 profile (profile == 2)
-        // 3. HDR transfer function (PQ = HDR10, HLG = HLG HDR)
+        // If the display is SDR, we MUST use 8-bit NV12 even for HDR content.
+        // VideoToolbox handles the tone mapping internally when outputting
+        // 8-bit. Without this, PQ transfer function is interpreted as gamma
+        // on SDR displays → completely wrong colors (red appears yellow).
         let bps = codecpar.pointee.bits_per_raw_sample
         let isMain10Profile = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
             && codecpar.pointee.profile == 2  // FF_PROFILE_HEVC_MAIN_10
         let isHDRTransfer = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
             || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
-        use10Bit = bps > 8 || isMain10Profile || isHDRTransfer
+        let contentIsHDR = bps > 8 || isMain10Profile || isHDRTransfer
+
+        #if canImport(UIKit)
+        let displaySupportsHDR = UIScreen.main.potentialEDRHeadroom > 1.0
+        #else
+        let displaySupportsHDR = true
+        #endif
+
+        use10Bit = contentIsHDR && displaySupportsHDR
 
         #if DEBUG
-        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue) → \(use10Bit ? "10-bit P010" : "8-bit NV12")")
+        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue), displayHDR=\(displaySupportsHDR) → \(use10Bit ? "10-bit P010" : "8-bit NV12")")
         #endif
 
         // Build CMVideoFormatDescription from FFmpeg's codec parameters

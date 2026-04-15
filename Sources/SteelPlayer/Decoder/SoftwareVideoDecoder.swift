@@ -5,6 +5,9 @@ import Libavformat
 import Libavcodec
 import Libavutil
 import Libswscale
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// FFmpeg software video decoder fallback for codecs without
 /// VideoToolbox hardware support (e.g. AV1 on Apple TV).
@@ -84,13 +87,19 @@ final class SoftwareVideoDecoder {
         }
         av_dict_free(&opts)
 
-        // Detect bit depth — use 10-bit output for HDR content.
-        // bits_per_raw_sample can be 0 in some streams, so also check
-        // color transfer function (PQ = HDR10, HLG = HLG HDR).
+        // Only use 10-bit when content is HDR AND display supports it.
+        // On SDR displays, 8-bit NV12 with sws_scale tone mapping gives correct colors.
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
             || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
-        use10Bit = bitsPerSample > 8 || isHDRTransfer
+        let contentIsHDR = bitsPerSample > 8 || isHDRTransfer
+
+        #if canImport(UIKit)
+        let displaySupportsHDR = UIScreen.main.potentialEDRHeadroom > 1.0
+        #else
+        let displaySupportsHDR = true
+        #endif
+        use10Bit = contentIsHDR && displaySupportsHDR
 
         #if DEBUG
         print("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")")
