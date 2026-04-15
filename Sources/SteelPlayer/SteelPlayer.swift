@@ -121,24 +121,23 @@ public final class SteelPlayer: ObservableObject {
         // may lock its output configuration at creation time. Without this,
         // multichannel content is downmixed to stereo.
         #if os(iOS) || os(tvOS)
+        let session = AVAudioSession.sharedInstance()
         do {
-            let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
             try session.setSupportsMultichannelContent(true)
             try session.setActive(true)
-            // Request multichannel output — without this, the system
-            // defaults to stereo even when HDMI supports 5.1/7.1.
-            // maximumOutputNumberOfChannels reflects actual hardware capability.
-            let maxCh = session.maximumOutputNumberOfChannels
-            if maxCh > 2 {
-                try session.setPreferredOutputNumberOfChannels(maxCh)
-            }
-            #if DEBUG
-            print("[SteelPlayer] Audio session: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels)")
-            #endif
         } catch {
-            print("[SteelPlayer] AVAudioSession error: \(error)")
+            print("[SteelPlayer] AVAudioSession setup error: \(error)")
         }
+        // Request multichannel output — separate try so a failure here
+        // doesn't prevent the basic audio session from working.
+        let maxCh = session.maximumOutputNumberOfChannels
+        if maxCh > 2 {
+            try? session.setPreferredOutputNumberOfChannels(maxCh)
+        }
+        #if DEBUG
+        print("[SteelPlayer] Audio session: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels), output=\(session.outputNumberOfChannels)")
+        #endif
         #endif
 
         // Add video display layer to the audio synchronizer so Apple
