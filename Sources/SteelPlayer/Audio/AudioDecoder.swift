@@ -49,25 +49,10 @@ final class AudioDecoder: @unchecked Sendable {
 
         let codecId = codecpar.pointee.codec_id
 
-        // EAC3 and AC3: use passthrough — Apple's renderer handles decode
-        // internally and preserves Dolby Atmos metadata for HDMI output.
-        if codecId == AV_CODEC_ID_EAC3 || codecId == AV_CODEC_ID_AC3 {
-            isPassthrough = true
-            framesPerPacket = 1536  // Standard for AC3/EAC3
-
-            // Extract codec-specific data (magic cookie) from extradata
-            var cookie: Data?
-            if let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
-                cookie = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
-            }
-
-            try createPassthroughFormatDescription(codecId: codecId, magicCookie: cookie)
-            #if DEBUG
-            let name = codecId == AV_CODEC_ID_EAC3 ? "eac3" : "ac3"
-            print("[AudioDecoder] Passthrough: \(sampleRate)Hz, \(channels)ch, codec=\(name), cookie=\(cookie?.count ?? 0) bytes")
-            #endif
-            return
-        }
+        // Note: EAC3/AC3 compressed passthrough to AVSampleBufferAudioRenderer
+        // was attempted but produces stereo output. FFmpeg decode to multichannel
+        // PCM is the working approach — Apple TV wraps it as Dolby MAT 2.0
+        // for HDMI eARC output (same approach as Infuse).
 
         // All other codecs: FFmpeg decode to PCM
         isPassthrough = false
