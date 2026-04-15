@@ -29,8 +29,14 @@ final class AudioOutput: @unchecked Sendable {
 
     /// Add the video display layer to the synchronizer so Apple handles
     /// A/V sync and frame pacing automatically.
-    func addVideoRenderer(_ displayLayer: AVSampleBufferDisplayLayer) {
+    func attachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
         synchronizer.addRenderer(displayLayer)
+    }
+
+    /// Remove the video display layer from the synchronizer.
+    /// Call when switching to AVPlayer audio engine (which manages its own timing).
+    func detachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
+        synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime(), completionHandler: nil)
     }
 
     /// Start audio playback at the given time. Call after enqueueing first samples.

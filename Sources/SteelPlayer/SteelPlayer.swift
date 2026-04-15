@@ -74,6 +74,29 @@ public final class SteelPlayer: ObservableObject {
     private let audioOutput = AudioOutput()
     nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
 
+    /// AVPlayer-based audio engine for EAC3/AC3 with Dolby Atmos passthrough.
+    /// nil when using the standard FFmpeg→PCM pipeline.
+    /// Accessed from demux queue — protected by single-writer (main actor sets, demux queue reads).
+    nonisolated(unsafe) private var avPlayerAudioEngine: AVPlayerAudioEngine?
+
+    /// True when the current audio track uses AVPlayer for Atmos passthrough.
+    nonisolated(unsafe) private var usingAVPlayerAudio = false
+
+    /// True when waiting for the first audio packet to initialize the AVPlayer engine.
+    nonisolated(unsafe) private var avPlayerAwaitingFirstPacket = false
+
+    /// True when the AVPlayer engine needs to restart after a seek (vs. initial start).
+    nonisolated(unsafe) private var avPlayerNeedsSeekRestart = false
+
+    /// The target seek time for AVPlayer restart.
+    nonisolated(unsafe) private var avPlayerSeekTarget: Double = 0
+
+    /// Stored codec info for AVPlayer audio engine initialization from demux loop.
+    nonisolated(unsafe) private var avPlayerCodecType: FMP4AudioMuxer.CodecType = .eac3
+    nonisolated(unsafe) private var avPlayerSampleRate: UInt32 = 48000
+    nonisolated(unsafe) private var avPlayerChannelCount: UInt32 = 6
+    nonisolated(unsafe) private var avPlayerBitRate: UInt32 = 640000
+
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
 
@@ -140,9 +163,8 @@ public final class SteelPlayer: ObservableObject {
         #endif
         #endif
 
-        // Add video display layer to the audio synchronizer so Apple
-        // handles A/V sync and frame pacing automatically.
-        audioOutput.addVideoRenderer(videoRenderer.displayLayer)
+        // Display layer timing is configured in load() based on which
+        // audio engine is active (synchronizer for PCM, controlTimebase for AVPlayer).
         setupLifecycleObservers()
     }
 
@@ -231,34 +253,77 @@ public final class SteelPlayer: ObservableObject {
             audioTracks = demuxer.audioTrackInfos()
             subtitleTracks = demuxer.subtitleTrackInfos()
 
-            // 2b. Find the audio stream and open the audio decoder
+            // 2b. Find the audio stream and configure the appropriate audio engine
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
+            usingAVPlayerAudio = false
+            avPlayerAwaitingFirstPacket = false
+
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
-                do {
-                    try audioDecoder.open(stream: audioStream)
+                let codecId = audioStream.pointee.codecpar?.pointee.codec_id
+                let isAtmosCodec = (codecId == AV_CODEC_ID_AC3 || codecId == AV_CODEC_ID_EAC3)
+
+                if isAtmosCodec {
+                    // EAC3/AC3 → AVPlayer audio engine for Dolby Atmos passthrough
+                    let codecpar = audioStream.pointee.codecpar!
+                    avPlayerCodecType = (codecId == AV_CODEC_ID_EAC3) ? .eac3 : .ac3
+                    avPlayerSampleRate = UInt32(codecpar.pointee.sample_rate)
+                    avPlayerChannelCount = UInt32(codecpar.pointee.ch_layout.nb_channels)
+                    avPlayerBitRate = UInt32(codecpar.pointee.bit_rate)
+                    if avPlayerSampleRate == 0 { avPlayerSampleRate = 48000 }
+                    if avPlayerChannelCount == 0 { avPlayerChannelCount = 6 }
+
+                    let engine = AVPlayerAudioEngine()
+                    avPlayerAudioEngine = engine
+                    usingAVPlayerAudio = true
+                    avPlayerAwaitingFirstPacket = true
                     audioAvailable = true
-                    // Update preferred output channels to match content
+
+                    // Video timing driven by AVPlayer's timebase
+                    videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+
+                    #if DEBUG
+                    print("[SteelPlayer] Audio: \(codecId == AV_CODEC_ID_EAC3 ? "EAC3" : "AC3") → AVPlayer engine (Atmos passthrough)")
+                    #endif
+
+                    // Update preferred output channels
                     #if os(iOS) || os(tvOS)
-                    let contentCh = Int(audioDecoder.channels)
+                    let contentCh = Int(avPlayerChannelCount)
                     let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
                     let preferred = min(contentCh, maxCh)
                     if preferred > 2 {
                         try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
                     }
                     #endif
-                } catch {
-                    print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
+                } else {
+                    // All other codecs → FFmpeg PCM pipeline
+                    do {
+                        try audioDecoder.open(stream: audioStream)
+                        audioAvailable = true
+
+                        // Video timing driven by synchronizer
+                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+
+                        #if os(iOS) || os(tvOS)
+                        let contentCh = Int(audioDecoder.channels)
+                        let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
+                        let preferred = min(contentCh, maxCh)
+                        if preferred > 2 {
+                            try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
+                        }
+                        #endif
+                    } catch {
+                        print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
+                    }
                 }
             }
 
-            // For video-only files (or failed audio), start the synchronizer
+            // For video-only files (or failed audio), use the synchronizer
             // as a free-running clock so video frame sync still works.
             if !audioAvailable {
+                audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                 audioOutput.start()
             }
-
-            // Audio session already configured in init() — no duplicate setup needed.
 
             // 4. Seek to start position if requested.
             // Pre-start the audio clock at the seek time so the synchronizer
@@ -298,14 +363,22 @@ public final class SteelPlayer: ObservableObject {
     public func play() {
         guard state == .paused else { return }
         isPlaying = true
-        audioOutput.resume()
+        if usingAVPlayerAudio {
+            avPlayerAudioEngine?.resume()
+        } else {
+            audioOutput.resume()
+        }
         state = .playing
     }
 
     public func pause() {
         guard state == .playing else { return }
         isPlaying = false
-        audioOutput.pause()
+        if usingAVPlayerAudio {
+            avPlayerAudioEngine?.pause()
+        } else {
+            audioOutput.pause()
+        }
         state = .paused
     }
 
@@ -322,39 +395,46 @@ public final class SteelPlayer: ObservableObject {
         state = .seeking
 
         // Pause the demux loop so it stops calling readPacket().
-        // The Demuxer's accessLock serializes seek vs. any in-flight read,
-        // but pausing first avoids decoding stale packets after flush.
         isPlaying = false
 
         // Flush decoders FIRST — VTDecompressionSession's flush waits for
         // async frames which get delivered to the renderer. Then flush the
-        // renderer to clear those stale frames. Wrong order causes a still
-        // frame from the old position to remain on screen after seek.
+        // renderer to clear those stale frames.
         if usingSoftwareDecode {
             softwareDecoder.flush()
         } else {
             videoDecoder.flush()
         }
         videoRenderer.flush()
-        audioDecoder.flush()
-        audioOutput.flush()
 
-        // Seek the demuxer — accessLock inside Demuxer ensures we wait
-        // if a readPacket() call is still in-flight on the demux queue.
+        if usingAVPlayerAudio {
+            // Prepare AVPlayer engine for seek — stops current playback,
+            // cancels pending resource loader requests.
+            avPlayerAudioEngine?.prepareForSeek()
+            avPlayerAwaitingFirstPacket = true
+            avPlayerNeedsSeekRestart = true
+            avPlayerSeekTarget = target
+        } else {
+            audioDecoder.flush()
+            audioOutput.flush()
+        }
+
+        // Seek the demuxer
         demuxer.seek(to: target)
         currentTime = target
 
         // Drop decoded frames between the keyframe and the seek target
-        // to prevent the visual "fast forward" effect.
         let seekTime = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
         videoRenderer.setSkipThreshold(seekTime)
         if usingSoftwareDecode {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // Restart the audio clock at the seek position. The synchronizer
-        // must be running for AVSampleBufferDisplayLayer to present frames.
-        audioOutput.start(at: seekTime)
+        if !usingAVPlayerAudio {
+            // PCM mode: restart the audio clock at the seek position
+            audioOutput.start(at: seekTime)
+        }
+        // AVPlayer mode: engine restarts when first post-seek packet arrives
 
         // Resume playing from new position
         isPlaying = true
@@ -377,23 +457,69 @@ public final class SteelPlayer: ObservableObject {
         guard streamIndex != activeAudioStreamIndex,
               let stream = demuxer.stream(at: streamIndex) else { return }
 
-        // Close old decoder, open new one on the selected stream
-        audioDecoder.flush()
-        audioDecoder.close()
-        audioOutput.flush()
+        let codecId = stream.pointee.codecpar?.pointee.codec_id
+        let newIsAtmos = (codecId == AV_CODEC_ID_AC3 || codecId == AV_CODEC_ID_EAC3)
 
-        do {
-            try audioDecoder.open(stream: stream)
-            activeAudioStreamIndex = streamIndex
-
-            // Restart synchronizer at current position
-            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
-            audioOutput.start(at: seekTime)
-        } catch {
-            #if DEBUG
-            print("[SteelPlayer] Audio track switch failed: \(error)")
-            #endif
+        // Tear down current audio engine
+        if usingAVPlayerAudio {
+            avPlayerAudioEngine?.stop()
+            avPlayerAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        } else {
+            audioDecoder.flush()
+            audioDecoder.close()
+            audioOutput.flush()
+            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         }
+
+        activeAudioStreamIndex = streamIndex
+
+        if newIsAtmos {
+            // Switch to AVPlayer audio engine
+            let codecpar = stream.pointee.codecpar!
+            avPlayerCodecType = (codecId == AV_CODEC_ID_EAC3) ? .eac3 : .ac3
+            avPlayerSampleRate = UInt32(codecpar.pointee.sample_rate)
+            avPlayerChannelCount = UInt32(codecpar.pointee.ch_layout.nb_channels)
+            avPlayerBitRate = UInt32(codecpar.pointee.bit_rate)
+            if avPlayerSampleRate == 0 { avPlayerSampleRate = 48000 }
+            if avPlayerChannelCount == 0 { avPlayerChannelCount = 6 }
+
+            let engine = AVPlayerAudioEngine()
+            avPlayerAudioEngine = engine
+            usingAVPlayerAudio = true
+            avPlayerAwaitingFirstPacket = true
+
+            videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+
+            #if DEBUG
+            print("[SteelPlayer] Switched to AVPlayer audio (\(codecId == AV_CODEC_ID_EAC3 ? "EAC3" : "AC3"))")
+            #endif
+        } else {
+            // Switch to FFmpeg PCM pipeline
+            usingAVPlayerAudio = false
+            avPlayerAwaitingFirstPacket = false
+            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+
+            do {
+                try audioDecoder.open(stream: stream)
+                let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+                audioOutput.start(at: seekTime)
+            } catch {
+                #if DEBUG
+                print("[SteelPlayer] Audio track switch failed: \(error)")
+                #endif
+            }
+        }
+
+        // Update preferred output channels
+        #if os(iOS) || os(tvOS)
+        let contentCh = newIsAtmos ? Int(avPlayerChannelCount) : Int(audioDecoder.channels)
+        let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
+        let preferred = min(contentCh, maxCh)
+        if preferred > 2 {
+            try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
+        }
+        #endif
     }
 
     public func selectSubtitleTrack(index: Int) {
@@ -402,13 +528,27 @@ public final class SteelPlayer: ObservableObject {
 
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
-        get { audioOutput.volume }
-        set { audioOutput.volume = newValue }
+        get {
+            if usingAVPlayerAudio {
+                return avPlayerAudioEngine?.volume ?? 1.0
+            }
+            return audioOutput.volume
+        }
+        set {
+            if usingAVPlayerAudio {
+                avPlayerAudioEngine?.volume = newValue
+            }
+            audioOutput.volume = newValue
+        }
     }
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
-        audioOutput.setRate(rate)
+        if usingAVPlayerAudio {
+            avPlayerAudioEngine?.setRate(rate)
+        } else {
+            audioOutput.setRate(rate)
+        }
     }
 
     // MARK: - Internal
@@ -417,7 +557,19 @@ public final class SteelPlayer: ObservableObject {
         stopRequested = true
         isPlaying = false
         stopTimeUpdates()
+
+        // Stop audio engines
+        if usingAVPlayerAudio {
+            avPlayerAudioEngine?.stop()
+            avPlayerAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        } else {
+            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+        }
         audioOutput.stop()
+        usingAVPlayerAudio = false
+        avPlayerAwaitingFirstPacket = false
+
         // Flush decoders before renderer — decoder flush waits for async
         // VT frames which would otherwise land on the already-flushed renderer.
         if usingSoftwareDecode {
@@ -505,7 +657,9 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.flush()
                     }
                     self.videoRenderer.drainReorderBuffer()
-                    self.audioDecoder.flush()
+                    if !self.usingAVPlayerAudio {
+                        self.audioDecoder.flush()
+                    }
                     Task { @MainActor [weak self] in
                         self?.state = .idle
                     }
@@ -527,18 +681,54 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.decode(packet: packet)
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
-                    let sampleBuffers = audioDecoder.decode(packet: packet)
-                    for sb in sampleBuffers {
-                        audioOutput.enqueue(sampleBuffer: sb)
-                    }
-                    // Start the synchronizer when first audio data arrives.
-                    // Starting HERE (not in load) ensures the clock doesn't
-                    // advance while the decoder is still producing the first
-                    // frame — eliminates "fast forward" on initial start.
-                    // Seek restarts the clock directly in seek().
-                    if !audioStarted && !sampleBuffers.isEmpty {
-                        audioOutput.start(at: initialAudioTime)
-                        audioStarted = true
+                    if self.usingAVPlayerAudio {
+                        // AVPlayer audio engine — feed raw packets (no decode)
+                        let packetData = Data(
+                            bytes: packet.pointee.data,
+                            count: Int(packet.pointee.size)
+                        )
+
+                        if self.avPlayerAwaitingFirstPacket {
+                            // First packet after load or seek — initialize/restart engine
+                            self.avPlayerAwaitingFirstPacket = false
+                            let engine = self.avPlayerAudioEngine
+
+                            if self.avPlayerNeedsSeekRestart {
+                                // Restart after seek
+                                self.avPlayerNeedsSeekRestart = false
+                                let seekTime = CMTimeMakeWithSeconds(
+                                    self.avPlayerSeekTarget,
+                                    preferredTimescale: 90000
+                                )
+                                engine?.restartAfterSeek(
+                                    firstPacketData: packetData,
+                                    atTime: seekTime
+                                )
+                            } else {
+                                // Initial start
+                                engine?.start(
+                                    firstPacketData: packetData,
+                                    codecType: self.avPlayerCodecType,
+                                    sampleRate: self.avPlayerSampleRate,
+                                    channelCount: self.avPlayerChannelCount,
+                                    bitRate: self.avPlayerBitRate,
+                                    startTime: initialAudioTime
+                                )
+                            }
+                        } else {
+                            self.avPlayerAudioEngine?.feedPacket(packetData)
+                        }
+                    } else {
+                        // FFmpeg PCM pipeline
+                        let sampleBuffers = audioDecoder.decode(packet: packet)
+                        for sb in sampleBuffers {
+                            audioOutput.enqueue(sampleBuffer: sb)
+                        }
+                        // Start the synchronizer when first audio data arrives.
+                        if !audioStarted && !sampleBuffers.isEmpty {
+                            audioOutput.start(at: initialAudioTime)
+                            audioStarted = true
+                        }
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets
@@ -558,7 +748,12 @@ public final class SteelPlayer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self = self, !Task.isCancelled else { return }
-                let t = self.audioOutput.currentTimeSeconds
+                let t: Double
+                if self.usingAVPlayerAudio {
+                    t = self.avPlayerAudioEngine?.currentTimeSeconds ?? 0
+                } else {
+                    t = self.audioOutput.currentTimeSeconds
+                }
                 if t > 0 {
                     self.currentTime = t
                     if self.duration > 0 {
