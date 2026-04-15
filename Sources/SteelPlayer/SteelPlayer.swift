@@ -328,8 +328,16 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // Set the audio clock to the seek target (not .zero!)
-        audioOutput.start(at: seekTime)
+        // For video+audio: DON'T start the clock here — it would advance
+        // while the demux loop hasn't produced any frames yet, causing
+        // "fast forward". Signal the demux loop to restart the clock when
+        // the first audio frame arrives after the seek.
+        // For video-only: start immediately (no audio to trigger restart).
+        if audioAvailable {
+            pendingSeekTime = seekTime
+        } else {
+            audioOutput.start(at: seekTime)
+        }
 
         // Resume playing from new position
         isPlaying = true
@@ -346,6 +354,10 @@ public final class SteelPlayer: ObservableObject {
     /// The currently active audio stream index.
     /// Accessed from demux queue — protected by single-writer (main actor).
     nonisolated(unsafe) private var activeAudioStreamIndex: Int32 = -1
+
+    /// After a seek, the demux loop must restart the audio clock when
+    /// the first new audio frame arrives. Set by seek(), cleared by demux loop.
+    nonisolated(unsafe) private var pendingSeekTime: CMTime?
 
     public func selectAudioTrack(index: Int) {
         let streamIndex = Int32(index)
@@ -504,13 +516,20 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start the synchronizer when first audio data arrives.
+                    // Start/restart the synchronizer when first audio data arrives.
                     // Starting HERE (not in load/seek) ensures the clock
                     // doesn't advance while the decoder is still producing
-                    // the first frame — eliminates "fast forward" on resume.
-                    if !audioStarted && !sampleBuffers.isEmpty {
-                        audioOutput.start(at: initialAudioTime)
-                        audioStarted = true
+                    // the first frame — eliminates "fast forward" on resume/seek.
+                    if !sampleBuffers.isEmpty {
+                        if let seekTime = self.pendingSeekTime {
+                            // After seek: restart clock at seek position
+                            audioOutput.start(at: seekTime)
+                            self.pendingSeekTime = nil
+                        } else if !audioStarted {
+                            // Initial start: begin clock at load position
+                            audioOutput.start(at: initialAudioTime)
+                            audioStarted = true
+                        }
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets
