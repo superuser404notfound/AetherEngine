@@ -46,6 +46,15 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
             timebaseOut: &tb
         )
         videoTimebase = tb
+
+        // Start timebase immediately at rate 1.0 so the display layer
+        // consumes video frames RIGHT AWAY. Without this, the demux loop
+        // blocks on video back-pressure (isReadyForMoreMediaData=false)
+        // while AVPlayer is still buffering audio → deadlock.
+        if let tb = tb {
+            CMTimebaseSetTime(tb, time: .zero)
+            CMTimebaseSetRate(tb, rate: 1.0)
+        }
     }
 
     // MARK: - Public API
@@ -278,7 +287,12 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
     private func setupTimeSync() {
         guard let player = player else { return }
         if let tb = videoTimebase {
-            CMTimebaseSetTime(tb, time: player.currentTime())
+            // Only sync time if player has a valid position.
+            // The timebase is already running from init() — just correct the time.
+            let t = player.currentTime()
+            if t.isValid && t != .zero {
+                CMTimebaseSetTime(tb, time: t)
+            }
             CMTimebaseSetRate(tb, rate: Float64(_rate))
         }
         timeObserver = player.addPeriodicTimeObserver(
