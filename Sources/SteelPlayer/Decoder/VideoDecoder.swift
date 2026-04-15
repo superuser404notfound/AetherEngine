@@ -5,9 +5,6 @@ import VideoToolbox
 import Libavformat
 import Libavcodec
 import Libavutil
-#if canImport(UIKit)
-import UIKit
-#endif
 
 /// Callback type for decoded video frames.
 typealias DecodedFrameHandler = (CVPixelBuffer, CMTime) -> Void
@@ -53,31 +50,19 @@ final class VideoDecoder: @unchecked Sendable {
         let tb = stream.pointee.time_base
         timeBase = CMTime(value: CMTimeValue(tb.num), timescale: CMTimeScale(tb.den))
 
-        // Only use 10-bit output when:
-        // 1. The content IS HDR (Main10 profile, PQ/HLG transfer, or >8bps)
-        // 2. AND the display supports HDR (EDR headroom > 1.0)
-        //
-        // If the display is SDR, we MUST use 8-bit NV12 even for HDR content.
-        // VideoToolbox handles the tone mapping internally when outputting
-        // 8-bit. Without this, PQ transfer function is interpreted as gamma
-        // on SDR displays → completely wrong colors (red appears yellow).
+        // Use 10-bit output for HDR/DV content so VideoToolbox preserves
+        // HDR metadata and the display can switch to HDR mode via
+        // AVDisplayCriteria. The host app must link AVKit and set
+        // AVDisplayCriteria to trigger the TV's HDR mode switch.
         let bps = codecpar.pointee.bits_per_raw_sample
         let isMain10Profile = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
             && codecpar.pointee.profile == 2  // FF_PROFILE_HEVC_MAIN_10
         let isHDRTransfer = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
             || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
-        let contentIsHDR = bps > 8 || isMain10Profile || isHDRTransfer
-
-        #if canImport(UIKit)
-        let displaySupportsHDR = UIScreen.main.potentialEDRHeadroom > 1.0
-        #else
-        let displaySupportsHDR = true
-        #endif
-
-        use10Bit = contentIsHDR && displaySupportsHDR
+        use10Bit = bps > 8 || isMain10Profile || isHDRTransfer
 
         #if DEBUG
-        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue), displayHDR=\(displaySupportsHDR) → \(use10Bit ? "10-bit P010" : "8-bit NV12")")
+        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue) → \(use10Bit ? "10-bit P010" : "8-bit NV12")")
         #endif
 
         // Build CMVideoFormatDescription from FFmpeg's codec parameters
@@ -180,12 +165,6 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
-                // On SDR displays, override HDR color metadata to BT.709
-                // so AVSampleBufferDisplayLayer doesn't try to display PQ
-                // on an SDR output — which causes completely wrong colors.
-                if !self.use10Bit {
-                    self.forceSDRColorSpace(on: pixelBuffer)
-                }
                 self.onFrame?(pixelBuffer, pts)
             }
         )
@@ -212,20 +191,6 @@ final class VideoDecoder: @unchecked Sendable {
 
     deinit {
         close()
-    }
-
-    // MARK: - Color Space Override
-
-    /// Override HDR color metadata on pixel buffers to BT.709/SDR.
-    /// Called when display is SDR to prevent AVSampleBufferDisplayLayer
-    /// from interpreting pixel data with PQ transfer function.
-    private func forceSDRColorSpace(on pixelBuffer: CVPixelBuffer) {
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
-                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
-                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
-        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
-                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
     }
 
     // MARK: - VideoToolbox Setup
