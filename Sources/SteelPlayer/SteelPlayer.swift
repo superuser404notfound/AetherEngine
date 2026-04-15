@@ -332,16 +332,9 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // For video+audio: DON'T start the clock here — it would advance
-        // while the demux loop hasn't produced any frames yet, causing
-        // "fast forward". Signal the demux loop to restart the clock when
-        // the first audio frame arrives after the seek.
-        // For video-only: start immediately (no audio to trigger restart).
-        if audioAvailable {
-            pendingSeekTime = seekTime
-        } else {
-            audioOutput.start(at: seekTime)
-        }
+        // Restart the audio clock at the seek position. The synchronizer
+        // must be running for AVSampleBufferDisplayLayer to present frames.
+        audioOutput.start(at: seekTime)
 
         // Resume playing from new position
         isPlaying = true
