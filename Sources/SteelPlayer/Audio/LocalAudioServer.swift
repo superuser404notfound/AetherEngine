@@ -5,12 +5,14 @@ import Network
 ///
 /// On tvOS, custom URL schemes don't work with AVPlayer because media
 /// playback runs out-of-process (mediaserverd doesn't know custom schemes).
-/// This server bridges the gap: we serve fMP4 data over HTTP on localhost,
-/// and AVPlayer connects via `http://127.0.0.1:{port}/audio.mp4`.
+/// This server streams fMP4 over HTTP/1.1 with chunked transfer encoding,
+/// which tells AVPlayer that more data is coming.
 ///
-/// Uses HTTP/1.0 style: no Content-Length, no chunked encoding. The response
-/// body is raw fMP4 data, and the connection stays open while we keep writing.
-/// AVPlayer reads continuously from the socket.
+/// ## Why Chunked?
+///
+/// - HTTP/1.0 + `Connection: close` → AVPlayer reads data, assumes EOF, disconnects
+/// - HTTP/1.1 + `Transfer-Encoding: chunked` → AVPlayer knows to keep reading
+/// - Each chunk is: `{size_hex}\r\n{data}\r\n` — explicit framing
 final class LocalAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?
@@ -67,6 +69,7 @@ final class LocalAudioServer: @unchecked Sendable {
     }
 
     /// Send fMP4 data to the connected AVPlayer.
+    /// Data is wrapped in HTTP chunked encoding before sending.
     /// Can be called before AVPlayer connects — data is buffered.
     func send(_ data: Data) {
         lock.lock()
@@ -93,7 +96,6 @@ final class LocalAudioServer: @unchecked Sendable {
     // MARK: - Connection Handling
 
     private func handleNewConnection(_ connection: NWConnection) {
-        // Only allow one connection (AVPlayer)
         activeConnection?.cancel()
         activeConnection = connection
 
@@ -118,7 +120,7 @@ final class LocalAudioServer: @unchecked Sendable {
 
         connection.start(queue: connectionQueue)
 
-        // Read the HTTP request (we don't care about its contents)
+        // Read the HTTP request (we don't parse it — just need to consume it)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, error in
             guard error == nil else { return }
 
@@ -134,13 +136,13 @@ final class LocalAudioServer: @unchecked Sendable {
     }
 
     private func sendHTTPHeader(_ connection: NWConnection) {
-        // HTTP/1.0 response: no Content-Length, no chunked encoding.
-        // Body is raw fMP4 data, connection stays open while we write.
+        // HTTP/1.1 with chunked transfer encoding.
+        // This tells AVPlayer to keep reading — more chunks will arrive.
         let header = [
-            "HTTP/1.0 200 OK",
+            "HTTP/1.1 200 OK",
             "Content-Type: video/mp4",
+            "Transfer-Encoding: chunked",
             "Cache-Control: no-cache, no-store",
-            "Connection: close",
             "",
             ""  // Empty line ends headers
         ].joined(separator: "\r\n")
@@ -158,35 +160,43 @@ final class LocalAudioServer: @unchecked Sendable {
             self?.lock.unlock()
 
             #if DEBUG
-            print("[LocalAudioServer] HTTP header sent, streaming fMP4 data")
+            print("[LocalAudioServer] HTTP/1.1 chunked header sent")
             #endif
 
             self?.drainPending()
         })
     }
 
-    /// Send any buffered data to the active connection.
+    /// Send buffered data as HTTP chunked encoding to the active connection.
+    /// Format: `{size_hex}\r\n{data}\r\n`
     private func drainPending() {
         lock.lock()
         guard headerSent, !isSending, !pendingData.isEmpty else {
             lock.unlock()
             return
         }
-        let dataToSend = pendingData
+        let rawData = pendingData
         pendingData = Data()
         isSending = true
         lock.unlock()
 
         guard let connection = activeConnection else {
             lock.lock()
-            // Put data back if no connection
-            pendingData = dataToSend + pendingData
+            pendingData = rawData + pendingData
             isSending = false
             lock.unlock()
             return
         }
 
-        connection.send(content: dataToSend, completion: .contentProcessed { [weak self] error in
+        // Wrap in chunked encoding: "{size_hex}\r\n{data}\r\n"
+        let sizeStr = String(rawData.count, radix: 16)
+        var chunk = Data()
+        chunk.append(contentsOf: sizeStr.utf8)
+        chunk.append(contentsOf: "\r\n".utf8)
+        chunk.append(rawData)
+        chunk.append(contentsOf: "\r\n".utf8)
+
+        connection.send(content: chunk, completion: .contentProcessed { [weak self] error in
             self?.lock.lock()
             self?.isSending = false
             self?.lock.unlock()
@@ -198,7 +208,7 @@ final class LocalAudioServer: @unchecked Sendable {
                 return
             }
 
-            // Check if more data arrived while we were sending
+            // Send more if data arrived while we were sending
             self?.drainPending()
         })
     }
