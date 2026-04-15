@@ -16,10 +16,11 @@ typealias DecodedFrameHandler = (CVPixelBuffer, CMTime) -> Void
 /// Supports H.264 and HEVC (including Main10 for HDR/DV). Falls back
 /// to "unsupported" error for codecs VideoToolbox can't handle —
 /// software fallback is a future addition.
-final class VideoDecoder {
+final class VideoDecoder: @unchecked Sendable {
 
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
+    private var use10Bit = false
 
     /// Thread-safe access to the frame callback. Written on the main thread
     /// (open/close), read on VideoToolbox's internal callback thread.
@@ -49,6 +50,12 @@ final class VideoDecoder {
         let tb = stream.pointee.time_base
         timeBase = CMTime(value: CMTimeValue(tb.num), timescale: CMTimeScale(tb.den))
 
+        // Use 10-bit output for HEVC and AV1 to preserve HDR10/Dolby Vision metadata.
+        // H.264 stays 8-bit (no HDR support). VideoToolbox automatically propagates
+        // per-frame HDR/DV metadata when outputting 10-bit pixel buffers.
+        use10Bit = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+            || codecpar.pointee.codec_id == AV_CODEC_ID_AV1
+
         // Build CMVideoFormatDescription from FFmpeg's codec parameters
         let formatDesc = try createFormatDescription(from: codecpar)
         self.formatDescription = formatDesc
@@ -58,7 +65,7 @@ final class VideoDecoder {
         self.decompressionSession = session
 
         #if DEBUG
-        print("[VideoDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(codecpar.pointee.codec_id.rawValue)")
+        print("[VideoDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(codecpar.pointee.codec_id.rawValue), \(use10Bit ? "10-bit P010 (HDR/DV)" : "8-bit NV12")")
         #endif
     }
 
@@ -240,12 +247,17 @@ final class VideoDecoder {
     private func createDecompressionSession(
         formatDescription: CMVideoFormatDescription
     ) throws -> VTDecompressionSession {
-        // Request NV12 (BiPlanar YCbCr 4:2:0) — this is VideoToolbox's native
-        // output format. Requesting BGRA would force an extra CPU/GPU conversion
-        // and use 2.5x more memory per frame (31 MB vs 12 MB at 4K).
-        // The Metal shader handles YUV→RGB conversion on the GPU.
+        // Request YCbCr BiPlanar 4:2:0 — VideoToolbox's native output.
+        // 10-bit (P010) for HEVC/AV1: preserves HDR10 and Dolby Vision metadata.
+        // 8-bit (NV12) for H.264: no HDR support, saves memory.
+        // PropagatePerFrameHDRDisplayMetadata is true by default in VT,
+        // so DV/HDR10 metadata flows automatically on 10-bit pixel buffers.
+        let pixelFormat: OSType = use10Bit
+            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+
         let pixelBufferAttrs: NSDictionary = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferPixelFormatTypeKey: pixelFormat,
             kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
         ]

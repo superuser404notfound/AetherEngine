@@ -51,6 +51,7 @@ public final class SteelPlayer: ObservableObject {
     @Published public private(set) var progress: Float = 0
     @Published public private(set) var audioTracks: [TrackInfo] = []
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
+    @Published public private(set) var videoFormat: VideoFormat = .sdr
 
     // MARK: - Output
 
@@ -63,7 +64,7 @@ public final class SteelPlayer: ObservableObject {
     /// Pipeline components — accessed from both main actor and demux queue.
     /// Each has internal locking for thread safety.
     nonisolated(unsafe) private let demuxer = Demuxer()
-    nonisolated(unsafe) private let videoDecoder = VideoDecoder()
+    private let videoDecoder = VideoDecoder()
     nonisolated(unsafe) private let softwareDecoder = SoftwareVideoDecoder()
     private let audioDecoder = AudioDecoder()
 
@@ -137,6 +138,7 @@ public final class SteelPlayer: ObservableObject {
         progress = 0
         audioTracks = []
         subtitleTracks = []
+        videoFormat = .sdr
         audioAvailable = false
         stopRequested = false
 
@@ -185,6 +187,9 @@ public final class SteelPlayer: ObservableObject {
                     throw error
                 }
             }
+
+            // Detect video format (SDR/HDR10/DV/HLG) from codec parameters
+            videoFormat = detectVideoFormat(stream: videoStream)
 
             // Detect video frame rate for display link matching
             let avgFR = videoStream.pointee.avg_frame_rate
@@ -519,6 +524,46 @@ public final class SteelPlayer: ObservableObject {
     private func stopTimeUpdates() {
         timeUpdateTimer?.cancel()
         timeUpdateTimer = nil
+    }
+
+    // MARK: - Video Format Detection
+
+    /// Detect HDR format from stream metadata.
+    private func detectVideoFormat(stream: UnsafeMutablePointer<AVStream>) -> VideoFormat {
+        guard let codecpar = stream.pointee.codecpar else { return .sdr }
+
+        let codecId = codecpar.pointee.codec_id
+        let colorTRC = codecpar.pointee.color_trc
+        let colorPrimaries = codecpar.pointee.color_primaries
+
+        // Check for Dolby Vision via codec parameters side data
+        if codecId == AV_CODEC_ID_HEVC {
+            // DV Profile 5/8 uses HEVC with specific signaling.
+            // Check coded_side_data for DOVI configuration record.
+            let nbSideData = Int(codecpar.pointee.nb_coded_side_data)
+            if let sideData = codecpar.pointee.coded_side_data {
+                for i in 0..<nbSideData {
+                    if sideData[i].type == AV_PKT_DATA_DOVI_CONF {
+                        #if DEBUG
+                        print("[SteelPlayer] Detected Dolby Vision stream")
+                        #endif
+                        return .dolbyVision
+                    }
+                }
+            }
+        }
+
+        // HDR10: BT.2020 primaries + PQ transfer function
+        if colorTRC == AVCOL_TRC_SMPTE2084 && colorPrimaries == AVCOL_PRI_BT2020 {
+            return .hdr10
+        }
+
+        // HLG: BT.2020 primaries + HLG transfer function
+        if colorTRC == AVCOL_TRC_ARIB_STD_B67 && colorPrimaries == AVCOL_PRI_BT2020 {
+            return .hlg
+        }
+
+        return .sdr
     }
 
     // MARK: - App Lifecycle

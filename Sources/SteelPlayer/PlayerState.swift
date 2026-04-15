@@ -10,6 +10,14 @@ public enum PlaybackState: Sendable, Equatable {
     case error(String)
 }
 
+/// The detected video dynamic range format.
+public enum VideoFormat: Sendable, Equatable {
+    case sdr
+    case hdr10
+    case dolbyVision
+    case hlg
+}
+
 /// Metadata about an audio or subtitle track in the loaded media.
 public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// Track index as reported by FFmpeg's AVStream.

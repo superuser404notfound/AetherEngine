@@ -19,6 +19,9 @@ final class SoftwareVideoDecoder {
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
+    /// True when the source stream is >8-bit (HDR10, AV1 HDR).
+    private var use10Bit = false
+
     /// After a seek, skip frames before this PTS to avoid the
     /// "fast forward" effect. Decoded for reference but not converted.
     var skipUntilPTS: CMTime?
@@ -76,8 +79,12 @@ final class SoftwareVideoDecoder {
         }
         av_dict_free(&opts)
 
+        // Detect bit depth — use 10-bit output for HDR content
+        let bitsPerSample = codecpar.pointee.bits_per_raw_sample
+        use10Bit = bitsPerSample > 8
+
         #if DEBUG
-        print("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count)")
+        print("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")")
         #endif
     }
 
@@ -169,9 +176,9 @@ final class SoftwareVideoDecoder {
 
         let srcFmt = AVPixelFormat(rawValue: frame.pointee.format)
 
-        // Always convert to NV12 8-bit — AVSampleBufferDisplayLayer
-        // handles it natively and it avoids 10-bit rendering complexity.
-        let dstFmt = AV_PIX_FMT_NV12
+        // Use P010LE (10-bit) for HDR sources, NV12 (8-bit) for SDR.
+        // P010 preserves HDR10 dynamic range; NV12 saves memory for SDR.
+        let dstFmt = use10Bit ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12
 
         // Get or create sws context (cached for same dimensions/format)
         swsContext = sws_getCachedContext(
@@ -182,7 +189,11 @@ final class SoftwareVideoDecoder {
         )
         guard swsContext != nil else { return nil }
 
-        // Create destination CVPixelBuffer
+        // Create destination CVPixelBuffer — 10-bit P010 or 8-bit NV12
+        let cvPixelFormat: OSType = use10Bit
+            ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+
         var pixelBuffer: CVPixelBuffer?
         let attrs: NSDictionary = [
             kCVPixelBufferMetalCompatibilityKey: true,
@@ -190,10 +201,14 @@ final class SoftwareVideoDecoder {
         ]
         let status = CVPixelBufferCreate(
             kCFAllocatorDefault, width, height,
-            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            cvPixelFormat,
             attrs, &pixelBuffer
         )
         guard status == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
+
+        // Attach color space metadata from FFmpeg so AVSampleBufferDisplayLayer
+        // renders with correct primaries/transfer/matrix (critical for HDR).
+        attachColorSpace(from: frame, to: pb)
 
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
@@ -241,5 +256,46 @@ final class SoftwareVideoDecoder {
         }
 
         return pb
+    }
+
+    // MARK: - Color Space Metadata
+
+    /// Map FFmpeg color metadata to CVPixelBuffer attachments.
+    /// This tells AVSampleBufferDisplayLayer the correct color space
+    /// for rendering — critical for HDR10 (BT.2020 + PQ).
+    private func attachColorSpace(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
+        // Color primaries (e.g. BT.709, BT.2020)
+        let primaries: CFString? = switch frame.pointee.color_primaries {
+        case AVCOL_PRI_BT709:       kCVImageBufferColorPrimaries_ITU_R_709_2
+        case AVCOL_PRI_BT2020:      kCVImageBufferColorPrimaries_ITU_R_2020
+        case AVCOL_PRI_SMPTE432:    kCVImageBufferColorPrimaries_P3_D65
+        default:                    nil
+        }
+
+        // Transfer function (e.g. SDR gamma, PQ for HDR10, HLG)
+        let transfer: CFString? = switch frame.pointee.color_trc {
+        case AVCOL_TRC_BT709:       kCVImageBufferTransferFunction_ITU_R_709_2
+        case AVCOL_TRC_SMPTE2084:   kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+        case AVCOL_TRC_ARIB_STD_B67: kCVImageBufferTransferFunction_ITU_R_2100_HLG
+        default:                    nil
+        }
+
+        // YCbCr matrix (e.g. BT.709, BT.2020)
+        let matrix: CFString? = switch frame.pointee.colorspace {
+        case AVCOL_SPC_BT709:       kCVImageBufferYCbCrMatrix_ITU_R_709_2
+        case AVCOL_SPC_BT2020_NCL, AVCOL_SPC_BT2020_CL:
+                                    kCVImageBufferYCbCrMatrix_ITU_R_2020
+        default:                    nil
+        }
+
+        if let primaries {
+            CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, primaries, .shouldPropagate)
+        }
+        if let transfer {
+            CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, transfer, .shouldPropagate)
+        }
+        if let matrix {
+            CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
+        }
     }
 }
