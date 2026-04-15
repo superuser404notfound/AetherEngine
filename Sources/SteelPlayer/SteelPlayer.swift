@@ -10,6 +10,9 @@ import Libavutil
 #if canImport(UIKit)
 import UIKit
 #endif
+#if os(tvOS)
+import AVKit
+#endif
 
 /// SteelPlayer — Open-source FFmpeg + VideoToolbox video player engine.
 ///
@@ -191,7 +194,8 @@ public final class SteelPlayer: ObservableObject {
             // Detect video format (SDR/HDR10/DV/HLG) from codec parameters
             videoFormat = detectVideoFormat(stream: videoStream)
 
-            // Detect video frame rate for display link matching
+            // Detect video frame rate for display link matching.
+            // Also used for AVDisplayCriteria to set correct refresh rate.
             let avgFR = videoStream.pointee.avg_frame_rate
             if avgFR.den > 0 && avgFR.num > 0 {
                 videoFrameRate = Double(avgFR.num) / Double(avgFR.den)
@@ -203,6 +207,13 @@ public final class SteelPlayer: ObservableObject {
             }
             #if DEBUG
             print("[SteelPlayer] Video frame rate: \(String(format: "%.3f", videoFrameRate)) fps")
+            #endif
+
+            // Tell tvOS to switch the TV to the matching display mode
+            // (HDR10/DV/HLG + correct refresh rate via Match Dynamic Range).
+            // Without this, the TV stays in SDR and HDR content shows wrong colors.
+            #if os(tvOS)
+            applyDisplayCriteria(format: videoFormat, frameRate: videoFrameRate)
             #endif
 
             // Populate track metadata from the demuxer
@@ -404,6 +415,9 @@ public final class SteelPlayer: ObservableObject {
         stopRequested = true
         isPlaying = false
         stopTimeUpdates()
+        #if os(tvOS)
+        resetDisplayCriteria()
+        #endif
         audioOutput.stop()
         videoRenderer.flush()
         if usingSoftwareDecode {
@@ -564,6 +578,95 @@ public final class SteelPlayer: ObservableObject {
         timeUpdateTimer?.cancel()
         timeUpdateTimer = nil
     }
+
+    // MARK: - Display Mode Switching (tvOS)
+
+    #if os(tvOS)
+    /// Request the TV to switch to the correct display mode for the content.
+    /// Uses AVDisplayCriteria via UIWindow.avDisplayManager — this is how
+    /// third-party players trigger HDR/DV mode switching on Apple TV.
+    private func applyDisplayCriteria(format: VideoFormat, frameRate: Double) {
+        guard format != .sdr else { return }
+        guard #available(tvOS 17.0, *) else { return }
+
+        let refreshRate = frameRate > 0 ? Float(frameRate) : 24.0
+
+        // Build a CMVideoFormatDescription with the correct color metadata
+        // so the TV knows which HDR mode to switch to.
+        let colorPrimaries: CFString
+        let transferFunction: CFString
+        let ycbcrMatrix: CFString
+        let codecType: CMVideoCodecType
+
+        switch format {
+        case .dolbyVision:
+            colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_2020
+            transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            ycbcrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_2020
+            codecType = kCMVideoCodecType_HEVC
+        case .hdr10:
+            colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_2020
+            transferFunction = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
+            ycbcrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_2020
+            codecType = kCMVideoCodecType_HEVC
+        case .hlg:
+            colorPrimaries = kCVImageBufferColorPrimaries_ITU_R_2020
+            transferFunction = kCVImageBufferTransferFunction_ITU_R_2100_HLG
+            ycbcrMatrix = kCVImageBufferYCbCrMatrix_ITU_R_2020
+            codecType = kCMVideoCodecType_HEVC
+        case .sdr:
+            return
+        }
+
+        let extensions: NSDictionary = [
+            kCMFormatDescriptionExtension_ColorPrimaries: colorPrimaries,
+            kCMFormatDescriptionExtension_TransferFunction: transferFunction,
+            kCMFormatDescriptionExtension_YCbCrMatrix: ycbcrMatrix,
+        ]
+
+        var formatDesc: CMVideoFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: codecType,
+            width: 1920, height: 1080,
+            extensions: extensions,
+            formatDescriptionOut: &formatDesc
+        )
+        guard status == noErr, let desc = formatDesc else {
+            #if DEBUG
+            print("[SteelPlayer] Failed to create display criteria format description")
+            #endif
+            return
+        }
+
+        let criteria = AVDisplayCriteria(refreshRate: refreshRate, formatDescription: desc)
+
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first else {
+            #if DEBUG
+            print("[SteelPlayer] No window available for display criteria")
+            #endif
+            return
+        }
+
+        window.avDisplayManager.preferredDisplayCriteria = criteria
+
+        #if DEBUG
+        print("[SteelPlayer] Display criteria: \(format), \(String(format: "%.2f", refreshRate)) fps")
+        #endif
+    }
+
+    /// Reset display criteria when playback stops (returns TV to default mode).
+    private func resetDisplayCriteria() {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap({ $0.windows })
+            .first else { return }
+        window.avDisplayManager.preferredDisplayCriteria = nil
+    }
+    #endif
 
     // MARK: - Video Format Detection
 
