@@ -113,8 +113,6 @@ public final class SteelPlayer: ObservableObject {
 
     // MARK: - Init
 
-    /// Initialize the player. Can fail if the Metal device or shader
-    /// library is not available (shouldn't happen on real Apple hardware).
     /// Lifecycle notification observers — stored for cleanup.
     private var lifecycleObservers: [Any] = []
 
@@ -352,10 +350,6 @@ public final class SteelPlayer: ObservableObject {
     /// Accessed from demux queue — protected by single-writer (main actor).
     nonisolated(unsafe) private var activeAudioStreamIndex: Int32 = -1
 
-    /// After a seek, the demux loop must restart the audio clock when
-    /// the first new audio frame arrives. Set by seek(), cleared by demux loop.
-    nonisolated(unsafe) private var pendingSeekTime: CMTime?
-
     public func selectAudioTrack(index: Int) {
         let streamIndex = Int32(index)
         guard streamIndex != activeAudioStreamIndex,
@@ -402,7 +396,8 @@ public final class SteelPlayer: ObservableObject {
         isPlaying = false
         stopTimeUpdates()
         audioOutput.stop()
-        videoRenderer.flush()
+        // Flush decoders before renderer — decoder flush waits for async
+        // VT frames which would otherwise land on the already-flushed renderer.
         if usingSoftwareDecode {
             softwareDecoder.flush()
             softwareDecoder.close()
@@ -410,6 +405,7 @@ public final class SteelPlayer: ObservableObject {
             videoDecoder.flush()
             videoDecoder.close()
         }
+        videoRenderer.flush()
         audioDecoder.close()
         demuxer.close()
         audioAvailable = false
@@ -513,20 +509,14 @@ public final class SteelPlayer: ObservableObject {
                     for sb in sampleBuffers {
                         audioOutput.enqueue(sampleBuffer: sb)
                     }
-                    // Start/restart the synchronizer when first audio data arrives.
-                    // Starting HERE (not in load/seek) ensures the clock
-                    // doesn't advance while the decoder is still producing
-                    // the first frame — eliminates "fast forward" on resume/seek.
-                    if !sampleBuffers.isEmpty {
-                        if let seekTime = self.pendingSeekTime {
-                            // After seek: restart clock at seek position
-                            audioOutput.start(at: seekTime)
-                            self.pendingSeekTime = nil
-                        } else if !audioStarted {
-                            // Initial start: begin clock at load position
-                            audioOutput.start(at: initialAudioTime)
-                            audioStarted = true
-                        }
+                    // Start the synchronizer when first audio data arrives.
+                    // Starting HERE (not in load) ensures the clock doesn't
+                    // advance while the decoder is still producing the first
+                    // frame — eliminates "fast forward" on initial start.
+                    // Seek restarts the clock directly in seek().
+                    if !audioStarted && !sampleBuffers.isEmpty {
+                        audioOutput.start(at: initialAudioTime)
+                        audioStarted = true
                     }
                 }
                 // TODO: Phase 6 — route subtitle packets
