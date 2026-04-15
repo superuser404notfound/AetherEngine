@@ -151,8 +151,14 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
         self.player = player
 
         let failureCallback = self.onPlaybackFailed
-        statusObservation = item.observe(\.status) { item, _ in
-            if item.status == .failed {
+        statusObservation = item.observe(\.status) { [weak self] item, _ in
+            if item.status == .readyToPlay {
+                // Start playback NOW — AVPlayer has enough data
+                self?.player?.play()
+                #if DEBUG
+                print("[AVPlayerAudioEngine] PlayerItem ready → play()")
+                #endif
+            } else if item.status == .failed {
                 #if DEBUG
                 print("[AVPlayerAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
                 if let e = item.error as NSError? {
@@ -161,11 +167,6 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
                 #endif
                 failureCallback?()
             }
-            #if DEBUG
-            if item.status == .readyToPlay {
-                print("[AVPlayerAudioEngine] PlayerItem ready to play")
-            }
-            #endif
         }
 
         setupTimeSync()
@@ -173,7 +174,8 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
         if startSeconds > 0 {
             player.seek(to: startTime, toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        player.rate = _rate
+        // Don't set rate here — wait for readyToPlay status above.
+        // Setting rate before readyToPlay is ignored by AVPlayer.
 
         #if DEBUG
         let atmosStr = config.numDepSub > 0 ? " (Atmos: \(config.numDepSub) dep sub)" : ""
@@ -312,6 +314,18 @@ final class AVPlayerAudioEngine: @unchecked Sendable {
 
     private func syncTimebase() {
         guard let tb = videoTimebase, let player = player else { return }
+
+        #if DEBUG
+        // Periodic status logging (fires every 100ms when player is active)
+        let statusRaw = player.currentItem?.status.rawValue ?? -1
+        let tcStatus = player.timeControlStatus.rawValue
+        let t = CMTimeGetSeconds(player.currentTime())
+        if statusRaw != 1 || tcStatus != 2 {
+            // Log only when NOT playing normally (status=1=readyToPlay, timeControl=2=playing)
+            print("[AVPlayerAudioEngine] status=\(statusRaw) timeControl=\(tcStatus) rate=\(player.rate) time=\(String(format: "%.2f", t))")
+        }
+        #endif
+
         let drift = CMTimeGetSeconds(player.currentTime()) - CMTimeGetSeconds(CMTimebaseGetTime(tb))
         if abs(drift) > 0.03 {
             CMTimebaseSetTime(tb, time: player.currentTime())
