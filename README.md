@@ -46,8 +46,10 @@ Most video player libraries try to do everything — UI, controls, playlists, an
 | **Codecs** | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM |
 | **Surround** | 5.1 and 7.1 multichannel output with proper channel layout mapping |
 | **Spatial Audio** | AirPods Pro/Max and HomePod spatialization (automatic) |
-| **HDMI eARC** | Apple TV outputs multichannel PCM as Dolby MAT 2.0 to receivers |
+| **HDMI** | Apple TV outputs multichannel PCM over HDMI eARC to receivers |
 | **Audio tracks** | Runtime audio track switching |
+
+> **Note on Dolby Atmos:** tvOS does not provide an audio passthrough API for third-party apps (as of tvOS 26.4). EAC3+Atmos and TrueHD+Atmos content is decoded to **7.1 multichannel PCM** — identical to how Infuse, Plex, and Swiftfin handle it. Object-based Atmos metadata (height channels) is lost during decode. Only Apple's own TV app can output true Atmos via proprietary system APIs.
 
 ### Playback
 
@@ -192,9 +194,18 @@ The `videoFormat` property reports the detected format: `.sdr`, `.hdr10`, `.dolb
 
 - FFmpeg decodes all audio codecs (AC3, EAC3, TrueHD, DTS, AAC, etc.) to **multichannel Float32 PCM**
 - Proper `AudioChannelLayout` mapping ensures correct speaker positions (mono through 7.1)
-- On **Apple TV 4K**: multichannel PCM is encoded as **Dolby MAT 2.0** over HDMI eARC — your receiver handles the rest
+- On **Apple TV 4K**: multichannel PCM is output over HDMI eARC — receiver decodes surround
 - On **AirPods Pro/Max**: spatial audio spatialization is enabled automatically
-- On **HomePod**: multichannel content plays with full spatial rendering
+- On **HomePod**: multichannel content plays with spatial rendering
+
+### Atmos Limitation
+
+tvOS does not expose audio bitstream passthrough to third-party apps. All audio is decoded to PCM before output. This means:
+
+- **What works:** 5.1 and 7.1 surround sound with correct speaker mapping
+- **What doesn't work:** Dolby Atmos object metadata and height channels — these are lost during PCM decode
+- **This is a platform limitation**, not a SteelPlayer limitation — Infuse, Plex, and all other third-party players have the same constraint
+- If Apple releases a passthrough API in a future tvOS version, SteelPlayer's architecture is ready to support it
 
 ---
 
