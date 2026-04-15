@@ -644,9 +644,10 @@ public final class SteelPlayer: ObservableObject {
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .flatMap({ $0.windows })
-            .first else {
+            .first,
+              window.responds(to: Selector(("avDisplayManager"))) else {
             #if DEBUG
-            print("[SteelPlayer] No window available for display criteria")
+            print("[SteelPlayer] AVDisplayManager not available (simulator?)")
             #endif
             return
         }
@@ -663,7 +664,8 @@ public final class SteelPlayer: ObservableObject {
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .flatMap({ $0.windows })
-            .first else { return }
+            .first,
+              window.responds(to: Selector(("avDisplayManager"))) else { return }
         window.avDisplayManager.preferredDisplayCriteria = nil
     }
     #endif
