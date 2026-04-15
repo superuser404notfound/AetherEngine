@@ -166,6 +166,14 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
+                // When DV metadata propagation is OFF, VT outputs pixel data
+                // in BT.2020/PQ but may strip color attachments from the buffer.
+                // Without attachments, the display layer defaults to BT.709
+                // interpretation → completely wrong colors. Fix: manually tag
+                // HDR pixel buffers with the correct color space.
+                if self.use10Bit {
+                    self.attachHDRColorSpace(to: pixelBuffer)
+                }
                 self.onFrame?(pixelBuffer, pts)
             }
         )
@@ -192,6 +200,21 @@ final class VideoDecoder: @unchecked Sendable {
 
     deinit {
         close()
+    }
+
+    // MARK: - HDR Color Space
+
+    /// Attach BT.2020/PQ color metadata to HDR pixel buffers.
+    /// When PropagatePerFrameHDRDisplayMetadata is OFF, VT may strip
+    /// color attachments — the display layer then defaults to BT.709
+    /// which produces completely wrong colors for BT.2020/PQ content.
+    private func attachHDRColorSpace(to pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
     }
 
     // MARK: - VideoToolbox Setup
