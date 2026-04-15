@@ -306,13 +306,16 @@ public final class SteelPlayer: ObservableObject {
         // but pausing first avoids decoding stale packets after flush.
         isPlaying = false
 
-        // Flush everything: display layer, decoders, audio renderer
-        videoRenderer.flush()
+        // Flush decoders FIRST — VTDecompressionSession's flush waits for
+        // async frames which get delivered to the renderer. Then flush the
+        // renderer to clear those stale frames. Wrong order causes a still
+        // frame from the old position to remain on screen after seek.
         if usingSoftwareDecode {
             softwareDecoder.flush()
         } else {
             videoDecoder.flush()
         }
+        videoRenderer.flush()
         audioDecoder.flush()
         audioOutput.flush()
 
