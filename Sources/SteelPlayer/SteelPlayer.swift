@@ -74,13 +74,16 @@ public final class SteelPlayer: ObservableObject {
     private let audioOutput = AudioOutput()
     nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
 
-    /// Compressed audio feeder for EAC3/AC3 — feeds raw compressed frames
+    /// Compressed audio feeder for AC3 — feeds raw compressed frames
     /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode).
-    /// The renderer handles decoding and can preserve Atmos metadata.
     private let compressedAudioFeeder = CompressedAudioFeeder()
 
-    /// True when using compressed passthrough instead of FFmpeg PCM decode.
-    nonisolated(unsafe) private var usingCompressedAudio = false
+    /// HLS audio engine for EAC3 — AVPlayer + local HLS for Dolby Atmos passthrough.
+    nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
+
+    /// Audio routing: which engine handles the current audio track.
+    enum AudioMode { case pcm, compressed, hls }
+    nonisolated(unsafe) private var audioMode: AudioMode = .pcm
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
@@ -239,44 +242,74 @@ public final class SteelPlayer: ObservableObject {
             subtitleTracks = demuxer.subtitleTrackInfos()
 
             // 2b. Find the audio stream and configure the appropriate audio engine
+            //
+            // EAC3 → HLS engine (AVPlayer for Dolby Atmos passthrough)
+            // AC3  → Compressed passthrough (AVSampleBufferAudioRenderer, no FFmpeg)
+            // Other → FFmpeg PCM decode
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
-            usingCompressedAudio = false
+            audioMode = .pcm
 
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
                 let codecId = audioStream.pointee.codecpar?.pointee.codec_id
-                let isCompressedPassthrough = (codecId == AV_CODEC_ID_EAC3 || codecId == AV_CODEC_ID_AC3)
+                let channelCount = Int(audioStream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
 
-                if isCompressedPassthrough {
-                    // EAC3/AC3 → feed compressed frames directly to renderer.
-                    // AVSampleBufferAudioRenderer handles decoding internally
-                    // and can preserve Atmos object metadata for EAC3+JOC.
+                if codecId == AV_CODEC_ID_EAC3 {
+                    // EAC3 → HLS engine for potential Dolby Atmos
                     do {
-                        try compressedAudioFeeder.open(stream: audioStream)
-                        usingCompressedAudio = true
+                        let engine = HLSAudioEngine()
+                        engine.onPlaybackFailed = { [weak self] in
+                            Task { @MainActor [weak self] in
+                                self?.fallbackFromHLS()
+                            }
+                        }
+                        try engine.prepare(stream: audioStream)
+                        hlsAudioEngine = engine
+                        audioMode = .hls
                         audioAvailable = true
 
-                        // Same synchronizer-driven timing as PCM path
-                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                        // Video timing driven by HLS engine's timebase
+                        videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+
+                        // Also open compressed feeder as fallback
+                        try? compressedAudioFeeder.open(stream: audioStream)
 
                         #if DEBUG
-                        print("[SteelPlayer] Audio: \(compressedAudioFeeder.codecName) → compressed passthrough")
+                        print("[SteelPlayer] Audio: EAC3 → HLS engine (Atmos passthrough)")
                         #endif
                     } catch {
                         #if DEBUG
-                        print("[SteelPlayer] Compressed feeder failed: \(error) — trying PCM fallback")
+                        print("[SteelPlayer] HLS engine failed: \(error) — using compressed fallback")
                         #endif
-                        // Fall back to FFmpeg PCM decode
+                        // Fall back to compressed passthrough
                         do {
-                            try audioDecoder.open(stream: audioStream)
+                            try compressedAudioFeeder.open(stream: audioStream)
+                            audioMode = .compressed
                             audioAvailable = true
                             audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         } catch {
-                            print("[SteelPlayer] Audio decoder also failed: \(error)")
+                            try? audioDecoder.open(stream: audioStream)
+                            audioAvailable = true
+                            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         }
                     }
+                } else if codecId == AV_CODEC_ID_AC3 {
+                    // AC3 → compressed passthrough (no Atmos possible)
+                    do {
+                        try compressedAudioFeeder.open(stream: audioStream)
+                        audioMode = .compressed
+                        audioAvailable = true
+                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                        #if DEBUG
+                        print("[SteelPlayer] Audio: AC3 → compressed passthrough")
+                        #endif
+                    } catch {
+                        try? audioDecoder.open(stream: audioStream)
+                        audioAvailable = true
+                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                    }
                 } else {
-                    // AAC, FLAC, Opus, etc. → FFmpeg PCM decode pipeline
+                    // AAC, FLAC, Opus, etc. → FFmpeg PCM decode
                     do {
                         try audioDecoder.open(stream: audioStream)
                         audioAvailable = true
@@ -288,11 +321,8 @@ public final class SteelPlayer: ObservableObject {
 
                 // Match output channels to content
                 #if os(iOS) || os(tvOS)
-                let contentCh = usingCompressedAudio
-                    ? Int(compressedAudioFeeder.channels)
-                    : Int(audioDecoder.channels)
                 let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
-                let preferred = max(2, min(contentCh, maxCh))
+                let preferred = max(2, min(channelCount, maxCh))
                 try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
                 #endif
             }
@@ -342,14 +372,22 @@ public final class SteelPlayer: ObservableObject {
     public func play() {
         guard state == .paused else { return }
         isPlaying = true
-        audioOutput.resume()
+        if audioMode == .hls {
+            hlsAudioEngine?.resume()
+        } else {
+            audioOutput.resume()
+        }
         state = .playing
     }
 
     public func pause() {
         guard state == .playing else { return }
         isPlaying = false
-        audioOutput.pause()
+        if audioMode == .hls {
+            hlsAudioEngine?.pause()
+        } else {
+            audioOutput.pause()
+        }
         state = .paused
     }
 
@@ -378,12 +416,16 @@ public final class SteelPlayer: ObservableObject {
         }
         videoRenderer.flush()
 
-        if usingCompressedAudio {
+        switch audioMode {
+        case .hls:
+            hlsAudioEngine?.prepareForSeek()
+        case .compressed:
             compressedAudioFeeder.flush()
-        } else {
+            audioOutput.flush()
+        case .pcm:
             audioDecoder.flush()
+            audioOutput.flush()
         }
-        audioOutput.flush()
 
         // Seek the demuxer
         demuxer.seek(to: target)
@@ -396,8 +438,15 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // Restart the audio clock at the seek position
-        audioOutput.start(at: seekTime)
+        // Restart audio at the seek position
+        if audioMode == .hls {
+            // HLS engine restarts when new packets arrive in the demux loop
+            if let audioStream = demuxer.stream(at: activeAudioStreamIndex) {
+                try? hlsAudioEngine?.restartAfterSeek(stream: audioStream, seekTime: seekTime)
+            }
+        } else {
+            audioOutput.start(at: seekTime)
+        }
 
         // Resume playing from new position
         isPlaying = true
@@ -421,48 +470,62 @@ public final class SteelPlayer: ObservableObject {
               let stream = demuxer.stream(at: streamIndex) else { return }
 
         let codecId = stream.pointee.codecpar?.pointee.codec_id
-        let newIsCompressed = (codecId == AV_CODEC_ID_EAC3 || codecId == AV_CODEC_ID_AC3)
 
-        // Tear down current audio
-        if usingCompressedAudio {
+        // Tear down current audio engine
+        switch audioMode {
+        case .hls:
+            hlsAudioEngine?.stop()
+            hlsAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        case .compressed:
             compressedAudioFeeder.flush()
             compressedAudioFeeder.close()
-        } else {
+        case .pcm:
             audioDecoder.flush()
             audioDecoder.close()
         }
         audioOutput.flush()
         activeAudioStreamIndex = streamIndex
 
-        if newIsCompressed {
+        // Open new audio engine for the selected track
+        if codecId == AV_CODEC_ID_EAC3 {
+            do {
+                let engine = HLSAudioEngine()
+                engine.onPlaybackFailed = { [weak self] in
+                    Task { @MainActor in self?.fallbackFromHLS() }
+                }
+                try engine.prepare(stream: stream, startTime: CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000))
+                hlsAudioEngine = engine
+                audioMode = .hls
+                audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+                videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+            } catch {
+                try? compressedAudioFeeder.open(stream: stream)
+                audioMode = .compressed
+                audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+            }
+        } else if codecId == AV_CODEC_ID_AC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
-                usingCompressedAudio = true
+                audioMode = .compressed
             } catch {
-                #if DEBUG
-                print("[SteelPlayer] Compressed feeder failed: \(error), trying PCM")
-                #endif
                 try? audioDecoder.open(stream: stream)
-                usingCompressedAudio = false
+                audioMode = .pcm
             }
+            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
         } else {
-            do {
-                try audioDecoder.open(stream: stream)
-                usingCompressedAudio = false
-            } catch {
-                #if DEBUG
-                print("[SteelPlayer] Audio track switch failed: \(error)")
-                #endif
-            }
+            try? audioDecoder.open(stream: stream)
+            audioMode = .pcm
+            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
         }
 
-        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
-        audioOutput.start(at: seekTime)
+        if audioMode != .hls {
+            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            audioOutput.start(at: seekTime)
+        }
 
         #if os(iOS) || os(tvOS)
-        let contentCh = usingCompressedAudio
-            ? Int(compressedAudioFeeder.channels)
-            : Int(audioDecoder.channels)
+        let contentCh = Int(stream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
         let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
         let preferred = max(2, min(contentCh, maxCh))
         try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
@@ -476,12 +539,37 @@ public final class SteelPlayer: ObservableObject {
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { audioOutput.volume }
-        set { audioOutput.volume = newValue }
+        set { audioOutput.volume = newValue }  // AVPlayer volume controlled separately if needed
     }
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
-        audioOutput.setRate(rate)
+        if audioMode == .hls {
+            hlsAudioEngine?.setRate(rate)
+        } else {
+            audioOutput.setRate(rate)
+        }
+    }
+
+    // MARK: - HLS Fallback
+
+    /// Fall back from HLS AVPlayer to CompressedAudioFeeder when HLS fails.
+    private func fallbackFromHLS() {
+        guard audioMode == .hls else { return }
+
+        #if DEBUG
+        print("[SteelPlayer] HLS audio failed — falling back to compressed passthrough")
+        #endif
+
+        hlsAudioEngine?.stop()
+        hlsAudioEngine = nil
+        videoRenderer.displayLayer.controlTimebase = nil
+
+        // Switch to compressed feeder (already opened as fallback in load)
+        audioMode = .compressed
+        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+        audioOutput.start(at: seekTime)
     }
 
     // MARK: - Internal
@@ -492,10 +580,16 @@ public final class SteelPlayer: ObservableObject {
         stopTimeUpdates()
 
         // Stop audio
-        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+        if audioMode == .hls {
+            hlsAudioEngine?.stop()
+            hlsAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        } else {
+            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+        }
         audioOutput.stop()
         compressedAudioFeeder.close()
-        usingCompressedAudio = false
+        audioMode = .pcm
 
         // Flush decoders before renderer — decoder flush waits for async
         // VT frames which would otherwise land on the already-flushed renderer.
@@ -584,10 +678,10 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.flush()
                     }
                     self.videoRenderer.drainReorderBuffer()
-                    if self.usingCompressedAudio {
-                        self.compressedAudioFeeder.flush()
-                    } else {
-                        self.audioDecoder.flush()
+                    switch self.audioMode {
+                    case .hls: break  // HLS engine handles its own cleanup
+                    case .compressed: self.compressedAudioFeeder.flush()
+                    case .pcm: self.audioDecoder.flush()
                     }
                     Task { @MainActor [weak self] in
                         self?.state = .idle
@@ -610,7 +704,12 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.decode(packet: packet)
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
-                    if self.usingCompressedAudio {
+                    switch self.audioMode {
+                    case .hls:
+                        // HLS engine — buffers packets, creates segments, feeds AVPlayer
+                        self.hlsAudioEngine?.feedPacket(packet)
+
+                    case .compressed:
                         // Compressed passthrough — wrap raw packet as CMSampleBuffer
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
                             audioOutput.enqueue(sampleBuffer: sampleBuffer)
@@ -619,7 +718,8 @@ public final class SteelPlayer: ObservableObject {
                                 audioStarted = true
                             }
                         }
-                    } else {
+
+                    case .pcm:
                         // FFmpeg PCM pipeline
                         let sampleBuffers = audioDecoder.decode(packet: packet)
                         for sb in sampleBuffers {
@@ -648,7 +748,9 @@ public final class SteelPlayer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self = self, !Task.isCancelled else { return }
-                let t = self.audioOutput.currentTimeSeconds
+                let t = self.audioMode == .hls
+                    ? (self.hlsAudioEngine?.currentTimeSeconds ?? 0)
+                    : self.audioOutput.currentTimeSeconds
                 if t > 0 {
                     self.currentTime = t
                     if self.duration > 0 {
