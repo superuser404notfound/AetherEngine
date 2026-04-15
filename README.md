@@ -10,7 +10,7 @@
 
 A lightweight video player engine for Apple platforms. FFmpeg handles the containers, VideoToolbox handles the decoding, Apple's synchronizer handles the timing. **Your app provides the UI — SteelPlayer provides the engine.**
 
-> **2,500 lines of Swift.** No bloat, no abstractions for abstractions. Just a clean pipeline from URL to pixels.
+> **~3,400 lines of Swift.** No bloat, no abstractions for abstractions. Just a clean pipeline from URL to pixels.
 
 ---
 
@@ -32,11 +32,11 @@ Most video player libraries try to do everything — UI, controls, playlists, an
 | | |
 |---|---|
 | **Containers** | MKV, MP4, AVI, MPEG-TS, WebM, OGG, FLV |
-| **Video (HW)** | H.264, HEVC, HEVC Main10 — via VideoToolbox |
-| **Video (SW)** | AV1, VP9, and anything FFmpeg supports — automatic fallback |
-| **HDR10** | 10-bit P010 output with BT.2020/PQ color metadata |
-| **Dolby Vision** | Profile 5, 8.1, 8.4 — automatic metadata propagation via VideoToolbox |
-| **HLG** | Hybrid Log-Gamma support with correct transfer function |
+| **HW decode** | H.264, HEVC, HEVC Main10 — via VideoToolbox |
+| **SW decode** | AV1, VP9 — FFmpeg fallback with pixel buffer pooling |
+| **HDR10** | 10-bit P010 output, BT.2020/PQ color metadata on every frame |
+| **Dolby Vision** | Profile 5, 8.1, 8.4 on DV-capable displays; HDR10 fallback on others |
+| **HLG** | Hybrid Log-Gamma detection and correct transfer function tagging |
 | **B-frames** | 4-frame reorder buffer for correct presentation order |
 
 ### Audio
@@ -44,24 +44,24 @@ Most video player libraries try to do everything — UI, controls, playlists, an
 | | |
 |---|---|
 | **Codecs** | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM |
-| **Surround** | 5.1 and 7.1 multichannel output with proper channel layout mapping |
+| **Surround** | 5.1 and 7.1 multichannel output with `AudioChannelLayout` mapping |
 | **Spatial Audio** | AirPods Pro/Max and HomePod spatialization (automatic) |
-| **HDMI** | Apple TV outputs multichannel PCM over HDMI eARC to receivers |
-| **Audio tracks** | Runtime audio track switching |
+| **HDMI** | Multichannel PCM over HDMI eARC — receiver handles surround |
+| **Tracks** | Runtime audio track switching |
 
-> **Note on Dolby Atmos:** tvOS does not provide an audio passthrough API for third-party apps (as of tvOS 26.4). EAC3+Atmos and TrueHD+Atmos content is decoded to **7.1 multichannel PCM** — identical to how Infuse, Plex, and Swiftfin handle it. Object-based Atmos metadata (height channels) is lost during decode. Only Apple's own TV app can output true Atmos via proprietary system APIs.
+> **Note on Dolby Atmos:** tvOS does not provide audio passthrough for third-party apps. Atmos content is decoded to 7.1 PCM — same as Infuse, Plex, and all other third-party players. Object-based metadata and height channels are lost during decode. Only Apple's own TV app outputs true Atmos.
 
 ### Playback
 
 | | |
 |---|---|
-| **A/V Sync** | `AVSampleBufferRenderSynchronizer` as master clock |
-| **Speed control** | 0.5x to 2.0x playback speed |
-| **Volume** | Programmable volume control |
-| **Seeking** | Flush + demuxer seek + skip-to-target (no visual fast-forward) |
+| **A/V Sync** | `AVSampleBufferRenderSynchronizer` master clock |
+| **Speed** | 0.5x to 2.0x playback speed |
+| **Volume** | Programmable volume (0.0–1.0) |
+| **Seeking** | Decoder-first flush + skip-to-target — no stale frames, no fast-forward |
 | **Streaming** | HTTP Range requests with double-buffered prefetch |
-| **Live streams** | Chunked streaming via URLSession delegate |
-| **Error recovery** | Automatic retry with exponential backoff on network errors |
+| **Live** | Chunked streaming via URLSession delegate (no Content-Length required) |
+| **Resilience** | Automatic retry with exponential backoff on network errors |
 | **Lifecycle** | Background pause, memory warning handling (iOS/tvOS) |
 
 ---
@@ -82,42 +82,39 @@ dependencies: [
 ```swift
 import SteelPlayer
 
-// Create the player
 let player = try SteelPlayer()
 
-// Add the video layer to your view
+// Embed in your view hierarchy
 myView.layer.addSublayer(player.videoLayer)
 
 // Load and play
 try await player.load(url: videoURL)
+try await player.load(url: videoURL, startPosition: 347.5) // resume
 
 // Controls
 player.play()
 player.pause()
 player.togglePlayPause()
-await player.seek(to: 120.0)   // jump to 2:00
+await player.seek(to: 120.0)
 player.stop()
 
-// Resume from a saved position
-try await player.load(url: videoURL, startPosition: 347.5)
-
 // Volume and speed
-player.volume = 0.5            // 0.0 = mute, 1.0 = full
-player.setRate(1.5)            // 0.5x to 2.0x
+player.volume = 0.5
+player.setRate(1.5)
 
-// Switch audio tracks
+// Audio tracks
 player.selectAudioTrack(index: trackID)
 
-// Observe state changes (Combine)
-player.$state.sink { state in ... }         // .idle, .loading, .playing, .paused, .seeking, .error
-player.$currentTime.sink { time in ... }    // seconds as Double
-player.$duration.sink { dur in ... }        // total duration
-player.$progress.sink { p in ... }          // 0.0 ... 1.0
-player.$videoFormat.sink { fmt in ... }     // .sdr, .hdr10, .dolbyVision, .hlg
+// Observe (Combine @Published)
+player.$state         // .idle, .loading, .playing, .paused, .seeking, .error
+player.$currentTime   // Double (seconds)
+player.$duration      // Double (seconds)
+player.$progress      // Float (0.0–1.0)
+player.$videoFormat   // .sdr, .hdr10, .dolbyVision, .hlg
 
-// Track metadata
-player.audioTracks      // [TrackInfo] — id, name, codec, language, channels
-player.subtitleTracks   // [TrackInfo]
+// Track info
+player.audioTracks    // [TrackInfo] — id, name, codec, language, channels
+player.subtitleTracks // [TrackInfo]
 ```
 
 ---
@@ -126,19 +123,19 @@ player.subtitleTracks   // [TrackInfo]
 
 ```
 Sources/SteelPlayer/
-├── SteelPlayer.swift              → Public API, demux→decode orchestration
-├── PlayerState.swift              → PlaybackState, VideoFormat, TrackInfo
+├── SteelPlayer.swift              Public API + demux→decode orchestration
+├── PlayerState.swift              PlaybackState, VideoFormat, TrackInfo
 ├── Demuxer/
-│   ├── Demuxer.swift              → FFmpeg AVFormatContext wrapper
-│   └── AVIOReader.swift           → HTTP streaming via URLSession
+│   ├── Demuxer.swift              FFmpeg AVFormatContext wrapper
+│   └── AVIOReader.swift           HTTP streaming via URLSession
 ├── Decoder/
-│   ├── VideoDecoder.swift         → VideoToolbox HW decode (H.264/HEVC/AV1)
-│   └── SoftwareVideoDecoder.swift → FFmpeg SW decode fallback + color metadata
+│   ├── VideoDecoder.swift         VideoToolbox HW decode + HDR/DV handling
+│   └── SoftwareVideoDecoder.swift FFmpeg SW decode + pixel buffer pool
 ├── Renderer/
-│   └── SampleBufferRenderer.swift → AVSampleBufferDisplayLayer + B-frame reorder
+│   └── SampleBufferRenderer.swift AVSampleBufferDisplayLayer + B-frame reorder
 └── Audio/
-    ├── AudioDecoder.swift         → FFmpeg decode + libswresample → multichannel PCM
-    └── AudioOutput.swift          → AVSampleBufferAudioRenderer + spatial audio
+    ├── AudioDecoder.swift         FFmpeg decode + libswresample → multichannel PCM
+    └── AudioOutput.swift          AVSampleBufferAudioRenderer + spatial audio
 ```
 
 ### Pipeline
@@ -161,51 +158,64 @@ VideoToolbox HW      FFmpeg SW Decode
  │                    │
  ▼                    ▼
 CVPixelBuffer        CMSampleBuffer
-(8-bit or 10-bit)    (multichannel PCM)
+(8-bit or 10-bit     (multichannel
+ + color metadata)    Float32 PCM)
  │                    │
  ▼                    ▼
 Reorder Buffer       AVSampleBuffer
 (4 frames)           AudioRenderer
  │                    │
  ▼                    ▼
-AVSampleBuffer       ──────────────┐
-DisplayLayer                       │
- │                                 │
- └──── AVSampleBufferRenderSynchronizer (master clock) ────┘
+AVSampleBuffer  ─────────────────────┐
+DisplayLayer                         │
+ │                                   │
+ └── AVSampleBufferRenderSynchronizer (master clock) ──┘
 ```
 
 ---
 
 ## HDR & Dolby Vision
 
-SteelPlayer automatically detects and handles HDR content:
+SteelPlayer automatically detects HDR content and configures the decode pipeline accordingly:
 
-- **HEVC/AV1** streams are decoded to **10-bit P010** pixel buffers
-- **H.264** streams stay at **8-bit NV12** (no HDR support in H.264)
-- VideoToolbox's `PropagatePerFrameHDRDisplayMetadata` (enabled by default) carries **Dolby Vision metadata** through the pipeline automatically
-- **No manual RPU parsing** — DV Profile 5, 8.1, and 8.4 work out of the box
-- Color space metadata (BT.2020, PQ, HLG) is attached to pixel buffers for correct display rendering
+| Content | Pixel Format | Color Tags | DV Metadata |
+|---|---|---|---|
+| H.264 (SDR) | 8-bit NV12 | — | — |
+| HEVC Main (SDR) | 8-bit NV12 | — | — |
+| HEVC Main10 (HDR10) | 10-bit P010 | BT.2020 + PQ | — |
+| HEVC Main10 (DV Profile 8) on DV display | 10-bit P010 | BT.2020 + PQ | Propagated |
+| HEVC Main10 (DV Profile 8) on HDR10 display | 10-bit P010 | BT.2020 + PQ | Stripped |
+| AV1 (HDR) | 10-bit P010 | BT.2020 + PQ | — |
 
-The `videoFormat` property reports the detected format: `.sdr`, `.hdr10`, `.dolbyVision`, or `.hlg`.
+**How it works:**
+
+- Bit depth is detected from codec profile and transfer function — not just `bits_per_raw_sample` (which can be 0)
+- BT.2020/PQ color metadata is explicitly attached to every HDR pixel buffer, ensuring correct display rendering even when VideoToolbox strips attachments
+- DV per-frame metadata (RPU) is enabled only when `AVPlayer.availableHDRModes` confirms the display supports Dolby Vision — non-DV displays get clean HDR10 output
+- `videoFormat` reports what's actually being **output** (`.hdr10` on non-DV displays), not what the content contains
+
+**Host app responsibility:** Set `AVDisplayCriteria` on tvOS to trigger the TV's HDR mode switch before starting playback. SteelPlayer reports `videoFormat` — the host app decides when and how to switch display modes.
 
 ---
 
 ## Surround Sound & Spatial Audio
 
-- FFmpeg decodes all audio codecs (AC3, EAC3, TrueHD, DTS, AAC, etc.) to **multichannel Float32 PCM**
-- Proper `AudioChannelLayout` mapping ensures correct speaker positions (mono through 7.1)
-- On **Apple TV 4K**: multichannel PCM is output over HDMI eARC — receiver decodes surround
-- On **AirPods Pro/Max**: spatial audio spatialization is enabled automatically
-- On **HomePod**: multichannel content plays with spatial rendering
+- All audio codecs decoded to **multichannel Float32 PCM** via FFmpeg + libswresample
+- `AudioChannelLayout` mapping for mono, stereo, 5.1, 7.1 ensures correct speaker positions
+- `AVAudioSession.setSupportsMultichannelContent(true)` for proper surround output
+- `renderer.allowedAudioSpatializationFormats = .multichannel` for AirPods/HomePod spatial audio
+- On **Apple TV 4K**: multichannel PCM over HDMI eARC — receiver handles surround decoding
+- On **AirPods Pro/Max**: Apple spatializes multichannel content automatically
+- On **HomePod**: spatial rendering for multichannel sources
 
-### Atmos Limitation
+### Platform Limitation: Atmos
 
-tvOS does not expose audio bitstream passthrough to third-party apps. All audio is decoded to PCM before output. This means:
+tvOS does not expose audio bitstream passthrough to third-party apps (as of tvOS 26). All audio is decoded to PCM:
 
-- **What works:** 5.1 and 7.1 surround sound with correct speaker mapping
-- **What doesn't work:** Dolby Atmos object metadata and height channels — these are lost during PCM decode
-- **This is a platform limitation**, not a SteelPlayer limitation — Infuse, Plex, and all other third-party players have the same constraint
-- If Apple releases a passthrough API in a future tvOS version, SteelPlayer's architecture is ready to support it
+- **Works:** 5.1 and 7.1 surround with correct channel layout
+- **Lost:** Dolby Atmos object metadata and height channels
+- **Same constraint** applies to Infuse, Plex, Swiftfin, and all third-party players
+- Architecture is ready for passthrough when Apple provides the API
 
 ---
 
@@ -215,7 +225,7 @@ tvOS does not expose audio bitstream passthrough to third-party apps. All audio 
 |---|---|---|
 | [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL 3.0 | Minimal FFmpeg 7.1 xcframeworks |
 | VideoToolbox | System | Hardware video decoding |
-| AVFoundation | System | Audio/video output + synchronization |
+| AVFoundation | System | Audio/video output, synchronization, HDR detection |
 | CoreMedia | System | Sample buffers + timing |
 
 ---
