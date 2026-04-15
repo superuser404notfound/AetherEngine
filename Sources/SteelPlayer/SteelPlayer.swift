@@ -261,19 +261,36 @@ public final class SteelPlayer: ObservableObject {
 
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
                 let codecId = audioStream.pointee.codecpar?.pointee.codec_id
-                let isAtmosCodec = (codecId == AV_CODEC_ID_AC3 || codecId == AV_CODEC_ID_EAC3)
+                // Only EAC3 can carry Atmos (via JOC dependent substreams).
+                // AC3 never has Atmos — always use PCM for AC3.
+                let canUseAVPlayer = (codecId == AV_CODEC_ID_EAC3)
 
-                if isAtmosCodec {
-                    // EAC3/AC3 → AVPlayer audio engine for Dolby Atmos passthrough
+                if canUseAVPlayer {
+                    // EAC3 → AVPlayer audio engine for potential Dolby Atmos passthrough
                     let codecpar = audioStream.pointee.codecpar!
-                    avPlayerCodecType = (codecId == AV_CODEC_ID_EAC3) ? .eac3 : .ac3
+                    avPlayerCodecType = .eac3
                     avPlayerSampleRate = UInt32(codecpar.pointee.sample_rate)
                     avPlayerChannelCount = UInt32(codecpar.pointee.ch_layout.nb_channels)
                     avPlayerBitRate = UInt32(codecpar.pointee.bit_rate)
                     if avPlayerSampleRate == 0 { avPlayerSampleRate = 48000 }
                     if avPlayerChannelCount == 0 { avPlayerChannelCount = 6 }
 
+                    // Also open AudioDecoder as PCM fallback — if AVPlayer fails,
+                    // we switch to PCM seamlessly.
+                    do {
+                        try audioDecoder.open(stream: audioStream)
+                    } catch {
+                        #if DEBUG
+                        print("[SteelPlayer] PCM fallback decoder failed: \(error)")
+                        #endif
+                    }
+
                     let engine = AVPlayerAudioEngine()
+                    engine.onPlaybackFailed = { [weak self] in
+                        Task { @MainActor [weak self] in
+                            self?.fallbackToPCMAudio()
+                        }
+                    }
                     avPlayerAudioEngine = engine
                     usingAVPlayerAudio = true
                     avPlayerAwaitingFirstPacket = true
@@ -283,7 +300,7 @@ public final class SteelPlayer: ObservableObject {
                     videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
 
                     #if DEBUG
-                    print("[SteelPlayer] Audio: \(codecId == AV_CODEC_ID_EAC3 ? "EAC3" : "AC3") → AVPlayer engine (Atmos passthrough)")
+                    print("[SteelPlayer] Audio: EAC3 → AVPlayer engine (Atmos passthrough)")
                     #endif
 
                     // Update preferred output channels
@@ -296,7 +313,7 @@ public final class SteelPlayer: ObservableObject {
                     }
                     #endif
                 } else {
-                    // All other codecs → FFmpeg PCM pipeline
+                    // AC3, AAC, and all other codecs → FFmpeg PCM pipeline
                     do {
                         try audioDecoder.open(stream: audioStream)
                         audioAvailable = true
@@ -458,7 +475,7 @@ public final class SteelPlayer: ObservableObject {
               let stream = demuxer.stream(at: streamIndex) else { return }
 
         let codecId = stream.pointee.codecpar?.pointee.codec_id
-        let newIsAtmos = (codecId == AV_CODEC_ID_AC3 || codecId == AV_CODEC_ID_EAC3)
+        let newIsAtmos = (codecId == AV_CODEC_ID_EAC3)
 
         // Tear down current audio engine
         if usingAVPlayerAudio {
@@ -549,6 +566,33 @@ public final class SteelPlayer: ObservableObject {
         } else {
             audioOutput.setRate(rate)
         }
+    }
+
+    // MARK: - AVPlayer Fallback
+
+    /// Fall back from AVPlayer audio to FFmpeg PCM pipeline.
+    /// Called when AVPlayer fails to open the fMP4 audio stream.
+    private func fallbackToPCMAudio() {
+        guard usingAVPlayerAudio else { return }
+
+        #if DEBUG
+        print("[SteelPlayer] AVPlayer audio failed — falling back to PCM")
+        #endif
+
+        // Stop AVPlayer engine
+        avPlayerAudioEngine?.stop()
+        avPlayerAudioEngine = nil
+        videoRenderer.displayLayer.controlTimebase = nil
+
+        // Switch to synchronizer-driven video timing
+        usingAVPlayerAudio = false
+        avPlayerAwaitingFirstPacket = false
+        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+
+        // AudioDecoder was already opened as fallback in load().
+        // Restart synchronizer at current position.
+        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+        audioOutput.start(at: seekTime)
     }
 
     // MARK: - Internal

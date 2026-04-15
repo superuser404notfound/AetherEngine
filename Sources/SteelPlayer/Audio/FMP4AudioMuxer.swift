@@ -272,11 +272,14 @@ final class FMP4AudioMuxer {
 
     private func buildFtyp() -> Data {
         var d = Data()
-        d.appendUInt32BE(20)     // size: 4+4+4+4+4 = 20
+        d.appendUInt32BE(32)     // size: 4+4+4+4 + 4*4 = 32
         d.appendFourCC("ftyp")
         d.appendFourCC("isom")   // major brand
         d.appendUInt32BE(0x200)  // minor version
-        d.appendFourCC("isom")   // compatible brand
+        d.appendFourCC("isom")   // compatible brands
+        d.appendFourCC("iso6")
+        d.appendFourCC("mp41")
+        d.appendFourCC("dash")
         return d
     }
 

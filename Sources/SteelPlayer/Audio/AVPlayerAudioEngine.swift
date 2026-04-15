@@ -39,6 +39,10 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
 
+    /// Called when AVPlayer fails to open the audio stream.
+    /// The host should fall back to PCM audio when this fires.
+    var onPlaybackFailed: (() -> Void)?
+
     // MARK: - Streaming Buffer
 
     /// All fMP4 data produced so far (init segment + media segments).
@@ -140,10 +144,22 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         self.player = player
 
         // Observe player status for error handling
+        let failureCallback = self.onPlaybackFailed
         statusObservation = item.observe(\.status) { item, _ in
             if item.status == .failed {
                 #if DEBUG
                 print("[AVPlayerAudioEngine] PlayerItem failed: \(item.error?.localizedDescription ?? "unknown")")
+                if let error = item.error as NSError? {
+                    print("[AVPlayerAudioEngine] Error domain=\(error.domain) code=\(error.code)")
+                    if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
+                        print("[AVPlayerAudioEngine] Underlying: domain=\(underlying.domain) code=\(underlying.code)")
+                    }
+                }
+                #endif
+                failureCallback?()
+            } else if item.status == .readyToPlay {
+                #if DEBUG
+                print("[AVPlayerAudioEngine] PlayerItem ready to play")
                 #endif
             }
         }
@@ -334,6 +350,9 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         if let contentInfo = request.contentInformationRequest {
             contentInfo.contentType = "public.mpeg-4"
             contentInfo.isByteRangeAccessSupported = false
+            // Signal streaming content with indeterminate length.
+            // Some AVPlayer implementations reject contentLength=0 as "empty".
+            contentInfo.contentLength = Int64.max
         }
 
         guard let dataRequest = request.dataRequest else {
@@ -397,6 +416,13 @@ extension AVPlayerAudioEngine: AVAssetResourceLoaderDelegate {
         _ resourceLoader: AVAssetResourceLoader,
         shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
     ) -> Bool {
+        #if DEBUG
+        let offset = loadingRequest.dataRequest?.requestedOffset ?? -1
+        let length = loadingRequest.dataRequest?.requestedLength ?? -1
+        let hasContentInfo = loadingRequest.contentInformationRequest != nil
+        print("[AVPlayerAudioEngine] ResourceLoader request: offset=\(offset) length=\(length) contentInfo=\(hasContentInfo) bufferSize=\(buffer.count)")
+        #endif
+
         bufferLock.lock()
         defer { bufferLock.unlock() }
 
