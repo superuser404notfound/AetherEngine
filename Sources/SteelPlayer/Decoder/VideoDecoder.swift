@@ -292,21 +292,20 @@ final class VideoDecoder: @unchecked Sendable {
         // metadata causes wrong colors because the TV can't process it.
         // DV Profile 8 is backwards-compatible with HDR10 — disabling
         // propagation gives correct HDR10 output on non-DV displays.
-        let enableDVMetadata: Bool
+        // Check if the connected display supports Dolby Vision specifically.
+        // We need the OptionSet (not just Bool) to distinguish DV from HDR10,
+        // so we use availableHDRModes despite deprecation on tvOS 26.
+        // DV per-frame metadata: only enable on DV-capable displays.
+        // On HDR10-only TVs, DV RPU causes wrong colors.
         #if os(tvOS) || os(iOS)
-        enableDVMetadata = AVPlayer.availableHDRModes.contains(.dolbyVision)
-        #else
-        enableDVMetadata = false
-        #endif
-
-        VTSessionSetProperty(
-            sess,
-            key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
-            value: enableDVMetadata ? kCFBooleanTrue : kCFBooleanFalse
-        )
-
+        let displaySupportsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
+        VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
+                             value: displaySupportsDV ? kCFBooleanTrue : kCFBooleanFalse)
         #if DEBUG
-        print("[VideoDecoder] DV metadata propagation: \(enableDVMetadata ? "ON (display supports DV)" : "OFF (HDR10 fallback)")")
+        print("[VideoDecoder] DV metadata: \(displaySupportsDV ? "ON" : "OFF (HDR10 fallback)")")
+        #endif
+        #else
+        VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata, value: kCFBooleanFalse)
         #endif
 
         return sess
