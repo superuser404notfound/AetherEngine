@@ -1,31 +1,35 @@
 import Foundation
 import Network
 
-/// Minimal local HTTP server that streams fMP4 audio data to AVPlayer.
+/// Minimal local HTTP server that streams fMP4 audio to AVPlayer on tvOS.
 ///
-/// mediaserverd uses standard HTTP range requests:
-/// 1. `Range: bytes=0-1` → probe (206 + 2 bytes)
-/// 2. `Range: bytes=0-N` → full content from start
-/// 3. `Range: bytes=X-N` → resume from offset X
+/// ## Request Flow
 ///
-/// We respond with whatever data is available and keep the sentOffset
-/// to handle subsequent requests. Memory is bounded by only keeping
-/// undelivered data + a small replay buffer for the initial probe.
+/// 1. mediaserverd sends `Range: bytes=0-1` (probe)
+///    → We respond 206 + 2 bytes, keep-alive for next request
+/// 2. mediaserverd sends `Range: bytes=0-{big}` (stream)
+///    → We respond 206 + Content-Length=2GB + keep connection OPEN
+///    → Data is pushed continuously as it arrives from the demuxer
+///
+/// The streaming connection stays open for the entire playback session.
+/// New fMP4 segments are sent via `send()` as the demux loop produces them.
 final class LocalAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?
-    private var activeConnection: NWConnection?
     private let connectionQueue = DispatchQueue(label: "com.steelplayer.audioserver")
 
     private let lock = NSLock()
 
-    /// All fMP4 data accumulated (init segment + media segments).
-    /// Trimmed periodically to prevent unbounded growth.
+    /// fMP4 data buffer. Grows as packets arrive, trimmed after sending.
     private var buffer = Data()
-    /// How many bytes have been trimmed from the start of buffer.
     private var bufferTrimmed = 0
 
-    /// Fake total size for Content-Length / Content-Range headers.
+    /// Streaming state: the persistent connection to mediaserverd.
+    private var streamConnection: NWConnection?
+    private var streamActive = false
+    private var streamSentOffset = 0  // Absolute bytes sent on stream
+    private var isSending = false
+
     private let declaredSize = 2_000_000_000
 
     private(set) var port: UInt16 = 0
@@ -46,11 +50,6 @@ final class LocalAudioServer: @unchecked Sendable {
                 print("[LocalAudioServer] Listening on port \(self?.port ?? 0)")
                 #endif
             }
-            #if DEBUG
-            if case .failed(let error) = state {
-                print("[LocalAudioServer] Listener failed: \(error)")
-            }
-            #endif
         }
 
         l.newConnectionHandler = { [weak self] connection in
@@ -66,21 +65,24 @@ final class LocalAudioServer: @unchecked Sendable {
         }
     }
 
-    /// Queue fMP4 data for sending to AVPlayer.
+    /// Queue fMP4 data. Sent immediately if stream connection is active.
     func send(_ data: Data) {
         lock.lock()
         buffer.append(data)
         lock.unlock()
+        drainToStream()
     }
 
     func stop() {
         lock.lock()
         buffer = Data()
         bufferTrimmed = 0
+        streamActive = false
+        isSending = false
         lock.unlock()
 
-        activeConnection?.cancel()
-        activeConnection = nil
+        streamConnection?.cancel()
+        streamConnection = nil
         listener?.cancel()
         listener = nil
         port = 0
@@ -89,12 +91,14 @@ final class LocalAudioServer: @unchecked Sendable {
     // MARK: - Connection Handling
 
     private func handleNewConnection(_ connection: NWConnection) {
-        connection.stateUpdateHandler = { state in
-            #if DEBUG
-            if case .failed(let error) = state {
-                print("[LocalAudioServer] Connection failed: \(error)")
+        connection.stateUpdateHandler = { [weak self] state in
+            if case .failed(_) = state {
+                self?.lock.lock()
+                if self?.streamConnection === connection {
+                    self?.streamActive = false
+                }
+                self?.lock.unlock()
             }
-            #endif
         }
         connection.start(queue: connectionQueue)
         readRequest(connection)
@@ -107,18 +111,11 @@ final class LocalAudioServer: @unchecked Sendable {
 
             let lines = request.components(separatedBy: "\r\n")
 
-            #if DEBUG
-            if let first = lines.first {
-                print("[LocalAudioServer] \(first)")
-            }
-            #endif
-
             // Parse Range header
             var rangeStart = 0
             var rangeEnd: Int? = nil
             for line in lines {
-                let lower = line.lowercased()
-                if lower.hasPrefix("range:") {
+                if line.lowercased().hasPrefix("range:") {
                     let value = line.dropFirst(6).trimmingCharacters(in: .whitespaces)
                     if value.hasPrefix("bytes=") {
                         let parts = value.dropFirst(6).split(separator: "-", maxSplits: 1)
@@ -131,25 +128,29 @@ final class LocalAudioServer: @unchecked Sendable {
                 }
             }
 
-            // Small probe (e.g., bytes=0-1): respond + wait for next request
-            let isSmallProbe = (rangeEnd != nil && rangeEnd! < 1024)
-            if isSmallProbe {
+            let isProbe = (rangeEnd != nil && rangeEnd! < 1024)
+
+            #if DEBUG
+            let first = lines.first ?? ""
+            print("[LocalAudioServer] \(first) → \(isProbe ? "probe" : "stream")")
+            #endif
+
+            if isProbe {
                 self.respondProbe(connection, start: rangeStart, end: rangeEnd!)
             } else {
-                // Content request: respond with available data + wait for next
-                self.respondContent(connection, start: rangeStart)
+                self.startStreaming(connection, start: rangeStart)
             }
         }
     }
 
-    /// Respond to a small probe request (e.g., bytes=0-1).
+    // MARK: - Probe Response
+
     private func respondProbe(_ connection: NWConnection, start: Int, end: Int) {
         lock.lock()
-        let totalAvailable = bufferTrimmed + buffer.count
-        let localStart = start - bufferTrimmed
+        let localStart = max(0, start - bufferTrimmed)
+        let localEnd = min(end + 1 - bufferTrimmed, buffer.count)
         let responseData: Data
-        if localStart >= 0 && localStart < buffer.count {
-            let localEnd = min(end + 1 - bufferTrimmed, buffer.count)
+        if localStart < buffer.count && localEnd > localStart {
             responseData = buffer.subdata(in: localStart..<localEnd)
         } else {
             responseData = Data(count: end - start + 1)
@@ -168,63 +169,109 @@ final class LocalAudioServer: @unchecked Sendable {
 
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
             guard error == nil else { return }
+            // Keep-alive: read next request on same connection
             self?.readRequest(connection)
         })
     }
 
-    /// Respond to a content request with all available data from the given offset.
-    /// After sending, waits for the next request (mediaserverd will re-request
-    /// from where we left off).
-    private func respondContent(_ connection: NWConnection, start: Int) {
-        lock.lock()
-        let localStart = start - bufferTrimmed
-        let responseData: Data
-        if localStart >= 0 && localStart < buffer.count {
-            responseData = buffer.subdata(in: localStart..<buffer.count)
-        } else if localStart >= buffer.count {
-            // No new data yet — wait briefly then try again
-            lock.unlock()
-            connectionQueue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.respondContent(connection, start: start)
-            }
-            return
-        } else {
-            responseData = Data()
-        }
+    // MARK: - Streaming Response
 
-        // Trim buffer: keep only last 64KB for potential re-reads
-        let totalSent = start + responseData.count
-        let safeToTrim = totalSent - bufferTrimmed - 65536
-        if safeToTrim > 0 && safeToTrim < buffer.count {
-            buffer = buffer.subdata(in: safeToTrim..<buffer.count)
-            bufferTrimmed += safeToTrim
+    /// Start the persistent streaming connection. Header + available data sent,
+    /// then new data pushed continuously via drainToStream().
+    private func startStreaming(_ connection: NWConnection, start: Int) {
+        let rangeEnd = declaredSize - 1
+        let contentLength = declaredSize - start
+
+        let header = "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes \(start)-\(rangeEnd)/\(declaredSize)\r\nContent-Length: \(contentLength)\r\nAccept-Ranges: bytes\r\n\r\n"
+
+        lock.lock()
+        // Gather all available data from the requested offset
+        let localStart = max(0, start - bufferTrimmed)
+        var payload = Data(header.utf8)
+        if localStart < buffer.count {
+            payload.append(buffer.subdata(in: localStart..<buffer.count))
         }
+        // Mark this as the active stream connection
+        streamConnection = connection
+        streamActive = true
+        streamSentOffset = bufferTrimmed + buffer.count  // Next byte to send
+        isSending = true  // We're about to send
         lock.unlock()
 
-        guard !responseData.isEmpty else {
-            // Edge case: data was trimmed, can't serve
-            readRequest(connection)
-            return
-        }
-
-        let actualEnd = start + responseData.count - 1
-        let header = "HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes \(start)-\(actualEnd)/\(declaredSize)\r\nContent-Length: \(responseData.count)\r\nAccept-Ranges: bytes\r\n\r\n"
-
-        var payload = Data(header.utf8)
-        payload.append(responseData)
-
         #if DEBUG
-        print("[LocalAudioServer] Content: 206 bytes \(start)-\(actualEnd) (\(responseData.count)B), buffer=\(buffer.count + bufferTrimmed)B")
+        print("[LocalAudioServer] Stream: 206 bytes \(start)-\(rangeEnd), initial \(payload.count)B (header+data)")
         #endif
 
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
-            guard error == nil else {
+            self?.lock.lock()
+            self?.isSending = false
+            self?.lock.unlock()
+
+            if let error = error {
                 #if DEBUG
-                print("[LocalAudioServer] Send error: \(error!)")
+                print("[LocalAudioServer] Stream send error: \(error)")
                 #endif
                 return
             }
-            self?.readRequest(connection)
+
+            #if DEBUG
+            print("[LocalAudioServer] Stream started, pushing data continuously")
+            #endif
+
+            // Start the continuous send loop
+            self?.drainToStream()
+        })
+    }
+
+    /// Push any new data to the active stream connection.
+    /// Called after each `send()` and after each successful write.
+    private func drainToStream() {
+        lock.lock()
+        guard streamActive, !isSending else {
+            lock.unlock()
+            return
+        }
+
+        // Calculate what's new since last send
+        let localStart = streamSentOffset - bufferTrimmed
+        guard localStart >= 0, localStart < buffer.count else {
+            lock.unlock()
+            return  // No new data yet
+        }
+
+        let dataToSend = buffer.subdata(in: localStart..<buffer.count)
+        streamSentOffset = bufferTrimmed + buffer.count
+        isSending = true
+
+        // Trim old data we'll never need again (keep 64KB margin)
+        let trimTo = streamSentOffset - bufferTrimmed - 65536
+        if trimTo > 0 && trimTo < buffer.count {
+            buffer = buffer.subdata(in: trimTo..<buffer.count)
+            bufferTrimmed += trimTo
+        }
+        lock.unlock()
+
+        guard let connection = streamConnection else {
+            lock.lock()
+            isSending = false
+            lock.unlock()
+            return
+        }
+
+        connection.send(content: dataToSend, completion: .contentProcessed { [weak self] error in
+            self?.lock.lock()
+            self?.isSending = false
+            self?.lock.unlock()
+
+            if error != nil {
+                #if DEBUG
+                print("[LocalAudioServer] Stream error: \(error!)")
+                #endif
+                return
+            }
+
+            // Check if more data arrived while sending
+            self?.drainToStream()
         })
     }
 }
