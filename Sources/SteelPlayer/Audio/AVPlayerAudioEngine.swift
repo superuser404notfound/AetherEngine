@@ -4,27 +4,27 @@ import CoreMedia
 
 /// Audio engine using AVPlayer for EAC3 playback with Dolby Atmos passthrough.
 ///
-/// AVPlayer wraps EAC3+JOC (Atmos) as Dolby MAT 2.0 automatically, enabling
-/// object-based audio output to compatible receivers via HDMI.
+/// Uses a local HTTP server (LocalAudioServer) to stream fMP4 data to AVPlayer.
+/// Custom URL schemes don't work on tvOS because media playback runs
+/// out-of-process (mediaserverd). HTTP on localhost bypasses this.
 ///
-/// ## Streaming Pattern
+/// ## Data Flow
 ///
-/// Uses AVAssetResourceLoader with a custom URL scheme. The key insight for
-/// streaming: when `requestsAllDataToEndOfResource` is true, we must NOT call
-/// `finishLoading()`. Instead, we keep the request open and feed data
-/// incrementally via `respond(with:)` as new packets arrive from the demuxer.
-///
-/// ## Video Sync
-///
-/// Provides a `CMTimebase` that tracks AVPlayer's playback position.
-/// Set as `displayLayer.controlTimebase` for A/V sync.
-final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
+/// ```
+/// FFmpeg demuxer → raw EAC3 packets
+///   → FMP4AudioMuxer (wraps in fMP4 segments)
+///   → LocalAudioServer (HTTP on 127.0.0.1)
+///   → AVPlayer (decodes EAC3, handles Dolby MAT 2.0 for Atmos)
+///   → HDMI → Receiver shows "Dolby Atmos"
+/// ```
+final class AVPlayerAudioEngine: @unchecked Sendable {
 
     // MARK: - Properties
 
     private var player: AVPlayer?
     private var playerItem: AVPlayerItem?
     private var muxer: FMP4AudioMuxer?
+    private var server: LocalAudioServer?
 
     /// CMTimebase for video sync — tracks AVPlayer's current time.
     private(set) var videoTimebase: CMTimebase?
@@ -36,22 +36,9 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
     /// Called when AVPlayer fails to open the audio stream.
     var onPlaybackFailed: (() -> Void)?
 
-    // MARK: - Streaming Buffer
-
-    /// All fMP4 data produced so far (init segment + media segments).
-    /// Protected by `bufferLock`.
-    private let bufferLock = NSLock()
-    private var buffer = Data()
-    private var bufferStartOffset = 0
-    private var pendingRequests: [AVAssetResourceLoadingRequest] = []
-
-    /// Queue for resource loader delegate callbacks.
-    private let loaderQueue = DispatchQueue(label: "com.steelplayer.resourceloader")
-
     // MARK: - Init
 
-    override init() {
-        super.init()
+    init() {
         var tb: CMTimebase?
         CMTimebaseCreateWithSourceClock(
             allocator: kCFAllocatorDefault,
@@ -116,19 +103,36 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         print("[AVPlayerAudioEngine] ftyp hex: \(hexPrefix)")
         #endif
 
-        bufferLock.lock()
-        buffer = Data()
-        bufferStartOffset = 0
-        buffer.append(initSegment)
-        buffer.append(firstMedia)
-        pendingRequests.removeAll()
-        bufferLock.unlock()
+        // Start local HTTP server and send initial data
+        let srv = LocalAudioServer()
+        do {
+            try srv.start()
+        } catch {
+            #if DEBUG
+            print("[AVPlayerAudioEngine] Server start failed: \(error)")
+            #endif
+            onPlaybackFailed?()
+            return
+        }
+        self.server = srv
 
-        // Custom URL scheme → intercepted by our resource loader delegate
-        let url = URL(string: "steelplayer-audio://stream.mp4")!
+        // Send init segment + first media segment to server buffer
+        srv.send(initSegment)
+        srv.send(firstMedia)
+
+        guard let url = srv.streamURL else {
+            #if DEBUG
+            print("[AVPlayerAudioEngine] No server URL")
+            #endif
+            onPlaybackFailed?()
+            return
+        }
+
+        #if DEBUG
+        print("[AVPlayerAudioEngine] Streaming from: \(url)")
+        #endif
+
         let asset = AVURLAsset(url: url)
-        asset.resourceLoader.setDelegate(self, queue: loaderQueue)
-
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 4.0
 
@@ -144,9 +148,6 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
                 print("[AVPlayerAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
                 if let e = item.error as NSError? {
                     print("[AVPlayerAudioEngine]   domain=\(e.domain) code=\(e.code)")
-                    if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
-                        print("[AVPlayerAudioEngine]   underlying: \(u.domain) code=\(u.code)")
-                    }
                 }
                 #endif
                 failureCallback?()
@@ -175,12 +176,7 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
     func feedPacket(_ data: Data) {
         guard let muxer = muxer else { return }
         let segment = muxer.createMediaSegment(frames: [data])
-
-        bufferLock.lock()
-        buffer.append(segment)
-        fulfillPendingRequests()
-        trimBuffer()
-        bufferLock.unlock()
+        server?.send(segment)
     }
 
     /// Prepare for seek.
@@ -188,16 +184,10 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         player?.pause()
         removeTimeSync()
         statusObservation = nil
-
-        bufferLock.lock()
-        for req in pendingRequests where !req.isFinished && !req.isCancelled {
-            req.finishLoading(with: URLError(.cancelled))
-        }
-        pendingRequests.removeAll()
-        bufferLock.unlock()
-
         player?.replaceCurrentItem(with: nil)
         playerItem = nil
+        server?.stop()
+        server = nil
     }
 
     /// Restart after seek with packets from the new position.
@@ -211,18 +201,27 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         let initSegment = newMuxer.createInitSegment()
         let firstMedia = newMuxer.createMediaSegment(frames: [firstPacketData])
 
-        bufferLock.lock()
-        buffer = Data()
-        bufferStartOffset = 0
-        buffer.append(initSegment)
-        buffer.append(firstMedia)
-        pendingRequests.removeAll()
-        bufferLock.unlock()
+        let srv = LocalAudioServer()
+        do {
+            try srv.start()
+        } catch {
+            #if DEBUG
+            print("[AVPlayerAudioEngine] Server restart failed: \(error)")
+            #endif
+            onPlaybackFailed?()
+            return
+        }
+        self.server = srv
 
-        let url = URL(string: "steelplayer-audio://stream.mp4")!
+        srv.send(initSegment)
+        srv.send(firstMedia)
+
+        guard let url = srv.streamURL else {
+            onPlaybackFailed?()
+            return
+        }
+
         let asset = AVURLAsset(url: url)
-        asset.resourceLoader.setDelegate(self, queue: loaderQueue)
-
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 4.0
         player?.replaceCurrentItem(with: item)
@@ -270,15 +269,8 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         player = nil
         playerItem = nil
         muxer = nil
-
-        bufferLock.lock()
-        for req in pendingRequests where !req.isFinished && !req.isCancelled {
-            req.finishLoading(with: URLError(.cancelled))
-        }
-        pendingRequests.removeAll()
-        buffer = Data()
-        bufferStartOffset = 0
-        bufferLock.unlock()
+        server?.stop()
+        server = nil
     }
 
     // MARK: - Video Timebase Sync
@@ -310,125 +302,5 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         if abs(drift) > 0.03 {
             CMTimebaseSetTime(tb, time: player.currentTime())
         }
-    }
-
-    // MARK: - Streaming Buffer Management
-
-    /// Feed available data to all pending resource loader requests.
-    /// Called with bufferLock held.
-    private func fulfillPendingRequests() {
-        pendingRequests.removeAll { req in
-            guard !req.isFinished, !req.isCancelled else { return true }
-
-            guard let dataReq = req.dataRequest else {
-                req.finishLoading()
-                return true
-            }
-
-            let localOffset = Int(dataReq.currentOffset) - bufferStartOffset
-            guard localOffset >= 0, localOffset < buffer.count else {
-                return false  // No new data for this request yet
-            }
-
-            // Feed all available data from current position
-            let respondData = buffer.subdata(in: localOffset..<buffer.count)
-            dataReq.respond(with: respondData)
-
-            // For streaming requests (requestsAllDataToEndOfResource):
-            // keep the request open — more data will arrive.
-            if dataReq.requestsAllDataToEndOfResource {
-                return false
-            }
-
-            // For fixed-length requests: finish if fully satisfied
-            let requestedEnd = Int(dataReq.requestedOffset) + dataReq.requestedLength
-            if Int(dataReq.currentOffset) >= requestedEnd {
-                req.finishLoading()
-                return true
-            }
-
-            return false
-        }
-    }
-
-    /// Trim consumed data. Called with bufferLock held.
-    private func trimBuffer() {
-        let minNeeded: Int
-        if let minReq = pendingRequests
-            .compactMap({ $0.dataRequest.map { Int($0.currentOffset) } })
-            .min() {
-            minNeeded = minReq
-        } else {
-            minNeeded = bufferStartOffset + max(0, buffer.count - 65536)
-        }
-        let safeToTrim = minNeeded - bufferStartOffset
-        guard safeToTrim > 1024 * 1024 else { return }
-        buffer = buffer.subdata(in: safeToTrim..<buffer.count)
-        bufferStartOffset += safeToTrim
-    }
-}
-
-// MARK: - AVAssetResourceLoaderDelegate
-
-extension AVPlayerAudioEngine: AVAssetResourceLoaderDelegate {
-
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
-    ) -> Bool {
-        #if DEBUG
-        if let dr = loadingRequest.dataRequest {
-            print("[AVPlayerAudioEngine] ResourceLoader: offset=\(dr.requestedOffset) len=\(dr.requestedLength) allData=\(dr.requestsAllDataToEndOfResource) contentInfo=\(loadingRequest.contentInformationRequest != nil)")
-        }
-        #endif
-
-        bufferLock.lock()
-        defer { bufferLock.unlock() }
-
-        // Fill content info on the first request
-        if let contentInfo = loadingRequest.contentInformationRequest {
-            contentInfo.contentType = "public.mpeg-4"
-            contentInfo.isByteRangeAccessSupported = false
-            // Don't set contentLength — streaming with unknown total size
-        }
-
-        guard let dataReq = loadingRequest.dataRequest else {
-            loadingRequest.finishLoading()
-            return true
-        }
-
-        let localOffset = Int(dataReq.currentOffset) - bufferStartOffset
-        if localOffset >= 0 && localOffset < buffer.count {
-            // Respond with all available data
-            let respondData = buffer.subdata(in: localOffset..<buffer.count)
-            dataReq.respond(with: respondData)
-
-            #if DEBUG
-            print("[AVPlayerAudioEngine] Responded with \(respondData.count) bytes (buffer=\(buffer.count))")
-            #endif
-        }
-
-        // For streaming (requestsAllDataToEndOfResource): keep request open.
-        // For small fixed-length probes: check if satisfied.
-        if !dataReq.requestsAllDataToEndOfResource {
-            let requestedEnd = Int(dataReq.requestedOffset) + dataReq.requestedLength
-            if Int(dataReq.currentOffset) >= requestedEnd {
-                loadingRequest.finishLoading()
-                return true
-            }
-        }
-
-        // Keep request in pending queue — more data will arrive via feedPacket()
-        pendingRequests.append(loadingRequest)
-        return true
-    }
-
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        didCancel loadingRequest: AVAssetResourceLoadingRequest
-    ) {
-        bufferLock.lock()
-        pendingRequests.removeAll { $0 === loadingRequest }
-        bufferLock.unlock()
     }
 }
