@@ -117,6 +117,24 @@ public final class SteelPlayer: ObservableObject {
     private var lifecycleObservers: [Any] = []
 
     public init() throws {
+        // Configure audio session BEFORE creating renderers — the renderer
+        // may lock its output configuration at creation time. Without this,
+        // multichannel content is downmixed to stereo.
+        #if os(iOS) || os(tvOS)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+            try session.setSupportsMultichannelContent(true)
+            try session.setActive(true)
+            #if DEBUG
+            let route = session.currentRoute.outputs.map { "\($0.portName)(\($0.channels?.count ?? 0)ch)" }.joined(separator: ", ")
+            print("[SteelPlayer] Audio session: multichannel=true, route=\(route)")
+            #endif
+        } catch {
+            print("[SteelPlayer] AVAudioSession error: \(error)")
+        }
+        #endif
+
         // Add video display layer to the audio synchronizer so Apple
         // handles A/V sync and frame pacing automatically.
         audioOutput.addVideoRenderer(videoRenderer.displayLayer)
@@ -226,17 +244,7 @@ public final class SteelPlayer: ObservableObject {
                 audioOutput.start()
             }
 
-            // 3. Activate AVAudioSession (required on tvOS/iOS for audio output)
-            #if os(iOS) || os(tvOS)
-            do {
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
-                try session.setSupportsMultichannelContent(true)
-                try session.setActive(true)
-            } catch {
-                print("[SteelPlayer] AVAudioSession error: \(error)")
-            }
-            #endif
+            // Audio session already configured in init() — no duplicate setup needed.
 
             // 4. Seek to start position if requested.
             // Pre-start the audio clock at the seek time so the synchronizer
