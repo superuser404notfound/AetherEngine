@@ -33,8 +33,23 @@ final class AudioOutput: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard !_isStarted else { return }
-        synchronizer.setRate(1.0, time: time)
+        synchronizer.setRate(_rate, time: time)
         _isStarted = true
+    }
+
+    /// The current playback rate. Stored so resume() restores the correct speed.
+    private var _rate: Float = 1.0
+
+    /// Playback volume (0.0 = mute, 1.0 = full).
+    var volume: Float {
+        get { renderer.volume }
+        set { renderer.volume = newValue }
+    }
+
+    /// Set playback speed (0.5–2.0). Takes effect immediately.
+    func setRate(_ rate: Float) {
+        _rate = rate
+        synchronizer.setRate(rate, time: synchronizer.currentTime())
     }
 
     /// Pause audio (and the master clock).
@@ -42,9 +57,9 @@ final class AudioOutput: @unchecked Sendable {
         synchronizer.setRate(0.0, time: synchronizer.currentTime())
     }
 
-    /// Resume audio (and the master clock).
+    /// Resume audio (and the master clock) at the current playback rate.
     func resume() {
-        synchronizer.setRate(1.0, time: synchronizer.currentTime())
+        synchronizer.setRate(_rate, time: synchronizer.currentTime())
     }
 
     /// Enqueue a decoded audio CMSampleBuffer for playback.

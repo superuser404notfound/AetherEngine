@@ -369,6 +369,17 @@ public final class SteelPlayer: ObservableObject {
         // TODO: Phase 6 — subtitle support
     }
 
+    /// Set playback volume (0.0 = mute, 1.0 = full).
+    public var volume: Float {
+        get { audioOutput.volume }
+        set { audioOutput.volume = newValue }
+    }
+
+    /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
+    public func setRate(_ rate: Float) {
+        audioOutput.setRate(rate)
+    }
+
     // MARK: - Internal
 
     private func stopInternal() {
