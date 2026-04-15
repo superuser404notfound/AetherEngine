@@ -123,7 +123,11 @@ public final class SteelPlayer: ObservableObject {
         #if os(iOS) || os(tvOS)
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+            if #available(tvOS 17.0, iOS 17.0, *) {
+                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo)
+            } else {
+                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+            }
             try session.setSupportsMultichannelContent(true)
             try session.setActive(true)
             #if DEBUG
