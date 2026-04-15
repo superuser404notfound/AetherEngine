@@ -54,10 +54,17 @@ final class AudioDecoder: @unchecked Sendable {
         if codecId == AV_CODEC_ID_EAC3 || codecId == AV_CODEC_ID_AC3 {
             isPassthrough = true
             framesPerPacket = 1536  // Standard for AC3/EAC3
-            try createPassthroughFormatDescription(codecId: codecId)
+
+            // Extract codec-specific data (magic cookie) from extradata
+            var cookie: Data?
+            if let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+                cookie = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
+            }
+
+            try createPassthroughFormatDescription(codecId: codecId, magicCookie: cookie)
             #if DEBUG
             let name = codecId == AV_CODEC_ID_EAC3 ? "eac3" : "ac3"
-            print("[AudioDecoder] Passthrough: \(sampleRate)Hz, \(channels)ch, codec=\(name)")
+            print("[AudioDecoder] Passthrough: \(sampleRate)Hz, \(channels)ch, codec=\(name), cookie=\(cookie?.count ?? 0) bytes")
             #endif
             return
         }
@@ -129,7 +136,7 @@ final class AudioDecoder: @unchecked Sendable {
     /// Create a format description for compressed EAC3 or AC3.
     /// AVSampleBufferAudioRenderer accepts these and decodes internally,
     /// preserving Dolby Atmos object metadata for HDMI output.
-    private func createPassthroughFormatDescription(codecId: AVCodecID) throws {
+    private func createPassthroughFormatDescription(codecId: AVCodecID, magicCookie: Data?) throws {
         let formatID: AudioFormatID = codecId == AV_CODEC_ID_EAC3
             ? kAudioFormatEnhancedAC3
             : kAudioFormatAC3
@@ -148,13 +155,24 @@ final class AudioDecoder: @unchecked Sendable {
         )
 
         var formatDesc: CMAudioFormatDescription?
+        let cookieSize: Int
+        let cookiePtr: UnsafeRawPointer?
+
+        if let cookie = magicCookie, !cookie.isEmpty {
+            cookieSize = cookie.count
+            cookiePtr = (cookie as NSData).bytes
+        } else {
+            cookieSize = 0
+            cookiePtr = nil
+        }
+
         let status = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
             asbd: &asbd,
             layoutSize: 0,
             layout: nil,
-            magicCookieSize: 0,
-            magicCookie: nil,
+            magicCookieSize: cookieSize,
+            magicCookie: cookiePtr,
             extensions: nil,
             formatDescriptionOut: &formatDesc
         )
