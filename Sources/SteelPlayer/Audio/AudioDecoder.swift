@@ -7,15 +7,14 @@ import Libavcodec
 import Libavutil
 import Libswresample
 
-/// FFmpeg audio decoder with passthrough support for EAC3/AC3.
+/// FFmpeg software audio decoder. Takes compressed audio AVPackets and
+/// produces multichannel interleaved Float32 PCM wrapped in CMSampleBuffers,
+/// ready for AVSampleBufferAudioRenderer.
 ///
-/// Two modes:
-/// - **Passthrough** (EAC3, AC3): Raw compressed packets are wrapped in
-///   CMSampleBuffers and fed directly to AVSampleBufferAudioRenderer.
-///   Apple's internal decoder handles decompression + Dolby MAT 2.0 output.
-///   This preserves Dolby Atmos object metadata and height channels.
-/// - **Decode** (everything else): FFmpeg decodes to PCM, libswresample
-///   converts to interleaved Float32 at source sample rate.
+/// Uses libswresample to convert whatever FFmpeg decoded (planar float,
+/// int16, etc.) to interleaved Float32 at the source sample rate and
+/// channel count (up to 7.1). Proper AudioChannelLayout ensures correct
+/// speaker mapping for surround output.
 final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -27,14 +26,8 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// Sample rate of the decoded audio (e.g. 48000).
     private(set) var sampleRate: Int32 = 0
-    /// Number of channels.
+    /// Number of channels (up to 8 for 7.1).
     private(set) var channels: Int32 = 0
-
-    /// True when using compressed passthrough (EAC3/AC3) instead of FFmpeg decode.
-    private(set) var isPassthrough = false
-
-    /// Frames per packet for compressed formats (EAC3=1536, AC3=1536).
-    private var framesPerPacket: UInt32 = 0
 
     /// Open the decoder for the given audio stream.
     func open(stream: UnsafeMutablePointer<AVStream>) throws {
@@ -47,16 +40,7 @@ final class AudioDecoder: @unchecked Sendable {
         channels = codecpar.pointee.ch_layout.nb_channels
         if channels <= 0 || channels > 8 { channels = 2 }
 
-        let codecId = codecpar.pointee.codec_id
-
-        // Note: EAC3/AC3 compressed passthrough to AVSampleBufferAudioRenderer
-        // was attempted but produces stereo output. FFmpeg decode to multichannel
-        // PCM is the working approach — Apple TV wraps it as Dolby MAT 2.0
-        // for HDMI eARC output (same approach as Infuse).
-
-        // All other codecs: FFmpeg decode to PCM
-        isPassthrough = false
-        guard let codec = avcodec_find_decoder(codecId) else {
+        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw AudioDecoderError.unsupportedCodec
         }
 
@@ -74,166 +58,15 @@ final class AudioDecoder: @unchecked Sendable {
         }
 
         try setupResampler(ctx: ctx)
-        try createPCMFormatDescription()
+        try createFormatDescription()
 
         #if DEBUG
-        print("[AudioDecoder] Decode: \(sampleRate)Hz, \(channels)ch, codec=\(String(cString: codec.pointee.name))")
+        print("[AudioDecoder] Opened: \(sampleRate)Hz, \(channels)ch, codec=\(String(cString: codec.pointee.name))")
         #endif
     }
 
-    /// Process an audio packet. Returns CMSampleBuffers.
-    /// In passthrough mode, wraps raw compressed data.
-    /// In decode mode, decodes to PCM via FFmpeg.
+    /// Decode an audio packet. Returns an array of CMSampleBuffers.
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
-        if isPassthrough {
-            if let sb = wrapCompressedPacket(packet) { return [sb] }
-            return []
-        }
-        return decodeToPCM(packet: packet)
-    }
-
-    /// Flush the decoder (call at EOF or seek).
-    func flush() {
-        guard !isPassthrough, let ctx = codecContext else { return }
-        avcodec_flush_buffers(ctx)
-    }
-
-    /// Close the decoder and release resources.
-    func close() {
-        if codecContext != nil {
-            avcodec_free_context(&codecContext)
-        }
-        if swrContext != nil {
-            swr_free(&swrContext)
-        }
-        codecContext = nil
-        swrContext = nil
-        audioFormatDescription = nil
-        isPassthrough = false
-    }
-
-    deinit {
-        close()
-    }
-
-    // MARK: - Passthrough (EAC3/AC3)
-
-    /// Create a format description for compressed EAC3 or AC3.
-    /// AVSampleBufferAudioRenderer accepts these and decodes internally,
-    /// preserving Dolby Atmos object metadata for HDMI output.
-    private func createPassthroughFormatDescription(codecId: AVCodecID, magicCookie: Data?) throws {
-        let formatID: AudioFormatID = codecId == AV_CODEC_ID_EAC3
-            ? kAudioFormatEnhancedAC3
-            : kAudioFormatAC3
-
-        // Compressed formats: mBytesPerPacket, mBytesPerFrame, mBitsPerChannel must be 0
-        var asbd = AudioStreamBasicDescription(
-            mSampleRate: Float64(sampleRate),
-            mFormatID: formatID,
-            mFormatFlags: 0,
-            mBytesPerPacket: 0,
-            mFramesPerPacket: framesPerPacket,
-            mBytesPerFrame: 0,
-            mChannelsPerFrame: UInt32(channels),
-            mBitsPerChannel: 0,
-            mReserved: 0
-        )
-
-        var formatDesc: CMAudioFormatDescription?
-        let cookieSize: Int
-        let cookiePtr: UnsafeRawPointer?
-
-        if let cookie = magicCookie, !cookie.isEmpty {
-            cookieSize = cookie.count
-            cookiePtr = (cookie as NSData).bytes
-        } else {
-            cookieSize = 0
-            cookiePtr = nil
-        }
-
-        let status = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            asbd: &asbd,
-            layoutSize: 0,
-            layout: nil,
-            magicCookieSize: cookieSize,
-            magicCookie: cookiePtr,
-            extensions: nil,
-            formatDescriptionOut: &formatDesc
-        )
-        guard status == noErr, let desc = formatDesc else {
-            throw AudioDecoderError.formatDescriptionFailed
-        }
-        audioFormatDescription = desc
-    }
-
-    /// Wrap a raw compressed AVPacket into a CMSampleBuffer for passthrough.
-    private func wrapCompressedPacket(_ packet: UnsafeMutablePointer<AVPacket>) -> CMSampleBuffer? {
-        guard let formatDesc = audioFormatDescription,
-              let data = packet.pointee.data,
-              packet.pointee.size > 0 else { return nil }
-
-        let dataSize = Int(packet.pointee.size)
-
-        // Create block buffer with packet data
-        var blockBuffer: CMBlockBuffer?
-        var status = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: nil,
-            blockLength: dataSize,
-            blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: dataSize,
-            flags: 0,
-            blockBufferOut: &blockBuffer
-        )
-        guard status == kCMBlockBufferNoErr, let block = blockBuffer else { return nil }
-
-        status = CMBlockBufferReplaceDataBytes(
-            with: data, blockBuffer: block, offsetIntoDestination: 0, dataLength: dataSize
-        )
-        guard status == kCMBlockBufferNoErr else { return nil }
-
-        // PTS conversion
-        let pts = packet.pointee.pts
-        let cmPTS: CMTime
-        if pts != Int64.min {
-            cmPTS = CMTimeMake(value: pts * Int64(timeBase.num), timescale: Int32(timeBase.den))
-        } else {
-            cmPTS = .invalid
-        }
-
-        // For compressed formats, use packet descriptions
-        var packetSize = dataSize
-        var timing = CMSampleTimingInfo(
-            duration: CMTimeMake(value: Int64(framesPerPacket), timescale: sampleRate),
-            presentationTimeStamp: cmPTS,
-            decodeTimeStamp: .invalid
-        )
-
-        var sampleBuffer: CMSampleBuffer?
-        status = CMSampleBufferCreate(
-            allocator: kCFAllocatorDefault,
-            dataBuffer: block,
-            dataReady: true,
-            makeDataReadyCallback: nil,
-            refcon: nil,
-            formatDescription: formatDesc,
-            sampleCount: 1,
-            sampleTimingEntryCount: 1,
-            sampleTimingArray: &timing,
-            sampleSizeEntryCount: 1,
-            sampleSizeArray: &packetSize,
-            sampleBufferOut: &sampleBuffer
-        )
-        guard status == noErr, let sample = sampleBuffer else { return nil }
-        return sample
-    }
-
-    // MARK: - FFmpeg Decode (PCM output)
-
-    private func decodeToPCM(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
         guard let ctx = codecContext else { return [] }
         var results: [CMSampleBuffer] = []
 
@@ -253,8 +86,32 @@ final class AudioDecoder: @unchecked Sendable {
         return results
     }
 
-    // MARK: - Resampler (PCM mode)
+    /// Flush the decoder (call at EOF or seek).
+    func flush() {
+        guard let ctx = codecContext else { return }
+        avcodec_flush_buffers(ctx)
+    }
 
+    /// Close the decoder and release resources.
+    func close() {
+        if codecContext != nil {
+            avcodec_free_context(&codecContext)
+        }
+        if swrContext != nil {
+            swr_free(&swrContext)
+        }
+        codecContext = nil
+        swrContext = nil
+        audioFormatDescription = nil
+    }
+
+    deinit {
+        close()
+    }
+
+    // MARK: - Resampler
+
+    /// Set up libswresample to convert decoded audio to interleaved Float32.
     private func setupResampler(ctx: UnsafeMutablePointer<AVCodecContext>) throws {
         var outLayout = AVChannelLayout()
         av_channel_layout_default(&outLayout, channels)
@@ -280,9 +137,9 @@ final class AudioDecoder: @unchecked Sendable {
         }
     }
 
-    // MARK: - Format Description (PCM mode)
+    // MARK: - Format Description
 
-    private func createPCMFormatDescription() throws {
+    private func createFormatDescription() throws {
         var asbd = AudioStreamBasicDescription(
             mSampleRate: Float64(sampleRate),
             mFormatID: kAudioFormatLinearPCM,
@@ -335,7 +192,7 @@ final class AudioDecoder: @unchecked Sendable {
         }
     }
 
-    // MARK: - Frame → CMSampleBuffer (PCM mode)
+    // MARK: - Frame → CMSampleBuffer
 
     private func convertFrameToSampleBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CMSampleBuffer? {
         guard let swr = swrContext, let formatDesc = audioFormatDescription else { return nil }
