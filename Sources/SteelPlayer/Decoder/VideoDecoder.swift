@@ -2,6 +2,7 @@ import Foundation
 import CoreMedia
 import CoreVideo
 import VideoToolbox
+import AVFoundation
 import Libavformat
 import Libavcodec
 import Libavutil
@@ -286,17 +287,27 @@ final class VideoDecoder: @unchecked Sendable {
             throw VideoDecoderError.sessionCreationFailed(status: status)
         }
 
-        // Disable per-frame HDR metadata propagation (Dolby Vision RPU).
-        // DV Profile 8 is backwards-compatible with HDR10 — without the
-        // per-frame DV enhancement, VT outputs plain HDR10 (BT.2020 + PQ)
-        // which works on all HDR TVs, even those without DV support.
-        // With propagation ON, non-DV TVs show wrong colors because they
-        // can't process the DV metadata on the pixel buffers.
+        // DV per-frame metadata: only enable if the connected display
+        // actually supports Dolby Vision. On HDR10-only TVs, DV RPU
+        // metadata causes wrong colors because the TV can't process it.
+        // DV Profile 8 is backwards-compatible with HDR10 — disabling
+        // propagation gives correct HDR10 output on non-DV displays.
+        let enableDVMetadata: Bool
+        #if os(tvOS) || os(iOS)
+        enableDVMetadata = AVPlayer.availableHDRModes.contains(.dolbyVision)
+        #else
+        enableDVMetadata = false
+        #endif
+
         VTSessionSetProperty(
             sess,
             key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
-            value: kCFBooleanFalse
+            value: enableDVMetadata ? kCFBooleanTrue : kCFBooleanFalse
         )
+
+        #if DEBUG
+        print("[VideoDecoder] DV metadata propagation: \(enableDVMetadata ? "ON (display supports DV)" : "OFF (HDR10 fallback)")")
+        #endif
 
         return sess
     }
