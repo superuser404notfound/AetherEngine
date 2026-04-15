@@ -303,14 +303,12 @@ public final class SteelPlayer: ObservableObject {
                     print("[SteelPlayer] Audio: EAC3 → AVPlayer engine (Atmos passthrough)")
                     #endif
 
-                    // Update preferred output channels
+                    // Match output channels to content (e.g. stereo→2, 5.1→6)
                     #if os(iOS) || os(tvOS)
                     let contentCh = Int(avPlayerChannelCount)
                     let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
-                    let preferred = min(contentCh, maxCh)
-                    if preferred > 2 {
-                        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
-                    }
+                    let preferred = max(2, min(contentCh, maxCh))
+                    try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
                     #endif
                 } else {
                     // AC3, AAC, and all other codecs → FFmpeg PCM pipeline
@@ -321,13 +319,12 @@ public final class SteelPlayer: ObservableObject {
                         // Video timing driven by synchronizer
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
 
+                        // Match output channels to content (e.g. stereo→2, 5.1→6)
                         #if os(iOS) || os(tvOS)
                         let contentCh = Int(audioDecoder.channels)
                         let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
-                        let preferred = min(contentCh, maxCh)
-                        if preferred > 2 {
-                            try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
-                        }
+                        let preferred = max(2, min(contentCh, maxCh))
+                        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
                         #endif
                     } catch {
                         print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
@@ -532,10 +529,8 @@ public final class SteelPlayer: ObservableObject {
         #if os(iOS) || os(tvOS)
         let contentCh = newIsAtmos ? Int(avPlayerChannelCount) : Int(audioDecoder.channels)
         let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
-        let preferred = min(contentCh, maxCh)
-        if preferred > 2 {
-            try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
-        }
+        let preferred = max(2, min(contentCh, maxCh))
+        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
         #endif
     }
 

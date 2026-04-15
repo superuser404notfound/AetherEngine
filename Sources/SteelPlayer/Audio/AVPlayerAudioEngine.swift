@@ -43,10 +43,14 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
     /// The host should fall back to PCM audio when this fires.
     var onPlaybackFailed: (() -> Void)?
 
-    // MARK: - Streaming Buffer
+    // MARK: - Temp File for AVPlayer
 
-    /// All fMP4 data produced so far (init segment + media segments).
-    /// Protected by `bufferLock`. Trimmed periodically to avoid unbounded growth.
+    /// Temp file URL where fMP4 data is written. AVPlayer reads from this file.
+    private var audioFileURL: URL?
+    private var audioFileHandle: FileHandle?
+
+    // MARK: - Streaming Buffer (kept for potential future resource loader use)
+
     private let bufferLock = NSLock()
     private var buffer = Data()
     private var bufferStartOffset = 0
@@ -121,6 +125,17 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         let initSegment = muxer.createInitSegment()
         let firstMedia = muxer.createMediaSegment(frames: [firstPacketData])
 
+        #if DEBUG
+        // Log init segment structure for debugging
+        let hexPrefix = initSegment.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+        print("[AVPlayerAudioEngine] Init segment: \(initSegment.count) bytes, first media: \(firstMedia.count) bytes")
+        print("[AVPlayerAudioEngine] Init hex: \(hexPrefix)")
+        // Write to temp file for offline inspection
+        let debugURL = FileManager.default.temporaryDirectory.appendingPathComponent("steelplayer_debug.mp4")
+        try? (initSegment + firstMedia).write(to: debugURL)
+        print("[AVPlayerAudioEngine] Debug fMP4 written to: \(debugURL.path)")
+        #endif
+
         bufferLock.lock()
         buffer = Data()
         bufferStartOffset = 0
@@ -130,10 +145,18 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         isFirstPacket = false
         bufferLock.unlock()
 
-        // Create AVPlayer with custom URL scheme (intercepted by resource loader)
-        let url = URL(string: "steelplayer-audio://stream.mp4")!
-        let asset = AVURLAsset(url: url)
-        asset.resourceLoader.setDelegate(self, queue: DispatchQueue(label: "com.steelplayer.resourceloader"))
+        // Write fMP4 to temp file — AVPlayer reads from file URL directly.
+        // This avoids AVAssetResourceLoader issues (format sniffing, 2-byte probes)
+        // and is the most reliable way to feed fMP4 to AVPlayer.
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("steelplayer_audio_\(ProcessInfo.processInfo.processIdentifier).mp4")
+        try? FileManager.default.removeItem(at: tempURL)
+        FileManager.default.createFile(atPath: tempURL.path, contents: initSegment + firstMedia)
+        audioFileURL = tempURL
+        audioFileHandle = FileHandle(forWritingAtPath: tempURL.path)
+        audioFileHandle?.seekToEndOfFile()
+
+        let asset = AVURLAsset(url: tempURL)
 
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 2.0
@@ -186,11 +209,8 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
 
         let segment = muxer.createMediaSegment(frames: [data])
 
-        bufferLock.lock()
-        buffer.append(segment)
-        processPendingRequests()
-        trimBuffer()
-        bufferLock.unlock()
+        // Append to temp file for AVPlayer
+        audioFileHandle?.write(segment)
     }
 
     /// Prepare for seek — cancel in-flight data, stop current playback.
@@ -199,15 +219,12 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         removeTimeSync()
         statusObservation = nil
 
-        bufferLock.lock()
-        for req in pendingRequests where !req.isFinished {
-            req.finishLoading(with: URLError(.cancelled))
-        }
-        pendingRequests.removeAll()
-        bufferLock.unlock()
-
         player?.replaceCurrentItem(with: nil)
         playerItem = nil
+
+        // Close old temp file
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
     }
 
     /// Restart after seek with packets from the new position.
@@ -221,30 +238,29 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         let initSegment = newMuxer.createInitSegment()
         let firstMedia = newMuxer.createMediaSegment(frames: [firstPacketData])
 
-        bufferLock.lock()
-        buffer = Data()
-        bufferStartOffset = 0
-        buffer.append(initSegment)
-        buffer.append(firstMedia)
-        pendingRequests.removeAll()
-        bufferLock.unlock()
+        // Write new fMP4 to temp file
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("steelplayer_audio_\(ProcessInfo.processInfo.processIdentifier).mp4")
+        try? FileManager.default.removeItem(at: tempURL)
+        FileManager.default.createFile(atPath: tempURL.path, contents: initSegment + firstMedia)
+        audioFileURL = tempURL
+        audioFileHandle = FileHandle(forWritingAtPath: tempURL.path)
+        audioFileHandle?.seekToEndOfFile()
 
-        // New player item with fresh resource loader
-        let url = URL(string: "steelplayer-audio://stream.mp4")!
-        let asset = AVURLAsset(url: url)
-        asset.resourceLoader.setDelegate(self, queue: DispatchQueue(label: "com.steelplayer.resourceloader"))
-
+        let asset = AVURLAsset(url: tempURL)
         let item = AVPlayerItem(asset: asset)
         item.preferredForwardBufferDuration = 2.0
 
         player?.replaceCurrentItem(with: item)
         playerItem = item
 
+        let failureCallback = self.onPlaybackFailed
         statusObservation = item.observe(\.status) { item, _ in
             if item.status == .failed {
                 #if DEBUG
                 print("[AVPlayerAudioEngine] PlayerItem failed after seek: \(item.error?.localizedDescription ?? "unknown")")
                 #endif
+                failureCallback?()
             }
         }
 
@@ -285,14 +301,13 @@ final class AVPlayerAudioEngine: NSObject, @unchecked Sendable {
         playerItem = nil
         muxer = nil
 
-        bufferLock.lock()
-        for req in pendingRequests where !req.isFinished {
-            req.finishLoading(with: URLError(.cancelled))
+        // Clean up temp file
+        audioFileHandle?.closeFile()
+        audioFileHandle = nil
+        if let url = audioFileURL {
+            try? FileManager.default.removeItem(at: url)
         }
-        pendingRequests.removeAll()
-        buffer = Data()
-        bufferStartOffset = 0
-        bufferLock.unlock()
+        audioFileURL = nil
     }
 
     // MARK: - Video Timebase Sync
