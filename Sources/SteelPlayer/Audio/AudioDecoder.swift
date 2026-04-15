@@ -28,6 +28,8 @@ final class AudioDecoder: @unchecked Sendable {
     private(set) var sampleRate: Int32 = 0
     /// Number of channels (up to 8 for 7.1).
     private(set) var channels: Int32 = 0
+    /// True when using compressed passthrough (EAC3/AC3).
+    private(set) var isPassthrough = false
 
     /// Open the decoder for the given audio stream.
     func open(stream: UnsafeMutablePointer<AVStream>) throws {
@@ -40,7 +42,23 @@ final class AudioDecoder: @unchecked Sendable {
         channels = codecpar.pointee.ch_layout.nb_channels
         if channels <= 0 || channels > 8 { channels = 2 }
 
-        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
+        let codecId = codecpar.pointee.codec_id
+
+        // EAC3/AC3: compressed passthrough to Apple's internal decoder.
+        // Preserves Dolby Atmos object metadata and height channels.
+        // Requires setPreferredOutputNumberOfChannels in audio session.
+        if codecId == AV_CODEC_ID_EAC3 || codecId == AV_CODEC_ID_AC3 {
+            isPassthrough = true
+            try createPassthroughFormatDescription(codecId: codecId)
+            #if DEBUG
+            let name = codecId == AV_CODEC_ID_EAC3 ? "eac3" : "ac3"
+            print("[AudioDecoder] Passthrough: \(sampleRate)Hz, \(channels)ch, codec=\(name)")
+            #endif
+            return
+        }
+
+        isPassthrough = false
+        guard let codec = avcodec_find_decoder(codecId) else {
             throw AudioDecoderError.unsupportedCodec
         }
 
@@ -65,8 +83,13 @@ final class AudioDecoder: @unchecked Sendable {
         #endif
     }
 
-    /// Decode an audio packet. Returns an array of CMSampleBuffers.
+    /// Process an audio packet. Returns CMSampleBuffers.
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
+        if isPassthrough {
+            if let sb = wrapCompressedPacket(packet) { return [sb] }
+            return []
+        }
+
         guard let ctx = codecContext else { return [] }
         var results: [CMSampleBuffer] = []
 
@@ -88,7 +111,7 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// Flush the decoder (call at EOF or seek).
     func flush() {
-        guard let ctx = codecContext else { return }
+        guard !isPassthrough, let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
     }
 
@@ -103,6 +126,7 @@ final class AudioDecoder: @unchecked Sendable {
         codecContext = nil
         swrContext = nil
         audioFormatDescription = nil
+        isPassthrough = false
     }
 
     deinit {
@@ -271,6 +295,101 @@ final class AudioDecoder: @unchecked Sendable {
             sampleTimingArray: &timing,
             sampleSizeEntryCount: 0,
             sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sample = sampleBuffer else { return nil }
+        return sample
+    }
+
+    // MARK: - Passthrough (EAC3/AC3)
+
+    private func createPassthroughFormatDescription(codecId: AVCodecID) throws {
+        let formatID: AudioFormatID = codecId == AV_CODEC_ID_EAC3
+            ? kAudioFormatEnhancedAC3 : kAudioFormatAC3
+
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Float64(sampleRate),
+            mFormatID: formatID,
+            mFormatFlags: 0,
+            mBytesPerPacket: 0,
+            mFramesPerPacket: 1536,
+            mBytesPerFrame: 0,
+            mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 0,
+            mReserved: 0
+        )
+
+        var formatDesc: CMAudioFormatDescription?
+        let status = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &formatDesc
+        )
+        guard status == noErr, let desc = formatDesc else {
+            throw AudioDecoderError.formatDescriptionFailed
+        }
+        audioFormatDescription = desc
+    }
+
+    private func wrapCompressedPacket(_ packet: UnsafeMutablePointer<AVPacket>) -> CMSampleBuffer? {
+        guard let formatDesc = audioFormatDescription,
+              let data = packet.pointee.data,
+              packet.pointee.size > 0 else { return nil }
+
+        let dataSize = Int(packet.pointee.size)
+
+        var blockBuffer: CMBlockBuffer?
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: dataSize,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: dataSize,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == kCMBlockBufferNoErr, let block = blockBuffer else { return nil }
+
+        status = CMBlockBufferReplaceDataBytes(
+            with: data, blockBuffer: block, offsetIntoDestination: 0, dataLength: dataSize
+        )
+        guard status == kCMBlockBufferNoErr else { return nil }
+
+        let pts = packet.pointee.pts
+        let cmPTS: CMTime
+        if pts != Int64.min {
+            cmPTS = CMTimeMake(value: pts * Int64(timeBase.num), timescale: Int32(timeBase.den))
+        } else {
+            cmPTS = .invalid
+        }
+
+        var packetSize = dataSize
+        var timing = CMSampleTimingInfo(
+            duration: CMTimeMake(value: 1536, timescale: sampleRate),
+            presentationTimeStamp: cmPTS,
+            decodeTimeStamp: .invalid
+        )
+
+        var sampleBuffer: CMSampleBuffer?
+        status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: block,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: formatDesc,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: &packetSize,
             sampleBufferOut: &sampleBuffer
         )
         guard status == noErr, let sample = sampleBuffer else { return nil }
