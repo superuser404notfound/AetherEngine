@@ -45,11 +45,13 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var frameBuffer: [Data] = []
     private var isPlayerCreated = false
 
-    /// Frames per HLS segment. 64 × 1536 samples / 48kHz = 2.048 seconds.
-    private let framesPerSegment = 64
+    /// Frames per HLS segment. 16 × 1536 samples / 48kHz = 0.512 seconds.
+    /// Small segments minimize initial buffering delay (~1s vs ~4s).
+    /// AVPlayer on localhost handles small segments without issues.
+    private let framesPerSegment = 16
 
     /// Duration of one segment in seconds.
-    private var segmentDuration: Double = 2.048
+    private var segmentDuration: Double = 0.512
 
     // MARK: - Init
 
@@ -112,7 +114,6 @@ final class HLSAudioEngine: @unchecked Sendable {
         try srv.start()
         server = srv
 
-        // Segment duration: framesPerSegment × 1536 / sampleRate
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
         #if DEBUG
@@ -219,6 +220,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        initialSyncDone = false
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
@@ -234,6 +236,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        initialSyncDone = false
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
@@ -308,12 +311,34 @@ final class HLSAudioEngine: @unchecked Sendable {
         timeObserver = nil
     }
 
+    /// True once AVPlayer has started and we've done the initial sync.
+    private var initialSyncDone = false
+
     private func syncTimebase() {
         guard let tb = videoTimebase, let player = player else { return }
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
-        let drift = CMTimeGetSeconds(playerTime) - CMTimeGetSeconds(CMTimebaseGetTime(tb))
-        if abs(drift) > 0.05 {
+        let playerSec = CMTimeGetSeconds(playerTime)
+        let tbSec = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+
+        if !initialSyncDone && playerSec > 0.1 {
+            // First sync: snap video to where AVPlayer is.
+            // The video timebase may have been running ahead during HLS buffering.
+            initialSyncDone = true
+            CMTimebaseSetTime(tb, time: playerTime)
+            CMTimebaseSetRate(tb, rate: Float64(_rate))
+            #if DEBUG
+            print("[HLSAudioEngine] Initial sync: video snapped to audio t=\(String(format: "%.2f", playerSec))s (was \(String(format: "%.2f", tbSec))s)")
+            #endif
+            return
+        }
+
+        guard initialSyncDone else { return }
+
+        // Ongoing sync: only correct small drifts (< 2s).
+        // Never jump backward by more than 2s — causes video stutter.
+        let drift = playerSec - tbSec
+        if abs(drift) > 0.05 && abs(drift) < 2.0 {
             CMTimebaseSetTime(tb, time: playerTime)
         }
     }
