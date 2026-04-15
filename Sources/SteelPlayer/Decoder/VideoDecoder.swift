@@ -285,6 +285,19 @@ final class VideoDecoder: @unchecked Sendable {
         guard status == noErr, let sess = session else {
             throw VideoDecoderError.sessionCreationFailed(status: status)
         }
+
+        // Disable per-frame HDR metadata propagation (Dolby Vision RPU).
+        // DV Profile 8 is backwards-compatible with HDR10 — without the
+        // per-frame DV enhancement, VT outputs plain HDR10 (BT.2020 + PQ)
+        // which works on all HDR TVs, even those without DV support.
+        // With propagation ON, non-DV TVs show wrong colors because they
+        // can't process the DV metadata on the pixel buffers.
+        VTSessionSetProperty(
+            sess,
+            key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
+            value: kCFBooleanFalse
+        )
+
         return sess
     }
 }
