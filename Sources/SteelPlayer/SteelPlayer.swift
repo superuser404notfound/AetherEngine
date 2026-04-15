@@ -692,12 +692,18 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // Back-pressure: wait if display layer isn't ready
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                        Thread.sleep(forTimeInterval: 0.005)
+                    // Back-pressure: wait if display layer isn't ready.
+                    // EXCEPTION: during HLS audio buffering, skip the wait
+                    // so the demux loop keeps feeding audio packets to HLS.
+                    let hlsBuffering = (self.audioMode == .hls && !(self.hlsAudioEngine?.isPlayerPlaying ?? true))
+                    if !hlsBuffering {
+                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                            Thread.sleep(forTimeInterval: 0.005)
+                        }
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
+                    // Decode video (display layer may drop frames if buffer is full)
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.decode(packet: packet)
                     } else {

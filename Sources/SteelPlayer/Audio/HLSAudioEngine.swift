@@ -45,13 +45,12 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var frameBuffer: [Data] = []
     private var isPlayerCreated = false
 
-    /// Frames per HLS segment. 16 × 1536 samples / 48kHz = 0.512 seconds.
-    /// Small segments minimize initial buffering delay (~1s vs ~4s).
-    /// AVPlayer on localhost handles small segments without issues.
-    private let framesPerSegment = 16
+    /// Frames per HLS segment. 64 × 1536 samples / 48kHz = 2.048 seconds.
+    /// AVPlayer requires segments >= ~2s for HLS to become readyToPlay.
+    private let framesPerSegment = 64
 
     /// Duration of one segment in seconds.
-    private var segmentDuration: Double = 0.512
+    private var segmentDuration: Double = 2.048
 
     // MARK: - Init
 
@@ -75,6 +74,13 @@ final class HLSAudioEngine: @unchecked Sendable {
     // MARK: - Public API
 
     var currentTime: CMTime { player?.currentTime() ?? .zero }
+
+    /// True once AVPlayer is actively playing audio.
+    /// During HLS buffering this is false — the demux loop should skip
+    /// video back-pressure to keep audio packets flowing.
+    var isPlayerPlaying: Bool {
+        player?.timeControlStatus == .playing
+    }
 
     var currentTimeSeconds: Double {
         let t = CMTimeGetSeconds(currentTime)
