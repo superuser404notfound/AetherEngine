@@ -84,9 +84,13 @@ final class SoftwareVideoDecoder {
         }
         av_dict_free(&opts)
 
-        // Detect bit depth — use 10-bit output for HDR content
+        // Detect bit depth — use 10-bit output for HDR content.
+        // bits_per_raw_sample can be 0 in some streams, so also check
+        // color transfer function (PQ = HDR10, HLG = HLG HDR).
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
-        use10Bit = bitsPerSample > 8
+        let isHDRTransfer = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
+            || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
+        use10Bit = bitsPerSample > 8 || isHDRTransfer
 
         #if DEBUG
         print("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")")
