@@ -126,9 +126,15 @@ public final class SteelPlayer: ObservableObject {
             try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
             try session.setSupportsMultichannelContent(true)
             try session.setActive(true)
+            // Request multichannel output — without this, the system
+            // defaults to stereo even when HDMI supports 5.1/7.1.
+            // maximumOutputNumberOfChannels reflects actual hardware capability.
+            let maxCh = session.maximumOutputNumberOfChannels
+            if maxCh > 2 {
+                try session.setPreferredOutputNumberOfChannels(maxCh)
+            }
             #if DEBUG
-            let route = session.currentRoute.outputs.map { "\($0.portName)(\($0.channels?.count ?? 0)ch)" }.joined(separator: ", ")
-            print("[SteelPlayer] Audio session: multichannel=true, route=\(route)")
+            print("[SteelPlayer] Audio session: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels)")
             #endif
         } catch {
             print("[SteelPlayer] AVAudioSession error: \(error)")
@@ -233,6 +239,15 @@ public final class SteelPlayer: ObservableObject {
                 do {
                     try audioDecoder.open(stream: audioStream)
                     audioAvailable = true
+                    // Update preferred output channels to match content
+                    #if os(iOS) || os(tvOS)
+                    let contentCh = Int(audioDecoder.channels)
+                    let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
+                    let preferred = min(contentCh, maxCh)
+                    if preferred > 2 {
+                        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
+                    }
+                    #endif
                 } catch {
                     print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
                 }
