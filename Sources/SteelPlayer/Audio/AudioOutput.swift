@@ -20,6 +20,11 @@ final class AudioOutput: @unchecked Sendable {
         renderer = AVSampleBufferAudioRenderer()
         synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
+
+        // Enable spatial audio for AirPods Pro/Max and HomePod.
+        // The renderer spatializes multichannel content automatically
+        // when the user has spatial audio enabled in system settings.
+        renderer.allowedAudioSpatializationFormats = .multichannel
     }
 
     /// Add the video display layer to the synchronizer so Apple handles

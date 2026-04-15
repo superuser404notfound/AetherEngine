@@ -164,12 +164,24 @@ final class AudioDecoder: @unchecked Sendable {
             mReserved: 0
         )
 
+        // Build AudioChannelLayout so the renderer maps channels to speakers correctly.
+        // Without this, multichannel audio (5.1/7.1) would play as raw interleaved
+        // data with no spatial mapping.
+        let layoutTag = channelLayoutTag(for: channels)
+        var layout = AudioChannelLayout(
+            mChannelLayoutTag: layoutTag,
+            mChannelBitmap: [],
+            mNumberChannelDescriptions: 0,
+            mChannelDescriptions: (AudioChannelDescription())
+        )
+        let layoutSize = MemoryLayout<AudioChannelLayout>.size
+
         var formatDesc: CMAudioFormatDescription?
         let status = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
             asbd: &asbd,
-            layoutSize: 0,
-            layout: nil,
+            layoutSize: layoutSize,
+            layout: &layout,
             magicCookieSize: 0,
             magicCookie: nil,
             extensions: nil,
@@ -179,6 +191,21 @@ final class AudioDecoder: @unchecked Sendable {
             throw AudioDecoderError.formatDescriptionFailed
         }
         audioFormatDescription = desc
+    }
+
+    /// Map channel count to the standard AudioChannelLayoutTag.
+    private func channelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
+        switch channels {
+        case 1:  return kAudioChannelLayoutTag_Mono
+        case 2:  return kAudioChannelLayoutTag_Stereo
+        case 3:  return kAudioChannelLayoutTag_MPEG_3_0_A   // L R C
+        case 4:  return kAudioChannelLayoutTag_Quadraphonic  // L R Ls Rs
+        case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A   // L R C Ls Rs
+        case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A   // L R C LFE Ls Rs
+        case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A   // L R C LFE Ls Rs Cs
+        case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A   // L R C LFE Ls Rs Lrs Rrs
+        default: return kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
+        }
     }
 
     // MARK: - Frame → CMSampleBuffer

@@ -232,6 +232,7 @@ public final class SteelPlayer: ObservableObject {
             do {
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+                try session.setSupportsMultichannelContent(true)
                 try session.setActive(true)
             } catch {
                 print("[SteelPlayer] AVAudioSession error: \(error)")
