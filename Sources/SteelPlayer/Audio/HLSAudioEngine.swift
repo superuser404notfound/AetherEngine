@@ -293,15 +293,21 @@ final class HLSAudioEngine: @unchecked Sendable {
                 guard let self else { return }
                 self.player?.play()
                 self.setPlayerPlaying(true)
-                // Timebase has been running since prepare() — don't touch it.
-                // Audio will start ~2-3s behind video. Both run at 1x.
-                // This offset is acceptable for now and avoids the
-                // pause/resume cycle that starved audio segments.
-                #if DEBUG
-                let tbTime = self.videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
-                let offset = tbTime - self.streamOffset
-                print("[HLSAudioEngine] PlayerItem ready -> play() (video \(String(format: "%.1f", offset))s ahead)")
-                #endif
+
+                // Snap timebase to match AVPlayer's position.
+                // This eliminates the ~4s offset from the buffering period.
+                // The display layer may briefly hold frames while the timebase
+                // catches up, but this is short (~200ms for a few buffered frames)
+                // and doesn't block the demux long enough to starve audio.
+                if let tb = self.videoTimebase {
+                    let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
+                    let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+                    #if DEBUG
+                    let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+                    print("[HLSAudioEngine] PlayerItem ready -> play(), snapping timebase \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
+                    #endif
+                    CMTimebaseSetTime(tb, time: corrected)
+                }
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
