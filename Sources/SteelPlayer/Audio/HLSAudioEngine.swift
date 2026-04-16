@@ -196,9 +196,12 @@ final class HLSAudioEngine: @unchecked Sendable {
             print("[HLSAudioEngine] Segment \(count - 1) created (\(segment.count) bytes)")
             #endif
 
-            // Create AVPlayer after first segment. automaticallyWaitsToMinimizeStalling
-            // handles buffering — AVPlayer waits until it has enough data before playing.
-            if !isPlayerCreated {
+            // Create AVPlayer after 3 segments (~6s buffer). This prevents
+            // the initial PlaybackStalled that occurs with only 1 segment.
+            // Combined with automaticallyWaitsToMinimizeStalling=false and
+            // no timebase pausing, this gives both zero-offset sync AND
+            // enough initial buffer for uninterrupted playback.
+            if !isPlayerCreated && (server?.segmentCount ?? 0) >= 3 {
                 isPlayerCreated = true
                 bufferLock.unlock()
                 createPlayer()
