@@ -302,22 +302,20 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // The display layer may briefly hold frames while the timebase
                 // catches up, but this is short (~200ms for a few buffered frames)
                 // and doesn't block the demux long enough to starve audio.
+                // NOTE: We intentionally do NOT snap the timebase here.
+                // Any snap blocks the display layer (holds frames until
+                // timebase catches up), which blocks the single-threaded
+                // demux loop and starves audio segment creation.
+                // The ~5s offset between video and audio is a known
+                // limitation of the single-threaded architecture.
+                // Proper fix: two-thread demux or AVAudioContentSource.passthrough (tvOS 26+).
+                #if DEBUG
                 if let tb = self.videoTimebase {
-                    let currentTbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+                    let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
                     let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
-                    // Snap back by at most 2 seconds. A larger snap blocks the
-                    // display layer too long (it holds frames until the timebase
-                    // catches up), which blocks the demux and starves audio.
-                    // The remaining offset (~3s) is a lip-sync tradeoff for
-                    // continuous playback.
-                    let snapTarget = max(playerStreamTime, currentTbTime - 2.0)
-                    let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
-                    #if DEBUG
-                    let offset = snapTarget - playerStreamTime
-                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", currentTbTime))s → \(String(format: "%.1f", snapTarget))s (offset \(String(format: "%.1f", offset))s)")
-                    #endif
-                    CMTimebaseSetTime(tb, time: corrected)
+                    print("[HLSAudioEngine] PlayerItem ready -> play() (video \(String(format: "%.1f", tbTime - playerStreamTime))s ahead)")
                 }
+                #endif
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
