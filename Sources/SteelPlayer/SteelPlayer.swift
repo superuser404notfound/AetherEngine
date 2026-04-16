@@ -85,12 +85,20 @@ public final class SteelPlayer: ObservableObject {
     nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
 
     /// Separate queue for feeding audio to the HLS engine in Atmos mode.
-    /// Decouples audio segment creation from video back-pressure so the
-    /// demux loop can block on video without starving AVPlayer.
     private let atmosAudioQueue = DispatchQueue(label: "com.steelplayer.atmos-audio", qos: .userInitiated)
     private let atmosAudioLock = NSLock()
     nonisolated(unsafe) private var atmosAudioBuffer: [Data] = []
     nonisolated(unsafe) private var atmosAudioDrainActive = false
+
+    /// Separate queue for video decoding in Atmos mode.
+    /// Decouples video back-pressure from the demux thread so audio
+    /// packets keep flowing even when the display layer is blocked.
+    private let atmosVideoQueue = DispatchQueue(label: "com.steelplayer.atmos-video", qos: .userInitiated)
+    private let atmosVideoLock = NSLock()
+    nonisolated(unsafe) private var atmosVideoBuffer: [UnsafeMutablePointer<AVPacket>] = []
+    nonisolated(unsafe) private var atmosVideoDrainActive = false
+    /// Cap video buffer at ~50MB to prevent OOM (4K packets ~130KB each)
+    private let atmosVideoBufferMax = 384
 
     /// Audio routing: which engine handles the current audio track.
     enum AudioMode { case pcm, compressed, atmos }
@@ -608,6 +616,47 @@ public final class SteelPlayer: ObservableObject {
         }
     }
 
+    // MARK: - Atmos Video Drain
+
+    /// Decodes video packets from the buffer with normal back-pressure.
+    /// Runs on its own queue so it doesn't block the demux thread.
+    private func startAtmosVideoDrain() {
+        atmosVideoLock.lock()
+        guard !atmosVideoDrainActive else { atmosVideoLock.unlock(); return }
+        atmosVideoDrainActive = true
+        atmosVideoLock.unlock()
+
+        atmosVideoQueue.async { [weak self] in
+            guard let self else { return }
+            while true {
+                self.atmosVideoLock.lock()
+                guard !self.atmosVideoBuffer.isEmpty else {
+                    self.atmosVideoDrainActive = false
+                    self.atmosVideoLock.unlock()
+                    return
+                }
+                let packet = self.atmosVideoBuffer.removeFirst()
+                self.atmosVideoLock.unlock()
+
+                // Back-pressure on THIS thread (doesn't affect demux or audio)
+                while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                guard !self.stopRequested else {
+                    av_packet_free_safe(packet)
+                    return
+                }
+
+                if self.usingSoftwareDecode {
+                    self.softwareDecoder.decode(packet: packet)
+                } else {
+                    self.videoDecoder.decode(packet: packet)
+                }
+                av_packet_free_safe(packet)
+            }
+        }
+    }
+
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { audioOutput.volume }
@@ -635,6 +684,10 @@ public final class SteelPlayer: ObservableObject {
             atmosAudioLock.lock()
             atmosAudioBuffer.removeAll()
             atmosAudioLock.unlock()
+            atmosVideoLock.lock()
+            for pkt in atmosVideoBuffer { av_packet_free_safe(pkt) }
+            atmosVideoBuffer.removeAll()
+            atmosVideoLock.unlock()
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
@@ -749,16 +802,34 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // Back-pressure: wait if display layer isn't ready
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                        Thread.sleep(forTimeInterval: 0.005)
-                    }
-                    if self.stopRequested { av_packet_free_safe(packet); break }
-
-                    if self.usingSoftwareDecode {
-                        self.softwareDecoder.decode(packet: packet)
+                    if self.audioMode == .atmos {
+                        // Atmos mode: push video to separate decode queue.
+                        // The demux thread NEVER blocks on video back-pressure,
+                        // so audio packets keep flowing to the HLS engine.
+                        if let copy = av_packet_clone(packet) {
+                            self.atmosVideoLock.lock()
+                            // Throttle if buffer is full (prevent OOM)
+                            while self.atmosVideoBuffer.count >= self.atmosVideoBufferMax && !self.stopRequested {
+                                self.atmosVideoLock.unlock()
+                                Thread.sleep(forTimeInterval: 0.01)
+                                self.atmosVideoLock.lock()
+                            }
+                            self.atmosVideoBuffer.append(copy)
+                            self.atmosVideoLock.unlock()
+                            self.startAtmosVideoDrain()
+                        }
                     } else {
-                        self.videoDecoder.decode(packet: packet)
+                        // Normal mode: inline decode with back-pressure
+                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                            Thread.sleep(forTimeInterval: 0.005)
+                        }
+                        if self.stopRequested { av_packet_free_safe(packet); break }
+
+                        if self.usingSoftwareDecode {
+                            self.softwareDecoder.decode(packet: packet)
+                        } else {
+                            self.videoDecoder.decode(packet: packet)
+                        }
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
