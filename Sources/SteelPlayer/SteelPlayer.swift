@@ -493,9 +493,22 @@ public final class SteelPlayer: ObservableObject {
         tearDownCurrentAudioEngine()
         activeAudioStreamIndex = streamIndex
 
+        // Flush video pipeline (like a seek) — the demux seek below
+        // resets both video and audio position
+        if usingSoftwareDecode {
+            softwareDecoder.flush()
+        } else {
+            videoDecoder.flush()
+        }
+        videoRenderer.flush()
+
         // Seek the demuxer to the current position so the new track
         // starts from the right place in the stream
         demuxer.seek(to: seekSeconds)
+        videoRenderer.setSkipThreshold(seekTime)
+        if usingSoftwareDecode {
+            softwareDecoder.skipUntilPTS = seekTime
+        }
 
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
