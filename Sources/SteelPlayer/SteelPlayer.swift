@@ -280,8 +280,8 @@ public final class SteelPlayer: ObservableObject {
 
             // 2c. Find the audio stream and configure the appropriate audio engine
             //
-            // EAC3 → HLSAudioEngine (Dolby Atmos via MAT 2.0 passthrough)
-            // AC3 → CompressedAudioFeeder (no Atmos, saves CPU)
+            // EAC3+JOC → HLSAudioEngine (Dolby Atmos via MAT 2.0 passthrough)
+            // EAC3/AC3 → CompressedAudioFeeder (5.1 passthrough, no Atmos overhead)
             // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
@@ -293,8 +293,12 @@ public final class SteelPlayer: ObservableObject {
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                if isEAC3 {
-                    // EAC3 → try HLS engine for Dolby Atmos (MAT 2.0 passthrough)
+                // For EAC3, probe the first audio packet to detect Atmos (JOC).
+                // Only EAC3 with dependent substreams benefits from AVPlayer passthrough.
+                let isAtmos = isEAC3 && probeAtmos(audioStreamIndex: audioIdx)
+
+                if isAtmos {
+                    // EAC3+JOC → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
                     // Falls back to CompressedAudioFeeder if AVPlayer fails.
                     let streamIdx = audioIdx
                     do {
@@ -333,15 +337,16 @@ public final class SteelPlayer: ObservableObject {
                         #endif
                         fallbackToCompressedAudio(stream: audioStream)
                     }
-                } else if isAC3 {
-                    // AC3 → compressed passthrough (no Atmos possible)
+                } else if isEAC3 || isAC3 {
+                    // EAC3 (no Atmos) / AC3 → compressed passthrough
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        print("[SteelPlayer] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
+                        let codecLabel = isEAC3 ? "EAC3" : "AC3"
+                        print("[SteelPlayer] Audio: \(codecLabel) → compressed passthrough (\(channelCount)ch)")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -531,8 +536,9 @@ public final class SteelPlayer: ObservableObject {
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
+        let isAtmos = isEAC3 && probeAtmos(audioStreamIndex: streamIndex)
 
-        if isEAC3 {
+        if isAtmos {
             do {
                 let engine = HLSAudioEngine()
                 engine.onPlaybackFailed = { [weak self] in
@@ -561,7 +567,7 @@ public final class SteelPlayer: ObservableObject {
                 fallbackToCompressedAudio(stream: stream)
                 audioOutput.start(at: seekTime)
             }
-        } else if isAC3 {
+        } else if isEAC3 || isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
@@ -1064,6 +1070,41 @@ public final class SteelPlayer: ObservableObject {
         }
         lifecycleObservers.append(memObserver)
         #endif
+    }
+
+    // MARK: - Atmos Probing
+
+    /// Read packets from the demuxer until we find one from the given audio
+    /// stream, then check the bitstream for Atmos (dependent substreams).
+    /// Seeks back to the current position afterward.
+    private func probeAtmos(audioStreamIndex: Int32) -> Bool {
+        let currentPos = currentTime
+
+        // Read up to 50 packets looking for an audio packet from this stream
+        for _ in 0..<50 {
+            guard let packet = try? demuxer.readPacket() else { break }
+            defer { av_packet_free_safe(packet) }
+
+            if packet.pointee.stream_index == audioStreamIndex,
+               packet.pointee.size > 0,
+               let data = packet.pointee.data {
+                let packetData = Data(bytes: data, count: Int(packet.pointee.size))
+                let hasAtmos = FMP4AudioMuxer.hasAtmosJOC(packetData: packetData)
+                // Seek back so the demux loop starts from the right position
+                demuxer.seek(to: currentPos)
+                #if DEBUG
+                print("[SteelPlayer] EAC3 probe: \(hasAtmos ? "Atmos (JOC) detected" : "no Atmos")")
+                #endif
+                return hasAtmos
+            }
+        }
+
+        // Couldn't find audio packet — seek back and assume no Atmos
+        demuxer.seek(to: currentPos)
+        #if DEBUG
+        print("[SteelPlayer] EAC3 probe: no audio packet found, assuming no Atmos")
+        #endif
+        return false
     }
 
 }
