@@ -81,15 +81,19 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Whether the initial timebase snap has been performed.
     private var hasSnapped = false
 
+    /// Whether the clock offset has been calibrated from measured drift.
+    private var hasCalibrated = false
+
     /// User-configurable audio delay compensation in seconds.
     /// Positive = delay video (audio comes first from HLS pipeline).
     /// Set this from the host app based on the user's audio setup.
     /// Default 0 = no compensation (timebase matches AVPlayer.currentTime).
     var audioDelayCompensation: Double = 0
 
-    /// Constant offset between CMTimebase (host clock) and AVPlayer's clock.
-    /// Measured consistently at ~170ms across content and playback sessions.
-    private let clockOffset = 0.17
+    /// Measured offset between CMTimebase (host clock) and AVPlayer's clock.
+    /// Captured at the first snap, then used for drift correction.
+    /// Varies by device/OS — not hardcoded.
+    private var clockOffset: Double = 0
 
     // MARK: - Stored Config
 
@@ -149,6 +153,8 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         setPlayerPlaying(false)
         hasSnapped = false
+        hasCalibrated = false
+        clockOffset = 0
 
         let srv = HLSAudioServer()
         try srv.start()
@@ -447,8 +453,8 @@ final class HLSAudioEngine: @unchecked Sendable {
         let playerStreamTime = playerSeconds + streamOffset
         let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
 
-        // One-time snap: wait until player is actually playing (currentTime > 0.1)
-        // then snap the timebase precisely. At readyToPlay, currentTime is
+        // One-time snap: wait until player is actually playing (currentTime > 0.5)
+        // then snap the timebase to match. At readyToPlay, currentTime is
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.5 {
             hasSnapped = true
@@ -457,18 +463,35 @@ final class HLSAudioEngine: @unchecked Sendable {
             let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             onWillStartTimebase?(startPTS)
 
-            snapTimebaseToPlayer(playerStreamTime: playerStreamTime, tb: tb)
+            // Set timebase directly to player position (no offset yet).
+            // The natural clock drift will be measured after ~2s and used
+            // as clockOffset for all subsequent corrections.
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            CMTimebaseSetTime(tb, time: corrected)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime - clockOffset))s (player=\(String(format: "%.3f", playerStreamTime))s)")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s")
             #endif
             return
         }
 
-        // Drift = how far the audio (player) is ahead of video (timebase).
-        // Expected value after snap: ~clockOffset (0.17s). Real clock drift
-        // is (drift - clockOffset). Correct when it exceeds 50ms.
+        // Drift = audio position - video position.
+        // Positive = audio ahead (video late), negative = video ahead (audio late).
         let drift = playerStreamTime - tbTime
+
+        // Calibrate: after ~2s of playback, capture the natural drift as the
+        // clock offset. This accounts for the inherent difference between
+        // CMTimebase (host clock) and AVPlayer's internal clock, which varies
+        // by device and OS version.
+        if !hasCalibrated && hasSnapped && playerSeconds > 2.5 {
+            hasCalibrated = true
+            clockOffset = drift
+            #if DEBUG
+            print("[HLSAudioEngine] Clock offset calibrated: \(String(format: "%+.3f", clockOffset))s")
+            #endif
+            return
+        }
+
         let realDrift = drift - clockOffset
 
         #if DEBUG
