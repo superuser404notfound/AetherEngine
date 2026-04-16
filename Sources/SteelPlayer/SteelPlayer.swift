@@ -77,11 +77,15 @@ public final class SteelPlayer: ObservableObject {
     /// Compressed audio feeder for AC3/EAC3 — feeds raw compressed frames
     /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode, saves CPU).
     /// Note: Atmos (JOC) metadata is NOT preserved — renderer outputs PCM 5.1/7.1.
-    /// Atmos passthrough requires AVPlayer (future feature, separate branch).
     private let compressedAudioFeeder = CompressedAudioFeeder()
 
+    /// HLS audio engine for Dolby Atmos — uses AVPlayer + local HLS server
+    /// to trigger Dolby MAT 2.0 wrapping for EAC3+JOC passthrough.
+    /// Accessed from demux queue — effectively immutable during playback.
+    nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
+
     /// Audio routing: which engine handles the current audio track.
-    enum AudioMode { case pcm, compressed }
+    enum AudioMode { case pcm, compressed, atmos }
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
 
     /// Serial queue for the demux→decode loop (runs off main thread).
@@ -240,10 +244,23 @@ public final class SteelPlayer: ObservableObject {
             audioTracks = demuxer.audioTrackInfos()
             subtitleTracks = demuxer.subtitleTrackInfos()
 
-            // 2b. Find the audio stream and configure the appropriate audio engine
+            // 2b. Compute initial audio time from start position (needed before audio engine setup)
+            var initialAudioTime: CMTime = .zero
+            if let start = startPosition, start > 0 {
+                demuxer.seek(to: start)
+                currentTime = start
+                let seekTime = CMTimeMakeWithSeconds(start, preferredTimescale: 90000)
+                videoRenderer.setSkipThreshold(seekTime)
+                if usingSoftwareDecode {
+                    softwareDecoder.skipUntilPTS = seekTime
+                }
+                initialAudioTime = seekTime
+            }
+
+            // 2c. Find the audio stream and configure the appropriate audio engine
             //
-            // EAC3 + externalAudioURL → AVPlayer (Dolby Atmos via MAT 2.0)
-            // AC3/EAC3 (no external URL) → CompressedAudioFeeder (no Atmos, saves CPU)
+            // EAC3 → HLSAudioEngine (Dolby Atmos via MAT 2.0 passthrough)
+            // AC3 → CompressedAudioFeeder (no Atmos, saves CPU)
             // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
@@ -255,15 +272,44 @@ public final class SteelPlayer: ObservableObject {
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                if isEAC3 || isAC3 {
-                    // AC3/EAC3 → compressed passthrough (no FFmpeg decode, saves CPU)
+                if isEAC3 {
+                    // EAC3 → try HLS engine for Dolby Atmos (MAT 2.0 passthrough)
+                    // Falls back to CompressedAudioFeeder if AVPlayer fails.
+                    let streamIdx = audioIdx
+                    do {
+                        let engine = HLSAudioEngine()
+                        engine.onPlaybackFailed = { [weak self] in
+                            Task { @MainActor in
+                                guard let self,
+                                      let s = self.demuxer.stream(at: streamIdx) else { return }
+                                self.fallbackToCompressedAudio(stream: s)
+                            }
+                        }
+                        try engine.prepare(stream: audioStream, startTime: initialAudioTime)
+                        hlsAudioEngine = engine
+                        audioMode = .atmos
+                        audioAvailable = true
+                        // Display layer uses controlTimebase from HLS engine
+                        // instead of the synchronizer — AVPlayer is the master clock.
+                        videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+                        #if DEBUG
+                        print("[SteelPlayer] Audio: EAC3 → HLS AVPlayer (Dolby Atmos) (\(channelCount)ch)")
+                        #endif
+                    } catch {
+                        #if DEBUG
+                        print("[SteelPlayer] HLS engine failed: \(error) — falling back to compressed passthrough")
+                        #endif
+                        fallbackToCompressedAudio(stream: audioStream)
+                    }
+                } else if isAC3 {
+                    // AC3 → compressed passthrough (no Atmos possible)
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        print("[SteelPlayer] Audio: \(isEAC3 ? "EAC3" : "AC3") → compressed passthrough (\(channelCount)ch)")
+                        print("[SteelPlayer] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -291,32 +337,18 @@ public final class SteelPlayer: ObservableObject {
 
             // For video-only files (or failed audio), use the synchronizer
             // as a free-running clock so video frame sync still works.
+            // Skip this for Atmos mode — display layer uses its own timebase.
             if !audioAvailable {
                 audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                 audioOutput.start()
+            } else if audioMode == .atmos {
+                // Atmos: display layer is NOT on the synchronizer.
+                // The HLS engine's controlTimebase drives video timing.
+                // We still need the synchronizer for currentTime fallback,
+                // but the display layer is detached from it.
             }
 
-            // 4. Seek to start position if requested.
-            // Pre-start the audio clock at the seek time so the synchronizer
-            // doesn't reject video frames whose PTS is far ahead of time 0.
-            // The demux loop's audioOutput.start() becomes a no-op since
-            // _isStarted is already true.
-            var initialAudioTime: CMTime = .zero
-            if let start = startPosition, start > 0 {
-                demuxer.seek(to: start)
-                currentTime = start
-                let seekTime = CMTimeMakeWithSeconds(start, preferredTimescale: 90000)
-                videoRenderer.setSkipThreshold(seekTime)
-                if usingSoftwareDecode {
-                    softwareDecoder.skipUntilPTS = seekTime
-                }
-                initialAudioTime = seekTime
-                // DON'T start audioOutput here — the clock would advance
-                // while the demux loop hasn't produced any frames yet.
-                // Instead, pass the time to the demux loop.
-            }
-
-            // 5. Start the demux→decode loop and time updates
+            // 4. Start the demux→decode loop and time updates
             isPlaying = true
             state = .playing
             startTimeUpdates()
@@ -334,14 +366,22 @@ public final class SteelPlayer: ObservableObject {
     public func play() {
         guard state == .paused else { return }
         isPlaying = true
-        audioOutput.resume()
+        if audioMode == .atmos {
+            hlsAudioEngine?.resume()
+        } else {
+            audioOutput.resume()
+        }
         state = .playing
     }
 
     public func pause() {
         guard state == .playing else { return }
         isPlaying = false
-        audioOutput.pause()
+        if audioMode == .atmos {
+            hlsAudioEngine?.pause()
+        } else {
+            audioOutput.pause()
+        }
         state = .paused
     }
 
@@ -370,12 +410,17 @@ public final class SteelPlayer: ObservableObject {
         }
         videoRenderer.flush()
 
-        if audioMode == .compressed {
+        switch audioMode {
+        case .atmos:
+            // Tear down HLS pipeline — must rebuild from new position
+            hlsAudioEngine?.prepareForSeek()
+        case .compressed:
             compressedAudioFeeder.flush()
-        } else {
+            audioOutput.flush()
+        case .pcm:
             audioDecoder.flush()
+            audioOutput.flush()
         }
-        audioOutput.flush()
 
         // Seek the demuxer
         demuxer.seek(to: target)
@@ -388,8 +433,16 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // Restart the audio clock at the seek position
-        audioOutput.start(at: seekTime)
+        // Restart audio at the seek position
+        if audioMode == .atmos {
+            // Restart HLS engine with new timestamps — feedPacket() will
+            // buffer new segments and recreate AVPlayer automatically.
+            if let audioStream = demuxer.stream(at: activeAudioStreamIndex) {
+                try? hlsAudioEngine?.restartAfterSeek(stream: audioStream, seekTime: seekTime)
+            }
+        } else {
+            audioOutput.start(at: seekTime)
+        }
 
         // Resume playing from new position
         isPlaying = true
@@ -415,21 +468,34 @@ public final class SteelPlayer: ObservableObject {
         let codecId = stream.pointee.codecpar?.pointee.codec_id
 
         // Tear down current audio engine
-        if audioMode == .compressed {
-            compressedAudioFeeder.flush()
-            compressedAudioFeeder.close()
-        } else {
-            audioDecoder.flush()
-            audioDecoder.close()
-        }
-        audioOutput.flush()
+        tearDownCurrentAudioEngine()
         activeAudioStreamIndex = streamIndex
 
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
+        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
 
-        if isEAC3 || isAC3 {
+        if isEAC3 {
+            // Try HLS engine for Atmos, fall back to compressed passthrough
+            do {
+                let engine = HLSAudioEngine()
+                engine.onPlaybackFailed = { [weak self] in
+                    Task { @MainActor in
+                        guard let self,
+                              let s = self.demuxer.stream(at: streamIndex) else { return }
+                        self.fallbackToCompressedAudio(stream: s)
+                    }
+                }
+                try engine.prepare(stream: stream, startTime: seekTime)
+                hlsAudioEngine = engine
+                audioMode = .atmos
+                videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+            } catch {
+                fallbackToCompressedAudio(stream: stream)
+                audioOutput.start(at: seekTime)
+            }
+        } else if isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
@@ -437,12 +503,12 @@ public final class SteelPlayer: ObservableObject {
                 try? audioDecoder.open(stream: stream)
                 audioMode = .pcm
             }
-            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
             audioOutput.start(at: seekTime)
         } else {
             try? audioDecoder.open(stream: stream)
             audioMode = .pcm
-            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
             audioOutput.start(at: seekTime)
         }
 
@@ -458,6 +524,54 @@ public final class SteelPlayer: ObservableObject {
         // TODO: Phase 6 — subtitle support
     }
 
+    // MARK: - Audio Engine Helpers
+
+    /// Tear down whichever audio engine is currently active.
+    private func tearDownCurrentAudioEngine() {
+        switch audioMode {
+        case .atmos:
+            hlsAudioEngine?.stop()
+            hlsAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        case .compressed:
+            compressedAudioFeeder.flush()
+            compressedAudioFeeder.close()
+            audioOutput.flush()
+        case .pcm:
+            audioDecoder.flush()
+            audioDecoder.close()
+            audioOutput.flush()
+        }
+        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+    }
+
+    /// Fall back from HLS Atmos engine to CompressedAudioFeeder.
+    /// Called when AVPlayer fails to play the HLS stream.
+    private func fallbackToCompressedAudio(stream: UnsafeMutablePointer<AVStream>) {
+        #if DEBUG
+        print("[SteelPlayer] Falling back from Atmos to compressed passthrough")
+        #endif
+
+        // Tear down HLS engine
+        hlsAudioEngine?.stop()
+        hlsAudioEngine = nil
+        videoRenderer.displayLayer.controlTimebase = nil
+
+        // Switch to compressed passthrough
+        do {
+            try compressedAudioFeeder.open(stream: stream)
+            audioMode = .compressed
+        } catch {
+            try? audioDecoder.open(stream: stream)
+            audioMode = .pcm
+        }
+
+        // Re-attach display layer to synchronizer
+        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+        audioOutput.start(at: seekTime)
+    }
+
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { audioOutput.volume }
@@ -466,7 +580,11 @@ public final class SteelPlayer: ObservableObject {
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
-        audioOutput.setRate(rate)
+        if audioMode == .atmos {
+            hlsAudioEngine?.setRate(rate)
+        } else {
+            audioOutput.setRate(rate)
+        }
     }
 
     // MARK: - Internal
@@ -476,8 +594,14 @@ public final class SteelPlayer: ObservableObject {
         isPlaying = false
         stopTimeUpdates()
 
-        // Stop audio
-        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+        // Stop audio — tear down whichever engine is active
+        if audioMode == .atmos {
+            hlsAudioEngine?.stop()
+            hlsAudioEngine = nil
+            videoRenderer.displayLayer.controlTimebase = nil
+        } else {
+            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+        }
         audioOutput.stop()
         compressedAudioFeeder.close()
         audioMode = .pcm
@@ -598,6 +722,11 @@ public final class SteelPlayer: ObservableObject {
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
+                    case .atmos:
+                        // Feed raw EAC3 packets to HLS engine — it buffers,
+                        // creates fMP4 segments, and feeds AVPlayer via HTTP.
+                        self.hlsAudioEngine?.feedPacket(packet)
+
                     case .compressed:
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
                             audioOutput.enqueue(sampleBuffer: sampleBuffer)
@@ -635,7 +764,12 @@ public final class SteelPlayer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self = self, !Task.isCancelled else { return }
-                let t = self.audioOutput.currentTimeSeconds
+                let t: Double
+                if self.audioMode == .atmos {
+                    t = self.hlsAudioEngine?.currentTimeSeconds ?? 0
+                } else {
+                    t = self.audioOutput.currentTimeSeconds
+                }
                 if t > 0 {
                     self.currentTime = t
                     if self.duration > 0 {
