@@ -637,6 +637,10 @@ public final class SteelPlayer: ObservableObject {
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
         nonisolated(unsafe) var audioStarted = false
+        /// Compressed video packets buffered during HLS audio init.
+        /// Replayed through the decoder once AVPlayer starts playing.
+        nonisolated(unsafe) var videoPacketBuffer: [UnsafeMutablePointer<AVPacket>] = []
+        nonisolated(unsafe) var videoBufferingDone = false
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }
@@ -711,9 +715,35 @@ public final class SteelPlayer: ObservableObject {
 
                 if streamIdx == videoStreamIndex {
                     if self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true {
-                        // During HLS buffering: skip video entirely
+                        // During HLS buffering: store compressed video packets
+                        // in RAM (~25 MB for 8s of 4K HEVC). Replayed after
+                        // AVPlayer starts for instant A/V sync.
+                        if let copy = av_packet_clone(packet) {
+                            videoPacketBuffer.append(copy)
+                        }
                         av_packet_free_safe(packet)
                         continue
+                    }
+
+                    // Replay buffered video packets (once, after AVPlayer starts)
+                    if !videoBufferingDone && !videoPacketBuffer.isEmpty {
+                        videoBufferingDone = true
+                        #if DEBUG
+                        print("[SteelPlayer] Atmos: replaying \(videoPacketBuffer.count) buffered video packets")
+                        #endif
+                        for buffered in videoPacketBuffer {
+                            if self.stopRequested { break }
+                            while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                                Thread.sleep(forTimeInterval: 0.005)
+                            }
+                            if self.usingSoftwareDecode {
+                                self.softwareDecoder.decode(packet: buffered)
+                            } else {
+                                self.videoDecoder.decode(packet: buffered)
+                            }
+                            av_packet_free_safe(buffered)
+                        }
+                        videoPacketBuffer.removeAll()
                     }
 
                     // Normal back-pressure + decode
@@ -731,43 +761,16 @@ public final class SteelPlayer: ObservableObject {
                     switch self.audioMode {
                     case .atmos:
                         if let engine = self.hlsAudioEngine {
-                            if !engine.isPlayerPlaying {
-                                // Phase 1: Buffer audio, skip video (handled above).
-                                engine.feedPacket(packet)
+                            // Always feed audio to HLS engine
+                            engine.feedPacket(packet)
 
-                                // After enough segments: pause demux, wait for AVPlayer,
-                                // then seek demuxer back to PTS 0 so video starts in sync.
-                                if engine.segmentCount >= 4 {
-                                    while !engine.isPlayerPlaying && !self.stopRequested {
-                                        Thread.sleep(forTimeInterval: 0.05)
-                                    }
-                                    if self.stopRequested { break }
-
-                                    // Seek demuxer back to start (or initial position).
-                                    // Video will decode from PTS 0, matching audio PTS 0.
-                                    let seekTarget = CMTimeGetSeconds(initialAudioTime)
-                                    self.demuxer.seek(to: seekTarget)
-
-                                    #if DEBUG
-                                    print("[SteelPlayer] Atmos: demuxer seeked back to \(String(format: "%.1f", seekTarget))s for A/V sync")
-                                    #endif
+                            // During initial buffering: pause after 4 segments,
+                            // wait for AVPlayer to start before continuing.
+                            // Video packets are buffered in RAM during this phase.
+                            if !engine.isPlayerPlaying && engine.segmentCount >= 4 {
+                                while !engine.isPlayerPlaying && !self.stopRequested {
+                                    Thread.sleep(forTimeInterval: 0.05)
                                 }
-                            } else {
-                                // Phase 2: Normal playback. Skip audio packets that
-                                // overlap with already-buffered segments (from before
-                                // the seek-back). Once past the buffered region, feed
-                                // new audio to create fresh segments.
-                                let pts = packet.pointee.pts
-                                if pts != Int64.min,
-                                   let aStream = self.demuxer.stream(at: self.activeAudioStreamIndex) {
-                                    let tbr = aStream.pointee.time_base
-                                    let ptsSeconds = Double(pts) * Double(tbr.num) / Double(tbr.den)
-                                    if ptsSeconds < engine.bufferedAudioTime - 0.5 {
-                                        // Already covered by existing segments — skip
-                                        break  // breaks out of switch, packet freed below
-                                    }
-                                }
-                                engine.feedPacket(packet)
                             }
                         }
 

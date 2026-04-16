@@ -57,12 +57,6 @@ final class HLSAudioEngine: @unchecked Sendable {
         return server?.segmentCount ?? 0
     }
 
-    /// Audio time covered so far in stream PTS space.
-    var bufferedAudioTime: Double {
-        bufferLock.lock()
-        defer { bufferLock.unlock() }
-        return streamOffset + Double(server?.segmentCount ?? 0) * segmentDuration
-    }
 
     // MARK: - Stream Offset
 
