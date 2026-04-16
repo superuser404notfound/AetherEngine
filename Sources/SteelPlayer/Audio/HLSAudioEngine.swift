@@ -50,6 +50,10 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     var onPlaybackFailed: (@Sendable () -> Void)?
 
+    /// Called right before the timebase starts — host should flush the
+    /// video renderer to clear frames accumulated during the paused period.
+    var onWillStartTimebase: (() -> Void)?
+
     // MARK: - Segment Buffering
 
     private let bufferLock = NSLock()
@@ -146,11 +150,14 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Start timebase immediately so video plays from the start.
-        // The three-thread architecture ensures audio flows independently.
+        // Start timebase PAUSED — no video frames shown until AVPlayer starts.
+        // The three-thread architecture ensures audio flows independently
+        // even though the video decode thread blocks on the paused display.
+        // When AVPlayer starts: flush video renderer (clear stale frames),
+        // then start timebase at player position → perfect sync.
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
-            CMTimebaseSetRate(tb, rate: 1.0)
+            CMTimebaseSetRate(tb, rate: 0)
         }
 
         #if DEBUG
@@ -404,14 +411,17 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            // Snap timebase to player position. audioDelayCompensation shifts
-            // video earlier (negative = video shows earlier content, matching
-            // audio that comes delayed through the HLS pipeline).
-            let snapTarget = playerStreamTime - audioDelayCompensation
-            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
+            // Flush video renderer to clear frames accumulated during pause.
+            // Without this, old frames cause a fast-forward effect.
+            onWillStartTimebase?()
+            // Start timebase at player's content position — both pipelines
+            // begin from the same point. No compensation needed because
+            // the timebase was paused (no early video frames shown).
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
+            CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Snap: \(String(format: "%.3f", tbTime))s → \(String(format: "%.3f", snapTarget))s (player=\(String(format: "%.3f", playerStreamTime))s, comp=\(audioDelayCompensation)s)")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s (flushed + synced)")
             #endif
             return
         }

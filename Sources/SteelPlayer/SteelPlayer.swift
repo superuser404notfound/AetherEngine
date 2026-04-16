@@ -301,6 +301,16 @@ public final class SteelPlayer: ObservableObject {
                                 self.fallbackToCompressedAudio(stream: s)
                             }
                         }
+                        engine.onWillStartTimebase = { [weak self] in
+                            guard let self else { return }
+                            // Flush video to clear frames from the paused period
+                            if self.usingSoftwareDecode {
+                                self.softwareDecoder.flush()
+                            } else {
+                                self.videoDecoder.flush()
+                            }
+                            self.videoRenderer.flush()
+                        }
                         try engine.prepare(stream: audioStream, startTime: initialAudioTime)
                         hlsAudioEngine = engine
                         audioMode = .atmos
@@ -523,6 +533,15 @@ public final class SteelPlayer: ObservableObject {
                               let s = self.demuxer.stream(at: streamIndex) else { return }
                         self.fallbackToCompressedAudio(stream: s)
                     }
+                }
+                engine.onWillStartTimebase = { [weak self] in
+                    guard let self else { return }
+                    if self.usingSoftwareDecode {
+                        self.softwareDecoder.flush()
+                    } else {
+                        self.videoDecoder.flush()
+                    }
+                    self.videoRenderer.flush()
                 }
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
