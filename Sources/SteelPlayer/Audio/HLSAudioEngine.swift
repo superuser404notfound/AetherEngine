@@ -427,11 +427,10 @@ final class HLSAudioEngine: @unchecked Sendable {
         }
         #endif
 
-        // Only snap forward — never pause the timebase.
-        if drift > 0.05 {
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
-            CMTimebaseSetTime(tb, time: corrected)
-        }
+        // No ongoing drift correction — the one-time snap (with audio
+        // output latency compensation) is sufficient. The CMTimebase and
+        // AVPlayer clocks run at identical rates (drift < 0.002s over 30s).
+        // Correcting drift would undo the deliberate latency compensation.
     }
 }
 
