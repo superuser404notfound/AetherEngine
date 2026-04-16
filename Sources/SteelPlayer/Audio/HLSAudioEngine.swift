@@ -398,10 +398,20 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            #if os(iOS) || os(tvOS)
+            let hwLatency = AVAudioSession.sharedInstance().outputLatency
+            #else
+            let hwLatency = 0.0
+            #endif
+            // Advance timebase to compensate for audio output latency.
+            // hwLatency = time between AVPlayer decode and actual speaker.
+            // The extra 0.226s is the measured CMTimebase-vs-AVPlayer offset.
+            let totalComp = hwLatency + 0.226
+            let snapTarget = playerStreamTime + totalComp
+            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             #if DEBUG
-            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
+            print("[HLSAudioEngine] Snap: tb \(String(format: "%.3f", tbTime)) → \(String(format: "%.3f", snapTarget)) (player=\(String(format: "%.3f", playerStreamTime)), hwLat=\(String(format: "%.3f", hwLatency)), comp=\(String(format: "%.3f", totalComp)))")
             #endif
             return
         }
