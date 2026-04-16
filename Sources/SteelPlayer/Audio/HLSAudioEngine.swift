@@ -140,11 +140,14 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Start timebase immediately at rate=1.0 so the display layer
-        // consumes video frames from the start. No deadlocks, no skipping.
+        // Start timebase PAUSED. Video frames accumulate in the display
+        // layer's buffer but are not shown. When AVPlayer starts, we set
+        // the timebase to the player's position and start both together.
+        // This is safe because the three-thread architecture ensures audio
+        // flows independently even when the video decode thread blocks.
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
-            CMTimebaseSetRate(tb, rate: 1.0)
+            CMTimebaseSetRate(tb, rate: 0)
         }
 
         #if DEBUG
@@ -398,22 +401,15 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            #if os(iOS) || os(tvOS)
-            let hwLatency = AVAudioSession.sharedInstance().outputLatency
-            #else
-            let hwLatency = 0.0
-            #endif
-            // DELAY video to match audio output latency.
-            // hwLatency = HDMI→speaker delay (reported by AVAudioSession).
-            // The 0.226s is the CMTimebase clock gain measured after each snap.
-            // Subtracting makes the timebase BEHIND the player, so video is
-            // shown later, matching when audio actually reaches the speaker.
-            let totalComp = hwLatency + 0.226
-            let snapTarget = playerStreamTime - totalComp
-            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
+            // Start the timebase at the player's position and rate=1.0.
+            // Since the timebase was paused (rate=0), NO video frames have
+            // been shown yet. Both video and audio start from the same
+            // content position → perfect sync from frame 1.
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
+            CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Snap: tb \(String(format: "%.3f", tbTime)) → \(String(format: "%.3f", snapTarget)) (player=\(String(format: "%.3f", playerStreamTime)), hwLat=\(String(format: "%.3f", hwLatency)), comp=\(String(format: "%.3f", totalComp)))")
+            print("[HLSAudioEngine] Timebase started: \(String(format: "%.3f", playerStreamTime))s, rate=\(_rate) (was paused at \(String(format: "%.3f", tbTime))s)")
             #endif
             return
         }
