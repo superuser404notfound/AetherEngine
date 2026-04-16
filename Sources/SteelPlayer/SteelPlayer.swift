@@ -717,21 +717,27 @@ public final class SteelPlayer: ObservableObject {
                         continue
                     }
 
-                    // After AVPlayer starts: short back-pressure timeout (10ms).
-                    // The display layer may hold frames while the timebase catches
-                    // up to the demux position. A short timeout prevents the demux
-                    // loop from blocking indefinitely, so audio packets keep flowing.
-                    if self.audioMode == .atmos {
-                        var waited = 0
-                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waited < 2 {
-                            Thread.sleep(forTimeInterval: 0.005)
-                            waited += 1
+                    // After AVPlayer starts: wait for timebase to catch up before
+                    // decoding. Each 4K P010 frame is ~24 MB — decoding frames the
+                    // display layer can't show yet causes OOM (2 GB limit on tvOS).
+                    // This blocks the demux loop but we have enough audio buffered.
+                    if self.audioMode == .atmos, let tb = self.hlsAudioEngine?.videoTimebase,
+                       let vStream = self.demuxer.stream(at: videoStreamIndex) {
+                        let pts = packet.pointee.pts
+                        if pts != Int64.min {
+                            let tbr = vStream.pointee.time_base
+                            let ptsSeconds = Double(pts) * Double(tbr.num) / Double(tbr.den)
+                            // Wait until this frame is within 1s of the timebase
+                            while ptsSeconds > CMTimeGetSeconds(CMTimebaseGetTime(tb)) + 1.0 && !self.stopRequested {
+                                Thread.sleep(forTimeInterval: 0.02)
+                            }
                         }
-                    } else {
-                        // Normal back-pressure: wait indefinitely
-                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                            Thread.sleep(forTimeInterval: 0.005)
-                        }
+                    }
+                    if self.stopRequested { av_packet_free_safe(packet); break }
+
+                    // Back-pressure: wait if display layer isn't ready
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                        Thread.sleep(forTimeInterval: 0.005)
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
@@ -751,7 +757,7 @@ public final class SteelPlayer: ObservableObject {
                         // the demux loop until AVPlayer starts playing. This limits
                         // readahead to ~6s so video doesn't get too far ahead.
                         if let engine = self.hlsAudioEngine, !engine.isPlayerPlaying {
-                            if engine.segmentCount >= 3 {
+                            if engine.segmentCount >= 4 {
                                 while !engine.isPlayerPlaying && !self.stopRequested {
                                     Thread.sleep(forTimeInterval: 0.05)
                                 }
