@@ -266,8 +266,23 @@ public final class SteelPlayer: ObservableObject {
 
                 if isEAC3, let audioURL = externalAudioURL {
                     // EAC3 + external URL → AVPlayer for Dolby Atmos passthrough.
-                    // AVPlayer is created now, but we wait for readyToPlay
-                    // before starting the demux loop (ensures A/V sync).
+                    #if DEBUG
+                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer")
+                    print("[SteelPlayer] Audio URL: \(audioURL.absoluteString.prefix(250))")
+
+                    // Diagnostic: check what the server actually returns
+                    do {
+                        var req = URLRequest(url: audioURL)
+                        req.httpMethod = "HEAD"
+                        let (_, resp) = try await URLSession.shared.data(for: req)
+                        if let http = resp as? HTTPURLResponse {
+                            print("[SteelPlayer] Audio URL probe: HTTP \(http.statusCode), type=\(http.value(forHTTPHeaderField: "Content-Type") ?? "nil"), length=\(http.value(forHTTPHeaderField: "Content-Length") ?? "nil")")
+                        }
+                    } catch {
+                        print("[SteelPlayer] Audio URL probe failed: \(error.localizedDescription)")
+                    }
+                    #endif
+
                     let item = AVPlayerItem(url: audioURL)
                     item.preferredForwardBufferDuration = 4.0
                     let avPlayer = AVPlayer(playerItem: item)
@@ -280,13 +295,7 @@ public final class SteelPlayer: ObservableObject {
                     // Video uses synchronizer (started when AVPlayer is ready)
                     audioOutput.attachVideoLayer(videoRenderer.displayLayer)
 
-                    #if DEBUG
-                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer")
-                    print("[SteelPlayer] Audio URL: \(audioURL.absoluteString.prefix(200))")
-                    #endif
-
                     // Wait for AVPlayer to buffer enough data before proceeding.
-                    // This ensures video and audio start at the same moment.
                     // If AVPlayer fails, fall back to compressed passthrough.
                     do {
                         try await waitForExternalAudioReady()
