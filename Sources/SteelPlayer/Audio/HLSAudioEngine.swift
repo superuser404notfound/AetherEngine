@@ -69,6 +69,14 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Duration of one segment in seconds.
     private var segmentDuration: Double = 2.048
 
+    /// Number of segments created so far. Used by the host to throttle
+    /// the demux loop during initial HLS buffering.
+    var segmentCount: Int {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return server?.segmentCount ?? 0
+    }
+
     // MARK: - Stored Config (set in prepare, used in feedPacket)
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3

@@ -710,20 +710,28 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // During HLS Atmos buffering: skip video entirely.
-                    // The demux loop must feed audio packets at full speed
-                    // to fill HLS segments before AVPlayer's buffer runs out.
-                    // Video decoding is too slow (50ms back-pressure × 24fps)
-                    // and would starve the audio pipeline. Video starts when
-                    // AVPlayer begins playing and the timebase starts.
+                    // During HLS Atmos buffering: skip video entirely so audio
+                    // packets flow at full speed to fill initial HLS segments.
                     if self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true {
                         av_packet_free_safe(packet)
                         continue
                     }
 
-                    // Normal back-pressure: wait if display layer isn't ready
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                        Thread.sleep(forTimeInterval: 0.005)
+                    // After AVPlayer starts: short back-pressure timeout (10ms).
+                    // The display layer may hold frames while the timebase catches
+                    // up to the demux position. A short timeout prevents the demux
+                    // loop from blocking indefinitely, so audio packets keep flowing.
+                    if self.audioMode == .atmos {
+                        var waited = 0
+                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waited < 2 {
+                            Thread.sleep(forTimeInterval: 0.005)
+                            waited += 1
+                        }
+                    } else {
+                        // Normal back-pressure: wait indefinitely
+                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                            Thread.sleep(forTimeInterval: 0.005)
+                        }
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
@@ -738,6 +746,17 @@ public final class SteelPlayer: ObservableObject {
                         // Feed raw EAC3 packets to HLS engine — it buffers,
                         // creates fMP4 segments, and feeds AVPlayer via HTTP.
                         self.hlsAudioEngine?.feedPacket(packet)
+
+                        // Throttle: once we have enough initial segments, pause
+                        // the demux loop until AVPlayer starts playing. This limits
+                        // readahead to ~6s so video doesn't get too far ahead.
+                        if let engine = self.hlsAudioEngine, !engine.isPlayerPlaying {
+                            if engine.segmentCount >= 3 {
+                                while !engine.isPlayerPlaying && !self.stopRequested {
+                                    Thread.sleep(forTimeInterval: 0.05)
+                                }
+                            }
+                        }
 
                     case .compressed:
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
