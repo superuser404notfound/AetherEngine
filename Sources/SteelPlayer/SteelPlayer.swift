@@ -281,12 +281,27 @@ public final class SteelPlayer: ObservableObject {
                     audioOutput.attachVideoLayer(videoRenderer.displayLayer)
 
                     #if DEBUG
-                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer (\(audioURL.lastPathComponent))")
+                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer")
+                    print("[SteelPlayer] Audio URL: \(audioURL.absoluteString.prefix(200))")
                     #endif
 
                     // Wait for AVPlayer to buffer enough data before proceeding.
                     // This ensures video and audio start at the same moment.
-                    try await waitForExternalAudioReady()
+                    // If AVPlayer fails, fall back to compressed passthrough.
+                    do {
+                        try await waitForExternalAudioReady()
+                    } catch {
+                        #if DEBUG
+                        print("[SteelPlayer] AVPlayer failed — falling back to compressed passthrough")
+                        #endif
+                        stopExternalAudioPlayer()
+                        audioMode = .pcm
+                        // Try compressed feeder as fallback
+                        if let stream = audioStream.pointee.codecpar {
+                            try? compressedAudioFeeder.open(stream: audioStream)
+                            audioMode = .compressed
+                        }
+                    }
 
                 } else if isEAC3 || isAC3 {
                     // AC3/EAC3 without external URL → compressed passthrough
@@ -564,6 +579,12 @@ public final class SteelPlayer: ObservableObject {
                 } else if item.status == .failed {
                     #if DEBUG
                     print("[SteelPlayer] External AVPlayer failed: \(item.error?.localizedDescription ?? "?")")
+                    if let e = item.error as NSError? {
+                        print("[SteelPlayer]   domain=\(e.domain) code=\(e.code)")
+                        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
+                            print("[SteelPlayer]   underlying: \(u.domain) code=\(u.code)")
+                        }
+                    }
                     #endif
                     continuation.resume(throwing: item.error ?? SteelPlayerError.noAudioStream)
                 }
