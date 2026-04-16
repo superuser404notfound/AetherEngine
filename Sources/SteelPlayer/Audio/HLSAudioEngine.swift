@@ -74,6 +74,8 @@ final class HLSAudioEngine: @unchecked Sendable {
     // MARK: - Stream Offset
 
     /// Offset between AVPlayer's 0-based timeline and the stream's PTS.
+    /// Set to the actual first audio packet PTS (not the seek target) for
+    /// precise sync after seek.
     private var streamOffset: Double = 0
 
     /// Whether the initial timebase snap has been performed.
@@ -306,6 +308,23 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     func restartAfterSeek(stream: UnsafeMutablePointer<AVStream>, seekTime: CMTime) throws {
         try prepare(stream: stream, startTime: seekTime)
+    }
+
+    /// Update streamOffset to the actual first audio packet PTS after seek.
+    /// Called from the demux loop when the first non-skipped audio packet
+    /// arrives. This corrects the offset from the seek target to the real
+    /// audio position, fixing A/V sync after seek.
+    func updateStreamOffset(_ actualPTSSeconds: Double) {
+        let old = streamOffset
+        streamOffset = actualPTSSeconds
+        // Also update the timebase position to match (still paused at this point)
+        if let tb = videoTimebase {
+            let newTime = CMTimeMakeWithSeconds(actualPTSSeconds, preferredTimescale: 90000)
+            CMTimebaseSetTime(tb, time: newTime)
+        }
+        #if DEBUG
+        print("[HLSAudioEngine] streamOffset corrected: \(String(format: "%.3f", old)) → \(String(format: "%.3f", actualPTSSeconds))s (Δ\(String(format: "%.3f", old - actualPTSSeconds))s)")
+        #endif
     }
 
     // MARK: - AVPlayer Creation

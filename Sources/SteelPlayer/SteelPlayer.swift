@@ -89,6 +89,10 @@ public final class SteelPlayer: ObservableObject {
     private let atmosAudioLock = NSLock()
     nonisolated(unsafe) private var atmosAudioBuffer: [Data] = []
     nonisolated(unsafe) private var atmosAudioDrainActive = false
+    /// PTS threshold (seconds) for skipping audio packets before seek target.
+    /// After seek, demuxer starts at the keyframe BEFORE the target. Video uses
+    /// skipThreshold to drop pre-target frames; this does the same for audio.
+    nonisolated(unsafe) private var atmosAudioSkipPTS: Double = -1
 
     /// Separate queue for video decoding in Atmos mode.
     /// Decouples video back-pressure from the demux thread so audio
@@ -271,6 +275,7 @@ public final class SteelPlayer: ObservableObject {
                     softwareDecoder.skipUntilPTS = seekTime
                 }
                 initialAudioTime = seekTime
+                atmosAudioSkipPTS = start
             }
 
             // 2c. Find the audio stream and configure the appropriate audio engine
@@ -464,6 +469,7 @@ public final class SteelPlayer: ObservableObject {
 
         // Restart audio at the seek position
         if audioMode == .atmos {
+            atmosAudioSkipPTS = target
             // Restart HLS engine with new timestamps — feedPacket() will
             // buffer new segments and recreate AVPlayer automatically.
             if let audioStream = demuxer.stream(at: activeAudioStreamIndex) {
@@ -520,6 +526,7 @@ public final class SteelPlayer: ObservableObject {
         if usingSoftwareDecode {
             softwareDecoder.skipUntilPTS = seekTime
         }
+        atmosAudioSkipPTS = seekSeconds
 
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
@@ -894,6 +901,26 @@ public final class SteelPlayer: ObservableObject {
                         // This decouples audio from video back-pressure so
                         // segments are created even when video decode blocks.
                         if packet.pointee.size > 0, let data = packet.pointee.data {
+                            // Skip audio packets before seek target (same as
+                            // video skipThreshold). After seek, the demuxer
+                            // starts at the keyframe BEFORE the target. Without
+                            // this filter, streamOffset overestimates the audio
+                            // position → video appears ahead of audio.
+                            let skipPTS = self.atmosAudioSkipPTS
+                            if skipPTS > 0 {
+                                let audioStream = self.demuxer.stream(at: self.activeAudioStreamIndex)
+                                let tb = audioStream?.pointee.time_base ?? AVRational(num: 1, den: 90000)
+                                let ptsSeconds = Double(packet.pointee.pts) * Double(tb.num) / Double(tb.den)
+                                if ptsSeconds < skipPTS - 0.01 {
+                                    // Drop pre-seek audio packet
+                                    break
+                                }
+                                // First packet at/after target — update streamOffset
+                                // to the actual audio PTS for precise sync
+                                self.atmosAudioSkipPTS = -1
+                                self.hlsAudioEngine?.updateStreamOffset(ptsSeconds)
+                            }
+
                             let packetData = Data(bytes: data, count: Int(packet.pointee.size))
                             self.atmosAudioLock.lock()
                             self.atmosAudioBuffer.append(packetData)
