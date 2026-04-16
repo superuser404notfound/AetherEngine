@@ -196,10 +196,9 @@ final class HLSAudioEngine: @unchecked Sendable {
             print("[HLSAudioEngine] Segment \(count - 1) created (\(segment.count) bytes)")
             #endif
 
-            // Wait for 3 segments (~6s) before creating AVPlayer.
-            // With only 1 segment, AVPlayer stalls immediately (PlaybackStalled)
-            // and never properly recovers. 3 segments give enough initial buffer.
-            if !isPlayerCreated && (server?.segmentCount ?? 0) >= 3 {
+            // Create AVPlayer after first segment. automaticallyWaitsToMinimizeStalling
+            // handles buffering — AVPlayer waits until it has enough data before playing.
+            if !isPlayerCreated {
                 isPlayerCreated = true
                 bufferLock.unlock()
                 createPlayer()
@@ -294,9 +293,14 @@ final class HLSAudioEngine: @unchecked Sendable {
                 guard let self else { return }
                 self.player?.play()
                 self.setPlayerPlaying(true)
+                // Timebase has been running since prepare() — don't touch it.
+                // Audio will start ~2-3s behind video. Both run at 1x.
+                // This offset is acceptable for now and avoids the
+                // pause/resume cycle that starved audio segments.
                 #if DEBUG
                 let tbTime = self.videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
-                print("[HLSAudioEngine] PlayerItem ready -> play() (timebase at \(String(format: "%.1f", tbTime))s)")
+                let offset = tbTime - self.streamOffset
+                print("[HLSAudioEngine] PlayerItem ready -> play() (video \(String(format: "%.1f", offset))s ahead)")
                 #endif
             } else if item.status == .failed {
                 #if DEBUG
@@ -367,9 +371,8 @@ final class HLSAudioEngine: @unchecked Sendable {
         let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
         let drift = playerStreamTime - tbTime  // positive = tb behind, negative = tb ahead
 
-        // Periodic status log every ~2 seconds
-        syncLogCounter += 1
         #if DEBUG
+        syncLogCounter += 1
         if syncLogCounter % 20 == 0 {
             let status: String
             switch player.timeControlStatus {
@@ -379,39 +382,18 @@ final class HLSAudioEngine: @unchecked Sendable {
             @unknown default: status = "unknown"
             }
             let rate = player.rate
-            let itemStatus = playerItem?.status.rawValue ?? -1
-            let errorLog = playerItem?.errorLog()?.events.last
-            let errInfo = errorLog.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
-            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", CMTimeGetSeconds(playerTime)))s status=\(status) rate=\(rate) itemStatus=\(itemStatus) drift=\(String(format: "%+.2f", drift))s \(errInfo)")
+            let errInfo = playerItem?.errorLog()?.events.last.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
+            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", CMTimeGetSeconds(playerTime)))s status=\(status) rate=\(rate) drift=\(String(format: "%+.2f", drift))s \(errInfo)")
         }
         #endif
 
+        // ONLY snap forward — never pause the timebase.
+        // Pausing the timebase blocks the display layer, which blocks
+        // the demux loop, which starves audio segment creation.
+        // A small negative drift (video ahead of audio) is acceptable.
         if drift > 0.05 {
-            // Timebase fell behind player → snap forward, ensure playing
             let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
-            if CMTimebaseGetRate(tb) == 0 {
-                CMTimebaseSetRate(tb, rate: Float64(_rate))
-                #if DEBUG
-                print("[HLSAudioEngine] Video resumed at \(String(format: "%.1f", playerStreamTime))s")
-                #endif
-            }
-        } else if drift < -0.2 {
-            // Timebase ahead of player → pause video, let audio catch up
-            if CMTimebaseGetRate(tb) != 0 {
-                CMTimebaseSetRate(tb, rate: 0)
-                #if DEBUG
-                print("[HLSAudioEngine] Video paused (ahead by \(String(format: "%.1f", -drift))s, waiting for audio)")
-                #endif
-            }
-        } else if abs(drift) <= 0.2 && CMTimebaseGetRate(tb) == 0 {
-            // Within sync threshold and currently paused → resume
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
-            CMTimebaseSetTime(tb, time: corrected)
-            CMTimebaseSetRate(tb, rate: Float64(_rate))
-            #if DEBUG
-            print("[HLSAudioEngine] Video synced and resumed at \(String(format: "%.1f", playerStreamTime))s")
-            #endif
         }
     }
 }
