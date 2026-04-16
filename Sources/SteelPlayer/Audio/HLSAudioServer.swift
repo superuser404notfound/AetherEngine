@@ -147,13 +147,14 @@ final class HLSAudioServer: @unchecked Sendable {
         var m3u8 = "#EXTM3U\n"
         m3u8 += "#EXT-X-TARGETDURATION:\(targetDuration)\n"
         m3u8 += "#EXT-X-VERSION:7\n"
+        m3u8 += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
         m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
         m3u8 += "#EXT-X-MAP:URI=\"init.mp4\"\n"
         for i in 0..<count {
             m3u8 += "#EXTINF:\(String(format: "%.3f", duration)),\n"
             m3u8 += "seg\(i).mp4\n"
         }
-        // No #EXT-X-ENDLIST — stream continues
+        // No #EXT-X-ENDLIST — stream continues (EVENT = all segs available, start from beginning)
 
         #if DEBUG
         print("[HLSAudioServer] Playlist: \(count) segments")
