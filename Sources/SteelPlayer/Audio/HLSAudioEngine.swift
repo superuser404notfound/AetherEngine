@@ -67,7 +67,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     private let framesPerSegment = 64
 
     /// Duration of one segment in seconds.
-    private var segmentDuration: Double = 2.048
+    private(set) var segmentDuration: Double = 2.048
 
     /// Number of segments created so far. Used by the host to throttle
     /// the demux loop during initial HLS buffering.

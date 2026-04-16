@@ -710,32 +710,33 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // During HLS Atmos buffering: skip video entirely so audio
-                    // packets flow at full speed to fill initial HLS segments.
-                    if self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true {
-                        av_packet_free_safe(packet)
-                        continue
-                    }
+                    if self.audioMode == .atmos {
+                        // Phase 1: Initial HLS buffering — skip video entirely
+                        guard self.hlsAudioEngine?.isPlayerPlaying == true else {
+                            av_packet_free_safe(packet)
+                            continue
+                        }
 
-                    // After AVPlayer starts: wait for timebase to catch up before
-                    // decoding. Each 4K P010 frame is ~24 MB — decoding frames the
-                    // display layer can't show yet causes OOM (2 GB limit on tvOS).
-                    // This blocks the demux loop but we have enough audio buffered.
-                    if self.audioMode == .atmos, let tb = self.hlsAudioEngine?.videoTimebase,
-                       let vStream = self.demuxer.stream(at: videoStreamIndex) {
-                        let pts = packet.pointee.pts
-                        if pts != Int64.min {
-                            let tbr = vStream.pointee.time_base
-                            let ptsSeconds = Double(pts) * Double(tbr.num) / Double(tbr.den)
-                            // Wait until this frame is within 1s of the timebase
-                            while ptsSeconds > CMTimeGetSeconds(CMTimebaseGetTime(tb)) + 1.0 && !self.stopRequested {
-                                Thread.sleep(forTimeInterval: 0.02)
+                        // Phase 2: Skip video frames too far ahead of timebase.
+                        // Don't wait/block — that would starve audio. Just drop
+                        // the frame and keep reading. Audio throttle (below)
+                        // prevents the demux from racing ahead unboundedly.
+                        if let tb = self.hlsAudioEngine?.videoTimebase,
+                           let vStream = self.demuxer.stream(at: videoStreamIndex) {
+                            let pts = packet.pointee.pts
+                            if pts != Int64.min {
+                                let tbr = vStream.pointee.time_base
+                                let ptsSeconds = Double(pts) * Double(tbr.num) / Double(tbr.den)
+                                let tbSeconds = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+                                if ptsSeconds > tbSeconds + 1.0 {
+                                    av_packet_free_safe(packet)
+                                    continue
+                                }
                             }
                         }
                     }
-                    if self.stopRequested { av_packet_free_safe(packet); break }
 
-                    // Back-pressure: wait if display layer isn't ready
+                    // Phase 3 (Atmos) / Normal path: back-pressure + decode
                     while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
                         Thread.sleep(forTimeInterval: 0.005)
                     }
@@ -753,13 +754,22 @@ public final class SteelPlayer: ObservableObject {
                         // creates fMP4 segments, and feeds AVPlayer via HTTP.
                         self.hlsAudioEngine?.feedPacket(packet)
 
-                        // Throttle: once we have enough initial segments, pause
-                        // the demux loop until AVPlayer starts playing. This limits
-                        // readahead to ~6s so video doesn't get too far ahead.
-                        if let engine = self.hlsAudioEngine, !engine.isPlayerPlaying {
-                            if engine.segmentCount >= 4 {
-                                while !engine.isPlayerPlaying && !self.stopRequested {
-                                    Thread.sleep(forTimeInterval: 0.05)
+                        if let engine = self.hlsAudioEngine {
+                            if !engine.isPlayerPlaying {
+                                // Phase 1: Initial buffering — pause after 4 segments
+                                if engine.segmentCount >= 4 {
+                                    while !engine.isPlayerPlaying && !self.stopRequested {
+                                        Thread.sleep(forTimeInterval: 0.05)
+                                    }
+                                }
+                            } else {
+                                // Phase 2: Throttle readahead while video catches up.
+                                // Limit audio buffer to ~10s ahead of player position
+                                // so the demux doesn't outrun the timebase.
+                                let playerTime = engine.currentTimeSeconds
+                                let bufferedTime = Double(engine.segmentCount) * engine.segmentDuration
+                                if bufferedTime - playerTime > 10.0 {
+                                    Thread.sleep(forTimeInterval: 0.1)
                                 }
                             }
                         }
