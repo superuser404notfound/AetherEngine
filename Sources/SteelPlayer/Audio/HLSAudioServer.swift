@@ -159,6 +159,10 @@ final class HLSAudioServer: @unchecked Sendable {
         }
         // No #EXT-X-ENDLIST — stream continues
 
+        #if DEBUG
+        print("[HLSAudioServer] Playlist: seq=\(startIndex) segments=\(startIndex)..\(count-1) (window=\(count - startIndex))")
+        #endif
+
         respondData(connection, data: Data(m3u8.utf8), contentType: "application/vnd.apple.mpegurl")
     }
 

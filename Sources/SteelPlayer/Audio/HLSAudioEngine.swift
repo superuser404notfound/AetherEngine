@@ -298,9 +298,36 @@ final class HLSAudioEngine: @unchecked Sendable {
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
+                if let log = item.errorLog() {
+                    for event in log.events {
+                        print("[HLSAudioEngine]   errorLog: domain=\(event.errorDomain) code=\(event.errorStatusCode) comment=\(event.errorComment ?? "nil")")
+                    }
+                }
                 #endif
                 failureCallback?()
             }
+        }
+
+        // Notification for playback failure
+        NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item, queue: .main
+        ) { [weak self] notification in
+            #if DEBUG
+            let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
+            print("[HLSAudioEngine] FailedToPlayToEndTime: \(error?.localizedDescription ?? "unknown")")
+            #endif
+            failureCallback?()
+        }
+
+        // Notification for playback stall
+        NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemPlaybackStalled,
+            object: item, queue: .main
+        ) { _ in
+            #if DEBUG
+            print("[HLSAudioEngine] PlaybackStalled!")
+            #endif
         }
 
         setupTimeSync()
@@ -326,6 +353,8 @@ final class HLSAudioEngine: @unchecked Sendable {
         timeObserver = nil
     }
 
+    private var syncLogCounter = 0
+
     private func syncTimebase() {
         guard let tb = videoTimebase, let player else { return }
         let playerTime = player.currentTime()
@@ -334,6 +363,25 @@ final class HLSAudioEngine: @unchecked Sendable {
         let playerStreamTime = CMTimeGetSeconds(playerTime) + streamOffset
         let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
         let drift = playerStreamTime - tbTime  // positive = tb behind, negative = tb ahead
+
+        // Periodic status log every ~2 seconds
+        syncLogCounter += 1
+        #if DEBUG
+        if syncLogCounter % 20 == 0 {
+            let status: String
+            switch player.timeControlStatus {
+            case .paused: status = "paused"
+            case .playing: status = "playing"
+            case .waitingToPlayAtSpecifiedRate: status = "waiting(\(player.reasonForWaitingToPlay?.rawValue ?? "?"))"
+            @unknown default: status = "unknown"
+            }
+            let rate = player.rate
+            let itemStatus = playerItem?.status.rawValue ?? -1
+            let errorLog = playerItem?.errorLog()?.events.last
+            let errInfo = errorLog.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
+            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", CMTimeGetSeconds(playerTime)))s status=\(status) rate=\(rate) itemStatus=\(itemStatus) drift=\(String(format: "%+.2f", drift))s \(errInfo)")
+        }
+        #endif
 
         if drift > 0.05 {
             // Timebase fell behind player → snap forward, ensure playing
