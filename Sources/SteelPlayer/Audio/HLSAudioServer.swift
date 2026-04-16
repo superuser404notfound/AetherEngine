@@ -139,28 +139,24 @@ final class HLSAudioServer: @unchecked Sendable {
         let duration = segDuration
         lock.unlock()
 
-        // Sliding window: only advertise the last 5 segments.
-        // As new segments are added, MEDIA-SEQUENCE increments and old
-        // segments drop off. AVPlayer sees a changing playlist on each
-        // poll, preventing stale-stream detection.
-        let windowSize = 5
-        let startIndex = max(0, count - windowSize)
+        // List all segments. With the three-thread architecture, segments
+        // are created faster than AVPlayer consumes them. A sliding window
+        // would remove segments before AVPlayer can fetch them.
         let targetDuration = Int(ceil(duration))
 
         var m3u8 = "#EXTM3U\n"
         m3u8 += "#EXT-X-TARGETDURATION:\(targetDuration)\n"
         m3u8 += "#EXT-X-VERSION:7\n"
-        // No #EXT-X-PLAYLIST-TYPE — plain live playlist
-        m3u8 += "#EXT-X-MEDIA-SEQUENCE:\(startIndex)\n"
+        m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
         m3u8 += "#EXT-X-MAP:URI=\"init.mp4\"\n"
-        for i in startIndex..<count {
+        for i in 0..<count {
             m3u8 += "#EXTINF:\(String(format: "%.3f", duration)),\n"
             m3u8 += "seg\(i).mp4\n"
         }
         // No #EXT-X-ENDLIST — stream continues
 
         #if DEBUG
-        print("[HLSAudioServer] Playlist: seq=\(startIndex) segments=\(startIndex)..\(count-1) (window=\(count - startIndex))")
+        print("[HLSAudioServer] Playlist: \(count) segments")
         #endif
 
         respondData(connection, data: Data(m3u8.utf8), contentType: "application/vnd.apple.mpegurl")
