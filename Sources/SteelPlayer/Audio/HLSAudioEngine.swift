@@ -403,11 +403,13 @@ final class HLSAudioEngine: @unchecked Sendable {
             #else
             let hwLatency = 0.0
             #endif
-            // Advance timebase to compensate for audio output latency.
-            // hwLatency = time between AVPlayer decode and actual speaker.
-            // The extra 0.226s is the measured CMTimebase-vs-AVPlayer offset.
+            // DELAY video to match audio output latency.
+            // hwLatency = HDMI→speaker delay (reported by AVAudioSession).
+            // The 0.226s is the CMTimebase clock gain measured after each snap.
+            // Subtracting makes the timebase BEHIND the player, so video is
+            // shown later, matching when audio actually reaches the speaker.
             let totalComp = hwLatency + 0.226
-            let snapTarget = playerStreamTime + totalComp
+            let snapTarget = playerStreamTime - totalComp
             let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             #if DEBUG
