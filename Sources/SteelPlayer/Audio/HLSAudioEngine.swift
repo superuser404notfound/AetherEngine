@@ -196,7 +196,10 @@ final class HLSAudioEngine: @unchecked Sendable {
             print("[HLSAudioEngine] Segment \(count - 1) created (\(segment.count) bytes)")
             #endif
 
-            if !isPlayerCreated {
+            // Wait for 3 segments (~6s) before creating AVPlayer.
+            // With only 1 segment, AVPlayer stalls immediately (PlaybackStalled)
+            // and never properly recovers. 3 segments give enough initial buffer.
+            if !isPlayerCreated && (server?.segmentCount ?? 0) >= 3 {
                 isPlayerCreated = true
                 bufferLock.unlock()
                 createPlayer()
@@ -281,7 +284,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         item.preferredForwardBufferDuration = 4.0
 
         let p = AVPlayer(playerItem: item)
-        p.automaticallyWaitsToMinimizeStalling = false
+        p.automaticallyWaitsToMinimizeStalling = true
         self.playerItem = item
         self.player = p
 
