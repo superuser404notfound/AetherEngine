@@ -209,6 +209,19 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         frameBuffer.append(packetData)
 
+        // Throttle: don't create more than 6 segments before AVPlayer starts.
+        // Without this, the audio drain creates 20+ segments by the time
+        // AVPlayer polls the playlist, causing it to start from the live edge
+        // (seg16+) instead of seg0 → massive A/V content offset.
+        if !isPlayerPlaying && (server?.segmentCount ?? 0) >= 6 && isPlayerCreated {
+            bufferLock.unlock()
+            // Wait for AVPlayer to start before creating more segments
+            while !isPlayerPlaying {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            bufferLock.lock()
+        }
+
         if frameBuffer.count >= framesPerSegment, let m = muxer {
             let frames = Array(frameBuffer.prefix(framesPerSegment))
             frameBuffer.removeFirst(framesPerSegment)

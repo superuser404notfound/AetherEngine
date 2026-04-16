@@ -157,7 +157,6 @@ final class HLSAudioServer: @unchecked Sendable {
         m3u8 += "#EXT-X-TARGETDURATION:\(targetDuration)\n"
         m3u8 += "#EXT-X-VERSION:7\n"
         m3u8 += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
-        m3u8 += "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES\n"
         m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
         m3u8 += "#EXT-X-MAP:URI=\"init.mp4\"\n"
         for i in 0..<count {
