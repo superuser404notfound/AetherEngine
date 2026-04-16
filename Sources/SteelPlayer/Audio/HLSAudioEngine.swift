@@ -51,8 +51,8 @@ final class HLSAudioEngine: @unchecked Sendable {
     var onPlaybackFailed: (@Sendable () -> Void)?
 
     /// Called right before the timebase starts — host should flush the
-    /// video renderer to clear frames accumulated during the paused period.
-    var onWillStartTimebase: (() -> Void)?
+    /// video renderer and re-set the skip threshold to the given PTS.
+    var onWillStartTimebase: ((_ skipToPTS: CMTime) -> Void)?
 
     // MARK: - Segment Buffering
 
@@ -425,8 +425,11 @@ final class HLSAudioEngine: @unchecked Sendable {
                 measuredLatency = max(0, wallElapsed - playerSeconds)
             }
 
-            // Flush video renderer to clear frames accumulated during pause
-            onWillStartTimebase?()
+            // Flush video renderer and re-set skip threshold to our start PTS.
+            // Without this, frames from before the seek target (keyframe offset)
+            // would be shown, causing a fast-forward effect and desync.
+            let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            onWillStartTimebase?(startPTS)
 
             // Start timebase behind playerStreamTime by the measured latency.
             // This delays video to match when audio actually reaches the speaker.

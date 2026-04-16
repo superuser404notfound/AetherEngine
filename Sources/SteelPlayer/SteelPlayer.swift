@@ -301,15 +301,16 @@ public final class SteelPlayer: ObservableObject {
                                 self.fallbackToCompressedAudio(stream: s)
                             }
                         }
-                        engine.onWillStartTimebase = { [weak self] in
+                        engine.onWillStartTimebase = { [weak self] skipPTS in
                             guard let self else { return }
-                            // Flush video to clear frames from the paused period
                             if self.usingSoftwareDecode {
                                 self.softwareDecoder.flush()
+                                self.softwareDecoder.skipUntilPTS = skipPTS
                             } else {
                                 self.videoDecoder.flush()
                             }
                             self.videoRenderer.flush()
+                            self.videoRenderer.setSkipThreshold(skipPTS)
                         }
                         try engine.prepare(stream: audioStream, startTime: initialAudioTime)
                         hlsAudioEngine = engine
@@ -534,14 +535,16 @@ public final class SteelPlayer: ObservableObject {
                         self.fallbackToCompressedAudio(stream: s)
                     }
                 }
-                engine.onWillStartTimebase = { [weak self] in
+                engine.onWillStartTimebase = { [weak self] skipPTS in
                     guard let self else { return }
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.flush()
+                        self.softwareDecoder.skipUntilPTS = skipPTS
                     } else {
                         self.videoDecoder.flush()
                     }
                     self.videoRenderer.flush()
+                    self.videoRenderer.setSkipThreshold(skipPTS)
                 }
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
