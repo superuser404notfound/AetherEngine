@@ -74,24 +74,15 @@ public final class SteelPlayer: ObservableObject {
     private let audioOutput = AudioOutput()
     nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
 
-    /// Compressed audio feeder for AC3 — feeds raw compressed frames
-    /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode).
+    /// Compressed audio feeder for AC3/EAC3 — feeds raw compressed frames
+    /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode, saves CPU).
+    /// Note: Atmos (JOC) metadata is NOT preserved — renderer outputs PCM 5.1/7.1.
+    /// Atmos passthrough requires AVPlayer (future feature, separate branch).
     private let compressedAudioFeeder = CompressedAudioFeeder()
 
     /// Audio routing: which engine handles the current audio track.
-    enum AudioMode { case pcm, compressed, externalAVPlayer }
+    enum AudioMode { case pcm, compressed }
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
-
-    /// External audio URL for AVPlayer-based playback (Dolby Atmos passthrough).
-    /// Set by the host app BEFORE calling load(). When set and the default audio
-    /// track is EAC3, SteelPlayer creates an AVPlayer for audio while handling
-    /// video through its own pipeline. AVPlayer wraps EAC3+JOC as Dolby MAT 2.0.
-    public var externalAudioURL: URL?
-
-    /// AVPlayer instance for external audio playback.
-    private var externalAudioPlayer: AVPlayer?
-    private var externalAudioItem: AVPlayerItem?
-    private var externalAudioObservation: NSKeyValueObservation?
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
@@ -264,63 +255,15 @@ public final class SteelPlayer: ObservableObject {
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                if isEAC3, let audioURL = externalAudioURL {
-                    // EAC3 + external URL → AVPlayer for Dolby Atmos passthrough.
-                    #if DEBUG
-                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer")
-                    print("[SteelPlayer] Audio URL: \(audioURL.absoluteString.prefix(250))")
-
-                    // Diagnostic: check what the server actually returns
-                    do {
-                        var req = URLRequest(url: audioURL)
-                        req.httpMethod = "HEAD"
-                        let (_, resp) = try await URLSession.shared.data(for: req)
-                        if let http = resp as? HTTPURLResponse {
-                            print("[SteelPlayer] Audio URL probe: HTTP \(http.statusCode), type=\(http.value(forHTTPHeaderField: "Content-Type") ?? "nil"), length=\(http.value(forHTTPHeaderField: "Content-Length") ?? "nil")")
-                        }
-                    } catch {
-                        print("[SteelPlayer] Audio URL probe failed: \(error.localizedDescription)")
-                    }
-                    #endif
-
-                    let item = AVPlayerItem(url: audioURL)
-                    item.preferredForwardBufferDuration = 4.0
-                    let avPlayer = AVPlayer(playerItem: item)
-                    avPlayer.automaticallyWaitsToMinimizeStalling = false
-                    externalAudioPlayer = avPlayer
-                    externalAudioItem = item
-                    audioMode = .externalAVPlayer
-                    audioAvailable = true
-
-                    // Video uses synchronizer (started when AVPlayer is ready)
-                    audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-
-                    // Wait for AVPlayer to buffer enough data before proceeding.
-                    // If AVPlayer fails, fall back to compressed passthrough.
-                    do {
-                        try await waitForExternalAudioReady()
-                    } catch {
-                        #if DEBUG
-                        print("[SteelPlayer] AVPlayer failed — falling back to compressed passthrough")
-                        #endif
-                        stopExternalAudioPlayer()
-                        audioMode = .pcm
-                        // Try compressed feeder as fallback
-                        if let stream = audioStream.pointee.codecpar {
-                            try? compressedAudioFeeder.open(stream: audioStream)
-                            audioMode = .compressed
-                        }
-                    }
-
-                } else if isEAC3 || isAC3 {
-                    // AC3/EAC3 without external URL → compressed passthrough
+                if isEAC3 || isAC3 {
+                    // AC3/EAC3 → compressed passthrough (no FFmpeg decode, saves CPU)
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        print("[SteelPlayer] Audio: \(isEAC3 ? "EAC3" : "AC3") → compressed passthrough")
+                        print("[SteelPlayer] Audio: \(isEAC3 ? "EAC3" : "AC3") → compressed passthrough (\(channelCount)ch)")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -373,18 +316,7 @@ public final class SteelPlayer: ObservableObject {
                 // Instead, pass the time to the demux loop.
             }
 
-            // 5. Start external AVPlayer (if active) at the correct position
-            if audioMode == .externalAVPlayer, let avPlayer = externalAudioPlayer {
-                if CMTimeGetSeconds(initialAudioTime) > 0 {
-                    await avPlayer.seek(to: initialAudioTime, toleranceBefore: .zero, toleranceAfter: .zero)
-                }
-                avPlayer.play()
-                // Start the synchronizer so video frames are presented
-                // in sync with AVPlayer (both start from the same time).
-                audioOutput.start(at: initialAudioTime)
-            }
-
-            // 6. Start the demux→decode loop and time updates
+            // 5. Start the demux→decode loop and time updates
             isPlaying = true
             state = .playing
             startTimeUpdates()
@@ -403,7 +335,6 @@ public final class SteelPlayer: ObservableObject {
         guard state == .paused else { return }
         isPlaying = true
         audioOutput.resume()
-        externalAudioPlayer?.play()
         state = .playing
     }
 
@@ -411,7 +342,6 @@ public final class SteelPlayer: ObservableObject {
         guard state == .playing else { return }
         isPlaying = false
         audioOutput.pause()
-        externalAudioPlayer?.pause()
         state = .paused
     }
 
@@ -440,16 +370,12 @@ public final class SteelPlayer: ObservableObject {
         }
         videoRenderer.flush()
 
-        switch audioMode {
-        case .externalAVPlayer:
-            externalAudioPlayer?.pause()
-        case .compressed:
+        if audioMode == .compressed {
             compressedAudioFeeder.flush()
-            audioOutput.flush()
-        case .pcm:
+        } else {
             audioDecoder.flush()
-            audioOutput.flush()
         }
+        audioOutput.flush()
 
         // Seek the demuxer
         demuxer.seek(to: target)
@@ -462,15 +388,8 @@ public final class SteelPlayer: ObservableObject {
             softwareDecoder.skipUntilPTS = seekTime
         }
 
-        // Restart audio at the seek position
-        if audioMode == .externalAVPlayer, let avPlayer = externalAudioPlayer {
-            // Seek AVPlayer, wait for completion, then start both
-            await avPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-            audioOutput.start(at: seekTime)
-            avPlayer.play()
-        } else {
-            audioOutput.start(at: seekTime)
-        }
+        // Restart the audio clock at the seek position
+        audioOutput.start(at: seekTime)
 
         // Resume playing from new position
         isPlaying = true
@@ -496,13 +415,10 @@ public final class SteelPlayer: ObservableObject {
         let codecId = stream.pointee.codecpar?.pointee.codec_id
 
         // Tear down current audio engine
-        switch audioMode {
-        case .externalAVPlayer:
-            stopExternalAudioPlayer()
-        case .compressed:
+        if audioMode == .compressed {
             compressedAudioFeeder.flush()
             compressedAudioFeeder.close()
-        case .pcm:
+        } else {
             audioDecoder.flush()
             audioDecoder.close()
         }
@@ -513,21 +429,7 @@ public final class SteelPlayer: ObservableObject {
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-        if isEAC3, let audioURL = externalAudioURL {
-            // Switch to AVPlayer for Atmos
-            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
-            let item = AVPlayerItem(url: audioURL)
-            let avPlayer = AVPlayer(playerItem: item)
-            avPlayer.automaticallyWaitsToMinimizeStalling = false
-            externalAudioPlayer = avPlayer
-            externalAudioItem = item
-            audioMode = .externalAVPlayer
-
-            // Seek AVPlayer to current position and start
-            avPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
-            avPlayer.play()
-            audioOutput.start(at: seekTime)
-        } else if isEAC3 || isAC3 {
+        if isEAC3 || isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
@@ -559,56 +461,12 @@ public final class SteelPlayer: ObservableObject {
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { audioOutput.volume }
-        set { audioOutput.volume = newValue }  // AVPlayer volume controlled separately if needed
+        set { audioOutput.volume = newValue }
     }
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
         audioOutput.setRate(rate)
-        externalAudioPlayer?.rate = rate
-    }
-
-    // MARK: - External Audio Player Helpers
-
-    /// Wait for the external AVPlayer to become readyToPlay.
-    /// Called during load() to ensure A/V sync — demux loop starts only after audio is ready.
-    private func waitForExternalAudioReady() async throws {
-        guard let item = externalAudioItem else { return }
-        if item.status == .readyToPlay { return }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            externalAudioObservation = item.observe(\.status) { [weak self] item, _ in
-                self?.externalAudioObservation?.invalidate()
-                self?.externalAudioObservation = nil
-                if item.status == .readyToPlay {
-                    #if DEBUG
-                    print("[SteelPlayer] External AVPlayer ready to play")
-                    #endif
-                    continuation.resume()
-                } else if item.status == .failed {
-                    #if DEBUG
-                    print("[SteelPlayer] External AVPlayer failed: \(item.error?.localizedDescription ?? "?")")
-                    if let e = item.error as NSError? {
-                        print("[SteelPlayer]   domain=\(e.domain) code=\(e.code)")
-                        if let u = e.userInfo[NSUnderlyingErrorKey] as? NSError {
-                            print("[SteelPlayer]   underlying: \(u.domain) code=\(u.code)")
-                        }
-                    }
-                    #endif
-                    continuation.resume(throwing: item.error ?? SteelPlayerError.noAudioStream)
-                }
-            }
-        }
-    }
-
-    /// Stop and clean up the external AVPlayer.
-    private func stopExternalAudioPlayer() {
-        externalAudioObservation?.invalidate()
-        externalAudioObservation = nil
-        externalAudioPlayer?.pause()
-        externalAudioPlayer?.replaceCurrentItem(with: nil)
-        externalAudioPlayer = nil
-        externalAudioItem = nil
     }
 
     // MARK: - Internal
@@ -619,7 +477,6 @@ public final class SteelPlayer: ObservableObject {
         stopTimeUpdates()
 
         // Stop audio
-        stopExternalAudioPlayer()
         audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         audioOutput.stop()
         compressedAudioFeeder.close()
@@ -712,10 +569,10 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.flush()
                     }
                     self.videoRenderer.drainReorderBuffer()
-                    switch self.audioMode {
-                    case .externalAVPlayer: break
-                    case .compressed: self.compressedAudioFeeder.flush()
-                    case .pcm: self.audioDecoder.flush()
+                    if self.audioMode == .compressed {
+                        self.compressedAudioFeeder.flush()
+                    } else {
+                        self.audioDecoder.flush()
                     }
                     Task { @MainActor [weak self] in
                         self?.state = .idle
@@ -741,9 +598,6 @@ public final class SteelPlayer: ObservableObject {
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
-                    case .externalAVPlayer:
-                        break  // Audio comes from AVPlayer, not from demux loop
-
                     case .compressed:
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
                             audioOutput.enqueue(sampleBuffer: sampleBuffer)
@@ -781,13 +635,7 @@ public final class SteelPlayer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self = self, !Task.isCancelled else { return }
-                let t: Double
-                if self.audioMode == .externalAVPlayer, let avPlayer = self.externalAudioPlayer {
-                    let s = CMTimeGetSeconds(avPlayer.currentTime())
-                    t = s.isFinite ? s : 0
-                } else {
-                    t = self.audioOutput.currentTimeSeconds
-                }
+                let t = self.audioOutput.currentTimeSeconds
                 if t > 0 {
                     self.currentTime = t
                     if self.duration > 0 {
