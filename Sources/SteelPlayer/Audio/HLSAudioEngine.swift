@@ -315,14 +315,10 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // while the timebase catches up, but audio keeps flowing.
                 if let tb = self.videoTimebase {
                     let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
-                    // Compensate for HLS audio pipeline latency (~250ms).
-                    // Without this, video is consistently ~250ms ahead of audio.
-                    let latencyCompensation = 0.25
-                    let snapTarget = playerStreamTime + latencyCompensation
-                    let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
+                    let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
                     #if DEBUG
                     let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", snapTarget))s (latency comp +\(latencyCompensation)s)")
+                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
                     #endif
                     CMTimebaseSetTime(tb, time: corrected)
                 }
