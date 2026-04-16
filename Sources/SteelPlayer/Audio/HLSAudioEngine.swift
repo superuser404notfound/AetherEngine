@@ -395,10 +395,17 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            // Compensate for audio output latency (HDMI → receiver/soundbar).
+            // AVPlayer.currentTime() reflects decode position, not when audio
+            // actually reaches the speaker. This delay varies by device:
+            // Sonos over HDMI eARC: ~100-300ms, soundbars: ~50-200ms.
+            // By subtracting the latency, video is delayed to match audio.
+            let audioOutputLatency = 0.3  // TODO: make user-configurable
+            let snapTarget = playerStreamTime - audioOutputLatency
+            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             #if DEBUG
-            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s (playerTime=\(String(format: "%.2f", playerSeconds))s)")
+            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", snapTarget))s (comp=\(audioOutputLatency)s)")
             #endif
             return
         }
