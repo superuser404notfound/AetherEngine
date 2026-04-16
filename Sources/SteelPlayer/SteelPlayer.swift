@@ -181,18 +181,6 @@ public final class SteelPlayer: ObservableObject {
 
     // MARK: - Public API
 
-    /// Stream indices that the host app knows carry Dolby Atmos (EAC3+JOC).
-    ///
-    /// EAC3+JOC embeds Atmos object metadata as extension elements within the
-    /// independent substream — same channel count (6ch) and packet framing as
-    /// standard EAC3 5.1. SteelPlayer cannot distinguish them from the bitstream
-    /// alone. Set this before calling `load()` with the stream indices your media
-    /// server reports as Atmos (e.g. from Jellyfin's MediaStream.IsAtmos).
-    ///
-    /// When empty (default), ALL EAC3 streams are routed through the Atmos
-    /// pipeline (AVPlayer + HLS) as a safe fallback.
-    public var atmosStreamIndices: Set<Int> = []
-
     /// Load a media file or stream URL. Replaces any current playback.
     public func load(url: URL, startPosition: Double? = nil) async throws {
         // Tear down any previous playback
@@ -292,8 +280,12 @@ public final class SteelPlayer: ObservableObject {
 
             // 2c. Find the audio stream and configure the appropriate audio engine
             //
-            // EAC3+JOC → HLSAudioEngine (Dolby Atmos via MAT 2.0 passthrough)
-            // EAC3/AC3 → CompressedAudioFeeder (5.1 passthrough, no Atmos overhead)
+            // EAC3 → HLSAudioEngine (AVPlayer + local HLS for Dolby Atmos passthrough)
+            //   EAC3+JOC (Atmos) embeds object metadata as extension elements within
+            //   the independent substream — identical framing and channel count as
+            //   regular EAC3 5.1. Cannot be distinguished at the packet level, so all
+            //   EAC3 goes through AVPlayer which handles both Atmos and non-Atmos.
+            // AC3 → CompressedAudioFeeder (no Atmos possible, simpler passthrough)
             // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
@@ -305,23 +297,7 @@ public final class SteelPlayer: ObservableObject {
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                // Determine if this EAC3 stream should use the Atmos pipeline.
-                // If the host app provided atmosStreamIndices, use that.
-                // Otherwise, route ALL EAC3 through HLS (safe fallback — JOC
-                // is invisible at the packet level, so we can't distinguish
-                // EAC3 Atmos from EAC3 5.1 without server metadata).
-                let isAtmos: Bool
                 if isEAC3 {
-                    if atmosStreamIndices.isEmpty {
-                        isAtmos = true  // No hint → assume Atmos for all EAC3
-                    } else {
-                        isAtmos = atmosStreamIndices.contains(Int(audioIdx))
-                    }
-                } else {
-                    isAtmos = false
-                }
-
-                if isAtmos {
                     // EAC3 → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
                     // Falls back to CompressedAudioFeeder if AVPlayer fails.
                     let streamIdx = audioIdx
@@ -361,16 +337,15 @@ public final class SteelPlayer: ObservableObject {
                         #endif
                         fallbackToCompressedAudio(stream: audioStream)
                     }
-                } else if isEAC3 || isAC3 {
-                    // EAC3 (no Atmos) / AC3 → compressed passthrough
+                } else if isAC3 {
+                    // AC3 → compressed passthrough (no Atmos possible)
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        let codecLabel = isEAC3 ? "EAC3" : "AC3"
-                        print("[SteelPlayer] Audio: \(codecLabel) → compressed passthrough (\(channelCount)ch)")
+                        print("[SteelPlayer] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -560,14 +535,8 @@ public final class SteelPlayer: ObservableObject {
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
-        let isAtmos: Bool
-        if isEAC3 {
-            isAtmos = atmosStreamIndices.isEmpty || atmosStreamIndices.contains(Int(streamIndex))
-        } else {
-            isAtmos = false
-        }
 
-        if isAtmos {
+        if isEAC3 {
             do {
                 let engine = HLSAudioEngine()
                 engine.onPlaybackFailed = { [weak self] in
@@ -596,7 +565,7 @@ public final class SteelPlayer: ObservableObject {
                 fallbackToCompressedAudio(stream: stream)
                 audioOutput.start(at: seekTime)
             }
-        } else if isEAC3 || isAC3 {
+        } else if isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
@@ -1099,61 +1068,6 @@ public final class SteelPlayer: ObservableObject {
         }
         lifecycleObservers.append(memObserver)
         #endif
-    }
-
-    // MARK: - Atmos Probing
-
-    /// Detect whether an EAC3 stream carries Dolby Atmos (JOC).
-    ///
-    /// Uses multiple signals (most to least reliable):
-    /// 1. Channel count > 6 — EAC3 Atmos is typically 7.1 (8ch base + objects),
-    ///    while standard EAC3 5.1 = 6ch. Most reliable for Blu-ray/remux content.
-    /// 2. Bitstream scan — check multiple audio packets for dependent substreams
-    ///    (strmtyp=1). May fail if FFmpeg delivers independent/dependent as
-    ///    separate AVPackets or if the first packets lack JOC.
-    private func probeAtmos(audioStreamIndex: Int32) -> Bool {
-        guard let stream = demuxer.stream(at: audioStreamIndex),
-              let codecpar = stream.pointee.codecpar else { return false }
-
-        let channelCount = Int(codecpar.pointee.ch_layout.nb_channels)
-
-        // Primary signal: channel count > 6 strongly indicates Atmos
-        if channelCount > 6 {
-            #if DEBUG
-            print("[SteelPlayer] EAC3 probe: Atmos detected (\(channelCount)ch > 6)")
-            #endif
-            return true
-        }
-
-        // Secondary: scan first audio packets for dependent substreams
-        let currentPos = currentTime
-        var audioPacketsChecked = 0
-
-        for _ in 0..<100 {
-            guard let packet = try? demuxer.readPacket() else { break }
-            defer { av_packet_free_safe(packet) }
-
-            if packet.pointee.stream_index == audioStreamIndex,
-               packet.pointee.size > 0,
-               let data = packet.pointee.data {
-                let packetData = Data(bytes: data, count: Int(packet.pointee.size))
-                if FMP4AudioMuxer.hasAtmosJOC(packetData: packetData) {
-                    demuxer.seek(to: currentPos)
-                    #if DEBUG
-                    print("[SteelPlayer] EAC3 probe: Atmos (JOC) in packet \(audioPacketsChecked)")
-                    #endif
-                    return true
-                }
-                audioPacketsChecked += 1
-                if audioPacketsChecked >= 5 { break }
-            }
-        }
-
-        demuxer.seek(to: currentPos)
-        #if DEBUG
-        print("[SteelPlayer] EAC3 probe: no Atmos (\(channelCount)ch, \(audioPacketsChecked) packets checked)")
-        #endif
-        return false
     }
 
 }

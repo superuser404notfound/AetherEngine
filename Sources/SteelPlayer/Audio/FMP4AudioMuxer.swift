@@ -54,33 +54,6 @@ final class FMP4AudioMuxer {
         self.config = config
     }
 
-    // MARK: - Atmos Detection
-
-    /// Quick bitstream scan: does this EAC3 packet contain dependent substreams (JOC/Atmos)?
-    /// Scans for sync words (0x0B77) and checks strmtyp for dependent substreams.
-    /// Call on the first audio packet to decide audio engine routing.
-    static func hasAtmosJOC(packetData: Data) -> Bool {
-        guard packetData.count >= 8,
-              packetData[0] == 0x0B,
-              packetData[1] == 0x77 else { return false }
-
-        var offset = 0
-        while offset + 6 < packetData.count {
-            guard packetData[offset] == 0x0B, packetData[offset + 1] == 0x77 else { break }
-            let b2 = packetData[offset + 2]
-            let b3 = packetData[offset + 3]
-            let frmsiz = (UInt16(b2 & 0x07) << 8) | UInt16(b3)
-            let frameSize = (Int(frmsiz) + 1) * 2
-            guard frameSize > 0 else { break }
-
-            let strmtyp = (b2 >> 6) & 0x03
-            if strmtyp == 1 { return true }
-
-            offset += frameSize
-        }
-        return false
-    }
-
     // MARK: - Config Detection
 
     /// Parse codec configuration from the first audio packet's bitstream headers.
