@@ -485,17 +485,23 @@ public final class SteelPlayer: ObservableObject {
 
         let codecId = stream.pointee.codecpar?.pointee.codec_id
 
+        // Capture current time BEFORE tearing down the engine
+        let seekSeconds = currentTime
+        let seekTime = CMTimeMakeWithSeconds(seekSeconds, preferredTimescale: 90000)
+
         // Tear down current audio engine
         tearDownCurrentAudioEngine()
         activeAudioStreamIndex = streamIndex
 
+        // Seek the demuxer to the current position so the new track
+        // starts from the right place in the stream
+        demuxer.seek(to: seekSeconds)
+
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
-        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
 
         if isEAC3 {
-            // Try HLS engine for Atmos, fall back to compressed passthrough
             do {
                 let engine = HLSAudioEngine()
                 engine.onPlaybackFailed = { [weak self] in

@@ -406,7 +406,9 @@ final class HLSAudioEngine: @unchecked Sendable {
             // Delay video by 2s so it matches when audio actually reaches the
             // speaker. This means ~2s of black screen at startup while the
             // timebase catches up to the first buffered video frame.
-            let hlsPipelineLatency = 2.7
+            // Empirically measured: 2.0=late, 2.5=slightly late, 2.7=slightly early, 3.0=early
+            // TODO: make user-configurable in settings
+            let hlsPipelineLatency = 2.6
             let snapTarget = playerStreamTime - hlsPipelineLatency
             let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
