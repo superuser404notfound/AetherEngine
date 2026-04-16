@@ -283,7 +283,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         item.preferredForwardBufferDuration = 4.0
 
         let p = AVPlayer(playerItem: item)
-        p.automaticallyWaitsToMinimizeStalling = true
+        p.automaticallyWaitsToMinimizeStalling = false
         self.playerItem = item
         self.player = p
 
