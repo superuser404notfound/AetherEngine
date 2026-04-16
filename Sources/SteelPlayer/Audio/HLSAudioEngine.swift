@@ -425,33 +425,22 @@ final class HLSAudioEngine: @unchecked Sendable {
         if !hasSnapped && playerSeconds > 0.5 {
             hasSnapped = true
 
-            // Measure HLS pipeline latency: time from seg0 fetch to now.
-            // playerTime is at ~0.5s, meaning AVPlayer has "played" 0.5s.
-            // The wall-clock time since seg0 was fetched tells us the total
-            // pipeline delay (fetch → decode → buffer → output).
-            var measuredLatency = 0.0
-            if let fetchTime = server?.seg0FetchTime {
-                let wallElapsed = Date().timeIntervalSince(fetchTime)
-                // wallElapsed = real time since seg0 download
-                // playerSeconds = how far AVPlayer has played
-                // latency = wallElapsed - playerSeconds (time "lost" in pipeline)
-                measuredLatency = max(0, wallElapsed - playerSeconds)
-            }
-
             // Flush video renderer and re-set skip threshold to our start PTS.
-            // Without this, frames from before the seek target (keyframe offset)
-            // would be shown, causing a fast-forward effect and desync.
             let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             onWillStartTimebase?(startPTS)
 
-            // Start timebase behind playerStreamTime by the measured latency.
-            // This delays video to match when audio actually reaches the speaker.
-            let snapTarget = playerStreamTime - measuredLatency
+            // Compensate for the constant ~0.17s CMTimebase clock offset.
+            // The CMTimebase (host clock) gains ~170ms relative to AVPlayer's
+            // internal clock after each snap. Measured consistently across all
+            // content and playback sessions. Without this, video is 170ms
+            // ahead of audio (noticeable lip-sync error).
+            let clockOffset = 0.17
+            let snapTarget = playerStreamTime - clockOffset
             let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", snapTarget))s (measured latency=\(String(format: "%.3f", measuredLatency))s, player=\(String(format: "%.3f", playerStreamTime))s)")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", snapTarget))s (clockComp=\(clockOffset)s, player=\(String(format: "%.3f", playerStreamTime))s)")
             #endif
             return
         }
