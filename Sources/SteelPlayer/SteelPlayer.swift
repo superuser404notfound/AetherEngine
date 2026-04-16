@@ -711,15 +711,16 @@ public final class SteelPlayer: ObservableObject {
 
                 if streamIdx == videoStreamIndex {
                     // Back-pressure: wait if display layer isn't ready.
-                    // Exception: during HLS Atmos buffering (AVPlayer not yet playing),
-                    // skip the wait so the demux loop keeps feeding audio packets
-                    // to the HLS engine. The display layer buffers video frames
-                    // while its timebase is paused.
-                    let skipBackPressure = (self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true)
-                    if !skipBackPressure {
-                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                            Thread.sleep(forTimeInterval: 0.005)
-                        }
+                    // During HLS Atmos buffering (AVPlayer not yet playing),
+                    // use a short timeout (50ms) instead of blocking indefinitely —
+                    // audio packets must keep flowing to the HLS engine, but we
+                    // can't skip entirely or VideoToolbox gets overwhelmed.
+                    let shortTimeout = (self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true)
+                    let maxWait = shortTimeout ? 10 : Int.max  // 10 × 5ms = 50ms
+                    var waited = 0
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waited < maxWait {
+                        Thread.sleep(forTimeInterval: 0.005)
+                        waited += 1
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 

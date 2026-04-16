@@ -15,12 +15,18 @@ import Libavcodec
 /// 5. AVPlayer fetches init segment + media segments, decodes EAC3
 /// 6. For EAC3+JOC (Atmos), AVPlayer wraps as Dolby MAT 2.0 → HDMI passthrough
 ///
+/// ## EAC3+JOC Access Units
+///
+/// FFmpeg delivers independent and dependent substreams as separate AVPackets
+/// with the same stream_index and PTS. This engine combines them into complete
+/// access units: [independent frame][dependent frame(s)] before muxing to fMP4.
+///
 /// ## A/V Sync
 ///
 /// Video uses a CMTimebase (controlTimebase on the display layer).
 /// The timebase starts at rate=0 (paused) so video frames are buffered
-/// but not displayed. The host must skip video back-pressure checks during
-/// this phase so audio packets can still flow to the HLS engine.
+/// but not displayed. The host should use a short back-pressure timeout
+/// (not skip entirely) to avoid flooding VideoToolbox.
 ///
 /// Once AVPlayer reaches readyToPlay:
 /// 1. Timebase is set to player.currentTime() and rate=1.0
@@ -40,8 +46,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     private(set) var videoTimebase: CMTimebase?
 
     /// True once AVPlayer has started playing audio.
-    /// The host should skip video back-pressure until this is true,
-    /// so the demux loop doesn't block and audio packets keep flowing.
+    /// The host should use a short back-pressure timeout until this is true.
     private let _isPlayerPlaying = NSLock()
     nonisolated(unsafe) private var __isPlayerPlaying = false
     var isPlayerPlaying: Bool {
@@ -65,6 +70,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     // MARK: - Segment Buffering
 
     private let bufferLock = NSLock()
+    /// Completed access units waiting to fill a segment.
     private var frameBuffer: [Data] = []
     private var isPlayerCreated = false
 
@@ -73,6 +79,20 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     /// Duration of one segment in seconds.
     private var segmentDuration: Double = 2.048
+
+    // MARK: - Access Unit Assembly
+
+    /// Pending independent frame waiting for dependent substream(s).
+    /// When the next independent frame arrives, the pending one is finalized.
+    private var pendingIndependent: Data?
+
+    /// Whether we've detected a dependent substream (Atmos/JOC).
+    private var hasAtmos = false
+
+    /// Packets buffered before muxer creation to detect Atmos.
+    /// We buffer up to `atmosDetectionLimit` packets before creating the muxer.
+    private var earlyPackets: [(Data, Bool)]? = []  // (data, isDependent)
+    private let atmosDetectionLimit = 4
 
     // MARK: - Stored Config (set in prepare, used in feedPacket)
 
@@ -92,9 +112,6 @@ final class HLSAudioEngine: @unchecked Sendable {
             timebaseOut: &tb
         )
         videoTimebase = tb
-        // Start PAUSED — video frames are buffered in the display layer
-        // but not presented. When AVPlayer is ready, we start both together.
-        // The host MUST skip video back-pressure during this phase.
         if let tb {
             CMTimebaseSetTime(tb, time: .zero)
             CMTimebaseSetRate(tb, rate: 0)
@@ -103,7 +120,6 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Public API
 
-    /// Current audio playback time from AVPlayer.
     var currentTime: CMTime { player?.currentTime() ?? .zero }
 
     var currentTimeSeconds: Double {
@@ -111,8 +127,6 @@ final class HLSAudioEngine: @unchecked Sendable {
         return t.isFinite ? t : 0
     }
 
-    /// Prepare the engine with codec parameters from the audio stream.
-    /// Call once from load(), before feedPacket().
     func prepare(
         stream: UnsafeMutablePointer<AVStream>,
         startTime: CMTime = .zero
@@ -135,19 +149,19 @@ final class HLSAudioEngine: @unchecked Sendable {
         storedStartTime = startTime
         frameBuffer.removeAll()
         isPlayerCreated = false
+        pendingIndependent = nil
+        hasAtmos = false
+        earlyPackets = []
         bufferLock.unlock()
 
         setPlayerPlaying(false)
 
-        // Start the HLS server
         let srv = HLSAudioServer()
         try srv.start()
         server = srv
 
-        // Segment duration: framesPerSegment x 1536 / sampleRate
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Timebase paused at start time — will be started when AVPlayer is ready
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
             CMTimebaseSetRate(tb, rate: 0)
@@ -159,46 +173,96 @@ final class HLSAudioEngine: @unchecked Sendable {
         #endif
     }
 
-    /// Feed a raw EAC3/AC3 packet. Buffers frames and creates segments.
-    /// On the first packet, initializes the muxer with bitstream config.
-    /// After enough frames for one segment, creates AVPlayer.
+    /// Feed a raw EAC3/AC3 packet from the demuxer.
+    ///
+    /// FFmpeg delivers independent and dependent substreams as separate packets.
+    /// This method combines them into complete access units before muxing.
     func feedPacket(_ packet: UnsafeMutablePointer<AVPacket>) {
         guard packet.pointee.size > 0, packet.pointee.data != nil else { return }
         let packetData = Data(bytes: packet.pointee.data, count: Int(packet.pointee.size))
 
+        // Detect substream type from EAC3 header
+        let isDependent = packetData.count >= 3 && packetData[0] == 0x0B && packetData[1] == 0x77
+            && ((packetData[2] >> 6) & 0x03) == 1
+
         bufferLock.lock()
 
-        // Initialize muxer from first packet (needs bitstream header for dec3 box)
-        if muxer == nil {
-            if let config = FMP4AudioMuxer.detectConfig(
-                codecType: storedCodecType,
-                sampleRate: storedSampleRate,
-                channelCount: storedChannelCount,
-                bitRate: storedBitRate,
-                firstPacketData: packetData
-            ) {
-                let m = FMP4AudioMuxer(config: config)
-                let startSeconds = CMTimeGetSeconds(storedStartTime)
-                if startSeconds > 0 {
-                    m.reset(atTimeSeconds: startSeconds)
-                }
-                muxer = m
+        // Phase 1: Buffer early packets to detect Atmos before creating muxer
+        if var early = earlyPackets {
+            early.append((packetData, isDependent))
+            if isDependent { hasAtmos = true }
 
-                // Generate and register init segment
-                let initSegment = m.createInitSegment()
-                server?.setInitSegment(initSegment)
+            // Wait for enough packets or until we've seen a dependent substream
+            if early.count < atmosDetectionLimit && !hasAtmos {
+                earlyPackets = early
+                bufferLock.unlock()
+                return
+            }
 
-                #if DEBUG
-                let atmos = config.numDepSub > 0 ? " (Atmos: \(config.numDepSub) dep sub)" : " (no Atmos/JOC)"
-                print("[HLSAudioEngine] Muxer ready: \(config.codecType == .eac3 ? "EAC3" : "AC3")\(atmos)")
-                print("[HLSAudioEngine]   fscod=\(config.fscod) bsid=\(config.bsid) acmod=\(config.acmod) lfeon=\(config.lfeon) channels=\(config.channelCount)")
-                #endif
+            // Create muxer with Atmos info and replay buffered packets
+            earlyPackets = nil
+            bufferLock.unlock()
+
+            createMuxer(firstPacketData: early[0].0)
+
+            for (data, dep) in early {
+                processPacket(data, isDependent: dep)
+            }
+            return
+        }
+
+        bufferLock.unlock()
+
+        // Create muxer from first independent packet if not yet created
+        // (e.g., after seek with known Atmos — earlyPackets is nil)
+        if !isDependent {
+            bufferLock.lock()
+            let needsMuxer = (muxer == nil)
+            bufferLock.unlock()
+            if needsMuxer {
+                createMuxer(firstPacketData: packetData)
             }
         }
 
-        frameBuffer.append(packetData)
+        processPacket(packetData, isDependent: isDependent)
+    }
+
+    /// Process a single packet — combine access units and feed to segment buffer.
+    private func processPacket(_ packetData: Data, isDependent: Bool) {
+        bufferLock.lock()
+
+        if isDependent {
+            // Dependent substream — append to pending independent
+            if var pending = pendingIndependent {
+                pending.append(packetData)
+                pendingIndependent = pending
+                // Finalize this access unit (independent + dependent)
+                frameBuffer.append(pending)
+                pendingIndependent = nil
+
+                #if DEBUG
+                if !hasAtmos {
+                    print("[HLSAudioEngine] Atmos detected: dependent substream (\(packetData.count) bytes)")
+                }
+                #endif
+                hasAtmos = true
+            }
+            // else: orphan dependent packet, skip it
+        } else {
+            // Independent substream — finalize any pending access unit first
+            if let pending = pendingIndependent {
+                frameBuffer.append(pending)  // Previous AU had no dependent
+            }
+            pendingIndependent = packetData
+        }
 
         // Check if we have enough frames for a segment
+        checkSegment()
+    }
+
+    /// Check if we have enough frames for a segment, create it if so.
+    /// Must be called with bufferLock held. Releases lock before returning.
+    private func checkSegment() {
         if frameBuffer.count >= framesPerSegment, let m = muxer {
             let frames = Array(frameBuffer.prefix(framesPerSegment))
             frameBuffer.removeFirst(framesPerSegment)
@@ -211,7 +275,6 @@ final class HLSAudioEngine: @unchecked Sendable {
             print("[HLSAudioEngine] Segment \(count - 1) created (\(segment.count) bytes)")
             #endif
 
-            // Create AVPlayer after first segment is ready
             if !isPlayerCreated {
                 isPlayerCreated = true
                 bufferLock.unlock()
@@ -220,6 +283,56 @@ final class HLSAudioEngine: @unchecked Sendable {
             }
         }
 
+        bufferLock.unlock()
+    }
+
+    /// Create the FMP4 muxer from the first packet's bitstream header.
+    private func createMuxer(firstPacketData: Data) {
+        bufferLock.lock()
+        guard muxer == nil else { bufferLock.unlock(); return }
+
+        if var config = FMP4AudioMuxer.detectConfig(
+            codecType: storedCodecType,
+            sampleRate: storedSampleRate,
+            channelCount: storedChannelCount,
+            bitRate: storedBitRate,
+            firstPacketData: firstPacketData
+        ) {
+            // Override numDepSub if we detected Atmos from packet stream
+            if hasAtmos && config.numDepSub == 0 {
+                config = FMP4AudioMuxer.Config(
+                    codecType: config.codecType,
+                    sampleRate: config.sampleRate,
+                    channelCount: config.channelCount,
+                    bitRate: config.bitRate,
+                    samplesPerFrame: config.samplesPerFrame,
+                    fscod: config.fscod,
+                    bsid: config.bsid,
+                    bsmod: config.bsmod,
+                    acmod: config.acmod,
+                    lfeon: config.lfeon,
+                    frmsizecod: config.frmsizecod,
+                    numDepSub: 1,
+                    depChanLoc: 0x0100  // Lc/Rc pair (standard Atmos)
+                )
+            }
+
+            let m = FMP4AudioMuxer(config: config)
+            let startSeconds = CMTimeGetSeconds(storedStartTime)
+            if startSeconds > 0 {
+                m.reset(atTimeSeconds: startSeconds)
+            }
+            muxer = m
+
+            let initSegment = m.createInitSegment()
+            server?.setInitSegment(initSegment)
+
+            #if DEBUG
+            let atmos = config.numDepSub > 0 ? " (Atmos: \(config.numDepSub) dep sub)" : " (no Atmos/JOC)"
+            print("[HLSAudioEngine] Muxer ready: \(config.codecType == .eac3 ? "EAC3" : "AC3")\(atmos)")
+            print("[HLSAudioEngine]   fscod=\(config.fscod) bsid=\(config.bsid) acmod=\(config.acmod) lfeon=\(config.lfeon) channels=\(config.channelCount)")
+            #endif
+        }
         bufferLock.unlock()
     }
 
@@ -256,11 +369,11 @@ final class HLSAudioEngine: @unchecked Sendable {
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
+        pendingIndependent = nil
+        earlyPackets = nil
         bufferLock.unlock()
     }
 
-    /// Prepare for a seek: tear down AVPlayer and HLS state so new
-    /// segments can be buffered from the new position.
     func prepareForSeek() {
         removeTimeSync()
         statusObservation = nil
@@ -275,13 +388,22 @@ final class HLSAudioEngine: @unchecked Sendable {
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
+        pendingIndependent = nil
+        earlyPackets = nil
         bufferLock.unlock()
     }
 
-    /// Restart after a seek: re-prepare with the new seek time so the
-    /// muxer generates segments with correct timestamps.
     func restartAfterSeek(stream: UnsafeMutablePointer<AVStream>, seekTime: CMTime) throws {
+        // Keep hasAtmos from before seek — don't re-detect
+        let atmosDetected = hasAtmos
         try prepare(stream: stream, startTime: seekTime)
+        hasAtmos = atmosDetected
+        // Skip early detection phase if we already know
+        if atmosDetected {
+            bufferLock.lock()
+            earlyPackets = nil
+            bufferLock.unlock()
+        }
     }
 
     // MARK: - AVPlayer Creation
@@ -333,8 +455,6 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Video Timebase Sync
 
-    /// Called when AVPlayer transitions to playing. Starts the video
-    /// timebase at the player's current time so both are in sync.
     private func onPlayerStarted() {
         guard let tb = videoTimebase, let player else { return }
         let playerTime = player.currentTime()
@@ -349,8 +469,6 @@ final class HLSAudioEngine: @unchecked Sendable {
         #endif
     }
 
-    /// Periodic observer that syncs the video timebase to AVPlayer's audio clock.
-    /// Runs every 100ms, corrects drift > 50ms.
     private func setupTimeSync() {
         guard let player else { return }
         timeObserver = player.addPeriodicTimeObserver(

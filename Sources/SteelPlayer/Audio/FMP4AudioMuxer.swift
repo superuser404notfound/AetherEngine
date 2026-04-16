@@ -241,21 +241,8 @@ final class FMP4AudioMuxer {
         var numDepSub: UInt8 = 0
         var offset = 0
 
-        #if DEBUG
-        let hexPrefix = data.prefix(min(16, data.count)).map { String(format: "%02x", $0) }.joined(separator: " ")
-        print("[FMP4AudioMuxer] First packet: \(data.count) bytes, hex: \(hexPrefix)")
-        #endif
-
         while offset + 6 < data.count {
-            guard data[offset] == 0x0B, data[offset + 1] == 0x77 else {
-                #if DEBUG
-                if offset > 0 {
-                    let nextBytes = data[offset..<min(offset+4, data.count)].map { String(format: "%02x", $0) }.joined(separator: " ")
-                    print("[FMP4AudioMuxer] No sync word at offset \(offset): \(nextBytes) (packet size=\(data.count))")
-                }
-                #endif
-                break
-            }
+            guard data[offset] == 0x0B, data[offset + 1] == 0x77 else { break }
             let b2 = data[offset + 2]
             let b3 = data[offset + 3]
             let frmsiz = (UInt16(b2 & 0x07) << 8) | UInt16(b3)
@@ -263,13 +250,6 @@ final class FMP4AudioMuxer {
             guard frameSize > 0 else { break }
 
             let strmtyp = (b2 >> 6) & 0x03
-            let substreamid = (b2 >> 3) & 0x07
-
-            #if DEBUG
-            let typeName = strmtyp == 0 ? "independent" : strmtyp == 1 ? "dependent" : "reserved(\(strmtyp))"
-            print("[FMP4AudioMuxer] Substream at offset \(offset): type=\(typeName) id=\(substreamid) frameSize=\(frameSize)")
-            #endif
-
             if strmtyp == 1 { numDepSub += 1 }
 
             offset += frameSize
