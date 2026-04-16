@@ -1,6 +1,6 @@
 import Foundation
 
-/// The playback state of a `SteelPlayer` instance.
+/// The playback state of a `AetherEngine` instance.
 public enum PlaybackState: Sendable, Equatable {
     case idle
     case loading

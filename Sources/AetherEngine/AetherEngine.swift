@@ -11,7 +11,7 @@ import Libavutil
 import UIKit
 #endif
 
-/// SteelPlayer — Open-source FFmpeg + VideoToolbox video player engine.
+/// AetherEngine — Open-source FFmpeg + VideoToolbox video player engine.
 ///
 /// A cross-platform (iOS, tvOS, macOS) media player that handles
 /// demuxing, hardware-accelerated decoding via VideoToolbox, and
@@ -31,7 +31,7 @@ import UIKit
 /// ## Quick Start
 ///
 /// ```swift
-/// let player = try SteelPlayer()
+/// let player = try AetherEngine()
 /// myView.layer.addSublayer(player.videoLayer)
 /// try await player.load(url: myVideoURL)
 /// player.play()
@@ -41,7 +41,7 @@ import UIKit
 ///
 /// LGPL 3.0 — App Store compatible when dynamically linked.
 @MainActor
-public final class SteelPlayer: ObservableObject {
+public final class AetherEngine: ObservableObject {
 
     // MARK: - Public State
 
@@ -85,7 +85,7 @@ public final class SteelPlayer: ObservableObject {
     nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
 
     /// Separate queue for feeding audio to the HLS engine in Atmos mode.
-    private let atmosAudioQueue = DispatchQueue(label: "com.steelplayer.atmos-audio", qos: .userInitiated)
+    private let atmosAudioQueue = DispatchQueue(label: "com.aetherengine.atmos-audio", qos: .userInitiated)
     private let atmosAudioLock = NSLock()
     nonisolated(unsafe) private var atmosAudioBuffer: [Data] = []
     nonisolated(unsafe) private var atmosAudioDrainActive = false
@@ -97,7 +97,7 @@ public final class SteelPlayer: ObservableObject {
     /// Separate queue for video decoding in Atmos mode.
     /// Decouples video back-pressure from the demux thread so audio
     /// packets keep flowing even when the display layer is blocked.
-    private let atmosVideoQueue = DispatchQueue(label: "com.steelplayer.atmos-video", qos: .userInitiated)
+    private let atmosVideoQueue = DispatchQueue(label: "com.aetherengine.atmos-video", qos: .userInitiated)
     private let atmosVideoLock = NSLock()
     nonisolated(unsafe) private var atmosVideoBuffer: [UnsafeMutablePointer<AVPacket>] = []
     nonisolated(unsafe) private var atmosVideoDrainActive = false
@@ -109,7 +109,7 @@ public final class SteelPlayer: ObservableObject {
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
 
     /// Serial queue for the demux→decode loop (runs off main thread).
-    private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
+    private let demuxQueue = DispatchQueue(label: "com.aetherengine.demux", qos: .userInitiated)
 
     /// Thread-safe playback control flags.
     /// Accessed from both main actor and demux queue — protected by flagsLock.
@@ -161,7 +161,7 @@ public final class SteelPlayer: ObservableObject {
             try session.setSupportsMultichannelContent(true)
             try session.setActive(true)
         } catch {
-            print("[SteelPlayer] AVAudioSession setup error: \(error)")
+            print("[AetherEngine] AVAudioSession setup error: \(error)")
         }
         // Request multichannel output — separate try so a failure here
         // doesn't prevent the basic audio session from working.
@@ -170,7 +170,7 @@ public final class SteelPlayer: ObservableObject {
             try? session.setPreferredOutputNumberOfChannels(maxCh)
         }
         #if DEBUG
-        print("[SteelPlayer] Audio session: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels), output=\(session.outputNumberOfChannels)")
+        print("[AetherEngine] Audio session: maxChannels=\(maxCh), preferred=\(session.preferredOutputNumberOfChannels), output=\(session.outputNumberOfChannels)")
         #endif
         #endif
 
@@ -197,7 +197,7 @@ public final class SteelPlayer: ObservableObject {
         stopRequested = false
 
         #if DEBUG
-        print("[SteelPlayer] Loading: \(url.absoluteString)")
+        print("[AetherEngine] Loading: \(url.absoluteString)")
         #endif
 
         do {
@@ -208,7 +208,7 @@ public final class SteelPlayer: ObservableObject {
             // 2. Find the video stream and open the hardware decoder
             let videoIdx = demuxer.videoStreamIndex
             guard videoIdx >= 0, let videoStream = demuxer.stream(at: videoIdx) else {
-                throw SteelPlayerError.noVideoStream
+                throw AetherEngineError.noVideoStream
             }
 
             let videoRenderer = self.videoRenderer
@@ -222,21 +222,21 @@ public final class SteelPlayer: ObservableObject {
                 try videoDecoder.open(stream: videoStream, onFrame: frameCallback)
                 usingSoftwareDecode = false
                 #if DEBUG
-                print("[SteelPlayer] Using VideoToolbox hardware decode")
+                print("[AetherEngine] Using VideoToolbox hardware decode")
                 #endif
             } catch {
                 #if DEBUG
-                print("[SteelPlayer] VT failed: \(error) — trying software decode")
+                print("[AetherEngine] VT failed: \(error) — trying software decode")
                 #endif
                 do {
                     try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
                     usingSoftwareDecode = true
                     #if DEBUG
-                    print("[SteelPlayer] Using FFmpeg software decode")
+                    print("[AetherEngine] Using FFmpeg software decode")
                     #endif
                 } catch {
                     #if DEBUG
-                    print("[SteelPlayer] Software decode also failed: \(error)")
+                    print("[AetherEngine] Software decode also failed: \(error)")
                     #endif
                     throw error
                 }
@@ -257,7 +257,7 @@ public final class SteelPlayer: ObservableObject {
                 }
             }
             #if DEBUG
-            print("[SteelPlayer] Video frame rate: \(String(format: "%.3f", videoFrameRate)) fps")
+            print("[AetherEngine] Video frame rate: \(String(format: "%.3f", videoFrameRate)) fps")
             #endif
 
             // Populate track metadata from the demuxer
@@ -329,11 +329,11 @@ public final class SteelPlayer: ObservableObject {
                         // instead of the synchronizer — AVPlayer is the master clock.
                         videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
                         #if DEBUG
-                        print("[SteelPlayer] Audio: EAC3 → HLS AVPlayer (Dolby Atmos) (\(channelCount)ch)")
+                        print("[AetherEngine] Audio: EAC3 → HLS AVPlayer (Dolby Atmos) (\(channelCount)ch)")
                         #endif
                     } catch {
                         #if DEBUG
-                        print("[SteelPlayer] HLS engine failed: \(error) — falling back to compressed passthrough")
+                        print("[AetherEngine] HLS engine failed: \(error) — falling back to compressed passthrough")
                         #endif
                         fallbackToCompressedAudio(stream: audioStream)
                     }
@@ -345,7 +345,7 @@ public final class SteelPlayer: ObservableObject {
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        print("[SteelPlayer] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
+                        print("[AetherEngine] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -359,7 +359,7 @@ public final class SteelPlayer: ObservableObject {
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                     } catch {
-                        print("[SteelPlayer] Audio decoder failed: \(error) — playback will be silent")
+                        print("[AetherEngine] Audio decoder failed: \(error) — playback will be silent")
                     }
                 }
 
@@ -391,7 +391,7 @@ public final class SteelPlayer: ObservableObject {
             startDemuxLoop(videoStreamIndex: videoIdx, audioStreamIndex: audioIdx, initialAudioTime: initialAudioTime)
 
             #if DEBUG
-            print("[SteelPlayer] Playback started (duration=\(String(format: "%.1f", duration))s)")
+            print("[AetherEngine] Playback started (duration=\(String(format: "%.1f", duration))s)")
             #endif
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
@@ -620,7 +620,7 @@ public final class SteelPlayer: ObservableObject {
     /// Called when AVPlayer fails to play the HLS stream.
     private func fallbackToCompressedAudio(stream: UnsafeMutablePointer<AVStream>) {
         #if DEBUG
-        print("[SteelPlayer] Falling back from Atmos to compressed passthrough")
+        print("[AetherEngine] Falling back from Atmos to compressed passthrough")
         #endif
 
         // Tear down HLS engine
@@ -832,13 +832,13 @@ public final class SteelPlayer: ObservableObject {
                             break
                         }
                         #if DEBUG
-                        print("[SteelPlayer] Read error (retry \(retries)/\(maxRetries)): \(error)")
+                        print("[AetherEngine] Read error (retry \(retries)/\(maxRetries)): \(error)")
                         #endif
                         Thread.sleep(forTimeInterval: Double(1 << retries) * 0.2)
                     }
                 }
                 if let readError {
-                    print("[SteelPlayer] Demuxer read failed after \(retries) retries: \(readError)")
+                    print("[AetherEngine] Demuxer read failed after \(retries) retries: \(readError)")
                     Task { @MainActor [weak self] in
                         self?.state = .error("Playback error: \(readError)")
                     }
@@ -1011,13 +1011,13 @@ public final class SteelPlayer: ObservableObject {
                         #if os(tvOS) || os(iOS)
                         if AVPlayer.availableHDRModes.contains(.dolbyVision) {
                             #if DEBUG
-                            print("[SteelPlayer] DV stream → Dolby Vision (display supports DV)")
+                            print("[AetherEngine] DV stream → Dolby Vision (display supports DV)")
                             #endif
                             return .dolbyVision
                         }
                         #endif
                         #if DEBUG
-                        print("[SteelPlayer] DV stream → HDR10 fallback")
+                        print("[AetherEngine] DV stream → HDR10 fallback")
                         #endif
                         return .hdr10
                     }
@@ -1063,7 +1063,7 @@ public final class SteelPlayer: ObservableObject {
             guard let self = self else { return }
             self.videoRenderer.flush()
             #if DEBUG
-            print("[SteelPlayer] Memory warning — flushed texture cache")
+            print("[AetherEngine] Memory warning — flushed texture cache")
             #endif
         }
         lifecycleObservers.append(memObserver)
@@ -1082,7 +1082,7 @@ private func av_packet_free_safe(_ packet: UnsafeMutablePointer<AVPacket>) {
 
 // MARK: - Errors
 
-public enum SteelPlayerError: Error {
+public enum AetherEngineError: Error {
     case noVideoStream
     case noAudioStream
 }

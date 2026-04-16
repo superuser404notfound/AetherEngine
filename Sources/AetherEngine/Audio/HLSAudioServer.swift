@@ -10,7 +10,7 @@ import Network
 final class HLSAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.steelplayer.hls")
+    private let queue = DispatchQueue(label: "com.aetherengine.hls")
 
     private let lock = NSLock()
     private var initSegmentData: Data?

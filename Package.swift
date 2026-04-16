@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "SteelPlayer",
+    name: "AetherEngine",
     platforms: [
         .iOS(.v16),
         .tvOS(.v16),
@@ -11,8 +11,8 @@ let package = Package(
     ],
     products: [
         .library(
-            name: "SteelPlayer",
-            targets: ["SteelPlayer"]
+            name: "AetherEngine",
+            targets: ["AetherEngine"]
         ),
     ],
     dependencies: [
@@ -22,7 +22,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SteelPlayer",
+            name: "AetherEngine",
             dependencies: [
                 .product(name: "FFmpegBuild", package: "FFmpegBuild"),
             ],

@@ -38,7 +38,7 @@ final class AVIOReader: @unchecked Sendable {
     private var prefetchOffset: Int64 = 0
     private var isPrefetching = false
     private let prefetchReady = DispatchSemaphore(value: 0)
-    private let prefetchQueue = DispatchQueue(label: "com.steelplayer.avio.prefetch", qos: .userInitiated)
+    private let prefetchQueue = DispatchQueue(label: "com.aetherengine.avio.prefetch", qos: .userInitiated)
     private static let maxRetries = 3
 
     // MARK: - Streaming Mode (sequential GET)
