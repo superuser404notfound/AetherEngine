@@ -56,7 +56,9 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var frameBuffer: [Data] = []
     private var isPlayerCreated = false
 
-    private let framesPerSegment = 64
+    /// Small segments reduce HLS pipeline latency. 64 frames = 2.048s
+    /// caused ~2 seconds of audio delay. 16 frames = 0.512s ≈ 0.5s latency.
+    private let framesPerSegment = 16
     private(set) var segmentDuration: Double = 2.048
 
     var segmentCount: Int {
@@ -211,7 +213,8 @@ final class HLSAudioEngine: @unchecked Sendable {
             // Combined with automaticallyWaitsToMinimizeStalling=false and
             // no timebase pausing, this gives both zero-offset sync AND
             // enough initial buffer for uninterrupted playback.
-            if !isPlayerCreated && (server?.segmentCount ?? 0) >= 3 {
+            // With 0.5s segments, need more initial segments for ~3s buffer
+            if !isPlayerCreated && (server?.segmentCount ?? 0) >= 6 {
                 isPlayerCreated = true
                 bufferLock.unlock()
                 createPlayer()
@@ -395,17 +398,10 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            // Compensate for audio output latency (HDMI → receiver/soundbar).
-            // AVPlayer.currentTime() reflects decode position, not when audio
-            // actually reaches the speaker. This delay varies by device:
-            // Sonos over HDMI eARC: ~100-300ms, soundbars: ~50-200ms.
-            // By subtracting the latency, video is delayed to match audio.
-            let audioOutputLatency = 0.3  // TODO: make user-configurable
-            let snapTarget = playerStreamTime - audioOutputLatency
-            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             #if DEBUG
-            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", snapTarget))s (comp=\(audioOutputLatency)s)")
+            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
             #endif
             return
         }
