@@ -26,8 +26,6 @@ final class HLSAudioServer: @unchecked Sendable {
     private var segments: [Data] = []
     private var segDuration: Double = 2.048
 
-    /// Tracks segment count at last playlist response to detect stale polls.
-    private var lastReturnedCount = 0
 
     private(set) var port: UInt16 = 0
 
@@ -72,7 +70,6 @@ final class HLSAudioServer: @unchecked Sendable {
         lock.lock()
         initSegmentData = nil
         segments.removeAll()
-        lastReturnedCount = 0
         lock.unlock()
     }
 
@@ -140,28 +137,12 @@ final class HLSAudioServer: @unchecked Sendable {
         lock.lock()
         let count = segments.count
         let duration = segDuration
-        let lastCount = lastReturnedCount
-        lock.unlock()
-
-        // If no new segments since last poll → 404 (WWDC17 Session 514).
-        // This tells AVPlayer "server alive, not stale, just buffering."
-        // Without this, AVPlayer sees the same playlist twice and gives up.
-        if count > 0 && count == lastCount {
-            #if DEBUG
-            print("[HLSAudioServer] Playlist stale (\(count) segments) → 404")
-            #endif
-            respond404(connection)
-            return
-        }
-
-        lock.lock()
-        lastReturnedCount = count
         lock.unlock()
 
         // Sliding window: only advertise the last 5 segments.
-        // Old segments stay in memory (AVPlayer may still request them)
-        // but the playlist only shows recent ones. This mimics a proper
-        // live stream and prevents AVPlayer's stale-detection from firing.
+        // As new segments are added, MEDIA-SEQUENCE increments and old
+        // segments drop off. AVPlayer sees a changing playlist on each
+        // poll, preventing stale-stream detection.
         let windowSize = 5
         let startIndex = max(0, count - windowSize)
         let targetDuration = Int(ceil(duration))
