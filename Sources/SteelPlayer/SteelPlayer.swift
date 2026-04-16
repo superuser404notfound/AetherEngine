@@ -78,12 +78,20 @@ public final class SteelPlayer: ObservableObject {
     /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode).
     private let compressedAudioFeeder = CompressedAudioFeeder()
 
-    /// HLS audio engine for EAC3 — AVPlayer + local HLS for Dolby Atmos passthrough.
-    nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
-
     /// Audio routing: which engine handles the current audio track.
-    enum AudioMode { case pcm, compressed, hls }
+    enum AudioMode { case pcm, compressed, externalAVPlayer }
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
+
+    /// External audio URL for AVPlayer-based playback (Dolby Atmos passthrough).
+    /// Set by the host app BEFORE calling load(). When set and the default audio
+    /// track is EAC3, SteelPlayer creates an AVPlayer for audio while handling
+    /// video through its own pipeline. AVPlayer wraps EAC3+JOC as Dolby MAT 2.0.
+    public var externalAudioURL: URL?
+
+    /// AVPlayer instance for external audio playback.
+    private var externalAudioPlayer: AVPlayer?
+    private var externalAudioItem: AVPlayerItem?
+    private var externalAudioObservation: NSKeyValueObservation?
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.steelplayer.demux", qos: .userInitiated)
@@ -243,9 +251,9 @@ public final class SteelPlayer: ObservableObject {
 
             // 2b. Find the audio stream and configure the appropriate audio engine
             //
-            // EAC3 → HLS engine (AVPlayer for Dolby Atmos passthrough)
-            // AC3  → Compressed passthrough (AVSampleBufferAudioRenderer, no FFmpeg)
-            // Other → FFmpeg PCM decode
+            // EAC3 + externalAudioURL → AVPlayer (Dolby Atmos via MAT 2.0)
+            // AC3/EAC3 (no external URL) → CompressedAudioFeeder (no Atmos, saves CPU)
+            // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
             audioMode = .pcm
@@ -253,55 +261,42 @@ public final class SteelPlayer: ObservableObject {
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
                 let codecId = audioStream.pointee.codecpar?.pointee.codec_id
                 let channelCount = Int(audioStream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
+                let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
+                let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                if codecId == AV_CODEC_ID_EAC3 {
-                    // EAC3 → HLS engine for potential Dolby Atmos
-                    do {
-                        let engine = HLSAudioEngine()
-                        engine.onPlaybackFailed = { [weak self] in
-                            Task { @MainActor [weak self] in
-                                self?.fallbackFromHLS()
-                            }
-                        }
-                        try engine.prepare(stream: audioStream)
-                        hlsAudioEngine = engine
-                        audioMode = .hls
-                        audioAvailable = true
+                if isEAC3, let audioURL = externalAudioURL {
+                    // EAC3 + external URL → AVPlayer for Dolby Atmos passthrough.
+                    // AVPlayer is created now, but we wait for readyToPlay
+                    // before starting the demux loop (ensures A/V sync).
+                    let item = AVPlayerItem(url: audioURL)
+                    item.preferredForwardBufferDuration = 4.0
+                    let avPlayer = AVPlayer(playerItem: item)
+                    avPlayer.automaticallyWaitsToMinimizeStalling = false
+                    externalAudioPlayer = avPlayer
+                    externalAudioItem = item
+                    audioMode = .externalAVPlayer
+                    audioAvailable = true
 
-                        // Video timing driven by HLS engine's timebase
-                        videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+                    // Video uses synchronizer (started when AVPlayer is ready)
+                    audioOutput.attachVideoLayer(videoRenderer.displayLayer)
 
-                        // Also open compressed feeder as fallback
-                        try? compressedAudioFeeder.open(stream: audioStream)
+                    #if DEBUG
+                    print("[SteelPlayer] Audio: EAC3 → external AVPlayer (\(audioURL.lastPathComponent))")
+                    #endif
 
-                        #if DEBUG
-                        print("[SteelPlayer] Audio: EAC3 → HLS engine (Atmos passthrough)")
-                        #endif
-                    } catch {
-                        #if DEBUG
-                        print("[SteelPlayer] HLS engine failed: \(error) — using compressed fallback")
-                        #endif
-                        // Fall back to compressed passthrough
-                        do {
-                            try compressedAudioFeeder.open(stream: audioStream)
-                            audioMode = .compressed
-                            audioAvailable = true
-                            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-                        } catch {
-                            try? audioDecoder.open(stream: audioStream)
-                            audioAvailable = true
-                            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-                        }
-                    }
-                } else if codecId == AV_CODEC_ID_AC3 {
-                    // AC3 → compressed passthrough (no Atmos possible)
+                    // Wait for AVPlayer to buffer enough data before proceeding.
+                    // This ensures video and audio start at the same moment.
+                    try await waitForExternalAudioReady()
+
+                } else if isEAC3 || isAC3 {
+                    // AC3/EAC3 without external URL → compressed passthrough
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        print("[SteelPlayer] Audio: AC3 → compressed passthrough")
+                        print("[SteelPlayer] Audio: \(isEAC3 ? "EAC3" : "AC3") → compressed passthrough")
                         #endif
                     } catch {
                         try? audioDecoder.open(stream: audioStream)
@@ -354,7 +349,18 @@ public final class SteelPlayer: ObservableObject {
                 // Instead, pass the time to the demux loop.
             }
 
-            // 5. Start the demux→decode loop and time updates
+            // 5. Start external AVPlayer (if active) at the correct position
+            if audioMode == .externalAVPlayer, let avPlayer = externalAudioPlayer {
+                if CMTimeGetSeconds(initialAudioTime) > 0 {
+                    await avPlayer.seek(to: initialAudioTime, toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                avPlayer.play()
+                // Start the synchronizer so video frames are presented
+                // in sync with AVPlayer (both start from the same time).
+                audioOutput.start(at: initialAudioTime)
+            }
+
+            // 6. Start the demux→decode loop and time updates
             isPlaying = true
             state = .playing
             startTimeUpdates()
@@ -372,22 +378,16 @@ public final class SteelPlayer: ObservableObject {
     public func play() {
         guard state == .paused else { return }
         isPlaying = true
-        if audioMode == .hls {
-            hlsAudioEngine?.resume()
-        } else {
-            audioOutput.resume()
-        }
+        audioOutput.resume()
+        externalAudioPlayer?.play()
         state = .playing
     }
 
     public func pause() {
         guard state == .playing else { return }
         isPlaying = false
-        if audioMode == .hls {
-            hlsAudioEngine?.pause()
-        } else {
-            audioOutput.pause()
-        }
+        audioOutput.pause()
+        externalAudioPlayer?.pause()
         state = .paused
     }
 
@@ -417,8 +417,8 @@ public final class SteelPlayer: ObservableObject {
         videoRenderer.flush()
 
         switch audioMode {
-        case .hls:
-            hlsAudioEngine?.prepareForSeek()
+        case .externalAVPlayer:
+            externalAudioPlayer?.pause()
         case .compressed:
             compressedAudioFeeder.flush()
             audioOutput.flush()
@@ -439,11 +439,11 @@ public final class SteelPlayer: ObservableObject {
         }
 
         // Restart audio at the seek position
-        if audioMode == .hls {
-            // HLS engine restarts when new packets arrive in the demux loop
-            if let audioStream = demuxer.stream(at: activeAudioStreamIndex) {
-                try? hlsAudioEngine?.restartAfterSeek(stream: audioStream, seekTime: seekTime)
-            }
+        if audioMode == .externalAVPlayer, let avPlayer = externalAudioPlayer {
+            // Seek AVPlayer, wait for completion, then start both
+            await avPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            audioOutput.start(at: seekTime)
+            avPlayer.play()
         } else {
             audioOutput.start(at: seekTime)
         }
@@ -473,10 +473,8 @@ public final class SteelPlayer: ObservableObject {
 
         // Tear down current audio engine
         switch audioMode {
-        case .hls:
-            hlsAudioEngine?.stop()
-            hlsAudioEngine = nil
-            videoRenderer.displayLayer.controlTimebase = nil
+        case .externalAVPlayer:
+            stopExternalAudioPlayer()
         case .compressed:
             compressedAudioFeeder.flush()
             compressedAudioFeeder.close()
@@ -488,23 +486,24 @@ public final class SteelPlayer: ObservableObject {
         activeAudioStreamIndex = streamIndex
 
         // Open new audio engine for the selected track
-        if codecId == AV_CODEC_ID_EAC3 {
-            do {
-                let engine = HLSAudioEngine()
-                engine.onPlaybackFailed = { [weak self] in
-                    Task { @MainActor in self?.fallbackFromHLS() }
-                }
-                try engine.prepare(stream: stream, startTime: CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000))
-                hlsAudioEngine = engine
-                audioMode = .hls
-                audioOutput.detachVideoLayer(videoRenderer.displayLayer)
-                videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
-            } catch {
-                try? compressedAudioFeeder.open(stream: stream)
-                audioMode = .compressed
-                audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-            }
-        } else if codecId == AV_CODEC_ID_AC3 {
+        let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
+        let isAC3 = (codecId == AV_CODEC_ID_AC3)
+
+        if isEAC3, let audioURL = externalAudioURL {
+            // Switch to AVPlayer for Atmos
+            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            let item = AVPlayerItem(url: audioURL)
+            let avPlayer = AVPlayer(playerItem: item)
+            avPlayer.automaticallyWaitsToMinimizeStalling = false
+            externalAudioPlayer = avPlayer
+            externalAudioItem = item
+            audioMode = .externalAVPlayer
+
+            // Seek AVPlayer to current position and start
+            avPlayer.seek(to: seekTime, toleranceBefore: .zero, toleranceAfter: .zero)
+            avPlayer.play()
+            audioOutput.start(at: seekTime)
+        } else if isEAC3 || isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
@@ -512,14 +511,11 @@ public final class SteelPlayer: ObservableObject {
                 try? audioDecoder.open(stream: stream)
                 audioMode = .pcm
             }
-            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+            let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
+            audioOutput.start(at: seekTime)
         } else {
             try? audioDecoder.open(stream: stream)
             audioMode = .pcm
-            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-        }
-
-        if audioMode != .hls {
             let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
             audioOutput.start(at: seekTime)
         }
@@ -544,32 +540,45 @@ public final class SteelPlayer: ObservableObject {
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
-        if audioMode == .hls {
-            hlsAudioEngine?.setRate(rate)
-        } else {
-            audioOutput.setRate(rate)
+        audioOutput.setRate(rate)
+        externalAudioPlayer?.rate = rate
+    }
+
+    // MARK: - External Audio Player Helpers
+
+    /// Wait for the external AVPlayer to become readyToPlay.
+    /// Called during load() to ensure A/V sync — demux loop starts only after audio is ready.
+    private func waitForExternalAudioReady() async throws {
+        guard let item = externalAudioItem else { return }
+        if item.status == .readyToPlay { return }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            externalAudioObservation = item.observe(\.status) { [weak self] item, _ in
+                self?.externalAudioObservation?.invalidate()
+                self?.externalAudioObservation = nil
+                if item.status == .readyToPlay {
+                    #if DEBUG
+                    print("[SteelPlayer] External AVPlayer ready to play")
+                    #endif
+                    continuation.resume()
+                } else if item.status == .failed {
+                    #if DEBUG
+                    print("[SteelPlayer] External AVPlayer failed: \(item.error?.localizedDescription ?? "?")")
+                    #endif
+                    continuation.resume(throwing: item.error ?? SteelPlayerError.noAudioStream)
+                }
+            }
         }
     }
 
-    // MARK: - HLS Fallback
-
-    /// Fall back from HLS AVPlayer to CompressedAudioFeeder when HLS fails.
-    private func fallbackFromHLS() {
-        guard audioMode == .hls else { return }
-
-        #if DEBUG
-        print("[SteelPlayer] HLS audio failed — falling back to compressed passthrough")
-        #endif
-
-        hlsAudioEngine?.stop()
-        hlsAudioEngine = nil
-        videoRenderer.displayLayer.controlTimebase = nil
-
-        // Switch to compressed feeder (already opened as fallback in load)
-        audioMode = .compressed
-        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
-        audioOutput.start(at: seekTime)
+    /// Stop and clean up the external AVPlayer.
+    private func stopExternalAudioPlayer() {
+        externalAudioObservation?.invalidate()
+        externalAudioObservation = nil
+        externalAudioPlayer?.pause()
+        externalAudioPlayer?.replaceCurrentItem(with: nil)
+        externalAudioPlayer = nil
+        externalAudioItem = nil
     }
 
     // MARK: - Internal
@@ -580,13 +589,8 @@ public final class SteelPlayer: ObservableObject {
         stopTimeUpdates()
 
         // Stop audio
-        if audioMode == .hls {
-            hlsAudioEngine?.stop()
-            hlsAudioEngine = nil
-            videoRenderer.displayLayer.controlTimebase = nil
-        } else {
-            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
-        }
+        stopExternalAudioPlayer()
+        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         audioOutput.stop()
         compressedAudioFeeder.close()
         audioMode = .pcm
@@ -679,7 +683,7 @@ public final class SteelPlayer: ObservableObject {
                     }
                     self.videoRenderer.drainReorderBuffer()
                     switch self.audioMode {
-                    case .hls: break  // HLS engine handles its own cleanup
+                    case .externalAVPlayer: break
                     case .compressed: self.compressedAudioFeeder.flush()
                     case .pcm: self.audioDecoder.flush()
                     }
@@ -694,35 +698,23 @@ public final class SteelPlayer: ObservableObject {
                 if streamIdx == videoStreamIndex {
                     // Back-pressure: wait if display layer isn't ready.
                     // During HLS buffering: use a short timeout (50ms) so the
-                    // demux loop can still feed audio packets. Without timeout,
-                    // the loop blocks forever (audio starves → HLS can't buffer).
-                    // Without any wait, VideoToolbox queues grow → OOM crash.
-                    let hlsBuffering = (self.audioMode == .hls && !(self.hlsAudioEngine?.isPlayerPlaying ?? true))
-                    var waitCycles = 0
-                    let maxCycles = hlsBuffering ? 10 : Int.max  // 10 × 5ms = 50ms timeout
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waitCycles < maxCycles {
+                    // Back-pressure: wait if display layer isn't ready
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
                         Thread.sleep(forTimeInterval: 0.005)
-                        waitCycles += 1
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
-                    // Only decode if display layer can accept — skip frame otherwise
-                    // to prevent VideoToolbox memory buildup during HLS buffering.
-                    if self.videoRenderer.displayLayer.isReadyForMoreMediaData {
-                        if self.usingSoftwareDecode {
-                            self.softwareDecoder.decode(packet: packet)
-                        } else {
-                            self.videoDecoder.decode(packet: packet)
-                        }
+                    if self.usingSoftwareDecode {
+                        self.softwareDecoder.decode(packet: packet)
+                    } else {
+                        self.videoDecoder.decode(packet: packet)
                     }
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
-                    case .hls:
-                        // HLS engine — buffers packets, creates segments, feeds AVPlayer
-                        self.hlsAudioEngine?.feedPacket(packet)
+                    case .externalAVPlayer:
+                        break  // Audio comes from AVPlayer, not from demux loop
 
                     case .compressed:
-                        // Compressed passthrough — wrap raw packet as CMSampleBuffer
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
                             audioOutput.enqueue(sampleBuffer: sampleBuffer)
                             if !audioStarted {
@@ -732,7 +724,6 @@ public final class SteelPlayer: ObservableObject {
                         }
 
                     case .pcm:
-                        // FFmpeg PCM pipeline
                         let sampleBuffers = audioDecoder.decode(packet: packet)
                         for sb in sampleBuffers {
                             audioOutput.enqueue(sampleBuffer: sb)
@@ -760,9 +751,13 @@ public final class SteelPlayer: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
                 guard let self = self, !Task.isCancelled else { return }
-                let t = self.audioMode == .hls
-                    ? (self.hlsAudioEngine?.currentTimeSeconds ?? 0)
-                    : self.audioOutput.currentTimeSeconds
+                let t: Double
+                if self.audioMode == .externalAVPlayer, let avPlayer = self.externalAudioPlayer {
+                    let s = CMTimeGetSeconds(avPlayer.currentTime())
+                    t = s.isFinite ? s : 0
+                } else {
+                    t = self.audioOutput.currentTimeSeconds
+                }
                 if t > 0 {
                     self.currentTime = t
                     if self.duration > 0 {
