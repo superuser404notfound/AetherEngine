@@ -70,6 +70,9 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Offset between AVPlayer's 0-based timeline and the stream's PTS.
     private var streamOffset: Double = 0
 
+    /// Whether the initial timebase snap has been performed.
+    private var hasSnapped = false
+
     // MARK: - Stored Config
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3
@@ -127,6 +130,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         bufferLock.unlock()
 
         setPlayerPlaying(false)
+        hasSnapped = false
 
         let srv = HLSAudioServer()
         try srv.start()
@@ -308,25 +312,15 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // The display layer may briefly hold frames while the timebase
                 // catches up, but this is short (~200ms for a few buffered frames)
                 // and doesn't block the demux long enough to starve audio.
-                // Snap timebase to player position for A/V sync.
-                // This is now safe because audio segment creation is
-                // decoupled from video back-pressure (separate queue).
-                // The display layer may block the demux loop briefly
-                // while the timebase catches up, but audio keeps flowing.
+                // Don't snap here — player.currentTime() is unreliable at
+                // readyToPlay. The snap happens at the first sync tick
+                // (100ms later) when the player is actually playing.
+                #if DEBUG
                 if let tb = self.videoTimebase {
-                    let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
-                    // Subtract 0.25s to compensate for AVPlayer startup latency.
-                    // Between play() and actual audio output, ~250ms pass where
-                    // the timebase advances but the player hasn't started yet.
-                    // Confirmed: +0.25 doubled the error, -0.25 should cancel it.
-                    let snapTarget = playerStreamTime - 0.25
-                    let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
-                    #if DEBUG
                     let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", snapTarget))s")
-                    #endif
-                    CMTimebaseSetTime(tb, time: corrected)
+                    print("[HLSAudioEngine] PlayerItem ready -> play() (timebase at \(String(format: "%.1f", tbTime))s, snap pending)")
                 }
+                #endif
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
@@ -392,9 +386,24 @@ final class HLSAudioEngine: @unchecked Sendable {
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
 
-        let playerStreamTime = CMTimeGetSeconds(playerTime) + streamOffset
+        let playerSeconds = CMTimeGetSeconds(playerTime)
+        let playerStreamTime = playerSeconds + streamOffset
         let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-        let drift = playerStreamTime - tbTime  // positive = tb behind, negative = tb ahead
+
+        // One-time snap: wait until player is actually playing (currentTime > 0.1)
+        // then snap the timebase precisely. At readyToPlay, currentTime is
+        // unreliable (player hasn't started decoding yet).
+        if !hasSnapped && playerSeconds > 0.1 {
+            hasSnapped = true
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            CMTimebaseSetTime(tb, time: corrected)
+            #if DEBUG
+            print("[HLSAudioEngine] Timebase snapped: \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s (playerTime=\(String(format: "%.2f", playerSeconds))s)")
+            #endif
+            return
+        }
+
+        let drift = playerStreamTime - tbTime
 
         #if DEBUG
         syncLogCounter += 1
@@ -406,16 +415,12 @@ final class HLSAudioEngine: @unchecked Sendable {
             case .waitingToPlayAtSpecifiedRate: status = "waiting(\(player.reasonForWaitingToPlay?.rawValue ?? "?"))"
             @unknown default: status = "unknown"
             }
-            let rate = player.rate
             let errInfo = playerItem?.errorLog()?.events.last.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
-            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", CMTimeGetSeconds(playerTime)))s status=\(status) rate=\(rate) drift=\(String(format: "%+.2f", drift))s \(errInfo)")
+            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", playerSeconds))s status=\(status) rate=\(player.rate) drift=\(String(format: "%+.3f", drift))s \(errInfo)")
         }
         #endif
 
-        // ONLY snap forward — never pause the timebase.
-        // Pausing the timebase blocks the display layer, which blocks
-        // the demux loop, which starves audio segment creation.
-        // A small negative drift (video ahead of audio) is acceptable.
+        // Only snap forward — never pause the timebase.
         if drift > 0.05 {
             let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
