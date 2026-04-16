@@ -6,12 +6,20 @@ import Libavcodec
 
 /// Audio engine that uses AVPlayer + local HLS for EAC3 Dolby Atmos passthrough.
 ///
-/// ## A/V Sync with Stream Offset
+/// ## A/V Sync Strategy
 ///
-/// AVPlayer normalizes HLS timeline to start at 0, regardless of fMP4
-/// timestamps. Video frames use the original stream PTS (e.g., 476.5s
-/// for a resumed playback). The engine tracks `streamOffset` to bridge
-/// this gap: timebase = playerTime + streamOffset.
+/// The video timebase starts at rate=1.0 immediately — video plays from
+/// frame 1. The demux loop runs normally (video back-pressure + audio feed).
+/// AVPlayer takes ~2-4 seconds to buffer and start. During this time, video
+/// is already 2-4 seconds ahead of audio.
+///
+/// When AVPlayer starts, the drift correction detects that the timebase is
+/// ahead and **pauses it** (rate=0). Video freezes for 2-4 seconds while
+/// AVPlayer catches up. Once caught up, the timebase resumes at rate=1.0.
+/// From that point, audio and video are perfectly in sync.
+///
+/// This approach has zero complexity: no video buffering, no replay queues,
+/// no skipping, no seek-back. Just start-pause-resume.
 final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Properties
@@ -57,12 +65,9 @@ final class HLSAudioEngine: @unchecked Sendable {
         return server?.segmentCount ?? 0
     }
 
-
     // MARK: - Stream Offset
 
     /// Offset between AVPlayer's 0-based timeline and the stream's PTS.
-    /// Example: if playback starts at 476.5s, streamOffset = 476.5.
-    /// Timebase = playerTime + streamOffset.
     private var streamOffset: Double = 0
 
     // MARK: - Stored Config
@@ -83,17 +88,12 @@ final class HLSAudioEngine: @unchecked Sendable {
             timebaseOut: &tb
         )
         videoTimebase = tb
-        if let tb {
-            CMTimebaseSetTime(tb, time: .zero)
-            CMTimebaseSetRate(tb, rate: 0)
-        }
     }
 
     // MARK: - Public API
 
     var currentTime: CMTime { player?.currentTime() ?? .zero }
 
-    /// Current playback time in the stream's timeline (with offset).
     var currentTimeSeconds: Double {
         let t = CMTimeGetSeconds(currentTime)
         return t.isFinite ? t + streamOffset : 0
@@ -134,15 +134,16 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Timebase in stream PTS space, paused until AVPlayer starts
+        // Start timebase immediately at rate=1.0 so the display layer
+        // consumes video frames from the start. No deadlocks, no skipping.
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
-            CMTimebaseSetRate(tb, rate: 0)
+            CMTimebaseSetRate(tb, rate: 1.0)
         }
 
         #if DEBUG
         let codecName = codecType == .eac3 ? "EAC3" : "AC3"
-        print("[HLSAudioEngine] Prepared: \(codecName) \(sampleRate)Hz \(channelCount)ch, segment=\(String(format: "%.3f", segmentDuration))s, offset=\(String(format: "%.1f", streamOffset))s")
+        print("[HLSAudioEngine] Prepared: \(codecName) \(sampleRate)Hz \(channelCount)ch, offset=\(String(format: "%.1f", streamOffset))s")
         #endif
     }
 
@@ -160,32 +161,20 @@ final class HLSAudioEngine: @unchecked Sendable {
                 bitRate: storedBitRate,
                 firstPacketData: packetData
             ) {
-                // Always declare JOC for EAC3
                 if config.codecType == .eac3 && config.numDepSub == 0 {
                     config = FMP4AudioMuxer.Config(
-                        codecType: config.codecType,
-                        sampleRate: config.sampleRate,
-                        channelCount: config.channelCount,
-                        bitRate: config.bitRate,
-                        samplesPerFrame: config.samplesPerFrame,
-                        fscod: config.fscod,
-                        bsid: config.bsid,
-                        bsmod: config.bsmod,
-                        acmod: config.acmod,
-                        lfeon: config.lfeon,
-                        frmsizecod: config.frmsizecod,
-                        numDepSub: 1,
-                        depChanLoc: 0x0100
+                        codecType: config.codecType, sampleRate: config.sampleRate,
+                        channelCount: config.channelCount, bitRate: config.bitRate,
+                        samplesPerFrame: config.samplesPerFrame, fscod: config.fscod,
+                        bsid: config.bsid, bsmod: config.bsmod, acmod: config.acmod,
+                        lfeon: config.lfeon, frmsizecod: config.frmsizecod,
+                        numDepSub: 1, depChanLoc: 0x0100
                     )
                 }
 
                 let m = FMP4AudioMuxer(config: config)
-                // Muxer starts at 0 — AVPlayer normalizes HLS timeline to 0
-                // regardless of internal timestamps. streamOffset bridges the gap.
                 muxer = m
-
-                let initSegment = m.createInitSegment()
-                server?.setInitSegment(initSegment)
+                server?.setInitSegment(m.createInitSegment())
 
                 #if DEBUG
                 print("[HLSAudioEngine] Muxer ready: EAC3 (Atmos/JOC declared)")
@@ -301,9 +290,10 @@ final class HLSAudioEngine: @unchecked Sendable {
             if item.status == .readyToPlay {
                 guard let self else { return }
                 self.player?.play()
-                self.onPlayerStarted()
+                self.setPlayerPlaying(true)
                 #if DEBUG
-                print("[HLSAudioEngine] PlayerItem ready -> play()")
+                let tbTime = self.videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
+                print("[HLSAudioEngine] PlayerItem ready -> play() (timebase at \(String(format: "%.1f", tbTime))s)")
                 #endif
             } else if item.status == .failed {
                 #if DEBUG
@@ -317,19 +307,6 @@ final class HLSAudioEngine: @unchecked Sendable {
     }
 
     // MARK: - Video Timebase Sync
-
-    private func onPlayerStarted() {
-        guard let tb = videoTimebase else { return }
-        // Set timebase in stream PTS space: playerTime(0) + streamOffset
-        let streamTime = CMTimeMakeWithSeconds(streamOffset, preferredTimescale: 90000)
-        CMTimebaseSetTime(tb, time: streamTime)
-        CMTimebaseSetRate(tb, rate: Float64(_rate))
-        setPlayerPlaying(true)
-
-        #if DEBUG
-        print("[HLSAudioEngine] Video timebase started at \(String(format: "%.3f", streamOffset))s (stream time)")
-        #endif
-    }
 
     private func setupTimeSync() {
         guard let player else { return }
@@ -353,16 +330,36 @@ final class HLSAudioEngine: @unchecked Sendable {
         guard let tb = videoTimebase, let player else { return }
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
-        // Convert player time (0-based) to stream time (offset-based)
-        let playerSeconds = CMTimeGetSeconds(playerTime)
-        let expectedStreamTime = playerSeconds + streamOffset
-        let actualStreamTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-        let drift = expectedStreamTime - actualStreamTime
-        if abs(drift) > 0.05 {
-            let corrected = CMTimeMakeWithSeconds(expectedStreamTime, preferredTimescale: 90000)
+
+        let playerStreamTime = CMTimeGetSeconds(playerTime) + streamOffset
+        let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        let drift = playerStreamTime - tbTime  // positive = tb behind, negative = tb ahead
+
+        if drift > 0.05 {
+            // Timebase fell behind player → snap forward, ensure playing
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
+            if CMTimebaseGetRate(tb) == 0 {
+                CMTimebaseSetRate(tb, rate: Float64(_rate))
+                #if DEBUG
+                print("[HLSAudioEngine] Video resumed at \(String(format: "%.1f", playerStreamTime))s")
+                #endif
+            }
+        } else if drift < -0.2 {
+            // Timebase ahead of player → pause video, let audio catch up
+            if CMTimebaseGetRate(tb) != 0 {
+                CMTimebaseSetRate(tb, rate: 0)
+                #if DEBUG
+                print("[HLSAudioEngine] Video paused (ahead by \(String(format: "%.1f", -drift))s, waiting for audio)")
+                #endif
+            }
+        } else if abs(drift) <= 0.2 && CMTimebaseGetRate(tb) == 0 {
+            // Within sync threshold and currently paused → resume
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            CMTimebaseSetTime(tb, time: corrected)
+            CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Drift corrected: \(String(format: "%+.3f", drift))s (stream=\(String(format: "%.3f", expectedStreamTime))s)")
+            print("[HLSAudioEngine] Video synced and resumed at \(String(format: "%.1f", playerStreamTime))s")
             #endif
         }
     }
