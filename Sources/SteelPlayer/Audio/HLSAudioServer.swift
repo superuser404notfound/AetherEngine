@@ -26,6 +26,10 @@ final class HLSAudioServer: @unchecked Sendable {
     private var segments: [Data] = []
     private var segDuration: Double = 2.048
 
+    /// Wall clock time when seg0 was first fetched by AVPlayer.
+    /// Used to measure HLS pipeline latency.
+    private(set) var seg0FetchTime: Date?
+
 
     private(set) var port: UInt16 = 0
 
@@ -70,6 +74,7 @@ final class HLSAudioServer: @unchecked Sendable {
         lock.lock()
         initSegmentData = nil
         segments.removeAll()
+        seg0FetchTime = nil
         lock.unlock()
     }
 
@@ -119,6 +124,10 @@ final class HLSAudioServer: @unchecked Sendable {
             } else if path.hasPrefix("/seg") && path.hasSuffix(".mp4") {
                 let indexStr = path.dropFirst(4).dropLast(4)
                 let index = Int(indexStr) ?? -1
+                // Track when seg0 is first fetched for latency measurement
+                if index == 0 && self.seg0FetchTime == nil {
+                    self.seg0FetchTime = Date()
+                }
                 self.lock.lock()
                 let data = (index >= 0 && index < self.segments.count) ? self.segments[index] : Data()
                 self.lock.unlock()
