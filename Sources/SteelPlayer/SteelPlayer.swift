@@ -181,6 +181,18 @@ public final class SteelPlayer: ObservableObject {
 
     // MARK: - Public API
 
+    /// Stream indices that the host app knows carry Dolby Atmos (EAC3+JOC).
+    ///
+    /// EAC3+JOC embeds Atmos object metadata as extension elements within the
+    /// independent substream — same channel count (6ch) and packet framing as
+    /// standard EAC3 5.1. SteelPlayer cannot distinguish them from the bitstream
+    /// alone. Set this before calling `load()` with the stream indices your media
+    /// server reports as Atmos (e.g. from Jellyfin's MediaStream.IsAtmos).
+    ///
+    /// When empty (default), ALL EAC3 streams are routed through the Atmos
+    /// pipeline (AVPlayer + HLS) as a safe fallback.
+    public var atmosStreamIndices: Set<Int> = []
+
     /// Load a media file or stream URL. Replaces any current playback.
     public func load(url: URL, startPosition: Double? = nil) async throws {
         // Tear down any previous playback
@@ -293,12 +305,24 @@ public final class SteelPlayer: ObservableObject {
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
 
-                // For EAC3, probe the first audio packet to detect Atmos (JOC).
-                // Only EAC3 with dependent substreams benefits from AVPlayer passthrough.
-                let isAtmos = isEAC3 && probeAtmos(audioStreamIndex: audioIdx)
+                // Determine if this EAC3 stream should use the Atmos pipeline.
+                // If the host app provided atmosStreamIndices, use that.
+                // Otherwise, route ALL EAC3 through HLS (safe fallback — JOC
+                // is invisible at the packet level, so we can't distinguish
+                // EAC3 Atmos from EAC3 5.1 without server metadata).
+                let isAtmos: Bool
+                if isEAC3 {
+                    if atmosStreamIndices.isEmpty {
+                        isAtmos = true  // No hint → assume Atmos for all EAC3
+                    } else {
+                        isAtmos = atmosStreamIndices.contains(Int(audioIdx))
+                    }
+                } else {
+                    isAtmos = false
+                }
 
                 if isAtmos {
-                    // EAC3+JOC → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
+                    // EAC3 → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
                     // Falls back to CompressedAudioFeeder if AVPlayer fails.
                     let streamIdx = audioIdx
                     do {
@@ -536,7 +560,12 @@ public final class SteelPlayer: ObservableObject {
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
-        let isAtmos = isEAC3 && probeAtmos(audioStreamIndex: streamIndex)
+        let isAtmos: Bool
+        if isEAC3 {
+            isAtmos = atmosStreamIndices.isEmpty || atmosStreamIndices.contains(Int(streamIndex))
+        } else {
+            isAtmos = false
+        }
 
         if isAtmos {
             do {
