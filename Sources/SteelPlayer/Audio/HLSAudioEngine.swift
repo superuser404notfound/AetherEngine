@@ -75,6 +75,12 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Whether the initial timebase snap has been performed.
     private var hasSnapped = false
 
+    /// User-configurable audio delay compensation in seconds.
+    /// Positive = delay video (audio comes first from HLS pipeline).
+    /// Set this from the host app based on the user's audio setup.
+    /// Default 0 = no compensation (timebase matches AVPlayer.currentTime).
+    var audioDelayCompensation: Double = 0
+
     // MARK: - Stored Config
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3
@@ -140,14 +146,11 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Start timebase PAUSED. Video frames accumulate in the display
-        // layer's buffer but are not shown. When AVPlayer starts, we set
-        // the timebase to the player's position and start both together.
-        // This is safe because the three-thread architecture ensures audio
-        // flows independently even when the video decode thread blocks.
+        // Start timebase immediately so video plays from the start.
+        // The three-thread architecture ensures audio flows independently.
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
-            CMTimebaseSetRate(tb, rate: 0)
+            CMTimebaseSetRate(tb, rate: 1.0)
         }
 
         #if DEBUG
@@ -401,20 +404,14 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            // AVPlayer's HLS pipeline has ~2s internal latency: currentTime()
-            // reports the decode position, but actual audio output is ~2s behind.
-            // Delay video by 2s so it matches when audio actually reaches the
-            // speaker. This means ~2s of black screen at startup while the
-            // timebase catches up to the first buffered video frame.
-            // Empirically measured: 2.0=late, 2.5=slightly late, 2.7=slightly early, 3.0=early
-            // TODO: make user-configurable in settings
-            let hlsPipelineLatency = 2.6
-            let snapTarget = playerStreamTime - hlsPipelineLatency
+            // Snap timebase to player position. audioDelayCompensation shifts
+            // video earlier (negative = video shows earlier content, matching
+            // audio that comes delayed through the HLS pipeline).
+            let snapTarget = playerStreamTime - audioDelayCompensation
             let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
-            CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started: \(String(format: "%.3f", snapTarget))s (player=\(String(format: "%.3f", playerStreamTime))s, comp=\(hlsPipelineLatency)s)")
+            print("[HLSAudioEngine] Snap: \(String(format: "%.3f", tbTime))s → \(String(format: "%.3f", snapTarget))s (player=\(String(format: "%.3f", playerStreamTime))s, comp=\(audioDelayCompensation)s)")
             #endif
             return
         }
