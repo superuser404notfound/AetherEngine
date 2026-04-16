@@ -6,22 +6,12 @@ import Libavcodec
 
 /// Audio engine that uses AVPlayer + local HLS for EAC3 Dolby Atmos passthrough.
 ///
-/// ## How It Works
+/// ## A/V Sync with Stream Offset
 ///
-/// 1. Raw EAC3 packets from the demuxer are muxed into fMP4 segments
-/// 2. Segments are served via a local HLS server
-/// 3. AVPlayer plays the HLS stream → tvOS wraps EAC3+JOC as Dolby MAT 2.0
-/// 4. The dec3 box always declares JOC so AVPlayer enables Atmos passthrough
-///
-/// ## A/V Sync
-///
-/// Video uses a CMTimebase (controlTimebase on the display layer).
-/// The timebase starts at rate=0 (paused). The host MUST skip video
-/// decoding entirely during HLS buffering (`isPlayerPlaying == false`)
-/// so audio packets flow at full speed. Once AVPlayer is ready:
-/// 1. Timebase set to player.currentTime() with rate=1.0
-/// 2. Video starts from current demux position
-/// 3. Periodic drift correction maintains sync
+/// AVPlayer normalizes HLS timeline to start at 0, regardless of fMP4
+/// timestamps. Video frames use the original stream PTS (e.g., 476.5s
+/// for a resumed playback). The engine tracks `streamOffset` to bridge
+/// this gap: timebase = playerTime + streamOffset.
 final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Properties
@@ -31,12 +21,8 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var player: AVPlayer?
     private var playerItem: AVPlayerItem?
 
-    /// CMTimebase for video sync — controls the display layer's frame pacing.
-    /// Starts at rate=0 (paused). Set to rate=1.0 when AVPlayer is ready.
     private(set) var videoTimebase: CMTimebase?
 
-    /// True once AVPlayer has started playing audio.
-    /// The host MUST skip video decoding while this is false.
     private let _isPlayerPlaying = NSLock()
     nonisolated(unsafe) private var __isPlayerPlaying = false
     var isPlayerPlaying: Bool {
@@ -54,7 +40,6 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
 
-    /// Called when AVPlayer fails — host should fall back to CompressedAudioFeeder.
     var onPlaybackFailed: (@Sendable () -> Void)?
 
     // MARK: - Segment Buffering
@@ -63,29 +48,30 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var frameBuffer: [Data] = []
     private var isPlayerCreated = false
 
-    /// Frames per HLS segment. 64 x 1536 samples / 48kHz = 2.048 seconds.
     private let framesPerSegment = 64
-
-    /// Duration of one segment in seconds.
     private(set) var segmentDuration: Double = 2.048
 
-    /// Number of segments created so far. Used by the host to throttle
-    /// the demux loop during initial HLS buffering.
     var segmentCount: Int {
         bufferLock.lock()
         defer { bufferLock.unlock() }
         return server?.segmentCount ?? 0
     }
 
-    /// Audio time (in seconds) covered by all segments so far.
-    /// Used to skip duplicate audio packets after a demuxer seek-back.
+    /// Audio time covered so far in stream PTS space.
     var bufferedAudioTime: Double {
         bufferLock.lock()
         defer { bufferLock.unlock() }
-        return Double(server?.segmentCount ?? 0) * segmentDuration
+        return streamOffset + Double(server?.segmentCount ?? 0) * segmentDuration
     }
 
-    // MARK: - Stored Config (set in prepare, used in feedPacket)
+    // MARK: - Stream Offset
+
+    /// Offset between AVPlayer's 0-based timeline and the stream's PTS.
+    /// Example: if playback starts at 476.5s, streamOffset = 476.5.
+    /// Timebase = playerTime + streamOffset.
+    private var streamOffset: Double = 0
+
+    // MARK: - Stored Config
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3
     private var storedSampleRate: UInt32 = 48000
@@ -113,9 +99,10 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     var currentTime: CMTime { player?.currentTime() ?? .zero }
 
+    /// Current playback time in the stream's timeline (with offset).
     var currentTimeSeconds: Double {
         let t = CMTimeGetSeconds(currentTime)
-        return t.isFinite ? t : 0
+        return t.isFinite ? t + streamOffset : 0
     }
 
     func prepare(
@@ -131,6 +118,9 @@ final class HLSAudioEngine: @unchecked Sendable {
         let sampleRate = max(UInt32(codecpar.pointee.sample_rate), 48000)
         let channelCount = max(UInt32(codecpar.pointee.ch_layout.nb_channels), 2)
         let bitRate = UInt32(codecpar.pointee.bit_rate)
+
+        let startSeconds = CMTimeGetSeconds(startTime)
+        streamOffset = startSeconds.isFinite ? startSeconds : 0
 
         bufferLock.lock()
         storedCodecType = codecType
@@ -150,6 +140,7 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
+        // Timebase in stream PTS space, paused until AVPlayer starts
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
             CMTimebaseSetRate(tb, rate: 0)
@@ -157,18 +148,16 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         #if DEBUG
         let codecName = codecType == .eac3 ? "EAC3" : "AC3"
-        print("[HLSAudioEngine] Prepared: \(codecName) \(sampleRate)Hz \(channelCount)ch, segment=\(String(format: "%.3f", segmentDuration))s")
+        print("[HLSAudioEngine] Prepared: \(codecName) \(sampleRate)Hz \(channelCount)ch, segment=\(String(format: "%.3f", segmentDuration))s, offset=\(String(format: "%.1f", streamOffset))s")
         #endif
     }
 
-    /// Feed a raw EAC3/AC3 packet from the demuxer.
     func feedPacket(_ packet: UnsafeMutablePointer<AVPacket>) {
         guard packet.pointee.size > 0, packet.pointee.data != nil else { return }
         let packetData = Data(bytes: packet.pointee.data, count: Int(packet.pointee.size))
 
         bufferLock.lock()
 
-        // Create muxer from first packet (needs bitstream header for dec3 box)
         if muxer == nil {
             if var config = FMP4AudioMuxer.detectConfig(
                 codecType: storedCodecType,
@@ -177,10 +166,7 @@ final class HLSAudioEngine: @unchecked Sendable {
                 bitRate: storedBitRate,
                 firstPacketData: packetData
             ) {
-                // Always declare JOC for EAC3 — Atmos metadata (JOC) can be
-                // embedded within the independent substream (ETSI TS 103 420)
-                // without separate dependent substream packets. AVPlayer needs
-                // the dec3 JOC flag to enable Dolby MAT 2.0 passthrough.
+                // Always declare JOC for EAC3
                 if config.codecType == .eac3 && config.numDepSub == 0 {
                     config = FMP4AudioMuxer.Config(
                         codecType: config.codecType,
@@ -200,25 +186,21 @@ final class HLSAudioEngine: @unchecked Sendable {
                 }
 
                 let m = FMP4AudioMuxer(config: config)
-                let startSeconds = CMTimeGetSeconds(storedStartTime)
-                if startSeconds > 0 {
-                    m.reset(atTimeSeconds: startSeconds)
-                }
+                // Muxer starts at 0 — AVPlayer normalizes HLS timeline to 0
+                // regardless of internal timestamps. streamOffset bridges the gap.
                 muxer = m
 
                 let initSegment = m.createInitSegment()
                 server?.setInitSegment(initSegment)
 
                 #if DEBUG
-                let atmos = config.numDepSub > 0 ? " (Atmos/JOC declared)" : ""
-                print("[HLSAudioEngine] Muxer ready: \(config.codecType == .eac3 ? "EAC3" : "AC3")\(atmos)")
+                print("[HLSAudioEngine] Muxer ready: EAC3 (Atmos/JOC declared)")
                 #endif
             }
         }
 
         frameBuffer.append(packetData)
 
-        // Check if we have enough frames for a segment
         if frameBuffer.count >= framesPerSegment, let m = muxer {
             let frames = Array(frameBuffer.prefix(framesPerSegment))
             frameBuffer.removeFirst(framesPerSegment)
@@ -303,9 +285,6 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     private func createPlayer() {
         guard let url = server?.playlistURL else {
-            #if DEBUG
-            print("[HLSAudioEngine] No playlist URL")
-            #endif
             onPlaybackFailed?()
             return
         }
@@ -335,9 +314,6 @@ final class HLSAudioEngine: @unchecked Sendable {
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
-                if let e = item.error as NSError? {
-                    print("[HLSAudioEngine]   domain=\(e.domain) code=\(e.code)")
-                }
                 #endif
                 failureCallback?()
             }
@@ -349,16 +325,15 @@ final class HLSAudioEngine: @unchecked Sendable {
     // MARK: - Video Timebase Sync
 
     private func onPlayerStarted() {
-        guard let tb = videoTimebase, let player else { return }
-        let playerTime = player.currentTime()
-        let time = playerTime.isValid ? playerTime : storedStartTime
-        CMTimebaseSetTime(tb, time: time)
+        guard let tb = videoTimebase else { return }
+        // Set timebase in stream PTS space: playerTime(0) + streamOffset
+        let streamTime = CMTimeMakeWithSeconds(streamOffset, preferredTimescale: 90000)
+        CMTimebaseSetTime(tb, time: streamTime)
         CMTimebaseSetRate(tb, rate: Float64(_rate))
         setPlayerPlaying(true)
 
         #if DEBUG
-        let t = CMTimeGetSeconds(time)
-        print("[HLSAudioEngine] Video timebase started at \(String(format: "%.3f", t))s")
+        print("[HLSAudioEngine] Video timebase started at \(String(format: "%.3f", streamOffset))s (stream time)")
         #endif
     }
 
@@ -384,13 +359,16 @@ final class HLSAudioEngine: @unchecked Sendable {
         guard let tb = videoTimebase, let player else { return }
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
+        // Convert player time (0-based) to stream time (offset-based)
         let playerSeconds = CMTimeGetSeconds(playerTime)
-        let tbSeconds = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-        let drift = playerSeconds - tbSeconds
+        let expectedStreamTime = playerSeconds + streamOffset
+        let actualStreamTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        let drift = expectedStreamTime - actualStreamTime
         if abs(drift) > 0.05 {
-            CMTimebaseSetTime(tb, time: playerTime)
+            let corrected = CMTimeMakeWithSeconds(expectedStreamTime, preferredTimescale: 90000)
+            CMTimebaseSetTime(tb, time: corrected)
             #if DEBUG
-            print("[HLSAudioEngine] Drift corrected: \(String(format: "%+.3f", drift))s (player=\(String(format: "%.3f", playerSeconds))s)")
+            print("[HLSAudioEngine] Drift corrected: \(String(format: "%+.3f", drift))s (stream=\(String(format: "%.3f", expectedStreamTime))s)")
             #endif
         }
     }
