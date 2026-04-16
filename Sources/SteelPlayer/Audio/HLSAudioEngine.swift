@@ -77,6 +77,14 @@ final class HLSAudioEngine: @unchecked Sendable {
         return server?.segmentCount ?? 0
     }
 
+    /// Audio time (in seconds) covered by all segments so far.
+    /// Used to skip duplicate audio packets after a demuxer seek-back.
+    var bufferedAudioTime: Double {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return Double(server?.segmentCount ?? 0) * segmentDuration
+    }
+
     // MARK: - Stored Config (set in prepare, used in feedPacket)
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3
