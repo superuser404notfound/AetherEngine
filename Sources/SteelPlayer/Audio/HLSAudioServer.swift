@@ -4,12 +4,18 @@ import Network
 /// Local HTTP server that serves HLS audio to AVPlayer on tvOS.
 ///
 /// Serves three types of resources:
-/// - `/audio.m3u8` — Dynamic EVENT playlist (AVPlayer polls for new segments)
+/// - `/audio.m3u8` — Live sliding-window playlist (last 5 segments)
 /// - `/init.mp4`   — fMP4 init segment (moov, loaded once)
 /// - `/segN.mp4`   — fMP4 media segments (moof+mdat, loaded sequentially)
 ///
-/// Uses simple HTTP/1.1 responses with full Content-Length for each resource.
-/// No range requests needed — HLS segments are small enough to serve in full.
+/// ## AVPlayer Stale-Detection Workaround
+///
+/// AVPlayer stops fetching segments when it polls the playlist multiple
+/// times and gets the same response (same segment count). To prevent this:
+/// 1. No `#EXT-X-PLAYLIST-TYPE:EVENT` — plain live playlist
+/// 2. Sliding window of 5 segments (old segments drop off)
+/// 3. Returns HTTP 404 when no new segments since last poll (signals
+///    "server alive, buffering" per WWDC17 Session 514)
 final class HLSAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?
@@ -19,6 +25,9 @@ final class HLSAudioServer: @unchecked Sendable {
     private var initSegmentData: Data?
     private var segments: [Data] = []
     private var segDuration: Double = 2.048
+
+    /// Tracks segment count at last playlist response to detect stale polls.
+    private var lastReturnedCount = 0
 
     private(set) var port: UInt16 = 0
 
@@ -63,6 +72,7 @@ final class HLSAudioServer: @unchecked Sendable {
         lock.lock()
         initSegmentData = nil
         segments.removeAll()
+        lastReturnedCount = 0
         lock.unlock()
     }
 
@@ -94,7 +104,6 @@ final class HLSAudioServer: @unchecked Sendable {
             guard let self = self, error == nil, let data = content,
                   let request = String(data: data, encoding: .utf8) else { return }
 
-            // Parse request path from first line: "GET /path HTTP/1.1"
             let firstLine = request.components(separatedBy: "\r\n").first ?? ""
             let parts = firstLine.split(separator: " ")
             let path = parts.count >= 2 ? String(parts[1]) : "/"
@@ -111,7 +120,6 @@ final class HLSAudioServer: @unchecked Sendable {
                 self.lock.unlock()
                 self.respondData(connection, data: data, contentType: "video/mp4")
             } else if path.hasPrefix("/seg") && path.hasSuffix(".mp4") {
-                // Parse segment index from "/seg0.mp4"
                 let indexStr = path.dropFirst(4).dropLast(4)
                 let index = Int(indexStr) ?? -1
                 self.lock.lock()
@@ -132,38 +140,59 @@ final class HLSAudioServer: @unchecked Sendable {
         lock.lock()
         let count = segments.count
         let duration = segDuration
+        let lastCount = lastReturnedCount
         lock.unlock()
 
-        // Build EVENT playlist — segments accumulate, never removed.
-        // No #EXT-X-ENDLIST → AVPlayer keeps polling for new segments.
-        let targetDuration = Int(ceil(duration)) + 1
+        // If no new segments since last poll → 404 (WWDC17 Session 514).
+        // This tells AVPlayer "server alive, not stale, just buffering."
+        // Without this, AVPlayer sees the same playlist twice and gives up.
+        if count > 0 && count == lastCount {
+            #if DEBUG
+            print("[HLSAudioServer] Playlist stale (\(count) segments) → 404")
+            #endif
+            respond404(connection)
+            return
+        }
+
+        lock.lock()
+        lastReturnedCount = count
+        lock.unlock()
+
+        // Sliding window: only advertise the last 5 segments.
+        // Old segments stay in memory (AVPlayer may still request them)
+        // but the playlist only shows recent ones. This mimics a proper
+        // live stream and prevents AVPlayer's stale-detection from firing.
+        let windowSize = 5
+        let startIndex = max(0, count - windowSize)
+        let targetDuration = Int(ceil(duration))
+
         var m3u8 = "#EXTM3U\n"
         m3u8 += "#EXT-X-TARGETDURATION:\(targetDuration)\n"
         m3u8 += "#EXT-X-VERSION:7\n"
-        m3u8 += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
-        m3u8 += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        // No #EXT-X-PLAYLIST-TYPE — plain live playlist
+        m3u8 += "#EXT-X-MEDIA-SEQUENCE:\(startIndex)\n"
         m3u8 += "#EXT-X-MAP:URI=\"init.mp4\"\n"
-        for i in 0..<count {
+        for i in startIndex..<count {
             m3u8 += "#EXTINF:\(String(format: "%.3f", duration)),\n"
             m3u8 += "seg\(i).mp4\n"
         }
+        // No #EXT-X-ENDLIST — stream continues
 
         respondData(connection, data: Data(m3u8.utf8), contentType: "application/vnd.apple.mpegurl")
     }
 
     private func respondData(_ connection: NWConnection, data: Data, contentType: String) {
-        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\n\r\n"
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(data)
 
         connection.send(content: payload, completion: .contentProcessed { [weak self] _ in
-            // Read next request on keep-alive connection
             self?.readRequest(connection)
         })
     }
 
     private func respond404(_ connection: NWConnection) {
-        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
         connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
             self?.readRequest(connection)
         })
