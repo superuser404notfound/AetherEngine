@@ -428,6 +428,14 @@ public final class SteelPlayer: ObservableObject {
 
         switch audioMode {
         case .atmos:
+            // Clear atmos buffers — drain threads will see empty buffers and stop
+            atmosAudioLock.lock()
+            atmosAudioBuffer.removeAll()
+            atmosAudioLock.unlock()
+            atmosVideoLock.lock()
+            for pkt in atmosVideoBuffer { av_packet_free_safe(pkt) }
+            atmosVideoBuffer.removeAll()
+            atmosVideoLock.unlock()
             // Tear down HLS pipeline — must rebuild from new position
             hlsAudioEngine?.prepareForSeek()
         case .compressed:
