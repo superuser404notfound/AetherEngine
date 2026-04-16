@@ -181,20 +181,35 @@ final class HLSAudioEngine: @unchecked Sendable {
         bufferLock.lock()
 
         if muxer == nil {
-            if let config = FMP4AudioMuxer.detectConfig(
+            if var config = FMP4AudioMuxer.detectConfig(
                 codecType: storedCodecType,
                 sampleRate: storedSampleRate,
                 channelCount: storedChannelCount,
                 bitRate: storedBitRate,
                 firstPacketData: packetData
             ) {
+                // Always declare JOC in the dec3 box when routed through HLS.
+                // AVPlayer needs this signaling to activate Dolby Atmos (MAT 2.0)
+                // passthrough. The actual JOC data may be in the bitstream even
+                // when our simple scan doesn't find dependent substreams
+                // (FFmpeg may deliver them differently depending on the container).
+                if config.codecType == .eac3 && config.numDepSub == 0 {
+                    config = FMP4AudioMuxer.Config(
+                        codecType: config.codecType, sampleRate: config.sampleRate,
+                        channelCount: config.channelCount, bitRate: config.bitRate,
+                        samplesPerFrame: config.samplesPerFrame, fscod: config.fscod,
+                        bsid: config.bsid, bsmod: config.bsmod, acmod: config.acmod,
+                        lfeon: config.lfeon, frmsizecod: config.frmsizecod,
+                        numDepSub: 1, depChanLoc: 0x0100
+                    )
+                }
+
                 let m = FMP4AudioMuxer(config: config)
                 muxer = m
                 server?.setInitSegment(m.createInitSegment())
 
                 #if DEBUG
-                let hasJOC = config.numDepSub > 0
-                print("[HLSAudioEngine] Muxer ready: EAC3 \(hasJOC ? "(Atmos/JOC)" : "(no JOC)")")
+                print("[HLSAudioEngine] Muxer ready: EAC3 (Atmos/JOC declared)")
                 #endif
             }
         }

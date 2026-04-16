@@ -1074,14 +1074,33 @@ public final class SteelPlayer: ObservableObject {
 
     // MARK: - Atmos Probing
 
-    /// Read packets from the demuxer until we find one from the given audio
-    /// stream, then check the bitstream for Atmos (dependent substreams).
-    /// Seeks back to the current position afterward.
+    /// Detect whether an EAC3 stream carries Dolby Atmos (JOC).
+    ///
+    /// Uses multiple signals (most to least reliable):
+    /// 1. Channel count > 6 — EAC3 Atmos is typically 7.1 (8ch base + objects),
+    ///    while standard EAC3 5.1 = 6ch. Most reliable for Blu-ray/remux content.
+    /// 2. Bitstream scan — check multiple audio packets for dependent substreams
+    ///    (strmtyp=1). May fail if FFmpeg delivers independent/dependent as
+    ///    separate AVPackets or if the first packets lack JOC.
     private func probeAtmos(audioStreamIndex: Int32) -> Bool {
-        let currentPos = currentTime
+        guard let stream = demuxer.stream(at: audioStreamIndex),
+              let codecpar = stream.pointee.codecpar else { return false }
 
-        // Read up to 50 packets looking for an audio packet from this stream
-        for _ in 0..<50 {
+        let channelCount = Int(codecpar.pointee.ch_layout.nb_channels)
+
+        // Primary signal: channel count > 6 strongly indicates Atmos
+        if channelCount > 6 {
+            #if DEBUG
+            print("[SteelPlayer] EAC3 probe: Atmos detected (\(channelCount)ch > 6)")
+            #endif
+            return true
+        }
+
+        // Secondary: scan first audio packets for dependent substreams
+        let currentPos = currentTime
+        var audioPacketsChecked = 0
+
+        for _ in 0..<100 {
             guard let packet = try? demuxer.readPacket() else { break }
             defer { av_packet_free_safe(packet) }
 
@@ -1089,20 +1108,21 @@ public final class SteelPlayer: ObservableObject {
                packet.pointee.size > 0,
                let data = packet.pointee.data {
                 let packetData = Data(bytes: data, count: Int(packet.pointee.size))
-                let hasAtmos = FMP4AudioMuxer.hasAtmosJOC(packetData: packetData)
-                // Seek back so the demux loop starts from the right position
-                demuxer.seek(to: currentPos)
-                #if DEBUG
-                print("[SteelPlayer] EAC3 probe: \(hasAtmos ? "Atmos (JOC) detected" : "no Atmos")")
-                #endif
-                return hasAtmos
+                if FMP4AudioMuxer.hasAtmosJOC(packetData: packetData) {
+                    demuxer.seek(to: currentPos)
+                    #if DEBUG
+                    print("[SteelPlayer] EAC3 probe: Atmos (JOC) in packet \(audioPacketsChecked)")
+                    #endif
+                    return true
+                }
+                audioPacketsChecked += 1
+                if audioPacketsChecked >= 5 { break }
             }
         }
 
-        // Couldn't find audio packet — seek back and assume no Atmos
         demuxer.seek(to: currentPos)
         #if DEBUG
-        print("[SteelPlayer] EAC3 probe: no audio packet found, assuming no Atmos")
+        print("[SteelPlayer] EAC3 probe: no Atmos (\(channelCount)ch, \(audioPacketsChecked) packets checked)")
         #endif
         return false
     }
