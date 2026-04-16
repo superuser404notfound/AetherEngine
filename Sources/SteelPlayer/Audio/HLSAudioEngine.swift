@@ -87,6 +87,10 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Default 0 = no compensation (timebase matches AVPlayer.currentTime).
     var audioDelayCompensation: Double = 0
 
+    /// Constant offset between CMTimebase (host clock) and AVPlayer's clock.
+    /// Measured consistently at ~170ms across content and playback sessions.
+    private let clockOffset = 0.17
+
     // MARK: - Stored Config
 
     private var storedCodecType: FMP4AudioMuxer.CodecType = .eac3
@@ -453,23 +457,19 @@ final class HLSAudioEngine: @unchecked Sendable {
             let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             onWillStartTimebase?(startPTS)
 
-            // Compensate for the constant ~0.17s CMTimebase clock offset.
-            // The CMTimebase (host clock) gains ~170ms relative to AVPlayer's
-            // internal clock after each snap. Measured consistently across all
-            // content and playback sessions. Without this, video is 170ms
-            // ahead of audio (noticeable lip-sync error).
-            let clockOffset = 0.17
-            let snapTarget = playerStreamTime - clockOffset
-            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
-            CMTimebaseSetTime(tb, time: corrected)
+            snapTimebaseToPlayer(playerStreamTime: playerStreamTime, tb: tb)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", snapTarget))s (clockComp=\(clockOffset)s, player=\(String(format: "%.3f", playerStreamTime))s)")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime - clockOffset))s (player=\(String(format: "%.3f", playerStreamTime))s)")
             #endif
             return
         }
 
+        // Drift = how far the audio (player) is ahead of video (timebase).
+        // Expected value after snap: ~clockOffset (0.17s). Real clock drift
+        // is (drift - clockOffset). Correct when it exceeds 50ms.
         let drift = playerStreamTime - tbTime
+        let realDrift = drift - clockOffset
 
         #if DEBUG
         syncLogCounter += 1
@@ -482,14 +482,26 @@ final class HLSAudioEngine: @unchecked Sendable {
             @unknown default: status = "unknown"
             }
             let errInfo = playerItem?.errorLog()?.events.last.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
-            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", playerSeconds))s status=\(status) rate=\(player.rate) drift=\(String(format: "%+.3f", drift))s \(errInfo)")
+            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", playerSeconds))s status=\(status) rate=\(player.rate) drift=\(String(format: "%+.3f", realDrift))s \(errInfo)")
         }
         #endif
 
-        // No ongoing drift correction — the one-time snap (with audio
-        // output latency compensation) is sufficient. The CMTimebase and
-        // AVPlayer clocks run at identical rates (drift < 0.002s over 30s).
-        // Correcting drift would undo the deliberate latency compensation.
+        // Correct drift when it exceeds 50ms. The display layer handles
+        // small time adjustments smoothly (holds or skips one frame).
+        if abs(realDrift) > 0.05 {
+            snapTimebaseToPlayer(playerStreamTime: playerStreamTime, tb: tb)
+            #if DEBUG
+            print("[HLSAudioEngine] Drift correction: \(String(format: "%+.3f", realDrift))s → snapped")
+            #endif
+        }
+    }
+
+    /// Snap the timebase to match the player's current position,
+    /// accounting for the constant CMTimebase-to-AVPlayer clock offset.
+    private func snapTimebaseToPlayer(playerStreamTime: Double, tb: CMTimebase) {
+        let target = playerStreamTime - clockOffset
+        let corrected = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
+        CMTimebaseSetTime(tb, time: corrected)
     }
 }
 
