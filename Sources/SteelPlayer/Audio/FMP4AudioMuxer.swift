@@ -102,10 +102,6 @@ final class FMP4AudioMuxer {
         let sampleCount = frames.count
         let duration = config.samplesPerFrame
 
-        // Compute total payload size
-        var payloadSize = 0
-        for f in frames { payloadSize += f.count }
-
         // Pre-compute box sizes (deterministic, avoids patching data_offset later)
         let trunSize = 12 + 4 + 4 + (sampleCount * 8)  // fullbox + count + offset + entries(dur+size)
         let tfdtSize = 20  // fullbox(12) + uint64(8)
@@ -114,6 +110,15 @@ final class FMP4AudioMuxer {
         let mfhdSize = 16  // fullbox(12) + sequence_number(4)
         let moofSize = 8 + mfhdSize + trafSize
         let dataOffset = UInt32(moofSize + 8)  // + mdat header (8 bytes)
+
+        // Single pass: compute payload size and build trun entries together
+        var payloadSize = 0
+        var trunEntries = Data(capacity: sampleCount * 8)
+        for frame in frames {
+            trunEntries.appendUInt32BE(duration)
+            trunEntries.appendUInt32BE(UInt32(frame.count))
+            payloadSize += frame.count
+        }
 
         var data = Data(capacity: moofSize + 8 + payloadSize)
 
@@ -149,10 +154,7 @@ final class FMP4AudioMuxer {
         data.appendVersionFlags(version: 0, flags: 0x000301)
         data.appendUInt32BE(UInt32(sampleCount))
         data.appendUInt32BE(dataOffset)
-        for frame in frames {
-            data.appendUInt32BE(duration)
-            data.appendUInt32BE(UInt32(frame.count))
-        }
+        data.append(trunEntries)
 
         // mdat
         data.appendUInt32BE(UInt32(8 + payloadSize))

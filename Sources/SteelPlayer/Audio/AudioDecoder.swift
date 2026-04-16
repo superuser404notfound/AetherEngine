@@ -16,9 +16,8 @@ import Libswresample
 /// channel count (up to 7.1). Proper AudioChannelLayout ensures correct
 /// speaker mapping for surround output.
 ///
-/// Note: For Dolby Atmos, a future AVPlayer-based audio engine will
-/// replace this for EAC3/AC3 tracks (AVSampleBufferAudioRenderer always
-/// decodes to PCM, losing Atmos object metadata).
+/// For Dolby Atmos (EAC3+JOC), HLSAudioEngine handles passthrough via
+/// AVPlayer — this decoder is used for non-Atmos audio tracks only.
 final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -182,17 +181,7 @@ final class AudioDecoder: @unchecked Sendable {
     }
 
     private func channelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
-        switch channels {
-        case 1:  return kAudioChannelLayoutTag_Mono
-        case 2:  return kAudioChannelLayoutTag_Stereo
-        case 3:  return kAudioChannelLayoutTag_MPEG_3_0_A
-        case 4:  return kAudioChannelLayoutTag_Quadraphonic
-        case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A
-        case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A
-        case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A
-        case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A
-        default: return kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
-        }
+        audioChannelLayoutTag(for: channels)
     }
 
     // MARK: - Frame → CMSampleBuffer

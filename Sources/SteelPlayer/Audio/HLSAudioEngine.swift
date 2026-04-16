@@ -31,17 +31,17 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     private(set) var videoTimebase: CMTimebase?
 
-    private let _isPlayerPlaying = NSLock()
-    nonisolated(unsafe) private var __isPlayerPlaying = false
+    private let playerPlayingLock = NSLock()
+    nonisolated(unsafe) private var _isPlayerPlaying = false
     var isPlayerPlaying: Bool {
-        _isPlayerPlaying.lock()
-        defer { _isPlayerPlaying.unlock() }
-        return __isPlayerPlaying
+        playerPlayingLock.lock()
+        defer { playerPlayingLock.unlock() }
+        return _isPlayerPlaying
     }
     private func setPlayerPlaying(_ value: Bool) {
-        _isPlayerPlaying.lock()
-        __isPlayerPlaying = value
-        _isPlayerPlaying.unlock()
+        playerPlayingLock.lock()
+        _isPlayerPlaying = value
+        playerPlayingLock.unlock()
     }
 
     private var _rate: Float = 1.0

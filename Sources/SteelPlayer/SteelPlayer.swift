@@ -743,13 +743,7 @@ public final class SteelPlayer: ObservableObject {
 
         // Stop audio — tear down whichever engine is active
         if audioMode == .atmos {
-            atmosAudioLock.lock()
-            atmosAudioBuffer.removeAll()
-            atmosAudioLock.unlock()
-            atmosVideoLock.lock()
-            for pkt in atmosVideoBuffer { av_packet_free_safe(pkt) }
-            atmosVideoBuffer.removeAll()
-            atmosVideoLock.unlock()
+            clearAtmosBuffers()
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
@@ -791,6 +785,14 @@ public final class SteelPlayer: ObservableObject {
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
         nonisolated(unsafe) var audioStarted = false
+
+        // Cache audio stream time_base to avoid per-packet lookup in the hot path.
+        let audioTimeBase: AVRational = {
+            if let stream = self.demuxer.stream(at: audioStreamIndex) {
+                return stream.pointee.time_base
+            }
+            return AVRational(num: 1, den: 90000)
+        }()
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }
@@ -908,9 +910,7 @@ public final class SteelPlayer: ObservableObject {
                             // position → video appears ahead of audio.
                             let skipPTS = self.atmosAudioSkipPTS
                             if skipPTS > 0 {
-                                let audioStream = self.demuxer.stream(at: self.activeAudioStreamIndex)
-                                let tb = audioStream?.pointee.time_base ?? AVRational(num: 1, den: 90000)
-                                let ptsSeconds = Double(packet.pointee.pts) * Double(tb.num) / Double(tb.den)
+                                let ptsSeconds = Double(packet.pointee.pts) * Double(audioTimeBase.num) / Double(audioTimeBase.den)
                                 if ptsSeconds < skipPTS - 0.01 {
                                     // Drop pre-seek audio packet
                                     break

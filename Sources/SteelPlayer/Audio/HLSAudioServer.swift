@@ -4,18 +4,9 @@ import Network
 /// Local HTTP server that serves HLS audio to AVPlayer on tvOS.
 ///
 /// Serves three types of resources:
-/// - `/audio.m3u8` — Live sliding-window playlist (last 5 segments)
+/// - `/audio.m3u8` — EVENT playlist (all segments available from start)
 /// - `/init.mp4`   — fMP4 init segment (moov, loaded once)
 /// - `/segN.mp4`   — fMP4 media segments (moof+mdat, loaded sequentially)
-///
-/// ## AVPlayer Stale-Detection Workaround
-///
-/// AVPlayer stops fetching segments when it polls the playlist multiple
-/// times and gets the same response (same segment count). To prevent this:
-/// 1. No `#EXT-X-PLAYLIST-TYPE:EVENT` — plain live playlist
-/// 2. Sliding window of 5 segments (old segments drop off)
-/// 3. Returns HTTP 404 when no new segments since last poll (signals
-///    "server alive, buffering" per WWDC17 Session 514)
 final class HLSAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?

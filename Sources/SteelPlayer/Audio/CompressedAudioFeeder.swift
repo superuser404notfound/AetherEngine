@@ -190,17 +190,7 @@ final class CompressedAudioFeeder: @unchecked Sendable {
     // MARK: - Channel Layout
 
     private func channelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
-        switch channels {
-        case 1:  return kAudioChannelLayoutTag_Mono
-        case 2:  return kAudioChannelLayoutTag_Stereo
-        case 3:  return kAudioChannelLayoutTag_MPEG_3_0_A
-        case 4:  return kAudioChannelLayoutTag_Quadraphonic
-        case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A
-        case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A
-        case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A
-        case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A
-        default: return kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
-        }
+        audioChannelLayoutTag(for: channels)
     }
 }
 

@@ -310,16 +310,10 @@ final class VideoDecoder: @unchecked Sendable {
             throw VideoDecoderError.sessionCreationFailed(status: status)
         }
 
-        // DV per-frame metadata: only enable if the connected display
-        // actually supports Dolby Vision. On HDR10-only TVs, DV RPU
-        // metadata causes wrong colors because the TV can't process it.
-        // DV Profile 8 is backwards-compatible with HDR10 — disabling
-        // propagation gives correct HDR10 output on non-DV displays.
-        // Check if the connected display supports Dolby Vision specifically.
-        // We need the OptionSet (not just Bool) to distinguish DV from HDR10,
-        // so we use availableHDRModes despite deprecation on tvOS 26.
         // DV per-frame metadata: only enable on DV-capable displays.
-        // On HDR10-only TVs, DV RPU causes wrong colors.
+        // On HDR10-only TVs, DV RPU causes wrong colors — DV Profile 8
+        // is backwards-compatible with HDR10, so disabling propagation
+        // gives correct HDR10 output on non-DV displays.
         #if os(tvOS) || os(iOS)
         let displaySupportsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
         VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
