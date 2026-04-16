@@ -638,9 +638,11 @@ public final class SteelPlayer: ObservableObject {
         let audioAvailable = self.audioAvailable
         nonisolated(unsafe) var audioStarted = false
         /// Compressed video packets buffered during HLS audio init.
-        /// Replayed through the decoder once AVPlayer starts playing.
         nonisolated(unsafe) var videoPacketBuffer: [UnsafeMutablePointer<AVPacket>] = []
-        nonisolated(unsafe) var videoBufferingDone = false
+        /// True while the replay queue is decoding buffered packets.
+        /// The demux loop skips live video during this time.
+        nonisolated(unsafe) var isReplayingVideo = false
+        nonisolated(unsafe) var replayDone = false
 
         demuxQueue.async { [weak self] in
             guard let self = self else { return }
@@ -714,36 +716,56 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    if self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true {
-                        // During HLS buffering: store compressed video packets
-                        // in RAM (~25 MB for 8s of 4K HEVC). Replayed after
-                        // AVPlayer starts for instant A/V sync.
-                        if let copy = av_packet_clone(packet) {
-                            videoPacketBuffer.append(copy)
+                    if self.audioMode == .atmos {
+                        if self.hlsAudioEngine?.isPlayerPlaying != true {
+                            // Phase 1: Buffer compressed video packets in RAM
+                            if let copy = av_packet_clone(packet) {
+                                videoPacketBuffer.append(copy)
+                            }
+                            av_packet_free_safe(packet)
+                            continue
                         }
-                        av_packet_free_safe(packet)
-                        continue
-                    }
 
-                    // Replay buffered video packets (once, after AVPlayer starts)
-                    if !videoBufferingDone && !videoPacketBuffer.isEmpty {
-                        videoBufferingDone = true
-                        #if DEBUG
-                        print("[SteelPlayer] Atmos: replaying \(videoPacketBuffer.count) buffered video packets")
-                        #endif
-                        for buffered in videoPacketBuffer {
-                            if self.stopRequested { break }
-                            while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                                Thread.sleep(forTimeInterval: 0.005)
+                        // Phase 2: Kick off replay on a separate queue (once).
+                        // The demux loop continues reading audio packets so
+                        // HLS segments keep being created without interruption.
+                        if !replayDone && !videoPacketBuffer.isEmpty {
+                            replayDone = true
+                            isReplayingVideo = true
+                            let packets = videoPacketBuffer
+                            videoPacketBuffer = []
+                            let renderer = self.videoRenderer
+                            let decoder = self.usingSoftwareDecode ? nil : self.videoDecoder
+                            let swDecoder = self.usingSoftwareDecode ? self.softwareDecoder : nil
+                            #if DEBUG
+                            print("[SteelPlayer] Atmos: replaying \(packets.count) buffered video packets on background queue")
+                            #endif
+                            DispatchQueue(label: "com.steelplayer.replay", qos: .userInitiated).async {
+                                for pkt in packets {
+                                    if self.stopRequested { break }
+                                    while !renderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                                        Thread.sleep(forTimeInterval: 0.005)
+                                    }
+                                    if let dec = decoder {
+                                        dec.decode(packet: pkt)
+                                    } else {
+                                        swDecoder?.decode(packet: pkt)
+                                    }
+                                    av_packet_free_safe(pkt)
+                                }
+                                isReplayingVideo = false
+                                #if DEBUG
+                                print("[SteelPlayer] Atmos: video replay complete")
+                                #endif
                             }
-                            if self.usingSoftwareDecode {
-                                self.softwareDecoder.decode(packet: buffered)
-                            } else {
-                                self.videoDecoder.decode(packet: buffered)
-                            }
-                            av_packet_free_safe(buffered)
                         }
-                        videoPacketBuffer.removeAll()
+
+                        // Skip live video while replay is in progress — the
+                        // replay queue is feeding the decoder/display layer.
+                        if isReplayingVideo {
+                            av_packet_free_safe(packet)
+                            continue
+                        }
                     }
 
                     // Normal back-pressure + decode
