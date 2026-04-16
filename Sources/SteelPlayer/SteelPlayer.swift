@@ -84,6 +84,14 @@ public final class SteelPlayer: ObservableObject {
     /// Accessed from demux queue — effectively immutable during playback.
     nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
 
+    /// Separate queue for feeding audio to the HLS engine in Atmos mode.
+    /// Decouples audio segment creation from video back-pressure so the
+    /// demux loop can block on video without starving AVPlayer.
+    private let atmosAudioQueue = DispatchQueue(label: "com.steelplayer.atmos-audio", qos: .userInitiated)
+    private let atmosAudioLock = NSLock()
+    nonisolated(unsafe) private var atmosAudioBuffer: [Data] = []
+    nonisolated(unsafe) private var atmosAudioDrainActive = false
+
     /// Audio routing: which engine handles the current audio track.
     enum AudioMode { case pcm, compressed, atmos }
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
@@ -572,6 +580,34 @@ public final class SteelPlayer: ObservableObject {
         audioOutput.start(at: seekTime)
     }
 
+    // MARK: - Atmos Audio Drain
+
+    /// Starts the background drain loop if not already running.
+    /// Drains buffered audio packets to the HLS engine on a separate queue,
+    /// completely independent of video back-pressure.
+    private func startAtmosAudioDrain() {
+        atmosAudioLock.lock()
+        guard !atmosAudioDrainActive else { atmosAudioLock.unlock(); return }
+        atmosAudioDrainActive = true
+        atmosAudioLock.unlock()
+
+        atmosAudioQueue.async { [weak self] in
+            guard let self else { return }
+            while true {
+                self.atmosAudioLock.lock()
+                guard !self.atmosAudioBuffer.isEmpty else {
+                    self.atmosAudioDrainActive = false
+                    self.atmosAudioLock.unlock()
+                    return
+                }
+                let packetData = self.atmosAudioBuffer.removeFirst()
+                self.atmosAudioLock.unlock()
+
+                self.hlsAudioEngine?.feedAudioData(packetData)
+            }
+        }
+    }
+
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { audioOutput.volume }
@@ -596,6 +632,9 @@ public final class SteelPlayer: ObservableObject {
 
         // Stop audio — tear down whichever engine is active
         if audioMode == .atmos {
+            atmosAudioLock.lock()
+            atmosAudioBuffer.removeAll()
+            atmosAudioLock.unlock()
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
@@ -724,10 +763,17 @@ public final class SteelPlayer: ObservableObject {
                 } else if streamIdx == self.activeAudioStreamIndex && audioAvailable {
                     switch self.audioMode {
                     case .atmos:
-                        // Feed audio to HLS engine. Video back-pressure
-                        // naturally throttles the demux loop to ~real-time,
-                        // so audio segments are created at a sustainable rate.
-                        self.hlsAudioEngine?.feedPacket(packet)
+                        // Copy audio data to a separate buffer. A background
+                        // queue drains the buffer and feeds the HLS engine.
+                        // This decouples audio from video back-pressure so
+                        // segments are created even when video decode blocks.
+                        if packet.pointee.size > 0, let data = packet.pointee.data {
+                            let packetData = Data(bytes: data, count: Int(packet.pointee.size))
+                            self.atmosAudioLock.lock()
+                            self.atmosAudioBuffer.append(packetData)
+                            self.atmosAudioLock.unlock()
+                            self.startAtmosAudioDrain()
+                        }
 
                     case .compressed:
                         if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {

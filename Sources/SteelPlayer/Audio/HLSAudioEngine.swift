@@ -150,6 +150,12 @@ final class HLSAudioEngine: @unchecked Sendable {
     func feedPacket(_ packet: UnsafeMutablePointer<AVPacket>) {
         guard packet.pointee.size > 0, packet.pointee.data != nil else { return }
         let packetData = Data(bytes: packet.pointee.data, count: Int(packet.pointee.size))
+        feedAudioData(packetData)
+    }
+
+    /// Feed raw audio data (already copied from AVPacket).
+    /// Used by the background audio drain queue.
+    func feedAudioData(_ packetData: Data) {
 
         bufferLock.lock()
 
@@ -302,20 +308,20 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // The display layer may briefly hold frames while the timebase
                 // catches up, but this is short (~200ms for a few buffered frames)
                 // and doesn't block the demux long enough to starve audio.
-                // NOTE: We intentionally do NOT snap the timebase here.
-                // Any snap blocks the display layer (holds frames until
-                // timebase catches up), which blocks the single-threaded
-                // demux loop and starves audio segment creation.
-                // The ~5s offset between video and audio is a known
-                // limitation of the single-threaded architecture.
-                // Proper fix: two-thread demux or AVAudioContentSource.passthrough (tvOS 26+).
-                #if DEBUG
+                // Snap timebase to player position for A/V sync.
+                // This is now safe because audio segment creation is
+                // decoupled from video back-pressure (separate queue).
+                // The display layer may block the demux loop briefly
+                // while the timebase catches up, but audio keeps flowing.
                 if let tb = self.videoTimebase {
-                    let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
                     let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
-                    print("[HLSAudioEngine] PlayerItem ready -> play() (video \(String(format: "%.1f", tbTime - playerStreamTime))s ahead)")
+                    let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+                    #if DEBUG
+                    let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
+                    #endif
+                    CMTimebaseSetTime(tb, time: corrected)
                 }
-                #endif
             } else if item.status == .failed {
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem FAILED: \(item.error?.localizedDescription ?? "?")")
