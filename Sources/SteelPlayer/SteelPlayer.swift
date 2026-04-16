@@ -710,17 +710,20 @@ public final class SteelPlayer: ObservableObject {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // Back-pressure: wait if display layer isn't ready.
-                    // During HLS Atmos buffering (AVPlayer not yet playing),
-                    // use a short timeout (50ms) instead of blocking indefinitely —
-                    // audio packets must keep flowing to the HLS engine, but we
-                    // can't skip entirely or VideoToolbox gets overwhelmed.
-                    let shortTimeout = (self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true)
-                    let maxWait = shortTimeout ? 10 : Int.max  // 10 × 5ms = 50ms
-                    var waited = 0
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested && waited < maxWait {
+                    // During HLS Atmos buffering: skip video entirely.
+                    // The demux loop must feed audio packets at full speed
+                    // to fill HLS segments before AVPlayer's buffer runs out.
+                    // Video decoding is too slow (50ms back-pressure × 24fps)
+                    // and would starve the audio pipeline. Video starts when
+                    // AVPlayer begins playing and the timebase starts.
+                    if self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true {
+                        av_packet_free_safe(packet)
+                        continue
+                    }
+
+                    // Normal back-pressure: wait if display layer isn't ready
+                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
                         Thread.sleep(forTimeInterval: 0.005)
-                        waited += 1
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
