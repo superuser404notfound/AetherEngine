@@ -401,15 +401,18 @@ final class HLSAudioEngine: @unchecked Sendable {
         // unreliable (player hasn't started decoding yet).
         if !hasSnapped && playerSeconds > 0.1 {
             hasSnapped = true
-            // Start the timebase at the player's position and rate=1.0.
-            // Since the timebase was paused (rate=0), NO video frames have
-            // been shown yet. Both video and audio start from the same
-            // content position → perfect sync from frame 1.
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+            // AVPlayer's HLS pipeline has ~2s internal latency: currentTime()
+            // reports the decode position, but actual audio output is ~2s behind.
+            // Delay video by 2s so it matches when audio actually reaches the
+            // speaker. This means ~2s of black screen at startup while the
+            // timebase catches up to the first buffered video frame.
+            let hlsPipelineLatency = 2.0
+            let snapTarget = playerStreamTime - hlsPipelineLatency
+            let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started: \(String(format: "%.3f", playerStreamTime))s, rate=\(_rate) (was paused at \(String(format: "%.3f", tbTime))s)")
+            print("[HLSAudioEngine] Timebase started: \(String(format: "%.3f", snapTarget))s (player=\(String(format: "%.3f", playerStreamTime))s, comp=\(hlsPipelineLatency)s)")
             #endif
             return
         }
