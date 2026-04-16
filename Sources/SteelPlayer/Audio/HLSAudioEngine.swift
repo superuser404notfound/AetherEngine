@@ -315,10 +315,15 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // while the timebase catches up, but audio keeps flowing.
                 if let tb = self.videoTimebase {
                     let playerStreamTime = CMTimeGetSeconds(self.player?.currentTime() ?? .zero) + self.streamOffset
-                    let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+                    // Subtract 0.25s to compensate for AVPlayer startup latency.
+                    // Between play() and actual audio output, ~250ms pass where
+                    // the timebase advances but the player hasn't started yet.
+                    // Confirmed: +0.25 doubled the error, -0.25 should cancel it.
+                    let snapTarget = playerStreamTime - 0.25
+                    let corrected = CMTimeMakeWithSeconds(snapTarget, preferredTimescale: 90000)
                     #if DEBUG
                     let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
-                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", playerStreamTime))s")
+                    print("[HLSAudioEngine] PlayerItem ready -> play(), snap \(String(format: "%.1f", tbTime))s → \(String(format: "%.1f", snapTarget))s")
                     #endif
                     CMTimebaseSetTime(tb, time: corrected)
                 }
