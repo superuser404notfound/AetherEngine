@@ -548,6 +548,7 @@ public final class SteelPlayer: ObservableObject {
     private func tearDownCurrentAudioEngine() {
         switch audioMode {
         case .atmos:
+            clearAtmosBuffers()
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
