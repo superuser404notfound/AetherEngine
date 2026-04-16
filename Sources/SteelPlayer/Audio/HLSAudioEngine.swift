@@ -18,10 +18,14 @@ import Libavcodec
 /// ## A/V Sync
 ///
 /// Video uses a CMTimebase (controlTimebase on the display layer).
-/// The timebase starts at rate=1.0 immediately to prevent deadlocks —
-/// the display layer must consume frames to unblock the demux loop.
-/// Once AVPlayer reaches readyToPlay, the timebase is synced to
-/// AVPlayer.currentTime() every 100ms with a 50ms drift threshold.
+/// The timebase starts at rate=0 (paused) so video frames are buffered
+/// but not displayed. The host must skip video back-pressure checks during
+/// this phase so audio packets can still flow to the HLS engine.
+///
+/// Once AVPlayer reaches readyToPlay:
+/// 1. Timebase is set to player.currentTime() and rate=1.0
+/// 2. Video and audio start at the same point → sync!
+/// 3. Periodic drift correction (every 100ms, 50ms threshold)
 final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Properties
@@ -32,8 +36,24 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var playerItem: AVPlayerItem?
 
     /// CMTimebase for video sync — controls the display layer's frame pacing.
-    /// Starts at rate=1.0 immediately to prevent demux loop deadlock.
+    /// Starts at rate=0 (paused). Set to rate=1.0 when AVPlayer is ready.
     private(set) var videoTimebase: CMTimebase?
+
+    /// True once AVPlayer has started playing audio.
+    /// The host should skip video back-pressure until this is true,
+    /// so the demux loop doesn't block and audio packets keep flowing.
+    private let _isPlayerPlaying = NSLock()
+    nonisolated(unsafe) private var __isPlayerPlaying = false
+    var isPlayerPlaying: Bool {
+        _isPlayerPlaying.lock()
+        defer { _isPlayerPlaying.unlock() }
+        return __isPlayerPlaying
+    }
+    private func setPlayerPlaying(_ value: Bool) {
+        _isPlayerPlaying.lock()
+        __isPlayerPlaying = value
+        _isPlayerPlaying.unlock()
+    }
 
     private var _rate: Float = 1.0
     private var timeObserver: Any?
@@ -72,12 +92,12 @@ final class HLSAudioEngine: @unchecked Sendable {
             timebaseOut: &tb
         )
         videoTimebase = tb
-        // Start immediately at rate=1.0 to prevent video deadlock.
-        // The display layer needs an advancing timebase to consume frames,
-        // which unblocks the demux loop to feed us audio packets.
+        // Start PAUSED — video frames are buffered in the display layer
+        // but not presented. When AVPlayer is ready, we start both together.
+        // The host MUST skip video back-pressure during this phase.
         if let tb {
             CMTimebaseSetTime(tb, time: .zero)
-            CMTimebaseSetRate(tb, rate: 1.0)
+            CMTimebaseSetRate(tb, rate: 0)
         }
     }
 
@@ -117,6 +137,8 @@ final class HLSAudioEngine: @unchecked Sendable {
         isPlayerCreated = false
         bufferLock.unlock()
 
+        setPlayerPlaying(false)
+
         // Start the HLS server
         let srv = HLSAudioServer()
         try srv.start()
@@ -125,10 +147,10 @@ final class HLSAudioEngine: @unchecked Sendable {
         // Segment duration: framesPerSegment x 1536 / sampleRate
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Set timebase to start time
+        // Timebase paused at start time — will be started when AVPlayer is ready
         if let tb = videoTimebase {
             CMTimebaseSetTime(tb, time: startTime)
-            CMTimebaseSetRate(tb, rate: Float64(_rate))
+            CMTimebaseSetRate(tb, rate: 0)
         }
 
         #if DEBUG
@@ -167,8 +189,9 @@ final class HLSAudioEngine: @unchecked Sendable {
                 server?.setInitSegment(initSegment)
 
                 #if DEBUG
-                let atmos = config.numDepSub > 0 ? " (Atmos: \(config.numDepSub) dep sub)" : ""
+                let atmos = config.numDepSub > 0 ? " (Atmos: \(config.numDepSub) dep sub)" : " (no Atmos/JOC)"
                 print("[HLSAudioEngine] Muxer ready: \(config.codecType == .eac3 ? "EAC3" : "AC3")\(atmos)")
+                print("[HLSAudioEngine]   fscod=\(config.fscod) bsid=\(config.bsid) acmod=\(config.acmod) lfeon=\(config.lfeon) channels=\(config.channelCount)")
                 #endif
             }
         }
@@ -229,6 +252,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        setPlayerPlaying(false)
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
@@ -247,6 +271,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        setPlayerPlaying(false)
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
@@ -286,8 +311,9 @@ final class HLSAudioEngine: @unchecked Sendable {
         let failureCallback = self.onPlaybackFailed
         statusObservation = item.observe(\.status) { [weak self] item, _ in
             if item.status == .readyToPlay {
-                self?.player?.play()
-                self?.syncTimebase()
+                guard let self else { return }
+                self.player?.play()
+                self.onPlayerStarted()
                 #if DEBUG
                 print("[HLSAudioEngine] PlayerItem ready -> play()")
                 #endif
@@ -307,6 +333,22 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Video Timebase Sync
 
+    /// Called when AVPlayer transitions to playing. Starts the video
+    /// timebase at the player's current time so both are in sync.
+    private func onPlayerStarted() {
+        guard let tb = videoTimebase, let player else { return }
+        let playerTime = player.currentTime()
+        let time = playerTime.isValid ? playerTime : storedStartTime
+        CMTimebaseSetTime(tb, time: time)
+        CMTimebaseSetRate(tb, rate: Float64(_rate))
+        setPlayerPlaying(true)
+
+        #if DEBUG
+        let t = CMTimeGetSeconds(time)
+        print("[HLSAudioEngine] Video timebase started at \(String(format: "%.3f", t))s")
+        #endif
+    }
+
     /// Periodic observer that syncs the video timebase to AVPlayer's audio clock.
     /// Runs every 100ms, corrects drift > 50ms.
     private func setupTimeSync() {
@@ -315,7 +357,8 @@ final class HLSAudioEngine: @unchecked Sendable {
             forInterval: CMTime(value: 1, timescale: 10),
             queue: .main
         ) { [weak self] _ in
-            self?.syncTimebase()
+            guard let self, self.isPlayerPlaying else { return }
+            self.syncTimebase()
         }
     }
 
@@ -330,9 +373,14 @@ final class HLSAudioEngine: @unchecked Sendable {
         guard let tb = videoTimebase, let player else { return }
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
-        let drift = CMTimeGetSeconds(playerTime) - CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        let playerSeconds = CMTimeGetSeconds(playerTime)
+        let tbSeconds = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        let drift = playerSeconds - tbSeconds
         if abs(drift) > 0.05 {
             CMTimebaseSetTime(tb, time: playerTime)
+            #if DEBUG
+            print("[HLSAudioEngine] Drift corrected: \(String(format: "%+.3f", drift))s (player=\(String(format: "%.3f", playerSeconds))s)")
+            #endif
         }
     }
 }

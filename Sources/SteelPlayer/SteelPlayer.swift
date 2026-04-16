@@ -693,9 +693,12 @@ public final class SteelPlayer: ObservableObject {
                         self.videoDecoder.flush()
                     }
                     self.videoRenderer.drainReorderBuffer()
-                    if self.audioMode == .compressed {
+                    switch self.audioMode {
+                    case .atmos:
+                        break // HLS engine manages its own lifecycle
+                    case .compressed:
                         self.compressedAudioFeeder.flush()
-                    } else {
+                    case .pcm:
                         self.audioDecoder.flush()
                     }
                     Task { @MainActor [weak self] in
@@ -708,10 +711,15 @@ public final class SteelPlayer: ObservableObject {
 
                 if streamIdx == videoStreamIndex {
                     // Back-pressure: wait if display layer isn't ready.
-                    // During HLS buffering: use a short timeout (50ms) so the
-                    // Back-pressure: wait if display layer isn't ready
-                    while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                        Thread.sleep(forTimeInterval: 0.005)
+                    // Exception: during HLS Atmos buffering (AVPlayer not yet playing),
+                    // skip the wait so the demux loop keeps feeding audio packets
+                    // to the HLS engine. The display layer buffers video frames
+                    // while its timebase is paused.
+                    let skipBackPressure = (self.audioMode == .atmos && self.hlsAudioEngine?.isPlayerPlaying != true)
+                    if !skipBackPressure {
+                        while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                            Thread.sleep(forTimeInterval: 0.005)
+                        }
                     }
                     if self.stopRequested { av_packet_free_safe(packet); break }
 
