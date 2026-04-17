@@ -657,13 +657,20 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Clear all buffered atmos packets. Called from seek (non-async safe).
+    /// Also resets the drain-active flags — a drain loop that exited
+    /// through the `stopRequested` early-return leaves them stuck at
+    /// `true`, and the next load()/startAtmosXxxDrain() would be a
+    /// no-op → packets pile up in the buffer and nothing ever decodes
+    /// (classic "second playback black screen" symptom).
     nonisolated private func clearAtmosBuffers() {
         atmosAudioLock.lock()
         atmosAudioBuffer.removeAll()
+        atmosAudioDrainActive = false
         atmosAudioLock.unlock()
         atmosVideoLock.lock()
         for pkt in atmosVideoBuffer { av_packet_free_safe(pkt) }
         atmosVideoBuffer.removeAll()
+        atmosVideoDrainActive = false
         atmosVideoLock.unlock()
     }
 
@@ -743,6 +750,12 @@ public final class AetherEngine: ObservableObject {
                 #endif
                 guard !self.stopRequested else {
                     av_packet_free_safe(packet)
+                    // Clear drainActive on stop-exit so the next load() can
+                    // start a fresh drain. Forgetting this made the second
+                    // playback of the same file show a black screen.
+                    self.atmosVideoLock.lock()
+                    self.atmosVideoDrainActive = false
+                    self.atmosVideoLock.unlock()
                     return
                 }
 
