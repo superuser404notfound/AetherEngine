@@ -298,13 +298,26 @@ public final class AetherEngine: ObservableObject {
             audioMode = .pcm
 
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
-                let codecId = audioStream.pointee.codecpar?.pointee.codec_id
-                let channelCount = Int(audioStream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
+                let codecpar = audioStream.pointee.codecpar!
+                let codecId = codecpar.pointee.codec_id
+                let channelCount = Int(codecpar.pointee.ch_layout.nb_channels)
+                let profile = codecpar.pointee.profile
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
+                // FF_PROFILE_EAC3_DDP_ATMOS = 30 — set by FFmpeg's EAC3 parser
+                // when JOC (Joint Object Coding) is detected in the bitstream.
+                // This is the only reliable way to distinguish Atmos from regular
+                // EAC3 5.1 without depending on server metadata.
+                let isAtmos = isEAC3 && profile == 30
 
+                #if DEBUG
                 if isEAC3 {
-                    // EAC3 → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
+                    print("[AetherEngine] EAC3 profile=\(profile) → \(isAtmos ? "Atmos (JOC)" : "standard 5.1")")
+                }
+                #endif
+
+                if isAtmos {
+                    // EAC3+JOC → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
                     // Falls back to CompressedAudioFeeder if AVPlayer fails.
                     let streamIdx = audioIdx
                     do {
@@ -343,8 +356,8 @@ public final class AetherEngine: ObservableObject {
                         #endif
                         fallbackToCompressedAudio(stream: audioStream)
                     }
-                } else if isAC3 {
-                    // AC3 → compressed passthrough (no Atmos possible)
+                } else if isEAC3 || isAC3 {
+                    // EAC3 (non-Atmos) / AC3 → compressed passthrough
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
@@ -551,8 +564,9 @@ public final class AetherEngine: ObservableObject {
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
         let isAC3 = (codecId == AV_CODEC_ID_AC3)
+        let isAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
 
-        if isEAC3 {
+        if isAtmos {
             do {
                 let engine = HLSAudioEngine()
                 engine.onPlaybackFailed = { [weak self] in
@@ -581,7 +595,7 @@ public final class AetherEngine: ObservableObject {
                 fallbackToCompressedAudio(stream: stream)
                 audioOutput.start(at: seekTime)
             }
-        } else if isAC3 {
+        } else if isEAC3 || isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
