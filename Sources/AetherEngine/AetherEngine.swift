@@ -766,6 +766,7 @@ public final class AetherEngine: ObservableObject {
         audioDecoder.close()
         demuxer.close()
         audioAvailable = false
+        atmosAudioSkipPTS = -1
     }
 
     // MARK: - Demux Loop

@@ -51,7 +51,7 @@ Most video player libraries try to do everything — UI, controls, playlists, an
 
 ### Dolby Atmos Architecture
 
-AetherEngine uses a three-thread architecture for Dolby Atmos playback:
+For Dolby Atmos (EAC3+JOC), AetherEngine uses a three-thread architecture that decouples audio from video back-pressure. Non-Atmos codecs use the simpler single-thread demux with inline decode.
 
 ```
 Demux Thread ──┬── Audio Packets ──► HLS Audio Engine (AVPlayer)
