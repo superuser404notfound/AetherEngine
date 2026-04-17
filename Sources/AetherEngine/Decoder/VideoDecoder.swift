@@ -22,12 +22,19 @@ final class VideoDecoder: @unchecked Sendable {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var use10Bit = false
-    /// When true, HDR10/DV content is tone-mapped to BT.709 SDR inside
-    /// VideoToolbox via PixelTransferProperties. Set this when the
-    /// display stays in SDR mode (e.g. Match Content disabled) — without
-    /// it, PQ-encoded pixels appear black on SDR displays because
-    /// AVSampleBufferDisplayLayer does not tone-map.
+    /// When true, HDR10/DV content is tone-mapped to BT.709 SDR via a
+    /// separate VTPixelTransferSession in the output handler. We do
+    /// NOT use kVTDecompressionPropertyKey_PixelTransferProperties
+    /// because that conflicts with controlTimebase-driven display
+    /// (used in Atmos mode) — frames stop rendering. An explicit
+    /// transfer session is independent of the decoder's timing path.
     private var tonemapToSDR = false
+
+    /// Post-decode pixel transfer for HDR→SDR tonemapping. Allocated
+    /// only when `tonemapToSDR` is true.
+    private var pixelTransferSession: VTPixelTransferSession?
+    /// Pool of 8-bit NV12 buffers used as the tonemap target.
+    private var tonemapPool: CVPixelBufferPool?
 
     /// Thread-safe access to the frame callback. Written on the main thread
     /// (open/close), read on VideoToolbox's internal callback thread.
@@ -88,8 +95,21 @@ final class VideoDecoder: @unchecked Sendable {
         let session = try createDecompressionSession(formatDescription: formatDesc)
         self.decompressionSession = session
 
+        // Tonemap infrastructure — only when going HDR→SDR.
+        if use10Bit && tonemapToSDR {
+            try setupTonemapPipeline(
+                width: Int(codecpar.pointee.width),
+                height: Int(codecpar.pointee.height)
+            )
+        }
+
         #if DEBUG
-        print("[VideoDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(codecpar.pointee.codec_id.rawValue), \(use10Bit ? "10-bit P010 (HDR/DV)" : "8-bit NV12")")
+        let outputMode: String = {
+            if use10Bit && tonemapToSDR { return "10-bit P010 → tonemap → 8-bit NV12 BT.709" }
+            if use10Bit { return "10-bit P010 (HDR/DV)" }
+            return "8-bit NV12"
+        }()
+        print("[VideoDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(codecpar.pointee.codec_id.rawValue), \(outputMode)")
         #endif
     }
 
@@ -180,18 +200,21 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
-                // Tag pixel buffers with correct color space:
-                // - tonemapToSDR: VT already converted to BT.709 via
-                //   PixelTransferProperties — tag as SDR so the display
-                //   layer interprets the bytes correctly.
-                // - use10Bit (HDR native): VT may strip color attachments
-                //   when DV propagation is off. Re-attach BT.2020/PQ.
-                if self.tonemapToSDR {
-                    self.attachSDRColorSpace(to: pixelBuffer)
-                } else if self.use10Bit {
-                    self.attachHDRColorSpace(to: pixelBuffer)
+                if self.tonemapToSDR, self.use10Bit {
+                    // Run the dedicated pixel transfer (PQ BT.2020 →
+                    // Rec.709 SDR). Forward the converted buffer.
+                    if let sdrBuffer = self.tonemapPixelBuffer(pixelBuffer) {
+                        self.attachSDRColorSpace(to: sdrBuffer)
+                        self.onFrame?(sdrBuffer, pts)
+                    }
+                } else {
+                    // Non-tonemap path: VT may strip color attachments
+                    // when DV propagation is off — re-tag HDR buffers.
+                    if self.use10Bit {
+                        self.attachHDRColorSpace(to: pixelBuffer)
+                    }
+                    self.onFrame?(pixelBuffer, pts)
                 }
-                self.onFrame?(pixelBuffer, pts)
             }
         )
     }
@@ -210,7 +233,12 @@ final class VideoDecoder: @unchecked Sendable {
             VTDecompressionSessionWaitForAsynchronousFrames(session)
             VTDecompressionSessionInvalidate(session)
         }
+        if let transfer = pixelTransferSession {
+            VTPixelTransferSessionInvalidate(transfer)
+        }
         decompressionSession = nil
+        pixelTransferSession = nil
+        tonemapPool = nil
         formatDescription = nil
         onFrame = nil
     }
@@ -310,12 +338,14 @@ final class VideoDecoder: @unchecked Sendable {
         formatDescription: CMVideoFormatDescription
     ) throws -> VTDecompressionSession {
         // Request YCbCr BiPlanar 4:2:0 — VideoToolbox's native output.
-        // - 10-bit (P010) for HDR HEVC/AV1 when we want native HDR10/DV output.
-        // - 8-bit (NV12) for SDR content AND for HDR content we need to
-        //   tone-map down (AVSampleBufferDisplayLayer can't tone-map PQ on
-        //   an SDR display — pixels would appear black).
-        let outputsHDR = use10Bit && !tonemapToSDR
-        let pixelFormat: OSType = outputsHDR
+        // 10-bit (P010) for HEVC/AV1 Main10: preserves HDR10 and DV metadata.
+        // 8-bit (NV12) for SDR content: smaller buffers, no HDR needed.
+        // Tonemap (PQ→BT.709) happens in a separate VTPixelTransferSession
+        // after decode so the decompression session never needs to know
+        // about it — this avoids a conflict with controlTimebase-driven
+        // display layers (Atmos mode) where PixelTransferProperties on
+        // the decoder stopped frame output.
+        let pixelFormat: OSType = use10Bit
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
@@ -355,24 +385,76 @@ final class VideoDecoder: @unchecked Sendable {
         VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata, value: kCFBooleanFalse)
         #endif
 
-        // If the display stays in SDR mode while the source is HDR10/DV,
-        // ask VideoToolbox to tone-map during decode. The display layer
-        // cannot tone-map PQ itself — without this, pixels are ~black.
-        if use10Bit && tonemapToSDR {
-            let transferProps: NSDictionary = [
-                kVTPixelTransferPropertyKey_DestinationColorPrimaries: kCVImageBufferColorPrimaries_ITU_R_709_2,
-                kVTPixelTransferPropertyKey_DestinationTransferFunction: kCVImageBufferTransferFunction_ITU_R_709_2,
-                kVTPixelTransferPropertyKey_DestinationYCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-            ]
-            VTSessionSetProperty(sess,
-                key: kVTDecompressionPropertyKey_PixelTransferProperties,
-                value: transferProps)
-            #if DEBUG
-            print("[VideoDecoder] HDR→SDR tone-mapping enabled (PQ→BT.709)")
-            #endif
-        }
-
         return sess
+    }
+
+    // MARK: - Tonemap Pipeline (HDR → SDR)
+
+    /// Allocate the VTPixelTransferSession and output pool used to
+    /// convert PQ BT.2020 buffers to Rec.709 SDR. Called from open()
+    /// only when `tonemapToSDR && use10Bit`.
+    private func setupTonemapPipeline(width: Int, height: Int) throws {
+        // 1. Pool of 8-bit NV12 output buffers.
+        let outputAttrs: NSDictionary = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
+        ]
+        let poolAttrs: NSDictionary = [
+            kCVPixelBufferPoolMinimumBufferCountKey: 4,
+        ]
+        var pool: CVPixelBufferPool?
+        let poolStatus = CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            poolAttrs,
+            outputAttrs,
+            &pool
+        )
+        guard poolStatus == kCVReturnSuccess, let p = pool else {
+            throw VideoDecoderError.sessionCreationFailed(status: poolStatus)
+        }
+        self.tonemapPool = p
+
+        // 2. Pixel transfer session — the actual HDR→SDR worker.
+        var session: VTPixelTransferSession?
+        let sessionStatus = VTPixelTransferSessionCreate(
+            allocator: kCFAllocatorDefault,
+            pixelTransferSessionOut: &session
+        )
+        guard sessionStatus == noErr, let s = session else {
+            throw VideoDecoderError.sessionCreationFailed(status: sessionStatus)
+        }
+        VTSessionSetProperty(s,
+            key: kVTPixelTransferPropertyKey_DestinationColorPrimaries,
+            value: kCVImageBufferColorPrimaries_ITU_R_709_2)
+        VTSessionSetProperty(s,
+            key: kVTPixelTransferPropertyKey_DestinationTransferFunction,
+            value: kCVImageBufferTransferFunction_ITU_R_709_2)
+        VTSessionSetProperty(s,
+            key: kVTPixelTransferPropertyKey_DestinationYCbCrMatrix,
+            value: kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+        self.pixelTransferSession = s
+
+        #if DEBUG
+        print("[VideoDecoder] HDR→SDR tonemap pipeline ready (\(width)x\(height))")
+        #endif
+    }
+
+    /// Convert an HDR pixel buffer to SDR using the transfer session.
+    /// Returns nil if anything in the path fails — caller should drop the frame.
+    private func tonemapPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        guard let session = pixelTransferSession,
+              let pool = tonemapPool else { return nil }
+
+        var output: CVPixelBuffer?
+        let allocStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
+        guard allocStatus == kCVReturnSuccess, let dst = output else { return nil }
+
+        let transferStatus = VTPixelTransferSessionTransferImage(session, from: source, to: dst)
+        guard transferStatus == noErr else { return nil }
+        return dst
     }
 }
 
