@@ -51,6 +51,15 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// `stop()` can remove the corresponding handlers. Previously the
     /// observers lived as long as NotificationCenter itself.
     private var notificationTokens: [NSObjectProtocol] = []
+    /// Scheduled on a PlaybackStalled notification; fires after a grace
+    /// period and, if the player still isn't playing, treats the stall as
+    /// a failure and invokes `onPlaybackFailed`. Some TVs / AVRs advertise
+    /// Atmos in their HDMI EDID but then stall instead of decoding — the
+    /// normal "status == .failed" path never fires, so we need this.
+    private var stallRecoveryWorkItem: DispatchWorkItem?
+    /// How long to wait for AVPlayer to recover on its own before we
+    /// decide the output can't actually handle the stream.
+    private let stallRecoveryGracePeriod: TimeInterval = 5.0
 
     var onPlaybackFailed: (@Sendable () -> Void)?
 
@@ -312,6 +321,7 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     func stop() {
         removeTimeSync()
+        cancelStallRecovery()
         // Tear down KVO BEFORE nilling playerItem so the observer is
         // released against the object it was registered on.
         statusObservation = nil
@@ -349,6 +359,7 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     func prepareForSeek() {
         removeTimeSync()
+        cancelStallRecovery()
         statusObservation = nil
         for token in notificationTokens {
             NotificationCenter.default.removeObserver(token)
@@ -472,10 +483,12 @@ final class HLSAudioEngine: @unchecked Sendable {
         let stalledToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemPlaybackStalled,
             object: item, queue: .main
-        ) { _ in
+        ) { [weak self] _ in
+            guard let self else { return }
             #if DEBUG
-            print("[HLSAudioEngine] PlaybackStalled!")
+            print("[HLSAudioEngine] PlaybackStalled — starting \(Int(self.stallRecoveryGracePeriod))s recovery watchdog")
             #endif
+            self.scheduleStallRecovery()
         }
         notificationTokens = [failedToken, stalledToken]
 
@@ -491,6 +504,15 @@ final class HLSAudioEngine: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             guard let self, self.isPlayerPlaying else { return }
+            // A periodic tick means AVPlayer is actively playing — cancel
+            // any pending stall-recovery watchdog scheduled by an earlier
+            // PlaybackStalled notification.
+            if self.stallRecoveryWorkItem != nil {
+                #if DEBUG
+                print("[HLSAudioEngine] Stall recovered — cancelling watchdog")
+                #endif
+                self.cancelStallRecovery()
+            }
             self.syncTimebase()
         }
     }
@@ -500,6 +522,34 @@ final class HLSAudioEngine: @unchecked Sendable {
             player.removeTimeObserver(observer)
         }
         timeObserver = nil
+    }
+
+    // MARK: - Stall Recovery
+
+    /// Called when AVPlayer posts PlaybackStalled. Schedules a deadline
+    /// on main; if the player hasn't resumed playing by then, escalate
+    /// to `onPlaybackFailed` so the host can fall back to PCM decode.
+    private func scheduleStallRecovery() {
+        stallRecoveryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard let player = self.player else { return }
+            if player.timeControlStatus == .playing { return }
+            #if DEBUG
+            print("[HLSAudioEngine] Stall did not recover after \(Int(self.stallRecoveryGracePeriod))s (timeControlStatus=\(player.timeControlStatus.rawValue)) — escalating to fallback")
+            #endif
+            self.onPlaybackFailed?()
+        }
+        stallRecoveryWorkItem = item
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + stallRecoveryGracePeriod,
+            execute: item
+        )
+    }
+
+    private func cancelStallRecovery() {
+        stallRecoveryWorkItem?.cancel()
+        stallRecoveryWorkItem = nil
     }
 
     private var syncLogCounter = 0
