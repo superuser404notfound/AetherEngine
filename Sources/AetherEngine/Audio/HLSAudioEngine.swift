@@ -366,7 +366,11 @@ final class HLSAudioEngine: @unchecked Sendable {
         isPlayerCreated = false
         bufferLock.unlock()
         srv?.stop()
-        videoTimebase = nil
+        // IMPORTANT: keep `videoTimebase` alive across seeks — the display
+        // layer's controlTimebase still holds a reference and prepare() will
+        // reseat its time/rate below. Nilling it here (as stop() does)
+        // leaves the display layer listening to a stopped clock → video
+        // freezes after scrub while audio keeps running.
         setPlayerPlaying(false)
         hasSnapped = false
         hasCalibrated = false
