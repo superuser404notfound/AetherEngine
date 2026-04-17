@@ -322,11 +322,25 @@ public final class AetherEngine: ObservableObject {
                 // when JOC (Joint Object Coding) is detected in the bitstream.
                 // This is the only reliable way to distinguish Atmos from regular
                 // EAC3 5.1 without depending on server metadata.
-                let isAtmos = isEAC3 && profile == 30
+                // The capability check keeps us off the HLS/AVPlayer path on
+                // outputs that can't accept multichannel passthrough (e.g.
+                // Bluetooth speakers) — there we just decode to PCM and let
+                // the system mix to whatever the route supports.
+                let streamIsAtmos = isEAC3 && profile == 30
+                let canPassthrough = canPassthroughAtmos()
+                let isAtmos = streamIsAtmos && canPassthrough
 
                 #if DEBUG
                 if isEAC3 {
-                    print("[AetherEngine] EAC3 profile=\(profile) → \(isAtmos ? "Atmos (JOC)" : "standard 5.1")")
+                    let atmosState: String
+                    if streamIsAtmos && !canPassthrough {
+                        atmosState = "Atmos (JOC) — route can't passthrough, using PCM"
+                    } else if streamIsAtmos {
+                        atmosState = "Atmos (JOC)"
+                    } else {
+                        atmosState = "standard 5.1"
+                    }
+                    print("[AetherEngine] EAC3 profile=\(profile) → \(atmosState)")
                 }
                 #endif
 
@@ -563,9 +577,17 @@ public final class AetherEngine: ObservableObject {
         }
         atmosAudioSkipPTS = seekSeconds
 
-        // Open new audio engine for the selected track
+        // Open new audio engine for the selected track.
+        // Gate the Atmos path on the output route's passthrough capability
+        // — a BT speaker can't accept the HLS multichannel stream.
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
-        let isAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
+        let streamIsAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
+        let isAtmos = streamIsAtmos && canPassthroughAtmos()
+        #if DEBUG
+        if streamIsAtmos && !isAtmos {
+            print("[AetherEngine] selectAudioTrack: Atmos stream on non-passthrough route → PCM")
+        }
+        #endif
 
         if isAtmos {
             do {
@@ -624,6 +646,32 @@ public final class AetherEngine: ObservableObject {
     }
 
     // MARK: - Audio Engine Helpers
+
+    /// True if the current audio output route can accept a Dolby Atmos
+    /// bitstream (EAC3 + JOC wrapped as Dolby MAT 2.0 by AVPlayer).
+    ///
+    /// Bluetooth routes advertise only compressed stereo codecs (A2DP
+    /// SBC/AAC) — AVPlayer refuses the multichannel HLS stream there
+    /// and stalls forever with silent audio and no video. Routes that
+    /// can't deliver at least 5.1 also make the Atmos path pointless
+    /// even when it technically works — we'd end up asking the system
+    /// to downmix what we could downmix ourselves cheaper.
+    private func canPassthroughAtmos() -> Bool {
+        #if os(iOS) || os(tvOS)
+        let session = AVAudioSession.sharedInstance()
+        for output in session.currentRoute.outputs {
+            switch output.portType {
+            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
+                return false
+            default:
+                continue
+            }
+        }
+        return session.maximumOutputNumberOfChannels >= 6
+        #else
+        return false
+        #endif
+    }
 
     /// Tear down whichever audio engine is currently active.
     private func tearDownCurrentAudioEngine() {
