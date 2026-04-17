@@ -102,6 +102,18 @@ final class AVIOReader: @unchecked Sendable {
 
     private var isClosed = false
 
+    /// Mark as closed without freeing resources. The AVIO read callback
+    /// checks this flag and returns -1 immediately, which causes
+    /// av_read_frame to return an error and unblock the demux thread.
+    /// Call this BEFORE acquiring the demuxer's access lock to prevent
+    /// deadlock when the demux thread is suspended inside av_read_frame.
+    func markClosed() {
+        isClosed = true
+        // Wake any semaphore waits so the read callbacks can exit
+        prefetchReady.signal()
+        streamDataReady.signal()
+    }
+
     func close() {
         guard !isClosed else { return }
         isClosed = true

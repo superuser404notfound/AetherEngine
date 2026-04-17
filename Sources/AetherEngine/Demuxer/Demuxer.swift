@@ -250,11 +250,24 @@ final class Demuxer {
     }
 
     /// Close the format context and release resources.
+    /// Thread-safe: waits for any in-progress readPacket() to finish
+    /// before freeing the format context. The AVIO reader is marked
+    /// closed first so its callback returns -1 immediately, unblocking
+    /// any suspended av_read_frame call.
     func close() {
+        // 1. Mark AVIO as closed — read callback returns -1 immediately.
+        //    This unblocks av_read_frame if the demux thread is suspended
+        //    inside a read (tvOS suspends threads in background).
+        avioReader?.markClosed()
+
+        // 2. Wait for readPacket() to release the lock, then tear down.
+        accessLock.lock()
         if formatContext != nil {
             avformat_close_input(&formatContext)
         }
         formatContext = nil
+        accessLock.unlock()
+
         avioReader?.close()
         avioReader = nil
     }
