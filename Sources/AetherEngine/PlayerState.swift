@@ -48,7 +48,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
 import CoreAudio
 
 /// Map channel count to the appropriate CoreAudio channel layout tag.
-/// Used by both AudioDecoder and CompressedAudioFeeder.
+/// Used by AudioDecoder for channel layout mapping.
 func audioChannelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
     switch channels {
     case 1:  return kAudioChannelLayoutTag_Mono

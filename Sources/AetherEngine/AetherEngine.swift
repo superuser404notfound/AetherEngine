@@ -79,10 +79,7 @@ public final class AetherEngine: ObservableObject {
     private let audioOutput = AudioOutput()
     nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
 
-    /// Compressed audio feeder for AC3/EAC3 — feeds raw compressed frames
-    /// directly to AVSampleBufferAudioRenderer (no FFmpeg decode, saves CPU).
-    /// Note: Atmos (JOC) metadata is NOT preserved — renderer outputs PCM 5.1/7.1.
-    private let compressedAudioFeeder = CompressedAudioFeeder()
+
 
     /// HLS audio engine for Dolby Atmos — uses AVPlayer + local HLS server
     /// to trigger Dolby MAT 2.0 wrapping for EAC3+JOC passthrough.
@@ -110,7 +107,7 @@ public final class AetherEngine: ObservableObject {
     private let atmosVideoBufferMax = 384
 
     /// Audio routing: which engine handles the current audio track.
-    enum AudioMode { case pcm, compressed, atmos }
+    enum AudioMode { case pcm, atmos }
     nonisolated(unsafe) private var audioMode: AudioMode = .pcm
 
     /// Serial queue for the demux→decode loop (runs off main thread).
@@ -291,7 +288,7 @@ public final class AetherEngine: ObservableObject {
             //   the independent substream — identical framing and channel count as
             //   regular EAC3 5.1. Cannot be distinguished at the packet level, so all
             //   EAC3 goes through AVPlayer which handles both Atmos and non-Atmos.
-            // AC3 → CompressedAudioFeeder (no Atmos possible, simpler passthrough)
+            // AC3/EAC3/AAC/etc. → FFmpeg PCM decode (full dynamics, no dialnorm)
             // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
@@ -318,7 +315,7 @@ public final class AetherEngine: ObservableObject {
 
                 if isAtmos {
                     // EAC3+JOC → HLS engine for Dolby Atmos (MAT 2.0 passthrough)
-                    // Falls back to CompressedAudioFeeder if AVPlayer fails.
+                    // Falls back to FFmpeg PCM decode if AVPlayer fails.
                     let streamIdx = audioIdx
                     do {
                         let engine = HLSAudioEngine()
@@ -326,7 +323,7 @@ public final class AetherEngine: ObservableObject {
                             Task { @MainActor in
                                 guard let self,
                                       let s = self.demuxer.stream(at: streamIdx) else { return }
-                                self.fallbackToCompressedAudio(stream: s)
+                                self.fallbackToPCMAudio(stream: s)
                             }
                         }
                         engine.onWillStartTimebase = { [weak self] skipPTS in
@@ -352,47 +349,23 @@ public final class AetherEngine: ObservableObject {
                         #endif
                     } catch {
                         #if DEBUG
-                        print("[AetherEngine] HLS engine failed: \(error) — falling back to compressed passthrough")
+                        print("[AetherEngine] HLS engine failed: \(error) — falling back to FFmpeg PCM")
                         #endif
-                        fallbackToCompressedAudio(stream: audioStream)
-                    }
-                } else if isAC3 {
-                    // AC3 → compressed passthrough (Apple's decoder is fine for AC3)
-                    do {
-                        try compressedAudioFeeder.open(stream: audioStream)
-                        audioMode = .compressed
-                        audioAvailable = true
-                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-                        #if DEBUG
-                        print("[AetherEngine] Audio: AC3 → compressed passthrough (\(channelCount)ch)")
-                        #endif
-                    } catch {
-                        try? audioDecoder.open(stream: audioStream)
-                        audioAvailable = true
-                        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                        fallbackToPCMAudio(stream: audioStream)
                     }
                 } else {
-                    // EAC3 (non-Atmos), AAC, FLAC, Opus, etc. → FFmpeg PCM decode.
-                    // EAC3 uses FFmpeg instead of CompressedAudioFeeder because
-                    // Apple's internal decoder applies dialnorm/DRC → quieter,
-                    // less dynamic output. FFmpeg preserves full dynamics.
+                    // All other codecs (AC3, EAC3 non-Atmos, AAC, FLAC, etc.)
+                    // → FFmpeg PCM decode. Consistent output across all codecs,
+                    // no dialnorm/DRC attenuation from Apple's decoder.
                     do {
                         try audioDecoder.open(stream: audioStream)
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                         #if DEBUG
-                        if isEAC3 {
-                            print("[AetherEngine] Audio: EAC3 → FFmpeg PCM decode (\(channelCount)ch)")
-                        }
+                        let codecName = isEAC3 ? "EAC3" : isAC3 ? "AC3" : "PCM"
+                        print("[AetherEngine] Audio: \(codecName) → FFmpeg PCM decode (\(channelCount)ch)")
                         #endif
                     } catch {
-                        // EAC3 fallback: try compressed passthrough
-                        if isEAC3 {
-                            try? compressedAudioFeeder.open(stream: audioStream)
-                            audioMode = .compressed
-                            audioAvailable = true
-                            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-                        }
                         print("[AetherEngine] Audio decoder failed: \(error)")
                     }
                 }
@@ -496,9 +469,6 @@ public final class AetherEngine: ObservableObject {
             clearAtmosBuffers()
             // Tear down HLS pipeline — must rebuild from new position
             hlsAudioEngine?.prepareForSeek()
-        case .compressed:
-            compressedAudioFeeder.flush()
-            audioOutput.flush()
         case .pcm:
             audioDecoder.flush()
             audioOutput.flush()
@@ -588,7 +558,7 @@ public final class AetherEngine: ObservableObject {
                     Task { @MainActor in
                         guard let self,
                               let s = self.demuxer.stream(at: streamIndex) else { return }
-                        self.fallbackToCompressedAudio(stream: s)
+                        self.fallbackToPCMAudio(stream: s)
                     }
                 }
                 engine.onWillStartTimebase = { [weak self] skipPTS in
@@ -607,19 +577,9 @@ public final class AetherEngine: ObservableObject {
                 audioMode = .atmos
                 videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
             } catch {
-                fallbackToCompressedAudio(stream: stream)
+                fallbackToPCMAudio(stream: stream)
                 audioOutput.start(at: seekTime)
             }
-        } else if isAC3 {
-            do {
-                try compressedAudioFeeder.open(stream: stream)
-                audioMode = .compressed
-            } catch {
-                try? audioDecoder.open(stream: stream)
-                audioMode = .pcm
-            }
-            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-            audioOutput.start(at: seekTime)
         } else {
             try? audioDecoder.open(stream: stream)
             audioMode = .pcm
@@ -649,10 +609,6 @@ public final class AetherEngine: ObservableObject {
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
-        case .compressed:
-            compressedAudioFeeder.flush()
-            compressedAudioFeeder.close()
-            audioOutput.flush()
         case .pcm:
             audioDecoder.flush()
             audioDecoder.close()
@@ -661,11 +617,11 @@ public final class AetherEngine: ObservableObject {
         audioOutput.detachVideoLayer(videoRenderer.displayLayer)
     }
 
-    /// Fall back from HLS Atmos engine to CompressedAudioFeeder.
+    /// Fall back from HLS Atmos engine to FFmpeg PCM decode.
     /// Called when AVPlayer fails to play the HLS stream.
-    private func fallbackToCompressedAudio(stream: UnsafeMutablePointer<AVStream>) {
+    private func fallbackToPCMAudio(stream: UnsafeMutablePointer<AVStream>) {
         #if DEBUG
-        print("[AetherEngine] Falling back from Atmos to compressed passthrough")
+        print("[AetherEngine] Falling back from Atmos to FFmpeg PCM decode")
         #endif
 
         // Tear down HLS engine
@@ -673,14 +629,9 @@ public final class AetherEngine: ObservableObject {
         hlsAudioEngine = nil
         videoRenderer.displayLayer.controlTimebase = nil
 
-        // Switch to compressed passthrough
-        do {
-            try compressedAudioFeeder.open(stream: stream)
-            audioMode = .compressed
-        } catch {
-            try? audioDecoder.open(stream: stream)
-            audioMode = .pcm
-        }
+        // Switch to FFmpeg PCM decode
+        try? audioDecoder.open(stream: stream)
+        audioMode = .pcm
 
         // Re-attach display layer to synchronizer
         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
@@ -800,7 +751,6 @@ public final class AetherEngine: ObservableObject {
             audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         }
         audioOutput.stop()
-        compressedAudioFeeder.close()
         audioMode = .pcm
 
         // Flush decoders before renderer — decoder flush waits for async
@@ -901,8 +851,6 @@ public final class AetherEngine: ObservableObject {
                     switch self.audioMode {
                     case .atmos:
                         break // HLS engine manages its own lifecycle
-                    case .compressed:
-                        self.compressedAudioFeeder.flush()
                     case .pcm:
                         self.audioDecoder.flush()
                     }
@@ -975,15 +923,6 @@ public final class AetherEngine: ObservableObject {
                             self.atmosAudioBuffer.append(packetData)
                             self.atmosAudioLock.unlock()
                             self.startAtmosAudioDrain()
-                        }
-
-                    case .compressed:
-                        if let sampleBuffer = self.compressedAudioFeeder.wrapPacket(packet) {
-                            audioOutput.enqueue(sampleBuffer: sampleBuffer)
-                            if !audioStarted {
-                                audioOutput.start(at: initialAudioTime)
-                                audioStarted = true
-                            }
                         }
 
                     case .pcm:
