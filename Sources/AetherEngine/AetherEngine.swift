@@ -184,7 +184,20 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Public API
 
     /// Load a media file or stream URL. Replaces any current playback.
-    public func load(url: URL, startPosition: Double? = nil) async throws {
+    ///
+    /// - Parameters:
+    ///   - url: Media source (http/https/file).
+    ///   - startPosition: Seconds into the stream to start at (resume).
+    ///   - tonemapHDRToSDR: Force HDR10/DV content to be tone-mapped down
+    ///     to BT.709 SDR inside VideoToolbox. Use this when the display
+    ///     cannot switch to HDR mode (e.g. user disabled Match Content
+    ///     on tvOS, or panel is SDR-only) — otherwise HDR content appears
+    ///     black because AVSampleBufferDisplayLayer does not tone-map.
+    public func load(
+        url: URL,
+        startPosition: Double? = nil,
+        tonemapHDRToSDR: Bool = false
+    ) async throws {
         // Tear down any previous playback
         stopInternal()
         loadedURL = url
@@ -222,7 +235,11 @@ public final class AetherEngine: ObservableObject {
             // Try VideoToolbox hardware decode first, fall back to FFmpeg
             // software decode for codecs without HW support (AV1 on A15, etc.)
             do {
-                try videoDecoder.open(stream: videoStream, onFrame: frameCallback)
+                try videoDecoder.open(
+                    stream: videoStream,
+                    tonemapToSDR: tonemapHDRToSDR,
+                    onFrame: frameCallback
+                )
                 usingSoftwareDecode = false
                 #if DEBUG
                 print("[AetherEngine] Using VideoToolbox hardware decode")

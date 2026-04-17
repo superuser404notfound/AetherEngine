@@ -22,6 +22,12 @@ final class VideoDecoder: @unchecked Sendable {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var use10Bit = false
+    /// When true, HDR10/DV content is tone-mapped to BT.709 SDR inside
+    /// VideoToolbox via PixelTransferProperties. Set this when the
+    /// display stays in SDR mode (e.g. Match Content disabled) — without
+    /// it, PQ-encoded pixels appear black on SDR displays because
+    /// AVSampleBufferDisplayLayer does not tone-map.
+    private var tonemapToSDR = false
 
     /// Thread-safe access to the frame callback. Written on the main thread
     /// (open/close), read on VideoToolbox's internal callback thread.
@@ -39,9 +45,17 @@ final class VideoDecoder: @unchecked Sendable {
     /// Create a decoder for the given video stream.
     /// - Parameters:
     ///   - stream: The FFmpeg AVStream for the video track.
+    ///   - tonemapToSDR: If true, convert HDR10/DV content to BT.709 SDR
+    ///     during decode. Use when the display cannot switch to HDR
+    ///     (Match Content disabled or SDR panel).
     ///   - onFrame: Called on a background thread with each decoded frame.
-    func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
+    func open(
+        stream: UnsafeMutablePointer<AVStream>,
+        tonemapToSDR: Bool = false,
+        onFrame: @escaping DecodedFrameHandler
+    ) throws {
         self.onFrame = onFrame
+        self.tonemapToSDR = tonemapToSDR
 
         guard let codecpar = stream.pointee.codecpar else {
             throw VideoDecoderError.noCodecParameters
@@ -166,12 +180,15 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
-                // When DV metadata propagation is OFF, VT outputs pixel data
-                // in BT.2020/PQ but may strip color attachments from the buffer.
-                // Without attachments, the display layer defaults to BT.709
-                // interpretation → completely wrong colors. Fix: manually tag
-                // HDR pixel buffers with the correct color space.
-                if self.use10Bit {
+                // Tag pixel buffers with correct color space:
+                // - tonemapToSDR: VT already converted to BT.709 via
+                //   PixelTransferProperties — tag as SDR so the display
+                //   layer interprets the bytes correctly.
+                // - use10Bit (HDR native): VT may strip color attachments
+                //   when DV propagation is off. Re-attach BT.2020/PQ.
+                if self.tonemapToSDR {
+                    self.attachSDRColorSpace(to: pixelBuffer)
+                } else if self.use10Bit {
                     self.attachHDRColorSpace(to: pixelBuffer)
                 }
                 self.onFrame?(pixelBuffer, pts)
@@ -215,6 +232,18 @@ final class VideoDecoder: @unchecked Sendable {
                               kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, .shouldPropagate)
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
                               kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+    }
+
+    /// Attach BT.709 SDR color metadata. Used after VideoToolbox has
+    /// tone-mapped HDR10/DV content down to SDR via PixelTransferProperties
+    /// — the display layer then interprets the bytes as Rec.709 SDR.
+    private func attachSDRColorSpace(to pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
+                              kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey,
+                              kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey,
+                              kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
     }
 
     // MARK: - VideoToolbox Setup
@@ -281,11 +310,12 @@ final class VideoDecoder: @unchecked Sendable {
         formatDescription: CMVideoFormatDescription
     ) throws -> VTDecompressionSession {
         // Request YCbCr BiPlanar 4:2:0 — VideoToolbox's native output.
-        // 10-bit (P010) for HEVC/AV1: preserves HDR10 and Dolby Vision metadata.
-        // 8-bit (NV12) for H.264: no HDR support, saves memory.
-        // PropagatePerFrameHDRDisplayMetadata is true by default in VT,
-        // so DV/HDR10 metadata flows automatically on 10-bit pixel buffers.
-        let pixelFormat: OSType = use10Bit
+        // - 10-bit (P010) for HDR HEVC/AV1 when we want native HDR10/DV output.
+        // - 8-bit (NV12) for SDR content AND for HDR content we need to
+        //   tone-map down (AVSampleBufferDisplayLayer can't tone-map PQ on
+        //   an SDR display — pixels would appear black).
+        let outputsHDR = use10Bit && !tonemapToSDR
+        let pixelFormat: OSType = outputsHDR
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
@@ -324,6 +354,23 @@ final class VideoDecoder: @unchecked Sendable {
         #else
         VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata, value: kCFBooleanFalse)
         #endif
+
+        // If the display stays in SDR mode while the source is HDR10/DV,
+        // ask VideoToolbox to tone-map during decode. The display layer
+        // cannot tone-map PQ itself — without this, pixels are ~black.
+        if use10Bit && tonemapToSDR {
+            let transferProps: NSDictionary = [
+                kVTPixelTransferPropertyKey_DestinationColorPrimaries: kCVImageBufferColorPrimaries_ITU_R_709_2,
+                kVTPixelTransferPropertyKey_DestinationTransferFunction: kCVImageBufferTransferFunction_ITU_R_709_2,
+                kVTPixelTransferPropertyKey_DestinationYCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            ]
+            VTSessionSetProperty(sess,
+                key: kVTDecompressionPropertyKey_PixelTransferProperties,
+                value: transferProps)
+            #if DEBUG
+            print("[VideoDecoder] HDR→SDR tone-mapping enabled (PQ→BT.709)")
+            #endif
+        }
 
         return sess
     }
