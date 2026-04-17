@@ -356,8 +356,8 @@ public final class AetherEngine: ObservableObject {
                         #endif
                         fallbackToCompressedAudio(stream: audioStream)
                     }
-                } else if isEAC3 || isAC3 {
-                    // EAC3 (non-Atmos) / AC3 → compressed passthrough
+                } else if isAC3 {
+                    // AC3 → compressed passthrough (Apple's decoder is fine for AC3)
                     do {
                         try compressedAudioFeeder.open(stream: audioStream)
                         audioMode = .compressed
@@ -372,13 +372,28 @@ public final class AetherEngine: ObservableObject {
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                     }
                 } else {
-                    // AAC, FLAC, Opus, etc. → FFmpeg PCM decode
+                    // EAC3 (non-Atmos), AAC, FLAC, Opus, etc. → FFmpeg PCM decode.
+                    // EAC3 uses FFmpeg instead of CompressedAudioFeeder because
+                    // Apple's internal decoder applies dialnorm/DRC → quieter,
+                    // less dynamic output. FFmpeg preserves full dynamics.
                     do {
                         try audioDecoder.open(stream: audioStream)
                         audioAvailable = true
                         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                        #if DEBUG
+                        if isEAC3 {
+                            print("[AetherEngine] Audio: EAC3 → FFmpeg PCM decode (\(channelCount)ch)")
+                        }
+                        #endif
                     } catch {
-                        print("[AetherEngine] Audio decoder failed: \(error) — playback will be silent")
+                        // EAC3 fallback: try compressed passthrough
+                        if isEAC3 {
+                            try? compressedAudioFeeder.open(stream: audioStream)
+                            audioMode = .compressed
+                            audioAvailable = true
+                            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                        }
+                        print("[AetherEngine] Audio decoder failed: \(error)")
                     }
                 }
 
@@ -595,7 +610,7 @@ public final class AetherEngine: ObservableObject {
                 fallbackToCompressedAudio(stream: stream)
                 audioOutput.start(at: seekTime)
             }
-        } else if isEAC3 || isAC3 {
+        } else if isAC3 {
             do {
                 try compressedAudioFeeder.open(stream: stream)
                 audioMode = .compressed
