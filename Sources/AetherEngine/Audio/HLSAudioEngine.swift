@@ -232,11 +232,25 @@ final class HLSAudioEngine: @unchecked Sendable {
         // (seg16+) instead of seg0 → massive A/V content offset.
         if !isPlayerPlaying && (server?.segmentCount ?? 0) >= 6 && isPlayerCreated {
             bufferLock.unlock()
-            // Wait for AVPlayer to start before creating more segments
-            while !isPlayerPlaying {
+            // Wait for AVPlayer to start before creating more segments.
+            // Bounded wait: ~10s max. If AVPlayer fails to start (network
+            // error, stop() called, etc.) we must not block the demux thread
+            // indefinitely. muxer==nil after stop() tears everything down.
+            var waited: Double = 0
+            while !isPlayerPlaying && waited < 10.0 {
                 Thread.sleep(forTimeInterval: 0.05)
+                waited += 0.05
+                bufferLock.lock()
+                let tornDown = (muxer == nil || server == nil)
+                bufferLock.unlock()
+                if tornDown { return }
             }
             bufferLock.lock()
+            // Re-check state — stop() may have run during the wait
+            guard muxer != nil, server != nil else {
+                bufferLock.unlock()
+                return
+            }
         }
 
         if frameBuffer.count >= framesPerSegment, let m = muxer {

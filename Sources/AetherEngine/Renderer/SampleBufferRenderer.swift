@@ -24,6 +24,13 @@ final class SampleBufferRenderer {
     /// Set via `setSkipThreshold(_:)`, cleared automatically.
     private var skipUntilPTS: CMTime?
 
+    /// Cached CMVideoFormatDescription for sample-buffer wrapping.
+    /// Format descriptions are expensive to create (allocation + Core
+    /// Foundation refcount) — cache keyed by pixel buffer dimensions +
+    /// format so we only rebuild when the stream changes.
+    private var cachedFormatDesc: CMVideoFormatDescription?
+    private var cachedFormatKey: UInt64 = 0
+
     init() {
         displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspect
@@ -76,6 +83,12 @@ final class SampleBufferRenderer {
     func flush() {
         reorderLock.lock()
         reorderBuffer.removeAll()
+        // Drop the cached format description — a following load() may open
+        // a stream with different color attachments at the same resolution,
+        // and CMVideoFormatDescriptionCreateForImageBuffer snapshots those
+        // into the description at creation time.
+        cachedFormatDesc = nil
+        cachedFormatKey = 0
         reorderLock.unlock()
 
         displayLayer.flushAndRemoveImage()
@@ -104,13 +117,29 @@ final class SampleBufferRenderer {
     }
 
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
-        var formatDesc: CMVideoFormatDescription?
-        let status = CMVideoFormatDescriptionCreateForImageBuffer(
-            allocator: kCFAllocatorDefault,
-            imageBuffer: pixelBuffer,
-            formatDescriptionOut: &formatDesc
-        )
-        guard status == noErr, let desc = formatDesc else { return nil }
+        // Reuse the format description unless dimensions or pixel format
+        // changed — rebuilding per frame wastes an allocation and Core
+        // Foundation refcount churn in the hot path.
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        let key = (UInt64(width) << 40) | (UInt64(height) << 16) | UInt64(fmt & 0xFFFF)
+
+        let desc: CMVideoFormatDescription
+        if let cached = cachedFormatDesc, key == cachedFormatKey {
+            desc = cached
+        } else {
+            var formatDesc: CMVideoFormatDescription?
+            let status = CMVideoFormatDescriptionCreateForImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: pixelBuffer,
+                formatDescriptionOut: &formatDesc
+            )
+            guard status == noErr, let new = formatDesc else { return nil }
+            cachedFormatDesc = new
+            cachedFormatKey = key
+            desc = new
+        }
 
         var timing = CMSampleTimingInfo(
             duration: .invalid,

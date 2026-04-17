@@ -672,7 +672,8 @@ public final class AetherEngine: ObservableObject {
     /// Starts the background drain loop if not already running.
     /// Drains buffered audio packets to the HLS engine on a separate queue,
     /// completely independent of video back-pressure.
-    private func startAtmosAudioDrain() {
+    /// `nonisolated` so the demux queue can start it without a main-actor hop.
+    nonisolated private func startAtmosAudioDrain() {
         atmosAudioLock.lock()
         guard !atmosAudioDrainActive else { atmosAudioLock.unlock(); return }
         atmosAudioDrainActive = true
@@ -699,7 +700,8 @@ public final class AetherEngine: ObservableObject {
 
     /// Decodes video packets from the buffer with normal back-pressure.
     /// Runs on its own queue so it doesn't block the demux thread.
-    private func startAtmosVideoDrain() {
+    /// `nonisolated` so the demux queue can start it without a main-actor hop.
+    nonisolated private func startAtmosVideoDrain() {
         atmosVideoLock.lock()
         guard !atmosVideoDrainActive else { atmosVideoLock.unlock(); return }
         atmosVideoDrainActive = true
