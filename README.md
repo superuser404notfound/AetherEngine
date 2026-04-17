@@ -10,8 +10,6 @@
 
 A video player engine for Apple platforms. FFmpeg demuxes, VideoToolbox decodes, AVPlayer handles Dolby Atmos, and Apple's synchronizer ties it all together. **Your app provides the UI — AetherEngine provides the engine.**
 
-> **~4,600 lines of Swift.** No bloat, no abstractions for abstractions. Just a clean pipeline from URL to pixels and sound.
-
 ---
 
 ## Why AetherEngine?
