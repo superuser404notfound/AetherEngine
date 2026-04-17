@@ -200,19 +200,21 @@ final class VideoDecoder: @unchecked Sendable {
                 guard status == noErr,
                       let pixelBuffer = imageBuffer,
                       let self = self else { return }
+                // VT strips color attachments when DV propagation is off
+                // (always the case in HDR10 fallback). Re-tag the buffer
+                // as BT.2020/PQ so the next stage knows what it's holding.
+                if self.use10Bit {
+                    self.attachHDRColorSpace(to: pixelBuffer)
+                }
                 if self.tonemapToSDR, self.use10Bit {
-                    // Run the dedicated pixel transfer (PQ BT.2020 →
-                    // Rec.709 SDR). Forward the converted buffer.
+                    // VTPixelTransferSession needs correct source color
+                    // attachments to know it must tone-map PQ→SDR. The
+                    // call above made that explicit. Now do the transfer.
                     if let sdrBuffer = self.tonemapPixelBuffer(pixelBuffer) {
                         self.attachSDRColorSpace(to: sdrBuffer)
                         self.onFrame?(sdrBuffer, pts)
                     }
                 } else {
-                    // Non-tonemap path: VT may strip color attachments
-                    // when DV propagation is off — re-tag HDR buffers.
-                    if self.use10Bit {
-                        self.attachHDRColorSpace(to: pixelBuffer)
-                    }
                     self.onFrame?(pixelBuffer, pts)
                 }
             }
@@ -446,16 +448,49 @@ final class VideoDecoder: @unchecked Sendable {
     /// Returns nil if anything in the path fails — caller should drop the frame.
     private func tonemapPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         guard let session = pixelTransferSession,
-              let pool = tonemapPool else { return nil }
+              let pool = tonemapPool else {
+            #if DEBUG
+            if !tonemapLoggedMissing { tonemapLoggedMissing = true
+                print("[VideoDecoder] tonemapPixelBuffer: missing session or pool")
+            }
+            #endif
+            return nil
+        }
 
         var output: CVPixelBuffer?
         let allocStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
-        guard allocStatus == kCVReturnSuccess, let dst = output else { return nil }
+        guard allocStatus == kCVReturnSuccess, let dst = output else {
+            #if DEBUG
+            if !tonemapLoggedAlloc { tonemapLoggedAlloc = true
+                print("[VideoDecoder] tonemap pool alloc failed: \(allocStatus)")
+            }
+            #endif
+            return nil
+        }
 
         let transferStatus = VTPixelTransferSessionTransferImage(session, from: source, to: dst)
-        guard transferStatus == noErr else { return nil }
+        guard transferStatus == noErr else {
+            #if DEBUG
+            if !tonemapLoggedTransfer { tonemapLoggedTransfer = true
+                print("[VideoDecoder] tonemap transfer failed: \(transferStatus)")
+            }
+            #endif
+            return nil
+        }
+        #if DEBUG
+        if !tonemapLoggedSuccess { tonemapLoggedSuccess = true
+            print("[VideoDecoder] tonemap first frame transferred OK")
+        }
+        #endif
         return dst
     }
+
+    #if DEBUG
+    private var tonemapLoggedMissing = false
+    private var tonemapLoggedAlloc = false
+    private var tonemapLoggedTransfer = false
+    private var tonemapLoggedSuccess = false
+    #endif
 }
 
 // MARK: - Errors
