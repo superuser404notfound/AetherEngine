@@ -597,10 +597,18 @@ public final class AetherEngine: ObservableObject {
                 audioOutput.start(at: seekTime)
             }
         } else {
-            try? audioDecoder.open(stream: stream)
-            audioMode = .pcm
-            audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-            audioOutput.start(at: seekTime)
+            do {
+                try audioDecoder.open(stream: stream)
+                audioMode = .pcm
+                audioOutput.attachVideoLayer(videoRenderer.displayLayer)
+                audioOutput.start(at: seekTime)
+            } catch {
+                #if DEBUG
+                print("[AetherEngine] audioDecoder.open failed in selectAudioTrack: \(error) — disabling audio")
+                #endif
+                audioAvailable = false
+                audioMode = .pcm
+            }
         }
 
         #if os(iOS) || os(tvOS)
@@ -646,8 +654,17 @@ public final class AetherEngine: ObservableObject {
         videoRenderer.displayLayer.controlTimebase = nil
 
         // Switch to FFmpeg PCM decode
-        try? audioDecoder.open(stream: stream)
-        audioMode = .pcm
+        do {
+            try audioDecoder.open(stream: stream)
+            audioMode = .pcm
+        } catch {
+            #if DEBUG
+            print("[AetherEngine] PCM fallback failed too: \(error) — disabling audio")
+            #endif
+            audioAvailable = false
+            audioMode = .pcm
+            return
+        }
 
         // Re-attach display layer to synchronizer
         audioOutput.attachVideoLayer(videoRenderer.displayLayer)
@@ -798,6 +815,11 @@ public final class AetherEngine: ObservableObject {
         demuxer.close()
         audioAvailable = false
         atmosAudioSkipPTS = -1
+        // usingSoftwareDecode must be reset — otherwise a subsequent
+        // load() that fails before opening any decoder would see a stale
+        // `true` from a prior SW-decoded session and try to flush/close
+        // the wrong decoder in its catch path.
+        usingSoftwareDecode = false
     }
 
     // MARK: - Demux Loop
