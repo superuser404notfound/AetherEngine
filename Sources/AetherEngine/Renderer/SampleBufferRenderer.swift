@@ -31,10 +31,32 @@ final class SampleBufferRenderer {
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: UInt64 = 0
 
+    #if DEBUG
+    private var enqueueCount = 0
+    private var flushCount = 0
+    private var loggedFirstFrame = false
+    private var loggedLayerFailed = false
+    #endif
+
     init() {
         displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.preventsDisplaySleepDuringVideoPlayback = true
+        // HDR10 / Dolby Vision output: without this the compositor
+        // treats the layer as SDR and clips BT.2020/PQ to Rec.709 —
+        // we end up with a black or washed-out image on an HDR TV
+        // that was correctly switched into HDR mode via AVDisplayCriteria.
+        // tvOS 18+ replaced `wantsExtendedDynamicRangeContent` with the
+        // more explicit `preferredDynamicRange` API.
+        if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
+            displayLayer.preferredDynamicRange = .high
+        } else {
+            #if os(iOS) || os(macOS)
+            if #available(iOS 16.0, macOS 13.0, *) {
+                displayLayer.wantsExtendedDynamicRangeContent = true
+            }
+            #endif
+        }
     }
 
     /// After seek, drop frames with PTS before the target to prevent
@@ -111,8 +133,36 @@ final class SampleBufferRenderer {
 
     private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime) {
         guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
+            #if DEBUG
+            print("[Renderer] createSampleBuffer failed")
+            #endif
             return
         }
+        #if DEBUG
+        flushCount += 1
+        if !loggedFirstFrame {
+            loggedFirstFrame = true
+            let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            let w = CVPixelBufferGetWidth(pixelBuffer)
+            let h = CVPixelBufferGetHeight(pixelBuffer)
+            let fmtStr = String(format: "%c%c%c%c",
+                                Int((fmt >> 24) & 0xFF),
+                                Int((fmt >> 16) & 0xFF),
+                                Int((fmt >> 8) & 0xFF),
+                                Int(fmt & 0xFF))
+            var mode: CVAttachmentMode = .shouldPropagate
+            let primariesRef = CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, &mode)
+            let primaries = primariesRef.map { "\($0.takeUnretainedValue())" } ?? "nil"
+            print("[Renderer] first frame: \(w)x\(h) fmt=\(fmtStr) primaries=\(primaries) status=\(displayLayer.status.rawValue)")
+        }
+        if flushCount % 120 == 0 {
+            print("[Renderer] flushed=\(flushCount) layer.status=\(displayLayer.status.rawValue) ready=\(displayLayer.isReadyForMoreMediaData)")
+        }
+        if displayLayer.status == .failed, !loggedLayerFailed {
+            loggedLayerFailed = true
+            print("[Renderer] DISPLAY LAYER FAILED: \(displayLayer.error?.localizedDescription ?? "nil")")
+        }
+        #endif
         displayLayer.enqueue(sampleBuffer)
     }
 
