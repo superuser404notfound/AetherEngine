@@ -69,7 +69,7 @@ Demux Thread ──┬── Audio Packets ──► HLS Audio Engine (AVPlayer)
 
 - **Auto-calibrated A/V sync** — measures the natural clock drift between CMTimebase and AVPlayer, then corrects deviations >50ms automatically
 - **Seek-safe** — filters pre-keyframe audio packets and corrects streamOffset to the actual first audio PTS
-- **Fallback** — if AVPlayer fails, falls back to CompressedAudioFeeder (5.1 PCM)
+- **Fallback** — if AVPlayer fails, falls back to FFmpeg PCM decode
 
 ### Playback
 
@@ -156,7 +156,6 @@ Sources/AetherEngine/
 └── Audio/
     ├── AudioDecoder.swift         FFmpeg decode + libswresample → multichannel PCM
     ├── AudioOutput.swift          AVSampleBufferAudioRenderer + spatial audio
-    ├── CompressedAudioFeeder.swift AC3/EAC3 compressed passthrough
     ├── HLSAudioEngine.swift       AVPlayer + CMTimebase sync for Dolby Atmos
     ├── HLSAudioServer.swift       Local HTTP server for HLS segments
     └── FMP4AudioMuxer.swift       EAC3 → fMP4 with dec3/JOC Atmos metadata
@@ -176,9 +175,9 @@ FFmpeg Demuxer → AVPackets
  ▼                    ▼
 Video                Audio
  │                    │
- ├─ VT HW Decode     ├─ EAC3 → fMP4 Muxer → HLS → AVPlayer (Atmos)
- ├─ FFmpeg SW         ├─ AC3 → CompressedAudioFeeder (passthrough)
- │                    └─ Other → FFmpeg PCM → AudioRenderer
+ ├─ VT HW Decode     ├─ EAC3+JOC → fMP4 Muxer → HLS → AVPlayer (Atmos)
+ ├─ FFmpeg SW         └─ All other → FFmpeg PCM → AudioRenderer
+ │
  ▼                    │
 CVPixelBuffer        ▼
  │               CMSampleBuffer
@@ -211,11 +210,12 @@ AetherEngine automatically detects HDR content and configures the decode pipelin
 
 | Codec | Engine | Output |
 |---|---|---|
-| **EAC3** (incl. Atmos) | HLS AVPlayer + fMP4 Muxer | Dolby Atmos passthrough (MAT 2.0) |
-| **AC3** | CompressedAudioFeeder | 5.1 passthrough (no decode) |
+| **EAC3+JOC** (Atmos, profile=30) | HLS AVPlayer + fMP4 Muxer | Dolby Atmos passthrough (MAT 2.0) |
+| **EAC3** (5.1) | FFmpeg + libswresample | Multichannel Float32 PCM |
+| **AC3** | FFmpeg + libswresample | Multichannel Float32 PCM |
 | **AAC, FLAC, Opus, etc.** | FFmpeg + libswresample | Multichannel Float32 PCM |
 
-EAC3+JOC (Atmos) embeds object metadata within the independent substream — identical framing to regular EAC3 5.1. AetherEngine routes all EAC3 through AVPlayer which handles both Atmos and non-Atmos content correctly.
+Atmos detection uses `codecpar.profile == 30` (`FF_PROFILE_EAC3_DDP_ATMOS`), set by FFmpeg's EAC3 parser when JOC is detected — no server metadata needed. Non-Atmos EAC3 is decoded by FFmpeg to preserve full dynamics (Apple's internal decoder applies dialnorm/DRC attenuation).
 
 ---
 
