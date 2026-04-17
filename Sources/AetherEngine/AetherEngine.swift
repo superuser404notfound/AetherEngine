@@ -59,6 +59,11 @@ public final class AetherEngine: ObservableObject {
     /// Uses AVSampleBufferDisplayLayer for optimal frame pacing.
     public var videoLayer: CALayer { videoRenderer.displayLayer }
 
+    /// The URL and position of the current playback session.
+    /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
+    /// after background suspension invalidates VT sessions and AVIO.
+    private var loadedURL: URL?
+
     // MARK: - Internal Pipeline
 
     /// Pipeline components — accessed from both main actor and demux queue.
@@ -185,6 +190,7 @@ public final class AetherEngine: ObservableObject {
     public func load(url: URL, startPosition: Double? = nil) async throws {
         // Tear down any previous playback
         stopInternal()
+        loadedURL = url
 
         state = .loading
         currentTime = 0
@@ -427,6 +433,16 @@ public final class AetherEngine: ObservableObject {
         case .paused: play()
         default: break
         }
+    }
+
+    /// Tear down and reload from the current position.
+    /// Call after returning from background — VTDecompressionSession and
+    /// AVIO connections are invalidated by tvOS when the app is suspended.
+    /// A fresh load() rebuilds everything safely.
+    public func reloadAtCurrentPosition() async throws {
+        guard let url = loadedURL else { return }
+        let pos = currentTime
+        try await load(url: url, startPosition: pos > 1 ? pos : nil)
     }
 
     public func seek(to seconds: Double) async {
@@ -1044,14 +1060,28 @@ public final class AetherEngine: ObservableObject {
         #if os(iOS) || os(tvOS)
         let nc = NotificationCenter.default
 
-        // Pause when entering background — Metal rendering is not allowed,
-        // and VTDecompressionSession becomes invalid in background.
+        // Stop the demux loop when entering background — VTDecompressionSession
+        // and AVIO connections are invalidated by tvOS during suspension.
+        // Just pausing isn't enough: when the user resumes, the demux loop
+        // calls av_read_frame which crashes on the dead AVIO context.
+        // The host app should call reloadAtCurrentPosition() on foreground return.
         let bgObserver = nc.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self = self, self.state == .playing else { return }
-            self.pause()
+            guard let self = self else { return }
+            guard self.state == .playing || self.state == .paused else { return }
+            self.stopRequested = true
+            self.isPlaying = false
+            if self.audioMode == .atmos {
+                self.hlsAudioEngine?.pause()
+            } else {
+                self.audioOutput.pause()
+            }
+            if let tb = self.hlsAudioEngine?.videoTimebase {
+                CMTimebaseSetRate(tb, rate: 0)
+            }
+            self.state = .paused
         }
         lifecycleObservers.append(bgObserver)
 
