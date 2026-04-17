@@ -766,12 +766,6 @@ public final class AetherEngine: ObservableObject {
         audioDecoder.close()
         demuxer.close()
         audioAvailable = false
-
-        // Remove lifecycle observers
-        for observer in lifecycleObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        lifecycleObservers.removeAll()
     }
 
     // MARK: - Demux Loop
