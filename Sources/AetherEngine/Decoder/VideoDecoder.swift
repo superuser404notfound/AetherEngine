@@ -118,6 +118,12 @@ final class VideoDecoder: @unchecked Sendable {
     func decode(packet: UnsafeMutablePointer<AVPacket>) {
         guard let session = decompressionSession,
               let formatDesc = formatDescription else { return }
+        #if DEBUG
+        decodeInputCount += 1
+        if decodeInputCount == 1 {
+            print("[VideoDecoder] first packet submitted")
+        }
+        #endif
 
         let packetData = packet.pointee.data
         let packetSize = Int(packet.pointee.size)
@@ -197,9 +203,20 @@ final class VideoDecoder: @unchecked Sendable {
             flags: decodeFlags,
             infoFlagsOut: &infoFlags,
             outputHandler: { [weak self] status, infoFlags, imageBuffer, pts, duration in
-                guard status == noErr,
-                      let pixelBuffer = imageBuffer,
-                      let self = self else { return }
+                guard let self = self else { return }
+                #if DEBUG
+                if status != noErr, !self.loggedDecodeError {
+                    self.loggedDecodeError = true
+                    print("[VideoDecoder] decode output error: status=\(status) info=\(infoFlags)")
+                }
+                #endif
+                guard status == noErr, let pixelBuffer = imageBuffer else { return }
+                #if DEBUG
+                self.decodeOutputCount += 1
+                if self.decodeOutputCount == 1 {
+                    print("[VideoDecoder] first frame decoded (PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts))))")
+                }
+                #endif
                 // VT strips color attachments when DV propagation is off
                 // (always the case in HDR10 fallback). Re-tag the buffer
                 // as BT.2020/PQ so the next stage knows what it's holding.
@@ -490,6 +507,9 @@ final class VideoDecoder: @unchecked Sendable {
     private var tonemapLoggedAlloc = false
     private var tonemapLoggedTransfer = false
     private var tonemapLoggedSuccess = false
+    fileprivate var decodeInputCount = 0
+    fileprivate var decodeOutputCount = 0
+    fileprivate var loggedDecodeError = false
     #endif
 }
 

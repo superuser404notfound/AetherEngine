@@ -709,6 +709,11 @@ public final class AetherEngine: ObservableObject {
 
         atmosVideoQueue.async { [weak self] in
             guard let self else { return }
+            #if DEBUG
+            nonisolated(unsafe) var drainDecoded = 0
+            nonisolated(unsafe) var drainBackpressureWaits = 0
+            nonisolated(unsafe) var loggedFirst = false
+            #endif
             while true {
                 self.atmosVideoLock.lock()
                 guard !self.atmosVideoBuffer.isEmpty else {
@@ -720,9 +725,22 @@ public final class AetherEngine: ObservableObject {
                 self.atmosVideoLock.unlock()
 
                 // Back-pressure on THIS thread (doesn't affect demux or audio)
+                #if DEBUG
+                var waited = 0
+                #endif
                 while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
                     Thread.sleep(forTimeInterval: 0.005)
+                    #if DEBUG
+                    waited += 1
+                    if waited == 200 && !loggedFirst {
+                        loggedFirst = true
+                        print("[AtmosVideoDrain] stalled in backpressure — displayLayer not ready after 1s, status=\(self.videoRenderer.displayLayer.status.rawValue) err=\(self.videoRenderer.displayLayer.error?.localizedDescription ?? "nil")")
+                    }
+                    #endif
                 }
+                #if DEBUG
+                drainBackpressureWaits += waited
+                #endif
                 guard !self.stopRequested else {
                     av_packet_free_safe(packet)
                     return
@@ -733,6 +751,15 @@ public final class AetherEngine: ObservableObject {
                 } else {
                     self.videoDecoder.decode(packet: packet)
                 }
+                #if DEBUG
+                drainDecoded += 1
+                if drainDecoded == 1 {
+                    print("[AtmosVideoDrain] first packet sent to decoder")
+                }
+                if drainDecoded % 120 == 0 {
+                    print("[AtmosVideoDrain] decoded=\(drainDecoded) backpressure_ticks=\(drainBackpressureWaits)")
+                }
+                #endif
                 av_packet_free_safe(packet)
             }
         }
