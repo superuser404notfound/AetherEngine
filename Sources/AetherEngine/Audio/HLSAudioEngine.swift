@@ -145,6 +145,13 @@ final class HLSAudioEngine: @unchecked Sendable {
         let startSeconds = CMTimeGetSeconds(startTime)
         streamOffset = startSeconds.isFinite ? startSeconds : 0
 
+        let srv = HLSAudioServer()
+        try srv.start()
+
+        // Publish server inside the same lock region that feedAudioData
+        // uses to read it. Previously feedAudioData could observe a new
+        // `server` while `muxer` was still nil from the prior teardown
+        // (or vice-versa) → null-ref or segment misrouted to stale server.
         bufferLock.lock()
         storedCodecType = codecType
         storedSampleRate = sampleRate
@@ -153,16 +160,14 @@ final class HLSAudioEngine: @unchecked Sendable {
         storedStartTime = startTime
         frameBuffer.removeAll()
         isPlayerCreated = false
+        server = srv
+        muxer = nil   // feedAudioData rebuilds muxer on the first packet
         bufferLock.unlock()
 
         setPlayerPlaying(false)
         hasSnapped = false
         hasCalibrated = false
         clockOffset = 0
-
-        let srv = HLSAudioServer()
-        try srv.start()
-        server = srv
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
@@ -307,6 +312,8 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     func stop() {
         removeTimeSync()
+        // Tear down KVO BEFORE nilling playerItem so the observer is
+        // released against the object it was registered on.
         statusObservation = nil
         // Remove the per-item notification observers we registered in
         // createPlayer(). Without this they leak across playbacks.
@@ -318,15 +325,18 @@ final class HLSAudioEngine: @unchecked Sendable {
         player?.replaceCurrentItem(with: nil)
         player = nil
         playerItem = nil
-        muxer = nil
-        server?.stop()
-        server = nil
-        videoTimebase = nil
-        setPlayerPlaying(false)
+        // Capture server before nilling under lock so we can stop() it
+        // outside the critical section (server.stop() may block on NWListener).
         bufferLock.lock()
+        let srv = server
+        server = nil
+        muxer = nil
         frameBuffer.removeAll()
         isPlayerCreated = false
         bufferLock.unlock()
+        srv?.stop()
+        videoTimebase = nil
+        setPlayerPlaying(false)
         // Reset sync state so the next prepare() starts fresh. Without
         // this a second playback kept the prior hasSnapped/calibrated
         // state and skipped the initial timebase snap → silent or
@@ -348,15 +358,16 @@ final class HLSAudioEngine: @unchecked Sendable {
         player?.replaceCurrentItem(with: nil)
         playerItem = nil
         player = nil
-        muxer = nil
-        server?.stop()
-        server = nil
-        videoTimebase = nil
-        setPlayerPlaying(false)
         bufferLock.lock()
+        let srv = server
+        server = nil
+        muxer = nil
         frameBuffer.removeAll()
         isPlayerCreated = false
         bufferLock.unlock()
+        srv?.stop()
+        videoTimebase = nil
+        setPlayerPlaying(false)
         hasSnapped = false
         hasCalibrated = false
         clockOffset = 0
