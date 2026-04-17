@@ -565,7 +565,6 @@ public final class AetherEngine: ObservableObject {
 
         // Open new audio engine for the selected track
         let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
-        let isAC3 = (codecId == AV_CODEC_ID_AC3)
         let isAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
 
         if isAtmos {
@@ -716,11 +715,6 @@ public final class AetherEngine: ObservableObject {
 
         atmosVideoQueue.async { [weak self] in
             guard let self else { return }
-            #if DEBUG
-            nonisolated(unsafe) var drainDecoded = 0
-            nonisolated(unsafe) var drainBackpressureWaits = 0
-            nonisolated(unsafe) var loggedFirst = false
-            #endif
             while true {
                 self.atmosVideoLock.lock()
                 guard !self.atmosVideoBuffer.isEmpty else {
@@ -732,22 +726,9 @@ public final class AetherEngine: ObservableObject {
                 self.atmosVideoLock.unlock()
 
                 // Back-pressure on THIS thread (doesn't affect demux or audio)
-                #if DEBUG
-                var waited = 0
-                #endif
                 while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
                     Thread.sleep(forTimeInterval: 0.005)
-                    #if DEBUG
-                    waited += 1
-                    if waited == 200 && !loggedFirst {
-                        loggedFirst = true
-                        print("[AtmosVideoDrain] stalled in backpressure — displayLayer not ready after 1s, status=\(self.videoRenderer.displayLayer.status.rawValue) err=\(self.videoRenderer.displayLayer.error?.localizedDescription ?? "nil")")
-                    }
-                    #endif
                 }
-                #if DEBUG
-                drainBackpressureWaits += waited
-                #endif
                 guard !self.stopRequested else {
                     av_packet_free_safe(packet)
                     // Clear drainActive on stop-exit so the next load() can
@@ -764,15 +745,6 @@ public final class AetherEngine: ObservableObject {
                 } else {
                     self.videoDecoder.decode(packet: packet)
                 }
-                #if DEBUG
-                drainDecoded += 1
-                if drainDecoded == 1 {
-                    print("[AtmosVideoDrain] first packet sent to decoder")
-                }
-                if drainDecoded % 120 == 0 {
-                    print("[AtmosVideoDrain] decoded=\(drainDecoded) backpressure_ticks=\(drainBackpressureWaits)")
-                }
-                #endif
                 av_packet_free_safe(packet)
             }
         }
@@ -839,14 +811,7 @@ public final class AetherEngine: ObservableObject {
         let audioAvailable = self.audioAvailable
         nonisolated(unsafe) var audioStarted = false
         #if DEBUG
-        print("[Demux] loop starting: videoIdx=\(videoStreamIndex) audioIdx=\(audioStreamIndex) atmos=\(self.audioMode == .atmos)")
-        nonisolated(unsafe) var dbgTotalPackets = 0
-        nonisolated(unsafe) var dbgVideoPackets = 0
-        nonisolated(unsafe) var dbgVideoClonedOK = 0
-        nonisolated(unsafe) var dbgVideoCloneFailed = 0
-        nonisolated(unsafe) var dbgAudioPackets = 0
-        nonisolated(unsafe) var dbgOtherPackets = 0
-        nonisolated(unsafe) var dbgVideoBufferFullWaits = 0
+        nonisolated(unsafe) var loggedCloneFailed = false
         #endif
 
         // Cache audio stream time_base to avoid per-packet lookup in the hot path.
@@ -925,18 +890,6 @@ public final class AetherEngine: ObservableObject {
                 }
 
                 let streamIdx = packet.pointee.stream_index
-                #if DEBUG
-                dbgTotalPackets += 1
-                if streamIdx == videoStreamIndex { dbgVideoPackets += 1 }
-                else if streamIdx == self.activeAudioStreamIndex { dbgAudioPackets += 1 }
-                else { dbgOtherPackets += 1 }
-                if dbgTotalPackets == 1 {
-                    print("[Demux] first packet: streamIdx=\(streamIdx) size=\(packet.pointee.size)")
-                }
-                if dbgTotalPackets % 200 == 0 {
-                    print("[Demux] total=\(dbgTotalPackets) video=\(dbgVideoPackets)(cloneOK=\(dbgVideoClonedOK),fail=\(dbgVideoCloneFailed),bufFullWaits=\(dbgVideoBufferFullWaits)) audio=\(dbgAudioPackets) other=\(dbgOtherPackets)")
-                }
-                #endif
 
                 if streamIdx == videoStreamIndex {
                     if self.audioMode == .atmos {
@@ -944,19 +897,10 @@ public final class AetherEngine: ObservableObject {
                         // The demux thread NEVER blocks on video back-pressure,
                         // so audio packets keep flowing to the HLS engine.
                         if let copy = av_packet_clone(packet) {
-                            #if DEBUG
-                            dbgVideoClonedOK += 1
-                            if dbgVideoClonedOK == 1 {
-                                print("[Demux] first video packet cloned (size=\(packet.pointee.size))")
-                            }
-                            #endif
                             self.atmosVideoLock.lock()
                             // Throttle if buffer is full (prevent OOM)
                             while self.atmosVideoBuffer.count >= self.atmosVideoBufferMax && !self.stopRequested {
                                 self.atmosVideoLock.unlock()
-                                #if DEBUG
-                                dbgVideoBufferFullWaits += 1
-                                #endif
                                 Thread.sleep(forTimeInterval: 0.01)
                                 self.atmosVideoLock.lock()
                             }
@@ -965,8 +909,8 @@ public final class AetherEngine: ObservableObject {
                             self.startAtmosVideoDrain()
                         } else {
                             #if DEBUG
-                            dbgVideoCloneFailed += 1
-                            if dbgVideoCloneFailed == 1 {
+                            if !loggedCloneFailed {
+                                loggedCloneFailed = true
                                 print("[Demux] av_packet_clone FAILED (size=\(packet.pointee.size))")
                             }
                             #endif

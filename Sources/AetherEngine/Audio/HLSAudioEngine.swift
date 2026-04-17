@@ -47,6 +47,10 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var _rate: Float = 1.0
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
+    /// Opaque tokens for `NotificationCenter.addObserver(forName:…)` so
+    /// `stop()` can remove the corresponding handlers. Previously the
+    /// observers lived as long as NotificationCenter itself.
+    private var notificationTokens: [NSObjectProtocol] = []
 
     var onPlaybackFailed: (@Sendable () -> Void)?
 
@@ -304,6 +308,12 @@ final class HLSAudioEngine: @unchecked Sendable {
     func stop() {
         removeTimeSync()
         statusObservation = nil
+        // Remove the per-item notification observers we registered in
+        // createPlayer(). Without this they leak across playbacks.
+        for token in notificationTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        notificationTokens.removeAll()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -311,16 +321,29 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        videoTimebase = nil
         setPlayerPlaying(false)
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
         bufferLock.unlock()
+        // Reset sync state so the next prepare() starts fresh. Without
+        // this a second playback kept the prior hasSnapped/calibrated
+        // state and skipped the initial timebase snap → silent or
+        // out-of-sync audio.
+        hasSnapped = false
+        hasCalibrated = false
+        clockOffset = 0
+        streamOffset = 0
     }
 
     func prepareForSeek() {
         removeTimeSync()
         statusObservation = nil
+        for token in notificationTokens {
+            NotificationCenter.default.removeObserver(token)
+        }
+        notificationTokens.removeAll()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         playerItem = nil
@@ -328,11 +351,16 @@ final class HLSAudioEngine: @unchecked Sendable {
         muxer = nil
         server?.stop()
         server = nil
+        videoTimebase = nil
         setPlayerPlaying(false)
         bufferLock.lock()
         frameBuffer.removeAll()
         isPlayerCreated = false
         bufferLock.unlock()
+        hasSnapped = false
+        hasCalibrated = false
+        clockOffset = 0
+        streamOffset = 0
     }
 
     func restartAfterSeek(stream: UnsafeMutablePointer<AVStream>, seekTime: CMTime) throws {
@@ -411,20 +439,22 @@ final class HLSAudioEngine: @unchecked Sendable {
             }
         }
 
-        // Notification for playback failure
-        NotificationCenter.default.addObserver(
+        // Notifications — store tokens so stop() can remove them. Without
+        // this, every createPlayer() added handlers that outlived the item
+        // and accumulated across sessions — 20+ orphaned callbacks firing
+        // on every playback event after ~10 plays.
+        let failedToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
             object: item, queue: .main
         ) { [weak self] notification in
+            guard let self else { return }
             #if DEBUG
             let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             print("[HLSAudioEngine] FailedToPlayToEndTime: \(error?.localizedDescription ?? "unknown")")
             #endif
-            failureCallback?()
+            self.onPlaybackFailed?()
         }
-
-        // Notification for playback stall
-        NotificationCenter.default.addObserver(
+        let stalledToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemPlaybackStalled,
             object: item, queue: .main
         ) { _ in
@@ -432,6 +462,7 @@ final class HLSAudioEngine: @unchecked Sendable {
             print("[HLSAudioEngine] PlaybackStalled!")
             #endif
         }
+        notificationTokens = [failedToken, stalledToken]
 
         setupTimeSync()
     }

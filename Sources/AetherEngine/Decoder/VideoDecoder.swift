@@ -118,12 +118,6 @@ final class VideoDecoder: @unchecked Sendable {
     func decode(packet: UnsafeMutablePointer<AVPacket>) {
         guard let session = decompressionSession,
               let formatDesc = formatDescription else { return }
-        #if DEBUG
-        decodeInputCount += 1
-        if decodeInputCount == 1 {
-            print("[VideoDecoder] first packet submitted")
-        }
-        #endif
 
         let packetData = packet.pointee.data
         let packetSize = Int(packet.pointee.size)
@@ -202,7 +196,7 @@ final class VideoDecoder: @unchecked Sendable {
             sampleBuffer: sample,
             flags: decodeFlags,
             infoFlagsOut: &infoFlags,
-            outputHandler: { [weak self] status, infoFlags, imageBuffer, pts, duration in
+            outputHandler: { [weak self] status, infoFlags, imageBuffer, pts, _ in
                 guard let self = self else { return }
                 #if DEBUG
                 if status != noErr, !self.loggedDecodeError {
@@ -211,12 +205,6 @@ final class VideoDecoder: @unchecked Sendable {
                 }
                 #endif
                 guard status == noErr, let pixelBuffer = imageBuffer else { return }
-                #if DEBUG
-                self.decodeOutputCount += 1
-                if self.decodeOutputCount == 1 {
-                    print("[VideoDecoder] first frame decoded (PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts))))")
-                }
-                #endif
                 // VT strips color attachments when DV propagation is off
                 // (always the case in HDR10 fallback). Re-tag the buffer
                 // as BT.2020/PQ so the next stage knows what it's holding.
@@ -465,50 +453,18 @@ final class VideoDecoder: @unchecked Sendable {
     /// Returns nil if anything in the path fails — caller should drop the frame.
     private func tonemapPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         guard let session = pixelTransferSession,
-              let pool = tonemapPool else {
-            #if DEBUG
-            if !tonemapLoggedMissing { tonemapLoggedMissing = true
-                print("[VideoDecoder] tonemapPixelBuffer: missing session or pool")
-            }
-            #endif
-            return nil
-        }
+              let pool = tonemapPool else { return nil }
 
         var output: CVPixelBuffer?
         let allocStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
-        guard allocStatus == kCVReturnSuccess, let dst = output else {
-            #if DEBUG
-            if !tonemapLoggedAlloc { tonemapLoggedAlloc = true
-                print("[VideoDecoder] tonemap pool alloc failed: \(allocStatus)")
-            }
-            #endif
-            return nil
-        }
+        guard allocStatus == kCVReturnSuccess, let dst = output else { return nil }
 
         let transferStatus = VTPixelTransferSessionTransferImage(session, from: source, to: dst)
-        guard transferStatus == noErr else {
-            #if DEBUG
-            if !tonemapLoggedTransfer { tonemapLoggedTransfer = true
-                print("[VideoDecoder] tonemap transfer failed: \(transferStatus)")
-            }
-            #endif
-            return nil
-        }
-        #if DEBUG
-        if !tonemapLoggedSuccess { tonemapLoggedSuccess = true
-            print("[VideoDecoder] tonemap first frame transferred OK")
-        }
-        #endif
+        guard transferStatus == noErr else { return nil }
         return dst
     }
 
     #if DEBUG
-    private var tonemapLoggedMissing = false
-    private var tonemapLoggedAlloc = false
-    private var tonemapLoggedTransfer = false
-    private var tonemapLoggedSuccess = false
-    fileprivate var decodeInputCount = 0
-    fileprivate var decodeOutputCount = 0
     fileprivate var loggedDecodeError = false
     #endif
 }

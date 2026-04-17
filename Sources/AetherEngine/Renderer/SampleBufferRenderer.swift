@@ -32,9 +32,6 @@ final class SampleBufferRenderer {
     private var cachedFormatKey: UInt64 = 0
 
     #if DEBUG
-    private var enqueueCount = 0
-    private var flushCount = 0
-    private var loggedFirstFrame = false
     private var loggedLayerFailed = false
     #endif
 
@@ -133,34 +130,12 @@ final class SampleBufferRenderer {
 
     private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime) {
         guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
-            #if DEBUG
-            print("[Renderer] createSampleBuffer failed")
-            #endif
             return
         }
         #if DEBUG
-        flushCount += 1
-        if !loggedFirstFrame {
-            loggedFirstFrame = true
-            let fmt = CVPixelBufferGetPixelFormatType(pixelBuffer)
-            let w = CVPixelBufferGetWidth(pixelBuffer)
-            let h = CVPixelBufferGetHeight(pixelBuffer)
-            let fmtStr = String(format: "%c%c%c%c",
-                                Int((fmt >> 24) & 0xFF),
-                                Int((fmt >> 16) & 0xFF),
-                                Int((fmt >> 8) & 0xFF),
-                                Int(fmt & 0xFF))
-            var mode: CVAttachmentMode = .shouldPropagate
-            let primariesRef = CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, &mode)
-            let primaries = primariesRef.map { "\($0.takeUnretainedValue())" } ?? "nil"
-            print("[Renderer] first frame: \(w)x\(h) fmt=\(fmtStr) primaries=\(primaries) status=\(displayLayer.status.rawValue)")
-        }
-        if flushCount % 120 == 0 {
-            print("[Renderer] flushed=\(flushCount) layer.status=\(displayLayer.status.rawValue) ready=\(displayLayer.isReadyForMoreMediaData)")
-        }
         if displayLayer.status == .failed, !loggedLayerFailed {
             loggedLayerFailed = true
-            print("[Renderer] DISPLAY LAYER FAILED: \(displayLayer.error?.localizedDescription ?? "nil")")
+            print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil")")
         }
         #endif
         displayLayer.enqueue(sampleBuffer)
