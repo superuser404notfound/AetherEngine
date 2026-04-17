@@ -825,6 +825,16 @@ public final class AetherEngine: ObservableObject {
         let audioDecoder = self.audioDecoder
         let audioAvailable = self.audioAvailable
         nonisolated(unsafe) var audioStarted = false
+        #if DEBUG
+        print("[Demux] loop starting: videoIdx=\(videoStreamIndex) audioIdx=\(audioStreamIndex) atmos=\(self.audioMode == .atmos)")
+        nonisolated(unsafe) var dbgTotalPackets = 0
+        nonisolated(unsafe) var dbgVideoPackets = 0
+        nonisolated(unsafe) var dbgVideoClonedOK = 0
+        nonisolated(unsafe) var dbgVideoCloneFailed = 0
+        nonisolated(unsafe) var dbgAudioPackets = 0
+        nonisolated(unsafe) var dbgOtherPackets = 0
+        nonisolated(unsafe) var dbgVideoBufferFullWaits = 0
+        #endif
 
         // Cache audio stream time_base to avoid per-packet lookup in the hot path.
         let audioTimeBase: AVRational = {
@@ -902,6 +912,18 @@ public final class AetherEngine: ObservableObject {
                 }
 
                 let streamIdx = packet.pointee.stream_index
+                #if DEBUG
+                dbgTotalPackets += 1
+                if streamIdx == videoStreamIndex { dbgVideoPackets += 1 }
+                else if streamIdx == self.activeAudioStreamIndex { dbgAudioPackets += 1 }
+                else { dbgOtherPackets += 1 }
+                if dbgTotalPackets == 1 {
+                    print("[Demux] first packet: streamIdx=\(streamIdx) size=\(packet.pointee.size)")
+                }
+                if dbgTotalPackets % 200 == 0 {
+                    print("[Demux] total=\(dbgTotalPackets) video=\(dbgVideoPackets)(cloneOK=\(dbgVideoClonedOK),fail=\(dbgVideoCloneFailed),bufFullWaits=\(dbgVideoBufferFullWaits)) audio=\(dbgAudioPackets) other=\(dbgOtherPackets)")
+                }
+                #endif
 
                 if streamIdx == videoStreamIndex {
                     if self.audioMode == .atmos {
@@ -909,16 +931,32 @@ public final class AetherEngine: ObservableObject {
                         // The demux thread NEVER blocks on video back-pressure,
                         // so audio packets keep flowing to the HLS engine.
                         if let copy = av_packet_clone(packet) {
+                            #if DEBUG
+                            dbgVideoClonedOK += 1
+                            if dbgVideoClonedOK == 1 {
+                                print("[Demux] first video packet cloned (size=\(packet.pointee.size))")
+                            }
+                            #endif
                             self.atmosVideoLock.lock()
                             // Throttle if buffer is full (prevent OOM)
                             while self.atmosVideoBuffer.count >= self.atmosVideoBufferMax && !self.stopRequested {
                                 self.atmosVideoLock.unlock()
+                                #if DEBUG
+                                dbgVideoBufferFullWaits += 1
+                                #endif
                                 Thread.sleep(forTimeInterval: 0.01)
                                 self.atmosVideoLock.lock()
                             }
                             self.atmosVideoBuffer.append(copy)
                             self.atmosVideoLock.unlock()
                             self.startAtmosVideoDrain()
+                        } else {
+                            #if DEBUG
+                            dbgVideoCloneFailed += 1
+                            if dbgVideoCloneFailed == 1 {
+                                print("[Demux] av_packet_clone FAILED (size=\(packet.pointee.size))")
+                            }
+                            #endif
                         }
                     } else {
                         // Normal mode: inline decode with back-pressure
