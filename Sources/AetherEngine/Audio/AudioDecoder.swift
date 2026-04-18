@@ -27,6 +27,19 @@ final class AudioDecoder: @unchecked Sendable {
     /// Source stream time base for PTS conversion.
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
 
+    /// TrueHD / MLP / lossless codecs emit 40-sample frames (≈0.83ms at
+    /// 48kHz). Feeding 1200+ tiny CMSampleBuffers per second to
+    /// AVSampleBufferAudioRenderer makes it accept them (no error) and
+    /// then silently drop the stream on multichannel output. Coalesce
+    /// decoded frames until we have at least this many samples before
+    /// building a CMSampleBuffer — renders ~47 buffers/sec at ~21ms
+    /// each, which the renderer handles normally.
+    private static let minSamplesPerBuffer = 1024
+
+    private var pendingBytes = Data()
+    private var pendingStartPTS: CMTime = .invalid
+    private var pendingSampleCount: Int = 0
+
     #if DEBUG
     private var _loggedZeroConvert = false
     #endif
@@ -96,8 +109,11 @@ final class AudioDecoder: @unchecked Sendable {
             if swrContext == nil {
                 if !initResamplerFromFrame(f) { continue }
             }
-            if let sampleBuffer = convertFrameToSampleBuffer(f) {
-                results.append(sampleBuffer)
+            appendFrameToPending(f)
+            if pendingSampleCount >= Self.minSamplesPerBuffer {
+                if let sampleBuffer = emitPending() {
+                    results.append(sampleBuffer)
+                }
             }
         }
 
@@ -163,6 +179,12 @@ final class AudioDecoder: @unchecked Sendable {
     func flush() {
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
+        // Drop whatever we were coalescing — after a seek the old
+        // samples would be at the wrong PTS anyway.
+        resetPending()
+        #if DEBUG
+        _loggedZeroConvert = false
+        #endif
     }
 
     /// Close the decoder and release resources.
@@ -254,23 +276,27 @@ final class AudioDecoder: @unchecked Sendable {
         audioChannelLayoutTag(for: channels)
     }
 
-    // MARK: - Frame → CMSampleBuffer
+    // MARK: - Frame → pending buffer → CMSampleBuffer
 
-    private func convertFrameToSampleBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CMSampleBuffer? {
-        guard let swr = swrContext, let formatDesc = audioFormatDescription else { return nil }
+    /// Resample one decoded frame and append the float-interleaved bytes
+    /// to the pending accumulator. Remembers the frame's PTS the first
+    /// time the accumulator is non-empty so emitPending() can stamp the
+    /// coalesced buffer correctly.
+    private func appendFrameToPending(_ frame: UnsafeMutablePointer<AVFrame>) {
+        guard let swr = swrContext else { return }
 
         let numSamples = Int(frame.pointee.nb_samples)
-        guard numSamples > 0 else { return nil }
+        guard numSamples > 0 else { return }
 
         let maxOutputSamples = Int(swr_get_out_samples(swr, frame.pointee.nb_samples))
-        guard maxOutputSamples > 0 else { return nil }
+        guard maxOutputSamples > 0 else { return }
 
         let bytesPerSample = Int(channels) * 4
         let bufferSize = maxOutputSamples * bytesPerSample
-        let outputBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-        defer { outputBuffer.deallocate() }
+        let tempBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { tempBuffer.deallocate() }
 
-        var outPtr: UnsafeMutablePointer<UInt8>? = outputBuffer
+        var outPtr: UnsafeMutablePointer<UInt8>? = tempBuffer
         let convertedSamples = withUnsafeMutablePointer(to: &outPtr) { outBuf in
             let srcData = UnsafePointer<UnsafePointer<UInt8>?>(
                 OpaquePointer(frame.pointee.extended_data)
@@ -289,40 +315,67 @@ final class AudioDecoder: @unchecked Sendable {
             print("[AudioDecoder] swr_convert returned \(convertedSamples) — pipeline silent from here")
         }
         #endif
-        guard convertedSamples > 0 else { return nil }
+        guard convertedSamples > 0 else { return }
 
-        let actualSize = Int(convertedSamples) * bytesPerSample
+        // First frame in a new accumulator → capture its PTS. Subsequent
+        // frames extend the same buffer, so only the start matters.
+        if pendingSampleCount == 0 {
+            let pts = frame.pointee.pts
+            pendingStartPTS = (pts != Int64.min)
+                ? CMTimeMake(value: pts * Int64(timeBase.num), timescale: Int32(timeBase.den))
+                : .invalid
+        }
+
+        pendingBytes.append(tempBuffer, count: Int(convertedSamples) * bytesPerSample)
+        pendingSampleCount += Int(convertedSamples)
+    }
+
+    /// Build a CMSampleBuffer from whatever is currently in the pending
+    /// accumulator and reset it. Returns nil if nothing was pending.
+    private func emitPending() -> CMSampleBuffer? {
+        guard pendingSampleCount > 0,
+              let formatDesc = audioFormatDescription,
+              !pendingBytes.isEmpty
+        else { return nil }
+
+        let totalBytes = pendingBytes.count
+        let totalSamples = pendingSampleCount
+        let startPTS = pendingStartPTS
 
         var blockBuffer: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: kCFAllocatorDefault,
             memoryBlock: nil,
-            blockLength: actualSize,
+            blockLength: totalBytes,
             blockAllocator: kCFAllocatorDefault,
             customBlockSource: nil,
             offsetToData: 0,
-            dataLength: actualSize,
+            dataLength: totalBytes,
             flags: 0,
             blockBufferOut: &blockBuffer
         )
-        guard status == kCMBlockBufferNoErr, let block = blockBuffer else { return nil }
+        guard status == kCMBlockBufferNoErr, let block = blockBuffer else {
+            resetPending()
+            return nil
+        }
 
-        status = CMBlockBufferReplaceDataBytes(
-            with: outputBuffer, blockBuffer: block, offsetIntoDestination: 0, dataLength: actualSize
-        )
-        guard status == kCMBlockBufferNoErr else { return nil }
-
-        let pts = frame.pointee.pts
-        let cmPTS: CMTime
-        if pts != Int64.min {
-            cmPTS = CMTimeMake(value: pts * Int64(timeBase.num), timescale: Int32(timeBase.den))
-        } else {
-            cmPTS = .invalid
+        status = pendingBytes.withUnsafeBytes { bytes -> OSStatus in
+            guard let base = bytes.baseAddress else { return -1 }
+            return CMBlockBufferReplaceDataBytes(
+                with: base,
+                blockBuffer: block,
+                offsetIntoDestination: 0,
+                dataLength: totalBytes
+            )
+        }
+        guard status == kCMBlockBufferNoErr else {
+            resetPending()
+            return nil
         }
 
         var timing = CMSampleTimingInfo(
-            duration: CMTimeMake(value: Int64(convertedSamples), timescale: sampleRate),
-            presentationTimeStamp: cmPTS,
+            duration: CMTimeMake(value: Int64(totalSamples), timescale: sampleRate),
+            presentationTimeStamp: startPTS,
             decodeTimeStamp: .invalid
         )
 
@@ -334,15 +387,22 @@ final class AudioDecoder: @unchecked Sendable {
             makeDataReadyCallback: nil,
             refcon: nil,
             formatDescription: formatDesc,
-            sampleCount: CMItemCount(convertedSamples),
+            sampleCount: CMItemCount(totalSamples),
             sampleTimingEntryCount: 1,
             sampleTimingArray: &timing,
             sampleSizeEntryCount: 0,
             sampleSizeArray: nil,
             sampleBufferOut: &sampleBuffer
         )
+        resetPending()
         guard status == noErr, let sample = sampleBuffer else { return nil }
         return sample
+    }
+
+    private func resetPending() {
+        pendingBytes.removeAll(keepingCapacity: true)
+        pendingSampleCount = 0
+        pendingStartPTS = .invalid
     }
 }
 
