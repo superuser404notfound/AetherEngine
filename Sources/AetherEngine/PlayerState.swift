@@ -49,6 +49,14 @@ import CoreAudio
 
 /// Map channel count to the appropriate CoreAudio channel layout tag.
 /// Used by AudioDecoder for channel layout mapping.
+///
+/// 7.1 note: `MPEG_7_1_A` is the ITU "center-sides" layout (L R C LFE
+/// Ls Rs Lc Rc) almost nobody ships. Blu-ray, TrueHD, DTS-HD MA and
+/// streaming 7.1 are all the "Hollywood" layout — L R C LFE Ls Rs Lsr
+/// Rsr — which is `MPEG_7_1_C`. Using the wrong tag made tvOS silently
+/// drop the stream: the audio pipeline can't reconcile 7.1-A samples
+/// with a 7.1-C output route, and just emits silence instead of
+/// routing them.
 func audioChannelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
     switch channels {
     case 1:  return kAudioChannelLayoutTag_Mono
@@ -58,7 +66,7 @@ func audioChannelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
     case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A
     case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A
     case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A
-    case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A
+    case 8:  return kAudioChannelLayoutTag_MPEG_7_1_C
     default: return kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
     }
 }
