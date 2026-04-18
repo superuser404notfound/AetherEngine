@@ -60,8 +60,12 @@ final class AudioDecoder: @unchecked Sendable {
             throw AudioDecoderError.openFailed
         }
 
-        try setupResampler(ctx: ctx)
-        try createFormatDescription()
+        // Don't build the resampler yet. TrueHD (and other codecs that
+        // advertise AV_CHANNEL_ORDER_UNSPEC or sample_fmt=NONE in
+        // codecpar until the first frame is decoded) would make
+        // swr_alloc_set_opts2 fail here, bubbling up as "open failed"
+        // → audioAvailable=false → no sound. The first frame carries
+        // fully resolved layout/rate/format; initialise from it.
 
         #if DEBUG
         print("[AudioDecoder] Opened: \(sampleRate)Hz, \(channels)ch, codec=\(String(cString: codec.pointee.name))")
@@ -81,12 +85,74 @@ final class AudioDecoder: @unchecked Sendable {
         guard let f = frame else { return [] }
 
         while avcodec_receive_frame(ctx, f) >= 0 {
+            // Lazy resampler init — waits until we have a real frame
+            // with fully resolved layout and sample format. Drops the
+            // very first frame on failure, but that's one audio block
+            // at the most and the stream recovers immediately.
+            if swrContext == nil {
+                if !initResamplerFromFrame(f) { continue }
+            }
             if let sampleBuffer = convertFrameToSampleBuffer(f) {
                 results.append(sampleBuffer)
             }
         }
 
         return results
+    }
+
+    private func initResamplerFromFrame(_ frame: UnsafeMutablePointer<AVFrame>) -> Bool {
+        // Refresh sample-rate / channels from the frame — codecpar was
+        // a hint, the frame is truth. Happens once at the start of a
+        // track so the rest of the pipeline sees the final values.
+        if frame.pointee.sample_rate > 0 { sampleRate = frame.pointee.sample_rate }
+        let frameChannels = frame.pointee.ch_layout.nb_channels
+        if frameChannels > 0 && frameChannels <= 8 { channels = frameChannels }
+
+        var outLayout = AVChannelLayout()
+        av_channel_layout_default(&outLayout, channels)
+
+        // Input layout: use the frame's if valid, otherwise synthesise
+        // a default for the channel count. For TrueHD 7.1 this is the
+        // key line — the frame always has it right after decoding even
+        // when codecpar didn't.
+        var inLayout = AVChannelLayout()
+        if frame.pointee.ch_layout.nb_channels > 0 {
+            av_channel_layout_copy(&inLayout, &frame.pointee.ch_layout)
+        } else {
+            av_channel_layout_default(&inLayout, channels)
+        }
+
+        let inFmt = AVSampleFormat(rawValue: frame.pointee.format)
+        let inRate = frame.pointee.sample_rate > 0 ? frame.pointee.sample_rate : sampleRate
+
+        let ret = swr_alloc_set_opts2(
+            &swrContext,
+            &outLayout,
+            AV_SAMPLE_FMT_FLT,
+            sampleRate,
+            &inLayout,
+            inFmt,
+            inRate,
+            0,
+            nil
+        )
+        guard ret >= 0, swrContext != nil else { return false }
+        guard swr_init(swrContext) >= 0 else {
+            swr_free(&swrContext)
+            return false
+        }
+
+        do {
+            try createFormatDescription()
+        } catch {
+            swr_free(&swrContext)
+            return false
+        }
+
+        #if DEBUG
+        print("[AudioDecoder] Resampler ready: \(sampleRate)Hz, \(channels)ch, inFmt=\(inFmt.rawValue)")
+        #endif
+        return true
     }
 
     /// Flush the decoder (call at EOF or seek).
