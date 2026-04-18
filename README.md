@@ -1,245 +1,163 @@
+<h1 align="center">AetherEngine</h1>
+
 <p align="center">
-  <img src="https://img.shields.io/badge/License-LGPL%20v3-blue.svg" alt="License: LGPL v3">
-  <img src="https://img.shields.io/badge/iOS-16%2B-000000?logo=apple" alt="iOS 16+">
-  <img src="https://img.shields.io/badge/tvOS-16%2B-000000?logo=apple" alt="tvOS 16+">
-  <img src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple" alt="macOS 14+">
-  <img src="https://img.shields.io/badge/Swift-6.0%2B-F05138?logo=swift&logoColor=white" alt="Swift 6.0+">
+  <b>A video player engine for Apple platforms.</b><br>
+  FFmpeg demuxes. VideoToolbox decodes. AVPlayer handles Dolby Atmos.<br>
+  You ship the UI.
 </p>
 
-# AetherEngine
-
-A video player engine for Apple platforms. FFmpeg demuxes, VideoToolbox decodes, AVPlayer handles Dolby Atmos, and Apple's synchronizer ties it all together. **Your app provides the UI — AetherEngine provides the engine.**
-
----
-
-## Why AetherEngine?
-
-Most video player libraries try to do everything — UI, controls, playlists, analytics. AetherEngine does one thing well: **decode and render video with perfect A/V sync, including Dolby Atmos.** You get a `CALayer` and a simple API. The rest is yours.
-
-- **No UIKit/AppKit dependency** — works in any view hierarchy
-- **No Metal shaders** — uses Apple's native `AVSampleBufferDisplayLayer`
-- **No network stack** — uses `URLSession` like every other Apple app
-- **No opinions** — play, pause, seek. That's it.
+<p align="center">
+  <img src="https://img.shields.io/badge/iOS-16%2B-black?logo=apple">
+  <img src="https://img.shields.io/badge/tvOS-16%2B-black?logo=apple">
+  <img src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple">
+  <img src="https://img.shields.io/badge/Swift-6.0%2B-F05138?logo=swift&logoColor=white">
+  <img src="https://img.shields.io/badge/license-LGPL--3.0-lightgrey">
+</p>
 
 ---
 
-## Features
+## What it is
 
-### Video
+A player engine that gets the hard parts right — HDR, Dolby Vision, Dolby Atmos, A/V sync across multiple clocks — and exposes a `CALayer` plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Embed the layer, call `play()`, read the published properties for state.
 
-| | |
-|---|---|
-| **Containers** | MKV, MP4, AVI, MPEG-TS, WebM, OGG, FLV |
-| **HW decode** | H.264, HEVC, HEVC Main10 — via VideoToolbox |
-| **SW decode** | AV1, VP9 — FFmpeg fallback with SIMD-optimized pixel buffer pooling |
-| **HDR10** | 10-bit P010 output, BT.2020/PQ color metadata on every frame |
-| **Dolby Vision** | Profile 5, 8.1, 8.4 on DV-capable displays; HDR10 fallback on others |
-| **HLG** | Hybrid Log-Gamma detection and correct transfer function tagging |
-| **B-frames** | 4-frame reorder buffer for correct presentation order |
+You provide the transport bar. You provide the dropdowns. You provide the pretty.
 
-### Audio
+## What it handles
 
-| | |
-|---|---|
-| **Codecs** | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM |
-| **Dolby Atmos** | EAC3+JOC passthrough via AVPlayer + local HLS (MAT 2.0 wrapping) |
-| **Surround** | 5.1 and 7.1 multichannel output with correct `AudioChannelLayout` mapping |
-| **AC3 passthrough** | Direct compressed audio feed — no decode overhead |
-| **Spatial Audio** | AirPods Pro/Max and HomePod spatialization (automatic) |
-| **HDMI** | Multichannel PCM over HDMI eARC — receiver handles surround |
-| **Tracks** | Runtime audio track switching with seamless A/V sync |
+| Area        | Details                                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV                                                                                      |
+| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox                                                                                   |
+| SW decode   | AV1 (dav1d), VP9 fallback — pooled pixel buffers, no per-frame allocations                                                  |
+| HDR10       | 10-bit P010 output, BT.2020 + PQ color tagging on every frame                                                               |
+| Dolby Vision| Profile 5 / 8.1 / 8.4 on DV-capable displays; HDR10 fallback on HDR10-only TVs                                              |
+| HLG         | Transfer function detected and forwarded                                                                                    |
+| HDR → SDR   | Software tonemap via `VTPixelTransferSession` when Match Dynamic Range is off                                               |
+| Audio       | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM                                                             |
+| Dolby Atmos | EAC3+JOC passthrough — local HLS + AVPlayer → Dolby MAT 2.0 wrapping                                                       |
+| Surround    | 5.1 / 7.1 with correct `AudioChannelLayout` tagging                                                                         |
+| Seek        | Decoder + renderer flush, pre-target frame skip — no "fast forward from keyframe" artifact                                 |
+| Streaming   | HTTP Range + chunked delegate reads via `URLSession`                                                                        |
+| Resilience  | Exponential backoff on transient network errors, background pause, display-link aware lifecycle                             |
 
-### Dolby Atmos Architecture
-
-For Dolby Atmos (EAC3+JOC), AetherEngine uses a three-thread architecture that decouples audio from video back-pressure. Non-Atmos codecs use the simpler single-thread demux with inline decode.
-
-```
-Demux Thread ──┬── Audio Packets ──► HLS Audio Engine (AVPlayer)
-               │                     ├── FMP4 Muxer (EAC3 → fMP4 + dec3/JOC)
-               │                     ├── Local HTTP Server (HLS playlist)
-               │                     └── AVPlayer (Dolby MAT 2.0 passthrough)
-               │
-               └── Video Packets ──► Video Decode Queue
-                                     ├── VideoToolbox or FFmpeg
-                                     └── AVSampleBufferDisplayLayer
-                                          (controlTimebase synced to AVPlayer)
-```
-
-- **Auto-calibrated A/V sync** — measures the natural clock drift between CMTimebase and AVPlayer, then corrects deviations >50ms automatically
-- **Seek-safe** — filters pre-keyframe audio packets and corrects streamOffset to the actual first audio PTS
-- **Fallback** — if AVPlayer fails, falls back to FFmpeg PCM decode
-
-### Playback
-
-| | |
-|---|---|
-| **A/V Sync** | `AVSampleBufferRenderSynchronizer` for PCM, auto-calibrated `CMTimebase` for Atmos |
-| **Speed** | 0.5x to 2.0x playback speed |
-| **Volume** | Programmable volume (0.0–1.0) |
-| **Seeking** | Decoder-first flush + skip-to-target — no stale frames, no fast-forward |
-| **Streaming** | HTTP Range requests with double-buffered prefetch |
-| **Live** | Chunked streaming via URLSession delegate (no Content-Length required) |
-| **Resilience** | Automatic retry with exponential backoff on network errors |
-| **Lifecycle** | Background pause, memory warning handling (iOS/tvOS) |
-
----
-
-## Quick Start
-
-### Install
-
-```swift
-// Package.swift
-dependencies: [
-    .package(url: "https://github.com/superuser404notfound/AetherEngine", branch: "main")
-]
-```
-
-### Use
+## Quick start
 
 ```swift
 import AetherEngine
 
 let player = try AetherEngine()
+view.layer.addSublayer(player.videoLayer)
 
-// Embed in your view hierarchy
-myView.layer.addSublayer(player.videoLayer)
+try await player.load(url: videoURL)                 // or
+try await player.load(url: videoURL, startPosition: 347.5)
 
-// Load and play
-try await player.load(url: videoURL)
-try await player.load(url: videoURL, startPosition: 347.5) // resume
-
-// Controls
 player.play()
 player.pause()
-player.togglePlayPause()
-await player.seek(to: 120.0)
-player.stop()
-
-// Volume and speed
-player.volume = 0.5
 player.setRate(1.5)
-
-// Audio tracks
-player.selectAudioTrack(index: trackID)
+await player.seek(to: 120)
+player.stop()
 
 // Observe (Combine @Published)
 player.$state         // .idle, .loading, .playing, .paused, .seeking, .error
-player.$currentTime   // Double (seconds)
-player.$duration      // Double (seconds)
-player.$progress      // Float (0.0–1.0)
+player.$currentTime
+player.$duration
 player.$videoFormat   // .sdr, .hdr10, .dolbyVision, .hlg
 
-// Track info
-player.audioTracks    // [TrackInfo] — id, name, codec, language, channels
-player.subtitleTracks // [TrackInfo]
+player.audioTracks    // [TrackInfo]
+player.selectAudioTrack(index: trackID)
 ```
 
----
+Install via Swift Package Manager:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", branch: "main")
+```
+
+## Dolby Atmos pipeline
+
+`AVSampleBufferAudioRenderer` ignores Atmos metadata. `AVPlayer` doesn't — so for EAC3+JOC streams, AetherEngine demuxes the EAC3 packets, wraps them into fMP4 with a `dec3` box that declares JOC (`numDepSub=1`, `depChanLoc=0x0100`), serves the segments from a local HLS server on `127.0.0.1:<port>`, and points `AVPlayer` at the playlist. `AVPlayer` wraps the bitstream as Dolby MAT 2.0 and the receiver lights up the Atmos indicator.
+
+```
+Demux ──┬─ Video packets ──► Decode queue ──► AVSampleBufferDisplayLayer
+        │                                              │
+        │                                              │ controlTimebase synced
+        │                                              │ to AVPlayer clock
+        │                                              │
+        └─ EAC3 packets ───► fMP4 muxer ──► HLS server ──► AVPlayer
+                                                         │
+                                                         └─► receiver / speaker
+```
+
+The `AVSampleBufferDisplayLayer` is driven by a `CMTimebase` that tracks the `AVPlayer`'s clock. The HLS pipe takes 2-4 seconds to buffer; during that window the timebase is paused and video holds on frame 1, then both start together. Drift between the two clocks is auto-calibrated once per playback and corrected thereafter.
+
+If the active output route can't take multichannel — Bluetooth A2DP, HFP, LE, or any route reporting fewer than 6 output channels — AetherEngine skips the Atmos pipeline entirely and routes EAC3 through the regular FFmpeg PCM decoder, so you still get sound instead of silence. If a TV advertises Atmos in EDID but `AVPlayer` stalls anyway (some AVRs do this), a 5-second watchdog falls back to PCM automatically.
+
+## HDR routing
+
+| Source                          | Output pixel format   | Tagged as        |
+| ------------------------------- | --------------------- | ---------------- |
+| H.264, HEVC (SDR)               | 8-bit NV12            | BT.709           |
+| HEVC Main10 (HDR10), HDR display| 10-bit P010           | BT.2020 / PQ     |
+| HEVC Main10 (DV P8), DV display | 10-bit P010           | BT.2020 / PQ + RPU |
+| HEVC Main10, SDR display        | 8-bit NV12 (tonemapped) | BT.709          |
+| AV1 HDR                         | 10-bit P010           | BT.2020 / PQ     |
+
+HDR → SDR tonemapping runs through a dedicated `VTPixelTransferSession` with a pre-allocated `CVPixelBufferPool` — separate from the decompression session so it doesn't interfere with the `controlTimebase`-driven display path used by Atmos.
+
+On tvOS, the display layer opts into `preferredDynamicRange = .high` so the compositor doesn't silently clip BT.2020 pixels to Rec.709 after the TV has been told to switch to HDR.
 
 ## Architecture
 
 ```
 Sources/AetherEngine/
-├── AetherEngine.swift             Public API + demux→decode orchestration
+├── AetherEngine.swift             Public API + demux/decode orchestration
 ├── PlayerState.swift              PlaybackState, VideoFormat, TrackInfo
 ├── Demuxer/
-│   ├── Demuxer.swift              FFmpeg AVFormatContext wrapper
-│   └── AVIOReader.swift           HTTP streaming via URLSession
+│   ├── Demuxer.swift              libavformat wrapper
+│   └── AVIOReader.swift           URLSession → avio_alloc_context
 ├── Decoder/
-│   ├── VideoDecoder.swift         VideoToolbox HW decode + HDR/DV handling
-│   └── SoftwareVideoDecoder.swift FFmpeg SW decode + sws_scale pixel buffer pool
+│   ├── VideoDecoder.swift         VideoToolbox + HDR tonemap
+│   └── SoftwareVideoDecoder.swift dav1d / libavcodec fallback
 ├── Renderer/
-│   └── SampleBufferRenderer.swift AVSampleBufferDisplayLayer + B-frame reorder
+│   └── SampleBufferRenderer.swift Display layer + B-frame reorder
 └── Audio/
-    ├── AudioDecoder.swift         FFmpeg decode + libswresample → multichannel PCM
-    ├── AudioOutput.swift          AVSampleBufferAudioRenderer + spatial audio
-    ├── HLSAudioEngine.swift       AVPlayer + CMTimebase sync for Dolby Atmos
-    ├── HLSAudioServer.swift       Local HTTP server for HLS segments
-    └── FMP4AudioMuxer.swift       EAC3 → fMP4 with dec3/JOC Atmos metadata
+    ├── AudioDecoder.swift         libswresample → PCM
+    ├── AudioOutput.swift          AVSampleBufferAudioRenderer
+    ├── HLSAudioEngine.swift       AVPlayer driver for Atmos passthrough
+    ├── HLSAudioServer.swift       Local HLS HTTP server
+    └── FMP4AudioMuxer.swift       EAC3 → fMP4 with dec3/JOC
 ```
-
-### Pipeline
-
-```
-URL
- │
- ▼
-AVIO (URLSession — Range requests or chunked streaming)
- │
- ▼
-FFmpeg Demuxer → AVPackets
- │                    │
- ▼                    ▼
-Video                Audio
- │                    │
- ├─ VT HW Decode     ├─ EAC3+JOC → fMP4 Muxer → HLS → AVPlayer (Atmos)
- ├─ FFmpeg SW         └─ All other → FFmpeg PCM → AudioRenderer
- │
- ▼                    │
-CVPixelBuffer        ▼
- │               CMSampleBuffer
- ▼                    │
-Reorder Buffer       ▼
- │               AudioRenderer
- ▼                    │
-DisplayLayer ─── Synchronizer / CMTimebase ──┘
-```
-
----
-
-## HDR & Dolby Vision
-
-AetherEngine automatically detects HDR content and configures the decode pipeline:
-
-| Content | Pixel Format | Color Tags | DV Metadata |
-|---|---|---|---|
-| H.264 (SDR) | 8-bit NV12 | — | — |
-| HEVC Main10 (HDR10) | 10-bit P010 | BT.2020 + PQ | — |
-| HEVC Main10 (DV Profile 8) on DV display | 10-bit P010 | BT.2020 + PQ | Propagated |
-| HEVC Main10 (DV Profile 8) on HDR10 display | 10-bit P010 | BT.2020 + PQ | Stripped |
-| AV1 (HDR) | 10-bit P010 | BT.2020 + PQ | — |
-
-**Host app responsibility:** Set `AVDisplayCriteria` on tvOS to trigger the TV's HDR mode switch before starting playback. AetherEngine reports `videoFormat` — the host app decides when and how to switch display modes.
-
----
-
-## Audio Routing
-
-| Codec | Engine | Output |
-|---|---|---|
-| **EAC3+JOC** (Atmos, profile=30) | HLS AVPlayer + fMP4 Muxer | Dolby Atmos passthrough (MAT 2.0) |
-| **EAC3** (5.1) | FFmpeg + libswresample | Multichannel Float32 PCM |
-| **AC3** | FFmpeg + libswresample | Multichannel Float32 PCM |
-| **AAC, FLAC, Opus, etc.** | FFmpeg + libswresample | Multichannel Float32 PCM |
-
-Atmos detection uses `codecpar.profile == 30` (`FF_PROFILE_EAC3_DDP_ATMOS`), set by FFmpeg's EAC3 parser when JOC is detected — no server metadata needed. Non-Atmos EAC3 is decoded by FFmpeg to preserve full dynamics (Apple's internal decoder applies dialnorm/DRC attenuation).
-
----
 
 ## Dependencies
 
-| Dependency | License | Purpose |
-|---|---|---|
-| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL 3.0 | Minimal FFmpeg 7.1 xcframeworks |
-| VideoToolbox | System | Hardware video decoding |
-| AVFoundation | System | Audio/video output, synchronization, HDR detection |
-| CoreMedia | System | Sample buffers + timing |
+| Package                                                            | License   | Purpose                      |
+| ------------------------------------------------------------------ | --------- | ---------------------------- |
+| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0  | Slim FFmpeg 7.1 + dav1d 1.5  |
+| VideoToolbox                                                       | System    | Hardware decode, tonemap     |
+| AVFoundation                                                       | System    | Audio renderer, AVPlayer, sync |
+| CoreMedia                                                          | System    | Sample buffers, timing       |
 
----
+## Non-goals
+
+Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
+
+- No built-in UI. No controls, no transport bar, no pretty HUD.
+- No analytics, telemetry, or session reporting. Wire your own to the `@Published` state.
+- No playlist / queue management. Call `load(url:)` when you want the next one.
+- No built-in subtitle rendering. The demuxer extracts tracks; your UI layer paints them.
+- No Metal shaders. Everything renders through Apple's native display stack.
+- No third-party networking. `URLSession` handles bytes; TLS / HTTP-3 / proxies / MDM rules ride for free.
 
 ## Requirements
 
-| | Minimum |
-|---|---|
+| | Min |
+| --- | --- |
 | iOS | 16.0 |
 | tvOS | 16.0 |
 | macOS | 14.0 |
 | Swift | 6.0 |
 | Xcode | 16.0 |
 
----
-
 ## License
 
-[LGPL 3.0](LICENSE) — App Store compatible when dynamically linked.
+[LGPL-3.0](LICENSE). App Store compatible when dynamically linked.
