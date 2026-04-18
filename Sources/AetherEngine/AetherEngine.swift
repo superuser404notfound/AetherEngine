@@ -387,8 +387,15 @@ public final class AetherEngine: ObservableObject {
                         hlsAudioEngine = engine
                         audioMode = .atmos
                         audioAvailable = true
-                        // Display layer uses controlTimebase from HLS engine
-                        // instead of the synchronizer — AVPlayer is the master clock.
+                        // Belt-and-braces: a previous PCM session may have
+                        // attached the display layer to the synchronizer.
+                        // Detach (blocks until removal completes) and clear
+                        // any existing control timebase before assigning
+                        // the new one — assigning while the layer is still
+                        // half-registered causes FigVideoQueueRemote -12080
+                        // and the layer never renders again.
+                        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+                        videoRenderer.displayLayer.controlTimebase = nil
                         videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
                         #if DEBUG
                         print("[AetherEngine] Audio: EAC3 → HLS AVPlayer (Dolby Atmos) (\(channelCount)ch)")
@@ -628,6 +635,11 @@ public final class AetherEngine: ObservableObject {
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
                 audioMode = .atmos
+                // See load() for the "why" — synchronous detach + clear
+                // before assigning the new timebase prevents the -12080
+                // black-screen race when switching from a PCM track.
+                audioOutput.detachVideoLayer(videoRenderer.displayLayer)
+                videoRenderer.displayLayer.controlTimebase = nil
                 videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
             } catch {
                 fallbackToPCMAudio(stream: stream)

@@ -33,10 +33,26 @@ final class AudioOutput: @unchecked Sendable {
         synchronizer.addRenderer(displayLayer)
     }
 
-    /// Remove the video display layer from the synchronizer.
-    /// Call when switching to AVPlayer audio engine (which manages its own timing).
+    /// Remove the video display layer from the synchronizer and block
+    /// until the removal actually completes. AVSampleBufferRenderSynchronizer
+    /// does the detach asynchronously; if the caller immediately assigns
+    /// `displayLayer.controlTimebase` for a new Atmos session the layer
+    /// is briefly owned by both the synchronizer and a controlTimebase,
+    /// which Apple documents as undefined behavior. Symptom: on the
+    /// first PCM→Atmos switch after app launch, FigVideoQueueRemote
+    /// throws err=-12080 the instant we assign the new timebase and
+    /// the display layer stops rendering entirely (audio keeps going).
+    ///
+    /// A short semaphore wait on the calling thread is cheap (sub-100ms
+    /// in practice) and makes the handoff deterministic.
     func detachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
-        synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime(), completionHandler: nil)
+        let semaphore = DispatchSemaphore(value: 0)
+        synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime()) { _ in
+            semaphore.signal()
+        }
+        // Bounded wait — if the system never calls the completion handler
+        // (shouldn't happen but defence in depth), don't lock up forever.
+        _ = semaphore.wait(timeout: .now() + .seconds(1))
     }
 
     /// Start audio playback at the given time. Call after enqueueing first samples.
