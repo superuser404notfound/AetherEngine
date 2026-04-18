@@ -66,7 +66,7 @@ func audioChannelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
     case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A
     case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A
     case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A
-    case 8:  return kAudioChannelLayoutTag_MPEG_7_1_C
+    case 8:  return kAudioChannelLayoutTag_AAC_7_1
     default: return kAudioChannelLayoutTag_DiscreteInOrder | UInt32(channels)
     }
 }

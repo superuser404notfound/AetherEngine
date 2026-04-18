@@ -27,6 +27,10 @@ final class AudioDecoder: @unchecked Sendable {
     /// Source stream time base for PTS conversion.
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
 
+    #if DEBUG
+    private var _loggedZeroConvert = false
+    #endif
+
     /// Sample rate of the decoded audio (e.g. 48000).
     private(set) var sampleRate: Int32 = 0
     /// Number of channels (up to 8 for 7.1).
@@ -279,6 +283,12 @@ final class AudioDecoder: @unchecked Sendable {
                 frame.pointee.nb_samples
             )
         }
+        #if DEBUG
+        if convertedSamples <= 0 && !_loggedZeroConvert {
+            _loggedZeroConvert = true
+            print("[AudioDecoder] swr_convert returned \(convertedSamples) — pipeline silent from here")
+        }
+        #endif
         guard convertedSamples > 0 else { return nil }
 
         let actualSize = Int(convertedSamples) * bytesPerSample

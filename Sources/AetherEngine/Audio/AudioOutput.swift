@@ -79,7 +79,32 @@ final class AudioOutput: @unchecked Sendable {
     /// before the synchronizer started, resulting in silence.
     func enqueue(sampleBuffer: CMSampleBuffer) {
         renderer.enqueue(sampleBuffer)
+
+        #if DEBUG
+        // Log exactly once per session: first successful enqueue and,
+        // if the renderer rejected it, the error. Lets us distinguish
+        // "no audio because nothing was enqueued" from "no audio
+        // because the renderer rejected our format".
+        if !_loggedFirstEnqueue {
+            _loggedFirstEnqueue = true
+            let fmt = CMSampleBufferGetFormatDescription(sampleBuffer).flatMap {
+                CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee
+            }
+            let sr = fmt.map { "\($0.mSampleRate)Hz" } ?? "?"
+            let ch = fmt.map { "\($0.mChannelsPerFrame)ch" } ?? "?"
+            let count = CMSampleBufferGetNumSamples(sampleBuffer)
+            print("[AudioOutput] first enqueue: \(sr) \(ch), \(count) samples, renderer.error=\(String(describing: renderer.error))")
+        } else if let err = renderer.error, !_loggedRendererError {
+            _loggedRendererError = true
+            print("[AudioOutput] renderer error: \(err)")
+        }
+        #endif
     }
+
+    #if DEBUG
+    private var _loggedFirstEnqueue = false
+    private var _loggedRendererError = false
+    #endif
 
     /// The current playback time according to the audio synchronizer.
     var currentTime: CMTime {
