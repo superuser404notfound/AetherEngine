@@ -39,18 +39,25 @@ final class SampleBufferRenderer {
         displayLayer = AVSampleBufferDisplayLayer()
         displayLayer.videoGravity = .resizeAspect
         displayLayer.preventsDisplaySleepDuringVideoPlayback = true
-        // HDR10 / Dolby Vision output: without this the compositor
-        // treats the layer as SDR and clips BT.2020/PQ to Rec.709 —
-        // we end up with a black or washed-out image on an HDR TV
-        // that was correctly switched into HDR mode via AVDisplayCriteria.
-        // tvOS 18+ replaced `wantsExtendedDynamicRangeContent` with the
-        // more explicit `preferredDynamicRange` API.
+        // Default: SDR output. `setHDROutput(true)` opts the layer into
+        // HDR right before a HDR pass-through load. Declaring `.high`
+        // unconditionally breaks the Atmos controlTimebase path when the
+        // pipeline tone-maps to BT.709 (Match Dynamic Range off) — the
+        // compositor refuses the layer-to-frame dynamic-range mismatch
+        // and the picture stays black / frozen on the first frame.
+    }
+
+    /// Opt the display layer into HDR output. Call with `true` only when
+    /// the decoder is delivering HDR10/DV pixel buffers directly (no
+    /// tone-map). Call with `false` (or leave at default) for SDR output
+    /// including the HDR→SDR tone-mapped path.
+    func setHDROutput(_ isHDR: Bool) {
         if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
-            displayLayer.preferredDynamicRange = .high
+            displayLayer.preferredDynamicRange = isHDR ? .high : .standard
         } else {
             #if os(iOS) || os(macOS)
             if #available(iOS 16.0, macOS 13.0, *) {
-                displayLayer.wantsExtendedDynamicRangeContent = true
+                displayLayer.wantsExtendedDynamicRangeContent = isHDR
             }
             #endif
         }

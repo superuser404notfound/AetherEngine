@@ -265,6 +265,21 @@ public final class AetherEngine: ObservableObject {
             // Detect video format (SDR/HDR10/DV/HLG) from codec parameters
             videoFormat = detectVideoFormat(stream: videoStream)
 
+            // Opt the display layer into HDR output only when the pipeline
+            // actually delivers HDR pixel buffers. When tonemapHDRToSDR is
+            // on (or the content is SDR to begin with), the decoder emits
+            // BT.709 SDR — declaring the layer as HDR then breaks the
+            // Atmos controlTimebase path (compositor refuses the frames,
+            // picture stays black / frozen on frame 1).
+            let pipelineIsHDR: Bool = {
+                guard !tonemapHDRToSDR else { return false }
+                switch videoFormat {
+                case .hdr10, .dolbyVision, .hlg: return true
+                case .sdr: return false
+                }
+            }()
+            videoRenderer.setHDROutput(pipelineIsHDR)
+
             // Detect video frame rate for display link matching.
             // Also used for AVDisplayCriteria to set correct refresh rate.
             let avgFR = videoStream.pointee.avg_frame_rate
