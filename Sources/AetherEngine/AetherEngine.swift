@@ -702,7 +702,6 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func selectSubtitleTrack(index: Int) {
-        // TODO: Phase 6 — subtitle support
     }
 
     // MARK: - Audio Engine Helpers
@@ -1102,7 +1101,6 @@ public final class AetherEngine: ObservableObject {
                         }
                     }
                 }
-                // TODO: Phase 6 — route subtitle packets
 
                 av_packet_free_safe(packet)
             }
