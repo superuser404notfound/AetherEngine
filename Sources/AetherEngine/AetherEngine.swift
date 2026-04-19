@@ -53,13 +53,6 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
-    /// True when the active audio path is the Dolby Atmos passthrough
-    /// (EAC3+JOC → AVPlayer). The DSP pipeline (Night Mode, Dialog
-    /// Boost) does not apply in this mode — the bitstream is forwarded
-    /// to the receiver untouched. UI can use this to grey out audio
-    /// processing toggles.
-    @Published public private(set) var isAtmosActive: Bool = false
-
     // MARK: - Output
 
     /// The video layer to embed in the host view hierarchy.
@@ -352,7 +345,7 @@ public final class AetherEngine: ObservableObject {
             // Other → FFmpeg PCM decode (AudioDecoder)
             let audioIdx = demuxer.audioStreamIndex
             activeAudioStreamIndex = audioIdx
-            setAudioMode(.pcm)
+            audioMode = .pcm
 
             if audioIdx >= 0, let audioStream = demuxer.stream(at: audioIdx) {
                 let codecpar = audioStream.pointee.codecpar!
@@ -413,7 +406,7 @@ public final class AetherEngine: ObservableObject {
                         }
                         try engine.prepare(stream: audioStream, startTime: initialAudioTime)
                         hlsAudioEngine = engine
-                        setAudioMode(.atmos)
+                        audioMode = .atmos
                         audioAvailable = true
                         // Full handoff sequence before giving the layer
                         // the Atmos timebase:
@@ -677,7 +670,7 @@ public final class AetherEngine: ObservableObject {
                 }
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
-                setAudioMode(.atmos)
+                audioMode = .atmos
                 // See load() for the "why" — full handoff sequence to
                 // prevent the -12080 black-screen race when switching
                 // from a PCM track.
@@ -692,7 +685,7 @@ public final class AetherEngine: ObservableObject {
         } else {
             do {
                 try audioDecoder.open(stream: stream)
-                setAudioMode(.pcm)
+                audioMode = .pcm
                 audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                 audioOutput.start(at: seekTime)
             } catch {
@@ -700,7 +693,7 @@ public final class AetherEngine: ObservableObject {
                 print("[AetherEngine] audioDecoder.open failed in selectAudioTrack: \(error) — disabling audio")
                 #endif
                 audioAvailable = false
-                setAudioMode(.pcm)
+                audioMode = .pcm
             }
         }
 
@@ -774,13 +767,13 @@ public final class AetherEngine: ObservableObject {
         // Switch to FFmpeg PCM decode
         do {
             try audioDecoder.open(stream: stream)
-            setAudioMode(.pcm)
+            audioMode = .pcm
         } catch {
             #if DEBUG
             print("[AetherEngine] PCM fallback failed too: \(error) — disabling audio")
             #endif
             audioAvailable = false
-            setAudioMode(.pcm)
+            audioMode = .pcm
             return
         }
 
@@ -891,24 +884,6 @@ public final class AetherEngine: ObservableObject {
         set { audioOutput.volume = newValue }
     }
 
-    /// Night-mode style dynamic range compression on the PCM audio
-    /// path. `.off` is a true bypass at near-zero CPU cost; `.light`
-    /// trims peaks transparently; `.strong` flattens action and lifts
-    /// quiet dialog. Has no effect while `isAtmosActive` is true —
-    /// the Atmos passthrough bitstream is forwarded unchanged.
-    public var audioProcessing: AudioProcessingMode {
-        get { audioOutput.processor.mode }
-        set { audioOutput.processor.mode = newValue }
-    }
-
-    /// Lift the 1-4 kHz speech band by ~4 dB to make dialog clearer
-    /// at low listening volumes. Independent of `audioProcessing`.
-    /// No effect while `isAtmosActive` is true.
-    public var dialogBoost: Bool {
-        get { audioOutput.processor.dialogBoost }
-        set { audioOutput.processor.dialogBoost = newValue }
-    }
-
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
         if audioMode == .atmos {
@@ -919,19 +894,6 @@ public final class AetherEngine: ObservableObject {
     }
 
     // MARK: - Internal
-
-    /// Set the internal audioMode and mirror it onto the published
-    /// `isAtmosActive` Boolean. Always safe from any thread — the
-    /// public-state hop runs on the MainActor.
-    nonisolated private func setAudioMode(_ mode: AudioMode) {
-        audioMode = mode
-        let active = (mode == .atmos)
-        Task { @MainActor in
-            if self.isAtmosActive != active {
-                self.isAtmosActive = active
-            }
-        }
-    }
 
     private func stopInternal() {
         stopRequested = true
@@ -948,7 +910,7 @@ public final class AetherEngine: ObservableObject {
             audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         }
         audioOutput.stop()
-        setAudioMode(.pcm)
+        audioMode = .pcm
 
         // Flush decoders before renderer — decoder flush waits for async
         // VT frames which would otherwise land on the already-flushed renderer.
