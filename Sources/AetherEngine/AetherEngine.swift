@@ -176,7 +176,9 @@ public final class AetherEngine: ObservableObject {
             try session.setSupportsMultichannelContent(true)
             try session.setActive(true)
         } catch {
+            #if DEBUG
             print("[AetherEngine] AVAudioSession setup error: \(error)")
+            #endif
         }
         // Request multichannel output — separate try so a failure here
         // doesn't prevent the basic audio session from working.
@@ -451,7 +453,9 @@ public final class AetherEngine: ObservableObject {
                         print("[AetherEngine] Audio: \(codecName) → FFmpeg PCM decode (\(channelCount)ch)")
                         #endif
                     } catch {
+                        #if DEBUG
                         print("[AetherEngine] Audio decoder failed: \(error)")
+                        #endif
                     }
                 }
 
@@ -991,7 +995,9 @@ public final class AetherEngine: ObservableObject {
                     }
                 }
                 if let readError {
+                    #if DEBUG
                     print("[AetherEngine] Demuxer read failed after \(retries) retries: \(readError)")
+                    #endif
                     Task { @MainActor [weak self] in
                         self?.state = .error("Playback error: \(readError)")
                     }
