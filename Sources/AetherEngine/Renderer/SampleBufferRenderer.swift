@@ -10,7 +10,20 @@ import CoreVideo
 /// being enqueued to the display layer in strict presentation order.
 final class SampleBufferRenderer {
 
-    let displayLayer: AVSampleBufferDisplayLayer
+    private(set) var displayLayer: AVSampleBufferDisplayLayer
+
+    /// Fired when the display layer instance is replaced. The host view
+    /// must swap the old sublayer out of its CALayer hierarchy and add
+    /// the new one. Required because once the layer has ping-ponged
+    /// between AVSampleBufferRenderSynchronizer and controlTimebase a
+    /// few times, Apple's "undefined behavior" warning cashes in: the
+    /// layer stays status=.rendering but silently stops consuming
+    /// frames, and no flush() can revive it. Only a fresh layer works.
+    var onLayerReplaced: ((AVSampleBufferDisplayLayer) -> Void)?
+
+    /// Track the HDR output setting so we can restore it on recreated
+    /// layers. Defaults match init().
+    private var currentlyHDR: Bool = false
 
     /// Reorder buffer: collects frames from the decoder (which may arrive
     /// out of display order due to B-frames) and flushes them to the
@@ -37,15 +50,23 @@ final class SampleBufferRenderer {
     #endif
 
     init() {
-        displayLayer = AVSampleBufferDisplayLayer()
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.preventsDisplaySleepDuringVideoPlayback = true
-        // Default: SDR output. `setHDROutput(true)` opts the layer into
-        // HDR right before a HDR pass-through load. Declaring `.high`
-        // unconditionally breaks the Atmos controlTimebase path when the
-        // pipeline tone-maps to BT.709 (Match Dynamic Range off) — the
-        // compositor refuses the layer-to-frame dynamic-range mismatch
-        // and the picture stays black / frozen on the first frame.
+        displayLayer = Self.makeDisplayLayer(isHDR: false)
+    }
+
+    private static func makeDisplayLayer(isHDR: Bool) -> AVSampleBufferDisplayLayer {
+        let layer = AVSampleBufferDisplayLayer()
+        layer.videoGravity = .resizeAspect
+        layer.preventsDisplaySleepDuringVideoPlayback = true
+        if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
+            layer.preferredDynamicRange = isHDR ? .high : .standard
+        } else {
+            #if os(iOS) || os(macOS)
+            if #available(iOS 16.0, macOS 13.0, *) {
+                layer.wantsExtendedDynamicRangeContent = isHDR
+            }
+            #endif
+        }
+        return layer
     }
 
     /// Opt the display layer into HDR output. Call with `true` only when
@@ -53,6 +74,7 @@ final class SampleBufferRenderer {
     /// tone-map). Call with `false` (or leave at default) for SDR output
     /// including the HDR→SDR tone-mapped path.
     func setHDROutput(_ isHDR: Bool) {
+        currentlyHDR = isHDR
         if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
             displayLayer.preferredDynamicRange = isHDR ? .high : .standard
         } else {
@@ -62,6 +84,33 @@ final class SampleBufferRenderer {
             }
             #endif
         }
+    }
+
+    /// Swap the display layer for a fresh instance. Called by
+    /// AetherEngine on every load() to avoid carrying over stale
+    /// Synchronizer/controlTimebase state across sessions — the
+    /// observed failure mode is status=.rendering but no frame
+    /// consumption, which no in-place reset can recover from.
+    /// The host view is notified via onLayerReplaced and must
+    /// remove the old sublayer and add the new one.
+    func recreateDisplayLayer() {
+        // Drop the cached format description — it's associated with
+        // the old layer's pipeline, and a new layer starts clean.
+        reorderLock.lock()
+        reorderBuffer.removeAll()
+        cachedFormatDesc = nil
+        cachedFormatKey = 0
+        reorderLock.unlock()
+
+        let newLayer = Self.makeDisplayLayer(isHDR: currentlyHDR)
+        displayLayer = newLayer
+        onLayerReplaced?(newLayer)
+
+        #if DEBUG
+        enqueueCount = 0
+        loggedLayerFailed = false
+        print("[Renderer] display layer recreated")
+        #endif
     }
 
     /// After seek, drop frames with PTS before the target to prevent

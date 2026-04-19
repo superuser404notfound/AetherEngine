@@ -59,6 +59,19 @@ public final class AetherEngine: ObservableObject {
     /// Uses AVSampleBufferDisplayLayer for optimal frame pacing.
     public var videoLayer: CALayer { videoRenderer.displayLayer }
 
+    /// Fires when the video layer is replaced with a fresh instance —
+    /// which happens on every `load()` call to avoid stale
+    /// Synchronizer/controlTimebase state from a previous playback.
+    /// The host view must remove the old sublayer and add the new one.
+    /// See `SampleBufferRenderer.onLayerReplaced` for the why.
+    public var onVideoLayerReplaced: ((CALayer) -> Void)? {
+        didSet {
+            videoRenderer.onLayerReplaced = { [weak self] newLayer in
+                self?.onVideoLayerReplaced?(newLayer)
+            }
+        }
+    }
+
     /// The URL and position of the current playback session.
     /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
     /// after background suspension invalidates VT sessions and AVIO.
@@ -201,7 +214,12 @@ public final class AetherEngine: ObservableObject {
         // Tear down any previous playback
         stopInternal()
         loadedURL = url
-        videoRenderer.resetDiagnostics()
+        // Replace the display layer with a clean instance. Reusing
+        // the old one after a Synchronizer↔controlTimebase history
+        // leaves it in a rendering-but-frozen state on some videos
+        // (no recovery via flush). The fresh layer starts without
+        // that history and renders cleanly.
+        videoRenderer.recreateDisplayLayer()
 
         state = .loading
         currentTime = 0
