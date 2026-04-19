@@ -162,6 +162,10 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 - [JellySeeTV](https://github.com/superuser404notfound/JellySeeTV) — native Jellyfin client for Apple TV.
 
+## Built with
+
+AetherEngine is vibe-coded — designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
+
 ## License
 
 [LGPL-3.0](LICENSE). App Store compatible when dynamically linked.
