@@ -158,6 +158,10 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 | Swift | 6.0 |
 | Xcode | 16.0 |
 
+## Used by
+
+- [JellySeeTV](https://github.com/superuser404notfound/JellySeeTV) — native Jellyfin client for Apple TV.
+
 ## License
 
 [LGPL-3.0](LICENSE). App Store compatible when dynamically linked.
