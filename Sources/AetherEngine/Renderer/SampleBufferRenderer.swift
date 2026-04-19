@@ -33,6 +33,7 @@ final class SampleBufferRenderer {
 
     #if DEBUG
     private var loggedLayerFailed = false
+    private var enqueueCount = 0
     #endif
 
     init() {
@@ -139,13 +140,57 @@ final class SampleBufferRenderer {
         guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
             return
         }
+        // If the layer has entered the failed state (undefined-behavior
+        // races during Synchronizer↔controlTimebase handoffs push it
+        // here, and once it's failed it stays failed until flushed),
+        // attempt an in-place recovery: flush clears the internal
+        // pipeline state and resets status back to .unknown so the next
+        // enqueue can render.
+        if displayLayer.status == .failed {
+            #if DEBUG
+            if !loggedLayerFailed {
+                loggedLayerFailed = true
+                print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil") — attempting recovery via flush()")
+            }
+            #endif
+            displayLayer.flush()
+        }
+        displayLayer.enqueue(sampleBuffer)
         #if DEBUG
-        if displayLayer.status == .failed, !loggedLayerFailed {
-            loggedLayerFailed = true
-            print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil")")
+        enqueueCount += 1
+        if enqueueCount == 1 || enqueueCount == 30 {
+            print("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(displayLayer.isReadyForMoreMediaData) error=\(displayLayer.error?.localizedDescription ?? "nil")")
         }
         #endif
-        displayLayer.enqueue(sampleBuffer)
+    }
+
+    #if DEBUG
+    private var statusName: String {
+        switch displayLayer.status {
+        case .unknown: "unknown"
+        case .rendering: "rendering"
+        case .failed: "failed"
+        @unknown default: "?"
+        }
+    }
+    #endif
+
+    /// Reset per-session diagnostic counters. Call on load() so the
+    /// first-frame / 30th-frame status log fires for each new video,
+    /// not only the first one after app launch.
+    func resetDiagnostics() {
+        #if DEBUG
+        enqueueCount = 0
+        loggedLayerFailed = false
+        #endif
+    }
+
+    /// Explicit flush of the underlying AVSampleBufferDisplayLayer
+    /// without clearing the currently displayed frame. Used by
+    /// AetherEngine before assigning a new controlTimebase to coax the
+    /// layer out of any leftover synchronizer state.
+    func flushDisplayLayer() {
+        displayLayer.flush()
     }
 
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {

@@ -201,6 +201,7 @@ public final class AetherEngine: ObservableObject {
         // Tear down any previous playback
         stopInternal()
         loadedURL = url
+        videoRenderer.resetDiagnostics()
 
         state = .loading
         currentTime = 0
@@ -387,16 +388,29 @@ public final class AetherEngine: ObservableObject {
                         hlsAudioEngine = engine
                         audioMode = .atmos
                         audioAvailable = true
-                        // Belt-and-braces: a previous PCM session may have
-                        // attached the display layer to the synchronizer.
-                        // Detach (blocks until removal completes) and clear
-                        // any existing control timebase before assigning
-                        // the new one — assigning while the layer is still
-                        // half-registered causes FigVideoQueueRemote -12080
-                        // and the layer never renders again.
+                        // Full handoff sequence before giving the layer
+                        // the Atmos timebase:
+                        //   1. detach from any synchronizer (sync wait)
+                        //   2. drop old controlTimebase
+                        //   3. flush the layer — clears internal
+                        //      pipeline state and resets .failed status
+                        //      back to .unknown if a previous handoff
+                        //      corrupted it
+                        //   4. assign the new timebase
                         audioOutput.detachVideoLayer(videoRenderer.displayLayer)
                         videoRenderer.displayLayer.controlTimebase = nil
+                        videoRenderer.flushDisplayLayer()
                         videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
+                        #if DEBUG
+                        let status: String
+                        switch videoRenderer.displayLayer.status {
+                        case .unknown: status = "unknown"
+                        case .rendering: status = "rendering"
+                        case .failed: status = "failed"
+                        @unknown default: status = "?"
+                        }
+                        print("[AetherEngine] Atmos handoff: layer status=\(status) error=\(videoRenderer.displayLayer.error?.localizedDescription ?? "nil")")
+                        #endif
                         #if DEBUG
                         print("[AetherEngine] Audio: EAC3 → HLS AVPlayer (Dolby Atmos) (\(channelCount)ch)")
                         #endif
@@ -635,11 +649,12 @@ public final class AetherEngine: ObservableObject {
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
                 audioMode = .atmos
-                // See load() for the "why" — synchronous detach + clear
-                // before assigning the new timebase prevents the -12080
-                // black-screen race when switching from a PCM track.
+                // See load() for the "why" — full handoff sequence to
+                // prevent the -12080 black-screen race when switching
+                // from a PCM track.
                 audioOutput.detachVideoLayer(videoRenderer.displayLayer)
                 videoRenderer.displayLayer.controlTimebase = nil
+                videoRenderer.flushDisplayLayer()
                 videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
             } catch {
                 fallbackToPCMAudio(stream: stream)

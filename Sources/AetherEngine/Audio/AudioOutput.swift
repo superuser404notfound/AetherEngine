@@ -50,9 +50,12 @@ final class AudioOutput: @unchecked Sendable {
         synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime()) { _ in
             semaphore.signal()
         }
-        // Bounded wait — if the system never calls the completion handler
-        // (shouldn't happen but defence in depth), don't lock up forever.
-        _ = semaphore.wait(timeout: .now() + .seconds(1))
+        let result = semaphore.wait(timeout: .now() + .seconds(1))
+        #if DEBUG
+        if result == .timedOut {
+            print("[AudioOutput] detachVideoLayer: timed out waiting for synchronizer removal")
+        }
+        #endif
     }
 
     /// Start audio playback at the given time. Call after enqueueing first samples.
