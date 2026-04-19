@@ -12,6 +12,7 @@ final class AudioOutput: @unchecked Sendable {
 
     let renderer: AVSampleBufferAudioRenderer
     let synchronizer: AVSampleBufferRenderSynchronizer
+    let processor: AudioProcessor
 
     private let lock = NSLock()
     private var _isStarted = false
@@ -20,6 +21,7 @@ final class AudioOutput: @unchecked Sendable {
         renderer = AVSampleBufferAudioRenderer()
         synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
+        processor = AudioProcessor()
 
         // Enable spatial audio for AirPods Pro/Max and HomePod.
         // The renderer spatializes multichannel content automatically
@@ -97,7 +99,10 @@ final class AudioOutput: @unchecked Sendable {
     /// isReadyForMoreMediaData caused early samples to be dropped
     /// before the synchronizer started, resulting in silence.
     func enqueue(sampleBuffer: CMSampleBuffer) {
-        renderer.enqueue(sampleBuffer)
+        // Night Mode / Dialog Boost runs here. When both are off the
+        // processor returns the buffer untouched at near-zero cost.
+        let processed = processor.process(sampleBuffer)
+        renderer.enqueue(processed)
 
         #if DEBUG
         // Log exactly once per session: first successful enqueue and,
@@ -141,6 +146,7 @@ final class AudioOutput: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         renderer.flush()
+        processor.reset()
         _isStarted = false
     }
 
@@ -150,6 +156,7 @@ final class AudioOutput: @unchecked Sendable {
         defer { lock.unlock() }
         synchronizer.setRate(0.0, time: .zero)
         renderer.flush()
+        processor.reset()
         _isStarted = false
     }
 }
