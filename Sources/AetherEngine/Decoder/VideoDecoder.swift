@@ -40,7 +40,7 @@ final class VideoDecoder: @unchecked Sendable {
     /// (open/close), read on VideoToolbox's internal callback thread.
     private let onFrameLock = NSLock()
     private var _onFrame: DecodedFrameHandler?
-    fileprivate var onFrame: DecodedFrameHandler? {
+    private var onFrame: DecodedFrameHandler? {
         get { onFrameLock.lock(); defer { onFrameLock.unlock() }; return _onFrame }
         set { onFrameLock.lock(); defer { onFrameLock.unlock() }; _onFrame = newValue }
     }
