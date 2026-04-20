@@ -18,7 +18,9 @@ let package = Package(
     dependencies: [
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
         // No network stack — we use custom AVIO + URLSession for HTTP streams.
-        .package(path: "../FFmpegBuild"),
+        // Resolved over Git rather than a local path so consumers (and
+        // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
+        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", branch: "main"),
     ],
     targets: [
         .target(
