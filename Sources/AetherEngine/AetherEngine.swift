@@ -506,6 +506,46 @@ public final class AetherEngine: ObservableObject {
         state = .playing
     }
 
+    /// Same setup as `load(url:)` but immediately pauses, leaving the
+    /// engine "warmed up" — demuxer open, decoders initialised, first
+    /// frames sitting in the renderer's reorder buffer. A subsequent
+    /// `play()` call will start producing frames within a frame or two
+    /// of the call instead of the 300-500 ms cold-start cost of a
+    /// full `load()`.
+    ///
+    /// Use case: the host app knows what the user is *likely* to play
+    /// (e.g. the focused movie in a detail view) and warms the engine
+    /// while the user is still browsing. Cheap to throw away — call
+    /// `stop()` to discard a prepared session.
+    public func prepare(
+        url: URL,
+        startPosition: Double? = nil,
+        tonemapHDRToSDR: Bool = false
+    ) async throws {
+        try await load(
+            url: url,
+            startPosition: startPosition,
+            tonemapHDRToSDR: tonemapHDRToSDR
+        )
+        // load() lands in .playing — flip to .paused so we don't burn
+        // audio output / send segments to a receiver while the user
+        // is still in the detail view.
+        if state == .playing {
+            isPlaying = false
+            if audioMode == .atmos {
+                hlsAudioEngine?.pause()
+            } else {
+                audioOutput.pause()
+            }
+            state = .paused
+        }
+    }
+
+    /// The URL the engine is currently loaded (or prepared) for, if
+    /// any. Lets the host app decide whether a fresh `load()` is
+    /// needed or a previously-prepared session can be played as-is.
+    public var preparedURL: URL? { loadedURL }
+
     public func pause() {
         guard state == .playing else { return }
         isPlaying = false
