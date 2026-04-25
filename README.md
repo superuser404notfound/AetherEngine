@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/tvOS-16%2B-black?logo=apple">
   <img src="https://img.shields.io/badge/macOS-14%2B-black?logo=apple">
   <img src="https://img.shields.io/badge/Swift-6.0%2B-F05138?logo=swift&logoColor=white">
-  <img src="https://img.shields.io/badge/license-LGPL--3.0-lightgrey">
+  <img src="https://img.shields.io/badge/license-LGPL--3.0%20%2B%20App%20Store%20Exception-lightgrey">
 </p>
 
 ---
@@ -168,4 +168,4 @@ AetherEngine is vibe-coded — designed and shipped by [Vincent Herbst](https://
 
 ## License
 
-[LGPL-3.0](LICENSE). App Store compatible when dynamically linked.
+[LGPL-3.0 with Apple Store / DRM Exception](LICENSE). The exception clause grants explicit permission to distribute through application stores (Apple App Store, TestFlight, etc.) whose terms otherwise conflict with LGPL §4–6 — modifications to the engine itself still have to be released under LGPL.
