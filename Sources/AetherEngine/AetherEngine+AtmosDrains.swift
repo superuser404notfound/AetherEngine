@@ -50,7 +50,7 @@ extension AetherEngine {
                     self.atmosAudioLock.unlock()
                     return
                 }
-                let packetData = self.atmosAudioBuffer.removeFirst()
+                let packetData = self.atmosAudioBuffer.popFront()
                 self.atmosAudioLock.unlock()
 
                 self.hlsAudioEngine?.feedAudioData(packetData)
@@ -78,7 +78,7 @@ extension AetherEngine {
                     self.atmosVideoLock.unlock()
                     return
                 }
-                let packet = self.atmosVideoBuffer.removeFirst()
+                let packet = self.atmosVideoBuffer.popFront()
                 self.atmosVideoLock.unlock()
 
                 // Back-pressure on THIS thread (doesn't affect demux or audio)

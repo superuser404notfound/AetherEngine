@@ -103,7 +103,7 @@ public final class AetherEngine: ObservableObject {
     /// Separate queue for feeding audio to the HLS engine in Atmos mode.
     let atmosAudioQueue = DispatchQueue(label: "com.aetherengine.atmos-audio", qos: .userInitiated)
     let atmosAudioLock = NSLock()
-    nonisolated(unsafe) var atmosAudioBuffer: [Data] = []
+    nonisolated(unsafe) var atmosAudioBuffer: PacketDeque<Data> = PacketDeque()
     nonisolated(unsafe) var atmosAudioDrainActive = false
     /// PTS threshold (seconds) for skipping audio packets before seek target.
     /// After seek, demuxer starts at the keyframe BEFORE the target. Video uses
@@ -115,7 +115,7 @@ public final class AetherEngine: ObservableObject {
     /// packets keep flowing even when the display layer is blocked.
     let atmosVideoQueue = DispatchQueue(label: "com.aetherengine.atmos-video", qos: .userInitiated)
     let atmosVideoLock = NSLock()
-    nonisolated(unsafe) var atmosVideoBuffer: [UnsafeMutablePointer<AVPacket>] = []
+    nonisolated(unsafe) var atmosVideoBuffer: PacketDeque<UnsafeMutablePointer<AVPacket>> = PacketDeque()
     nonisolated(unsafe) var atmosVideoDrainActive = false
     /// Cap video buffer at ~50MB to prevent OOM (4K packets ~130KB each)
     let atmosVideoBufferMax = 384
@@ -825,7 +825,30 @@ public final class AetherEngine: ObservableObject {
                                 self.hlsAudioEngine?.updateStreamOffset(ptsSeconds)
                             }
 
-                            let packetData = Data(bytes: data, count: Int(packet.pointee.size))
+                            // Zero-copy hand-off: clone the packet (refcount
+                            // bump on the underlying buffer, no memcpy) and
+                            // wrap its data into a Data view that releases
+                            // the cloned packet when freed. Saves the
+                            // malloc + memcpy that `Data(bytes:count:)`
+                            // would do per packet — at 768 kbps Atmos that
+                            // was ~96 KB/s of allocation churn on the demux
+                            // thread. Falls back to the copy path if the
+                            // refcount bump fails (allocation pressure).
+                            let packetData: Data
+                            if let cloned = av_packet_clone(packet),
+                               let clonedBytes = cloned.pointee.data {
+                                let size = Int(cloned.pointee.size)
+                                packetData = Data(
+                                    bytesNoCopy: UnsafeMutableRawPointer(mutating: clonedBytes),
+                                    count: size,
+                                    deallocator: .custom { _, _ in
+                                        var p: UnsafeMutablePointer<AVPacket>? = cloned
+                                        av_packet_free(&p)
+                                    }
+                                )
+                            } else {
+                                packetData = Data(bytes: data, count: Int(packet.pointee.size))
+                            }
                             self.atmosAudioLock.lock()
                             // Throttle if buffer is full — same approach as
                             // the video drain. Without it a multi-second
