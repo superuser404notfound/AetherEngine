@@ -81,47 +81,54 @@ public final class AetherEngine: ObservableObject {
 
     /// Pipeline components — accessed from both main actor and demux queue.
     /// Each has internal locking for thread safety.
-    nonisolated(unsafe) private let demuxer = Demuxer()
-    private let videoDecoder = VideoDecoder()
-    nonisolated(unsafe) private let softwareDecoder = SoftwareVideoDecoder()
-    private let audioDecoder = AudioDecoder()
+    /// `internal` (no modifier) so the Audio + AtmosDrains extensions
+    /// in their own files can reach them; the AetherEngine module is
+    /// the only consumer either way.
+    nonisolated(unsafe) let demuxer = Demuxer()
+    let videoDecoder = VideoDecoder()
+    nonisolated(unsafe) let softwareDecoder = SoftwareVideoDecoder()
+    let audioDecoder = AudioDecoder()
 
     /// True if the current stream uses software decoding (FFmpeg) instead of VT.
     /// Set during load(), read during demux loop — effectively immutable during playback.
-    nonisolated(unsafe) private var usingSoftwareDecode = false
-    private let audioOutput = AudioOutput()
-    nonisolated(unsafe) private let videoRenderer = SampleBufferRenderer()
-
-
+    nonisolated(unsafe) var usingSoftwareDecode = false
+    let audioOutput = AudioOutput()
+    nonisolated(unsafe) let videoRenderer = SampleBufferRenderer()
 
     /// HLS audio engine for Dolby Atmos — uses AVPlayer + local HLS server
     /// to trigger Dolby MAT 2.0 wrapping for EAC3+JOC passthrough.
     /// Accessed from demux queue — effectively immutable during playback.
-    nonisolated(unsafe) private var hlsAudioEngine: HLSAudioEngine?
+    nonisolated(unsafe) var hlsAudioEngine: HLSAudioEngine?
 
     /// Separate queue for feeding audio to the HLS engine in Atmos mode.
-    private let atmosAudioQueue = DispatchQueue(label: "com.aetherengine.atmos-audio", qos: .userInitiated)
-    private let atmosAudioLock = NSLock()
-    nonisolated(unsafe) private var atmosAudioBuffer: [Data] = []
-    nonisolated(unsafe) private var atmosAudioDrainActive = false
+    let atmosAudioQueue = DispatchQueue(label: "com.aetherengine.atmos-audio", qos: .userInitiated)
+    let atmosAudioLock = NSLock()
+    nonisolated(unsafe) var atmosAudioBuffer: [Data] = []
+    nonisolated(unsafe) var atmosAudioDrainActive = false
     /// PTS threshold (seconds) for skipping audio packets before seek target.
     /// After seek, demuxer starts at the keyframe BEFORE the target. Video uses
     /// skipThreshold to drop pre-target frames; this does the same for audio.
-    nonisolated(unsafe) private var atmosAudioSkipPTS: Double = -1
+    nonisolated(unsafe) var atmosAudioSkipPTS: Double = -1
 
     /// Separate queue for video decoding in Atmos mode.
     /// Decouples video back-pressure from the demux thread so audio
     /// packets keep flowing even when the display layer is blocked.
-    private let atmosVideoQueue = DispatchQueue(label: "com.aetherengine.atmos-video", qos: .userInitiated)
-    private let atmosVideoLock = NSLock()
-    nonisolated(unsafe) private var atmosVideoBuffer: [UnsafeMutablePointer<AVPacket>] = []
-    nonisolated(unsafe) private var atmosVideoDrainActive = false
+    let atmosVideoQueue = DispatchQueue(label: "com.aetherengine.atmos-video", qos: .userInitiated)
+    let atmosVideoLock = NSLock()
+    nonisolated(unsafe) var atmosVideoBuffer: [UnsafeMutablePointer<AVPacket>] = []
+    nonisolated(unsafe) var atmosVideoDrainActive = false
     /// Cap video buffer at ~50MB to prevent OOM (4K packets ~130KB each)
-    private let atmosVideoBufferMax = 384
+    let atmosVideoBufferMax = 384
+    /// Cap audio buffer to bound memory if AVPlayer stalls. EAC3 packets
+    /// run ~32 KB each at typical Atmos bitrates, so 1024 ≈ 32 MB
+    /// worth of headroom — large enough that a 30s network blip doesn't
+    /// throttle real playback, small enough that a stuck AVPlayer can't
+    /// quietly grow the heap into hundreds of MB.
+    let atmosAudioBufferMax = 1024
 
     /// Audio routing: which engine handles the current audio track.
     enum AudioMode { case pcm, atmos }
-    nonisolated(unsafe) private var audioMode: AudioMode = .pcm
+    nonisolated(unsafe) var audioMode: AudioMode = .pcm
 
     /// Serial queue for the demux→decode loop (runs off main thread).
     private let demuxQueue = DispatchQueue(label: "com.aetherengine.demux", qos: .userInitiated)
@@ -133,15 +140,20 @@ public final class AetherEngine: ObservableObject {
     nonisolated(unsafe) private var _stopRequested = false
 
     /// Whether the audio stream was successfully opened.
-    private var audioAvailable = false
+    var audioAvailable = false
 
     /// Detected video frame rate.
     private var videoFrameRate: Double = 0
 
+    /// The currently active audio stream index — accessed from the
+    /// demux queue (single-writer from the main actor) and from the
+    /// Audio extension when switching tracks.
+    nonisolated(unsafe) var activeAudioStreamIndex: Int32 = -1
+
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
-    nonisolated private var isPlaying: Bool {
+    nonisolated var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
             flagsLock.lock()
@@ -150,7 +162,7 @@ public final class AetherEngine: ObservableObject {
             if newValue { demuxCondition.broadcast() }
         }
     }
-    nonisolated private var stopRequested: Bool {
+    nonisolated var stopRequested: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _stopRequested }
         set {
             flagsLock.lock()
@@ -598,285 +610,9 @@ public final class AetherEngine: ObservableObject {
         progress = 0
     }
 
-    /// The currently active audio stream index.
-    /// Accessed from demux queue — protected by single-writer (main actor).
-    nonisolated(unsafe) private var activeAudioStreamIndex: Int32 = -1
-
-    public func selectAudioTrack(index: Int) {
-        let streamIndex = Int32(index)
-        guard streamIndex != activeAudioStreamIndex,
-              let stream = demuxer.stream(at: streamIndex) else { return }
-
-        let codecId = stream.pointee.codecpar?.pointee.codec_id
-
-        // Capture current time BEFORE tearing down the engine
-        let seekSeconds = currentTime
-        let seekTime = CMTimeMakeWithSeconds(seekSeconds, preferredTimescale: 90000)
-
-        // Tear down current audio engine
-        tearDownCurrentAudioEngine()
-        activeAudioStreamIndex = streamIndex
-
-        // Flush video pipeline (like a seek) — the demux seek below
-        // resets both video and audio position
-        if usingSoftwareDecode {
-            softwareDecoder.flush()
-        } else {
-            videoDecoder.flush()
-        }
-        videoRenderer.flush()
-
-        // Seek the demuxer to the current position so the new track
-        // starts from the right place in the stream
-        demuxer.seek(to: seekSeconds)
-        videoRenderer.setSkipThreshold(seekTime)
-        if usingSoftwareDecode {
-            softwareDecoder.skipUntilPTS = seekTime
-        }
-        atmosAudioSkipPTS = seekSeconds
-
-        // Open new audio engine for the selected track.
-        // Gate the Atmos path on the output route's passthrough capability
-        // — a BT speaker can't accept the HLS multichannel stream.
-        let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
-        let streamIsAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
-        let isAtmos = streamIsAtmos && canPassthroughAtmos()
-        #if DEBUG
-        if streamIsAtmos && !isAtmos {
-            print("[AetherEngine] selectAudioTrack: Atmos stream on non-passthrough route → PCM")
-        }
-        #endif
-
-        if isAtmos {
-            do {
-                let engine = HLSAudioEngine()
-                engine.onPlaybackFailed = { [weak self] in
-                    Task { @MainActor in
-                        guard let self,
-                              let s = self.demuxer.stream(at: streamIndex) else { return }
-                        self.fallbackToPCMAudio(stream: s)
-                    }
-                }
-                engine.onWillStartTimebase = { [weak self] skipPTS in
-                    guard let self else { return }
-                    if self.usingSoftwareDecode {
-                        self.softwareDecoder.flush()
-                        self.softwareDecoder.skipUntilPTS = skipPTS
-                    } else {
-                        self.videoDecoder.flush()
-                    }
-                    self.videoRenderer.flush()
-                    self.videoRenderer.setSkipThreshold(skipPTS)
-                }
-                try engine.prepare(stream: stream, startTime: seekTime)
-                hlsAudioEngine = engine
-                audioMode = .atmos
-                // See load() for the "why" — full handoff sequence to
-                // prevent the -12080 black-screen race when switching
-                // from a PCM track.
-                audioOutput.detachVideoLayer(videoRenderer.displayLayer)
-                videoRenderer.displayLayer.controlTimebase = nil
-                videoRenderer.flushDisplayLayer()
-                videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
-            } catch {
-                fallbackToPCMAudio(stream: stream)
-                audioOutput.start(at: seekTime)
-            }
-        } else {
-            do {
-                try audioDecoder.open(stream: stream)
-                audioMode = .pcm
-                audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-                audioOutput.start(at: seekTime)
-            } catch {
-                #if DEBUG
-                print("[AetherEngine] audioDecoder.open failed in selectAudioTrack: \(error) — disabling audio")
-                #endif
-                audioAvailable = false
-                audioMode = .pcm
-            }
-        }
-
-        #if os(iOS) || os(tvOS)
-        let contentCh = Int(stream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
-        let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
-        let preferred = max(2, min(contentCh, maxCh))
-        try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
-        #endif
-    }
-
-    public func selectSubtitleTrack(index: Int) {
-    }
-
-    // MARK: - Audio Engine Helpers
-
-    /// True if the current audio output route can accept a Dolby Atmos
-    /// bitstream (EAC3 + JOC wrapped as Dolby MAT 2.0 by AVPlayer).
-    ///
-    /// Bluetooth routes advertise only compressed stereo codecs (A2DP
-    /// SBC/AAC) — AVPlayer refuses the multichannel HLS stream there
-    /// and stalls forever with silent audio and no video. Routes that
-    /// can't deliver at least 5.1 also make the Atmos path pointless
-    /// even when it technically works — we'd end up asking the system
-    /// to downmix what we could downmix ourselves cheaper.
-    private func canPassthroughAtmos() -> Bool {
-        #if os(iOS) || os(tvOS)
-        let session = AVAudioSession.sharedInstance()
-        for output in session.currentRoute.outputs {
-            switch output.portType {
-            case .bluetoothA2DP, .bluetoothHFP, .bluetoothLE:
-                return false
-            default:
-                continue
-            }
-        }
-        return session.maximumOutputNumberOfChannels >= 6
-        #else
-        return false
-        #endif
-    }
-
-    /// Tear down whichever audio engine is currently active.
-    private func tearDownCurrentAudioEngine() {
-        switch audioMode {
-        case .atmos:
-            clearAtmosBuffers()
-            hlsAudioEngine?.stop()
-            hlsAudioEngine = nil
-            videoRenderer.displayLayer.controlTimebase = nil
-        case .pcm:
-            audioDecoder.flush()
-            audioDecoder.close()
-            audioOutput.flush()
-        }
-        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
-    }
-
-    /// Fall back from HLS Atmos engine to FFmpeg PCM decode.
-    /// Called when AVPlayer fails to play the HLS stream.
-    private func fallbackToPCMAudio(stream: UnsafeMutablePointer<AVStream>) {
-        #if DEBUG
-        print("[AetherEngine] Falling back from Atmos to FFmpeg PCM decode")
-        #endif
-
-        // Tear down HLS engine
-        hlsAudioEngine?.stop()
-        hlsAudioEngine = nil
-        videoRenderer.displayLayer.controlTimebase = nil
-
-        // Switch to FFmpeg PCM decode
-        do {
-            try audioDecoder.open(stream: stream)
-            audioMode = .pcm
-        } catch {
-            #if DEBUG
-            print("[AetherEngine] PCM fallback failed too: \(error) — disabling audio")
-            #endif
-            audioAvailable = false
-            audioMode = .pcm
-            return
-        }
-
-        // Re-attach display layer to synchronizer
-        audioOutput.attachVideoLayer(videoRenderer.displayLayer)
-        let seekTime = CMTimeMakeWithSeconds(currentTime, preferredTimescale: 90000)
-        audioOutput.start(at: seekTime)
-    }
-
-    /// Clear all buffered atmos packets. Called from seek (non-async safe).
-    /// Also resets the drain-active flags — a drain loop that exited
-    /// through the `stopRequested` early-return leaves them stuck at
-    /// `true`, and the next load()/startAtmosXxxDrain() would be a
-    /// no-op → packets pile up in the buffer and nothing ever decodes
-    /// (classic "second playback black screen" symptom).
-    nonisolated private func clearAtmosBuffers() {
-        atmosAudioLock.lock()
-        atmosAudioBuffer.removeAll()
-        atmosAudioDrainActive = false
-        atmosAudioLock.unlock()
-        atmosVideoLock.lock()
-        for pkt in atmosVideoBuffer { av_packet_free_safe(pkt) }
-        atmosVideoBuffer.removeAll()
-        atmosVideoDrainActive = false
-        atmosVideoLock.unlock()
-    }
-
-    // MARK: - Atmos Audio Drain
-
-    /// Starts the background drain loop if not already running.
-    /// Drains buffered audio packets to the HLS engine on a separate queue,
-    /// completely independent of video back-pressure.
-    /// `nonisolated` so the demux queue can start it without a main-actor hop.
-    nonisolated private func startAtmosAudioDrain() {
-        atmosAudioLock.lock()
-        guard !atmosAudioDrainActive else { atmosAudioLock.unlock(); return }
-        atmosAudioDrainActive = true
-        atmosAudioLock.unlock()
-
-        atmosAudioQueue.async { [weak self] in
-            guard let self else { return }
-            while true {
-                self.atmosAudioLock.lock()
-                guard !self.atmosAudioBuffer.isEmpty else {
-                    self.atmosAudioDrainActive = false
-                    self.atmosAudioLock.unlock()
-                    return
-                }
-                let packetData = self.atmosAudioBuffer.removeFirst()
-                self.atmosAudioLock.unlock()
-
-                self.hlsAudioEngine?.feedAudioData(packetData)
-            }
-        }
-    }
-
-    // MARK: - Atmos Video Drain
-
-    /// Decodes video packets from the buffer with normal back-pressure.
-    /// Runs on its own queue so it doesn't block the demux thread.
-    /// `nonisolated` so the demux queue can start it without a main-actor hop.
-    nonisolated private func startAtmosVideoDrain() {
-        atmosVideoLock.lock()
-        guard !atmosVideoDrainActive else { atmosVideoLock.unlock(); return }
-        atmosVideoDrainActive = true
-        atmosVideoLock.unlock()
-
-        atmosVideoQueue.async { [weak self] in
-            guard let self else { return }
-            while true {
-                self.atmosVideoLock.lock()
-                guard !self.atmosVideoBuffer.isEmpty else {
-                    self.atmosVideoDrainActive = false
-                    self.atmosVideoLock.unlock()
-                    return
-                }
-                let packet = self.atmosVideoBuffer.removeFirst()
-                self.atmosVideoLock.unlock()
-
-                // Back-pressure on THIS thread (doesn't affect demux or audio)
-                while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
-                    Thread.sleep(forTimeInterval: 0.005)
-                }
-                guard !self.stopRequested else {
-                    av_packet_free_safe(packet)
-                    // Clear drainActive on stop-exit so the next load() can
-                    // start a fresh drain. Forgetting this made the second
-                    // playback of the same file show a black screen.
-                    self.atmosVideoLock.lock()
-                    self.atmosVideoDrainActive = false
-                    self.atmosVideoLock.unlock()
-                    return
-                }
-
-                if self.usingSoftwareDecode {
-                    self.softwareDecoder.decode(packet: packet)
-                } else {
-                    self.videoDecoder.decode(packet: packet)
-                }
-                av_packet_free_safe(packet)
-            }
-        }
-    }
+    // selectAudioTrack, selectSubtitleTrack, audio engine helpers and
+    // Atmos drain logic live in AetherEngine+Audio.swift and
+    // AetherEngine+AtmosDrains.swift respectively.
 
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
@@ -1091,6 +827,16 @@ public final class AetherEngine: ObservableObject {
 
                             let packetData = Data(bytes: data, count: Int(packet.pointee.size))
                             self.atmosAudioLock.lock()
+                            // Throttle if buffer is full — same approach as
+                            // the video drain. Without it a multi-second
+                            // AVPlayer stall lets the audio buffer grow
+                            // without bound (one Data per packet, no
+                            // back-pressure from the consumer side).
+                            while self.atmosAudioBuffer.count >= self.atmosAudioBufferMax && !self.stopRequested {
+                                self.atmosAudioLock.unlock()
+                                Thread.sleep(forTimeInterval: 0.01)
+                                self.atmosAudioLock.lock()
+                            }
                             self.atmosAudioBuffer.append(packetData)
                             self.atmosAudioLock.unlock()
                             self.startAtmosAudioDrain()
@@ -1243,7 +989,10 @@ public final class AetherEngine: ObservableObject {
 // MARK: - Helpers
 
 /// Safe wrapper around av_packet_free that handles the double-pointer.
-private func av_packet_free_safe(_ packet: UnsafeMutablePointer<AVPacket>) {
+/// Top-level helper used by the demux loop and by the Atmos drains
+/// in their respective extension files. `internal` so cross-file
+/// access is allowed within the AetherEngine module.
+func av_packet_free_safe(_ packet: UnsafeMutablePointer<AVPacket>) {
     var p: UnsafeMutablePointer<AVPacket>? = packet
     av_packet_free(&p)
 }
