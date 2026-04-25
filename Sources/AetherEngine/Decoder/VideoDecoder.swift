@@ -22,6 +22,13 @@ final class VideoDecoder: @unchecked Sendable {
     private var decompressionSession: VTDecompressionSession?
     private var formatDescription: CMVideoFormatDescription?
     private var use10Bit = false
+    /// True only for actual HDR content (PQ or HLG transfer). 10-bit
+    /// SDR (Main 10 with BT.709 transfer — common in anime / cartoon
+    /// encodes for banding control) is *not* HDR and must keep its
+    /// BT.709 color attachments, otherwise the display interprets
+    /// the BT.709 yuv values as BT.2020/PQ and the picture comes out
+    /// massively oversaturated.
+    private var isHDR = false
     /// When true, HDR10/DV content is tone-mapped to BT.709 SDR via a
     /// separate VTPixelTransferSession in the output handler. We do
     /// NOT use kVTDecompressionPropertyKey_PixelTransferProperties
@@ -82,9 +89,14 @@ final class VideoDecoder: @unchecked Sendable {
         let isHDRTransfer = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
             || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
         use10Bit = bps > 8 || isMain10Profile || isHDRTransfer
+        // HDR ≠ 10-bit. The bit-depth above only chooses the
+        // VideoToolbox output pixel format (P010 vs NV12). The
+        // color-attachment decision below uses *transfer function*,
+        // which is the actual HDR signal.
+        isHDR = isHDRTransfer
 
         #if DEBUG
-        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue) → \(use10Bit ? "10-bit P010" : "8-bit NV12")")
+        print("[VideoDecoder] Bit depth: bps=\(bps), profile=\(codecpar.pointee.profile), trc=\(codecpar.pointee.color_trc.rawValue) → \(use10Bit ? "10-bit P010" : "8-bit NV12") isHDR=\(isHDR)")
         #endif
 
         // Build CMVideoFormatDescription from FFmpeg's codec parameters
@@ -95,8 +107,10 @@ final class VideoDecoder: @unchecked Sendable {
         let session = try createDecompressionSession(formatDescription: formatDesc)
         self.decompressionSession = session
 
-        // Tonemap infrastructure — only when going HDR→SDR.
-        if use10Bit && tonemapToSDR {
+        // Tonemap infrastructure — only when going HDR→SDR. 10-bit
+        // SDR doesn't need tonemapping; its values are already in
+        // BT.709 space.
+        if use10Bit && isHDR && tonemapToSDR {
             try setupTonemapPipeline(
                 width: Int(codecpar.pointee.width),
                 height: Int(codecpar.pointee.height)
@@ -205,13 +219,28 @@ final class VideoDecoder: @unchecked Sendable {
                 }
                 #endif
                 guard status == noErr, let pixelBuffer = imageBuffer else { return }
-                // VT strips color attachments when DV propagation is off
-                // (always the case in HDR10 fallback). Re-tag the buffer
-                // as BT.2020/PQ so the next stage knows what it's holding.
+                // VT strips color attachments when DV propagation is
+                // off (the HDR10-fallback path) and on plain decode
+                // paths sometimes leaves the buffer untagged. Re-tag
+                // explicitly so the display layer knows how to
+                // interpret the bytes:
+                //
+                //   - actually-HDR (PQ/HLG transfer)  → BT.2020 + PQ
+                //   - 10-bit SDR (Main 10, BT.709)   → BT.709 SDR
+                //
+                // This is the difference that fixes oversaturated
+                // 10-bit SDR encodes (e.g. anime/cartoon HEVC Main10
+                // with BT.709) — without the SDR tag the display
+                // would assume BT.2020 because of the 10-bit format
+                // and crush the colors.
                 if self.use10Bit {
-                    self.attachHDRColorSpace(to: pixelBuffer)
+                    if self.isHDR {
+                        self.attachHDRColorSpace(to: pixelBuffer)
+                    } else {
+                        self.attachSDRColorSpace(to: pixelBuffer)
+                    }
                 }
-                if self.tonemapToSDR, self.use10Bit {
+                if self.tonemapToSDR, self.use10Bit, self.isHDR {
                     // VTPixelTransferSession needs correct source color
                     // attachments to know it must tone-map PQ→SDR. The
                     // call above made that explicit. Now do the transfer.
