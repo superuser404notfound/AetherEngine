@@ -59,7 +59,6 @@ extension AetherEngine {
         if isAtmos {
             do {
                 let engine = HLSAudioEngine()
-                engine.audioDelayCompensation = atmosAudioDelay
                 engine.onPlaybackFailed = { [weak self] in
                     Task { @MainActor in
                         guard let self,

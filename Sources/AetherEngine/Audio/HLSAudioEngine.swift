@@ -98,13 +98,9 @@ final class HLSAudioEngine: @unchecked Sendable {
     private var hasCalibrated = false
 
     /// User-configurable audio delay compensation in seconds.
-    /// Positive value = audio is heard later than the player's reported
-    /// position, so we hold video back by the same amount to match.
-    /// Use case: AVR/soundbar Atmos decoders add ~50–200ms of latency
-    /// that AVPlayer.currentTime() doesn't expose. Setting this to the
-    /// measured lag re-aligns the picture with what the user actually
-    /// hears. Default 0 = no compensation. Updates take effect on the
-    /// next sync tick (~100ms).
+    /// Positive = delay video (audio comes first from HLS pipeline).
+    /// Set this from the host app based on the user's audio setup.
+    /// Default 0 = no compensation (timebase matches AVPlayer.currentTime).
     var audioDelayCompensation: Double = 0
 
     /// Measured offset between CMTimebase (host clock) and AVPlayer's clock.
@@ -577,25 +573,21 @@ final class HLSAudioEngine: @unchecked Sendable {
             let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             onWillStartTimebase?(startPTS)
 
-            // Set timebase to player position minus the user-configured audio
-            // delay. clockOffset is still 0 (calibrated below); the natural
-            // host-vs-player drift gets folded in once that calibration runs.
-            let target = playerStreamTime - audioDelayCompensation
-            let corrected = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
+            // Set timebase directly to player position (no offset yet).
+            // The natural clock drift will be measured after ~2s and used
+            // as clockOffset for all subsequent corrections.
+            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", target))s (compensation=\(String(format: "%+.3f", audioDelayCompensation))s)")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s")
             #endif
             return
         }
 
-        // Drift = where audio actually is (after compensation) - where video is.
-        // Subtracting audioDelayCompensation lets the same drift threshold
-        // apply regardless of how much the user has dialed in: a correctly
-        // compensated stream always reads as zero drift, not as a constant
-        // offset that would otherwise be re-snapped every tick.
-        let drift = (playerStreamTime - audioDelayCompensation) - tbTime
+        // Drift = audio position - video position.
+        // Positive = audio ahead (video late), negative = video ahead (audio late).
+        let drift = playerStreamTime - tbTime
 
         // Calibrate: after ~2s of playback, capture the natural drift as the
         // clock offset. This accounts for the inherent difference between
@@ -638,10 +630,9 @@ final class HLSAudioEngine: @unchecked Sendable {
     }
 
     /// Snap the timebase to match the player's current position,
-    /// accounting for the constant CMTimebase-to-AVPlayer clock offset
-    /// and the user-configured audio delay compensation.
+    /// accounting for the constant CMTimebase-to-AVPlayer clock offset.
     private func snapTimebaseToPlayer(playerStreamTime: Double, tb: CMTimebase) {
-        let target = playerStreamTime - clockOffset - audioDelayCompensation
+        let target = playerStreamTime - clockOffset
         let corrected = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
         CMTimebaseSetTime(tb, time: corrected)
     }
