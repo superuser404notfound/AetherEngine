@@ -563,24 +563,29 @@ final class HLSAudioEngine: @unchecked Sendable {
         let playerStreamTime = playerSeconds + streamOffset
         let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
 
-        // One-time snap: wait until player is actually playing (currentTime > 0.5)
-        // then snap the timebase to match. At readyToPlay, currentTime is
-        // unreliable (player hasn't started decoding yet).
-        if !hasSnapped && playerSeconds > 0.5 {
+        // One-time snap: wait until the player is genuinely playing, not
+        // just `readyToPlay`. AVPlayer can sit in `waitingToPlayAtSpecifiedRate`
+        // for 100–300 ms after play() while it primes the audio output;
+        // currentTime() reports the requested position but the audio stream
+        // hasn't actually started, so a snap at this point gives a tbTime
+        // that's ahead of the loudspeakers — the source of the mid-switch
+        // PCM→Atmos lag we used to see. Gating on `.playing` makes the snap
+        // happen at a moment the reported position actually matches what
+        // the user is hearing.
+        if !hasSnapped, playerSeconds > 0, player.timeControlStatus == .playing {
             hasSnapped = true
 
             // Flush video renderer and re-set skip threshold to our start PTS.
             let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             onWillStartTimebase?(startPTS)
 
-            // Set timebase directly to player position (no offset yet).
-            // The natural clock drift will be measured after ~2s and used
-            // as clockOffset for all subsequent corrections.
+            // Set timebase directly to player position. The drift correction
+            // below cleans up any residual clock skew over the next few ticks.
             let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
             CMTimebaseSetTime(tb, time: corrected)
             CMTimebaseSetRate(tb, rate: Float64(_rate))
             #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s")
+            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s (player=.playing)")
             #endif
             return
         }
@@ -590,15 +595,26 @@ final class HLSAudioEngine: @unchecked Sendable {
         let drift = playerStreamTime - tbTime
 
         // Calibrate: after ~2s of playback, capture the natural drift as the
-        // clock offset. This accounts for the inherent difference between
-        // CMTimebase (host clock) and AVPlayer's internal clock, which varies
-        // by device and OS version.
+        // clock offset — but ONLY if drift is small (< 50ms). A larger drift
+        // is real lag, not host-vs-player clock skew, and folding it into
+        // clockOffset would cement the lag forever (the previous bug: any
+        // 100ms pipeline lag got absorbed here, drift then read as 0, and
+        // no further correction ever fired). For large drift we leave
+        // clockOffset at 0 and let the snap-on-drift loop below keep
+        // pulling tb back onto the player's reported position.
         if !hasCalibrated && hasSnapped && playerSeconds > 2.5 {
             hasCalibrated = true
-            clockOffset = drift
-            #if DEBUG
-            print("[HLSAudioEngine] Clock offset calibrated: \(String(format: "%+.3f", clockOffset))s")
-            #endif
+            if abs(drift) < 0.05 {
+                clockOffset = drift
+                #if DEBUG
+                print("[HLSAudioEngine] Clock offset calibrated: \(String(format: "%+.3f", clockOffset))s")
+                #endif
+            } else {
+                clockOffset = 0
+                #if DEBUG
+                print("[HLSAudioEngine] Drift \(String(format: "%+.3f", drift))s too large to calibrate as clock skew — keeping clockOffset=0")
+                #endif
+            }
             return
         }
 
