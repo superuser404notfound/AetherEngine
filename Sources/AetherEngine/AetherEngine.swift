@@ -398,6 +398,7 @@ public final class AetherEngine: ObservableObject {
                     let streamIdx = audioIdx
                     do {
                         let engine = HLSAudioEngine()
+                        engine.audioDelayCompensation = _atmosAudioDelay
                         engine.onPlaybackFailed = { [weak self] in
                             Task { @MainActor in
                                 guard let self,
@@ -618,6 +619,24 @@ public final class AetherEngine: ObservableObject {
     public var volume: Float {
         get { audioOutput.volume }
         set { audioOutput.volume = newValue }
+    }
+
+    /// Compensation for audio that lags the picture in Atmos mode, in seconds.
+    /// AVPlayer.currentTime() reflects the player's decoded position, but on
+    /// AVR/soundbar setups the actual loudspeaker output can trail by 50–200ms
+    /// due to MAT 2.0 unpacking and Atmos decoder latency that the system
+    /// doesn't expose. A positive value holds video back so the picture lines
+    /// up with what the user actually hears. PCM (FFmpeg) playback uses the
+    /// AVSampleBufferRenderSynchronizer's hardware-aware clock and doesn't
+    /// need this knob. Stored on the engine so the value survives Atmos
+    /// engine recreations triggered by track switches and seeks.
+    private var _atmosAudioDelay: Double = 0
+    public var atmosAudioDelay: Double {
+        get { _atmosAudioDelay }
+        set {
+            _atmosAudioDelay = newValue
+            hlsAudioEngine?.audioDelayCompensation = newValue
+        }
     }
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
