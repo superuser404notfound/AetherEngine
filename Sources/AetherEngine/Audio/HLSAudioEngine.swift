@@ -8,18 +8,15 @@ import Libavcodec
 ///
 /// ## A/V Sync Strategy
 ///
-/// The video timebase starts at rate=1.0 immediately — video plays from
-/// frame 1. The demux loop runs normally (video back-pressure + audio feed).
-/// AVPlayer takes ~2-4 seconds to buffer and start. During this time, video
-/// is already 2-4 seconds ahead of audio.
-///
-/// When AVPlayer starts, the drift correction detects that the timebase is
-/// ahead and **pauses it** (rate=0). Video freezes for 2-4 seconds while
-/// AVPlayer catches up. Once caught up, the timebase resumes at rate=1.0.
-/// From that point, audio and video are perfectly in sync.
-///
-/// This approach has zero complexity: no video buffering, no replay queues,
-/// no skipping, no seek-back. Just start-pause-resume.
+/// The video timebase starts paused at the seek/start position while the HLS
+/// pipeline buffers and AVPlayer comes up. Once the player is genuinely
+/// `.playing` and `AVPlayerItem.timebase` is available, we bind our
+/// timebase's source to the player item's own timebase and set the offset
+/// so our timebase reports absolute stream PTS. From that point on the
+/// video clock ticks at exactly the rate of the audio output — pre-roll,
+/// pause/resume, end-of-stream, AVR Atmos decoder latency, all of it
+/// propagates automatically. No drift correction, no periodic snapping,
+/// no constant-offset bookkeeping.
 final class HLSAudioEngine: @unchecked Sendable {
 
     // MARK: - Properties
@@ -91,22 +88,8 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// precise sync after seek.
     private var streamOffset: Double = 0
 
-    /// Whether the initial timebase snap has been performed.
+    /// Whether the initial timebase bind to AVPlayerItem.timebase has run.
     private var hasSnapped = false
-
-    /// Whether the clock offset has been calibrated from measured drift.
-    private var hasCalibrated = false
-
-    /// User-configurable audio delay compensation in seconds.
-    /// Positive = delay video (audio comes first from HLS pipeline).
-    /// Set this from the host app based on the user's audio setup.
-    /// Default 0 = no compensation (timebase matches AVPlayer.currentTime).
-    var audioDelayCompensation: Double = 0
-
-    /// Measured offset between CMTimebase (host clock) and AVPlayer's clock.
-    /// Captured at the first snap, then used for drift correction.
-    /// Varies by device/OS — not hardcoded.
-    private var clockOffset: Double = 0
 
     // MARK: - Stored Config
 
@@ -175,8 +158,6 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         setPlayerPlaying(false)
         hasSnapped = false
-        hasCalibrated = false
-        clockOffset = 0
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
@@ -348,13 +329,16 @@ final class HLSAudioEngine: @unchecked Sendable {
         videoTimebase = nil
         setPlayerPlaying(false)
         // Reset sync state so the next prepare() starts fresh. Without
-        // this a second playback kept the prior hasSnapped/calibrated
-        // state and skipped the initial timebase snap → silent or
-        // out-of-sync audio.
+        // this a second playback kept the prior hasSnapped state and
+        // skipped the initial timebase bind → silent or out-of-sync audio.
         hasSnapped = false
-        hasCalibrated = false
-        clockOffset = 0
         streamOffset = 0
+        // Detach our timebase from the now-dead player item timebase so a
+        // fresh prepare() can rebind cleanly. Falling back to host clock
+        // is safe — the timebase stays paused until the next bind.
+        if let tb = videoTimebase {
+            CMTimebaseSetSourceClock(tb, CMClockGetHostTimeClock())
+        }
     }
 
     func prepareForSeek() {
@@ -384,9 +368,13 @@ final class HLSAudioEngine: @unchecked Sendable {
         // freezes after scrub while audio keeps running.
         setPlayerPlaying(false)
         hasSnapped = false
-        hasCalibrated = false
-        clockOffset = 0
         streamOffset = 0
+        // Same reason as in stop(): detach from the player-item timebase
+        // we won't have for a moment, fall back to host clock so the next
+        // prepare() can re-bind without inheriting a dangling source.
+        if let tb = videoTimebase {
+            CMTimebaseSetSourceClock(tb, CMClockGetHostTimeClock())
+        }
     }
 
     func restartAfterSeek(stream: UnsafeMutablePointer<AVStream>, seekTime: CMTime) throws {
@@ -554,103 +542,55 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     private var syncLogCounter = 0
 
+    /// Bind the video timebase to the AVPlayerItem's own timebase as soon
+    /// as the player is genuinely producing audio, then leave it alone.
+    /// AVPlayer's timebase is driven by the same hardware-aware clock that
+    /// drives audio output to the AVR/soundbar — Atmos decoder latency,
+    /// MAT 2.0 unpack latency, the lot. Following that timebase rather
+    /// than re-snapping against the synthetic AVPlayer.currentTime() value
+    /// removes the constant ~100 ms lag that snap+drift could not see
+    /// (drift between two virtual clocks read as zero while the actual
+    /// loudspeakers were behind).
     private func syncTimebase() {
-        guard let tb = videoTimebase, let player else { return }
+        guard !hasSnapped,
+              let tb = videoTimebase,
+              let player,
+              let item = playerItem,
+              player.timeControlStatus == .playing else { return }
+
         let playerTime = player.currentTime()
         guard playerTime.isValid else { return }
-
         let playerSeconds = CMTimeGetSeconds(playerTime)
+        guard playerSeconds.isFinite, playerSeconds > 0 else { return }
+
+        // item.timebase only becomes non-nil once the player has actually
+        // started producing samples — wait for that. timeControlStatus can
+        // briefly read .playing while the timebase is still being set up.
+        guard let itemTimebase = item.timebase else { return }
+        let itemTime = CMTimebaseGetTime(itemTimebase)
+        guard itemTime.isValid else { return }
+
+        hasSnapped = true
+
         let playerStreamTime = playerSeconds + streamOffset
-        let tbTime = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
+        onWillStartTimebase?(startPTS)
 
-        // One-time snap: wait until the player is genuinely playing, not
-        // just `readyToPlay`. AVPlayer can sit in `waitingToPlayAtSpecifiedRate`
-        // for 100–300 ms after play() while it primes the audio output;
-        // currentTime() reports the requested position but the audio stream
-        // hasn't actually started, so a snap at this point gives a tbTime
-        // that's ahead of the loudspeakers — the source of the mid-switch
-        // PCM→Atmos lag we used to see. Gating on `.playing` makes the snap
-        // happen at a moment the reported position actually matches what
-        // the user is hearing.
-        if !hasSnapped, playerSeconds > 0, player.timeControlStatus == .playing {
-            hasSnapped = true
+        // Bind tb's source to the AVPlayerItem's timebase. From here on tb
+        // ticks at exactly the same rate as the player — pre-roll, pause,
+        // resume, end-of-stream all propagate automatically.
+        CMTimebaseSetSourceTimebase(tb, itemTimebase)
+        // SetTime after SetMasterTimebase establishes the offset between
+        // the master's stream-relative time and our absolute PTS time.
+        CMTimebaseSetTime(tb, time: startPTS)
+        CMTimebaseSetRate(tb, rate: Float64(_rate))
 
-            // Flush video renderer and re-set skip threshold to our start PTS.
-            let startPTS = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
-            onWillStartTimebase?(startPTS)
-
-            // Set timebase directly to player position. The drift correction
-            // below cleans up any residual clock skew over the next few ticks.
-            let corrected = CMTimeMakeWithSeconds(playerStreamTime, preferredTimescale: 90000)
-            CMTimebaseSetTime(tb, time: corrected)
-            CMTimebaseSetRate(tb, rate: Float64(_rate))
-            #if DEBUG
-            print("[HLSAudioEngine] Timebase started at \(String(format: "%.3f", playerStreamTime))s (player=.playing)")
-            #endif
-            return
-        }
-
-        // Drift = audio position - video position.
-        // Positive = audio ahead (video late), negative = video ahead (audio late).
-        let drift = playerStreamTime - tbTime
-
-        // Calibrate: after ~2s of playback, capture the natural drift as the
-        // clock offset — but ONLY if drift is small (< 50ms). A larger drift
-        // is real lag, not host-vs-player clock skew, and folding it into
-        // clockOffset would cement the lag forever (the previous bug: any
-        // 100ms pipeline lag got absorbed here, drift then read as 0, and
-        // no further correction ever fired). For large drift we leave
-        // clockOffset at 0 and let the snap-on-drift loop below keep
-        // pulling tb back onto the player's reported position.
-        if !hasCalibrated && hasSnapped && playerSeconds > 2.5 {
-            hasCalibrated = true
-            if abs(drift) < 0.05 {
-                clockOffset = drift
-                #if DEBUG
-                print("[HLSAudioEngine] Clock offset calibrated: \(String(format: "%+.3f", clockOffset))s")
-                #endif
-            } else {
-                clockOffset = 0
-                #if DEBUG
-                print("[HLSAudioEngine] Drift \(String(format: "%+.3f", drift))s too large to calibrate as clock skew — keeping clockOffset=0")
-                #endif
-            }
-            return
-        }
-
-        let realDrift = drift - clockOffset
-
+        // Stop polling — there's nothing left to correct. The periodic
+        // observer is also our stall-recovery cancel signal, so we leave
+        // it running, but syncTimebase() is now a no-op for sync work.
         #if DEBUG
-        syncLogCounter += 1
-        if syncLogCounter % 20 == 0 {
-            let status: String
-            switch player.timeControlStatus {
-            case .paused: status = "paused"
-            case .playing: status = "playing"
-            case .waitingToPlayAtSpecifiedRate: status = "waiting(\(player.reasonForWaitingToPlay?.rawValue ?? "?"))"
-            @unknown default: status = "unknown"
-            }
-            let errInfo = playerItem?.errorLog()?.events.last.map { "lastErr=\($0.errorStatusCode)" } ?? "noErrors"
-            print("[HLSAudioEngine] Status: playerTime=\(String(format: "%.1f", playerSeconds))s status=\(status) rate=\(player.rate) drift=\(String(format: "%+.3f", realDrift))s \(errInfo)")
-        }
+        print("[HLSAudioEngine] Timebase bound to AVPlayerItem.timebase at \(String(format: "%.3f", playerStreamTime))s")
         #endif
-
-        // Correct drift when it exceeds 50ms. The display layer handles
-        // small time adjustments smoothly (holds or skips one frame).
-        if abs(realDrift) > 0.05 {
-            snapTimebaseToPlayer(playerStreamTime: playerStreamTime, tb: tb)
-            #if DEBUG
-            print("[HLSAudioEngine] Drift correction: \(String(format: "%+.3f", realDrift))s → snapped")
-            #endif
-        }
-    }
-
-    /// Snap the timebase to match the player's current position,
-    /// accounting for the constant CMTimebase-to-AVPlayer clock offset.
-    private func snapTimebaseToPlayer(playerStreamTime: Double, tb: CMTimebase) {
-        let target = playerStreamTime - clockOffset
-        let corrected = CMTimeMakeWithSeconds(target, preferredTimescale: 90000)
-        CMTimebaseSetTime(tb, time: corrected)
     }
 }
 
