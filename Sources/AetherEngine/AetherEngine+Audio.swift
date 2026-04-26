@@ -95,6 +95,13 @@ extension AetherEngine {
             do {
                 try audioDecoder.open(stream: stream)
                 audioMode = .pcm
+                // Sanitise the display layer before re-attaching to the
+                // synchronizer. After an Atmos→PCM teardown the layer can
+                // be left in `.failed` (the -12080 we see in logs); a
+                // plain attach without flush gives the synchronizer a
+                // dead layer → video freeze. Mirror the inverse handoff
+                // sequence used in load() and the PCM→Atmos branch above.
+                videoRenderer.flushDisplayLayer()
                 audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                 audioOutput.start(at: seekTime)
             } catch {
@@ -147,18 +154,39 @@ extension AetherEngine {
 
     /// Tear down whichever audio engine is currently active.
     func tearDownCurrentAudioEngine() {
-        switch audioMode {
+        let previousMode = audioMode
+
+        // Flip the mode first so the atmos drain loops see audioMode != .atmos
+        // on their next iteration check and exit cleanly. Without this they
+        // can keep decoding into a flushed VideoDecoder during the switch
+        // (-12909 kVTVideoDecoderBadDataErr in the logs).
+        if previousMode == .atmos {
+            audioMode = .pcm
+        }
+
+        switch previousMode {
         case .atmos:
+            // Empty buffers so the drains terminate at the next emptiness
+            // check; then sync-barrier the queues so any in-flight iteration
+            // (decoder.decode + renderer back-pressure wait) is fully done
+            // before we touch the video pipeline below.
             clearAtmosBuffers()
+            atmosVideoQueue.sync { /* barrier */ }
+            atmosAudioQueue.sync { /* barrier */ }
+
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
+            // Layer was driven by controlTimebase, not the synchronizer —
+            // no detachVideoLayer here. Calling it for an unattached layer
+            // makes synchronizer.removeRenderer's completion never fire,
+            // and the semaphore wait blocks the main thread for 1 second.
         case .pcm:
             audioDecoder.flush()
             audioDecoder.close()
             audioOutput.flush()
+            audioOutput.detachVideoLayer(videoRenderer.displayLayer)
         }
-        audioOutput.detachVideoLayer(videoRenderer.displayLayer)
     }
 
     /// Fall back from HLS Atmos engine to FFmpeg PCM decode.

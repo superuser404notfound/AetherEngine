@@ -50,6 +50,15 @@ extension AetherEngine {
                     self.atmosAudioLock.unlock()
                     return
                 }
+                // Bail on track switch — feedAudioData can block up to 10s
+                // waiting for AVPlayer to start, which would in turn block
+                // tearDownCurrentAudioEngine's sync barrier.
+                guard self.audioMode == .atmos else {
+                    self.atmosAudioBuffer.removeAll()
+                    self.atmosAudioDrainActive = false
+                    self.atmosAudioLock.unlock()
+                    return
+                }
                 let packetData = self.atmosAudioBuffer.popFront()
                 self.atmosAudioLock.unlock()
 
@@ -78,16 +87,32 @@ extension AetherEngine {
                     self.atmosVideoLock.unlock()
                     return
                 }
+                // Audio-track switch flips audioMode to .pcm before tearing
+                // down the HLS engine. Bail at every loop entry so we don't
+                // race the switch and decode into a flushed VideoDecoder
+                // (-12909 in the logs).
+                guard self.audioMode == .atmos else {
+                    let packet = self.atmosVideoBuffer.popFront()
+                    av_packet_free_safe(packet)
+                    self.atmosVideoDrainActive = false
+                    self.atmosVideoLock.unlock()
+                    return
+                }
                 let packet = self.atmosVideoBuffer.popFront()
                 self.atmosVideoLock.unlock()
 
-                // Back-pressure on THIS thread (doesn't affect demux or audio)
-                while !self.videoRenderer.displayLayer.isReadyForMoreMediaData && !self.stopRequested {
+                // Back-pressure on THIS thread (doesn't affect demux or audio).
+                // The audioMode check exits immediately on a track switch —
+                // without it the wait can pin a paused-timebase layer forever
+                // and block tearDownCurrentAudioEngine's sync barrier.
+                while !self.videoRenderer.displayLayer.isReadyForMoreMediaData
+                    && !self.stopRequested
+                    && self.audioMode == .atmos {
                     Thread.sleep(forTimeInterval: 0.005)
                 }
-                guard !self.stopRequested else {
+                guard !self.stopRequested, self.audioMode == .atmos else {
                     av_packet_free_safe(packet)
-                    // Clear drainActive on stop-exit so the next load() can
+                    // Clear drainActive on early-exit so the next load() can
                     // start a fresh drain. Forgetting this made the second
                     // playback of the same file show a black screen.
                     self.atmosVideoLock.lock()
