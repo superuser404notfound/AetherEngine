@@ -80,12 +80,21 @@ extension AetherEngine {
                 try engine.prepare(stream: stream, startTime: seekTime)
                 hlsAudioEngine = engine
                 audioMode = .atmos
-                // See load() for the "why" — full handoff sequence to
-                // prevent the -12080 black-screen race when switching
-                // from a PCM track.
+                // Full handoff sequence:
+                //   1. detach from synchronizer (sync wait)
+                //   2. recreate the display layer — a layer that has been
+                //      attached to a synchronizer and is then handed a
+                //      controlTimebase enters Apple's "undefined behavior"
+                //      regime; on Marty Supreme this manifested as audio
+                //      lag that survived every snap, and after a scrub the
+                //      layer fast-forwarded through queued frames. F1
+                //      (Atmos-only, layer never sees the synchronizer)
+                //      didn't have either symptom — strong signal that
+                //      the layer's history is the cause. Recreating it
+                //      gives controlTimebase a fresh canvas.
+                //   3. flush + assign the new timebase on the new layer.
                 audioOutput.detachVideoLayer(videoRenderer.displayLayer)
-                videoRenderer.displayLayer.controlTimebase = nil
-                videoRenderer.flushDisplayLayer()
+                videoRenderer.recreateDisplayLayer()
                 videoRenderer.displayLayer.controlTimebase = engine.videoTimebase
             } catch {
                 fallbackToPCMAudio(stream: stream)
