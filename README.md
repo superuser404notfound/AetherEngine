@@ -88,7 +88,7 @@ Demux ──┬─ Video packets ──► Decode queue ──► AVSampleBuffer
                                                          └─► receiver / speaker
 ```
 
-The `AVSampleBufferDisplayLayer` is driven by a `CMTimebase` that tracks the `AVPlayer`'s clock. The HLS pipe takes 2-4 seconds to buffer; during that window the timebase is paused and video holds on frame 1, then both start together. Drift between the two clocks is auto-calibrated once per playback and corrected thereafter.
+The `AVSampleBufferDisplayLayer` is driven by a `CMTimebase` whose source is bound directly to `AVPlayerItem.timebase` via `CMTimebaseSetSourceTimebase`. The HLS pipe takes 2-4 seconds to buffer; during that window the timebase is paused and video holds on frame 1. Once `AVPlayer.timeControlStatus` flips to `.playing` and the item timebase is live, the bind is established and from that moment on video and audio share the same hardware-aware clock — including AVR / soundbar Atmos decoder latency, MAT 2.0 unpack delay, pre-roll, and pause/resume — without any periodic drift correction.
 
 If the active output route can't take multichannel — Bluetooth A2DP, HFP, LE, or any route reporting fewer than 6 output channels — AetherEngine skips the Atmos pipeline entirely and routes EAC3 through the regular FFmpeg PCM decoder, so you still get sound instead of silence. If a TV advertises Atmos in EDID but `AVPlayer` stalls anyway (some AVRs do this), a 5-second watchdog falls back to PCM automatically.
 
