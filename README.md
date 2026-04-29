@@ -160,7 +160,7 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 ## Used by
 
-- [JellySeeTV](https://github.com/superuser404notfound/JellySeeTV) — native Jellyfin client for Apple TV.
+- [Sodalite](https://github.com/superuser404notfound/Sodalite) — native Jellyfin client for Apple TV.
 
 ## Built with
 
