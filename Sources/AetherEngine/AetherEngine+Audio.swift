@@ -17,6 +17,56 @@ extension AetherEngine {
               let stream = demuxer.stream(at: streamIndex) else { return }
 
         let codecId = stream.pointee.codecpar?.pointee.codec_id
+        let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
+        let streamIsAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
+        let willBeAtmos = streamIsAtmos && canPassthroughAtmos()
+
+        // Hot-swap fast path for PCM → PCM track changes. A user
+        // flipping German AC3 to English AC3 (the common case) does
+        // not need a demuxer seek, a video pipeline flush, or a
+        // display-layer detach — the master clock keeps ticking, the
+        // video pipeline stays untouched, the demuxer keeps reading
+        // sequentially. Old-stream audio packets fall off as soon as
+        // we flip activeAudioStreamIndex (the demux dispatch checks
+        // stream_index == activeAudioStreamIndex), and new-stream
+        // packets arrive within a couple hundred milliseconds and
+        // route to the freshly opened decoder.
+        //
+        // Without this, the seek + skip-threshold + display-layer
+        // re-attach sequence below produces a visible video burst
+        // whenever the user just wants to swap audio languages.
+        //
+        // Cross-mode swaps (PCM↔Atmos) and Atmos↔Atmos both need the
+        // controlTimebase / synchronizer handoff and stay on the
+        // original reset path below.
+        if audioMode == .pcm && !willBeAtmos {
+            audioDecoder.flush()
+            audioDecoder.close()
+            activeAudioStreamIndex = streamIndex
+            do {
+                try audioDecoder.open(stream: stream)
+                // Drain any old-language frames that were queued
+                // ahead of the renderer so the language switch is
+                // audible immediately. Crucially, `flushRenderer-
+                // KeepingClock` does NOT reset `_isStarted`, so the
+                // synchronizer keeps the master clock running and
+                // the video display layer keeps presenting frames
+                // without a re-attach.
+                audioOutput.flushRendererKeepingClock()
+            } catch {
+                #if DEBUG
+                print("[AetherEngine] selectAudioTrack hot-swap failed: \(error) — disabling audio")
+                #endif
+                audioAvailable = false
+            }
+            #if os(iOS) || os(tvOS)
+            let contentCh = Int(stream.pointee.codecpar?.pointee.ch_layout.nb_channels ?? 2)
+            let maxCh = AVAudioSession.sharedInstance().maximumOutputNumberOfChannels
+            let preferred = max(2, min(contentCh, maxCh))
+            try? AVAudioSession.sharedInstance().setPreferredOutputNumberOfChannels(preferred)
+            #endif
+            return
+        }
 
         // Capture current time BEFORE tearing down the engine
         let seekSeconds = currentTime
@@ -47,9 +97,7 @@ extension AetherEngine {
         // Open new audio engine for the selected track.
         // Gate the Atmos path on the output route's passthrough capability
         // — a BT speaker can't accept the HLS multichannel stream.
-        let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
-        let streamIsAtmos = isEAC3 && (stream.pointee.codecpar?.pointee.profile == 30)
-        let isAtmos = streamIsAtmos && canPassthroughAtmos()
+        let isAtmos = willBeAtmos
         #if DEBUG
         if streamIsAtmos && !isAtmos {
             print("[AetherEngine] selectAudioTrack: Atmos stream on non-passthrough route → PCM")

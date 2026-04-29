@@ -144,6 +144,23 @@ final class AudioOutput: @unchecked Sendable {
         _isStarted = false
     }
 
+    /// Flush the renderer queue without resetting `_isStarted` or
+    /// stopping the synchronizer. Used when hot-swapping the audio
+    /// decoder mid-playback (e.g. an audio-track switch with the
+    /// same audio mode) — the master clock keeps ticking, the video
+    /// pipeline stays untouched, and only the queued audio samples
+    /// from the old track are dropped so the new language is heard
+    /// promptly. Without this, calling the regular flush would
+    /// reset `_isStarted = false`, and the synchronizer would stop
+    /// until a fresh `start(at:)` call jumped the clock — visually
+    /// the same fast-forward burst the cross-mode reset path
+    /// produces.
+    func flushRendererKeepingClock() {
+        lock.lock()
+        defer { lock.unlock() }
+        renderer.flush()
+    }
+
     /// Stop and tear down.
     func stop() {
         lock.lock()
