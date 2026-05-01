@@ -32,14 +32,21 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let channels: Int
     /// True if this track is marked as default in the container.
     public let isDefault: Bool
+    /// True if this is a Dolby Atmos track — currently means EAC3 with
+    /// the JOC (Joint Object Coding) profile, which is what every
+    /// streaming-quality Atmos elementary stream looks like in practice.
+    /// Lets the player UI surface "Atmos" instead of just the channel
+    /// count of the bed (typically 5.1).
+    public let isAtmos: Bool
 
-    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, isDefault: Bool) {
+    public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, isDefault: Bool, isAtmos: Bool = false) {
         self.id = id
         self.name = name
         self.codec = codec
         self.language = language
         self.channels = channels
         self.isDefault = isDefault
+        self.isAtmos = isAtmos
     }
 }
 

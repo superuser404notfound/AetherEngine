@@ -183,13 +183,22 @@ final class Demuxer {
         let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
         let channels = Int(codecpar.pointee.ch_layout.nb_channels)
 
+        // Atmos detection mirrors the gate used by the audio engine
+        // selectAudioTrack path: EAC3 with profile 30 = JOC, which is
+        // what every Dolby-Atmos-on-streaming elementary stream is in
+        // practice. Lets the UI label the row "Atmos" instead of just
+        // its bed channel count.
+        let isAtmos = (codecpar.pointee.codec_id == AV_CODEC_ID_EAC3)
+            && codecpar.pointee.profile == 30
+
         return TrackInfo(
             id: index,
             name: name,
             codec: codecName,
             language: language,
             channels: channels,
-            isDefault: isDefault
+            isDefault: isDefault,
+            isAtmos: isAtmos
         )
     }
 
