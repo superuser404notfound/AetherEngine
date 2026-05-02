@@ -3,6 +3,7 @@ import QuartzCore
 import CoreMedia
 import CoreVideo
 import AVFoundation
+import Compression
 import Libavformat
 import Libavcodec
 import Libavutil
@@ -206,6 +207,9 @@ public final class AetherEngine: ObservableObject {
     /// One-shot latch so the "PGS packets carry PES header" notice
     /// only logs once per session.
     nonisolated(unsafe) var pgsHeaderStripLogged: Bool = false
+    /// One-shot latch so the "subtitle packets are zlib-compressed"
+    /// notice only logs once per session.
+    nonisolated(unsafe) var zlibInflateLogged: Bool = false
 
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
@@ -817,6 +821,7 @@ public final class AetherEngine: ObservableObject {
         subtitleDecodeAttempts = 0
         subtitleDecodeSuccess = 0
         pgsHeaderStripLogged = false
+        zlibInflateLogged = false
         subtitleLock.unlock()
 
         // Some demuxers default subtitle streams to AVDISCARD_DEFAULT
@@ -1136,26 +1141,60 @@ public final class AetherEngine: ObservableObject {
     /// Decode wrapper that fixes up packets some Blu-ray-to-MKV tools
     /// store in non-standard form before handing them to FFmpeg.
     ///
-    /// **PGS with leading PES "PG" header** — the spec for MKV PGS
-    /// stores raw segments (`segment_type` + `segment_size` +
-    /// `payload`). Some converters leave the original PES PG header
-    /// (`'P','G'` magic + 4-byte pts + 4-byte dts = 10 bytes) at the
-    /// start of every block. With the header still attached, FFmpeg's
-    /// pgssubdec reads byte 0 = 0x50 as a segment type, fails to
-    /// recognise it, jumps the bogus length, and never sees the
-    /// trailing END (0x80) segment — so `got_sub_ptr` stays 0
-    /// forever. Strip the 10 bytes into a working copy before decode.
-    /// The check is cheap (two-byte sniff per packet) and a no-op for
-    /// any properly-stored PGS / DVB / DVD stream.
+    /// Two known quirks today:
+    ///
+    /// **zlib-compressed subtitle blocks.** Tools like the older mkvtoolnix
+    /// versions and many ripping suites apply zlib compression to subtitle
+    /// tracks via Matroska `ContentEncoding` — but with a flag combination
+    /// libavformat treats as "Unsupported encoding type", which causes it
+    /// to disable the encoding (`scope = 0`) and pass the raw compressed
+    /// bytes straight through to us. The zlib stream starts with `0x78`
+    /// (CMF = deflate / 32 KB window) and the second byte sets the
+    /// compression level (`0xDA` = best, `0x9C` = default, `0x01`/`0x5E`
+    /// also seen). When we see those at the start of a subtitle packet
+    /// we decompress before decode.
+    ///
+    /// **PGS with leading PES "PG" header.** Some converters leave the
+    /// original Blu-ray PES header (`'P','G'` magic + 4-byte pts +
+    /// 4-byte dts = 10 bytes) at the start of every PGS block. Decoder
+    /// reads byte 0 = 0x50 as an unknown segment type, jumps the bogus
+    /// length, never sees END, gotSub stays 0. Strip the 10 bytes if
+    /// present.
+    ///
+    /// Both checks are byte-sniffs — effectively free per packet for
+    /// standard streams.
     nonisolated private func decodeSubtitleWithFixups(
         ctx: UnsafeMutablePointer<AVCodecContext>,
         pkt: UnsafeMutablePointer<AVPacket>,
         sub: UnsafeMutablePointer<AVSubtitle>,
         gotSub: UnsafeMutablePointer<Int32>
     ) -> Int32 {
+        guard let data = pkt.pointee.data, pkt.pointee.size > 2 else {
+            return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
+        }
+
+        // 1. zlib-wrapped — applies to any subtitle codec since the
+        //    compression is at the container level, not the codec.
+        if data[0] == 0x78,
+           data[1] == 0x01 || data[1] == 0x5E || data[1] == 0x9C || data[1] == 0xDA {
+            if let decompressed = inflateZlibBlock(data, size: Int(pkt.pointee.size)) {
+                if !zlibInflateLogged {
+                    print("[Engine.subs] subtitle packets are zlib-compressed (matroska 'Unsupported encoding type' fallback) — inflating per block before decode")
+                    zlibInflateLogged = true
+                }
+                return decodeWithReplacedPayload(
+                    ctx: ctx,
+                    pkt: pkt,
+                    payload: decompressed,
+                    sub: sub,
+                    gotSub: gotSub
+                )
+            }
+        }
+
+        // 2. PGS PES-header strip.
         let isPGS = ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE
         if isPGS,
-           let data = pkt.pointee.data,
            pkt.pointee.size > 10,
            data[0] == 0x50, data[1] == 0x47 {
             if !pgsHeaderStripLogged {
@@ -1164,7 +1203,66 @@ public final class AetherEngine: ObservableObject {
             }
             return decodeWithStrippedPrefix(ctx: ctx, pkt: pkt, prefix: 10, sub: sub, gotSub: gotSub)
         }
+
         return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
+    }
+
+    /// Inflate a zlib-wrapped buffer. Wraps Apple's Compression
+    /// framework which expects raw DEFLATE — we strip the 2-byte zlib
+    /// header and the trailing 4-byte Adler-32. Returns nil if the
+    /// data isn't valid zlib or fits into none of the destination
+    /// sizes we try.
+    nonisolated private func inflateZlibBlock(_ src: UnsafePointer<UInt8>, size: Int) -> [UInt8]? {
+        guard size > 6 else { return nil }
+        let deflateStart = src.advanced(by: 2)
+        let deflateSize = size - 2 - 4
+
+        // Subtitle blocks decompress to anywhere from a few hundred
+        // bytes (PCS + WDS + END) up to ~50× their input size for
+        // PGS bitmaps. Start with 8× and grow by 2× up to 8 MB.
+        var dstCapacity = max(size * 8, 4096)
+        let maxCapacity = 8 * 1024 * 1024
+        while dstCapacity <= maxCapacity {
+            let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: dstCapacity)
+            defer { dst.deallocate() }
+            let written = compression_decode_buffer(
+                dst, dstCapacity,
+                deflateStart, deflateSize,
+                nil, COMPRESSION_ZLIB
+            )
+            if written > 0 && written < dstCapacity {
+                return Array(UnsafeBufferPointer(start: dst, count: written))
+            }
+            if written == 0 { return nil }
+            dstCapacity *= 2
+        }
+        return nil
+    }
+
+    /// Build a transient AVPacket whose data points at a Swift-owned
+    /// padded buffer (the inflated payload), hand it to the decoder,
+    /// and let the buffer drop when the closure returns.
+    nonisolated private func decodeWithReplacedPayload(
+        ctx: UnsafeMutablePointer<AVCodecContext>,
+        pkt: UnsafeMutablePointer<AVPacket>,
+        payload: [UInt8],
+        sub: UnsafeMutablePointer<AVSubtitle>,
+        gotSub: UnsafeMutablePointer<Int32>
+    ) -> Int32 {
+        let paddingSize = 64
+        var buffer = payload
+        buffer.append(contentsOf: repeatElement(0, count: paddingSize))
+        return buffer.withUnsafeMutableBufferPointer { bufPtr -> Int32 in
+            var temp = AVPacket()
+            temp.data = bufPtr.baseAddress
+            temp.size = Int32(payload.count)
+            temp.pts = pkt.pointee.pts
+            temp.dts = pkt.pointee.dts
+            temp.duration = pkt.pointee.duration
+            temp.stream_index = pkt.pointee.stream_index
+            temp.flags = pkt.pointee.flags
+            return avcodec_decode_subtitle2(ctx, sub, gotSub, &temp)
+        }
     }
 
     /// Build a transient AVPacket whose data points at a Swift-owned
