@@ -36,6 +36,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Audio       | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM                                                             |
 | Dolby Atmos | EAC3+JOC passthrough — local HLS + AVPlayer → Dolby MAT 2.0 wrapping                                                       |
 | Surround    | 5.1 / 7.1 with correct `AudioChannelLayout` tagging                                                                         |
+| Subtitles   | SubRip / ASS / SSA / WebVTT / mov_text streamed inline; PGS / HDMV PGS / DVB / DVD rendered as `CGImage` with normalised position; sidecar `.srt` / `.ass` / `.vtt` URLs decoded via short-lived context |
 | Seek        | Decoder + renderer flush, pre-target frame skip — no "fast forward from keyframe" artifact                                 |
 | Streaming   | HTTP Range + chunked delegate reads via `URLSession`                                                                        |
 | Resilience  | Exponential backoff on transient network errors, background pause, display-link aware lifecycle                             |
@@ -65,6 +66,15 @@ player.$videoFormat   // .sdr, .hdr10, .dolbyVision, .hlg
 
 player.audioTracks    // [TrackInfo]
 player.selectAudioTrack(index: trackID)
+
+// Subtitles — text and bitmap, one published list
+player.subtitleTracks                          // [TrackInfo] for the loaded source
+player.selectSubtitleTrack(index: streamID)    // embedded — text or bitmap
+player.selectSidecarSubtitle(url: srtURL)      // .srt / .ass / .vtt next to the media
+player.clearSubtitle()
+player.$subtitleCues                           // [SubtitleCue] — body is .text(String) or .image(SubtitleImage)
+player.$isSubtitleActive                       // host mirror gate
+player.$isLoadingSubtitles                     // sidecar fetch + decode in progress
 ```
 
 Install via Swift Package Manager:
@@ -106,18 +116,31 @@ HDR → SDR tonemapping runs through a dedicated `VTPixelTransferSession` with a
 
 On tvOS, the display layer opts into `preferredDynamicRange = .high` so the compositor doesn't silently clip BT.2020 pixels to Rec.709 after the TV has been told to switch to HDR.
 
+## Subtitles
+
+Subtitle packets are routed through the same demux loop as audio and video — no second AVIO connection, no full-file scan. Each packet decodes inline through `avcodec_decode_subtitle2`, the result lands in a single `[SubtitleCue]` published list:
+
+- **Text codecs** (SubRip / ASS / SSA / WebVTT / mov_text) → `SubtitleCue.body = .text(String)`. ASS dialogue headers and override blocks (`{\an8}`, `{\b1}`, ...) are stripped; `\N` becomes a real newline so the host can render with regular text layout.
+- **Bitmap codecs** (PGS / HDMV PGS / DVB / DVD) → `.image(SubtitleImage)`. The indexed pixel plane is walked through its palette, premultiplied against alpha, and wrapped as a `CGImage`. Position is normalised in `[0..1]` against the source video frame so the host scales to any on-screen rect.
+- **Sidecar files** (a separate `.srt` / `.ass` / `.vtt` URL) → `selectSidecarSubtitle(url:)` opens its own short-lived `AVFormatContext`, decodes the whole file once, atomically swaps the result into `subtitleCues`.
+
+A single packet that carries multiple rects (PGS often emits signs/songs at the top alongside dialogue at the bottom) becomes multiple cues at the same time range — the host renders all of them. Cues are inserted in sorted order; backward seeks dedupe by `start|end` so the list doesn't grow on rewind.
+
+The host stays in charge of the actual paint: text styling, overlay layout, fade transitions, position scaling against the on-screen video rect.
+
 ## Architecture
 
 ```
 Sources/AetherEngine/
-├── AetherEngine.swift             Public API + demux/decode orchestration
-├── PlayerState.swift              PlaybackState, VideoFormat, TrackInfo
+├── AetherEngine.swift             Public API + demux/decode orchestration + subtitle stream decode
+├── PlayerState.swift              PlaybackState, VideoFormat, TrackInfo, SubtitleCue, SubtitleImage
 ├── Demuxer/
 │   ├── Demuxer.swift              libavformat wrapper
 │   └── AVIOReader.swift           URLSession → avio_alloc_context
 ├── Decoder/
 │   ├── VideoDecoder.swift         VideoToolbox + HDR tonemap
-│   └── SoftwareVideoDecoder.swift dav1d / libavcodec fallback
+│   ├── SoftwareVideoDecoder.swift dav1d / libavcodec fallback
+│   └── SubtitleDecoder.swift      Sidecar URL one-shot decode (text only)
 ├── Renderer/
 │   └── SampleBufferRenderer.swift Display layer + B-frame reorder
 └── Audio/
@@ -144,7 +167,7 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 - No built-in UI. No controls, no transport bar, no pretty HUD.
 - No analytics, telemetry, or session reporting. Wire your own to the `@Published` state.
 - No playlist / queue management. Call `load(url:)` when you want the next one.
-- No built-in subtitle rendering. The demuxer extracts tracks; your UI layer paints them.
+- No subtitle overlay. The engine decodes packets and emits `SubtitleCue` (text or `CGImage` with normalised position); your UI paints them with whatever style and animation you want.
 - No Metal shaders. Everything renders through Apple's native display stack.
 - No third-party networking. `URLSession` handles bytes; TLS / HTTP-3 / proxies / MDM rules ride for free.
 
