@@ -918,6 +918,39 @@ public final class AetherEngine: ObservableObject {
         subtitleDecodeAttempts += 1
         if subtitleDecodeAttempts <= 3 {
             print("[Engine.subs] decode attempt#\(subtitleDecodeAttempts) ret=\(ret) gotSub=\(gotSub) pktSize=\(pkt.pointee.size) pts=\(pkt.pointee.pts) duration=\(pkt.pointee.duration)")
+            dumpSubtitlePacket(pkt, attempt: subtitleDecodeAttempts)
+        }
+
+        // Some MKV converters drop the trailing END segment (0x80) on
+        // PGS, so the decoder accumulates state but never gets the
+        // signal to emit. If gotSub is still 0 after the real packet
+        // and the codec is PGS, feed a synthetic END to flush —
+        // duplicate END would give AVERROR_INVALIDDATA which we just
+        // ignore, but for the missing-END case it produces the cue.
+        if gotSub == 0,
+           ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE,
+           pkt.pointee.size > 30 {
+            var endBytes: [UInt8] = [0x80, 0x00, 0x00,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                     0, 0, 0, 0, 0, 0, 0, 0, 0]
+            endBytes.withUnsafeMutableBufferPointer { buf in
+                var endPkt = AVPacket()
+                endPkt.data = buf.baseAddress
+                endPkt.size = 3
+                endPkt.pts = pkt.pointee.pts
+                endPkt.dts = pkt.pointee.dts
+                endPkt.duration = pkt.pointee.duration
+                endPkt.stream_index = pkt.pointee.stream_index
+                _ = avcodec_decode_subtitle2(ctx, &sub, &gotSub, &endPkt)
+            }
+            if subtitleDecodeAttempts <= 5 {
+                print("[Engine.subs] synthetic-END flush: gotSub=\(gotSub) (codec needed an END segment that wasn't in the packet)")
+            }
         }
 
         guard ret >= 0, gotSub != 0 else {
@@ -1058,6 +1091,34 @@ public final class AetherEngine: ObservableObject {
             return cleanASSBody(raw)
         }
         return nil
+    }
+
+    /// Diagnostic — dumps the first 16 bytes of a subtitle packet
+    /// plus a heuristic scan of segment headers (`type` + 16-bit
+    /// `length`). Used during the first three packets after a
+    /// track switch so a `log stream` capture pinpoints whether a
+    /// failure to produce cues is from a bogus prefix (PG magic),
+    /// missing END (0x80) segment, or genuinely unparseable data.
+    nonisolated private func dumpSubtitlePacket(_ pkt: UnsafeMutablePointer<AVPacket>, attempt: Int) {
+        guard let data = pkt.pointee.data, pkt.pointee.size > 0 else { return }
+        let pktSize = Int(pkt.pointee.size)
+
+        var hex = ""
+        for i in 0..<min(16, pktSize) {
+            hex += String(format: "%02x ", data[i])
+        }
+
+        var segments: [String] = []
+        var off = 0
+        while off + 3 <= pktSize, segments.count < 8 {
+            let segType = data[off]
+            let segLen = (Int(data[off + 1]) << 8) | Int(data[off + 2])
+            segments.append(String(format: "0x%02x(%d)", segType, segLen))
+            off += 3 + segLen
+            if segLen < 0 || off > pktSize { break }
+        }
+        let segText = segments.joined(separator: ",")
+        print("[Engine.subs] pkt#\(attempt) hex16=\(hex)| segments=[\(segText)]")
     }
 
     /// Codecs that emit bitmap (graphic) subtitle rects rather than
