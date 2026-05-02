@@ -43,16 +43,20 @@ final class Demuxer {
 
     /// Open a local file URL via FFmpeg's built-in file protocol.
     private func openLocal(url: URL) throws {
-        var ctx: UnsafeMutablePointer<AVFormatContext>?
-        let urlString = url.isFileURL ? url.path : url.absoluteString
+        var ctx: UnsafeMutablePointer<AVFormatContext>? = avformat_alloc_context()
+        guard let allocated = ctx else {
+            throw DemuxerError.openFailed(code: -1)
+        }
+        applyProbeBudget(allocated)
 
+        let urlString = url.isFileURL ? url.path : url.absoluteString
         let ret = avformat_open_input(&ctx, urlString, nil, nil)
-        guard ret == 0, let ctx = ctx else {
+        guard ret == 0, let openedCtx = ctx else {
             throw DemuxerError.openFailed(code: ret)
         }
-        formatContext = ctx
+        formatContext = openedCtx
 
-        try probeStreams(ctx)
+        try probeStreams(openedCtx)
     }
 
     /// Open an HTTP(S) URL via custom AVIO context + URLSession.
@@ -67,6 +71,7 @@ final class Demuxer {
             throw DemuxerError.openFailed(code: -1)
         }
         ctx.pointee.pb = reader.context
+        applyProbeBudget(ctx)
         formatContext = ctx
 
         // 3. Open input — pass nil for URL since pb is already set
@@ -82,6 +87,20 @@ final class Demuxer {
         formatContext = ctxPtr
 
         try probeStreams(ctxPtr!)
+    }
+
+    /// Default probe budgets are tuned for live network streams — 5 MB
+    /// of bytes and ~5 seconds of analysed content. For big container
+    /// files (10–20 GB Blu-ray rips) with sparse subtitle streams that
+    /// budget runs out before libavformat sees a single PGS / DVB
+    /// presentation segment, leaving those tracks with no codec
+    /// parameters and the decoder unable to assemble cues. Bumping
+    /// to 50 MB / 60 s gives the probe enough material without
+    /// noticeably slowing playback start (LAN can move 50 MB in
+    /// well under a second).
+    private func applyProbeBudget(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        ctx.pointee.probesize = 50 * 1024 * 1024
+        ctx.pointee.max_analyze_duration = 60 * 1_000_000
     }
 
     /// Common stream probing after open.

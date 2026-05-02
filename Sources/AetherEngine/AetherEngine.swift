@@ -783,6 +783,18 @@ public final class AetherEngine: ObservableObject {
             return
         }
 
+        // Bitmap subtitle codecs author their bitmaps against a known
+        // canvas (the source video frame). The probe step often can't
+        // determine those dimensions when the file is big and the
+        // sub stream sparse — codec context comes back with width=0
+        // and the decoder rejects later segments. Seed from the
+        // captured video frame size as a fallback; the PCS will
+        // overwrite once it arrives.
+        if isBitmapSubtitleCodec(codecpar.pointee.codec_id) {
+            if ctx.pointee.width == 0 { ctx.pointee.width = videoFrameWidth }
+            if ctx.pointee.height == 0 { ctx.pointee.height = videoFrameHeight }
+        }
+
         if avcodec_open2(ctx, codec, nil) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
@@ -1042,6 +1054,18 @@ public final class AetherEngine: ObservableObject {
             return cleanASSBody(raw)
         }
         return nil
+    }
+
+    /// Codecs that emit bitmap (graphic) subtitle rects rather than
+    /// text. Bitmap decoders need the canvas dimensions from the
+    /// container to correctly position rects; these are also the
+    /// codecs we seed `videoFrameWidth/Height` into when the probe
+    /// missed them.
+    nonisolated private func isBitmapSubtitleCodec(_ codecID: AVCodecID) -> Bool {
+        return codecID == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+            || codecID == AV_CODEC_ID_DVB_SUBTITLE
+            || codecID == AV_CODEC_ID_DVD_SUBTITLE
+            || codecID == AV_CODEC_ID_XSUB
     }
 
     nonisolated private static func cleanASSBody(_ raw: String) -> String? {
