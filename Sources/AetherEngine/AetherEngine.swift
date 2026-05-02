@@ -53,16 +53,22 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
-    /// Decoded subtitle cues for the currently selected text-subtitle
-    /// stream. Empty when no track is selected, when the stream is still
-    /// loading, or when the stream is a graphic format the engine doesn't
-    /// decode yet (host falls back to its own path in that case).
+    /// Decoded subtitle cues for the active subtitle source — either
+    /// an embedded stream (text codec) routed through the main demux
+    /// loop, or a sidecar file URL fully decoded up-front. Empty when
+    /// no subtitle is active or the source is a graphic format the
+    /// engine doesn't render yet.
     @Published public private(set) var subtitleCues: [SubtitleCue] = []
-    /// True while `selectSubtitleTrack` is decoding the chosen stream.
-    /// The host can show a spinner without having to track this itself.
+    /// True while a sidecar file is being downloaded + decoded.
+    /// Embedded tracks populate cues lazily as the demuxer reads
+    /// packets, so this stays false for those.
     @Published public private(set) var isLoadingSubtitles: Bool = false
-    /// Stream index currently driving `subtitleCues`. nil means "off".
-    @Published public private(set) var currentSubtitleStreamIndex: Int?
+    /// True when the engine is the active subtitle source — a
+    /// `selectSubtitleTrack` or `selectSidecarSubtitle` call is in
+    /// effect. Goes false on `clearSubtitle`. The host should mirror
+    /// `subtitleCues` only while this is true so a parallel HTTP
+    /// fallback path doesn't get clobbered.
+    @Published public private(set) var isSubtitleActive: Bool = false
 
     // MARK: - Output
 
@@ -87,6 +93,11 @@ public final class AetherEngine: ObservableObject {
     /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
     /// after background suspension invalidates VT sessions and AVIO.
     var loadedURL: URL?
+
+    /// In-flight sidecar subtitle decode (separate AVFormatContext
+    /// on a small text file). Cancelled on subtitle clear / track
+    /// switch so a stale decode can't overwrite fresh cues.
+    private var sidecarTask: Task<Void, Never>?
 
     // MARK: - Internal Pipeline
 
@@ -719,12 +730,13 @@ public final class AetherEngine: ObservableObject {
     /// back to its server-extraction path for those.
     public func selectSubtitleTrack(index: Int) {
         closeSubtitleDecoder()
+        cancelSidecarTask()
 
         guard let stream = demuxer.stream(at: Int32(index)),
               let codecpar = stream.pointee.codecpar,
               codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
         else {
-            currentSubtitleStreamIndex = nil
+            isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
             return
@@ -733,7 +745,7 @@ public final class AetherEngine: ObservableObject {
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id),
               let ctx = avcodec_alloc_context3(codec)
         else {
-            currentSubtitleStreamIndex = nil
+            isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
             return
@@ -742,7 +754,7 @@ public final class AetherEngine: ObservableObject {
         if avcodec_parameters_to_context(ctx, codecpar) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
-            currentSubtitleStreamIndex = nil
+            isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
             return
@@ -751,7 +763,7 @@ public final class AetherEngine: ObservableObject {
         if avcodec_open2(ctx, codec, nil) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
-            currentSubtitleStreamIndex = nil
+            isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
             return
@@ -764,18 +776,65 @@ public final class AetherEngine: ObservableObject {
         seenSubtitleKeys = []
         subtitleLock.unlock()
 
-        currentSubtitleStreamIndex = index
+        isSubtitleActive = true
         subtitleCues = []
         isLoadingSubtitles = false
     }
 
+    /// Decode a sidecar subtitle file (`.srt` / `.ass` / `.vtt` / `.ssa`
+    /// served alongside the media). The whole file is fetched and
+    /// decoded up-front via `SubtitleDecoder.decodeFile`, then the
+    /// resulting cues replace `subtitleCues` atomically. `isLoadingSubtitles`
+    /// flips on for the duration so the host can show a spinner.
+    /// Subsequent calls cancel any in-flight sidecar decode.
+    public func selectSidecarSubtitle(url: URL) {
+        closeSubtitleDecoder()
+        cancelSidecarTask()
+
+        isSubtitleActive = true
+        subtitleCues = []
+        isLoadingSubtitles = true
+
+        sidecarTask = Task { [weak self] in
+            let cues: [SubtitleCue]
+            do {
+                cues = try await SubtitleDecoder.decodeFile(url: url)
+            } catch {
+                #if DEBUG
+                print("[AetherEngine] sidecar decode failed: \(error)")
+                #endif
+                await MainActor.run {
+                    guard let self = self else { return }
+                    if self.isSubtitleActive {
+                        self.isLoadingSubtitles = false
+                    }
+                }
+                return
+            }
+
+            await MainActor.run {
+                guard let self = self else { return }
+                // Drop late results if the host switched away.
+                guard self.isSubtitleActive else { return }
+                self.subtitleCues = cues
+                self.isLoadingSubtitles = false
+            }
+        }
+    }
+
     /// Turn subtitles off and clear cached cues. Closes the active
-    /// subtitle codec context.
+    /// embedded subtitle codec context and cancels any sidecar task.
     public func clearSubtitle() {
         closeSubtitleDecoder()
-        currentSubtitleStreamIndex = nil
+        cancelSidecarTask()
+        isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false
+    }
+
+    private func cancelSidecarTask() {
+        sidecarTask?.cancel()
+        sidecarTask = nil
     }
 
     nonisolated private func closeSubtitleDecoder() {
