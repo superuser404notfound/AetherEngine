@@ -153,6 +153,27 @@ public final class AetherEngine: ObservableObject {
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
+    /// Set to true by the demux loop the first time an audio packet
+    /// flows through to the renderer (audioOutput.start fires for
+    /// PCM, first segment fed to AVPlayer for Atmos). `load()` polls
+    /// this before returning so the engine guarantees that, by the
+    /// time `await load(...)` resumes the caller, the synchronizer
+    /// is fully wired up — without it, an immediate `pause()` from
+    /// the caller races the demux loop's `audioOutput.start(at:)`
+    /// call and leaves the synchronizer's clock running at rate 1
+    /// while the engine state is `.paused`. Resume after that race
+    /// would render one stale frame and stall.
+    private let audioFlowLock = NSLock()
+    nonisolated(unsafe) private var _isAudioFlowing: Bool = false
+    nonisolated var isAudioFlowing: Bool {
+        get { audioFlowLock.lock(); defer { audioFlowLock.unlock() }; return _isAudioFlowing }
+        set {
+            audioFlowLock.lock()
+            _isAudioFlowing = newValue
+            audioFlowLock.unlock()
+        }
+    }
+
     nonisolated var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
@@ -244,6 +265,7 @@ public final class AetherEngine: ObservableObject {
         videoFormat = .sdr
         audioAvailable = false
         stopRequested = false
+        isAudioFlowing = false
 
         #if DEBUG
         print("[AetherEngine] Loading: \(url.absoluteString)")
@@ -501,6 +523,27 @@ public final class AetherEngine: ObservableObject {
             #if DEBUG
             print("[AetherEngine] Playback started (duration=\(String(format: "%.1f", duration))s)")
             #endif
+
+            // Wait for the demux loop to confirm audio is actually
+            // flowing through before returning. Without this, a
+            // caller that awaits `load(...)` and immediately calls
+            // `pause()` races the demux loop's first audioOutput.
+            // start() / HLS feed — the synchronizer's clock then
+            // advances past the renderer queue and resume after
+            // pause renders one stale frame and stalls. Capped at
+            // 2s so audio-less files (or unusual containers without
+            // an audio stream) still let load() return.
+            if audioAvailable {
+                let deadline = Date().addingTimeInterval(2.0)
+                while !isAudioFlowing && Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 10_000_000) // 10ms poll
+                }
+                #if DEBUG
+                if !isAudioFlowing {
+                    print("[AetherEngine] Audio flow timeout — load() returning anyway")
+                }
+                #endif
+            }
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
@@ -863,6 +906,12 @@ public final class AetherEngine: ObservableObject {
                             self.atmosAudioBuffer.append(packetData)
                             self.atmosAudioLock.unlock()
                             self.startAtmosAudioDrain()
+                            // Atmos parallel of the PCM signal: as
+                            // soon as a packet has been routed into
+                            // the HLS pipeline, downstream consumers
+                            // can rely on `await load(...)` having
+                            // returned with a settled engine.
+                            self.isAudioFlowing = true
                         }
 
                     case .pcm:
@@ -873,6 +922,10 @@ public final class AetherEngine: ObservableObject {
                         if !audioStarted && !sampleBuffers.isEmpty {
                             audioOutput.start(at: initialAudioTime)
                             audioStarted = true
+                            // Signal load() that the synchronizer is
+                            // now driving samples — safe to release
+                            // the caller from `await load(...)`.
+                            self.isAudioFlowing = true
                         }
                     }
                 }
