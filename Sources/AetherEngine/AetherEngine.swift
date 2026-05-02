@@ -197,20 +197,6 @@ public final class AetherEngine: ObservableObject {
     nonisolated(unsafe) var videoFrameWidth: Int32 = 0
     nonisolated(unsafe) var videoFrameHeight: Int32 = 0
 
-    /// Diagnostic counters for the subtitle pipeline. Reset on every
-    /// track switch; printed periodically from the decode hot path so
-    /// silent failures (codec produced no cues, demuxer never feeds
-    /// the chosen stream, etc.) leave a trail in `log stream`.
-    nonisolated(unsafe) var subtitlePacketsSeen: Int = 0
-    nonisolated(unsafe) var subtitleDecodeAttempts: Int = 0
-    nonisolated(unsafe) var subtitleDecodeSuccess: Int = 0
-    /// One-shot latch so the "PGS packets carry PES header" notice
-    /// only logs once per session.
-    nonisolated(unsafe) var pgsHeaderStripLogged: Bool = false
-    /// One-shot latch so the "subtitle packets are zlib-compressed"
-    /// notice only logs once per session.
-    nonisolated(unsafe) var zlibInflateLogged: Bool = false
-
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
@@ -755,7 +741,6 @@ public final class AetherEngine: ObservableObject {
     /// text — `subtitleCues` stays empty and the host should fall
     /// back to its server-extraction path for those.
     public func selectSubtitleTrack(index: Int) {
-        print("[Engine.subs] selectSubtitleTrack index=\(index)")
         closeSubtitleDecoder()
         cancelSidecarTask()
 
@@ -763,7 +748,6 @@ public final class AetherEngine: ObservableObject {
               let codecpar = stream.pointee.codecpar,
               codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
         else {
-            print("[Engine.subs] ✗ stream \(index) is not a subtitle stream (or out of range)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -773,7 +757,6 @@ public final class AetherEngine: ObservableObject {
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id),
               let ctx = avcodec_alloc_context3(codec)
         else {
-            print("[Engine.subs] ✗ no decoder for codec_id=\(codecpar.pointee.codec_id.rawValue) on stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -783,7 +766,6 @@ public final class AetherEngine: ObservableObject {
         if avcodec_parameters_to_context(ctx, codecpar) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
-            print("[Engine.subs] ✗ avcodec_parameters_to_context failed for stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -805,7 +787,6 @@ public final class AetherEngine: ObservableObject {
         if avcodec_open2(ctx, codec, nil) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
-            print("[Engine.subs] ✗ avcodec_open2 failed for stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -817,11 +798,6 @@ public final class AetherEngine: ObservableObject {
         activeSubtitleStreamIndex = Int32(index)
         subtitleCueIDCounter = 0
         seenSubtitleKeys = []
-        subtitlePacketsSeen = 0
-        subtitleDecodeAttempts = 0
-        subtitleDecodeSuccess = 0
-        pgsHeaderStripLogged = false
-        zlibInflateLogged = false
         subtitleLock.unlock()
 
         // Some demuxers default subtitle streams to AVDISCARD_DEFAULT
@@ -829,10 +805,6 @@ public final class AetherEngine: ObservableObject {
         // useless. Force NONE on the active stream so every byte
         // makes it to av_read_frame.
         stream.pointee.discard = AVDISCARD_NONE
-
-        let codecName = String(cString: codec.pointee.name)
-        let videoW = videoFrameWidth, videoH = videoFrameHeight
-        print("[Engine.subs] ✓ codec=\(codecName) stream=\(index) videoFrame=\(videoW)x\(videoH)")
 
         isSubtitleActive = true
         subtitleCues = []
@@ -920,11 +892,6 @@ public final class AetherEngine: ObservableObject {
         var sub = AVSubtitle()
         var gotSub: Int32 = 0
         let ret = decodeSubtitleWithFixups(ctx: ctx, pkt: pkt, sub: &sub, gotSub: &gotSub)
-        subtitleDecodeAttempts += 1
-        if subtitleDecodeAttempts <= 3 {
-            print("[Engine.subs] decode attempt#\(subtitleDecodeAttempts) ret=\(ret) gotSub=\(gotSub) pktSize=\(pkt.pointee.size) pts=\(pkt.pointee.pts) duration=\(pkt.pointee.duration)")
-            dumpSubtitlePacket(pkt, attempt: subtitleDecodeAttempts)
-        }
 
         // Some MKV converters drop the trailing END segment (0x80) on
         // PGS, so the decoder accumulates state but never gets the
@@ -953,16 +920,13 @@ public final class AetherEngine: ObservableObject {
                 endPkt.stream_index = pkt.pointee.stream_index
                 _ = avcodec_decode_subtitle2(ctx, &sub, &gotSub, &endPkt)
             }
-            if subtitleDecodeAttempts <= 5 {
-                print("[Engine.subs] synthetic-END flush: gotSub=\(gotSub) (codec needed an END segment that wasn't in the packet)")
-            }
         }
 
         guard ret >= 0, gotSub != 0 else {
             subtitleLock.unlock()
             return
         }
-        subtitleDecodeSuccess += 1
+        _ = ret
 
         let timeBase = stream.pointee.time_base
         let tbSec = Double(timeBase.num) / Double(timeBase.den)
@@ -999,14 +963,9 @@ public final class AetherEngine: ObservableObject {
         // becomes its own cue at the same time range.
         var bodies: [SubtitleCue.Body] = []
         var textLines: [String] = []
-        var rectGeometry: [String] = []
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
-                if subtitleDecodeSuccess <= 20 {
-                    let r = rect.pointee
-                    rectGeometry.append("rect(x=\(r.x) y=\(r.y) w=\(r.w) h=\(r.h) type=\(r.type.rawValue))")
-                }
                 if let text = Self.textForSubtitleRect(rect) {
                     textLines.append(text)
                 } else if let image = Self.imageForSubtitleRect(
@@ -1045,30 +1004,6 @@ public final class AetherEngine: ObservableObject {
         guard !isClearEvent || isPGSCodec else {
             subtitleLock.unlock()
             return
-        }
-
-        // Log every bitmap cue for the first 20 successes so a
-        // capture from a session covers both `forced` and `full`
-        // PGS variants — they often differ in author-supplied rect
-        // positions and that's exactly what we need to compare.
-        let hasImage = bodies.contains { if case .image = $0 { return true } else { return false } }
-        if subtitleDecodeSuccess <= 20 && (hasImage || subtitleDecodeSuccess <= 3) {
-            let bodyDesc: String
-            if bodies.isEmpty {
-                bodyDesc = "<clear>"
-            } else {
-                bodyDesc = bodies.map { body -> String in
-                    switch body {
-                    case .text(let s): return "text(\(s.prefix(40)))"
-                    case .image(let img):
-                        let p = img.position
-                        let pStr = String(format: "(%.3f,%.3f,%.3f,%.3f)", p.minX, p.minY, p.width, p.height)
-                        return "image(\(img.cgImage.width)x\(img.cgImage.height) norm=\(pStr))"
-                    }
-                }.joined(separator: ", ")
-            }
-            let geom = rectGeometry.isEmpty ? "" : " " + rectGeometry.joined(separator: " ")
-            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) canvas=\(canvasW)x\(canvasH) bodies=[\(bodyDesc)]\(geom)")
         }
 
         // Dedupe full duplicate non-empty events; keep clear events
@@ -1166,34 +1101,6 @@ public final class AetherEngine: ObservableObject {
         return nil
     }
 
-    /// Diagnostic — dumps the first 16 bytes of a subtitle packet
-    /// plus a heuristic scan of segment headers (`type` + 16-bit
-    /// `length`). Used during the first three packets after a
-    /// track switch so a `log stream` capture pinpoints whether a
-    /// failure to produce cues is from a bogus prefix (PG magic),
-    /// missing END (0x80) segment, or genuinely unparseable data.
-    nonisolated private func dumpSubtitlePacket(_ pkt: UnsafeMutablePointer<AVPacket>, attempt: Int) {
-        guard let data = pkt.pointee.data, pkt.pointee.size > 0 else { return }
-        let pktSize = Int(pkt.pointee.size)
-
-        var hex = ""
-        for i in 0..<min(16, pktSize) {
-            hex += String(format: "%02x ", data[i])
-        }
-
-        var segments: [String] = []
-        var off = 0
-        while off + 3 <= pktSize, segments.count < 8 {
-            let segType = data[off]
-            let segLen = (Int(data[off + 1]) << 8) | Int(data[off + 2])
-            segments.append(String(format: "0x%02x(%d)", segType, segLen))
-            off += 3 + segLen
-            if segLen < 0 || off > pktSize { break }
-        }
-        let segText = segments.joined(separator: ",")
-        print("[Engine.subs] pkt#\(attempt) hex16=\(hex)| segments=[\(segText)]")
-    }
-
     /// Codecs that emit bitmap (graphic) subtitle rects rather than
     /// text. Bitmap decoders need the canvas dimensions from the
     /// container to correctly position rects; these are also the
@@ -1245,10 +1152,6 @@ public final class AetherEngine: ObservableObject {
         if data[0] == 0x78,
            data[1] == 0x01 || data[1] == 0x5E || data[1] == 0x9C || data[1] == 0xDA {
             if let decompressed = inflateZlibBlock(data, size: Int(pkt.pointee.size)) {
-                if !zlibInflateLogged {
-                    print("[Engine.subs] subtitle packets are zlib-compressed (matroska 'Unsupported encoding type' fallback) — inflating per block before decode")
-                    zlibInflateLogged = true
-                }
                 return decodeWithReplacedPayload(
                     ctx: ctx, pkt: pkt, payload: decompressed,
                     sub: sub, gotSub: gotSub
@@ -1261,10 +1164,6 @@ public final class AetherEngine: ObservableObject {
         if pkt.pointee.size > 18,
            data[0] == 0x1F, data[1] == 0x8B {
             if let decompressed = inflateGzipBlock(data, size: Int(pkt.pointee.size)) {
-                if !zlibInflateLogged {
-                    print("[Engine.subs] subtitle packets are gzip-compressed — inflating per block before decode")
-                    zlibInflateLogged = true
-                }
                 return decodeWithReplacedPayload(
                     ctx: ctx, pkt: pkt, payload: decompressed,
                     sub: sub, gotSub: gotSub
@@ -1277,10 +1176,6 @@ public final class AetherEngine: ObservableObject {
         if isPGS,
            pkt.pointee.size > 10,
            data[0] == 0x50, data[1] == 0x47 {
-            if !pgsHeaderStripLogged {
-                print("[Engine.subs] PGS packets carry leading 'PG' PES header — stripping 10 bytes per block before decode")
-                pgsHeaderStripLogged = true
-            }
             return decodeWithStrippedPrefix(ctx: ctx, pkt: pkt, prefix: 10, sub: sub, gotSub: gotSub)
         }
 
@@ -1843,15 +1738,8 @@ public final class AetherEngine: ObservableObject {
                     // codecs are cheap (a few microseconds each) so we
                     // don't bother offloading; cues land on the main
                     // actor through `decodeSubtitlePacket`.
-                    self.subtitlePacketsSeen += 1
-                    if self.subtitlePacketsSeen == 1 {
-                        print("[Engine.subs] first subtitle packet on stream \(streamIdx) pts=\(packet.pointee.pts) size=\(packet.pointee.size)")
-                    }
                     if let stream = self.demuxer.stream(at: streamIdx) {
                         self.decodeSubtitlePacket(packet, stream: stream)
-                    }
-                    if self.subtitlePacketsSeen % 50 == 0 {
-                        print("[Engine.subs] tally packetsSeen=\(self.subtitlePacketsSeen) decodeAttempts=\(self.subtitleDecodeAttempts) decodeSuccess=\(self.subtitleDecodeSuccess)")
                     }
                 }
 
