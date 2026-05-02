@@ -46,6 +46,7 @@ enum SubtitleDecoder {
 
     private static func decodeAllSync(url: URL, streamIndex: Int) throws -> [SubtitleCue] {
         let isHTTP = url.scheme == "http" || url.scheme == "https"
+        print("[SubtitleDecoder] start streamIndex=\(streamIndex) isHTTP=\(isHTTP) url=\(url.absoluteString.prefix(120))")
 
         var formatContext: UnsafeMutablePointer<AVFormatContext>?
         var avioReader: AVIOReader?
@@ -90,8 +91,10 @@ enum SubtitleDecoder {
 
         let probeRet = avformat_find_stream_info(fmt, nil)
         guard probeRet >= 0 else {
+            print("[SubtitleDecoder] probe failed code=\(probeRet)")
             throw SubtitleDecoderError.openFailed(code: probeRet)
         }
+        print("[SubtitleDecoder] opened nb_streams=\(fmt.pointee.nb_streams)")
 
         // Validate that the requested stream is actually a subtitle stream.
         guard streamIndex >= 0,
@@ -100,13 +103,16 @@ enum SubtitleDecoder {
               let codecpar = stream.pointee.codecpar,
               codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
         else {
+            print("[SubtitleDecoder] streamIndex=\(streamIndex) is not a subtitle stream")
             throw SubtitleDecoderError.streamNotSubtitle
         }
 
         // Open the codec.
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
+            print("[SubtitleDecoder] no decoder for codec_id=\(codecpar.pointee.codec_id.rawValue)")
             throw SubtitleDecoderError.noDecoder
         }
+        print("[SubtitleDecoder] codec=\(String(cString: codec.pointee.name)) timeBase=\(stream.pointee.time_base.num)/\(stream.pointee.time_base.den)")
         guard let codecCtx = avcodec_alloc_context3(codec) else {
             throw SubtitleDecoderError.codecOpenFailed(code: -1)
         }
@@ -134,6 +140,12 @@ enum SubtitleDecoder {
 
         var cues: [SubtitleCue] = []
         var nextID = 0
+        var totalPackets = 0
+        var matchedPackets = 0
+        var decodedSubs = 0
+        var firstAssSample: String?
+        var firstTextSample: String?
+        var lastReadErr: Int32 = 0
 
         // Read until EOF or task cancel.
         while !Task.isCancelled {
@@ -144,8 +156,10 @@ enum SubtitleDecoder {
                 av_packet_free(&pktPtr)
                 if readRet == AVERROR_EOF_VALUE { break }
                 // Transient read failure — bail rather than spin.
+                lastReadErr = readRet
                 break
             }
+            totalPackets += 1
 
             // Only decode packets from the chosen subtitle stream.
             if Int(pkt.pointee.stream_index) != streamIndex {
@@ -153,12 +167,23 @@ enum SubtitleDecoder {
                 av_packet_free(&pktPtr)
                 continue
             }
+            matchedPackets += 1
 
             var sub = AVSubtitle()
             var gotSub: Int32 = 0
             let decodeRet = avcodec_decode_subtitle2(codecCtx, &sub, &gotSub, pkt)
 
             if decodeRet >= 0 && gotSub != 0 {
+                decodedSubs += 1
+                if firstAssSample == nil, sub.num_rects > 0,
+                   let rect = sub.rects?[0] {
+                    if let assPtr = rect.pointee.ass {
+                        firstAssSample = String(cString: assPtr)
+                    }
+                    if let textPtr = rect.pointee.text {
+                        firstTextSample = String(cString: textPtr)
+                    }
+                }
                 let pktPTS = pkt.pointee.pts == Int64.min
                     ? 0.0
                     : Double(pkt.pointee.pts) * tbSec
@@ -226,6 +251,10 @@ enum SubtitleDecoder {
         if avcodec_decode_subtitle2(codecCtx, &flushSub, &gotSub, &flushPkt) >= 0 && gotSub != 0 {
             avsubtitle_free(&flushSub)
         }
+
+        let assPreview = firstAssSample.map { $0.prefix(80) } ?? "nil"
+        let textPreview = firstTextSample.map { $0.prefix(80) } ?? "nil"
+        print("[SubtitleDecoder] done totalPackets=\(totalPackets) matched=\(matchedPackets) decoded=\(decodedSubs) cues=\(cues.count) lastReadErr=\(lastReadErr) firstAss=\(assPreview) firstText=\(textPreview)")
 
         return cues.sorted { $0.startTime < $1.startTime }
     }
