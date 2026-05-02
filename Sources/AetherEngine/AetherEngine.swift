@@ -161,6 +161,25 @@ public final class AetherEngine: ObservableObject {
     /// Audio extension when switching tracks.
     nonisolated(unsafe) var activeAudioStreamIndex: Int32 = -1
 
+    /// Stream index of the subtitle stream currently being routed
+    /// through the demux loop, or -1 when subtitles are off.
+    /// Read by the demux thread to decide whether to decode each
+    /// packet; written from the main actor in `selectSubtitleTrack`/
+    /// `clearSubtitle` under `subtitleLock`.
+    nonisolated(unsafe) var activeSubtitleStreamIndex: Int32 = -1
+    /// Codec context for the active subtitle stream. Allocated on
+    /// track select, freed on clear / track switch / stop.
+    nonisolated(unsafe) var subtitleCodecContext: UnsafeMutablePointer<AVCodecContext>?
+    /// Serializes codec context lifecycle (alloc / free) against the
+    /// demux thread's decode call.
+    let subtitleLock = NSLock()
+    /// Monotonic ID source for cues so SwiftUI animations stay stable
+    /// across appends. Reset on every track switch.
+    nonisolated(unsafe) var subtitleCueIDCounter: Int = 0
+    /// Dedupe set keyed by `"start|end"` so packets re-read after
+    /// a seek don't produce duplicate cues.
+    nonisolated(unsafe) var seenSubtitleKeys: Set<String> = []
+
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
@@ -686,22 +705,216 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Subtitles
 
     /// Switch the active embedded subtitle stream and decode it
-    /// Switch the active subtitle stream. The current implementation
-    /// is a placeholder — host apps still drive subtitle loading via
-    /// their own pipeline. The engine streaming-decode path lands in
-    /// the next stage and will populate `subtitleCues` from packets
-    /// already flowing through the main demux loop.
+    /// Switch the active subtitle stream. Subtitle packets read by
+    /// the main demux loop get routed through a per-track decoder,
+    /// converted to `SubtitleCue`s, and appended to `subtitleCues`
+    /// in playback order. Auto-resolved tracks selected before
+    /// playback starts capture cues from the very first packet —
+    /// mid-playback enables only see cues from the demuxer cursor
+    /// onwards, since prior packets are already past.
+    ///
+    /// Text codecs (SubRip / ASS / SSA / WebVTT / mov_text) decode
+    /// directly. Bitmap codecs (PGS / DVB) decode but produce no
+    /// text — `subtitleCues` stays empty and the host should fall
+    /// back to its server-extraction path for those.
     public func selectSubtitleTrack(index: Int) {
+        closeSubtitleDecoder()
+
+        guard let stream = demuxer.stream(at: Int32(index)),
+              let codecpar = stream.pointee.codecpar,
+              codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
+        else {
+            currentSubtitleStreamIndex = nil
+            subtitleCues = []
+            isLoadingSubtitles = false
+            return
+        }
+
+        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id),
+              let ctx = avcodec_alloc_context3(codec)
+        else {
+            currentSubtitleStreamIndex = nil
+            subtitleCues = []
+            isLoadingSubtitles = false
+            return
+        }
+
+        if avcodec_parameters_to_context(ctx, codecpar) < 0 {
+            var local: UnsafeMutablePointer<AVCodecContext>? = ctx
+            avcodec_free_context(&local)
+            currentSubtitleStreamIndex = nil
+            subtitleCues = []
+            isLoadingSubtitles = false
+            return
+        }
+
+        if avcodec_open2(ctx, codec, nil) < 0 {
+            var local: UnsafeMutablePointer<AVCodecContext>? = ctx
+            avcodec_free_context(&local)
+            currentSubtitleStreamIndex = nil
+            subtitleCues = []
+            isLoadingSubtitles = false
+            return
+        }
+
+        subtitleLock.lock()
+        subtitleCodecContext = ctx
+        activeSubtitleStreamIndex = Int32(index)
+        subtitleCueIDCounter = 0
+        seenSubtitleKeys = []
+        subtitleLock.unlock()
+
         currentSubtitleStreamIndex = index
         subtitleCues = []
         isLoadingSubtitles = false
     }
 
-    /// Turn subtitles off and clear any cached cues.
+    /// Turn subtitles off and clear cached cues. Closes the active
+    /// subtitle codec context.
     public func clearSubtitle() {
+        closeSubtitleDecoder()
         currentSubtitleStreamIndex = nil
         subtitleCues = []
         isLoadingSubtitles = false
+    }
+
+    nonisolated private func closeSubtitleDecoder() {
+        subtitleLock.lock()
+        if subtitleCodecContext != nil {
+            avcodec_free_context(&subtitleCodecContext)
+        }
+        activeSubtitleStreamIndex = -1
+        seenSubtitleKeys = []
+        subtitleLock.unlock()
+    }
+
+    /// Decode a subtitle packet pulled by the main demux loop and
+    /// publish the resulting cue to `subtitleCues` on the main actor.
+    /// Runs on the demux queue; codec-context access serialised by
+    /// `subtitleLock` so a track switch on the main actor can't free
+    /// the context mid-decode.
+    nonisolated func decodeSubtitlePacket(_ pkt: UnsafeMutablePointer<AVPacket>, stream: UnsafeMutablePointer<AVStream>) {
+        subtitleLock.lock()
+        guard let ctx = subtitleCodecContext else {
+            subtitleLock.unlock()
+            return
+        }
+
+        var sub = AVSubtitle()
+        var gotSub: Int32 = 0
+        let ret = avcodec_decode_subtitle2(ctx, &sub, &gotSub, pkt)
+
+        guard ret >= 0, gotSub != 0 else {
+            subtitleLock.unlock()
+            return
+        }
+
+        let timeBase = stream.pointee.time_base
+        let tbSec = Double(timeBase.num) / Double(timeBase.den)
+        let pktPTS = pkt.pointee.pts == Int64.min
+            ? 0.0
+            : Double(pkt.pointee.pts) * tbSec
+        let startOffset = Double(sub.start_display_time) / 1000.0
+        let endOffset: Double
+        if sub.end_display_time > 0 {
+            endOffset = Double(sub.end_display_time) / 1000.0
+        } else if pkt.pointee.duration > 0 {
+            endOffset = Double(pkt.pointee.duration) * tbSec
+        } else {
+            // Last-resort default for streams that don't carry duration.
+            endOffset = 5.0
+        }
+        let startTime = pktPTS + startOffset
+        let endTime = pktPTS + endOffset
+
+        var lines: [String] = []
+        if sub.num_rects > 0, let rects = sub.rects {
+            for i in 0..<Int(sub.num_rects) {
+                guard let rect = rects[i] else { continue }
+                if let text = Self.textForSubtitleRect(rect) {
+                    lines.append(text)
+                }
+            }
+        }
+        avsubtitle_free(&sub)
+
+        let merged = lines
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !merged.isEmpty, endTime > startTime else {
+            subtitleLock.unlock()
+            return
+        }
+
+        let key = "\(startTime)|\(endTime)"
+        if seenSubtitleKeys.contains(key) {
+            subtitleLock.unlock()
+            return
+        }
+        seenSubtitleKeys.insert(key)
+        let cueID = subtitleCueIDCounter
+        subtitleCueIDCounter += 1
+        let streamIdx = activeSubtitleStreamIndex
+        subtitleLock.unlock()
+
+        let cue = SubtitleCue(id: cueID, startTime: startTime, endTime: endTime, text: merged)
+
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            // Drop cues whose stream the user has since switched away from.
+            guard self.activeSubtitleStreamIndex == streamIdx else { return }
+            // Cues mostly arrive in DTS order, but a backward seek can
+            // make a fresh packet land before existing cues. Insert in
+            // sorted position so the overlay's binary-search lookup
+            // stays correct.
+            var lo = 0, hi = self.subtitleCues.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if self.subtitleCues[mid].startTime < cue.startTime {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            self.subtitleCues.insert(cue, at: lo)
+        }
+    }
+
+    /// Pull displayable text out of an `AVSubtitleRect`. Prefers
+    /// `rect.text` (raw plain text), otherwise parses `rect.ass`
+    /// as an ASS dialogue line and strips override blocks.
+    nonisolated private static func textForSubtitleRect(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
+        if let textPtr = rect.pointee.text {
+            let s = String(cString: textPtr)
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        if let assPtr = rect.pointee.ass {
+            var line = String(cString: assPtr)
+            if line.hasPrefix("Dialogue: ") {
+                line.removeFirst("Dialogue: ".count)
+            }
+            // ASS dialogue layout: 9 comma-separated fields; the body
+            // is the 9th and may itself contain commas.
+            let parts = line.split(separator: ",", maxSplits: 8, omittingEmptySubsequences: false)
+            let raw = parts.count == 9 ? String(parts[8]) : line
+            return cleanASSBody(raw)
+        }
+        return nil
+    }
+
+    nonisolated private static func cleanASSBody(_ raw: String) -> String? {
+        var s = raw
+        s = s.replacingOccurrences(of: "\\N", with: "\n")
+        s = s.replacingOccurrences(of: "\\n", with: "\n")
+        s = s.replacingOccurrences(of: "\\h", with: " ")
+        s = s.replacingOccurrences(
+            of: "\\{[^}]*\\}",
+            with: "",
+            options: .regularExpression
+        )
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: - Internal
@@ -734,6 +947,10 @@ public final class AetherEngine: ObservableObject {
         }
         videoRenderer.flush()
         audioDecoder.close()
+        // Subtitle codec context is tied to the demuxer's stream
+        // pointers — drop it before closing the demuxer so we don't
+        // dangle into the next load.
+        closeSubtitleDecoder()
         demuxer.close()
         audioAvailable = false
         atmosAudioSkipPTS = -1
@@ -959,6 +1176,14 @@ public final class AetherEngine: ObservableObject {
                             // the caller from `await load(...)`.
                             self.isAudioFlowing = true
                         }
+                    }
+                } else if streamIdx == self.activeSubtitleStreamIndex {
+                    // Subtitle stream — decode the packet inline. Text
+                    // codecs are cheap (a few microseconds each) so we
+                    // don't bother offloading; cues land on the main
+                    // actor through `decodeSubtitlePacket`.
+                    if let stream = self.demuxer.stream(at: streamIdx) {
+                        self.decodeSubtitlePacket(packet, stream: stream)
                     }
                 }
 
