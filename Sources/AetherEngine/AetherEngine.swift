@@ -982,21 +982,37 @@ public final class AetherEngine: ObservableObject {
         let startTime = pktPTS + startOffset
         let endTime = pktPTS + endOffset
 
+        // Bitmap subtitle codecs author rects against the canvas
+        // size declared in the Presentation Composition Segment, which
+        // libavcodec writes back into ctx.width / ctx.height. Use
+        // those for normalisation — the codec's view of the canvas
+        // may differ from the source video frame size (some Blu-ray
+        // rips ship with PGS authored at half resolution). Fall back
+        // to the captured source video dims if the codec didn't
+        // populate them.
+        let canvasW = ctx.pointee.width > 0 ? ctx.pointee.width : videoFrameWidth
+        let canvasH = ctx.pointee.height > 0 ? ctx.pointee.height : videoFrameHeight
+
         // Build a list of cue bodies from this packet's rects. Most
         // text packets have one rect; PGS / DVB packets can have
         // several (signs/songs at top + dialogue at bottom) — each
         // becomes its own cue at the same time range.
         var bodies: [SubtitleCue.Body] = []
         var textLines: [String] = []
+        var rectGeometry: [String] = []
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
+                if subtitleDecodeSuccess <= 3 {
+                    let r = rect.pointee
+                    rectGeometry.append("rect(x=\(r.x) y=\(r.y) w=\(r.w) h=\(r.h) type=\(r.type.rawValue))")
+                }
                 if let text = Self.textForSubtitleRect(rect) {
                     textLines.append(text)
                 } else if let image = Self.imageForSubtitleRect(
                     rect,
-                    videoWidth: Int(videoFrameWidth),
-                    videoHeight: Int(videoFrameHeight)
+                    videoWidth: Int(canvasW),
+                    videoHeight: Int(canvasH)
                 ) {
                     bodies.append(.image(image))
                 }
@@ -1013,30 +1029,50 @@ public final class AetherEngine: ObservableObject {
             bodies.append(.text(merged))
         }
 
-        guard !bodies.isEmpty, endTime > startTime else {
-            if subtitleDecodeSuccess <= 3 {
-                print("[Engine.subs] decode#\(subtitleDecodeSuccess) bodies=\(bodies.count) start=\(startTime) end=\(endTime) — DROPPED (empty bodies or bad timing)")
-            }
+        // PGS events with zero rects are *clear signals* — the
+        // decoder emits gotSub=1 to tell the host "the previous sub
+        // is now over". Don't drop those; they trigger the trim
+        // pass below so old cues actually disappear when the next
+        // event arrives. For text codecs (SubRip / ASS / etc) an
+        // empty body means we couldn't parse anything useful and
+        // there's nothing to trim, so drop those.
+        let isPGSCodec = ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+        let isClearEvent = bodies.isEmpty
+        guard endTime > startTime else {
+            subtitleLock.unlock()
+            return
+        }
+        guard !isClearEvent || isPGSCodec else {
             subtitleLock.unlock()
             return
         }
 
         if subtitleDecodeSuccess <= 3 {
-            let bodyDesc = bodies.map { body -> String in
-                switch body {
-                case .text(let s): return "text(\(s.prefix(40)))"
-                case .image(let img): return "image(\(img.cgImage.width)x\(img.cgImage.height) at \(img.position))"
-                }
-            }.joined(separator: ", ")
-            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) end=\(endTime) bodies=[\(bodyDesc)]")
+            let bodyDesc: String
+            if bodies.isEmpty {
+                bodyDesc = "<clear>"
+            } else {
+                bodyDesc = bodies.map { body -> String in
+                    switch body {
+                    case .text(let s): return "text(\(s.prefix(40)))"
+                    case .image(let img): return "image(\(img.cgImage.width)x\(img.cgImage.height) at \(img.position))"
+                    }
+                }.joined(separator: ", ")
+            }
+            let geom = rectGeometry.isEmpty ? "" : " " + rectGeometry.joined(separator: " ")
+            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) end=\(endTime) canvas=\(canvasW)x\(canvasH) bodies=[\(bodyDesc)]\(geom)")
         }
 
-        let key = "\(startTime)|\(endTime)"
-        if seenSubtitleKeys.contains(key) {
-            subtitleLock.unlock()
-            return
+        // Dedupe full duplicate non-empty events; keep clear events
+        // distinct since each one trims a different previous cue.
+        if !isClearEvent {
+            let key = "\(startTime)|\(endTime)|\(bodies.count)"
+            if seenSubtitleKeys.contains(key) {
+                subtitleLock.unlock()
+                return
+            }
+            seenSubtitleKeys.insert(key)
         }
-        seenSubtitleKeys.insert(key)
         let cueIDStart = subtitleCueIDCounter
         subtitleCueIDCounter += bodies.count
         let streamIdx = activeSubtitleStreamIndex
@@ -1050,11 +1086,35 @@ public final class AetherEngine: ObservableObject {
                 body: body
             )
         }
+        let trimAt = startTime
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             // Drop cues whose stream the user has since switched away from.
             guard self.activeSubtitleStreamIndex == streamIdx else { return }
+
+            // PGS doesn't carry explicit end times — each event
+            // implicitly terminates whatever was on screen. Truncate
+            // any image cue whose interval straddles `trimAt` so it
+            // disappears at the right moment instead of staying up
+            // for the UINT32_MAX (~50-day) default the decoder
+            // hands us. Runs for both clear events (empty bodies)
+            // and replacement events (new bitmap incoming).
+            if isPGSCodec {
+                for i in 0..<self.subtitleCues.count {
+                    guard case .image = self.subtitleCues[i].body else { continue }
+                    let cue = self.subtitleCues[i]
+                    if cue.startTime < trimAt && cue.endTime > trimAt {
+                        self.subtitleCues[i] = SubtitleCue(
+                            id: cue.id,
+                            startTime: cue.startTime,
+                            endTime: trimAt,
+                            body: cue.body
+                        )
+                    }
+                }
+            }
+
             // Cues mostly arrive in DTS order, but a backward seek can
             // make a fresh packet land before existing cues. Insert
             // each in sorted position so the overlay's lookup
