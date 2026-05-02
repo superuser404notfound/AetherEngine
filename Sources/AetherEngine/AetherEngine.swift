@@ -1003,7 +1003,7 @@ public final class AetherEngine: ObservableObject {
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
-                if subtitleDecodeSuccess <= 3 {
+                if subtitleDecodeSuccess <= 20 {
                     let r = rect.pointee
                     rectGeometry.append("rect(x=\(r.x) y=\(r.y) w=\(r.w) h=\(r.h) type=\(r.type.rawValue))")
                 }
@@ -1047,7 +1047,12 @@ public final class AetherEngine: ObservableObject {
             return
         }
 
-        if subtitleDecodeSuccess <= 3 {
+        // Log every bitmap cue for the first 20 successes so a
+        // capture from a session covers both `forced` and `full`
+        // PGS variants — they often differ in author-supplied rect
+        // positions and that's exactly what we need to compare.
+        let hasImage = bodies.contains { if case .image = $0 { return true } else { return false } }
+        if subtitleDecodeSuccess <= 20 && (hasImage || subtitleDecodeSuccess <= 3) {
             let bodyDesc: String
             if bodies.isEmpty {
                 bodyDesc = "<clear>"
@@ -1055,12 +1060,15 @@ public final class AetherEngine: ObservableObject {
                 bodyDesc = bodies.map { body -> String in
                     switch body {
                     case .text(let s): return "text(\(s.prefix(40)))"
-                    case .image(let img): return "image(\(img.cgImage.width)x\(img.cgImage.height) at \(img.position))"
+                    case .image(let img):
+                        let p = img.position
+                        let pStr = String(format: "(%.3f,%.3f,%.3f,%.3f)", p.minX, p.minY, p.width, p.height)
+                        return "image(\(img.cgImage.width)x\(img.cgImage.height) norm=\(pStr))"
                     }
                 }.joined(separator: ", ")
             }
             let geom = rectGeometry.isEmpty ? "" : " " + rectGeometry.joined(separator: " ")
-            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) end=\(endTime) canvas=\(canvasW)x\(canvasH) bodies=[\(bodyDesc)]\(geom)")
+            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) canvas=\(canvasW)x\(canvasH) bodies=[\(bodyDesc)]\(geom)")
         }
 
         // Dedupe full duplicate non-empty events; keep clear events
