@@ -1474,11 +1474,50 @@ public final class AetherEngine: ObservableObject {
         let height = Int(r.h)
         let stride = Int(r.linesize.0)
 
-        // Convert indexed → packed RGBA premultiplied.
-        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        // Walk the bitmap once to find the bounding box of pixels with
+        // non-zero alpha. Some Blu-ray-to-MKV conversions emit PGS
+        // events as full 1920x1080 ODS bitmaps with cropping
+        // parameters that say "show only this small region at this
+        // canvas position" — but FFmpeg's pgssubdec discards the
+        // crop fields and hands us the whole bitmap with rect.x/y
+        // both zero. Without re-cropping ourselves the host either
+        // renders the full frame (text appears wherever it sits in
+        // the source bitmap, often the upper-left for Blu-ray) or
+        // wastes 8 MB per cue holding mostly-transparent pixels.
+        //
+        // For standard PGS where rect.x/y already point at the text
+        // and the bitmap is already snug, the bounding box equals
+        // the full bitmap and the work is a no-op except for the
+        // O(w*h) scan.
+        let alphaThreshold: UInt8 = 8
+        var minX = width, minY = height, maxX = -1, maxY = -1
         for y in 0..<height {
+            let rowOff = y * stride
             for x in 0..<width {
-                let palIdx = Int(pixelsPtr[y * stride + x])
+                let palIdx = Int(pixelsPtr[rowOff + x])
+                let alpha = palettePtr[palIdx * 4 + 3]
+                if alpha >= alphaThreshold {
+                    if x < minX { minX = x }
+                    if y < minY { minY = y }
+                    if x > maxX { maxX = x }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+
+        let cropW = maxX - minX + 1
+        let cropH = maxY - minY + 1
+        let absX = Int(r.x) + minX
+        let absY = Int(r.y) + minY
+
+        // Convert just the cropped region to packed RGBA premultiplied.
+        var rgba = [UInt8](repeating: 0, count: cropW * cropH * 4)
+        for cy in 0..<cropH {
+            let srcRow = (minY + cy) * stride
+            let dstRow = cy * cropW * 4
+            for cx in 0..<cropW {
+                let palIdx = Int(pixelsPtr[srcRow + minX + cx])
                 let palOff = palIdx * 4
                 // Memory order from libavcodec on little-endian Apple
                 // platforms is [B, G, R, A] for a uint32 stored as
@@ -1487,12 +1526,11 @@ public final class AetherEngine: ObservableObject {
                 let g = palettePtr[palOff + 1]
                 let red = palettePtr[palOff + 2]
                 let a = palettePtr[palOff + 3]
-
                 // Premultiply against alpha so CGImage's
                 // premultipliedLast renders correctly without the
                 // black-fringe edges that straight alpha produces
                 // on smooth blends.
-                let outOff = (y * width + x) * 4
+                let outOff = dstRow + cx * 4
                 rgba[outOff + 0] = UInt8((Int(red) * Int(a) + 127) / 255)
                 rgba[outOff + 1] = UInt8((Int(g) * Int(a) + 127) / 255)
                 rgba[outOff + 2] = UInt8((Int(b) * Int(a) + 127) / 255)
@@ -1507,11 +1545,11 @@ public final class AetherEngine: ObservableObject {
 
         let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
         guard let cgImage = CGImage(
-            width: width,
-            height: height,
+            width: cropW,
+            height: cropH,
             bitsPerComponent: 8,
             bitsPerPixel: 32,
-            bytesPerRow: width * 4,
+            bytesPerRow: cropW * 4,
             space: colorSpace,
             bitmapInfo: bitmapInfo,
             provider: provider,
@@ -1520,19 +1558,18 @@ public final class AetherEngine: ObservableObject {
             intent: .defaultIntent
         ) else { return nil }
 
-        // Normalise the rect's position against the source video
-        // frame. `videoWidth` / `videoHeight` come from the engine's
-        // captured codecpar dims; if for some reason they're zero
-        // (very early in load before videoStream picked) we fall
-        // back to a centered overlay sized for the bitmap's own
-        // aspect — better than rendering at (0, 0) full-size.
+        // Normalise the cropped region's position against the canvas.
+        // `videoWidth` / `videoHeight` come from the codec context's
+        // PCS-reported dimensions (or the captured source video as a
+        // fallback). The host scales these normalised values to the
+        // on-screen video rect.
         let position: CGRect
         if videoWidth > 0, videoHeight > 0 {
             position = CGRect(
-                x: Double(r.x) / Double(videoWidth),
-                y: Double(r.y) / Double(videoHeight),
-                width: Double(width) / Double(videoWidth),
-                height: Double(height) / Double(videoHeight)
+                x: Double(absX) / Double(videoWidth),
+                y: Double(absY) / Double(videoHeight),
+                width: Double(cropW) / Double(videoWidth),
+                height: Double(cropH) / Double(videoHeight)
             )
         } else {
             position = CGRect(x: 0.1, y: 0.8, width: 0.8, height: 0.15)
