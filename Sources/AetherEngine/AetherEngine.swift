@@ -85,14 +85,8 @@ public final class AetherEngine: ObservableObject {
 
     /// The URL and position of the current playback session.
     /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
-    /// after background suspension invalidates VT sessions and AVIO,
-    /// and by `selectSubtitleTrack` to point its secondary format
-    /// context at the same source.
+    /// after background suspension invalidates VT sessions and AVIO.
     var loadedURL: URL?
-
-    /// In-flight subtitle decode, kept so a rapid track switch can
-    /// cancel the previous decode before it overwrites the new cues.
-    var subtitleDecodeTask: Task<Void, Never>?
 
     // MARK: - Internal Pipeline
 
@@ -692,58 +686,19 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Subtitles
 
     /// Switch the active embedded subtitle stream and decode it
-    /// end-to-end into `subtitleCues`. Returns immediately — decode
-    /// runs on a background task; observe `isLoadingSubtitles` and
-    /// `subtitleCues` for results. Subsequent calls cancel the
-    /// previous decode.
-    ///
-    /// `index` is the FFmpeg stream index from `subtitleTracks[i].id`.
-    /// Text-based codecs only (SubRip, ASS/SSA, WebVTT, mov_text);
-    /// graphic formats produce zero cues so the host can fall back to
-    /// its own bitmap path.
+    /// Switch the active subtitle stream. The current implementation
+    /// is a placeholder — host apps still drive subtitle loading via
+    /// their own pipeline. The engine streaming-decode path lands in
+    /// the next stage and will populate `subtitleCues` from packets
+    /// already flowing through the main demux loop.
     public func selectSubtitleTrack(index: Int) {
-        subtitleDecodeTask?.cancel()
-        subtitleCues = []
         currentSubtitleStreamIndex = index
-
-        guard let url = loadedURL else {
-            isLoadingSubtitles = false
-            return
-        }
-        isLoadingSubtitles = true
-
-        subtitleDecodeTask = Task { [weak self] in
-            let cues: [SubtitleCue]
-            do {
-                cues = try await SubtitleDecoder.decodeAll(url: url, streamIndex: index)
-            } catch {
-                #if DEBUG
-                print("[AetherEngine] subtitle decode failed: \(error)")
-                #endif
-                await MainActor.run {
-                    guard let self = self else { return }
-                    if self.currentSubtitleStreamIndex == index {
-                        self.isLoadingSubtitles = false
-                    }
-                }
-                return
-            }
-
-            await MainActor.run {
-                guard let self = self else { return }
-                // Drop late-arriving cues if the user switched again.
-                guard self.currentSubtitleStreamIndex == index else { return }
-                self.subtitleCues = cues
-                self.isLoadingSubtitles = false
-            }
-        }
+        subtitleCues = []
+        isLoadingSubtitles = false
     }
 
-    /// Turn subtitles off. Cancels any in-flight decode and clears the
-    /// cue list immediately.
+    /// Turn subtitles off and clear any cached cues.
     public func clearSubtitle() {
-        subtitleDecodeTask?.cancel()
-        subtitleDecodeTask = nil
         currentSubtitleStreamIndex = nil
         subtitleCues = []
         isLoadingSubtitles = false
