@@ -203,6 +203,9 @@ public final class AetherEngine: ObservableObject {
     nonisolated(unsafe) var subtitlePacketsSeen: Int = 0
     nonisolated(unsafe) var subtitleDecodeAttempts: Int = 0
     nonisolated(unsafe) var subtitleDecodeSuccess: Int = 0
+    /// One-shot latch so the "PGS packets carry PES header" notice
+    /// only logs once per session.
+    nonisolated(unsafe) var pgsHeaderStripLogged: Bool = false
 
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
@@ -813,6 +816,7 @@ public final class AetherEngine: ObservableObject {
         subtitlePacketsSeen = 0
         subtitleDecodeAttempts = 0
         subtitleDecodeSuccess = 0
+        pgsHeaderStripLogged = false
         subtitleLock.unlock()
 
         // Some demuxers default subtitle streams to AVDISCARD_DEFAULT
@@ -910,7 +914,7 @@ public final class AetherEngine: ObservableObject {
 
         var sub = AVSubtitle()
         var gotSub: Int32 = 0
-        let ret = avcodec_decode_subtitle2(ctx, &sub, &gotSub, pkt)
+        let ret = decodeSubtitleWithFixups(ctx: ctx, pkt: pkt, sub: &sub, gotSub: &gotSub)
         subtitleDecodeAttempts += 1
         if subtitleDecodeAttempts <= 3 {
             print("[Engine.subs] decode attempt#\(subtitleDecodeAttempts) ret=\(ret) gotSub=\(gotSub) pktSize=\(pkt.pointee.size) pts=\(pkt.pointee.pts) duration=\(pkt.pointee.duration)")
@@ -1066,6 +1070,75 @@ public final class AetherEngine: ObservableObject {
             || codecID == AV_CODEC_ID_DVB_SUBTITLE
             || codecID == AV_CODEC_ID_DVD_SUBTITLE
             || codecID == AV_CODEC_ID_XSUB
+    }
+
+    /// Decode wrapper that fixes up packets some Blu-ray-to-MKV tools
+    /// store in non-standard form before handing them to FFmpeg.
+    ///
+    /// **PGS with leading PES "PG" header** — the spec for MKV PGS
+    /// stores raw segments (`segment_type` + `segment_size` +
+    /// `payload`). Some converters leave the original PES PG header
+    /// (`'P','G'` magic + 4-byte pts + 4-byte dts = 10 bytes) at the
+    /// start of every block. With the header still attached, FFmpeg's
+    /// pgssubdec reads byte 0 = 0x50 as a segment type, fails to
+    /// recognise it, jumps the bogus length, and never sees the
+    /// trailing END (0x80) segment — so `got_sub_ptr` stays 0
+    /// forever. Strip the 10 bytes into a working copy before decode.
+    /// The check is cheap (two-byte sniff per packet) and a no-op for
+    /// any properly-stored PGS / DVB / DVD stream.
+    nonisolated private func decodeSubtitleWithFixups(
+        ctx: UnsafeMutablePointer<AVCodecContext>,
+        pkt: UnsafeMutablePointer<AVPacket>,
+        sub: UnsafeMutablePointer<AVSubtitle>,
+        gotSub: UnsafeMutablePointer<Int32>
+    ) -> Int32 {
+        let isPGS = ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+        if isPGS,
+           let data = pkt.pointee.data,
+           pkt.pointee.size > 10,
+           data[0] == 0x50, data[1] == 0x47 {
+            if !pgsHeaderStripLogged {
+                print("[Engine.subs] PGS packets carry leading 'PG' PES header — stripping 10 bytes per block before decode")
+                pgsHeaderStripLogged = true
+            }
+            return decodeWithStrippedPrefix(ctx: ctx, pkt: pkt, prefix: 10, sub: sub, gotSub: gotSub)
+        }
+        return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
+    }
+
+    /// Build a transient AVPacket whose data points at a Swift-owned
+    /// padded copy of the input minus the first `prefix` bytes, hand
+    /// it to the decoder, and let the buffer drop when the closure
+    /// returns. The padded tail (AV_INPUT_BUFFER_PADDING_SIZE = 64
+    /// bytes of zeros) keeps libavcodec's bitstream readers from
+    /// straying past the end.
+    nonisolated private func decodeWithStrippedPrefix(
+        ctx: UnsafeMutablePointer<AVCodecContext>,
+        pkt: UnsafeMutablePointer<AVPacket>,
+        prefix: Int,
+        sub: UnsafeMutablePointer<AVSubtitle>,
+        gotSub: UnsafeMutablePointer<Int32>
+    ) -> Int32 {
+        let originalSize = Int(pkt.pointee.size)
+        guard originalSize > prefix, let srcData = pkt.pointee.data else {
+            return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
+        }
+        let payloadSize = originalSize - prefix
+        let paddingSize = 64
+        var buffer = [UInt8](repeating: 0, count: payloadSize + paddingSize)
+        memcpy(&buffer, srcData.advanced(by: prefix), payloadSize)
+
+        return buffer.withUnsafeMutableBufferPointer { bufPtr -> Int32 in
+            var temp = AVPacket()
+            temp.data = bufPtr.baseAddress
+            temp.size = Int32(payloadSize)
+            temp.pts = pkt.pointee.pts
+            temp.dts = pkt.pointee.dts
+            temp.duration = pkt.pointee.duration
+            temp.stream_index = pkt.pointee.stream_index
+            temp.flags = pkt.pointee.flags
+            return avcodec_decode_subtitle2(ctx, sub, gotSub, &temp)
+        }
     }
 
     nonisolated private static func cleanASSBody(_ raw: String) -> String? {
