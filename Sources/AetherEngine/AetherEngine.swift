@@ -1173,8 +1173,7 @@ public final class AetherEngine: ObservableObject {
             return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
         }
 
-        // 1. zlib-wrapped — applies to any subtitle codec since the
-        //    compression is at the container level, not the codec.
+        // 1. zlib-wrapped (RFC 1950) — `78 01/5E/9C/DA` magic.
         if data[0] == 0x78,
            data[1] == 0x01 || data[1] == 0x5E || data[1] == 0x9C || data[1] == 0xDA {
             if let decompressed = inflateZlibBlock(data, size: Int(pkt.pointee.size)) {
@@ -1183,11 +1182,24 @@ public final class AetherEngine: ObservableObject {
                     zlibInflateLogged = true
                 }
                 return decodeWithReplacedPayload(
-                    ctx: ctx,
-                    pkt: pkt,
-                    payload: decompressed,
-                    sub: sub,
-                    gotSub: gotSub
+                    ctx: ctx, pkt: pkt, payload: decompressed,
+                    sub: sub, gotSub: gotSub
+                )
+            }
+        }
+
+        // 1b. gzip-wrapped (RFC 1952) — `1F 8B` magic. Same DEFLATE
+        //     body as zlib, just a different envelope.
+        if pkt.pointee.size > 18,
+           data[0] == 0x1F, data[1] == 0x8B {
+            if let decompressed = inflateGzipBlock(data, size: Int(pkt.pointee.size)) {
+                if !zlibInflateLogged {
+                    print("[Engine.subs] subtitle packets are gzip-compressed — inflating per block before decode")
+                    zlibInflateLogged = true
+                }
+                return decodeWithReplacedPayload(
+                    ctx: ctx, pkt: pkt, payload: decompressed,
+                    sub: sub, gotSub: gotSub
                 )
             }
         }
@@ -1207,27 +1219,79 @@ public final class AetherEngine: ObservableObject {
         return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
     }
 
-    /// Inflate a zlib-wrapped buffer. Wraps Apple's Compression
-    /// framework which expects raw DEFLATE — we strip the 2-byte zlib
-    /// header and the trailing 4-byte Adler-32. Returns nil if the
-    /// data isn't valid zlib or fits into none of the destination
-    /// sizes we try.
+    /// Inflate a gzip-wrapped buffer. Strips the gzip framing
+    /// (10-byte fixed header + optional FEXTRA / FNAME / FCOMMENT
+    /// / FHCRC sections per the FLG byte, plus the trailing 8-byte
+    /// CRC32 + ISIZE) and feeds the raw DEFLATE body to Apple's
+    /// `compression_decode_buffer`.
+    nonisolated private func inflateGzipBlock(_ src: UnsafePointer<UInt8>, size: Int) -> [UInt8]? {
+        guard size > 18, src[0] == 0x1F, src[1] == 0x8B else { return nil }
+        let flg = src[3]
+        var off = 10
+        // FEXTRA — 2-byte LE length followed by extra data.
+        if flg & 0x04 != 0 {
+            guard off + 2 <= size else { return nil }
+            let xlen = Int(src[off]) | (Int(src[off + 1]) << 8)
+            off += 2 + xlen
+            if off > size { return nil }
+        }
+        // FNAME — null-terminated string.
+        if flg & 0x08 != 0 {
+            while off < size && src[off] != 0 { off += 1 }
+            off += 1
+            if off > size { return nil }
+        }
+        // FCOMMENT — null-terminated string.
+        if flg & 0x10 != 0 {
+            while off < size && src[off] != 0 { off += 1 }
+            off += 1
+            if off > size { return nil }
+        }
+        // FHCRC — 2-byte header CRC.
+        if flg & 0x02 != 0 {
+            off += 2
+            if off > size { return nil }
+        }
+        let trailerSize = 8
+        guard off < size - trailerSize else { return nil }
+        return inflateDeflateStream(
+            src.advanced(by: off),
+            size: size - off - trailerSize,
+            originalSize: size
+        )
+    }
+
+    /// Inflate a zlib-wrapped buffer. Strips the 2-byte zlib header
+    /// and the trailing 4-byte Adler-32, then runs the inner DEFLATE
+    /// stream through `inflateDeflateStream`.
     nonisolated private func inflateZlibBlock(_ src: UnsafePointer<UInt8>, size: Int) -> [UInt8]? {
         guard size > 6 else { return nil }
-        let deflateStart = src.advanced(by: 2)
-        let deflateSize = size - 2 - 4
+        return inflateDeflateStream(
+            src.advanced(by: 2),
+            size: size - 2 - 4,
+            originalSize: size
+        )
+    }
 
-        // Subtitle blocks decompress to anywhere from a few hundred
-        // bytes (PCS + WDS + END) up to ~50× their input size for
-        // PGS bitmaps. Start with 8× and grow by 2× up to 8 MB.
-        var dstCapacity = max(size * 8, 4096)
+    /// Run a raw DEFLATE stream through Apple's
+    /// `compression_decode_buffer`. Subtitle blocks decompress to
+    /// anywhere from a few hundred bytes (PCS + WDS + END) up to
+    /// ~50× their input size for PGS bitmaps — start with an 8×
+    /// buffer and grow by 2× up to 8 MB.
+    nonisolated private func inflateDeflateStream(
+        _ src: UnsafePointer<UInt8>,
+        size: Int,
+        originalSize: Int
+    ) -> [UInt8]? {
+        guard size > 0 else { return nil }
+        var dstCapacity = max(originalSize * 8, 4096)
         let maxCapacity = 8 * 1024 * 1024
         while dstCapacity <= maxCapacity {
             let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: dstCapacity)
             defer { dst.deallocate() }
             let written = compression_decode_buffer(
                 dst, dstCapacity,
-                deflateStart, deflateSize,
+                src, size,
                 nil, COMPRESSION_ZLIB
             )
             if written > 0 && written < dstCapacity {
