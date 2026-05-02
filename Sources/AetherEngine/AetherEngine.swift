@@ -196,6 +196,14 @@ public final class AetherEngine: ObservableObject {
     nonisolated(unsafe) var videoFrameWidth: Int32 = 0
     nonisolated(unsafe) var videoFrameHeight: Int32 = 0
 
+    /// Diagnostic counters for the subtitle pipeline. Reset on every
+    /// track switch; printed periodically from the decode hot path so
+    /// silent failures (codec produced no cues, demuxer never feeds
+    /// the chosen stream, etc.) leave a trail in `log stream`.
+    nonisolated(unsafe) var subtitlePacketsSeen: Int = 0
+    nonisolated(unsafe) var subtitleDecodeAttempts: Int = 0
+    nonisolated(unsafe) var subtitleDecodeSuccess: Int = 0
+
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
 
@@ -740,6 +748,7 @@ public final class AetherEngine: ObservableObject {
     /// text — `subtitleCues` stays empty and the host should fall
     /// back to its server-extraction path for those.
     public func selectSubtitleTrack(index: Int) {
+        print("[Engine.subs] selectSubtitleTrack index=\(index)")
         closeSubtitleDecoder()
         cancelSidecarTask()
 
@@ -747,6 +756,7 @@ public final class AetherEngine: ObservableObject {
               let codecpar = stream.pointee.codecpar,
               codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
         else {
+            print("[Engine.subs] ✗ stream \(index) is not a subtitle stream (or out of range)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -756,6 +766,7 @@ public final class AetherEngine: ObservableObject {
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id),
               let ctx = avcodec_alloc_context3(codec)
         else {
+            print("[Engine.subs] ✗ no decoder for codec_id=\(codecpar.pointee.codec_id.rawValue) on stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -765,6 +776,7 @@ public final class AetherEngine: ObservableObject {
         if avcodec_parameters_to_context(ctx, codecpar) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
+            print("[Engine.subs] ✗ avcodec_parameters_to_context failed for stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -774,6 +786,7 @@ public final class AetherEngine: ObservableObject {
         if avcodec_open2(ctx, codec, nil) < 0 {
             var local: UnsafeMutablePointer<AVCodecContext>? = ctx
             avcodec_free_context(&local)
+            print("[Engine.subs] ✗ avcodec_open2 failed for stream \(index)")
             isSubtitleActive = false
             subtitleCues = []
             isLoadingSubtitles = false
@@ -785,7 +798,20 @@ public final class AetherEngine: ObservableObject {
         activeSubtitleStreamIndex = Int32(index)
         subtitleCueIDCounter = 0
         seenSubtitleKeys = []
+        subtitlePacketsSeen = 0
+        subtitleDecodeAttempts = 0
+        subtitleDecodeSuccess = 0
         subtitleLock.unlock()
+
+        // Some demuxers default subtitle streams to AVDISCARD_DEFAULT
+        // which can swallow packets that the parser thinks are
+        // useless. Force NONE on the active stream so every byte
+        // makes it to av_read_frame.
+        stream.pointee.discard = AVDISCARD_NONE
+
+        let codecName = String(cString: codec.pointee.name)
+        let videoW = videoFrameWidth, videoH = videoFrameHeight
+        print("[Engine.subs] ✓ codec=\(codecName) stream=\(index) videoFrame=\(videoW)x\(videoH)")
 
         isSubtitleActive = true
         subtitleCues = []
@@ -873,11 +899,16 @@ public final class AetherEngine: ObservableObject {
         var sub = AVSubtitle()
         var gotSub: Int32 = 0
         let ret = avcodec_decode_subtitle2(ctx, &sub, &gotSub, pkt)
+        subtitleDecodeAttempts += 1
+        if subtitleDecodeAttempts <= 3 {
+            print("[Engine.subs] decode attempt#\(subtitleDecodeAttempts) ret=\(ret) gotSub=\(gotSub) pktSize=\(pkt.pointee.size) pts=\(pkt.pointee.pts) duration=\(pkt.pointee.duration)")
+        }
 
         guard ret >= 0, gotSub != 0 else {
             subtitleLock.unlock()
             return
         }
+        subtitleDecodeSuccess += 1
 
         let timeBase = stream.pointee.time_base
         let tbSec = Double(timeBase.num) / Double(timeBase.den)
@@ -929,8 +960,21 @@ public final class AetherEngine: ObservableObject {
         }
 
         guard !bodies.isEmpty, endTime > startTime else {
+            if subtitleDecodeSuccess <= 3 {
+                print("[Engine.subs] decode#\(subtitleDecodeSuccess) bodies=\(bodies.count) start=\(startTime) end=\(endTime) — DROPPED (empty bodies or bad timing)")
+            }
             subtitleLock.unlock()
             return
+        }
+
+        if subtitleDecodeSuccess <= 3 {
+            let bodyDesc = bodies.map { body -> String in
+                switch body {
+                case .text(let s): return "text(\(s.prefix(40)))"
+                case .image(let img): return "image(\(img.cgImage.width)x\(img.cgImage.height) at \(img.position))"
+                }
+            }.joined(separator: ", ")
+            print("[Engine.subs] decode#\(subtitleDecodeSuccess) start=\(startTime) end=\(endTime) bodies=[\(bodyDesc)]")
         }
 
         let key = "\(startTime)|\(endTime)"
@@ -1374,8 +1418,15 @@ public final class AetherEngine: ObservableObject {
                     // codecs are cheap (a few microseconds each) so we
                     // don't bother offloading; cues land on the main
                     // actor through `decodeSubtitlePacket`.
+                    self.subtitlePacketsSeen += 1
+                    if self.subtitlePacketsSeen == 1 {
+                        print("[Engine.subs] first subtitle packet on stream \(streamIdx) pts=\(packet.pointee.pts) size=\(packet.pointee.size)")
+                    }
                     if let stream = self.demuxer.stream(at: streamIdx) {
                         self.decodeSubtitlePacket(packet, stream: stream)
+                    }
+                    if self.subtitlePacketsSeen % 50 == 0 {
+                        print("[Engine.subs] tally packetsSeen=\(self.subtitlePacketsSeen) decodeAttempts=\(self.subtitleDecodeAttempts) decodeSuccess=\(self.subtitleDecodeSuccess)")
                     }
                 }
 
