@@ -50,6 +50,26 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     }
 }
 
+/// A single decoded subtitle cue — start/end in container seconds, text in
+/// UTF-8 with newlines preserved. Produced by `SubtitleDecoder` from any
+/// text-based subtitle codec (SubRip, ASS/SSA, WebVTT, mov_text). Graphic
+/// formats (PGS, DVB) aren't decoded here — they need bitmap rendering
+/// which the engine doesn't ship yet, so the host falls back to its
+/// server-extraction path for those.
+public struct SubtitleCue: Identifiable, Sendable, Equatable {
+    public let id: Int
+    public let startTime: Double
+    public let endTime: Double
+    public let text: String
+
+    public init(id: Int, startTime: Double, endTime: Double, text: String) {
+        self.id = id
+        self.startTime = startTime
+        self.endTime = endTime
+        self.text = text
+    }
+}
+
 // MARK: - Audio Utilities
 
 import CoreAudio

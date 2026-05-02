@@ -178,9 +178,6 @@ extension AetherEngine {
         #endif
     }
 
-    public func selectSubtitleTrack(index: Int) {
-    }
-
     // MARK: - Audio Engine Helpers
 
     /// True if the current audio output route can accept a Dolby Atmos

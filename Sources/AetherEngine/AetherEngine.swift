@@ -53,6 +53,17 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
+    /// Decoded subtitle cues for the currently selected text-subtitle
+    /// stream. Empty when no track is selected, when the stream is still
+    /// loading, or when the stream is a graphic format the engine doesn't
+    /// decode yet (host falls back to its own path in that case).
+    @Published public private(set) var subtitleCues: [SubtitleCue] = []
+    /// True while `selectSubtitleTrack` is decoding the chosen stream.
+    /// The host can show a spinner without having to track this itself.
+    @Published public private(set) var isLoadingSubtitles: Bool = false
+    /// Stream index currently driving `subtitleCues`. nil means "off".
+    @Published public private(set) var currentSubtitleStreamIndex: Int?
+
     // MARK: - Output
 
     /// The video layer to embed in the host view hierarchy.
@@ -74,8 +85,14 @@ public final class AetherEngine: ObservableObject {
 
     /// The URL and position of the current playback session.
     /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
-    /// after background suspension invalidates VT sessions and AVIO.
-    private var loadedURL: URL?
+    /// after background suspension invalidates VT sessions and AVIO,
+    /// and by `selectSubtitleTrack` to point its secondary format
+    /// context at the same source.
+    var loadedURL: URL?
+
+    /// In-flight subtitle decode, kept so a rapid track switch can
+    /// cancel the previous decode before it overwrites the new cues.
+    var subtitleDecodeTask: Task<Void, Never>?
 
     // MARK: - Internal Pipeline
 
@@ -670,6 +687,66 @@ public final class AetherEngine: ObservableObject {
         } else {
             audioOutput.setRate(rate)
         }
+    }
+
+    // MARK: - Subtitles
+
+    /// Switch the active embedded subtitle stream and decode it
+    /// end-to-end into `subtitleCues`. Returns immediately — decode
+    /// runs on a background task; observe `isLoadingSubtitles` and
+    /// `subtitleCues` for results. Subsequent calls cancel the
+    /// previous decode.
+    ///
+    /// `index` is the FFmpeg stream index from `subtitleTracks[i].id`.
+    /// Text-based codecs only (SubRip, ASS/SSA, WebVTT, mov_text);
+    /// graphic formats produce zero cues so the host can fall back to
+    /// its own bitmap path.
+    public func selectSubtitleTrack(index: Int) {
+        subtitleDecodeTask?.cancel()
+        subtitleCues = []
+        currentSubtitleStreamIndex = index
+
+        guard let url = loadedURL else {
+            isLoadingSubtitles = false
+            return
+        }
+        isLoadingSubtitles = true
+
+        subtitleDecodeTask = Task { [weak self] in
+            let cues: [SubtitleCue]
+            do {
+                cues = try await SubtitleDecoder.decodeAll(url: url, streamIndex: index)
+            } catch {
+                #if DEBUG
+                print("[AetherEngine] subtitle decode failed: \(error)")
+                #endif
+                await MainActor.run {
+                    guard let self = self else { return }
+                    if self.currentSubtitleStreamIndex == index {
+                        self.isLoadingSubtitles = false
+                    }
+                }
+                return
+            }
+
+            await MainActor.run {
+                guard let self = self else { return }
+                // Drop late-arriving cues if the user switched again.
+                guard self.currentSubtitleStreamIndex == index else { return }
+                self.subtitleCues = cues
+                self.isLoadingSubtitles = false
+            }
+        }
+    }
+
+    /// Turn subtitles off. Cancels any in-flight decode and clears the
+    /// cue list immediately.
+    public func clearSubtitle() {
+        subtitleDecodeTask?.cancel()
+        subtitleDecodeTask = nil
+        currentSubtitleStreamIndex = nil
+        subtitleCues = []
+        isLoadingSubtitles = false
     }
 
     // MARK: - Internal
