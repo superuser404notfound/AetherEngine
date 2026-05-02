@@ -184,7 +184,7 @@ enum SubtitleDecoder {
                         id: nextID,
                         startTime: startTime,
                         endTime: endTime,
-                        text: merged
+                        body: .text(merged)
                     ))
                     nextID += 1
                 }

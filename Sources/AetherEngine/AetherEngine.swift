@@ -190,6 +190,11 @@ public final class AetherEngine: ObservableObject {
     /// Dedupe set keyed by `"start|end"` so packets re-read after
     /// a seek don't produce duplicate cues.
     nonisolated(unsafe) var seenSubtitleKeys: Set<String> = []
+    /// Source video frame width / height in pixels — captured at
+    /// load() so the demux thread can normalise bitmap-subtitle rect
+    /// coordinates without re-touching the AVStream.
+    nonisolated(unsafe) var videoFrameWidth: Int32 = 0
+    nonisolated(unsafe) var videoFrameHeight: Int32 = 0
 
     /// Condition for waking the demux loop from pause.
     private let demuxCondition = NSCondition()
@@ -322,6 +327,12 @@ public final class AetherEngine: ObservableObject {
             guard videoIdx >= 0, let videoStream = demuxer.stream(at: videoIdx) else {
                 throw AetherEngineError.noVideoStream
             }
+
+            // Capture source video dimensions — used to normalise
+            // bitmap-subtitle rect coordinates so the host can scale
+            // to any on-screen video rect.
+            videoFrameWidth = videoStream.pointee.codecpar.pointee.width
+            videoFrameHeight = videoStream.pointee.codecpar.pointee.height
 
             let videoRenderer = self.videoRenderer
             let frameCallback: DecodedFrameHandler = { pixelBuffer, pts in
@@ -886,21 +897,38 @@ public final class AetherEngine: ObservableObject {
         let startTime = pktPTS + startOffset
         let endTime = pktPTS + endOffset
 
-        var lines: [String] = []
+        // Build a list of cue bodies from this packet's rects. Most
+        // text packets have one rect; PGS / DVB packets can have
+        // several (signs/songs at top + dialogue at bottom) — each
+        // becomes its own cue at the same time range.
+        var bodies: [SubtitleCue.Body] = []
+        var textLines: [String] = []
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
                 if let text = Self.textForSubtitleRect(rect) {
-                    lines.append(text)
+                    textLines.append(text)
+                } else if let image = Self.imageForSubtitleRect(
+                    rect,
+                    videoWidth: Int(videoFrameWidth),
+                    videoHeight: Int(videoFrameHeight)
+                ) {
+                    bodies.append(.image(image))
                 }
             }
         }
         avsubtitle_free(&sub)
 
-        let merged = lines
+        // Merge plain text rects into a single text body — that
+        // matches the existing single-Text overlay rendering.
+        let merged = textLines
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !merged.isEmpty, endTime > startTime else {
+        if !merged.isEmpty {
+            bodies.append(.text(merged))
+        }
+
+        guard !bodies.isEmpty, endTime > startTime else {
             subtitleLock.unlock()
             return
         }
@@ -911,31 +939,41 @@ public final class AetherEngine: ObservableObject {
             return
         }
         seenSubtitleKeys.insert(key)
-        let cueID = subtitleCueIDCounter
-        subtitleCueIDCounter += 1
+        let cueIDStart = subtitleCueIDCounter
+        subtitleCueIDCounter += bodies.count
         let streamIdx = activeSubtitleStreamIndex
         subtitleLock.unlock()
 
-        let cue = SubtitleCue(id: cueID, startTime: startTime, endTime: endTime, text: merged)
+        let cues: [SubtitleCue] = bodies.enumerated().map { (offset, body) in
+            SubtitleCue(
+                id: cueIDStart + offset,
+                startTime: startTime,
+                endTime: endTime,
+                body: body
+            )
+        }
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             // Drop cues whose stream the user has since switched away from.
             guard self.activeSubtitleStreamIndex == streamIdx else { return }
             // Cues mostly arrive in DTS order, but a backward seek can
-            // make a fresh packet land before existing cues. Insert in
-            // sorted position so the overlay's binary-search lookup
-            // stays correct.
-            var lo = 0, hi = self.subtitleCues.count
-            while lo < hi {
-                let mid = (lo + hi) / 2
-                if self.subtitleCues[mid].startTime < cue.startTime {
-                    lo = mid + 1
-                } else {
-                    hi = mid
+            // make a fresh packet land before existing cues. Insert
+            // each in sorted position so the overlay's lookup
+            // (binary-search-then-walk for overlapping cues) stays
+            // correct.
+            for cue in cues {
+                var lo = 0, hi = self.subtitleCues.count
+                while lo < hi {
+                    let mid = (lo + hi) / 2
+                    if self.subtitleCues[mid].startTime < cue.startTime {
+                        lo = mid + 1
+                    } else {
+                        hi = mid
+                    }
                 }
+                self.subtitleCues.insert(cue, at: lo)
             }
-            self.subtitleCues.insert(cue, at: lo)
         }
     }
 
@@ -974,6 +1012,101 @@ public final class AetherEngine: ObservableObject {
         )
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Render a bitmap subtitle rect (PGS / DVB / HDMV) into a
+    /// CGImage with normalised position. Walks the indexed-pixel
+    /// plane (`data[0]`) through the palette (`data[1]`) into a
+    /// packed RGBA buffer and wraps that as a CGImage.
+    ///
+    /// The palette is delivered by libavcodec as 32-bit values laid
+    /// out with alpha in the high byte and BGR below — i.e. on a
+    /// little-endian platform the bytes in memory read `[B, G, R, A]`.
+    /// We rewrite to RGBA byte order for CGImage's
+    /// `premultipliedLast` consumer.
+    nonisolated private static func imageForSubtitleRect(
+        _ rect: UnsafeMutablePointer<AVSubtitleRect>,
+        videoWidth: Int,
+        videoHeight: Int
+    ) -> SubtitleImage? {
+        // libavcodec's 5.x layout: SUBTITLE_BITMAP rects carry the
+        // indexed plane in `data.0` and the palette in `data.1`.
+        let r = rect.pointee
+        guard r.type == SUBTITLE_BITMAP,
+              r.w > 0, r.h > 0,
+              let pixelsPtr = r.data.0,
+              let palettePtr = r.data.1
+        else { return nil }
+
+        let width = Int(r.w)
+        let height = Int(r.h)
+        let stride = Int(r.linesize.0)
+
+        // Convert indexed → packed RGBA premultiplied.
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        for y in 0..<height {
+            for x in 0..<width {
+                let palIdx = Int(pixelsPtr[y * stride + x])
+                let palOff = palIdx * 4
+                // Memory order from libavcodec on little-endian Apple
+                // platforms is [B, G, R, A] for a uint32 stored as
+                // (a << 24) | (r << 16) | (g << 8) | b.
+                let b = palettePtr[palOff + 0]
+                let g = palettePtr[palOff + 1]
+                let red = palettePtr[palOff + 2]
+                let a = palettePtr[palOff + 3]
+
+                // Premultiply against alpha so CGImage's
+                // premultipliedLast renders correctly without the
+                // black-fringe edges that straight alpha produces
+                // on smooth blends.
+                let outOff = (y * width + x) * 4
+                rgba[outOff + 0] = UInt8((Int(red) * Int(a) + 127) / 255)
+                rgba[outOff + 1] = UInt8((Int(g) * Int(a) + 127) / 255)
+                rgba[outOff + 2] = UInt8((Int(b) * Int(a) + 127) / 255)
+                rgba[outOff + 3] = a
+            }
+        }
+
+        let data = Data(rgba)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
+        else { return nil }
+
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let cgImage = CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ) else { return nil }
+
+        // Normalise the rect's position against the source video
+        // frame. `videoWidth` / `videoHeight` come from the engine's
+        // captured codecpar dims; if for some reason they're zero
+        // (very early in load before videoStream picked) we fall
+        // back to a centered overlay sized for the bitmap's own
+        // aspect — better than rendering at (0, 0) full-size.
+        let position: CGRect
+        if videoWidth > 0, videoHeight > 0 {
+            position = CGRect(
+                x: Double(r.x) / Double(videoWidth),
+                y: Double(r.y) / Double(videoHeight),
+                width: Double(width) / Double(videoWidth),
+                height: Double(height) / Double(videoHeight)
+            )
+        } else {
+            position = CGRect(x: 0.1, y: 0.8, width: 0.8, height: 0.15)
+        }
+
+        return SubtitleImage(cgImage: cgImage, position: position)
     }
 
     // MARK: - Internal
