@@ -596,6 +596,32 @@ public final class AetherEngine: ObservableObject {
                     print("[AetherEngine] Audio flow timeout — load() returning anyway")
                 }
                 #endif
+
+                // Race fix for "black video at episode start that
+                // recovers after a seek": the demux loop can produce
+                // and enqueue the first decoded video frame BEFORE
+                // the synchronizer's rate is set to 1.0 (which only
+                // happens once the audio path delivers its first
+                // sample buffer to the renderer). If a frame lands
+                // in the display layer while the synchronizer is
+                // still paused, the layer's clock isn't advancing —
+                // the frame sits in the queue, `isReadyForMoreMediaData`
+                // flips to false, the demux thread back-pressures
+                // off, and we end up with a black screen and audio
+                // playing. A user seek (skipIntro et al.) recovers
+                // it because seek's `flushAndRemoveImage` clears the
+                // bad state and the next keyframe lands in a clean
+                // queue with the synchronizer already running.
+                //
+                // Now that audio has flowed and the synchronizer is
+                // live, flush whatever's in the layer queue (using
+                // the lighter `flush()` that doesn't kill the
+                // displayed image — at startup there isn't one
+                // anyway) so the very next decoded frame from the
+                // demux thread lands clean and renders immediately.
+                if isAudioFlowing {
+                    videoRenderer.flushDisplayLayer()
+                }
             }
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
