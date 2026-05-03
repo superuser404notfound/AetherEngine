@@ -1553,6 +1553,19 @@ public final class AetherEngine: ObservableObject {
         // pointers — drop it before closing the demuxer so we don't
         // dangle into the next load.
         closeSubtitleDecoder()
+        cancelSidecarTask()
+        // Reset the published subtitle state too. The engine is a
+        // singleton; a host that creates a fresh ViewModel per session
+        // (we do) and subscribes to `$subtitleCues` will otherwise
+        // receive the previous session's last cue array as the initial
+        // Combine replay — and `isSubtitleActive` still being `true`
+        // means our guard lets it through, so a stale subtitle line
+        // briefly flashes on the next playback before the new load
+        // settles. Clearing here makes stop() leave the engine in the
+        // same state as a fresh init.
+        isSubtitleActive = false
+        subtitleCues = []
+        isLoadingSubtitles = false
         demuxer.close()
         audioAvailable = false
         atmosAudioSkipPTS = -1
