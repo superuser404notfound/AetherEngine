@@ -643,6 +643,25 @@ public final class AetherEngine: ObservableObject {
                     videoRenderer.flushDisplayLayer()
                 }
             }
+
+            // Wait for the first decoded video frame to actually land
+            // on the display layer before returning. Without this,
+            // callers that await `load(...)` and immediately call
+            // `pause()` (foreground-from-background reload) freeze on
+            // an empty layer because the new sublayer was just created
+            // and no frame has flushed through the reorder buffer yet.
+            // Capped at 1 s so a stalled video stream still lets load()
+            // return.
+            videoRenderer.resetFirstFrameTracking()
+            let videoDeadline = Date().addingTimeInterval(1.0)
+            while !videoRenderer.hasRenderedFirstFrame && Date() < videoDeadline {
+                try? await Task.sleep(nanoseconds: 10_000_000) // 10ms poll
+            }
+            #if DEBUG
+            if !videoRenderer.hasRenderedFirstFrame {
+                print("[AetherEngine] First-frame timeout — load() returning anyway")
+            }
+            #endif
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error

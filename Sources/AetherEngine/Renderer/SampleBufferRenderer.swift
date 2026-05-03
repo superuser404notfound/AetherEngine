@@ -49,6 +49,29 @@ final class SampleBufferRenderer {
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: UInt64 = 0
 
+    /// Tracks whether at least one frame has reached the display layer
+    /// since the last reset. Used by `AetherEngine.load()` to wait for
+    /// the first video frame to actually render before returning, so
+    /// callers that pause immediately after load (foreground reload)
+    /// don't freeze on an empty layer (black). Touched from both the
+    /// decoder callback thread (set) and the engine actor (read +
+    /// reset), hence the explicit lock.
+    private let firstFrameLock = NSLock()
+    nonisolated(unsafe) private var _hasRenderedFirstFrame = false
+    nonisolated var hasRenderedFirstFrame: Bool {
+        firstFrameLock.lock(); defer { firstFrameLock.unlock() }
+        return _hasRenderedFirstFrame
+    }
+
+    /// Reset the first-frame tracker. Call before waiting for the
+    /// next post-flush frame so a pre-flush frame doesn't satisfy
+    /// the wait spuriously.
+    func resetFirstFrameTracking() {
+        firstFrameLock.lock()
+        _hasRenderedFirstFrame = false
+        firstFrameLock.unlock()
+    }
+
     #if DEBUG
     private var loggedLayerFailed = false
     private var enqueueCount = 0
@@ -117,6 +140,10 @@ final class SampleBufferRenderer {
         cachedFormatKey = 0
         reorderLock.unlock()
 
+        firstFrameLock.lock()
+        _hasRenderedFirstFrame = false
+        firstFrameLock.unlock()
+
         let newLayer = Self.makeDisplayLayer(isHDR: currentlyHDR, gravity: currentGravity)
         displayLayer = newLayer
         onLayerReplaced?(newLayer)
@@ -182,6 +209,10 @@ final class SampleBufferRenderer {
         cachedFormatKey = 0
         reorderLock.unlock()
 
+        firstFrameLock.lock()
+        _hasRenderedFirstFrame = false
+        firstFrameLock.unlock()
+
         displayLayer.flushAndRemoveImage()
     }
 
@@ -220,6 +251,14 @@ final class SampleBufferRenderer {
             displayLayer.flush()
         }
         displayLayer.enqueue(sampleBuffer)
+
+        // Mark first frame after the most recent reset. Lock-protected
+        // because flushFrame runs on the decoder callback thread while
+        // AetherEngine reads / resets this from its actor.
+        firstFrameLock.lock()
+        _hasRenderedFirstFrame = true
+        firstFrameLock.unlock()
+
         #if DEBUG
         enqueueCount += 1
         if enqueueCount == 1 || enqueueCount == 30 {
