@@ -36,6 +36,12 @@ final class VideoDecoder: @unchecked Sendable {
     /// (used in Atmos mode) — frames stop rendering. An explicit
     /// transfer session is independent of the decoder's timing path.
     private var tonemapToSDR = false
+    /// True when the input stream carries Dolby Vision RPU metadata
+    /// and the format description has been tagged as `dvh1` with a
+    /// `dvcC` extension. The TV-side DV mode switch only fires when
+    /// the layer sees a DV-tagged format description, so this flag
+    /// gates whether we even attempted that signalling.
+    private var isDolbyVision = false
 
     /// Post-decode pixel transfer for HDR→SDR tonemapping. Allocated
     /// only when `tonemapToSDR` is true.
@@ -314,14 +320,18 @@ final class VideoDecoder: @unchecked Sendable {
 
     /// Create a CMVideoFormatDescription from FFmpeg's AVCodecParameters.
     /// This extracts the codec-specific "extradata" (avcC for H.264,
-    /// hvcC for HEVC) and passes it as a sample description extension.
+    /// hvcC for HEVC, av1C for AV1) and passes it as a sample-description
+    /// extension. For HEVC streams that carry a Dolby Vision config in
+    /// codec side data, the format description is tagged as `dvh1` and
+    /// extended with a `dvcC` atom alongside `hvcC` so the display layer
+    /// (and ultimately the TV) recognises the DV signalling.
     private func createFormatDescription(
         from codecpar: UnsafePointer<AVCodecParameters>
     ) throws -> CMVideoFormatDescription {
         let width = codecpar.pointee.width
         let height = codecpar.pointee.height
 
-        // Determine the CMVideoCodecType
+        // Determine the CMVideoCodecType + the matching base atom key.
         let codecType: CMVideoCodecType
         let atomKey: String
         switch codecpar.pointee.codec_id {
@@ -340,16 +350,41 @@ final class VideoDecoder: @unchecked Sendable {
             )
         }
 
-        // Build CMVideoFormatDescription. For H.264/HEVC, FFmpeg stores
-        // extradata in avcC/hvcC format (from mp4/mkv), which is exactly
-        // what CMVideoFormatDescription expects. AV1 uses av1C.
+        // FFmpeg stores extradata in the codec's native config-record
+        // format (avcC / hvcC / av1C from mp4 / mkv), which is exactly
+        // what CMVideoFormatDescription expects.
         guard let extradata = codecpar.pointee.extradata,
               codecpar.pointee.extradata_size > 0 else {
             throw VideoDecoderError.noExtradata
         }
-
         let extradataBytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
-        let atoms: NSDictionary = [atomKey: extradataBytes]
+
+        // Detect Dolby Vision via FFmpeg's `AV_PKT_DATA_DOVI_CONF` side
+        // data on the codec parameters. When present *and* the runtime
+        // display supports DV *and* we're not tone-mapping to SDR, we
+        // promote the codec type to `kCMVideoCodecType_DolbyVisionHEVC`
+        // and pack a `dvcC` atom alongside the existing `hvcC` so the
+        // layer sees a proper DV format description — without this the
+        // TV stays in HDR10 fallback (or wrong-colour Profile 5 base
+        // layer) instead of switching to DV mode. On non-DV displays
+        // we leave the format as plain HEVC so the HDR10 / HLG
+        // backward-compatible base layer still plays correctly.
+        let atoms: NSMutableDictionary = [atomKey: extradataBytes]
+        let effectiveCodecType: CMVideoCodecType
+        if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
+           !tonemapToSDR,
+           Self.displaySupportsDolbyVision,
+           let dvcCData = doviConfigAtomData(from: codecpar) {
+            atoms["dvcC"] = dvcCData
+            effectiveCodecType = kCMVideoCodecType_DolbyVisionHEVC
+            isDolbyVision = true
+            #if DEBUG
+            print("[VideoDecoder] Dolby Vision config found — tagging as 'dvh1' with dvcC")
+            #endif
+        } else {
+            effectiveCodecType = codecType
+        }
+
         let extensions: NSDictionary = [
             kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms
         ]
@@ -357,7 +392,7 @@ final class VideoDecoder: @unchecked Sendable {
         var formatDesc: CMVideoFormatDescription?
         let status = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            codecType: codecType,
+            codecType: effectiveCodecType,
             width: width,
             height: height,
             extensions: extensions,
@@ -367,6 +402,83 @@ final class VideoDecoder: @unchecked Sendable {
             throw VideoDecoderError.formatDescriptionFailed(status: status)
         }
         return desc
+    }
+
+    /// Whether the active video output supports Dolby Vision. Mirrors
+    /// the check used for `PropagatePerFrameHDRDisplayMetadata` so the
+    /// format-description tag and the propagation flag agree.
+    private static var displaySupportsDolbyVision: Bool {
+        #if os(tvOS) || os(iOS)
+        return AVPlayer.availableHDRModes.contains(.dolbyVision)
+        #else
+        return false
+        #endif
+    }
+
+    /// Look up FFmpeg's `AV_PKT_DATA_DOVI_CONF` side data on the codec
+    /// parameters. When present, the payload is an
+    /// `AVDOVIDecoderConfigurationRecord` which we serialise into the
+    /// 24-byte ISO BMFF `dvcC` box body that CoreMedia consumes.
+    private func doviConfigAtomData(
+        from codecpar: UnsafePointer<AVCodecParameters>
+    ) -> Data? {
+        let count = Int(codecpar.pointee.nb_coded_side_data)
+        guard count > 0, let sideData = codecpar.pointee.coded_side_data else {
+            return nil
+        }
+        for i in 0..<count {
+            let item = sideData.advanced(by: i).pointee
+            guard item.type == AV_PKT_DATA_DOVI_CONF else { continue }
+            // The first 8 fields of AVDOVIDecoderConfigurationRecord
+            // are the public DV config bytes. Newer FFmpeg builds add
+            // `dv_md_compression` (9th byte) — we don't use it for the
+            // box body, so 8 bytes is enough to proceed safely.
+            guard let raw = item.data, item.size >= 8 else { continue }
+            let record = raw.withMemoryRebound(
+                to: AVDOVIDecoderConfigurationRecord.self,
+                capacity: 1
+            ) { $0.pointee }
+            return buildDvcCAtom(from: record)
+        }
+        return nil
+    }
+
+    /// Build the 24-byte `dvcC` atom payload from FFmpeg's DV record.
+    ///
+    /// Layout (DOVIDecoderConfigurationRecord, ISO BMFF Dolby Vision
+    /// streams spec v2.1.2):
+    /// ```
+    ///   8 bits : dv_version_major
+    ///   8 bits : dv_version_minor
+    ///   7 bits : dv_profile
+    ///   6 bits : dv_level
+    ///   1 bit  : rpu_present_flag
+    ///   1 bit  : el_present_flag
+    ///   1 bit  : bl_present_flag
+    ///   4 bits : dv_bl_signal_compatibility_id
+    ///  28 bits : reserved (zero)
+    /// 128 bits : reserved (zero)
+    /// ```
+    private func buildDvcCAtom(
+        from record: AVDOVIDecoderConfigurationRecord
+    ) -> Data {
+        var bytes = [UInt8](repeating: 0, count: 24)
+        bytes[0] = record.dv_version_major
+        bytes[1] = record.dv_version_minor
+        let profile = record.dv_profile & 0x7F
+        let level   = record.dv_level   & 0x3F
+        let rpu     = record.rpu_present_flag & 0x01
+        let el      = record.el_present_flag  & 0x01
+        let bl      = record.bl_present_flag  & 0x01
+        let compat  = record.dv_bl_signal_compatibility_id & 0x0F
+        // Byte 2: dv_profile (7) << 1 | high bit of dv_level (1)
+        bytes[2] = (profile << 1) | ((level >> 5) & 0x01)
+        // Byte 3: low 5 bits of dv_level | rpu | el | bl
+        bytes[3] = ((level & 0x1F) << 3) | (rpu << 2) | (el << 1) | bl
+        // Byte 4: dv_bl_signal_compatibility_id (4) << 4 | reserved high nibble (0)
+        bytes[4] = compat << 4
+        // Bytes 5–23 are reserved zero (already initialised).
+        return Data(bytes)
     }
 
     /// Create a VTDecompressionSession for hardware decoding.
