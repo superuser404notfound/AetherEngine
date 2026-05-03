@@ -77,6 +77,26 @@ public final class AetherEngine: ObservableObject {
     /// Uses AVSampleBufferDisplayLayer for optimal frame pacing.
     public var videoLayer: CALayer { videoRenderer.displayLayer }
 
+    /// How the rendered video fills its container layer.
+    ///
+    /// - `.resizeAspect` (default) — preserve aspect, letterbox / pillarbox
+    ///   any leftover space. The classic "fit" behaviour every Apple TV
+    ///   player uses by default.
+    /// - `.resizeAspectFill` — preserve aspect, scale until the frame
+    ///   covers the layer, crop whatever overflows. Useful for 4:3 source
+    ///   on a 16:9 display (zooms in slightly to ditch the pillarbox)
+    ///   and for 2.39:1 cinemascope content where users prefer no
+    ///   letterbox.
+    /// - `.resize` — distort to fill, no aspect preservation. Rarely
+    ///   what anyone wants but exposed for completeness.
+    ///
+    /// Survives layer recreation across `load()` calls — the renderer
+    /// re-applies the cached gravity on every fresh display layer.
+    public var videoGravity: AVLayerVideoGravity {
+        get { videoRenderer.videoGravity }
+        set { videoRenderer.setVideoGravity(newValue) }
+    }
+
     /// Fires when the video layer is replaced with a fresh instance —
     /// which happens on every `load()` call to avoid stale
     /// Synchronizer/controlTimebase state from a previous playback.

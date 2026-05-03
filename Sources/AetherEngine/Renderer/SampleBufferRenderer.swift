@@ -25,6 +25,11 @@ final class SampleBufferRenderer {
     /// layers. Defaults match init().
     private var currentlyHDR: Bool = false
 
+    /// Track the requested video gravity so it survives the
+    /// recreate-display-layer-on-every-load() dance. The host sets it
+    /// once via `setVideoGravity` and we reapply on every fresh layer.
+    private var currentGravity: AVLayerVideoGravity = .resizeAspect
+
     /// Reorder buffer: collects frames from the decoder (which may arrive
     /// out of display order due to B-frames) and flushes them to the
     /// display layer in ascending PTS order.
@@ -53,9 +58,9 @@ final class SampleBufferRenderer {
         displayLayer = Self.makeDisplayLayer(isHDR: false)
     }
 
-    private static func makeDisplayLayer(isHDR: Bool) -> AVSampleBufferDisplayLayer {
+    private static func makeDisplayLayer(isHDR: Bool, gravity: AVLayerVideoGravity = .resizeAspect) -> AVSampleBufferDisplayLayer {
         let layer = AVSampleBufferDisplayLayer()
-        layer.videoGravity = .resizeAspect
+        layer.videoGravity = gravity
         layer.preventsDisplaySleepDuringVideoPlayback = true
         if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
             layer.preferredDynamicRange = isHDR ? .high : .standard
@@ -68,6 +73,16 @@ final class SampleBufferRenderer {
         }
         return layer
     }
+
+    /// Set how the rendered video frame fills its CALayer rect.
+    /// Survives layer recreation across `load()` cycles — the renderer
+    /// caches the value and re-applies it on every fresh layer.
+    func setVideoGravity(_ gravity: AVLayerVideoGravity) {
+        currentGravity = gravity
+        displayLayer.videoGravity = gravity
+    }
+
+    var videoGravity: AVLayerVideoGravity { currentGravity }
 
     /// Opt the display layer into HDR output. Call with `true` only when
     /// the decoder is delivering HDR10/DV pixel buffers directly (no
@@ -102,7 +117,7 @@ final class SampleBufferRenderer {
         cachedFormatKey = 0
         reorderLock.unlock()
 
-        let newLayer = Self.makeDisplayLayer(isHDR: currentlyHDR)
+        let newLayer = Self.makeDisplayLayer(isHDR: currentlyHDR, gravity: currentGravity)
         displayLayer = newLayer
         onLayerReplaced?(newLayer)
 
