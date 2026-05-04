@@ -32,9 +32,13 @@ final class SampleBufferRenderer {
 
     /// Reorder buffer: collects frames from the decoder (which may arrive
     /// out of display order due to B-frames) and flushes them to the
-    /// display layer in ascending PTS order.
+    /// display layer in ascending PTS order. The third tuple slot
+    /// carries optional per-frame HDR10+ metadata (T.35 SEI bytes) so
+    /// the data stays paired with its frame across the reorder, then
+    /// rides along to `flushFrame` where it's attached to the
+    /// CMSampleBuffer via `kCMSampleAttachmentKey_HDR10PlusPerFrameData`.
     private let reorderLock = NSLock()
-    private var reorderBuffer: [(CVPixelBuffer, CMTime)] = []
+    private var reorderBuffer: [(CVPixelBuffer, CMTime, Data?)] = []
     private let reorderDepth = 4  // B-frame reorder (handles up to 3 consecutive B-frames)
 
     /// After a seek, frames decoded between the keyframe and the actual
@@ -164,8 +168,11 @@ final class SampleBufferRenderer {
     }
 
     /// Enqueue a decoded video frame. Frames are buffered and reordered
-    /// by PTS before being sent to the display layer.
-    func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime) {
+    /// by PTS before being sent to the display layer. `hdr10PlusData`,
+    /// when non-nil, carries the per-frame ST 2094-40 dynamic metadata
+    /// already serialised to the T.35 SEI byte format Apple's
+    /// `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects.
+    func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data? = nil) {
         reorderLock.lock()
 
         // Drop pre-seek frames (between keyframe and actual seek target)
@@ -182,13 +189,13 @@ final class SampleBufferRenderer {
         let insertIdx = reorderBuffer.firstIndex(where: {
             CMTimeGetSeconds($0.1) > ptsSeconds
         }) ?? reorderBuffer.endIndex
-        reorderBuffer.insert((pixelBuffer, pts), at: insertIdx)
+        reorderBuffer.insert((pixelBuffer, pts, hdr10PlusData), at: insertIdx)
 
         // Flush oldest frames when buffer exceeds reorder depth
         while reorderBuffer.count > reorderDepth {
-            let (pb, t) = reorderBuffer.removeFirst()
+            let (pb, t, hdr) = reorderBuffer.removeFirst()
             reorderLock.unlock()
-            flushFrame(pixelBuffer: pb, pts: t)
+            flushFrame(pixelBuffer: pb, pts: t, hdr10PlusData: hdr)
             reorderLock.lock()
         }
 
@@ -224,16 +231,28 @@ final class SampleBufferRenderer {
         reorderBuffer.removeAll()
         reorderLock.unlock()
 
-        for (pb, t) in remaining {
-            flushFrame(pixelBuffer: pb, pts: t)
+        for (pb, t, hdr) in remaining {
+            flushFrame(pixelBuffer: pb, pts: t, hdr10PlusData: hdr)
         }
     }
 
     // MARK: - Internal
 
-    private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime) {
+    private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?) {
         guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
             return
+        }
+        // Attach HDR10+ dynamic metadata before enqueue. Per Apple's
+        // doc this attachment overrides any HDR10+ payload baked into
+        // the compressed bitstream — which is exactly what we want
+        // because VT may strip per-frame SEI on the way out.
+        if let hdr10PlusData {
+            CMSetAttachment(
+                sampleBuffer,
+                key: kCMSampleAttachmentKey_HDR10PlusPerFrameData,
+                value: hdr10PlusData as CFData,
+                attachmentMode: CMAttachmentMode(kCMAttachmentMode_ShouldPropagate)
+            )
         }
         // If the layer has entered the failed state (undefined-behavior
         // races during Synchronizer↔controlTimebase handoffs push it

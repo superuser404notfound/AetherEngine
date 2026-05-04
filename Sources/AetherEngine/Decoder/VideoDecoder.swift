@@ -8,7 +8,12 @@ import Libavcodec
 import Libavutil
 
 /// Callback type for decoded video frames.
-typealias DecodedFrameHandler = (CVPixelBuffer, CMTime) -> Void
+///
+/// `hdr10PlusT35` carries the source-frame's HDR10+ dynamic metadata,
+/// already serialised to the ITU-T T.35 byte format Apple's
+/// `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects. Nil for
+/// non-HDR10+ streams or when the metadata was dropped (tonemap-to-SDR).
+typealias DecodedFrameHandler = (CVPixelBuffer, CMTime, Data?) -> Void
 
 /// VideoToolbox hardware decoder wrapper. Takes compressed AVPackets
 /// from the Demuxer and produces decoded CVPixelBuffers via Apple's
@@ -42,6 +47,19 @@ final class VideoDecoder: @unchecked Sendable {
     /// the layer sees a DV-tagged format description, so this flag
     /// gates whether we even attempted that signalling.
     private var isDolbyVision = false
+
+    /// Per-frame HDR10+ metadata, keyed by the packet PTS so the
+    /// async VT output handler can pair the right T.35 SEI bytes
+    /// to each decoded frame (B-frame reorder makes the simple "use
+    /// the most recent value" approach unsafe). FFmpeg gives us the
+    /// data on the input AVPacket; the matching CVPixelBuffer comes
+    /// out of VT some frames later, so we stash on the way in and
+    /// look up + remove on the way out.
+    private let hdr10PlusLock = NSLock()
+    nonisolated(unsafe) private var pendingHDR10Plus: [Int64: Data] = [:]
+    #if DEBUG
+    private var loggedHDR10PlusOnce = false
+    #endif
 
     /// Post-decode pixel transfer for HDR→SDR tonemapping. Allocated
     /// only when `tonemapToSDR` is true.
@@ -158,6 +176,25 @@ final class VideoDecoder: @unchecked Sendable {
             cmPTS = .invalid
         }
 
+        // HDR10+ — extract dynamic metadata from the packet's side data
+        // and stash it under the packet PTS so the async VT output
+        // handler can pair it with the matching decoded frame. We
+        // serialise to T.35 SEI bytes here (vs. on the output side)
+        // because FFmpeg's `av_dynamic_hdr_plus_to_t35` is cheap and
+        // keeping the parsed struct alive across thread boundaries is
+        // more fragile than handing across an immutable Data.
+        if cmPTS.isValid, let hdrData = extractHDR10PlusBytes(from: packet) {
+            hdr10PlusLock.lock()
+            pendingHDR10Plus[cmPTS.value] = hdrData
+            hdr10PlusLock.unlock()
+            #if DEBUG
+            if !loggedHDR10PlusOnce {
+                loggedHDR10PlusOnce = true
+                print("[VideoDecoder] HDR10+ dynamic metadata detected — \(hdrData.count) bytes T.35 SEI per frame")
+            }
+            #endif
+        }
+
         // Copy packet data into a CoreMedia-managed CMBlockBuffer.
         // We must copy because VTDecompressionSession decodes asynchronously
         // and the FFmpeg AVPacket may be freed before decoding completes.
@@ -246,25 +283,76 @@ final class VideoDecoder: @unchecked Sendable {
                         self.attachSDRColorSpace(to: pixelBuffer)
                     }
                 }
+
+                // Reclaim any HDR10+ payload the demux side stashed
+                // for this frame's PTS. Tonemap-to-SDR drops the
+                // metadata (it's irrelevant for an SDR output) so we
+                // pull it off the map either way to avoid leaking.
+                let hdr10PlusData: Data? = {
+                    guard pts.isValid else { return nil }
+                    self.hdr10PlusLock.lock()
+                    defer { self.hdr10PlusLock.unlock() }
+                    return self.pendingHDR10Plus.removeValue(forKey: pts.value)
+                }()
+
                 if self.tonemapToSDR, self.use10Bit, self.isHDR {
                     // VTPixelTransferSession needs correct source color
                     // attachments to know it must tone-map PQ→SDR. The
                     // call above made that explicit. Now do the transfer.
                     if let sdrBuffer = self.tonemapPixelBuffer(pixelBuffer) {
                         self.attachSDRColorSpace(to: sdrBuffer)
-                        self.onFrame?(sdrBuffer, pts)
+                        self.onFrame?(sdrBuffer, pts, nil)
                     }
                 } else {
-                    self.onFrame?(pixelBuffer, pts)
+                    self.onFrame?(pixelBuffer, pts, hdr10PlusData)
                 }
             }
         )
+    }
+
+    /// Pull HDR10+ dynamic metadata from `AV_PKT_DATA_DYNAMIC_HDR10_PLUS`
+    /// packet side data and serialise it to the T.35 SEI byte format
+    /// `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects (starts
+    /// with `itu_t_t35_country_code = 0xb5`, little endian payload).
+    /// Returns nil when the packet has no HDR10+ side data.
+    private func extractHDR10PlusBytes(
+        from packet: UnsafeMutablePointer<AVPacket>
+    ) -> Data? {
+        let count = Int(packet.pointee.side_data_elems)
+        guard count > 0, let sideData = packet.pointee.side_data else {
+            return nil
+        }
+        for i in 0..<count {
+            let item = sideData.advanced(by: i).pointee
+            guard item.type == AV_PKT_DATA_DYNAMIC_HDR10_PLUS else { continue }
+            guard let raw = item.data, item.size > 0 else { continue }
+            return raw.withMemoryRebound(
+                to: AVDynamicHDRPlus.self,
+                capacity: 1
+            ) { recordPtr -> Data? in
+                var dataPtr: UnsafeMutablePointer<UInt8>? = nil
+                var size: Int = 0
+                let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
+                guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
+                let data = Data(bytes: buf, count: size)
+                free(buf)
+                return data
+            }
+        }
+        return nil
     }
 
     /// Flush the decoder — wait for all pending frames to be delivered.
     func flush() {
         guard let session = decompressionSession else { return }
         VTDecompressionSessionWaitForAsynchronousFrames(session)
+        // Drop any HDR10+ payloads whose frames were dropped instead
+        // of delivered (e.g. seek-target skip). Seek/stop pre-flush
+        // followed by a fresh demux walks new PTSes, so old entries
+        // would leak forever.
+        hdr10PlusLock.lock()
+        pendingHDR10Plus.removeAll(keepingCapacity: true)
+        hdr10PlusLock.unlock()
     }
 
     /// Close the decoder and release resources.

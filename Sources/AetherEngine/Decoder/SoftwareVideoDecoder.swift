@@ -140,7 +140,14 @@ final class SoftwareVideoDecoder {
                 cmPTS = .invalid
             }
 
-            onFrame?(pixelBuffer, cmPTS)
+            // HDR10+ — software path reads the dynamic metadata off
+            // the post-decode AVFrame side data and serialises to T.35
+            // SEI bytes the same way the VT path does. We can't reuse
+            // the VT path's packet-side stash because the software
+            // decoder owns its own packet flow.
+            let hdr10PlusData = extractHDR10PlusBytes(from: f)
+
+            onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
         }
 
         av_frame_free(&frame)
@@ -151,6 +158,37 @@ final class SoftwareVideoDecoder {
         defer { lock.unlock() }
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
+    }
+
+    /// Extract HDR10+ dynamic metadata from a decoded AVFrame's side
+    /// data and serialise to T.35 SEI bytes (the format Apple's
+    /// `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects).
+    /// Returns nil when the frame carries no HDR10+ side data.
+    private func extractHDR10PlusBytes(
+        from frame: UnsafeMutablePointer<AVFrame>
+    ) -> Data? {
+        let count = Int(frame.pointee.nb_side_data)
+        guard count > 0, let sideData = frame.pointee.side_data else {
+            return nil
+        }
+        for i in 0..<count {
+            guard let entry = sideData[i] else { continue }
+            guard entry.pointee.type == AV_FRAME_DATA_DYNAMIC_HDR_PLUS else { continue }
+            guard let raw = entry.pointee.data, entry.pointee.size > 0 else { continue }
+            return raw.withMemoryRebound(
+                to: AVDynamicHDRPlus.self,
+                capacity: 1
+            ) { recordPtr -> Data? in
+                var dataPtr: UnsafeMutablePointer<UInt8>? = nil
+                var size: Int = 0
+                let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
+                guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
+                let data = Data(bytes: buf, count: size)
+                free(buf)
+                return data
+            }
+        }
+        return nil
     }
 
     func close() {

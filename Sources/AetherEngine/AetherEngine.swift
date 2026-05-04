@@ -356,8 +356,12 @@ public final class AetherEngine: ObservableObject {
             videoFrameHeight = videoStream.pointee.codecpar.pointee.height
 
             let videoRenderer = self.videoRenderer
-            let frameCallback: DecodedFrameHandler = { pixelBuffer, pts in
-                videoRenderer.enqueue(pixelBuffer: pixelBuffer, pts: pts)
+            let frameCallback: DecodedFrameHandler = { pixelBuffer, pts, hdr10PlusData in
+                videoRenderer.enqueue(
+                    pixelBuffer: pixelBuffer,
+                    pts: pts,
+                    hdr10PlusData: hdr10PlusData
+                )
             }
 
             // Try VideoToolbox hardware decode first, fall back to FFmpeg
