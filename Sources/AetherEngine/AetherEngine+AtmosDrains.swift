@@ -7,12 +7,12 @@ import Libavutil
 /// AetherEngine class. Both drains run on dedicated dispatch queues
 /// so the demux thread never blocks on display-layer back-pressure or
 /// AVPlayer stalls. The buffers themselves and their locks live as
-/// stored properties on the engine class — the methods here simply
+/// stored properties on the engine class, the methods here simply
 /// drive them.
 extension AetherEngine {
 
     /// Clear all buffered atmos packets. Called from seek (non-async safe).
-    /// Also resets the drain-active flags — a drain loop that exited
+    /// Also resets the drain-active flags, a drain loop that exited
     /// through the `stopRequested` early-return leaves them stuck at
     /// `true`, and the next load()/startAtmosXxxDrain() would be a
     /// no-op → packets pile up in the buffer and nothing ever decodes
@@ -50,7 +50,7 @@ extension AetherEngine {
                     self.atmosAudioLock.unlock()
                     return
                 }
-                // Bail on track switch — feedAudioData can block up to 10s
+                // Bail on track switch, feedAudioData can block up to 10s
                 // waiting for AVPlayer to start, which would in turn block
                 // tearDownCurrentAudioEngine's sync barrier.
                 guard self.audioMode == .atmos else {
@@ -102,7 +102,7 @@ extension AetherEngine {
                 self.atmosVideoLock.unlock()
 
                 // Back-pressure on THIS thread (doesn't affect demux or audio).
-                // The audioMode check exits immediately on a track switch —
+                // The audioMode check exits immediately on a track switch,
                 // without it the wait can pin a paused-timebase layer forever
                 // and block tearDownCurrentAudioEngine's sync barrier.
                 while !self.videoRenderer.displayLayer.isReadyForMoreMediaData

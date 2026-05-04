@@ -4,9 +4,9 @@ import Network
 /// Local HTTP server that serves HLS audio to AVPlayer on tvOS.
 ///
 /// Serves three types of resources:
-/// - `/audio.m3u8` — EVENT playlist (all segments available from start)
-/// - `/init.mp4`   — fMP4 init segment (moov, loaded once)
-/// - `/segN.mp4`   — fMP4 media segments (moof+mdat, loaded sequentially)
+/// - `/audio.m3u8`, EVENT playlist (all segments available from start)
+/// - `/init.mp4`  , fMP4 init segment (moov, loaded once)
+/// - `/segN.mp4`  , fMP4 media segments (moof+mdat, loaded sequentially)
 final class HLSAudioServer: @unchecked Sendable {
 
     private var listener: NWListener?
@@ -154,7 +154,7 @@ final class HLSAudioServer: @unchecked Sendable {
             m3u8 += "#EXTINF:\(String(format: "%.3f", duration)),\n"
             m3u8 += "seg\(i).mp4\n"
         }
-        // No #EXT-X-ENDLIST — stream continues (EVENT = all segs available, start from beginning)
+        // No #EXT-X-ENDLIST, stream continues (EVENT = all segs available, start from beginning)
 
         #if DEBUG
         print("[HLSAudioServer] Playlist: \(count) segments")

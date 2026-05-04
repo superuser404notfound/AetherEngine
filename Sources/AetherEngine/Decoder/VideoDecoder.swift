@@ -20,7 +20,7 @@ typealias DecodedFrameHandler = (CVPixelBuffer, CMTime, Data?) -> Void
 /// hardware-accelerated VideoToolbox.
 ///
 /// Supports H.264 and HEVC (including Main10 for HDR/DV). Falls back
-/// to "unsupported" error for codecs VideoToolbox can't handle —
+/// to "unsupported" error for codecs VideoToolbox can't handle,
 /// software fallback is a future addition.
 final class VideoDecoder: @unchecked Sendable {
 
@@ -28,7 +28,7 @@ final class VideoDecoder: @unchecked Sendable {
     private var formatDescription: CMVideoFormatDescription?
     private var use10Bit = false
     /// True only for actual HDR content (PQ or HLG transfer). 10-bit
-    /// SDR (Main 10 with BT.709 transfer — common in anime / cartoon
+    /// SDR (Main 10 with BT.709 transfer, common in anime / cartoon
     /// encodes for banding control) is *not* HDR and must keep its
     /// BT.709 color attachments, otherwise the display interprets
     /// the BT.709 yuv values as BT.2020/PQ and the picture comes out
@@ -38,7 +38,7 @@ final class VideoDecoder: @unchecked Sendable {
     /// separate VTPixelTransferSession in the output handler. We do
     /// NOT use kVTDecompressionPropertyKey_PixelTransferProperties
     /// because that conflicts with controlTimebase-driven display
-    /// (used in Atmos mode) — frames stop rendering. An explicit
+    /// (used in Atmos mode), frames stop rendering. An explicit
     /// transfer session is independent of the decoder's timing path.
     private var tonemapToSDR = false
     /// True when the input stream carries Dolby Vision RPU metadata
@@ -140,7 +140,7 @@ final class VideoDecoder: @unchecked Sendable {
         let session = try createDecompressionSession(formatDescription: formatDesc)
         self.decompressionSession = session
 
-        // Tonemap infrastructure — only when going HDR→SDR. 10-bit
+        // Tonemap infrastructure, only when going HDR→SDR. 10-bit
         // SDR doesn't need tonemapping; its values are already in
         // BT.709 space.
         if use10Bit && isHDR && tonemapToSDR {
@@ -185,7 +185,7 @@ final class VideoDecoder: @unchecked Sendable {
             cmPTS = .invalid
         }
 
-        // HDR10+ — extract dynamic metadata from the packet's side data
+        // HDR10+, extract dynamic metadata from the packet's side data
         // and stash it under the packet PTS so the async VT output
         // handler can pair it with the matching decoded frame. We
         // serialise to T.35 SEI bytes here (vs. on the output side)
@@ -200,7 +200,7 @@ final class VideoDecoder: @unchecked Sendable {
             hdr10PlusLock.unlock()
             if firstTime {
                 #if DEBUG
-                print("[VideoDecoder] HDR10+ dynamic metadata detected — \(hdrData.count) bytes T.35 SEI per frame")
+                print("[VideoDecoder] HDR10+ dynamic metadata detected, \(hdrData.count) bytes T.35 SEI per frame")
                 #endif
                 onFirstHDR10PlusDetected?()
             }
@@ -251,7 +251,7 @@ final class VideoDecoder: @unchecked Sendable {
         // Send to VideoToolbox for hardware decoding.
         // Using the OutputHandler variant for cleaner Swift integration
         // (no C function pointer needed).
-        // Async decode with temporal processing — VT outputs frames in
+        // Async decode with temporal processing, VT outputs frames in
         // display order (sorted by PTS). Required for AVSampleBufferDisplayLayer
         // which expects frames in presentation order.
         let decodeFlags: VTDecodeFrameFlags = [
@@ -284,7 +284,7 @@ final class VideoDecoder: @unchecked Sendable {
                 //
                 // This is the difference that fixes oversaturated
                 // 10-bit SDR encodes (e.g. anime/cartoon HEVC Main10
-                // with BT.709) — without the SDR tag the display
+                // with BT.709), without the SDR tag the display
                 // would assume BT.2020 because of the 10-bit format
                 // and crush the colors.
                 if self.use10Bit {
@@ -346,7 +346,7 @@ final class VideoDecoder: @unchecked Sendable {
                 let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
                 guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
                 let data = Data(bytes: buf, count: size)
-                // FFmpeg owns the allocation — free via av_free() so the
+                // FFmpeg owns the allocation, free via av_free() so the
                 // matching allocator is used (plain free() happens to
                 // work on Apple platforms today but the contract isn't
                 // guaranteed across libavutil's allocator backends).
@@ -357,7 +357,7 @@ final class VideoDecoder: @unchecked Sendable {
         return nil
     }
 
-    /// Flush the decoder — wait for all pending frames to be delivered.
+    /// Flush the decoder, wait for all pending frames to be delivered.
     func flush() {
         guard let session = decompressionSession else { return }
         VTDecompressionSessionWaitForAsynchronousFrames(session)
@@ -365,7 +365,7 @@ final class VideoDecoder: @unchecked Sendable {
         // of delivered (e.g. seek-target skip). Seek/stop pre-flush
         // followed by a fresh demux walks new PTSes, so old entries
         // would leak forever. The seenHDR10Plus latch stays as-is
-        // across seeks within the same session — the format hasn't
+        // across seeks within the same session, the format hasn't
         // changed, so re-firing the callback would be noise.
         hdr10PlusLock.lock()
         pendingHDR10Plus.removeAll(keepingCapacity: true)
@@ -398,7 +398,7 @@ final class VideoDecoder: @unchecked Sendable {
 
     /// Attach BT.2020/PQ color metadata to HDR pixel buffers.
     /// When PropagatePerFrameHDRDisplayMetadata is OFF, VT may strip
-    /// color attachments — the display layer then defaults to BT.709
+    /// color attachments, the display layer then defaults to BT.709
     /// which produces completely wrong colors for BT.2020/PQ content.
     private func attachHDRColorSpace(to pixelBuffer: CVPixelBuffer) {
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
@@ -411,7 +411,7 @@ final class VideoDecoder: @unchecked Sendable {
 
     /// Attach BT.709 SDR color metadata. Used after VideoToolbox has
     /// tone-mapped HDR10/DV content down to SDR via PixelTransferProperties
-    /// — the display layer then interprets the bytes as Rec.709 SDR.
+    ///, the display layer then interprets the bytes as Rec.709 SDR.
     private func attachSDRColorSpace(to pixelBuffer: CVPixelBuffer) {
         CVBufferSetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey,
                               kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
@@ -469,7 +469,7 @@ final class VideoDecoder: @unchecked Sendable {
         // display supports DV *and* we're not tone-mapping to SDR, we
         // promote the codec type to `kCMVideoCodecType_DolbyVisionHEVC`
         // and pack a `dvcC` atom alongside the existing `hvcC` so the
-        // layer sees a proper DV format description — without this the
+        // layer sees a proper DV format description, without this the
         // TV stays in HDR10 fallback (or wrong-colour Profile 5 base
         // layer) instead of switching to DV mode. On non-DV displays
         // we leave the format as plain HEVC so the HDR10 / HLG
@@ -479,7 +479,7 @@ final class VideoDecoder: @unchecked Sendable {
 
         // Detection happens unconditionally for diagnostics so the
         // "did we see DV in this stream" question is answerable on
-        // any panel — including non-DV ones where we'll eventually
+        // any panel, including non-DV ones where we'll eventually
         // skip the tagging. Tagging itself is gated on display
         // capability + tonemap mode below.
         let detectedDVRecord: AVDOVIDecoderConfigurationRecord? = {
@@ -493,7 +493,7 @@ final class VideoDecoder: @unchecked Sendable {
             if tonemapToSDR {
                 action = "skipped (tonemap-to-SDR active, falling back to plain HEVC)"
             } else if !Self.displaySupportsDolbyVision {
-                action = "skipped (display does not advertise DV in availableHDRModes — using HDR10/HLG fallback)"
+                action = "skipped (display does not advertise DV in availableHDRModes, using HDR10/HLG fallback)"
             } else {
                 action = "tagging as 'dvh1' with dvcC"
             }
@@ -552,7 +552,7 @@ final class VideoDecoder: @unchecked Sendable {
     /// stream carries no Dolby Vision configuration.
     ///
     /// The 24-byte ISO BMFF `dvcC` box body is built from the record by
-    /// `buildDvcCAtom(from:)` — separated so the diagnostics in
+    /// `buildDvcCAtom(from:)`, separated so the diagnostics in
     /// `createFormatDescription` can inspect profile / level / flags
     /// without serialising the atom unnecessarily.
     private func doviConfigRecord(
@@ -567,7 +567,7 @@ final class VideoDecoder: @unchecked Sendable {
             guard item.type == AV_PKT_DATA_DOVI_CONF else { continue }
             // The first 8 fields of AVDOVIDecoderConfigurationRecord
             // are the public DV config bytes. Newer FFmpeg builds add
-            // `dv_md_compression` (9th byte) — we don't use it for the
+            // `dv_md_compression` (9th byte), we don't use it for the
             // box body, so 8 bytes is enough to proceed safely.
             guard let raw = item.data, item.size >= 8 else { continue }
             return raw.withMemoryRebound(
@@ -620,12 +620,12 @@ final class VideoDecoder: @unchecked Sendable {
     private func createDecompressionSession(
         formatDescription: CMVideoFormatDescription
     ) throws -> VTDecompressionSession {
-        // Request YCbCr BiPlanar 4:2:0 — VideoToolbox's native output.
+        // Request YCbCr BiPlanar 4:2:0, VideoToolbox's native output.
         // 10-bit (P010) for HEVC/AV1 Main10: preserves HDR10 and DV metadata.
         // 8-bit (NV12) for SDR content: smaller buffers, no HDR needed.
         // Tonemap (PQ→BT.709) happens in a separate VTPixelTransferSession
         // after decode so the decompression session never needs to know
-        // about it — this avoids a conflict with controlTimebase-driven
+        // about it, this avoids a conflict with controlTimebase-driven
         // display layers (Atmos mode) where PixelTransferProperties on
         // the decoder stopped frame output.
         let pixelFormat: OSType = use10Bit
@@ -638,7 +638,7 @@ final class VideoDecoder: @unchecked Sendable {
             kCVPixelBufferIOSurfacePropertiesKey: NSDictionary(),
         ]
 
-        // Using nil for outputCallback — we use the per-frame
+        // Using nil for outputCallback, we use the per-frame
         // OutputHandler in decode() instead of a session-level C callback.
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
@@ -654,7 +654,7 @@ final class VideoDecoder: @unchecked Sendable {
         }
 
         // DV per-frame metadata: only enable on DV-capable displays.
-        // On HDR10-only TVs, DV RPU causes wrong colors — DV Profile 8
+        // On HDR10-only TVs, DV RPU causes wrong colors, DV Profile 8
         // is backwards-compatible with HDR10, so disabling propagation
         // gives correct HDR10 output on non-DV displays.
         #if os(tvOS) || os(iOS)
@@ -700,7 +700,7 @@ final class VideoDecoder: @unchecked Sendable {
         }
         self.tonemapPool = p
 
-        // 2. Pixel transfer session — the actual HDR→SDR worker.
+        // 2. Pixel transfer session, the actual HDR→SDR worker.
         var session: VTPixelTransferSession?
         let sessionStatus = VTPixelTransferSessionCreate(
             allocator: kCFAllocatorDefault,
@@ -726,7 +726,7 @@ final class VideoDecoder: @unchecked Sendable {
     }
 
     /// Convert an HDR pixel buffer to SDR using the transfer session.
-    /// Returns nil if anything in the path fails — caller should drop the frame.
+    /// Returns nil if anything in the path fails, caller should drop the frame.
     private func tonemapPixelBuffer(_ source: CVPixelBuffer) -> CVPixelBuffer? {
         guard let session = pixelTransferSession,
               let pool = tonemapPool else { return nil }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// FIFO buffer with O(1) front-removal — replacement for the
+/// FIFO buffer with O(1) front-removal, replacement for the
 /// `[Element].removeFirst()` pattern used by the Atmos audio and
 /// video drains. `Array.removeFirst()` is O(n) because it shifts
 /// every remaining element down one slot; at typical Atmos rates
@@ -9,10 +9,10 @@ import Foundation
 ///
 /// This deque keeps a head index instead of compacting on every
 /// pop. Storage compaction happens lazily when more than half of
-/// the storage has been consumed past the head — bounded amortised
+/// the storage has been consumed past the head, bounded amortised
 /// cost without wasting memory on a permanently growing buffer.
 ///
-/// Not thread-safe on its own — every caller in the engine guards
+/// Not thread-safe on its own, every caller in the engine guards
 /// the buffer with the existing `atmos*Lock` NSLock. The API mirrors
 /// the Array methods we used before so the call sites stay readable.
 struct PacketDeque<Element>: Sequence {

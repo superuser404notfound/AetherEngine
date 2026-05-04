@@ -29,7 +29,7 @@ final class AVIOReader: @unchecked Sendable {
 
     private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
-    private static let streamTrimThreshold = 1024 * 1024  // 1 MB — keep for small backward seeks
+    private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
     private let bufferLock = NSLock()
     private var currentBuffer = Data()
@@ -415,7 +415,7 @@ final class AVIOReader: @unchecked Sendable {
             #endif
             return length
         } catch {
-            // HEAD timeout or network error — fall back to streaming mode.
+            // HEAD timeout or network error, fall back to streaming mode.
             // This is expected for live transcode URLs where the server
             // needs to start transcoding before responding.
             #if DEBUG
@@ -511,7 +511,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
 
 // MARK: - C Callbacks
 
-/// FFmpeg AVERROR_EOF — the C macro can't be imported into Swift.
+/// FFmpeg AVERROR_EOF, the C macro can't be imported into Swift.
 /// FFERRTAG(0xF8,'E','O','F') = -541478725
 private let AVERROR_EOF_VALUE: Int32 = -541478725
 

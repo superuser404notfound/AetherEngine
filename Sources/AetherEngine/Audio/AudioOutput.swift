@@ -93,7 +93,7 @@ final class AudioOutput: @unchecked Sendable {
     }
 
     /// Enqueue a decoded audio CMSampleBuffer for playback.
-    /// Always enqueues — the renderer buffers internally. Checking
+    /// Always enqueues, the renderer buffers internally. Checking
     /// isReadyForMoreMediaData caused early samples to be dropped
     /// before the synchronizer started, resulting in silence.
     func enqueue(sampleBuffer: CMSampleBuffer) {
@@ -147,12 +147,12 @@ final class AudioOutput: @unchecked Sendable {
     /// Flush the renderer queue without resetting `_isStarted` or
     /// stopping the synchronizer. Used when hot-swapping the audio
     /// decoder mid-playback (e.g. an audio-track switch with the
-    /// same audio mode) — the master clock keeps ticking, the video
+    /// same audio mode), the master clock keeps ticking, the video
     /// pipeline stays untouched, and only the queued audio samples
     /// from the old track are dropped so the new language is heard
     /// promptly. Without this, calling the regular flush would
     /// reset `_isStarted = false`, and the synchronizer would stop
-    /// until a fresh `start(at:)` call jumped the clock — visually
+    /// until a fresh `start(at:)` call jumped the clock, visually
     /// the same fast-forward burst the cross-mode reset path
     /// produces.
     func flushRendererKeepingClock() {

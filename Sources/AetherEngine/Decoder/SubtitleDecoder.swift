@@ -3,7 +3,7 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
-/// AVERROR_EOF — FFmpeg's end-of-file sentinel.
+/// AVERROR_EOF, FFmpeg's end-of-file sentinel.
 private let AVERROR_EOF_VALUE: Int32 = -541478725
 
 enum SubtitleDecoderError: Error {
@@ -19,7 +19,7 @@ enum SubtitleDecoderError: Error {
 /// the decoded cue list.
 ///
 /// Distinct from the main demux loop's streaming decoder which routes
-/// subtitle packets that are *already* flowing for an embedded track —
+/// subtitle packets that are *already* flowing for an embedded track,
 /// sidecars are separate small files that the main demuxer never sees,
 /// so they need their own context. Bandwidth-wise this is cheap: a
 /// typical SRT/ASS file is ~50–200 KB, served straight from the host
@@ -194,7 +194,7 @@ enum SubtitleDecoder {
             av_packet_free(&pktPtr)
         }
 
-        // Flush — ASS/SSA decoders sometimes buffer events.
+        // Flush, ASS/SSA decoders sometimes buffer events.
         var flushPkt = AVPacket()
         flushPkt.data = nil
         flushPkt.size = 0

@@ -13,7 +13,7 @@ public enum PlaybackState: Sendable, Equatable {
 
 /// The detected video dynamic range format.
 ///
-/// `hdr10Plus` shares the underlying HDR10 base layer with `hdr10` —
+/// `hdr10Plus` shares the underlying HDR10 base layer with `hdr10`,
 /// what makes it distinct is the per-frame ST 2094-40 dynamic metadata
 /// the engine forwards to the display via
 /// `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. From an
@@ -42,7 +42,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let channels: Int
     /// True if this track is marked as default in the container.
     public let isDefault: Bool
-    /// True if this is a Dolby Atmos track — currently means EAC3 with
+    /// True if this is a Dolby Atmos track, currently means EAC3 with
     /// the JOC (Joint Object Coding) profile, which is what every
     /// streaming-quality Atmos elementary stream looks like in practice.
     /// Lets the player UI surface "Atmos" instead of just the channel
@@ -60,7 +60,7 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     }
 }
 
-/// A single decoded subtitle cue — start/end in container seconds plus a
+/// A single decoded subtitle cue, start/end in container seconds plus a
 /// payload. The payload is either plain text (SubRip / ASS / SSA / WebVTT
 /// / mov_text after override-stripping) or a rendered bitmap (PGS / DVB
 /// / HDMV) with a position normalised against the source video frame.
@@ -95,7 +95,7 @@ public struct SubtitleCue: Identifiable, Sendable {
 extension SubtitleCue: Equatable {
     public static func == (lhs: SubtitleCue, rhs: SubtitleCue) -> Bool {
         // ID is monotonic per subtitle session and unique within the
-        // current `subtitleCues` array — that's enough to drive
+        // current `subtitleCues` array, that's enough to drive
         // SwiftUI animation diffing without comparing CGImage refs.
         lhs.id == rhs.id
             && lhs.startTime == rhs.startTime
@@ -103,7 +103,7 @@ extension SubtitleCue: Equatable {
     }
 }
 
-/// A decoded bitmap subtitle rect — the kind PGS, HDMV PGS, DVB and
+/// A decoded bitmap subtitle rect, the kind PGS, HDMV PGS, DVB and
 /// DVD subtitles produce. The CGImage is fully rendered (palette
 /// applied, RGBA, premultiplied alpha) and ready to display. Position
 /// is normalised in [0, 1] against the source video frame so the host
@@ -130,8 +130,8 @@ import CoreAudio
 ///
 /// 7.1 note: `MPEG_7_1_A` is the ITU "center-sides" layout (L R C LFE
 /// Ls Rs Lc Rc) almost nobody ships. Blu-ray, TrueHD, DTS-HD MA and
-/// streaming 7.1 are all the "Hollywood" layout — L R C LFE Ls Rs Lsr
-/// Rsr — which is `MPEG_7_1_C`. Using the wrong tag made tvOS silently
+/// streaming 7.1 are all the "Hollywood" layout, L R C LFE Ls Rs Lsr
+/// Rsr, which is `MPEG_7_1_C`. Using the wrong tag made tvOS silently
 /// drop the stream: the audio pipeline can't reconcile 7.1-A samples
 /// with a 7.1-C output route, and just emits silence instead of
 /// routing them.

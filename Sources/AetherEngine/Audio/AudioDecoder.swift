@@ -17,7 +17,7 @@ import Libswresample
 /// speaker mapping for surround output.
 ///
 /// For Dolby Atmos (EAC3+JOC), HLSAudioEngine handles passthrough via
-/// AVPlayer — this decoder is used for non-Atmos audio tracks only.
+/// AVPlayer, this decoder is used for non-Atmos audio tracks only.
 final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -32,7 +32,7 @@ final class AudioDecoder: @unchecked Sendable {
     /// AVSampleBufferAudioRenderer makes it accept them (no error) and
     /// then silently drop the stream on multichannel output. Coalesce
     /// decoded frames until we have at least this many samples before
-    /// building a CMSampleBuffer — renders ~47 buffers/sec at ~21ms
+    /// building a CMSampleBuffer, renders ~47 buffers/sec at ~21ms
     /// each, which the renderer handles normally.
     private static let minSamplesPerBuffer = 1024
 
@@ -102,7 +102,7 @@ final class AudioDecoder: @unchecked Sendable {
         guard let f = frame else { return [] }
 
         while avcodec_receive_frame(ctx, f) >= 0 {
-            // Lazy resampler init — waits until we have a real frame
+            // Lazy resampler init, waits until we have a real frame
             // with fully resolved layout and sample format. Drops the
             // very first frame on failure, but that's one audio block
             // at the most and the stream recovers immediately.
@@ -121,7 +121,7 @@ final class AudioDecoder: @unchecked Sendable {
     }
 
     private func initResamplerFromFrame(_ frame: UnsafeMutablePointer<AVFrame>) -> Bool {
-        // Refresh sample-rate / channels from the frame — codecpar was
+        // Refresh sample-rate / channels from the frame, codecpar was
         // a hint, the frame is truth. Happens once at the start of a
         // track so the rest of the pipeline sees the final values.
         if frame.pointee.sample_rate > 0 { sampleRate = frame.pointee.sample_rate }
@@ -133,7 +133,7 @@ final class AudioDecoder: @unchecked Sendable {
 
         // Input layout: use the frame's if valid, otherwise synthesise
         // a default for the channel count. For TrueHD 7.1 this is the
-        // key line — the frame always has it right after decoding even
+        // key line, the frame always has it right after decoding even
         // when codecpar didn't.
         var inLayout = AVChannelLayout()
         if frame.pointee.ch_layout.nb_channels > 0 {
@@ -179,7 +179,7 @@ final class AudioDecoder: @unchecked Sendable {
     func flush() {
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
-        // Drop whatever we were coalescing — after a seek the old
+        // Drop whatever we were coalescing, after a seek the old
         // samples would be at the wrong PTS anyway.
         resetPending()
         #if DEBUG
@@ -312,7 +312,7 @@ final class AudioDecoder: @unchecked Sendable {
         #if DEBUG
         if convertedSamples <= 0 && !_loggedZeroConvert {
             _loggedZeroConvert = true
-            print("[AudioDecoder] swr_convert returned \(convertedSamples) — pipeline silent from here")
+            print("[AudioDecoder] swr_convert returned \(convertedSamples), pipeline silent from here")
         }
         #endif
         guard convertedSamples > 0 else { return }

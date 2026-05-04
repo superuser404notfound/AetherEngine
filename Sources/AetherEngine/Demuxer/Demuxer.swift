@@ -3,7 +3,7 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
-/// AVERROR_EOF — FFmpeg's end-of-file sentinel. The C macro can't be
+/// AVERROR_EOF, FFmpeg's end-of-file sentinel. The C macro can't be
 /// imported into Swift, so we define it inline: FFERRTAG(0xF8,'E','O','F').
 private let AVERROR_EOF_VALUE: Int32 = -541478725
 
@@ -21,7 +21,7 @@ final class Demuxer {
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// Serializes access to formatContext between readPacket() (demux queue)
-    /// and seek() (main actor) — prevents concurrent AVFormatContext access
+    /// and seek() (main actor), prevents concurrent AVFormatContext access
     /// that triggers assertion failures in matroskadec.c.
     private let accessLock = NSLock()
 
@@ -74,7 +74,7 @@ final class Demuxer {
         applyProbeBudget(ctx)
         formatContext = ctx
 
-        // 3. Open input — pass nil for URL since pb is already set
+        // 3. Open input, pass nil for URL since pb is already set
         var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
         let ret = avformat_open_input(&ctxPtr, nil, nil, nil)
         guard ret == 0 else {
@@ -89,7 +89,7 @@ final class Demuxer {
         try probeStreams(ctxPtr!)
     }
 
-    /// Default probe budgets are tuned for live network streams — 5 MB
+    /// Default probe budgets are tuned for live network streams, 5 MB
     /// of bytes and ~5 seconds of analysed content. For big container
     /// files (10–20 GB Blu-ray rips) with sparse subtitle streams that
     /// budget runs out before libavformat sees a single PGS / DVB
@@ -258,7 +258,7 @@ final class Demuxer {
     }
 
     /// Seek to a position in seconds.
-    /// Uses avformat_seek_file instead of av_seek_frame — more robust
+    /// Uses avformat_seek_file instead of av_seek_frame, more robust
     /// for MKV containers (av_seek_frame triggers assertion failures
     /// in matroskadec.c with nested elements).
     func seek(to seconds: Double) {
@@ -272,7 +272,7 @@ final class Demuxer {
             print("[Demuxer] Seek to \(seconds)s failed: \(ret)")
             #endif
         }
-        // Flush internal parser state after seek — prevents assertion
+        // Flush internal parser state after seek, prevents assertion
         // failures in matroskadec.c when reading the next packet.
         avformat_flush(ctx)
     }
@@ -283,7 +283,7 @@ final class Demuxer {
     /// closed first so its callback returns -1 immediately, unblocking
     /// any suspended av_read_frame call.
     func close() {
-        // 1. Mark AVIO as closed — read callback returns -1 immediately.
+        // 1. Mark AVIO as closed, read callback returns -1 immediately.
         //    This unblocks av_read_frame if the demux thread is suspended
         //    inside a read (tvOS suspends threads in background).
         avioReader?.markClosed()

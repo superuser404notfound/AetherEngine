@@ -12,12 +12,12 @@ import Libavutil
 import UIKit
 #endif
 
-/// AetherEngine — Open-source FFmpeg + VideoToolbox video player engine.
+/// AetherEngine, Open-source FFmpeg + VideoToolbox video player engine.
 ///
 /// A cross-platform (iOS, tvOS, macOS) media player that handles
 /// demuxing, hardware-accelerated decoding via VideoToolbox, and
 /// audio/video output via Apple's AVSampleBuffer infrastructure.
-/// No UIKit/AppKit dependency — the host app provides its own UI
+/// No UIKit/AppKit dependency, the host app provides its own UI
 /// and simply embeds the player's `videoLayer` in a view.
 ///
 /// ## Architecture
@@ -40,7 +40,7 @@ import UIKit
 ///
 /// ## License
 ///
-/// LGPL 3.0 — App Store compatible when dynamically linked.
+/// LGPL 3.0, App Store compatible when dynamically linked.
 @MainActor
 public final class AetherEngine: ObservableObject {
 
@@ -54,7 +54,7 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
-    /// Decoded subtitle cues for the active subtitle source — either
+    /// Decoded subtitle cues for the active subtitle source, either
     /// an embedded stream (text codec) routed through the main demux
     /// loop, or a sidecar file URL fully decoded up-front. Empty when
     /// no subtitle is active or the source is a graphic format the
@@ -64,7 +64,7 @@ public final class AetherEngine: ObservableObject {
     /// Embedded tracks populate cues lazily as the demuxer reads
     /// packets, so this stays false for those.
     @Published public private(set) var isLoadingSubtitles: Bool = false
-    /// True when the engine is the active subtitle source — a
+    /// True when the engine is the active subtitle source, a
     /// `selectSubtitleTrack` or `selectSidecarSubtitle` call is in
     /// effect. Goes false on `clearSubtitle`. The host should mirror
     /// `subtitleCues` only while this is true so a parallel HTTP
@@ -79,25 +79,25 @@ public final class AetherEngine: ObservableObject {
 
     /// How the rendered video fills its container layer.
     ///
-    /// - `.resizeAspect` (default) — preserve aspect, letterbox / pillarbox
+    /// - `.resizeAspect` (default), preserve aspect, letterbox / pillarbox
     ///   any leftover space. The classic "fit" behaviour every Apple TV
     ///   player uses by default.
-    /// - `.resizeAspectFill` — preserve aspect, scale until the frame
+    /// - `.resizeAspectFill`, preserve aspect, scale until the frame
     ///   covers the layer, crop whatever overflows. Useful for 4:3 source
     ///   on a 16:9 display (zooms in slightly to ditch the pillarbox)
     ///   and for 2.39:1 cinemascope content where users prefer no
     ///   letterbox.
-    /// - `.resize` — distort to fill, no aspect preservation. Rarely
+    /// - `.resize`, distort to fill, no aspect preservation. Rarely
     ///   what anyone wants but exposed for completeness.
     ///
-    /// Survives layer recreation across `load()` calls — the renderer
+    /// Survives layer recreation across `load()` calls, the renderer
     /// re-applies the cached gravity on every fresh display layer.
     public var videoGravity: AVLayerVideoGravity {
         get { videoRenderer.videoGravity }
         set { videoRenderer.setVideoGravity(newValue) }
     }
 
-    /// Fires when the video layer is replaced with a fresh instance —
+    /// Fires when the video layer is replaced with a fresh instance,
     /// which happens on every `load()` call to avoid stale
     /// Synchronizer/controlTimebase state from a previous playback.
     /// The host view must remove the old sublayer and add the new one.
@@ -122,7 +122,7 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Internal Pipeline
 
-    /// Pipeline components — accessed from both main actor and demux queue.
+    /// Pipeline components, accessed from both main actor and demux queue.
     /// Each has internal locking for thread safety.
     /// `internal` (no modifier) so the Audio + AtmosDrains extensions
     /// in their own files can reach them; the AetherEngine module is
@@ -133,14 +133,14 @@ public final class AetherEngine: ObservableObject {
     let audioDecoder = AudioDecoder()
 
     /// True if the current stream uses software decoding (FFmpeg) instead of VT.
-    /// Set during load(), read during demux loop — effectively immutable during playback.
+    /// Set during load(), read during demux loop, effectively immutable during playback.
     nonisolated(unsafe) var usingSoftwareDecode = false
     let audioOutput = AudioOutput()
     nonisolated(unsafe) let videoRenderer = SampleBufferRenderer()
 
-    /// HLS audio engine for Dolby Atmos — uses AVPlayer + local HLS server
+    /// HLS audio engine for Dolby Atmos, uses AVPlayer + local HLS server
     /// to trigger Dolby MAT 2.0 wrapping for EAC3+JOC passthrough.
-    /// Accessed from demux queue — effectively immutable during playback.
+    /// Accessed from demux queue, effectively immutable during playback.
     nonisolated(unsafe) var hlsAudioEngine: HLSAudioEngine?
 
     /// Separate queue for feeding audio to the HLS engine in Atmos mode.
@@ -164,7 +164,7 @@ public final class AetherEngine: ObservableObject {
     let atmosVideoBufferMax = 384
     /// Cap audio buffer to bound memory if AVPlayer stalls. EAC3 packets
     /// run ~32 KB each at typical Atmos bitrates, so 1024 ≈ 32 MB
-    /// worth of headroom — large enough that a 30s network blip doesn't
+    /// worth of headroom, large enough that a 30s network blip doesn't
     /// throttle real playback, small enough that a stuck AVPlayer can't
     /// quietly grow the heap into hundreds of MB.
     let atmosAudioBufferMax = 1024
@@ -177,7 +177,7 @@ public final class AetherEngine: ObservableObject {
     private let demuxQueue = DispatchQueue(label: "com.aetherengine.demux", qos: .userInitiated)
 
     /// Thread-safe playback control flags.
-    /// Accessed from both main actor and demux queue — protected by flagsLock.
+    /// Accessed from both main actor and demux queue, protected by flagsLock.
     private let flagsLock = NSLock()
     nonisolated(unsafe) private var _isPlaying = false
     nonisolated(unsafe) private var _stopRequested = false
@@ -188,7 +188,7 @@ public final class AetherEngine: ObservableObject {
     /// Detected video frame rate.
     private var videoFrameRate: Double = 0
 
-    /// The currently active audio stream index — accessed from the
+    /// The currently active audio stream index, accessed from the
     /// demux queue (single-writer from the main actor) and from the
     /// Audio extension when switching tracks.
     nonisolated(unsafe) var activeAudioStreamIndex: Int32 = -1
@@ -211,7 +211,7 @@ public final class AetherEngine: ObservableObject {
     /// Dedupe set keyed by `"start|end"` so packets re-read after
     /// a seek don't produce duplicate cues.
     nonisolated(unsafe) var seenSubtitleKeys: Set<String> = []
-    /// Source video frame width / height in pixels — captured at
+    /// Source video frame width / height in pixels, captured at
     /// load() so the demux thread can normalise bitmap-subtitle rect
     /// coordinates without re-touching the AVStream.
     nonisolated(unsafe) var videoFrameWidth: Int32 = 0
@@ -225,7 +225,7 @@ public final class AetherEngine: ObservableObject {
     /// PCM, first segment fed to AVPlayer for Atmos). `load()` polls
     /// this before returning so the engine guarantees that, by the
     /// time `await load(...)` resumes the caller, the synchronizer
-    /// is fully wired up — without it, an immediate `pause()` from
+    /// is fully wired up, without it, an immediate `pause()` from
     /// the caller races the demux loop's `audioOutput.start(at:)`
     /// call and leaves the synchronizer's clock running at rate 1
     /// while the engine state is `.paused`. Resume after that race
@@ -262,11 +262,11 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Init
 
-    /// Lifecycle notification observers — stored for cleanup.
+    /// Lifecycle notification observers, stored for cleanup.
     private var lifecycleObservers: [Any] = []
 
     public init() throws {
-        // Configure audio session BEFORE creating renderers — the renderer
+        // Configure audio session BEFORE creating renderers, the renderer
         // may lock its output configuration at creation time. Without this,
         // multichannel content is downmixed to stereo.
         #if os(iOS) || os(tvOS)
@@ -280,7 +280,7 @@ public final class AetherEngine: ObservableObject {
             print("[AetherEngine] AVAudioSession setup error: \(error)")
             #endif
         }
-        // Request multichannel output — separate try so a failure here
+        // Request multichannel output, separate try so a failure here
         // doesn't prevent the basic audio session from working.
         let maxCh = session.maximumOutputNumberOfChannels
         if maxCh > 2 {
@@ -306,7 +306,7 @@ public final class AetherEngine: ObservableObject {
     ///   - tonemapHDRToSDR: Force HDR10/DV content to be tone-mapped down
     ///     to BT.709 SDR inside VideoToolbox. Use this when the display
     ///     cannot switch to HDR mode (e.g. user disabled Match Content
-    ///     on tvOS, or panel is SDR-only) — otherwise HDR content appears
+    ///     on tvOS, or panel is SDR-only), otherwise HDR content appears
     ///     black because AVSampleBufferDisplayLayer does not tone-map.
     public func load(
         url: URL,
@@ -349,7 +349,7 @@ public final class AetherEngine: ObservableObject {
                 throw AetherEngineError.noVideoStream
             }
 
-            // Capture source video dimensions — used to normalise
+            // Capture source video dimensions, used to normalise
             // bitmap-subtitle rect coordinates so the host can scale
             // to any on-screen video rect.
             videoFrameWidth = videoStream.pointee.codecpar.pointee.width
@@ -366,7 +366,7 @@ public final class AetherEngine: ObservableObject {
 
             // Reactive HDR10+ upgrade. Stream-open detection looks at
             // codec params side data which holds DV / HDR10 baselines
-            // but doesn't reliably carry HDR10+ — that lives in per-
+            // but doesn't reliably carry HDR10+, that lives in per-
             // frame T.35 SEI. The decoders fire this callback the
             // first time they see dynamic metadata, and we promote
             // videoFormat from .hdr10 to .hdr10Plus so the host's HDR
@@ -401,7 +401,7 @@ public final class AetherEngine: ObservableObject {
                 #endif
             } catch {
                 #if DEBUG
-                print("[AetherEngine] VT failed: \(error) — trying software decode")
+                print("[AetherEngine] VT failed: \(error), trying software decode")
                 #endif
                 do {
                     try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
@@ -423,7 +423,7 @@ public final class AetherEngine: ObservableObject {
             // Opt the display layer into HDR output only when the pipeline
             // actually delivers HDR pixel buffers. When tonemapHDRToSDR is
             // on (or the content is SDR to begin with), the decoder emits
-            // BT.709 SDR — declaring the layer as HDR then breaks the
+            // BT.709 SDR, declaring the layer as HDR then breaks the
             // Atmos controlTimebase path (compositor refuses the frames,
             // picture stays black / frozen on frame 1).
             let pipelineIsHDR: Bool = {
@@ -472,7 +472,7 @@ public final class AetherEngine: ObservableObject {
             //
             // EAC3 → HLSAudioEngine (AVPlayer + local HLS for Dolby Atmos passthrough)
             //   EAC3+JOC (Atmos) embeds object metadata as extension elements within
-            //   the independent substream — identical framing and channel count as
+            //   the independent substream, identical framing and channel count as
             //   regular EAC3 5.1. Cannot be distinguished at the packet level, so all
             //   EAC3 goes through AVPlayer which handles both Atmos and non-Atmos.
             // AC3/EAC3/AAC/etc. → FFmpeg PCM decode (full dynamics, no dialnorm)
@@ -488,13 +488,13 @@ public final class AetherEngine: ObservableObject {
                 let profile = codecpar.pointee.profile
                 let isEAC3 = (codecId == AV_CODEC_ID_EAC3)
                 let isAC3 = (codecId == AV_CODEC_ID_AC3)
-                // FF_PROFILE_EAC3_DDP_ATMOS = 30 — set by FFmpeg's EAC3 parser
+                // FF_PROFILE_EAC3_DDP_ATMOS = 30, set by FFmpeg's EAC3 parser
                 // when JOC (Joint Object Coding) is detected in the bitstream.
                 // This is the only reliable way to distinguish Atmos from regular
                 // EAC3 5.1 without depending on server metadata.
                 // The capability check keeps us off the HLS/AVPlayer path on
                 // outputs that can't accept multichannel passthrough (e.g.
-                // Bluetooth speakers) — there we just decode to PCM and let
+                // Bluetooth speakers), there we just decode to PCM and let
                 // the system mix to whatever the route supports.
                 let streamIsAtmos = isEAC3 && profile == 30
                 let canPassthrough = canPassthroughAtmos()
@@ -504,7 +504,7 @@ public final class AetherEngine: ObservableObject {
                 if isEAC3 {
                     let atmosState: String
                     if streamIsAtmos && !canPassthrough {
-                        atmosState = "Atmos (JOC) — route can't passthrough, using PCM"
+                        atmosState = "Atmos (JOC), route can't passthrough, using PCM"
                     } else if streamIsAtmos {
                         atmosState = "Atmos (JOC)"
                     } else {
@@ -546,7 +546,7 @@ public final class AetherEngine: ObservableObject {
                         // the Atmos timebase:
                         //   1. detach from any synchronizer (sync wait)
                         //   2. drop old controlTimebase
-                        //   3. flush the layer — clears internal
+                        //   3. flush the layer, clears internal
                         //      pipeline state and resets .failed status
                         //      back to .unknown if a previous handoff
                         //      corrupted it
@@ -570,7 +570,7 @@ public final class AetherEngine: ObservableObject {
                         #endif
                     } catch {
                         #if DEBUG
-                        print("[AetherEngine] HLS engine failed: \(error) — falling back to FFmpeg PCM")
+                        print("[AetherEngine] HLS engine failed: \(error), falling back to FFmpeg PCM")
                         #endif
                         fallbackToPCMAudio(stream: audioStream)
                     }
@@ -603,7 +603,7 @@ public final class AetherEngine: ObservableObject {
 
             // For video-only files (or failed audio), use the synchronizer
             // as a free-running clock so video frame sync still works.
-            // Skip this for Atmos mode — display layer uses its own timebase.
+            // Skip this for Atmos mode, display layer uses its own timebase.
             if !audioAvailable {
                 audioOutput.attachVideoLayer(videoRenderer.displayLayer)
                 audioOutput.start()
@@ -628,7 +628,7 @@ public final class AetherEngine: ObservableObject {
             // flowing through before returning. Without this, a
             // caller that awaits `load(...)` and immediately calls
             // `pause()` races the demux loop's first audioOutput.
-            // start() / HLS feed — the synchronizer's clock then
+            // start() / HLS feed, the synchronizer's clock then
             // advances past the renderer queue and resume after
             // pause renders one stale frame and stalls. Capped at
             // 2s so audio-less files (or unusual containers without
@@ -640,7 +640,7 @@ public final class AetherEngine: ObservableObject {
                 }
                 #if DEBUG
                 if !isAudioFlowing {
-                    print("[AetherEngine] Audio flow timeout — load() returning anyway")
+                    print("[AetherEngine] Audio flow timeout, load() returning anyway")
                 }
                 #endif
 
@@ -651,7 +651,7 @@ public final class AetherEngine: ObservableObject {
                 // happens once the audio path delivers its first
                 // sample buffer to the renderer). If a frame lands
                 // in the display layer while the synchronizer is
-                // still paused, the layer's clock isn't advancing —
+                // still paused, the layer's clock isn't advancing,
                 // the frame sits in the queue, `isReadyForMoreMediaData`
                 // flips to false, the demux thread back-pressures
                 // off, and we end up with a black screen and audio
@@ -663,7 +663,7 @@ public final class AetherEngine: ObservableObject {
                 // Now that audio has flowed and the synchronizer is
                 // live, flush whatever's in the layer queue (using
                 // the lighter `flush()` that doesn't kill the
-                // displayed image — at startup there isn't one
+                // displayed image, at startup there isn't one
                 // anyway) so the very next decoded frame from the
                 // demux thread lands clean and renders immediately.
                 if isAudioFlowing {
@@ -686,7 +686,7 @@ public final class AetherEngine: ObservableObject {
             }
             #if DEBUG
             if !videoRenderer.hasRenderedFirstFrame {
-                print("[AetherEngine] First-frame timeout — load() returning anyway")
+                print("[AetherEngine] First-frame timeout, load() returning anyway")
             }
             #endif
         } catch {
@@ -726,7 +726,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Tear down and reload from the current position.
-    /// Call after returning from background — VTDecompressionSession and
+    /// Call after returning from background, VTDecompressionSession and
     /// AVIO connections are invalidated by tvOS when the app is suspended.
     /// A fresh load() rebuilds everything safely.
     public func reloadAtCurrentPosition() async throws {
@@ -742,7 +742,7 @@ public final class AetherEngine: ObservableObject {
         // Pause the demux loop so it stops calling readPacket().
         isPlaying = false
 
-        // Flush decoders FIRST — VTDecompressionSession's flush waits for
+        // Flush decoders FIRST, VTDecompressionSession's flush waits for
         // async frames which get delivered to the renderer. Then flush the
         // renderer to clear those stale frames.
         if usingSoftwareDecode {
@@ -754,9 +754,9 @@ public final class AetherEngine: ObservableObject {
 
         switch audioMode {
         case .atmos:
-            // Clear atmos buffers — drain threads will see empty buffers and stop
+            // Clear atmos buffers, drain threads will see empty buffers and stop
             clearAtmosBuffers()
-            // Tear down HLS pipeline — must rebuild from new position
+            // Tear down HLS pipeline, must rebuild from new position
             hlsAudioEngine?.prepareForSeek()
         case .pcm:
             audioDecoder.flush()
@@ -777,7 +777,7 @@ public final class AetherEngine: ObservableObject {
         // Restart audio at the seek position
         if audioMode == .atmos {
             atmosAudioSkipPTS = target
-            // Restart HLS engine with new timestamps — feedPacket() will
+            // Restart HLS engine with new timestamps, feedPacket() will
             // buffer new segments and recreate AVPlayer automatically.
             if let audioStream = demuxer.stream(at: activeAudioStreamIndex) {
                 try? hlsAudioEngine?.restartAfterSeek(stream: audioStream, seekTime: seekTime)
@@ -824,13 +824,13 @@ public final class AetherEngine: ObservableObject {
     /// the main demux loop get routed through a per-track decoder,
     /// converted to `SubtitleCue`s, and appended to `subtitleCues`
     /// in playback order. Auto-resolved tracks selected before
-    /// playback starts capture cues from the very first packet —
+    /// playback starts capture cues from the very first packet,
     /// mid-playback enables only see cues from the demuxer cursor
     /// onwards, since prior packets are already past.
     ///
     /// Text codecs (SubRip / ASS / SSA / WebVTT / mov_text) decode
     /// directly. Bitmap codecs (PGS / DVB) decode but produce no
-    /// text — `subtitleCues` stays empty and the host should fall
+    /// text, `subtitleCues` stays empty and the host should fall
     /// back to its server-extraction path for those.
     public func selectSubtitleTrack(index: Int) {
         closeSubtitleDecoder()
@@ -867,7 +867,7 @@ public final class AetherEngine: ObservableObject {
         // Bitmap subtitle codecs author their bitmaps against a known
         // canvas (the source video frame). The probe step often can't
         // determine those dimensions when the file is big and the
-        // sub stream sparse — codec context comes back with width=0
+        // sub stream sparse, codec context comes back with width=0
         // and the decoder rejects later segments. Seed from the
         // captured video frame size as a fallback; the PCS will
         // overwrite once it arrives.
@@ -988,7 +988,7 @@ public final class AetherEngine: ObservableObject {
         // Some MKV converters drop the trailing END segment (0x80) on
         // PGS, so the decoder accumulates state but never gets the
         // signal to emit. If gotSub is still 0 after the real packet
-        // and the codec is PGS, feed a synthetic END to flush —
+        // and the codec is PGS, feed a synthetic END to flush,
         // duplicate END would give AVERROR_INVALIDDATA which we just
         // ignore, but for the missing-END case it produces the cue.
         if gotSub == 0,
@@ -1041,7 +1041,7 @@ public final class AetherEngine: ObservableObject {
         // Bitmap subtitle codecs author rects against the canvas
         // size declared in the Presentation Composition Segment, which
         // libavcodec writes back into ctx.width / ctx.height. Use
-        // those for normalisation — the codec's view of the canvas
+        // those for normalisation, the codec's view of the canvas
         // may differ from the source video frame size (some Blu-ray
         // rips ship with PGS authored at half resolution). Fall back
         // to the captured source video dims if the codec didn't
@@ -1051,7 +1051,7 @@ public final class AetherEngine: ObservableObject {
 
         // Build a list of cue bodies from this packet's rects. Most
         // text packets have one rect; PGS / DVB packets can have
-        // several (signs/songs at top + dialogue at bottom) — each
+        // several (signs/songs at top + dialogue at bottom), each
         // becomes its own cue at the same time range.
         var bodies: [SubtitleCue.Body] = []
         var textLines: [String] = []
@@ -1071,7 +1071,7 @@ public final class AetherEngine: ObservableObject {
         }
         avsubtitle_free(&sub)
 
-        // Merge plain text rects into a single text body — that
+        // Merge plain text rects into a single text body, that
         // matches the existing single-Text overlay rendering.
         let merged = textLines
             .joined(separator: "\n")
@@ -1080,7 +1080,7 @@ public final class AetherEngine: ObservableObject {
             bodies.append(.text(merged))
         }
 
-        // PGS events with zero rects are *clear signals* — the
+        // PGS events with zero rects are *clear signals*, the
         // decoder emits gotSub=1 to tell the host "the previous sub
         // is now over". Don't drop those; they trigger the trim
         // pass below so old cues actually disappear when the next
@@ -1128,7 +1128,7 @@ public final class AetherEngine: ObservableObject {
             // Drop cues whose stream the user has since switched away from.
             guard self.activeSubtitleStreamIndex == streamIdx else { return }
 
-            // PGS doesn't carry explicit end times — each event
+            // PGS doesn't carry explicit end times, each event
             // implicitly terminates whatever was on screen. Truncate
             // any image cue whose interval straddles `trimAt` so it
             // disappears at the right moment instead of staying up
@@ -1212,7 +1212,7 @@ public final class AetherEngine: ObservableObject {
     ///
     /// **zlib-compressed subtitle blocks.** Tools like the older mkvtoolnix
     /// versions and many ripping suites apply zlib compression to subtitle
-    /// tracks via Matroska `ContentEncoding` — but with a flag combination
+    /// tracks via Matroska `ContentEncoding`, but with a flag combination
     /// libavformat treats as "Unsupported encoding type", which causes it
     /// to disable the encoding (`scope = 0`) and pass the raw compressed
     /// bytes straight through to us. The zlib stream starts with `0x78`
@@ -1228,7 +1228,7 @@ public final class AetherEngine: ObservableObject {
     /// length, never sees END, gotSub stays 0. Strip the 10 bytes if
     /// present.
     ///
-    /// Both checks are byte-sniffs — effectively free per packet for
+    /// Both checks are byte-sniffs, effectively free per packet for
     /// standard streams.
     nonisolated private func decodeSubtitleWithFixups(
         ctx: UnsafeMutablePointer<AVCodecContext>,
@@ -1240,7 +1240,7 @@ public final class AetherEngine: ObservableObject {
             return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
         }
 
-        // 1. zlib-wrapped (RFC 1950) — `78 01/5E/9C/DA` magic.
+        // 1. zlib-wrapped (RFC 1950), `78 01/5E/9C/DA` magic.
         if data[0] == 0x78,
            data[1] == 0x01 || data[1] == 0x5E || data[1] == 0x9C || data[1] == 0xDA {
             if let decompressed = inflateZlibBlock(data, size: Int(pkt.pointee.size)) {
@@ -1251,7 +1251,7 @@ public final class AetherEngine: ObservableObject {
             }
         }
 
-        // 1b. gzip-wrapped (RFC 1952) — `1F 8B` magic. Same DEFLATE
+        // 1b. gzip-wrapped (RFC 1952), `1F 8B` magic. Same DEFLATE
         //     body as zlib, just a different envelope.
         if pkt.pointee.size > 18,
            data[0] == 0x1F, data[1] == 0x8B {
@@ -1283,26 +1283,26 @@ public final class AetherEngine: ObservableObject {
         guard size > 18, src[0] == 0x1F, src[1] == 0x8B else { return nil }
         let flg = src[3]
         var off = 10
-        // FEXTRA — 2-byte LE length followed by extra data.
+        // FEXTRA, 2-byte LE length followed by extra data.
         if flg & 0x04 != 0 {
             guard off + 2 <= size else { return nil }
             let xlen = Int(src[off]) | (Int(src[off + 1]) << 8)
             off += 2 + xlen
             if off > size { return nil }
         }
-        // FNAME — null-terminated string.
+        // FNAME, null-terminated string.
         if flg & 0x08 != 0 {
             while off < size && src[off] != 0 { off += 1 }
             off += 1
             if off > size { return nil }
         }
-        // FCOMMENT — null-terminated string.
+        // FCOMMENT, null-terminated string.
         if flg & 0x10 != 0 {
             while off < size && src[off] != 0 { off += 1 }
             off += 1
             if off > size { return nil }
         }
-        // FHCRC — 2-byte header CRC.
+        // FHCRC, 2-byte header CRC.
         if flg & 0x02 != 0 {
             off += 2
             if off > size { return nil }
@@ -1331,7 +1331,7 @@ public final class AetherEngine: ObservableObject {
     /// Run a raw DEFLATE stream through Apple's
     /// `compression_decode_buffer`. Subtitle blocks decompress to
     /// anywhere from a few hundred bytes (PCS + WDS + END) up to
-    /// ~50× their input size for PGS bitmaps — start with an 8×
+    /// ~50× their input size for PGS bitmaps, start with an 8×
     /// buffer and grow by 2× up to 8 MB.
     nonisolated private func inflateDeflateStream(
         _ src: UnsafePointer<UInt8>,
@@ -1439,7 +1439,7 @@ public final class AetherEngine: ObservableObject {
     /// packed RGBA buffer and wraps that as a CGImage.
     ///
     /// The palette is delivered by libavcodec as 32-bit values laid
-    /// out with alpha in the high byte and BGR below — i.e. on a
+    /// out with alpha in the high byte and BGR below, i.e. on a
     /// little-endian platform the bytes in memory read `[B, G, R, A]`.
     /// We rewrite to RGBA byte order for CGImage's
     /// `premultipliedLast` consumer.
@@ -1465,7 +1465,7 @@ public final class AetherEngine: ObservableObject {
         // non-zero alpha. Some Blu-ray-to-MKV conversions emit PGS
         // events as full 1920x1080 ODS bitmaps with cropping
         // parameters that say "show only this small region at this
-        // canvas position" — but FFmpeg's pgssubdec discards the
+        // canvas position", but FFmpeg's pgssubdec discards the
         // crop fields and hands us the whole bitmap with rect.x/y
         // both zero. Without re-cropping ourselves the host either
         // renders the full frame (text appears wherever it sits in
@@ -1572,7 +1572,7 @@ public final class AetherEngine: ObservableObject {
         isPlaying = false
         stopTimeUpdates()
 
-        // Stop audio — tear down whichever engine is active
+        // Stop audio, tear down whichever engine is active
         if audioMode == .atmos {
             clearAtmosBuffers()
             hlsAudioEngine?.stop()
@@ -1584,7 +1584,7 @@ public final class AetherEngine: ObservableObject {
         audioOutput.stop()
         audioMode = .pcm
 
-        // Flush decoders before renderer — decoder flush waits for async
+        // Flush decoders before renderer, decoder flush waits for async
         // VT frames which would otherwise land on the already-flushed renderer.
         if usingSoftwareDecode {
             softwareDecoder.flush()
@@ -1596,7 +1596,7 @@ public final class AetherEngine: ObservableObject {
         videoRenderer.flush()
         audioDecoder.close()
         // Subtitle codec context is tied to the demuxer's stream
-        // pointers — drop it before closing the demuxer so we don't
+        // pointers, drop it before closing the demuxer so we don't
         // dangle into the next load.
         closeSubtitleDecoder()
         cancelSidecarTask()
@@ -1604,7 +1604,7 @@ public final class AetherEngine: ObservableObject {
         // singleton; a host that creates a fresh ViewModel per session
         // (we do) and subscribes to `$subtitleCues` will otherwise
         // receive the previous session's last cue array as the initial
-        // Combine replay — and `isSubtitleActive` still being `true`
+        // Combine replay, and `isSubtitleActive` still being `true`
         // means our guard lets it through, so a stale subtitle line
         // briefly flashes on the next playback before the new load
         // settles. Clearing here makes stop() leave the engine in the
@@ -1615,7 +1615,7 @@ public final class AetherEngine: ObservableObject {
         demuxer.close()
         audioAvailable = false
         atmosAudioSkipPTS = -1
-        // usingSoftwareDecode must be reset — otherwise a subsequent
+        // usingSoftwareDecode must be reset, otherwise a subsequent
         // load() that fails before opening any decoder would see a stale
         // `true` from a prior SW-decoded session and try to flush/close
         // the wrong decoder in its catch path.
@@ -1694,7 +1694,7 @@ public final class AetherEngine: ObservableObject {
                 }
 
                 guard let packet = packet else {
-                    // EOF — flush decoder and drain reorder buffer
+                    // EOF, flush decoder and drain reorder buffer
                     if self.usingSoftwareDecode {
                         self.softwareDecoder.flush()
                     } else {
@@ -1772,7 +1772,7 @@ public final class AetherEngine: ObservableObject {
                                     // Drop pre-seek audio packet
                                     break
                                 }
-                                // First packet at/after target — update streamOffset
+                                // First packet at/after target, update streamOffset
                                 // to the actual audio PTS for precise sync
                                 self.atmosAudioSkipPTS = -1
                                 self.hlsAudioEngine?.updateStreamOffset(ptsSeconds)
@@ -1783,7 +1783,7 @@ public final class AetherEngine: ObservableObject {
                             // wrap its data into a Data view that releases
                             // the cloned packet when freed. Saves the
                             // malloc + memcpy that `Data(bytes:count:)`
-                            // would do per packet — at 768 kbps Atmos that
+                            // would do per packet, at 768 kbps Atmos that
                             // was ~96 KB/s of allocation churn on the demux
                             // thread. Falls back to the copy path if the
                             // refcount bump fails (allocation pressure).
@@ -1803,7 +1803,7 @@ public final class AetherEngine: ObservableObject {
                                 packetData = Data(bytes: data, count: Int(packet.pointee.size))
                             }
                             self.atmosAudioLock.lock()
-                            // Throttle if buffer is full — same approach as
+                            // Throttle if buffer is full, same approach as
                             // the video drain. Without it a multi-second
                             // AVPlayer stall lets the audio buffer grow
                             // without bound (one Data per packet, no
@@ -1833,13 +1833,13 @@ public final class AetherEngine: ObservableObject {
                             audioOutput.start(at: initialAudioTime)
                             audioStarted = true
                             // Signal load() that the synchronizer is
-                            // now driving samples — safe to release
+                            // now driving samples, safe to release
                             // the caller from `await load(...)`.
                             self.isAudioFlowing = true
                         }
                     }
                 } else if streamIdx == self.activeSubtitleStreamIndex {
-                    // Subtitle stream — decode the packet inline. Text
+                    // Subtitle stream, decode the packet inline. Text
                     // codecs are cheap (a few microseconds each) so we
                     // don't bother offloading; cues land on the main
                     // actor through `decodeSubtitlePacket`.
@@ -1895,7 +1895,7 @@ public final class AetherEngine: ObservableObject {
         let colorPrimaries = codecpar.pointee.color_primaries
 
         // Check for Dolby Vision via codec parameters side data.
-        // Only report .dolbyVision if the display actually supports it —
+        // Only report .dolbyVision if the display actually supports it,
         // otherwise report .hdr10 (DV Profile 8 is HDR10-compatible).
         if codecId == AV_CODEC_ID_HEVC {
             let nbSideData = Int(codecpar.pointee.nb_coded_side_data)
@@ -1938,7 +1938,7 @@ public final class AetherEngine: ObservableObject {
         #if os(iOS) || os(tvOS)
         let nc = NotificationCenter.default
 
-        // Stop the demux loop when entering background — VTDecompressionSession
+        // Stop the demux loop when entering background, VTDecompressionSession
         // and AVIO connections are invalidated by tvOS during suspension.
         // Just pausing isn't enough: when the user resumes, the demux loop
         // calls av_read_frame which crashes on the dead AVIO context.
@@ -1963,7 +1963,7 @@ public final class AetherEngine: ObservableObject {
         }
         lifecycleObservers.append(bgObserver)
 
-        // Handle memory pressure — flush texture cache and drop queued frames
+        // Handle memory pressure, flush texture cache and drop queued frames
         let memObserver = nc.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil, queue: .main
@@ -1971,7 +1971,7 @@ public final class AetherEngine: ObservableObject {
             guard let self = self else { return }
             self.videoRenderer.flush()
             #if DEBUG
-            print("[AetherEngine] Memory warning — flushed texture cache")
+            print("[AetherEngine] Memory warning, flushed texture cache")
             #endif
         }
         lifecycleObservers.append(memObserver)

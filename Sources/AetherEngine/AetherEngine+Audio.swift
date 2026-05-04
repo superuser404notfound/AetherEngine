@@ -24,7 +24,7 @@ extension AetherEngine {
         // Hot-swap fast path for PCM → PCM track changes. A user
         // flipping German AC3 to English AC3 (the common case) does
         // not need a demuxer seek, a video pipeline flush, or a
-        // display-layer detach — the master clock keeps ticking, the
+        // display-layer detach, the master clock keeps ticking, the
         // video pipeline stays untouched, the demuxer keeps reading
         // sequentially. Old-stream audio packets fall off as soon as
         // we flip activeAudioStreamIndex (the demux dispatch checks
@@ -55,7 +55,7 @@ extension AetherEngine {
                 audioOutput.flushRendererKeepingClock()
             } catch {
                 #if DEBUG
-                print("[AetherEngine] selectAudioTrack hot-swap failed: \(error) — disabling audio")
+                print("[AetherEngine] selectAudioTrack hot-swap failed: \(error), disabling audio")
                 #endif
                 audioAvailable = false
             }
@@ -76,7 +76,7 @@ extension AetherEngine {
         tearDownCurrentAudioEngine()
         activeAudioStreamIndex = streamIndex
 
-        // Flush video pipeline (like a seek) — the demux seek below
+        // Flush video pipeline (like a seek), the demux seek below
         // resets both video and audio position
         if usingSoftwareDecode {
             softwareDecoder.flush()
@@ -96,7 +96,7 @@ extension AetherEngine {
 
         // Open new audio engine for the selected track.
         // Gate the Atmos path on the output route's passthrough capability
-        // — a BT speaker can't accept the HLS multichannel stream.
+        //, a BT speaker can't accept the HLS multichannel stream.
         let isAtmos = willBeAtmos
         #if DEBUG
         if streamIsAtmos && !isAtmos {
@@ -130,14 +130,14 @@ extension AetherEngine {
                 audioMode = .atmos
                 // Full handoff sequence:
                 //   1. detach from synchronizer (sync wait)
-                //   2. recreate the display layer — a layer that has been
+                //   2. recreate the display layer, a layer that has been
                 //      attached to a synchronizer and is then handed a
                 //      controlTimebase enters Apple's "undefined behavior"
                 //      regime; on Marty Supreme this manifested as audio
                 //      lag that survived every snap, and after a scrub the
                 //      layer fast-forwarded through queued frames. F1
                 //      (Atmos-only, layer never sees the synchronizer)
-                //      didn't have either symptom — strong signal that
+                //      didn't have either symptom, strong signal that
                 //      the layer's history is the cause. Recreating it
                 //      gives controlTimebase a fresh canvas.
                 //   3. flush + assign the new timebase on the new layer.
@@ -163,7 +163,7 @@ extension AetherEngine {
                 audioOutput.start(at: seekTime)
             } catch {
                 #if DEBUG
-                print("[AetherEngine] audioDecoder.open failed in selectAudioTrack: \(error) — disabling audio")
+                print("[AetherEngine] audioDecoder.open failed in selectAudioTrack: \(error), disabling audio")
                 #endif
                 audioAvailable = false
                 audioMode = .pcm
@@ -184,10 +184,10 @@ extension AetherEngine {
     /// bitstream (EAC3 + JOC wrapped as Dolby MAT 2.0 by AVPlayer).
     ///
     /// Bluetooth routes advertise only compressed stereo codecs (A2DP
-    /// SBC/AAC) — AVPlayer refuses the multichannel HLS stream there
+    /// SBC/AAC), AVPlayer refuses the multichannel HLS stream there
     /// and stalls forever with silent audio and no video. Routes that
     /// can't deliver at least 5.1 also make the Atmos path pointless
-    /// even when it technically works — we'd end up asking the system
+    /// even when it technically works, we'd end up asking the system
     /// to downmix what we could downmix ourselves cheaper.
     func canPassthroughAtmos() -> Bool {
         #if os(iOS) || os(tvOS)
@@ -231,7 +231,7 @@ extension AetherEngine {
             hlsAudioEngine?.stop()
             hlsAudioEngine = nil
             videoRenderer.displayLayer.controlTimebase = nil
-            // Layer was driven by controlTimebase, not the synchronizer —
+            // Layer was driven by controlTimebase, not the synchronizer,
             // no detachVideoLayer here. Calling it for an unattached layer
             // makes synchronizer.removeRenderer's completion never fire,
             // and the semaphore wait blocks the main thread for 1 second.
@@ -261,7 +261,7 @@ extension AetherEngine {
             audioMode = .pcm
         } catch {
             #if DEBUG
-            print("[AetherEngine] PCM fallback failed too: \(error) — disabling audio")
+            print("[AetherEngine] PCM fallback failed too: \(error), disabling audio")
             #endif
             audioAvailable = false
             audioMode = .pcm

@@ -498,7 +498,7 @@ final class FMP4AudioMuxer {
     }
 
     private func buildMvex() -> Data {
-        // Track Extends Box — defaults for media segments
+        // Track Extends Box, defaults for media segments
         var d = Data()
         d.appendUInt32BE(Self.trackID)       // track_ID
         d.appendUInt32BE(1)                  // default_sample_description_index

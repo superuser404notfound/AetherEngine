@@ -48,7 +48,7 @@ final class SampleBufferRenderer {
 
     /// Cached CMVideoFormatDescription for sample-buffer wrapping.
     /// Format descriptions are expensive to create (allocation + Core
-    /// Foundation refcount) — cache keyed by pixel buffer dimensions +
+    /// Foundation refcount), cache keyed by pixel buffer dimensions +
     /// format so we only rebuild when the stream changes.
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: UInt64 = 0
@@ -102,7 +102,7 @@ final class SampleBufferRenderer {
     }
 
     /// Set how the rendered video frame fills its CALayer rect.
-    /// Survives layer recreation across `load()` cycles — the renderer
+    /// Survives layer recreation across `load()` cycles, the renderer
     /// caches the value and re-applies it on every fresh layer.
     func setVideoGravity(_ gravity: AVLayerVideoGravity) {
         currentGravity = gravity
@@ -130,13 +130,13 @@ final class SampleBufferRenderer {
 
     /// Swap the display layer for a fresh instance. Called by
     /// AetherEngine on every load() to avoid carrying over stale
-    /// Synchronizer/controlTimebase state across sessions — the
+    /// Synchronizer/controlTimebase state across sessions, the
     /// observed failure mode is status=.rendering but no frame
     /// consumption, which no in-place reset can recover from.
     /// The host view is notified via onLayerReplaced and must
     /// remove the old sublayer and add the new one.
     func recreateDisplayLayer() {
-        // Drop the cached format description — it's associated with
+        // Drop the cached format description, it's associated with
         // the old layer's pipeline, and a new layer starts clean.
         reorderLock.lock()
         reorderBuffer.removeAll()
@@ -204,11 +204,11 @@ final class SampleBufferRenderer {
 
     /// Discard all buffered and displayed frames (call on seek/stop).
     /// Uses flushAndRemoveImage to clear the currently visible frame
-    /// immediately — prevents showing stale content after seeking.
+    /// immediately, prevents showing stale content after seeking.
     func flush() {
         reorderLock.lock()
         reorderBuffer.removeAll()
-        // Drop the cached format description — a following load() may open
+        // Drop the cached format description, a following load() may open
         // a stream with different color attachments at the same resolution,
         // and CMVideoFormatDescriptionCreateForImageBuffer snapshots those
         // into the description at creation time.
@@ -244,7 +244,7 @@ final class SampleBufferRenderer {
         }
         // Attach HDR10+ dynamic metadata before enqueue. Per Apple's
         // doc this attachment overrides any HDR10+ payload baked into
-        // the compressed bitstream — which is exactly what we want
+        // the compressed bitstream, which is exactly what we want
         // because VT may strip per-frame SEI on the way out.
         if let hdr10PlusData {
             CMSetAttachment(
@@ -264,7 +264,7 @@ final class SampleBufferRenderer {
             #if DEBUG
             if !loggedLayerFailed {
                 loggedLayerFailed = true
-                print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil") — attempting recovery via flush()")
+                print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil"), attempting recovery via flush()")
             }
             #endif
             displayLayer.flush()
@@ -317,7 +317,7 @@ final class SampleBufferRenderer {
 
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Reuse the format description unless dimensions or pixel format
-        // changed — rebuilding per frame wastes an allocation and Core
+        // changed, rebuilding per frame wastes an allocation and Core
         // Foundation refcount churn in the hot path.
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)

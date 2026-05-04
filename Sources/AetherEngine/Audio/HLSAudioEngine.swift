@@ -13,7 +13,7 @@ import Libavcodec
 /// `.playing` and `AVPlayerItem.timebase` is available, we bind our
 /// timebase's source to the player item's own timebase and set the offset
 /// so our timebase reports absolute stream PTS. From that point on the
-/// video clock ticks at exactly the rate of the audio output — pre-roll,
+/// video clock ticks at exactly the rate of the audio output, pre-roll,
 /// pause/resume, end-of-stream, AVR Atmos decoder latency, all of it
 /// propagates automatically. No drift correction, no periodic snapping,
 /// no constant-offset bookkeeping.
@@ -51,7 +51,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Scheduled on a PlaybackStalled notification; fires after a grace
     /// period and, if the player still isn't playing, treats the stall as
     /// a failure and invokes `onPlaybackFailed`. Some TVs / AVRs advertise
-    /// Atmos in their HDMI EDID but then stall instead of decoding — the
+    /// Atmos in their HDMI EDID but then stall instead of decoding, the
     /// normal "status == .failed" path never fires, so we need this.
     private var stallRecoveryWorkItem: DispatchWorkItem?
     /// How long to wait for AVPlayer to recover on its own before we
@@ -60,7 +60,7 @@ final class HLSAudioEngine: @unchecked Sendable {
 
     var onPlaybackFailed: (@Sendable () -> Void)?
 
-    /// Called right before the timebase starts — host should flush the
+    /// Called right before the timebase starts, host should flush the
     /// video renderer and re-set the skip threshold to the given PTS.
     var onWillStartTimebase: ((_ skipToPTS: CMTime) -> Void)?
 
@@ -161,7 +161,7 @@ final class HLSAudioEngine: @unchecked Sendable {
 
         segmentDuration = Double(framesPerSegment) * 1536.0 / Double(sampleRate)
 
-        // Start timebase PAUSED — no video frames shown until AVPlayer starts.
+        // Start timebase PAUSED, no video frames shown until AVPlayer starts.
         // The three-thread architecture ensures audio flows independently
         // even though the video decode thread blocks on the paused display.
         // When AVPlayer starts: flush video renderer (clear stale frames),
@@ -245,7 +245,7 @@ final class HLSAudioEngine: @unchecked Sendable {
                 if tornDown { return }
             }
             bufferLock.lock()
-            // Re-check state — stop() may have run during the wait
+            // Re-check state, stop() may have run during the wait
             guard muxer != nil, server != nil else {
                 bufferLock.unlock()
                 return
@@ -335,7 +335,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         streamOffset = 0
         // Detach our timebase from the now-dead player item timebase so a
         // fresh prepare() can rebind cleanly. Falling back to host clock
-        // is safe — the timebase stays paused until the next bind.
+        // is safe, the timebase stays paused until the next bind.
         if let tb = videoTimebase {
             CMTimebaseSetSourceClock(tb, CMClockGetHostTimeClock())
         }
@@ -361,7 +361,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         isPlayerCreated = false
         bufferLock.unlock()
         srv?.stop()
-        // IMPORTANT: keep `videoTimebase` alive across seeks — the display
+        // IMPORTANT: keep `videoTimebase` alive across seeks, the display
         // layer's controlTimebase still holds a reference and prepare() will
         // reseat its time/rate below. Nilling it here (as stop() does)
         // leaves the display layer listening to a stopped clock → video
@@ -431,7 +431,7 @@ final class HLSAudioEngine: @unchecked Sendable {
                 // The display layer may briefly hold frames while the timebase
                 // catches up, but this is short (~200ms for a few buffered frames)
                 // and doesn't block the demux long enough to starve audio.
-                // Don't snap here — player.currentTime() is unreliable at
+                // Don't snap here, player.currentTime() is unreliable at
                 // readyToPlay. The snap happens at the first sync tick
                 // (100ms later) when the player is actually playing.
                 #if DEBUG
@@ -453,9 +453,9 @@ final class HLSAudioEngine: @unchecked Sendable {
             }
         }
 
-        // Notifications — store tokens so stop() can remove them. Without
+        // Notifications, store tokens so stop() can remove them. Without
         // this, every createPlayer() added handlers that outlived the item
-        // and accumulated across sessions — 20+ orphaned callbacks firing
+        // and accumulated across sessions, 20+ orphaned callbacks firing
         // on every playback event after ~10 plays.
         let failedToken = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemFailedToPlayToEndTime,
@@ -474,7 +474,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         ) { [weak self] _ in
             guard let self else { return }
             #if DEBUG
-            print("[HLSAudioEngine] PlaybackStalled — starting \(Int(self.stallRecoveryGracePeriod))s recovery watchdog")
+            print("[HLSAudioEngine] PlaybackStalled, starting \(Int(self.stallRecoveryGracePeriod))s recovery watchdog")
             #endif
             self.scheduleStallRecovery()
         }
@@ -492,12 +492,12 @@ final class HLSAudioEngine: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             guard let self, self.isPlayerPlaying else { return }
-            // A periodic tick means AVPlayer is actively playing — cancel
+            // A periodic tick means AVPlayer is actively playing, cancel
             // any pending stall-recovery watchdog scheduled by an earlier
             // PlaybackStalled notification.
             if self.stallRecoveryWorkItem != nil {
                 #if DEBUG
-                print("[HLSAudioEngine] Stall recovered — cancelling watchdog")
+                print("[HLSAudioEngine] Stall recovered, cancelling watchdog")
                 #endif
                 self.cancelStallRecovery()
             }
@@ -524,7 +524,7 @@ final class HLSAudioEngine: @unchecked Sendable {
             guard let player = self.player else { return }
             if player.timeControlStatus == .playing { return }
             #if DEBUG
-            print("[HLSAudioEngine] Stall did not recover after \(Int(self.stallRecoveryGracePeriod))s (timeControlStatus=\(player.timeControlStatus.rawValue)) — escalating to fallback")
+            print("[HLSAudioEngine] Stall did not recover after \(Int(self.stallRecoveryGracePeriod))s (timeControlStatus=\(player.timeControlStatus.rawValue)), escalating to fallback")
             #endif
             self.onPlaybackFailed?()
         }
@@ -545,7 +545,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     /// Bind the video timebase to the AVPlayerItem's own timebase as soon
     /// as the player is genuinely producing audio, then leave it alone.
     /// AVPlayer's timebase is driven by the same hardware-aware clock that
-    /// drives audio output to the AVR/soundbar — Atmos decoder latency,
+    /// drives audio output to the AVR/soundbar, Atmos decoder latency,
     /// MAT 2.0 unpack latency, the lot. Following that timebase rather
     /// than re-snapping against the synthetic AVPlayer.currentTime() value
     /// removes the constant ~100 ms lag that snap+drift could not see
@@ -564,7 +564,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         guard playerSeconds.isFinite, playerSeconds > 0 else { return }
 
         // item.timebase only becomes non-nil once the player has actually
-        // started producing samples — wait for that. timeControlStatus can
+        // started producing samples, wait for that. timeControlStatus can
         // briefly read .playing while the timebase is still being set up.
         guard let itemTimebase = item.timebase else { return }
         let itemTime = CMTimebaseGetTime(itemTimebase)
@@ -577,7 +577,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         onWillStartTimebase?(startPTS)
 
         // Bind tb's source to the AVPlayerItem's timebase. From here on tb
-        // ticks at exactly the same rate as the player — pre-roll, pause,
+        // ticks at exactly the same rate as the player, pre-roll, pause,
         // resume, end-of-stream all propagate automatically.
         CMTimebaseSetSourceTimebase(tb, itemTimebase)
         // SetTime after SetMasterTimebase establishes the offset between
@@ -585,7 +585,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         CMTimebaseSetTime(tb, time: startPTS)
         CMTimebaseSetRate(tb, rate: Float64(_rate))
 
-        // Stop polling — there's nothing left to correct. The periodic
+        // Stop polling, there's nothing left to correct. The periodic
         // observer is also our stall-recovery cancel signal, so we leave
         // it running, but syncTimebase() is now a no-op for sync work.
         #if DEBUG

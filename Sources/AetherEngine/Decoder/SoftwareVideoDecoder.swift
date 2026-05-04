@@ -33,7 +33,7 @@ final class SoftwareVideoDecoder {
     /// True when the source stream is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false
 
-    /// Pixel buffer pool — reuses allocations instead of creating per frame.
+    /// Pixel buffer pool, reuses allocations instead of creating per frame.
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth = 0
     private var poolHeight = 0
@@ -68,7 +68,7 @@ final class SoftwareVideoDecoder {
             throw VideoDecoderError.noCodecParameters
         }
 
-        // Force pure software decode — disable all hardware acceleration.
+        // Force pure software decode, disable all hardware acceleration.
         ctx.pointee.get_format = { _, fmts in
             guard let fmts = fmts else { return AV_PIX_FMT_NONE }
             var i = 0
@@ -85,7 +85,7 @@ final class SoftwareVideoDecoder {
         ctx.pointee.thread_count = Int32(ProcessInfo.processInfo.activeProcessorCount)
         ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
 
-        // Disable hwaccel via codec options — some decoders ignore get_format
+        // Disable hwaccel via codec options, some decoders ignore get_format
         var opts: OpaquePointer?
         av_dict_set(&opts, "hwaccel", "none", 0)
 
@@ -124,7 +124,7 @@ final class SoftwareVideoDecoder {
             lock.unlock()
             guard ret >= 0 else { break }
 
-            // Skip pre-seek frames — decoded for reference but not converted.
+            // Skip pre-seek frames, decoded for reference but not converted.
             // This avoids the expensive sws_scale + display for frames the
             // renderer would drop anyway via skipUntilPTS.
             if let threshold = skipUntilPTS, f.pointee.pts != Int64.min {
@@ -151,7 +151,7 @@ final class SoftwareVideoDecoder {
                 cmPTS = .invalid
             }
 
-            // HDR10+ — software path reads the dynamic metadata off
+            // HDR10+, software path reads the dynamic metadata off
             // the post-decode AVFrame side data and serialises to T.35
             // SEI bytes the same way the VT path does. We can't reuse
             // the VT path's packet-side stash because the software
@@ -199,7 +199,7 @@ final class SoftwareVideoDecoder {
                 let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
                 guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
                 let data = Data(bytes: buf, count: size)
-                // FFmpeg owns the allocation — free via av_free() so the
+                // FFmpeg owns the allocation, free via av_free() so the
                 // matching allocator is used (plain free() happens to
                 // work on Apple platforms today but the contract isn't
                 // guaranteed across libavutil's allocator backends).
@@ -234,7 +234,7 @@ final class SoftwareVideoDecoder {
     // MARK: - AVFrame → CVPixelBuffer (sws_scale)
 
     /// Convert a decoded AVFrame to an NV12 CVPixelBuffer using sws_scale.
-    /// sws_scale is SIMD-optimized (NEON on ARM) — much faster than
+    /// sws_scale is SIMD-optimized (NEON on ARM), much faster than
     /// manual per-pixel loops, critical for AV1 at 1080p.
     private func convertFrameToPixelBuffer(_ frame: UnsafeMutablePointer<AVFrame>) -> CVPixelBuffer? {
         let width = Int(frame.pointee.width)
@@ -337,7 +337,7 @@ final class SoftwareVideoDecoder {
 
     /// Map FFmpeg color metadata to CVPixelBuffer attachments.
     /// This tells AVSampleBufferDisplayLayer the correct color space
-    /// for rendering — critical for HDR10 (BT.2020 + PQ).
+    /// for rendering, critical for HDR10 (BT.2020 + PQ).
     private func attachColorSpace(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
         // Color primaries (e.g. BT.709, BT.2020)
         let primaries: CFString? = switch frame.pointee.color_primaries {
