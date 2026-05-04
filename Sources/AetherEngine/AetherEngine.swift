@@ -406,7 +406,7 @@ public final class AetherEngine: ObservableObject {
             let pipelineIsHDR: Bool = {
                 guard !tonemapHDRToSDR else { return false }
                 switch videoFormat {
-                case .hdr10, .dolbyVision, .hlg: return true
+                case .hdr10, .hdr10Plus, .dolbyVision, .hlg: return true
                 case .sdr: return false
                 }
             }()

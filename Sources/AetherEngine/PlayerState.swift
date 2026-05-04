@@ -12,9 +12,18 @@ public enum PlaybackState: Sendable, Equatable {
 }
 
 /// The detected video dynamic range format.
+///
+/// `hdr10Plus` shares the underlying HDR10 base layer with `hdr10` —
+/// what makes it distinct is the per-frame ST 2094-40 dynamic metadata
+/// the engine forwards to the display via
+/// `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. From an
+/// AVDisplayCriteria perspective both formats request the same TV
+/// mode (PQ + BT.2020); the badge / detection split exists so the host
+/// UI can show the right label and so reporting is accurate.
 public enum VideoFormat: Sendable, Equatable {
     case sdr
     case hdr10
+    case hdr10Plus
     case dolbyVision
     case hlg
 }
