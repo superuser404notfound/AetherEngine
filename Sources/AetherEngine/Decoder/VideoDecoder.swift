@@ -371,16 +371,43 @@ final class VideoDecoder: @unchecked Sendable {
         // backward-compatible base layer still plays correctly.
         let atoms: NSMutableDictionary = [atomKey: extradataBytes]
         let effectiveCodecType: CMVideoCodecType
-        if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
+
+        // Detection happens unconditionally for diagnostics so the
+        // "did we see DV in this stream" question is answerable on
+        // any panel — including non-DV ones where we'll eventually
+        // skip the tagging. Tagging itself is gated on display
+        // capability + tonemap mode below.
+        let detectedDVRecord: AVDOVIDecoderConfigurationRecord? = {
+            guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
+            return doviConfigRecord(from: codecpar)
+        }()
+
+        #if DEBUG
+        if let r = detectedDVRecord {
+            let action: String
+            if tonemapToSDR {
+                action = "skipped (tonemap-to-SDR active, falling back to plain HEVC)"
+            } else if !Self.displaySupportsDolbyVision {
+                action = "skipped (display does not advertise DV in availableHDRModes — using HDR10/HLG fallback)"
+            } else {
+                action = "tagging as 'dvh1' with dvcC"
+            }
+            print(
+                "[VideoDecoder] Dolby Vision detected: profile=\(r.dv_profile) level=\(r.dv_level) "
+                + "rpu=\(r.rpu_present_flag) el=\(r.el_present_flag) bl=\(r.bl_present_flag) "
+                + "compat=\(r.dv_bl_signal_compatibility_id) → \(action)"
+            )
+        } else if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+            print("[VideoDecoder] No Dolby Vision side data on HEVC stream")
+        }
+        #endif
+
+        if let dvRecord = detectedDVRecord,
            !tonemapToSDR,
-           Self.displaySupportsDolbyVision,
-           let dvcCData = doviConfigAtomData(from: codecpar) {
-            atoms["dvcC"] = dvcCData
+           Self.displaySupportsDolbyVision {
+            atoms["dvcC"] = buildDvcCAtom(from: dvRecord)
             effectiveCodecType = kCMVideoCodecType_DolbyVisionHEVC
             isDolbyVision = true
-            #if DEBUG
-            print("[VideoDecoder] Dolby Vision config found — tagging as 'dvh1' with dvcC")
-            #endif
         } else {
             effectiveCodecType = codecType
         }
@@ -416,12 +443,16 @@ final class VideoDecoder: @unchecked Sendable {
     }
 
     /// Look up FFmpeg's `AV_PKT_DATA_DOVI_CONF` side data on the codec
-    /// parameters. When present, the payload is an
-    /// `AVDOVIDecoderConfigurationRecord` which we serialise into the
-    /// 24-byte ISO BMFF `dvcC` box body that CoreMedia consumes.
-    private func doviConfigAtomData(
+    /// parameters and return the parsed record. Returns nil when the
+    /// stream carries no Dolby Vision configuration.
+    ///
+    /// The 24-byte ISO BMFF `dvcC` box body is built from the record by
+    /// `buildDvcCAtom(from:)` — separated so the diagnostics in
+    /// `createFormatDescription` can inspect profile / level / flags
+    /// without serialising the atom unnecessarily.
+    private func doviConfigRecord(
         from codecpar: UnsafePointer<AVCodecParameters>
-    ) -> Data? {
+    ) -> AVDOVIDecoderConfigurationRecord? {
         let count = Int(codecpar.pointee.nb_coded_side_data)
         guard count > 0, let sideData = codecpar.pointee.coded_side_data else {
             return nil
@@ -434,11 +465,10 @@ final class VideoDecoder: @unchecked Sendable {
             // `dv_md_compression` (9th byte) — we don't use it for the
             // box body, so 8 bytes is enough to proceed safely.
             guard let raw = item.data, item.size >= 8 else { continue }
-            let record = raw.withMemoryRebound(
+            return raw.withMemoryRebound(
                 to: AVDOVIDecoderConfigurationRecord.self,
                 capacity: 1
             ) { $0.pointee }
-            return buildDvcCAtom(from: record)
         }
         return nil
     }
