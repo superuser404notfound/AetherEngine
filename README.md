@@ -18,7 +18,7 @@
 
 ## What it is
 
-A player engine that gets the hard parts right — HDR, Dolby Vision, Dolby Atmos, A/V sync across multiple clocks — and exposes a `CALayer` plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Embed the layer, call `play()`, read the published properties for state.
+A player engine that gets the hard parts right (HDR, Dolby Vision, Dolby Atmos, A/V sync across multiple clocks) and exposes a `CALayer` plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Embed the layer, call `play()`, read the published properties for state.
 
 You provide the transport bar. You provide the dropdowns. You provide the pretty.
 
@@ -28,17 +28,17 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV                                                                                      |
 | HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox                                                                                   |
-| SW decode   | AV1 (dav1d), VP9 fallback — pooled pixel buffers, no per-frame allocations                                                  |
+| SW decode   | AV1 (dav1d), VP9 fallback. Pooled pixel buffers, no per-frame allocations                                                   |
 | HDR10       | 10-bit P010 output, BT.2020 + PQ color tagging on every frame                                                               |
 | HDR10+      | Per-frame ST 2094-40 dynamic metadata extracted from `AV_PKT_DATA_DYNAMIC_HDR10_PLUS` and attached to every `CMSampleBuffer` via `kCMSampleAttachmentKey_HDR10PlusPerFrameData` |
-| Dolby Vision| Profile 5 / 8.1 / 8.4 — format description tagged as `kCMVideoCodecType_DolbyVisionHEVC` (`'dvh1'`) with a `dvcC` extension built from FFmpeg's DV configuration record so DV-capable TVs switch into DV mode; HDR10 / HLG fallback on non-DV TVs |
+| Dolby Vision| Profile 5 / 8.1 / 8.4. Format description tagged as `kCMVideoCodecType_DolbyVisionHEVC` (`'dvh1'`) with a `dvcC` extension built from FFmpeg's DV configuration record so DV-capable TVs switch into DV mode; HDR10 / HLG fallback on non-DV TVs |
 | HLG         | Transfer function detected and forwarded                                                                                    |
-| HDR → SDR   | Software tonemap via `VTPixelTransferSession` when Match Dynamic Range is off                                               |
+| HDR to SDR  | Software tonemap via `VTPixelTransferSession` when Match Dynamic Range is off                                               |
 | Audio       | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM                                                             |
-| Dolby Atmos | EAC3+JOC passthrough — local HLS + AVPlayer → Dolby MAT 2.0 wrapping                                                       |
+| Dolby Atmos | EAC3+JOC passthrough via local HLS + AVPlayer with Dolby MAT 2.0 wrapping                                                   |
 | Surround    | 5.1 / 7.1 with correct `AudioChannelLayout` tagging                                                                         |
 | Subtitles   | SubRip / ASS / SSA / WebVTT / mov_text streamed inline; PGS / HDMV PGS / DVB / DVD rendered as `CGImage` with normalised position; sidecar `.srt` / `.ass` / `.vtt` URLs decoded via short-lived context |
-| Seek        | Decoder + renderer flush, pre-target frame skip — no "fast forward from keyframe" artifact                                 |
+| Seek        | Decoder + renderer flush, pre-target frame skip, no "fast forward from keyframe" artifact                                  |
 | Streaming   | HTTP Range + chunked delegate reads via `URLSession`                                                                        |
 | Resilience  | Exponential backoff on transient network errors, background pause, display-link aware lifecycle                             |
 
@@ -68,12 +68,12 @@ player.$videoFormat   // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 player.audioTracks    // [TrackInfo]
 player.selectAudioTrack(index: trackID)
 
-// Subtitles — text and bitmap, one published list
+// Subtitles, text and bitmap, one published list
 player.subtitleTracks                          // [TrackInfo] for the loaded source
-player.selectSubtitleTrack(index: streamID)    // embedded — text or bitmap
+player.selectSubtitleTrack(index: streamID)    // embedded, text or bitmap
 player.selectSidecarSubtitle(url: srtURL)      // .srt / .ass / .vtt next to the media
 player.clearSubtitle()
-player.$subtitleCues                           // [SubtitleCue] — body is .text(String) or .image(SubtitleImage)
+player.$subtitleCues                           // [SubtitleCue], body is .text(String) or .image(SubtitleImage)
 player.$isSubtitleActive                       // host mirror gate
 player.$isLoadingSubtitles                     // sidecar fetch + decode in progress
 ```
@@ -86,7 +86,7 @@ Install via Swift Package Manager:
 
 ## Dolby Atmos pipeline
 
-`AVSampleBufferAudioRenderer` ignores Atmos metadata. `AVPlayer` doesn't — so for EAC3+JOC streams, AetherEngine demuxes the EAC3 packets, wraps them into fMP4 with a `dec3` box that declares JOC (`numDepSub=1`, `depChanLoc=0x0100`), serves the segments from a local HLS server on `127.0.0.1:<port>`, and points `AVPlayer` at the playlist. `AVPlayer` wraps the bitstream as Dolby MAT 2.0 and the receiver lights up the Atmos indicator.
+`AVSampleBufferAudioRenderer` ignores Atmos metadata. `AVPlayer` doesn't. So for EAC3+JOC streams, AetherEngine demuxes the EAC3 packets, wraps them into fMP4 with a `dec3` box that declares JOC (`numDepSub=1`, `depChanLoc=0x0100`), serves the segments from a local HLS server on `127.0.0.1:<port>`, and points `AVPlayer` at the playlist. `AVPlayer` wraps the bitstream as Dolby MAT 2.0 and the receiver lights up the Atmos indicator.
 
 ```
 Demux ──┬─ Video packets ──► Decode queue ──► AVSampleBufferDisplayLayer
@@ -99,9 +99,9 @@ Demux ──┬─ Video packets ──► Decode queue ──► AVSampleBuffer
                                                          └─► receiver / speaker
 ```
 
-The `AVSampleBufferDisplayLayer` is driven by a `CMTimebase` whose source is bound directly to `AVPlayerItem.timebase` via `CMTimebaseSetSourceTimebase`. The HLS pipe takes 2-4 seconds to buffer; during that window the timebase is paused and video holds on frame 1. Once `AVPlayer.timeControlStatus` flips to `.playing` and the item timebase is live, the bind is established and from that moment on video and audio share the same hardware-aware clock — including AVR / soundbar Atmos decoder latency, MAT 2.0 unpack delay, pre-roll, and pause/resume — without any periodic drift correction.
+The `AVSampleBufferDisplayLayer` is driven by a `CMTimebase` whose source is bound directly to `AVPlayerItem.timebase` via `CMTimebaseSetSourceTimebase`. The HLS pipe takes 2-4 seconds to buffer; during that window the timebase is paused and video holds on frame 1. Once `AVPlayer.timeControlStatus` flips to `.playing` and the item timebase is live, the bind is established and from that moment on video and audio share the same hardware-aware clock (including AVR / soundbar Atmos decoder latency, MAT 2.0 unpack delay, pre-roll, and pause/resume) without any periodic drift correction.
 
-If the active output route can't take multichannel — Bluetooth A2DP, HFP, LE, or any route reporting fewer than 6 output channels — AetherEngine skips the Atmos pipeline entirely and routes EAC3 through the regular FFmpeg PCM decoder, so you still get sound instead of silence. If a TV advertises Atmos in EDID but `AVPlayer` stalls anyway (some AVRs do this), a 5-second watchdog falls back to PCM automatically.
+If the active output route can't take multichannel (Bluetooth A2DP, HFP, LE, or any route reporting fewer than 6 output channels), AetherEngine skips the Atmos pipeline entirely and routes EAC3 through the regular FFmpeg PCM decoder, so you still get sound instead of silence. If a TV advertises Atmos in EDID but `AVPlayer` stalls anyway (some AVRs do this), a 5-second watchdog falls back to PCM automatically.
 
 ## HDR routing
 
@@ -114,7 +114,7 @@ If the active output route can't take multichannel — Bluetooth A2DP, HFP, LE, 
 | HEVC Main10, SDR display          | 8-bit NV12 (tonemapped) | BT.709                           |
 | AV1 HDR                           | 10-bit P010             | BT.2020 / PQ                     |
 
-HDR → SDR tonemapping runs through a dedicated `VTPixelTransferSession` with a pre-allocated `CVPixelBufferPool` — separate from the decompression session so it doesn't interfere with the `controlTimebase`-driven display path used by Atmos.
+HDR to SDR tonemapping runs through a dedicated `VTPixelTransferSession` with a pre-allocated `CVPixelBufferPool`, separate from the decompression session so it doesn't interfere with the `controlTimebase`-driven display path used by Atmos.
 
 On tvOS, the display layer opts into `preferredDynamicRange = .high` so the compositor doesn't silently clip BT.2020 pixels to Rec.709 after the TV has been told to switch to HDR.
 
@@ -128,13 +128,13 @@ For DV streams the demuxer surfaces an `AVDOVIDecoderConfigurationRecord` on the
 
 ## Subtitles
 
-Subtitle packets are routed through the same demux loop as audio and video — no second AVIO connection, no full-file scan. Each packet decodes inline through `avcodec_decode_subtitle2`, the result lands in a single `[SubtitleCue]` published list:
+Subtitle packets are routed through the same demux loop as audio and video. No second AVIO connection, no full-file scan. Each packet decodes inline through `avcodec_decode_subtitle2`, the result lands in a single `[SubtitleCue]` published list:
 
 - **Text codecs** (SubRip / ASS / SSA / WebVTT / mov_text) → `SubtitleCue.body = .text(String)`. ASS dialogue headers and override blocks (`{\an8}`, `{\b1}`, ...) are stripped; `\N` becomes a real newline so the host can render with regular text layout.
 - **Bitmap codecs** (PGS / HDMV PGS / DVB / DVD) → `.image(SubtitleImage)`. The indexed pixel plane is walked through its palette, premultiplied against alpha, and wrapped as a `CGImage`. Position is normalised in `[0..1]` against the source video frame so the host scales to any on-screen rect.
 - **Sidecar files** (a separate `.srt` / `.ass` / `.vtt` URL) → `selectSidecarSubtitle(url:)` opens its own short-lived `AVFormatContext`, decodes the whole file once, atomically swaps the result into `subtitleCues`.
 
-A single packet that carries multiple rects (PGS often emits signs/songs at the top alongside dialogue at the bottom) becomes multiple cues at the same time range — the host renders all of them. Cues are inserted in sorted order; backward seeks dedupe by `start|end` so the list doesn't grow on rewind.
+A single packet that carries multiple rects (PGS often emits signs/songs at the top alongside dialogue at the bottom) becomes multiple cues at the same time range, and the host renders all of them. Cues are inserted in sorted order; backward seeks dedupe by `start|end` so the list doesn't grow on rewind.
 
 The host stays in charge of the actual paint: text styling, overlay layout, fade transitions, position scaling against the on-screen video rect.
 
@@ -193,12 +193,12 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 ## Used by
 
-- [Sodalite](https://github.com/superuser404notfound/Sodalite) — native Jellyfin client for Apple TV.
+- [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
 
 ## Built with
 
-AetherEngine is vibe-coded — designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
+AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
 
 ## License
 
-[LGPL-3.0 with Apple Store / DRM Exception](LICENSE). The exception clause grants explicit permission to distribute through application stores (Apple App Store, TestFlight, etc.) whose terms otherwise conflict with LGPL §4–6 — modifications to the engine itself still have to be released under LGPL.
+[LGPL-3.0 with Apple Store / DRM Exception](LICENSE). The exception clause grants explicit permission to distribute through application stores (Apple App Store, TestFlight, etc.) whose terms otherwise conflict with LGPL §4–6. Modifications to the engine itself still have to be released under LGPL.
