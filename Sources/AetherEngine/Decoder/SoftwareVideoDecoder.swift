@@ -19,6 +19,17 @@ final class SoftwareVideoDecoder {
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
+    /// One-shot detection of HDR10+ dynamic metadata on a decoded
+    /// frame's side data. Mirrors the VT path's flag so the engine
+    /// can flip its published videoFormat to `.hdr10Plus` regardless
+    /// of which decoder backend processed the stream.
+    private var seenHDR10Plus = false
+
+    /// Fires once per session, on the demux thread, the first time
+    /// HDR10+ dynamic metadata appears on a decoded frame. Engine
+    /// hooks this up the same way it hooks VideoDecoder's callback.
+    var onFirstHDR10PlusDetected: (() -> Void)?
+
     /// True when the source stream is >8-bit (HDR10, AV1 HDR).
     private var use10Bit = false
 
@@ -146,6 +157,10 @@ final class SoftwareVideoDecoder {
             // the VT path's packet-side stash because the software
             // decoder owns its own packet flow.
             let hdr10PlusData = extractHDR10PlusBytes(from: f)
+            if hdr10PlusData != nil, !seenHDR10Plus {
+                seenHDR10Plus = true
+                onFirstHDR10PlusDetected?()
+            }
 
             onFrame?(pixelBuffer, cmPTS, hdr10PlusData)
         }

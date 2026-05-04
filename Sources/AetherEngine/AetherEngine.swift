@@ -364,6 +364,29 @@ public final class AetherEngine: ObservableObject {
                 )
             }
 
+            // Reactive HDR10+ upgrade. Stream-open detection looks at
+            // codec params side data which holds DV / HDR10 baselines
+            // but doesn't reliably carry HDR10+ — that lives in per-
+            // frame T.35 SEI. The decoders fire this callback the
+            // first time they see dynamic metadata, and we promote
+            // videoFormat from .hdr10 to .hdr10Plus so the host's HDR
+            // badge picks it up. We don't downgrade DV → HDR10+ even
+            // if both signals are present; DV is the more capable
+            // surface.
+            let hdr10PlusUpgrade: () -> Void = { [weak self] in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if self.videoFormat == .hdr10 {
+                        self.videoFormat = .hdr10Plus
+                        #if DEBUG
+                        print("[AetherEngine] HDR10+ stream → upgraded videoFormat .hdr10 → .hdr10Plus")
+                        #endif
+                    }
+                }
+            }
+            videoDecoder.onFirstHDR10PlusDetected = hdr10PlusUpgrade
+            softwareDecoder.onFirstHDR10PlusDetected = hdr10PlusUpgrade
+
             // Try VideoToolbox hardware decode first, fall back to FFmpeg
             // software decode for codecs without HW support (AV1 on A15, etc.)
             do {

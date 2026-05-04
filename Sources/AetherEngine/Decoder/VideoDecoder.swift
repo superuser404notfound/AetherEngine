@@ -57,9 +57,18 @@ final class VideoDecoder: @unchecked Sendable {
     /// look up + remove on the way out.
     private let hdr10PlusLock = NSLock()
     nonisolated(unsafe) private var pendingHDR10Plus: [Int64: Data] = [:]
-    #if DEBUG
-    private var loggedHDR10PlusOnce = false
-    #endif
+    /// One-shot flag set the first time HDR10+ side data lands on an
+    /// input packet. Drives the public `onFirstHDR10PlusDetected`
+    /// callback so the engine can flip its published videoFormat from
+    /// `.hdr10` to `.hdr10Plus` reactively (mirroring how DV is
+    /// detected at stream-open time, just with a per-frame source).
+    private var seenHDR10Plus = false
+
+    /// Fires once per session, on the demux thread, the first time
+    /// HDR10+ dynamic metadata appears on an input packet. The host
+    /// side uses this to update the published videoFormat for the
+    /// HDR badge label.
+    var onFirstHDR10PlusDetected: (() -> Void)?
 
     /// Post-decode pixel transfer for HDR→SDR tonemapping. Allocated
     /// only when `tonemapToSDR` is true.
@@ -186,13 +195,15 @@ final class VideoDecoder: @unchecked Sendable {
         if cmPTS.isValid, let hdrData = extractHDR10PlusBytes(from: packet) {
             hdr10PlusLock.lock()
             pendingHDR10Plus[cmPTS.value] = hdrData
+            let firstTime = !seenHDR10Plus
+            if firstTime { seenHDR10Plus = true }
             hdr10PlusLock.unlock()
-            #if DEBUG
-            if !loggedHDR10PlusOnce {
-                loggedHDR10PlusOnce = true
+            if firstTime {
+                #if DEBUG
                 print("[VideoDecoder] HDR10+ dynamic metadata detected — \(hdrData.count) bytes T.35 SEI per frame")
+                #endif
+                onFirstHDR10PlusDetected?()
             }
-            #endif
         }
 
         // Copy packet data into a CoreMedia-managed CMBlockBuffer.
@@ -353,7 +364,9 @@ final class VideoDecoder: @unchecked Sendable {
         // Drop any HDR10+ payloads whose frames were dropped instead
         // of delivered (e.g. seek-target skip). Seek/stop pre-flush
         // followed by a fresh demux walks new PTSes, so old entries
-        // would leak forever.
+        // would leak forever. The seenHDR10Plus latch stays as-is
+        // across seeks within the same session — the format hasn't
+        // changed, so re-firing the callback would be noise.
         hdr10PlusLock.lock()
         pendingHDR10Plus.removeAll(keepingCapacity: true)
         hdr10PlusLock.unlock()
