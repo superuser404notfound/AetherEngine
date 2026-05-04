@@ -30,7 +30,8 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox                                                                                   |
 | SW decode   | AV1 (dav1d), VP9 fallback — pooled pixel buffers, no per-frame allocations                                                  |
 | HDR10       | 10-bit P010 output, BT.2020 + PQ color tagging on every frame                                                               |
-| Dolby Vision| Profile 5 / 8.1 / 8.4 on DV-capable displays; HDR10 fallback on HDR10-only TVs                                              |
+| HDR10+      | Per-frame ST 2094-40 dynamic metadata extracted from `AV_PKT_DATA_DYNAMIC_HDR10_PLUS` and attached to every `CMSampleBuffer` via `kCMSampleAttachmentKey_HDR10PlusPerFrameData` |
+| Dolby Vision| Profile 5 / 8.1 / 8.4 — format description tagged as `kCMVideoCodecType_DolbyVisionHEVC` (`'dvh1'`) with a `dvcC` extension built from FFmpeg's DV configuration record so DV-capable TVs switch into DV mode; HDR10 / HLG fallback on non-DV TVs |
 | HLG         | Transfer function detected and forwarded                                                                                    |
 | HDR → SDR   | Software tonemap via `VTPixelTransferSession` when Match Dynamic Range is off                                               |
 | Audio       | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, ALAC, PCM                                                             |
@@ -62,7 +63,7 @@ player.stop()
 player.$state         // .idle, .loading, .playing, .paused, .seeking, .error
 player.$currentTime
 player.$duration
-player.$videoFormat   // .sdr, .hdr10, .dolbyVision, .hlg
+player.$videoFormat   // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 
 player.audioTracks    // [TrackInfo]
 player.selectAudioTrack(index: trackID)
@@ -104,17 +105,26 @@ If the active output route can't take multichannel — Bluetooth A2DP, HFP, LE, 
 
 ## HDR routing
 
-| Source                          | Output pixel format   | Tagged as        |
-| ------------------------------- | --------------------- | ---------------- |
-| H.264, HEVC (SDR)               | 8-bit NV12            | BT.709           |
-| HEVC Main10 (HDR10), HDR display| 10-bit P010           | BT.2020 / PQ     |
-| HEVC Main10 (DV P8), DV display | 10-bit P010           | BT.2020 / PQ + RPU |
-| HEVC Main10, SDR display        | 8-bit NV12 (tonemapped) | BT.709          |
-| AV1 HDR                         | 10-bit P010           | BT.2020 / PQ     |
+| Source                            | Output pixel format     | Tagged as                        |
+| --------------------------------- | ----------------------- | -------------------------------- |
+| H.264, HEVC (SDR)                 | 8-bit NV12              | BT.709                           |
+| HEVC Main10 (HDR10), HDR display  | 10-bit P010             | BT.2020 / PQ                     |
+| HEVC Main10 (HDR10+), HDR display | 10-bit P010             | BT.2020 / PQ + per-frame ST 2094-40 |
+| HEVC Main10 (DV P5/P8), DV display| 10-bit P010             | BT.2020 / PQ + dvcC + RPU passthrough |
+| HEVC Main10, SDR display          | 8-bit NV12 (tonemapped) | BT.709                           |
+| AV1 HDR                           | 10-bit P010             | BT.2020 / PQ                     |
 
 HDR → SDR tonemapping runs through a dedicated `VTPixelTransferSession` with a pre-allocated `CVPixelBufferPool` — separate from the decompression session so it doesn't interfere with the `controlTimebase`-driven display path used by Atmos.
 
 On tvOS, the display layer opts into `preferredDynamicRange = .high` so the compositor doesn't silently clip BT.2020 pixels to Rec.709 after the TV has been told to switch to HDR.
+
+### HDR10+ dynamic metadata
+
+For HDR10+ content the demuxer emits an `AVDynamicHDRPlus` struct as packet side data on each frame. The decoder serialises it back to the user-data-registered ITU-T T.35 byte form via `av_dynamic_hdr_plus_to_t35`, stashes it under the packet PTS, and on the way out of `VTDecompressionSession` pairs it with the matching decoded frame. The bytes are then attached to the outgoing `CMSampleBuffer` via `kCMSampleAttachmentKey_HDR10PlusPerFrameData` (introduced in iOS 16 / tvOS 16). The display layer forwards the metadata to the system compositor, which sends it onward over HDMI; HDR10+-capable TVs apply the source's per-scene tone-mapping curves instead of falling back to the static HDR10 base layer. Tonemap-to-SDR drops the metadata since it would be irrelevant on an SDR output.
+
+### Dolby Vision signalling
+
+For DV streams the demuxer surfaces an `AVDOVIDecoderConfigurationRecord` on the codec parameters' coded side data. The decoder packs it into the 24-byte ISO BMFF `dvcC` box body, attaches it as a sample-description-extension atom alongside `hvcC`, and promotes the codec type from `kCMVideoCodecType_HEVC` to `kCMVideoCodecType_DolbyVisionHEVC` (`'dvh1'`). On DV-capable displays this is what triggers the TV-side switch to Dolby Vision mode for Profile 5 (no HDR10 fallback), 8.1 (HDR10 backward-compatible) and 8.4 (HLG backward-compatible). On HDR10-only TVs we leave the format as plain `'hvc1'` so the existing HDR10 / HLG backward-compatible base layer plays correctly. Detection logging is unconditional in `DEBUG` so consumers can verify the path engages without owning DV hardware.
 
 ## Subtitles
 
