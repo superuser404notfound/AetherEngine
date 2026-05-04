@@ -335,7 +335,11 @@ final class VideoDecoder: @unchecked Sendable {
                 let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
                 guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
                 let data = Data(bytes: buf, count: size)
-                free(buf)
+                // FFmpeg owns the allocation — free via av_free() so the
+                // matching allocator is used (plain free() happens to
+                // work on Apple platforms today but the contract isn't
+                // guaranteed across libavutil's allocator backends).
+                av_free(buf)
                 return data
             }
         }
