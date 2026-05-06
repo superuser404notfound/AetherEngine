@@ -1895,25 +1895,30 @@ public final class AetherEngine: ObservableObject {
         let colorPrimaries = codecpar.pointee.color_primaries
 
         // Check for Dolby Vision via codec parameters side data.
-        // Only report .dolbyVision if the display actually supports it,
-        // otherwise report .hdr10 (DV Profile 8 is HDR10-compatible).
+        // Report .dolbyVision unconditionally when DV configuration is
+        // present, mirroring the VT-tagging path which dropped the
+        // `AVPlayer.availableHDRModes.contains(.dolbyVision)` gate in
+        // c01cb15. The deprecated API was observed to lag the HDMI
+        // HDR-mode handshake on tvOS 26 and could return false on a
+        // genuinely DV-capable TV. If we returned .hdr10 here while
+        // the VT path simultaneously tagged the stream as `dvh1`, the
+        // host would call `preferredDisplayCriteria(.hdr10)` and the
+        // TV would never enter DV mode while receiving DV-shaped
+        // sample buffers. Profile 8.1 / 8.4 still play their HDR10 /
+        // HLG base layer on non-DV TVs (the layer is responsible for
+        // delivering the base); Profile 5 has no compatible base and
+        // will produce wrong colours on a non-DV sink, but that is a
+        // content-side limitation, not something we can fix by lying
+        // about the format.
         if codecId == AV_CODEC_ID_HEVC {
             let nbSideData = Int(codecpar.pointee.nb_coded_side_data)
             if let sideData = codecpar.pointee.coded_side_data {
                 for i in 0..<nbSideData {
                     if sideData[i].type == AV_PKT_DATA_DOVI_CONF {
-                        #if os(tvOS) || os(iOS)
-                        if AVPlayer.availableHDRModes.contains(.dolbyVision) {
-                            #if DEBUG
-                            print("[AetherEngine] DV stream → Dolby Vision (display supports DV)")
-                            #endif
-                            return .dolbyVision
-                        }
-                        #endif
                         #if DEBUG
-                        print("[AetherEngine] DV stream → HDR10 fallback")
+                        print("[AetherEngine] DV stream → reporting .dolbyVision (gate dropped)")
                         #endif
-                        return .hdr10
+                        return .dolbyVision
                     }
                 }
             }
