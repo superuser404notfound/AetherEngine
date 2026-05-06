@@ -700,21 +700,19 @@ final class VideoDecoder: @unchecked Sendable {
             throw VideoDecoderError.sessionCreationFailed(status: status)
         }
 
-        // DV per-frame metadata: only enable on DV-capable displays.
-        // On HDR10-only TVs, DV RPU causes wrong colors, DV Profile 8
-        // is backwards-compatible with HDR10, so disabling propagation
-        // gives correct HDR10 output on non-DV displays.
-        #if os(tvOS) || os(iOS)
-        let displaySupportsDV = AVPlayer.availableHDRModes.contains(.dolbyVision)
-        VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata,
-                             value: displaySupportsDV ? kCFBooleanTrue : kCFBooleanFalse)
-        #if DEBUG
-        print("[VideoDecoder] DV metadata: \(displaySupportsDV ? "ON" : "OFF (HDR10 fallback)")")
-        #endif
-        #else
-        VTSessionSetProperty(sess, key: kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata, value: kCFBooleanFalse)
-        #endif
-
+        // Leave `kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata`
+        // at its default (true). The previous code gated it on
+        // `AVPlayer.availableHDRModes.contains(.dolbyVision)`, the
+        // same soft-deprecated tvOS-26 API we just removed from the
+        // format-description tagging path. When that gate returned
+        // false on a DV-capable TV (the API is observed to lag the
+        // HDMI HDR-mode handshake), VT was being told to STRIP the
+        // DV RPU per-frame metadata even though our format
+        // description was tagged as `dvh1`, so the TV got a
+        // DV-shaped sample stream with no actual DV data and
+        // refused to switch into DV mode. Apple's own HDR-with-
+        // Dolby-Vision PDF says to leave this property at the
+        // default. Ours is now the default.
         return sess
     }
 
@@ -902,8 +900,12 @@ final class VideoDecoder: @unchecked Sendable {
 
             guard off + payloadSize <= rbsp.count else { break }
 
-            // payload_type 5 = user_data_registered_itu_t_t35
-            if payloadType == 5, payloadSize >= 6,
+            // HEVC payload_type 4 = user_data_registered_itu_t_t35
+            // (ISO/IEC 23008-2 Annex D, Table D.2.1). The earlier
+            // version of this walker checked == 5, which is
+            // user_data_unregistered, so it never matched on real
+            // HDR10+ streams and the HW path always returned nil.
+            if payloadType == 4, payloadSize >= 6,
                rbsp[off] == 0xB5,                                 // USA
                rbsp[off + 1] == 0x00, rbsp[off + 2] == 0x3C,      // Samsung
                rbsp[off + 3] == 0x00, rbsp[off + 4] == 0x01,      // SMPTE 2094-40
