@@ -303,7 +303,19 @@ final class VideoDecoder: @unchecked Sendable {
                 // with BT.709), without the SDR tag the display
                 // would assume BT.2020 because of the 10-bit format
                 // and crush the colors.
-                if self.use10Bit {
+                //
+                // Dolby Vision streams are excluded because their
+                // pixel-buffer colorspace is profile-specific:
+                // Profile 8.1 base is BT.2020+PQ, Profile 5 base is
+                // IPT-PQ-c2 (not BT.2020 at all), Profile 8.4 base is
+                // BT.2020+HLG. VT picks the right output attachments
+                // based on the dvcC atom in the format description;
+                // overriding here with a hardcoded BT.2020+PQ tag
+                // mislabels the bytes for P5 in particular and the
+                // TV reads the lie and crushes colors into the
+                // green/magenta cast DrHurt reported. For DV we
+                // trust VT and leave the attachments alone.
+                if self.use10Bit, !self.isDolbyVision {
                     if self.isHDR {
                         self.attachHDRColorSpace(to: pixelBuffer)
                     } else {
