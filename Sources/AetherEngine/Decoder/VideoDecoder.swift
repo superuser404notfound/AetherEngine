@@ -217,9 +217,7 @@ final class VideoDecoder: @unchecked Sendable {
             if firstTime { seenHDR10Plus = true }
             hdr10PlusLock.unlock()
             if firstTime {
-                #if DEBUG
-                print("[VideoDecoder] HDR10+ dynamic metadata detected, \(hdrData.count) bytes T.35 SEI per frame")
-                #endif
+                EngineLog.emit("[VideoDecoder] HDR10+ dynamic metadata detected, \(hdrData.count) bytes T.35 SEI per frame")
                 onFirstHDR10PlusDetected?()
             }
         }
@@ -512,40 +510,36 @@ final class VideoDecoder: @unchecked Sendable {
             return doviConfigRecord(from: codecpar)
         }()
 
-        #if DEBUG
-        // Always log the gate value too, so DrHurt's next test can
-        // tell us whether the deprecated API actually returns DV on
-        // his hardware regardless of whether we still gate on it.
+        // Diagnostic logging (always emitted via EngineLog so the
+        // host can mirror it into an in-app overlay regardless of
+        // build config).
         let gateRaw = Self.availableHDRModesRawValue
         let gateContainsDV = Self.displaySupportsDolbyVision
-        print("[VideoDecoder] AVPlayer.availableHDRModes raw=\(gateRaw) contains.dolbyVision=\(gateContainsDV)")
+        EngineLog.emit("[VideoDecoder] AVPlayer.availableHDRModes raw=\(gateRaw) contains.dolbyVision=\(gateContainsDV)")
 
         if let r = detectedDVRecord {
             let action: String
             if tonemapToSDR {
                 action = "skipped (tonemap-to-SDR active, falling back to plain HEVC)"
             } else {
-                action = "tagging as 'dvh1' with dvcC (gate dropped, applying unconditionally)"
+                action = "tagging as 'dvh1' with dvcC (unconditional)"
             }
-            print(
+            EngineLog.emit(
                 "[VideoDecoder] Dolby Vision detected: profile=\(r.dv_profile) level=\(r.dv_level) "
                 + "rpu=\(r.rpu_present_flag) el=\(r.el_present_flag) bl=\(r.bl_present_flag) "
                 + "compat=\(r.dv_bl_signal_compatibility_id) → \(action)"
             )
         } else if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
-            print("[VideoDecoder] No Dolby Vision side data on HEVC stream")
+            EngineLog.emit("[VideoDecoder] No Dolby Vision side data on HEVC stream")
         }
-        #endif
 
         if let dvRecord = detectedDVRecord, !tonemapToSDR {
             let dvcCData = buildDvcCAtom(from: dvRecord)
             atoms["dvcC"] = dvcCData
             effectiveCodecType = kCMVideoCodecType_DolbyVisionHEVC
             isDolbyVision = true
-            #if DEBUG
             let hex = dvcCData.map { String(format: "%02x", $0) }.joined(separator: " ")
-            print("[VideoDecoder] dvcC bytes (24): \(hex)")
-            #endif
+            EngineLog.emit("[VideoDecoder] dvcC bytes (24): \(hex)")
         } else {
             effectiveCodecType = codecType
         }
@@ -787,8 +781,8 @@ final class VideoDecoder: @unchecked Sendable {
 
     #if DEBUG
     fileprivate var loggedDecodeError = false
-    private var loggedHEVCSEIWalker = false
     #endif
+    private var loggedHEVCSEIWalker = false
 
     // MARK: - HEVC SEI Walker (HDR10+ extraction on the HW path)
 
@@ -834,12 +828,10 @@ final class VideoDecoder: @unchecked Sendable {
                     bytes: data + seiStart,
                     size: seiSize
                 ) {
-                    #if DEBUG
                     if !loggedHEVCSEIWalker {
                         loggedHEVCSEIWalker = true
-                        print("[VideoDecoder] HEVC bitstream SEI walker found HDR10+ T.35 payload (\(t35.count) bytes)")
+                        EngineLog.emit("[VideoDecoder] HEVC bitstream SEI walker found HDR10+ T.35 payload (\(t35.count) bytes)")
                     }
-                    #endif
                     return t35
                 }
             }

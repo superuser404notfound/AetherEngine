@@ -378,9 +378,7 @@ public final class AetherEngine: ObservableObject {
                     guard let self else { return }
                     if self.videoFormat == .hdr10 {
                         self.videoFormat = .hdr10Plus
-                        #if DEBUG
-                        print("[AetherEngine] HDR10+ stream → upgraded videoFormat .hdr10 → .hdr10Plus")
-                        #endif
+                        EngineLog.emit("[AetherEngine] HDR10+ stream → upgraded videoFormat .hdr10 → .hdr10Plus")
                     }
                 }
             }
@@ -1895,30 +1893,38 @@ public final class AetherEngine: ObservableObject {
         let colorPrimaries = codecpar.pointee.color_primaries
 
         // Check for Dolby Vision via codec parameters side data.
-        // Report .dolbyVision unconditionally when DV configuration is
-        // present, mirroring the VT-tagging path which dropped the
-        // `AVPlayer.availableHDRModes.contains(.dolbyVision)` gate in
-        // c01cb15. The deprecated API was observed to lag the HDMI
-        // HDR-mode handshake on tvOS 26 and could return false on a
-        // genuinely DV-capable TV. If we returned .hdr10 here while
-        // the VT path simultaneously tagged the stream as `dvh1`, the
-        // host would call `preferredDisplayCriteria(.hdr10)` and the
-        // TV would never enter DV mode while receiving DV-shaped
-        // sample buffers. Profile 8.1 / 8.4 still play their HDR10 /
-        // HLG base layer on non-DV TVs (the layer is responsible for
-        // delivering the base); Profile 5 has no compatible base and
-        // will produce wrong colours on a non-DV sink, but that is a
-        // content-side limitation, not something we can fix by lying
-        // about the format.
+        // Report `.dolbyVision` only when the active display
+        // advertises DV in `AVPlayer.availableHDRModes`, otherwise
+        // fall back to `.hdr10`. The VT-tagging path is independently
+        // unconditional (dvh1 + dvcC always emitted when DV side data
+        // is present, see VideoDecoder.createFormatDescription), so
+        // even on a non-DV TV the layer still gets a DV-shaped sample
+        // stream and Profile 8.1 / 8.4 play their backward-compatible
+        // HDR10 / HLG base layer cleanly.
+        //
+        // The c23e1fe commit message hypothesised that this gate
+        // could return false on a DV-capable tvOS-26 TV due to API
+        // lag and so should be dropped here too. That hypothesis is
+        // unverified, and dropping it caused the badge to read
+        // "Dolby Vision" on genuinely non-DV TVs, which lies to the
+        // user. Re-gated until DrHurt's next round of logs proves
+        // the API actually misbehaves on real DV hardware.
         if codecId == AV_CODEC_ID_HEVC {
             let nbSideData = Int(codecpar.pointee.nb_coded_side_data)
             if let sideData = codecpar.pointee.coded_side_data {
                 for i in 0..<nbSideData {
                     if sideData[i].type == AV_PKT_DATA_DOVI_CONF {
-                        #if DEBUG
-                        print("[AetherEngine] DV stream → reporting .dolbyVision (gate dropped)")
-                        #endif
+                        #if os(tvOS) || os(iOS)
+                        if AVPlayer.availableHDRModes.contains(.dolbyVision) {
+                            EngineLog.emit("[AetherEngine] DV stream → .dolbyVision (display advertises DV)")
+                            return .dolbyVision
+                        }
+                        EngineLog.emit("[AetherEngine] DV stream → .hdr10 fallback (display does not advertise DV in availableHDRModes)")
+                        return .hdr10
+                        #else
+                        EngineLog.emit("[AetherEngine] DV stream → .dolbyVision (non-mobile platform)")
                         return .dolbyVision
+                        #endif
                     }
                 }
             }
