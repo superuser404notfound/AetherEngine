@@ -79,6 +79,7 @@ final class SampleBufferRenderer {
     #if DEBUG
     private var loggedLayerFailed = false
     private var enqueueCount = 0
+    private var hdr10PlusAttachedCount = 0
     #endif
 
     init() {
@@ -253,6 +254,12 @@ final class SampleBufferRenderer {
                 value: hdr10PlusData as CFData,
                 attachmentMode: CMAttachmentMode(kCMAttachmentMode_ShouldPropagate)
             )
+            #if DEBUG
+            hdr10PlusAttachedCount += 1
+            if hdr10PlusAttachedCount == 1 || hdr10PlusAttachedCount == 30 || hdr10PlusAttachedCount % 600 == 0 {
+                print("[Renderer] HDR10+ attachment count: \(hdr10PlusAttachedCount) (last payload \(hdr10PlusData.count) bytes)")
+            }
+            #endif
         }
         // If the layer has entered the failed state (undefined-behavior
         // races during Synchronizer↔controlTimebase handoffs push it

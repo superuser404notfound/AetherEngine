@@ -185,14 +185,32 @@ final class VideoDecoder: @unchecked Sendable {
             cmPTS = .invalid
         }
 
-        // HDR10+, extract dynamic metadata from the packet's side data
-        // and stash it under the packet PTS so the async VT output
-        // handler can pair it with the matching decoded frame. We
-        // serialise to T.35 SEI bytes here (vs. on the output side)
-        // because FFmpeg's `av_dynamic_hdr_plus_to_t35` is cheap and
-        // keeping the parsed struct alive across thread boundaries is
-        // more fragile than handing across an immutable Data.
-        if cmPTS.isValid, let hdrData = extractHDR10PlusBytes(from: packet) {
+        // HDR10+ extraction. FFmpeg's HEVC decoder is the only thing
+        // that parses bitstream T.35 SEI into AVFrame side data, and
+        // we bypass that decoder entirely on the VT hardware path.
+        // So:
+        //
+        //   - First try `AV_PKT_DATA_DYNAMIC_HDR10_PLUS` on the
+        //     packet (works for VP9 / AV1-in-container where the
+        //     demuxer surfaces it pre-decode).
+        //   - For HEVC fall through to a manual SEI walker that
+        //     parses the packet bitstream, finds the T.35 SEI, and
+        //     extracts the payload starting at country_code 0xB5
+        //     (the format Apple's
+        //     `kCMSampleAttachmentKey_HDR10PlusPerFrameData` expects).
+        //
+        // Stashed under packet PTS so the async VT output handler
+        // can pair the bytes with the matching decoded frame on the
+        // way back out (B-frame reorder makes "use the most recent"
+        // unsafe).
+        var hdrData = extractHDR10PlusBytes(from: packet)
+        if hdrData == nil {
+            hdrData = extractHDR10PlusBytesFromHEVCBitstream(
+                data: data,
+                size: packetSize
+            )
+        }
+        if cmPTS.isValid, let hdrData {
             hdr10PlusLock.lock()
             pendingHDR10Plus[cmPTS.value] = hdrData
             let firstTime = !seenHDR10Plus
@@ -465,37 +483,49 @@ final class VideoDecoder: @unchecked Sendable {
         let extradataBytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
 
         // Detect Dolby Vision via FFmpeg's `AV_PKT_DATA_DOVI_CONF` side
-        // data on the codec parameters. When present *and* the runtime
-        // display supports DV *and* we're not tone-mapping to SDR, we
-        // promote the codec type to `kCMVideoCodecType_DolbyVisionHEVC`
-        // and pack a `dvcC` atom alongside the existing `hvcC` so the
-        // layer sees a proper DV format description, without this the
-        // TV stays in HDR10 fallback (or wrong-colour Profile 5 base
-        // layer) instead of switching to DV mode. On non-DV displays
-        // we leave the format as plain HEVC so the HDR10 / HLG
-        // backward-compatible base layer still plays correctly.
+        // data on the codec parameters. When present and we're not
+        // tone-mapping to SDR, we promote the codec type to
+        // `kCMVideoCodecType_DolbyVisionHEVC` and pack a `dvcC` atom
+        // alongside the existing `hvcC` so the layer sees a proper DV
+        // format description.
+        //
+        // The previous `displaySupportsDolbyVision` gate (querying
+        // `AVPlayer.availableHDRModes.contains(.dolbyVision)`) is
+        // removed: the API is soft-deprecated on tvOS 26 and was
+        // observed to lag the HDMI HDR-mode handshake, so it could
+        // return false on a DV-capable TV that just hadn't switched
+        // yet. DrHurt's first verification round confirmed P8 / P5 /
+        // HDR10+ all fell back even though his display is genuinely
+        // DV-capable. We now always emit `dvh1` + `dvcC` for DV
+        // streams. On non-DV TVs Profile 8.1 / 8.4 still play via
+        // their backward-compatible HDR10 / HLG base layer (the layer
+        // is responsible for delivering the base; the dvcC atom is
+        // additive metadata the TV only acts on when it can). Profile
+        // 5 has no backward-compatible base, so on a non-DV TV it'll
+        // still produce wrong colours, but that's the same as before
+        // and we'll add a play-time refusal later if needed.
         let atoms: NSMutableDictionary = [atomKey: extradataBytes]
         let effectiveCodecType: CMVideoCodecType
 
-        // Detection happens unconditionally for diagnostics so the
-        // "did we see DV in this stream" question is answerable on
-        // any panel, including non-DV ones where we'll eventually
-        // skip the tagging. Tagging itself is gated on display
-        // capability + tonemap mode below.
         let detectedDVRecord: AVDOVIDecoderConfigurationRecord? = {
             guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
             return doviConfigRecord(from: codecpar)
         }()
 
         #if DEBUG
+        // Always log the gate value too, so DrHurt's next test can
+        // tell us whether the deprecated API actually returns DV on
+        // his hardware regardless of whether we still gate on it.
+        let gateRaw = Self.availableHDRModesRawValue
+        let gateContainsDV = Self.displaySupportsDolbyVision
+        print("[VideoDecoder] AVPlayer.availableHDRModes raw=\(gateRaw) contains.dolbyVision=\(gateContainsDV)")
+
         if let r = detectedDVRecord {
             let action: String
             if tonemapToSDR {
                 action = "skipped (tonemap-to-SDR active, falling back to plain HEVC)"
-            } else if !Self.displaySupportsDolbyVision {
-                action = "skipped (display does not advertise DV in availableHDRModes, using HDR10/HLG fallback)"
             } else {
-                action = "tagging as 'dvh1' with dvcC"
+                action = "tagging as 'dvh1' with dvcC (gate dropped, applying unconditionally)"
             }
             print(
                 "[VideoDecoder] Dolby Vision detected: profile=\(r.dv_profile) level=\(r.dv_level) "
@@ -507,12 +537,15 @@ final class VideoDecoder: @unchecked Sendable {
         }
         #endif
 
-        if let dvRecord = detectedDVRecord,
-           !tonemapToSDR,
-           Self.displaySupportsDolbyVision {
-            atoms["dvcC"] = buildDvcCAtom(from: dvRecord)
+        if let dvRecord = detectedDVRecord, !tonemapToSDR {
+            let dvcCData = buildDvcCAtom(from: dvRecord)
+            atoms["dvcC"] = dvcCData
             effectiveCodecType = kCMVideoCodecType_DolbyVisionHEVC
             isDolbyVision = true
+            #if DEBUG
+            let hex = dvcCData.map { String(format: "%02x", $0) }.joined(separator: " ")
+            print("[VideoDecoder] dvcC bytes (24): \(hex)")
+            #endif
         } else {
             effectiveCodecType = codecType
         }
@@ -536,14 +569,28 @@ final class VideoDecoder: @unchecked Sendable {
         return desc
     }
 
-    /// Whether the active video output supports Dolby Vision. Mirrors
-    /// the check used for `PropagatePerFrameHDRDisplayMetadata` so the
-    /// format-description tag and the propagation flag agree.
+    /// Whether the active video output advertises Dolby Vision in
+    /// `AVPlayer.availableHDRModes`. Kept around for diagnostic
+    /// logging only; the DV-tagging path no longer gates on it
+    /// because the API is soft-deprecated on tvOS 26 and was
+    /// observed to lag the HDMI HDR-mode handshake on real DV TVs.
     private static var displaySupportsDolbyVision: Bool {
         #if os(tvOS) || os(iOS)
         return AVPlayer.availableHDRModes.contains(.dolbyVision)
         #else
         return false
+        #endif
+    }
+
+    /// Raw OptionSet value of `AVPlayer.availableHDRModes`. Lets
+    /// debug logs differentiate "API returned 0 (no HDR at all)"
+    /// from "API returned HDR10|HLG but not DV" without requiring
+    /// the reader to know the bit layout (HLG=1, HDR10=2, DV=4).
+    private static var availableHDRModesRawValue: Int {
+        #if os(tvOS) || os(iOS)
+        return AVPlayer.availableHDRModes.rawValue
+        #else
+        return 0
         #endif
     }
 
@@ -742,7 +789,133 @@ final class VideoDecoder: @unchecked Sendable {
 
     #if DEBUG
     fileprivate var loggedDecodeError = false
+    private var loggedHEVCSEIWalker = false
     #endif
+
+    // MARK: - HEVC SEI Walker (HDR10+ extraction on the HW path)
+
+    /// Walk an HEVC packet's NAL units, find any user-data-registered
+    /// ITU-T T.35 SEI carrying HDR10+ dynamic metadata, and return
+    /// the T.35 payload starting from the country_code byte (0xB5)
+    /// in the format Apple's `kCMSampleAttachmentKey_HDR10PlusPerFrameData`
+    /// expects.
+    ///
+    /// Required because FFmpeg only exposes HDR10+ as `AVFrame` side
+    /// data after its own HEVC decoder runs, and we bypass that
+    /// decoder entirely on the VT hardware path. So the SEI message
+    /// lives in the packet bitstream and would otherwise be lost
+    /// before VT swallows it.
+    ///
+    /// Assumes mp4 / mkv style length-prefixed NAL framing with a
+    /// 4-byte big-endian length, which is the universal default for
+    /// HEVC in those containers.
+    private func extractHDR10PlusBytesFromHEVCBitstream(
+        data: UnsafeMutablePointer<UInt8>,
+        size: Int
+    ) -> Data? {
+        let lengthSize = 4
+        var offset = 0
+        while offset + lengthSize < size {
+            // 4-byte big-endian NAL length
+            var nalLength = 0
+            for i in 0..<lengthSize {
+                nalLength = (nalLength << 8) | Int(data[offset + i])
+            }
+            offset += lengthSize
+            guard nalLength > 2, offset + nalLength <= size else { break }
+
+            // HEVC NAL header byte 0: forbidden_zero (1) +
+            // nal_unit_type (6) + nuh_layer_id high bit (1).
+            // NUT 39 = PREFIX_SEI_NUT, 40 = SUFFIX_SEI_NUT.
+            let nalUnitType = (data[offset] >> 1) & 0x3F
+            if nalUnitType == 39 || nalUnitType == 40 {
+                // Skip the 2-byte NAL header to the SEI payload.
+                let seiStart = offset + 2
+                let seiSize = nalLength - 2
+                if let t35 = parseHEVCSEIPayloadForT35(
+                    bytes: data + seiStart,
+                    size: seiSize
+                ) {
+                    #if DEBUG
+                    if !loggedHEVCSEIWalker {
+                        loggedHEVCSEIWalker = true
+                        print("[VideoDecoder] HEVC bitstream SEI walker found HDR10+ T.35 payload (\(t35.count) bytes)")
+                    }
+                    #endif
+                    return t35
+                }
+            }
+            offset += nalLength
+        }
+        return nil
+    }
+
+    /// Parse one HEVC SEI NAL's payload, returning the T.35 bytes
+    /// for the first SEI message that matches the HDR10+ signature
+    /// (country_code 0xB5, terminal_provider 0x003C, oriented_code
+    /// 0x0001, application_identifier 4 = SMPTE 2094-40).
+    ///
+    /// Handles emulation-prevention-byte unescape (HEVC's RBSP rule
+    /// strips 0x03 from any 0x00 0x00 0x03 sequence) and the
+    /// variable-length payload_type / payload_size encoding (sum of
+    /// preceding 0xFF bytes plus the final non-FF byte).
+    private func parseHEVCSEIPayloadForT35(
+        bytes: UnsafePointer<UInt8>,
+        size: Int
+    ) -> Data? {
+        // Unescape RBSP first so payload_size is byte-accurate.
+        var rbsp: [UInt8] = []
+        rbsp.reserveCapacity(size)
+        var i = 0
+        while i < size {
+            if i + 2 < size, bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 0x03 {
+                rbsp.append(0)
+                rbsp.append(0)
+                i += 3
+            } else {
+                rbsp.append(bytes[i])
+                i += 1
+            }
+        }
+
+        var off = 0
+        while off < rbsp.count {
+            // payload_type: sum of preceding 0xFF bytes + final byte
+            var payloadType = 0
+            while off < rbsp.count, rbsp[off] == 0xFF {
+                payloadType += 255
+                off += 1
+            }
+            guard off < rbsp.count else { break }
+            payloadType += Int(rbsp[off])
+            off += 1
+
+            // payload_size: same encoding
+            var payloadSize = 0
+            while off < rbsp.count, rbsp[off] == 0xFF {
+                payloadSize += 255
+                off += 1
+            }
+            guard off < rbsp.count else { break }
+            payloadSize += Int(rbsp[off])
+            off += 1
+
+            guard off + payloadSize <= rbsp.count else { break }
+
+            // payload_type 5 = user_data_registered_itu_t_t35
+            if payloadType == 5, payloadSize >= 6,
+               rbsp[off] == 0xB5,                                 // USA
+               rbsp[off + 1] == 0x00, rbsp[off + 2] == 0x3C,      // Samsung
+               rbsp[off + 3] == 0x00, rbsp[off + 4] == 0x01,      // SMPTE 2094-40
+               rbsp[off + 5] == 0x04                              // application_identifier 4
+            {
+                return Data(rbsp[off..<(off + payloadSize)])
+            }
+
+            off += payloadSize
+        }
+        return nil
+    }
 }
 
 // MARK: - Errors
