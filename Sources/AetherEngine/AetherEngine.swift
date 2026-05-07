@@ -298,6 +298,43 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Public API
 
+    /// Active native AVPlayer session, set by
+    /// `startNativeVideoSession`. Non-nil while the host is using
+    /// the AVPlayer-rooted DV path instead of the FFmpeg + VT
+    /// pipeline.
+    private var nativeVideoSession: HLSVideoEngine?
+
+    /// Open a Dolby Vision direct-play source for the AVPlayer
+    /// path. The engine spins up a local HLS-fMP4 server fed by
+    /// FFmpeg-driven remuxing and returns a `localhost` playlist
+    /// URL the host hands to AVPlayer. Used only for DV streams on
+    /// DV-capable TVs, because Apple TV's HDMI HDR-mode handshake
+    /// to "Dolby Vision" is reachable solely through `AVPlayer`-
+    /// rooted playback (custom `AVSampleBufferDisplayLayer`
+    /// pipelines stay in HDR10).
+    ///
+    /// Non-DV content stays on the regular `load(url:)` path; this
+    /// method is purely additive and does not interfere with the
+    /// FFmpeg + VideoToolbox pipeline. The host must call
+    /// `stopNativeVideoSession()` when the AVPlayer session ends.
+    public func startNativeVideoSession(url: URL) throws -> URL {
+        stopNativeVideoSession()
+        let session = HLSVideoEngine(url: url)
+        let playbackURL = try session.start()
+        self.nativeVideoSession = session
+        return playbackURL
+    }
+
+    /// Tear down a native session started by
+    /// `startNativeVideoSession`. Safe to call when no session is
+    /// active. Frees the local server's TCP port and the FFmpeg
+    /// demuxer / muxer immediately so a follow-up session can bind
+    /// without conflict.
+    public func stopNativeVideoSession() {
+        nativeVideoSession?.stop()
+        nativeVideoSession = nil
+    }
+
     /// Load a media file or stream URL. Replaces any current playback.
     ///
     /// - Parameters:
