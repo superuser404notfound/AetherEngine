@@ -394,23 +394,15 @@ public final class AetherEngine: ObservableObject {
                     onFrame: frameCallback
                 )
                 usingSoftwareDecode = false
-                #if DEBUG
-                print("[AetherEngine] Using VideoToolbox hardware decode")
-                #endif
+                EngineLog.emit("[AetherEngine] Using VideoToolbox hardware decode")
             } catch {
-                #if DEBUG
-                print("[AetherEngine] VT failed: \(error), trying software decode")
-                #endif
+                EngineLog.emit("[AetherEngine] VT failed: \(error), trying software decode")
                 do {
                     try softwareDecoder.open(stream: videoStream, onFrame: frameCallback)
                     usingSoftwareDecode = true
-                    #if DEBUG
-                    print("[AetherEngine] Using FFmpeg software decode")
-                    #endif
+                    EngineLog.emit("[AetherEngine] Using FFmpeg software decode")
                 } catch {
-                    #if DEBUG
-                    print("[AetherEngine] Software decode also failed: \(error)")
-                    #endif
+                    EngineLog.emit("[AetherEngine] Software decode also failed: \(error)")
                     throw error
                 }
             }

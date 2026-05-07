@@ -323,6 +323,27 @@ final class VideoDecoder: @unchecked Sendable {
                     }
                 }
 
+                // Diagnostic dump on the first DV-decoded frame so we
+                // can see what VT actually puts on the output buffer
+                // for each profile. Build 113 (engine c1ef72e) showed
+                // that skipping our BT.2020+PQ override didn't change
+                // the TV's HDR-mode handshake, which means either VT
+                // is setting the same tags itself or the downshift
+                // signal is coming from somewhere else entirely. The
+                // attachments and pixel format below should tell us
+                // which.
+                if self.isDolbyVision, !self.loggedFirstDVFrame {
+                    self.loggedFirstDVFrame = true
+                    let pf = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                    let pfStr = String(format: "%c%c%c%c",
+                                       (pf >> 24) & 0xFF, (pf >> 16) & 0xFF,
+                                       (pf >> 8) & 0xFF, pf & 0xFF)
+                    let prim = CVBufferGetAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil)?.takeUnretainedValue() as? String ?? "<nil>"
+                    let trc = CVBufferGetAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil)?.takeUnretainedValue() as? String ?? "<nil>"
+                    let mat = CVBufferGetAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil)?.takeUnretainedValue() as? String ?? "<nil>"
+                    EngineLog.emit("[VideoDecoder] First DV frame: pixelFormat='\(pfStr)' (0x\(String(pf, radix: 16))) primaries=\(prim) trc=\(trc) matrix=\(mat)")
+                }
+
                 // Reclaim any HDR10+ payload the demux side stashed
                 // for this frame's PTS. Tonemap-to-SDR drops the
                 // metadata (it's irrelevant for an SDR output) so we
@@ -703,8 +724,10 @@ final class VideoDecoder: @unchecked Sendable {
             decompressionSessionOut: &session
         )
         guard status == noErr, let sess = session else {
+            EngineLog.emit("[VideoDecoder] VTDecompressionSessionCreate FAILED status=\(status) (codecType=0x\(String(CMFormatDescriptionGetMediaSubType(formatDescription), radix: 16)) pixelFormat=0x\(String(pixelFormat, radix: 16)))")
             throw VideoDecoderError.sessionCreationFailed(status: status)
         }
+        EngineLog.emit("[VideoDecoder] VTDecompressionSessionCreate ok (codecType=0x\(String(CMFormatDescriptionGetMediaSubType(formatDescription), radix: 16)) requested=0x\(String(pixelFormat, radix: 16)))")
 
         // Leave `kVTDecompressionPropertyKey_PropagatePerFrameHDRDisplayMetadata`
         // at its default (true). The previous code gated it on
@@ -795,6 +818,7 @@ final class VideoDecoder: @unchecked Sendable {
     fileprivate var loggedDecodeError = false
     #endif
     private var loggedHEVCSEIWalker = false
+    private var loggedFirstDVFrame = false
 
     // MARK: - HEVC SEI Walker (HDR10+ extraction on the HW path)
 
