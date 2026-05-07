@@ -22,7 +22,7 @@ final class HLSAudioEngine: @unchecked Sendable {
     // MARK: - Properties
 
     private var muxer: FMP4AudioMuxer?
-    private var server: HLSAudioServer?
+    private var server: HLSLocalServer?
     private var player: AVPlayer?
     private var playerItem: AVPlayerItem?
 
@@ -137,7 +137,7 @@ final class HLSAudioEngine: @unchecked Sendable {
         let startSeconds = CMTimeGetSeconds(startTime)
         streamOffset = startSeconds.isFinite ? startSeconds : 0
 
-        let srv = HLSAudioServer()
+        let srv = HLSLocalServer()
         try srv.start()
 
         // Publish server inside the same lock region that feedAudioData
