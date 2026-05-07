@@ -568,11 +568,12 @@ final class VideoDecoder: @unchecked Sendable {
 
         if let dvRecord = detectedDVRecord, !tonemapToSDR {
             let dvcCData = buildDvcCAtom(from: dvRecord)
-            atoms["dvcC"] = dvcCData
+            let atomKey = dvConfigAtomKey(for: dvRecord)
+            atoms[atomKey] = dvcCData
             effectiveCodecType = kCMVideoCodecType_DolbyVisionHEVC
             isDolbyVision = true
             let hex = dvcCData.map { String(format: "%02x", $0) }.joined(separator: " ")
-            EngineLog.emit("[VideoDecoder] dvcC bytes (24): \(hex)")
+            EngineLog.emit("[VideoDecoder] \(atomKey) bytes (24): \(hex) (md_compression=\(dvRecord.dv_md_compression))")
         } else {
             effectiveCodecType = codecType
         }
@@ -652,10 +653,13 @@ final class VideoDecoder: @unchecked Sendable {
         return nil
     }
 
-    /// Build the 24-byte `dvcC` atom payload from FFmpeg's DV record.
+    /// Build the 24-byte DV configuration atom payload from FFmpeg's
+    /// DV record. The atom box type (`dvcC` vs `dvvC`) is selected by
+    /// the caller based on `dv_md_compression`, see `dvConfigAtomKey`.
     ///
     /// Layout (DOVIDecoderConfigurationRecord, ISO BMFF Dolby Vision
-    /// streams spec v2.1.2):
+    /// streams spec v2.1.2 for `dvcC`, v4.0 for `dvvC` adds the
+    /// `dv_md_compression` nibble):
     /// ```
     ///   8 bits : dv_version_major
     ///   8 bits : dv_version_minor
@@ -665,7 +669,8 @@ final class VideoDecoder: @unchecked Sendable {
     ///   1 bit  : el_present_flag
     ///   1 bit  : bl_present_flag
     ///   4 bits : dv_bl_signal_compatibility_id
-    ///  28 bits : reserved (zero)
+    ///   4 bits : dv_md_compression (dvvC only, zero in dvcC)
+    ///  24 bits : reserved (zero)
     /// 128 bits : reserved (zero)
     /// ```
     private func buildDvcCAtom(
@@ -674,20 +679,40 @@ final class VideoDecoder: @unchecked Sendable {
         var bytes = [UInt8](repeating: 0, count: 24)
         bytes[0] = record.dv_version_major
         bytes[1] = record.dv_version_minor
-        let profile = record.dv_profile & 0x7F
-        let level   = record.dv_level   & 0x3F
-        let rpu     = record.rpu_present_flag & 0x01
-        let el      = record.el_present_flag  & 0x01
-        let bl      = record.bl_present_flag  & 0x01
-        let compat  = record.dv_bl_signal_compatibility_id & 0x0F
+        let profile        = record.dv_profile & 0x7F
+        let level          = record.dv_level   & 0x3F
+        let rpu            = record.rpu_present_flag & 0x01
+        let el             = record.el_present_flag  & 0x01
+        let bl             = record.bl_present_flag  & 0x01
+        let compat         = record.dv_bl_signal_compatibility_id & 0x0F
+        let mdCompression  = record.dv_md_compression & 0x0F
         // Byte 2: dv_profile (7) << 1 | high bit of dv_level (1)
         bytes[2] = (profile << 1) | ((level >> 5) & 0x01)
         // Byte 3: low 5 bits of dv_level | rpu | el | bl
         bytes[3] = ((level & 0x1F) << 3) | (rpu << 2) | (el << 1) | bl
-        // Byte 4: dv_bl_signal_compatibility_id (4) << 4 | reserved high nibble (0)
-        bytes[4] = compat << 4
+        // Byte 4: dv_bl_signal_compatibility_id (4) << 4 | dv_md_compression (4).
+        // For dvcC streams md_compression is zero (the field doesn't
+        // exist in the older spec); for dvvC streams it can be non-zero.
+        bytes[4] = (compat << 4) | mdCompression
         // Bytes 5–23 are reserved zero (already initialised).
         return Data(bytes)
+    }
+
+    /// Pick the right ISO BMFF atom box type for a DV configuration
+    /// record. `dvcC` is the original (Dolby Vision spec v2.x), `dvvC`
+    /// is the newer one added when `dv_md_compression` was introduced
+    /// (spec v4.0+). VT validates the box type against the record
+    /// content: emitting `dvcC` for a stream that actually uses
+    /// metadata compression makes `VTDecompressionSessionCreate`
+    /// reject the format with `status=-4` (`unimpErr`), exactly the
+    /// failure DrHurt's P5 level=9 streams hit. When in doubt about
+    /// what the muxer wrote, follow `dv_md_compression`: non-zero
+    /// implies the stream was authored against the v4.0 spec and so
+    /// must be tagged with `dvvC`.
+    private func dvConfigAtomKey(
+        for record: AVDOVIDecoderConfigurationRecord
+    ) -> String {
+        return record.dv_md_compression != 0 ? "dvvC" : "dvcC"
     }
 
     /// Create a VTDecompressionSession for hardware decoding.
