@@ -193,15 +193,15 @@ final class HLSVideoEngine: @unchecked Sendable {
         case .profile5:
             codecTagOverride = "dvh1"
             videoRange = .pq
-            codecsString = "dvh1.05.\(formatLevel(dvRecord!.dv_level))"
+            codecsString = "dvh1"
         case .profile81:
             codecTagOverride = "dvh1"
             videoRange = .pq
-            codecsString = "dvh1.08.\(formatLevel(dvRecord!.dv_level))"
+            codecsString = "dvh1"
         case .profile84:
             codecTagOverride = nil  // default 'hvc1', AVPlayer reads dvvC + VIDEO-RANGE=HLG to engage DV
             videoRange = .hlg
-            codecsString = buildHEVCCodecsString(codecpar: codecpar)
+            codecsString = "hvc1"
         case .profile7:
             throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
         case .profile82:
@@ -215,7 +215,7 @@ final class HLSVideoEngine: @unchecked Sendable {
             // but be defensive: play as plain HEVC HDR10/HLG/SDR.
             codecTagOverride = nil
             videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
-            codecsString = buildHEVCCodecsString(codecpar: codecpar)
+            codecsString = "hvc1"
         }
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
@@ -439,23 +439,13 @@ final class HLSVideoEngine: @unchecked Sendable {
         return .unknown
     }
 
-    /// Format `dv_level` (0–13 typical) as a two-digit decimal so the
-    /// HLS `CODECS` string reads like `dvh1.05.06` rather than
-    /// `dvh1.5.6`. Per RFC 6381 / Apple's HLS Authoring Spec.
-    private func formatLevel(_ level: UInt8) -> String {
-        String(format: "%02d", level)
-    }
-
-    /// HLS `CODECS` attribute string for plain HEVC (HDR10 / HLG /
-    /// SDR). Form: `hvc1.<profile>.4.L<level>.B0`. For Main10 (the
-    /// only HEVC profile for HDR/DV), this comes out as
-    /// `hvc1.2.4.L150.B0` for 4K Main10 Level 5.0 etc.
-    private func buildHEVCCodecsString(codecpar: UnsafePointer<AVCodecParameters>) -> String {
-        let profile = codecpar.pointee.profile
-        let level = codecpar.pointee.level
-        let levelDigits = max(0, level)
-        return "hvc1.\(profile).4.L\(levelDigits).B0"
-    }
+    // No `formatLevel` / `buildHEVCCodecsString` helpers: the
+    // master-playlist CODECS attribute uses the bare 4cc (`dvh1` or
+    // `hvc1`) per DrHurt's empirical KSPlayer testing
+    // (AetherEngine#2). The dotted RFC 6381 form (`dvh1.05.06`) is
+    // spec-compliant but Apple TV's AVPlayer treats them as
+    // equivalent at variant-info parse time, and the bare form
+    // sidesteps any pickiness about exact level encoding.
 
     // MARK: - Segment plan model
 
