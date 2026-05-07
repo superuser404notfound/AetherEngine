@@ -654,25 +654,35 @@ final class VideoDecoder: @unchecked Sendable {
     }
 
     /// Build the 24-byte DV configuration atom payload from FFmpeg's
-    /// DV record. The atom box type (`dvcC` vs `dvvC`) is selected by
-    /// the caller based on `dv_md_compression`, see `dvConfigAtomKey`.
+    /// DV record. The atom box type (`dvcC` vs `dvvC` vs `dvwC`) is
+    /// selected by `dvConfigAtomKey(for:)` strictly from `dv_profile`
+    /// per the Dolby spec and every reference muxer (FFmpeg movenc,
+    /// GPAC MP4Box, mkvtoolnix). The 24-byte payload is identical in
+    /// all three boxes; only the FourCC differs.
     ///
     /// Layout (DOVIDecoderConfigurationRecord, ISO BMFF Dolby Vision
-    /// streams spec v2.1.2 for `dvcC`, v4.0 for `dvvC` adds the
-    /// `dv_md_compression` nibble):
+    /// Streams spec v2.x and the v4.0 extension that added the
+    /// `dv_md_compression` 2-bit field at the same byte position):
+    ///
     /// ```
-    ///   8 bits : dv_version_major
-    ///   8 bits : dv_version_minor
-    ///   7 bits : dv_profile
-    ///   6 bits : dv_level
-    ///   1 bit  : rpu_present_flag
-    ///   1 bit  : el_present_flag
-    ///   1 bit  : bl_present_flag
-    ///   4 bits : dv_bl_signal_compatibility_id
-    ///   4 bits : dv_md_compression (dvvC only, zero in dvcC)
-    ///  24 bits : reserved (zero)
-    /// 128 bits : reserved (zero)
+    ///   Byte 0    : dv_version_major
+    ///   Byte 1    : dv_version_minor
+    ///   Byte 2    : dv_profile (7) << 1 | dv_level high bit (1)
+    ///   Byte 3    : dv_level low 5 bits << 3 | rpu << 2 | el << 1 | bl
+    ///   Byte 4    : dv_bl_signal_compatibility_id (4) << 4
+    ///                | dv_md_compression (2) << 2
+    ///                | reserved (2) at the bottom
+    ///   Bytes 5..7  : reserved zero
+    ///   Bytes 8..23 : reserved zero
     /// ```
+    ///
+    /// Note on byte 4: `dv_md_compression` is a 2-bit field at bits
+    /// [3..2]. FFmpeg's parser reads it as `(byte >> 2) & 0x03` and
+    /// the canonical encoder packs it the same way. The values are
+    /// 0 (none), 1 (limited), 2 (reserved), 3 (extended). The
+    /// previous version of this code packed it into bits [3..0],
+    /// which silently misreported the compression mode whenever the
+    /// stream actually used compressed RPU metadata.
     private func buildDvcCAtom(
         from record: AVDOVIDecoderConfigurationRecord
     ) -> Data {
@@ -685,34 +695,41 @@ final class VideoDecoder: @unchecked Sendable {
         let el             = record.el_present_flag  & 0x01
         let bl             = record.bl_present_flag  & 0x01
         let compat         = record.dv_bl_signal_compatibility_id & 0x0F
-        let mdCompression  = record.dv_md_compression & 0x0F
+        let mdCompression  = record.dv_md_compression & 0x03
         // Byte 2: dv_profile (7) << 1 | high bit of dv_level (1)
         bytes[2] = (profile << 1) | ((level >> 5) & 0x01)
         // Byte 3: low 5 bits of dv_level | rpu | el | bl
         bytes[3] = ((level & 0x1F) << 3) | (rpu << 2) | (el << 1) | bl
-        // Byte 4: dv_bl_signal_compatibility_id (4) << 4 | dv_md_compression (4).
-        // For dvcC streams md_compression is zero (the field doesn't
-        // exist in the older spec); for dvvC streams it can be non-zero.
-        bytes[4] = (compat << 4) | mdCompression
-        // Bytes 5–23 are reserved zero (already initialised).
+        // Byte 4: compat_id (bits 7..4) | md_compression (bits 3..2)
+        //                                | reserved (bits 1..0)
+        bytes[4] = (compat << 4) | (mdCompression << 2)
+        // Bytes 5–23 reserved zero (already initialised).
         return Data(bytes)
     }
 
     /// Pick the right ISO BMFF atom box type for a DV configuration
-    /// record. `dvcC` is the original (Dolby Vision spec v2.x), `dvvC`
-    /// is the newer one added when `dv_md_compression` was introduced
-    /// (spec v4.0+). VT validates the box type against the record
-    /// content: emitting `dvcC` for a stream that actually uses
-    /// metadata compression makes `VTDecompressionSessionCreate`
-    /// reject the format with `status=-4` (`unimpErr`), exactly the
-    /// failure DrHurt's P5 level=9 streams hit. When in doubt about
-    /// what the muxer wrote, follow `dv_md_compression`: non-zero
-    /// implies the stream was authored against the v4.0 spec and so
-    /// must be tagged with `dvvC`.
+    /// record. Strictly profile-based per Dolby's "Dolby Vision
+    /// Streams Within the ISO Base Media File Format" spec and every
+    /// open-source reference muxer (FFmpeg `mov_write_dvcc_dvvc_tag`,
+    /// GPAC `dvcC_box_write`, mkvtoolnix BlockAdditionMapping):
+    ///
+    ///   - `dv_profile` 0..7  (incl. P5, P7) → `dvcC` (original)
+    ///   - `dv_profile` 8..10 (P8, P9, P10/AV1) → `dvvC`
+    ///   - `dv_profile`  > 10 (P11+/VVC)  → `dvwC`
+    ///
+    /// The earlier `dv_md_compression != 0 → dvvC` heuristic was
+    /// wrong: md_compression is orthogonal to the box type and varies
+    /// independently within a profile. Apple's VT, every shipping
+    /// player, and every Hollywood DV master follow the profile rule.
     private func dvConfigAtomKey(
         for record: AVDOVIDecoderConfigurationRecord
     ) -> String {
-        return record.dv_md_compression != 0 ? "dvvC" : "dvcC"
+        let profile = Int(record.dv_profile)
+        switch profile {
+        case ...7:    return "dvcC"
+        case 8...10:  return "dvvC"
+        default:      return "dvwC"
+        }
     }
 
     /// Create a VTDecompressionSession for hardware decoding.
