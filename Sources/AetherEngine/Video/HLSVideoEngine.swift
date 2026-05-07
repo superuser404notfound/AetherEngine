@@ -62,6 +62,44 @@ final class HLSVideoEngine: @unchecked Sendable {
         case unknown        // anything else (P9, P10/AV1, malformed) → reject
     }
 
+    /// Audio codec compatibility with AVPlayer's native fMP4 decode
+    /// pipeline. AAC / AC3 / EAC3 (incl. Atmos JOC) / FLAC / ALAC /
+    /// MP3 stream-copy directly into fMP4 segments and AVPlayer
+    /// renders them. TrueHD / DTS / DTS-HD MA need transcode to FLAC
+    /// (DrHurt's `-c:a flac` trick) which is a phase-7 expansion;
+    /// for now we reject unsupported codecs and the host falls back
+    /// to AetherEngine.
+    fileprivate enum AudioCodecCompat {
+        case aac, ac3, eac3, flac, alac, mp3, opus
+        case unsupported
+
+        static func from(_ codecID: AVCodecID) -> AudioCodecCompat {
+            switch codecID {
+            case AV_CODEC_ID_AAC:  return .aac
+            case AV_CODEC_ID_AC3:  return .ac3
+            case AV_CODEC_ID_EAC3: return .eac3
+            case AV_CODEC_ID_FLAC: return .flac
+            case AV_CODEC_ID_ALAC: return .alac
+            case AV_CODEC_ID_MP3:  return .mp3
+            case AV_CODEC_ID_OPUS: return .opus
+            default:               return .unsupported
+            }
+        }
+
+        var hlsCodecsString: String {
+            switch self {
+            case .aac:  return "mp4a.40.2"
+            case .ac3:  return "ac-3"
+            case .eac3: return "ec-3"
+            case .flac: return "fLaC"
+            case .alac: return "alac"
+            case .mp3:  return "mp4a.40.34"
+            case .opus: return "opus"
+            case .unsupported: return ""
+            }
+        }
+    }
+
     // MARK: - State
 
     private let sourceURL: URL
@@ -182,7 +220,42 @@ final class HLSVideoEngine: @unchecked Sendable {
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
 
-        // 5. Build the per-session muxer, generate the init segment.
+        // 5. Pick the best audio stream and check codec compat with
+        //    AVPlayer. AAC / AC3 / EAC3 (incl. Atmos JOC) / FLAC /
+        //    ALAC / MP3 / Opus stream-copy directly. TrueHD / DTS /
+        //    DTS-HD MA are unsupported in AVPlayer's fMP4 decode and
+        //    would need transcode-to-FLAC (DrHurt's `-c:a flac`
+        //    trick from AetherEngine#1) — a phase-7 expansion. For
+        //    now we surface them as a routing-incompat signal so the
+        //    host falls back to AetherEngine for the affected file.
+        let audioStreamIndex = dem.audioStreamIndex
+        var audioConfig: FMP4VideoMuxer.StreamConfig? = nil
+        var audioHLSCodec: String? = nil
+        var resolvedAudioStreamIndex: Int32 = -1
+        if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
+            let audioCodecID = audioStream.pointee.codecpar.pointee.codec_id
+            let compat = AudioCodecCompat.from(audioCodecID)
+            if compat != .unsupported {
+                audioConfig = FMP4VideoMuxer.StreamConfig(
+                    codecpar: audioStream.pointee.codecpar,
+                    timeBase: audioStream.pointee.time_base,
+                    codecTagOverride: nil
+                )
+                audioHLSCodec = compat.hlsCodecsString
+                resolvedAudioStreamIndex = audioStreamIndex
+                EngineLog.emit("[HLSVideoEngine] audio: codec=\(compat) → muxing as `\(compat.hlsCodecsString)`")
+            } else {
+                EngineLog.emit("[HLSVideoEngine] audio codec id=\(audioCodecID.rawValue) unsupported in fMP4 (probably TrueHD/DTS); video-only fragment")
+            }
+        }
+
+        // Build the master-playlist CODECS string. AVPlayer reads
+        // this at variant-info parse time and filters streams it
+        // can't decode. Per RFC 6381: comma-separated, video first,
+        // audio after when present.
+        let manifestCodecs = audioHLSCodec.map { "\(codecsString),\($0)" } ?? codecsString
+
+        // 6. Build the per-session muxer, generate the init segment.
         //    The muxer is reused across every fragment in this
         //    session; segments may be requested out of order (seeks)
         //    but per ISO BMFF the `mfhd.sequence_number` is only a
@@ -195,7 +268,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         )
         let muxer: FMP4VideoMuxer
         do {
-            muxer = try FMP4VideoMuxer(video: videoConfig, audio: nil)
+            muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
         } catch {
             throw HLSVideoEngineError.muxerInit(underlying: error)
         }
@@ -208,20 +281,21 @@ final class HLSVideoEngine: @unchecked Sendable {
         }
 
         EngineLog.emit(
-            "[HLSVideoEngine] prepared: codec=\(codecsString) resolution=\(resolution.0)x\(resolution.1) "
+            "[HLSVideoEngine] prepared: codec=\(manifestCodecs) resolution=\(resolution.0)x\(resolution.1) "
             + "range=\(videoRange.rawValue) DV=\(dvVariant) segments=\(plan.count) "
             + "duration=\(String(format: "%.1f", durationSeconds))s init=\(initSegmentData.count)B"
         )
 
-        // 6. Wire the provider, the server, and serve the URL.
+        // 7. Wire the provider, the server, and serve the URL.
         let prov = VideoSegmentProvider(
             demuxer: dem,
             videoStreamIndex: videoIndex,
+            audioStreamIndex: resolvedAudioStreamIndex >= 0 ? resolvedAudioStreamIndex : nil,
             videoTimeBase: videoTimeBase,
             muxer: muxer,
             initSegmentData: initSegmentData,
             segments: plan,
-            codecsString: codecsString,
+            codecsString: manifestCodecs,
             resolution: resolution,
             videoRange: videoRange
         )
@@ -403,6 +477,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
     private let demuxer: Demuxer
     private let videoStreamIndex: Int32
+    private let audioStreamIndex: Int32?
     private let videoTimeBase: AVRational
     private let muxer: FMP4VideoMuxer
 
@@ -419,6 +494,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     init(
         demuxer: Demuxer,
         videoStreamIndex: Int32,
+        audioStreamIndex: Int32?,
         videoTimeBase: AVRational,
         muxer: FMP4VideoMuxer,
         initSegmentData: Data,
@@ -429,6 +505,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     ) {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
+        self.audioStreamIndex = audioStreamIndex
         self.videoTimeBase = videoTimeBase
         self.muxer = muxer
         self.initSegmentData = initSegmentData
@@ -465,40 +542,50 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         // avformat_seek_file for MKV-safe seek behaviour).
         demuxer.seek(to: seg.startSeconds)
 
-        var packetCount = 0
-        var didEnqueueAny = false
+        var videoCount = 0
+        var audioCount = 0
+        var didEnqueueAnyVideo = false
         do {
             while let packet = try demuxer.readPacket() {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
                 defer { av_packet_free(&pktPtr) }
 
                 let streamIdx = packet.pointee.stream_index
-                guard streamIdx == videoStreamIndex else { continue }
 
-                // Stop reading once we've passed this segment's end
-                // boundary, but only on a keyframe (otherwise we'd
-                // cut in the middle of a GOP and break the next
-                // segment's IDR alignment).
-                if didEnqueueAny,
-                   packet.pointee.pts != Int64.min,
-                   packet.pointee.pts >= seg.endPts,
-                   (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0 {
-                    break
+                if streamIdx == videoStreamIndex {
+                    // Stop reading once we've passed this segment's
+                    // end boundary, but only on a keyframe (otherwise
+                    // we'd cut in the middle of a GOP and break the
+                    // next segment's IDR alignment).
+                    if didEnqueueAnyVideo,
+                       packet.pointee.pts != Int64.min,
+                       packet.pointee.pts >= seg.endPts,
+                       (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0 {
+                        break
+                    }
+                    try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
+                    didEnqueueAnyVideo = true
+                    videoCount += 1
+                } else if let aIdx = audioStreamIndex,
+                          let aOutIdx = muxer.audioOutputIndex,
+                          streamIdx == aIdx {
+                    try muxer.writePacket(packet, toStreamIndex: aOutIdx)
+                    audioCount += 1
                 }
-
-                try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
-                didEnqueueAny = true
-                packetCount += 1
+                // Other streams (additional audio tracks, subtitles,
+                // attachments) are silently dropped. Audio-track
+                // switching mid-session would require re-priming the
+                // muxer and is a phase-7 concern.
 
                 // Safety bound: never read more than ~30 s worth of
                 // packets for one segment, regardless of where the
                 // next keyframe is. Pathological sources without
                 // mid-stream keyframes can otherwise gobble the
                 // whole file.
-                if packetCount > 1800 { break }
+                if videoCount + audioCount > 3600 { break }
             }
             let bytes = try muxer.flushFragment()
-            EngineLog.emit("[HLSVideoEngine] seg\(index): \(packetCount) pkts → \(bytes.count) B (start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s)")
+            EngineLog.emit("[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B (start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s)")
             return bytes
         } catch {
             EngineLog.emit("[HLSVideoEngine] seg\(index) generation failed: \(error)")
