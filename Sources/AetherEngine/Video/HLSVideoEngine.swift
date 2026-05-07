@@ -28,6 +28,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         case noVideoStream
         case unsupportedCodec(rawCodecID: UInt32)
         case noKeyframeIndex
+        case unsupportedDVProfile(profile: Int, compatID: Int)
         case muxerInit(underlying: Error)
         case alreadyStarted
         case notStarted
@@ -38,11 +39,27 @@ final class HLSVideoEngine: @unchecked Sendable {
             case .noVideoStream:         return "HLSVideoEngine: source has no video stream"
             case .unsupportedCodec(let id): return "HLSVideoEngine: unsupported codec id \(id) (only HEVC supported)"
             case .noKeyframeIndex:       return "HLSVideoEngine: source has no keyframe index (cannot build segment boundaries)"
+            case .unsupportedDVProfile(let p, let c): return "HLSVideoEngine: unsupported Dolby Vision profile \(p).\(c)"
             case .muxerInit(let e):      return "HLSVideoEngine: muxer init failed (\(e))"
             case .alreadyStarted:        return "HLSVideoEngine: session already started"
             case .notStarted:            return "HLSVideoEngine: session not started"
             }
         }
+    }
+
+    /// DV profile + base-layer compatibility classification per the
+    /// table in DrHurt's KSPlayer notes (AetherEngine#1) and Apple's
+    /// HLS Authoring Spec. The codec FourCC the muxer writes and the
+    /// `VIDEO-RANGE` we put on the master playlist depend on which
+    /// variant we hit.
+    fileprivate enum DVVariant {
+        case none           // not DV (would be a routing bug — phase 1 only sends DV here)
+        case profile5       // P5 (IPT-PQ-c2, no HDR10 base)         → dvh1 + PQ
+        case profile81      // P8 with HDR10-compat base              → dvh1 + PQ
+        case profile84      // P8 with HLG-compat base                → hvc1 + HLG
+        case profile7       // P7 dual-layer (Apple TV cannot decode) → reject
+        case profile82      // P8 with SDR-compat base (rare)         → reject
+        case unknown        // anything else (P9, P10/AV1, malformed) → reject
     }
 
     // MARK: - State
@@ -114,13 +131,55 @@ final class HLSVideoEngine: @unchecked Sendable {
             sourceDurationSeconds: durationSeconds
         )
 
-        // 4. Detect Dolby Vision and build a manifest CODECS string.
+        // 4. Classify the DV variant and pick the codec-tag /
+        //    video-range / CODECS-string trio per DrHurt's empirical
+        //    AVPlayer profile table (AetherEngine#1):
+        //
+        //       Profile         | codec_tag | VIDEO-RANGE
+        //       ----------------+-----------+------------
+        //       P5 (compat 0)   | dvh1      | PQ
+        //       P8.1 (compat 1) | dvh1      | PQ
+        //       P8.4 (compat 4) | hvc1      | HLG
+        //       P7 / P8.2 / etc | unsupported, reject and let host fall back
+        //
+        //    The earlier "all DV → dvh1 + PQ" approach was wrong for
+        //    P8.4: AVPlayer expects an HDR10-compat base layer when
+        //    it sees dvh1+PQ, but P8.4 carries HLG bytes underneath,
+        //    so the HDMI handshake gets confused.
         let dvRecord = doviConfigRecord(from: codecpar)
-        let isDolbyVision = dvRecord != nil
-        let codecsString = buildCodecsString(codecpar: codecpar, dvRecord: dvRecord)
-        let videoRange: HLSVideoRange = (isDolbyVision || isHDRTransfer(codecpar))
-            ? .pq
-            : .sdr
+        let dvVariant = classifyDVVariant(dvRecord)
+        let codecTagOverride: String?
+        let videoRange: HLSVideoRange
+        let codecsString: String
+        switch dvVariant {
+        case .profile5:
+            codecTagOverride = "dvh1"
+            videoRange = .pq
+            codecsString = "dvh1.05.\(formatLevel(dvRecord!.dv_level))"
+        case .profile81:
+            codecTagOverride = "dvh1"
+            videoRange = .pq
+            codecsString = "dvh1.08.\(formatLevel(dvRecord!.dv_level))"
+        case .profile84:
+            codecTagOverride = nil  // default 'hvc1', AVPlayer reads dvvC + VIDEO-RANGE=HLG to engage DV
+            videoRange = .hlg
+            codecsString = buildHEVCCodecsString(codecpar: codecpar)
+        case .profile7:
+            throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
+        case .profile82:
+            throw HLSVideoEngineError.unsupportedDVProfile(profile: 8, compatID: 2)
+        case .unknown:
+            let p = Int(dvRecord?.dv_profile ?? 0)
+            let c = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 0)
+            throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
+        case .none:
+            // Phase-1 routing should keep non-DV out of this engine,
+            // but be defensive: play as plain HEVC HDR10/HLG/SDR.
+            codecTagOverride = nil
+            videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
+            codecsString = buildHEVCCodecsString(codecpar: codecpar)
+        }
+
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
 
         // 5. Build the per-session muxer, generate the init segment.
@@ -132,7 +191,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         let videoConfig = FMP4VideoMuxer.StreamConfig(
             codecpar: codecpar,
             timeBase: videoTimeBase,
-            isDolbyVision: isDolbyVision
+            codecTagOverride: codecTagOverride
         )
         let muxer: FMP4VideoMuxer
         do {
@@ -150,7 +209,7 @@ final class HLSVideoEngine: @unchecked Sendable {
 
         EngineLog.emit(
             "[HLSVideoEngine] prepared: codec=\(codecsString) resolution=\(resolution.0)x\(resolution.1) "
-            + "range=\(videoRange.rawValue) DV=\(isDolbyVision) segments=\(plan.count) "
+            + "range=\(videoRange.rawValue) DV=\(dvVariant) segments=\(plan.count) "
             + "duration=\(String(format: "%.1f", durationSeconds))s init=\(initSegmentData.count)B"
         )
 
@@ -284,22 +343,40 @@ final class HLSVideoEngine: @unchecked Sendable {
         return trc == AVCOL_TRC_SMPTE2084 || trc == AVCOL_TRC_ARIB_STD_B67
     }
 
-    /// HLS `CODECS` attribute string. For DV: `dvh1.<profile>.<level>`
-    /// using the configuration record's profile + level. For plain
-    /// HDR10/SDR HEVC: a sensible `hvc1.…` string. Apple TV uses
-    /// this at variant-stream-info parse time to pick the decoder
-    /// pipeline, so the dvh1.X.YY accuracy matters for triggering
-    /// the DV HDMI handshake.
-    private func buildCodecsString(
-        codecpar: UnsafePointer<AVCodecParameters>,
-        dvRecord: AVDOVIDecoderConfigurationRecord?
-    ) -> String {
-        if let r = dvRecord {
-            let profile = String(format: "%02d", r.dv_profile)
-            let level = String(format: "%02d", r.dv_level)
-            return "dvh1.\(profile).\(level)"
+    /// Classify the source's Dolby Vision variant from the parsed
+    /// configuration record. P8.6 is normalised to P8.1 per
+    /// DrHurt's note: "P8.6 is not a valid profile (but should still
+    /// play if treated as 8.1)".
+    private func classifyDVVariant(_ record: AVDOVIDecoderConfigurationRecord?) -> DVVariant {
+        guard let r = record else { return .none }
+        let profile = Int(r.dv_profile)
+        let compat = Int(r.dv_bl_signal_compatibility_id)
+
+        if profile == 5 { return .profile5 }
+        if profile == 7 { return .profile7 }
+        if profile == 8 || profile == 9 || profile == 10 {
+            switch compat {
+            case 1: return .profile81
+            case 2: return .profile82
+            case 4: return .profile84
+            default: return .profile81  // P8.6 etc → treat as P8.1
+            }
         }
-        // Plain HEVC fallback. Profile 1 = Main, Profile 2 = Main10.
+        return .unknown
+    }
+
+    /// Format `dv_level` (0–13 typical) as a two-digit decimal so the
+    /// HLS `CODECS` string reads like `dvh1.05.06` rather than
+    /// `dvh1.5.6`. Per RFC 6381 / Apple's HLS Authoring Spec.
+    private func formatLevel(_ level: UInt8) -> String {
+        String(format: "%02d", level)
+    }
+
+    /// HLS `CODECS` attribute string for plain HEVC (HDR10 / HLG /
+    /// SDR). Form: `hvc1.<profile>.4.L<level>.B0`. For Main10 (the
+    /// only HEVC profile for HDR/DV), this comes out as
+    /// `hvc1.2.4.L150.B0` for 4K Main10 Level 5.0 etc.
+    private func buildHEVCCodecsString(codecpar: UnsafePointer<AVCodecParameters>) -> String {
         let profile = codecpar.pointee.profile
         let level = codecpar.pointee.level
         let levelDigits = max(0, level)

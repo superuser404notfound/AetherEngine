@@ -67,11 +67,19 @@ final class FMP4VideoMuxer {
     struct StreamConfig {
         let codecpar: UnsafeMutablePointer<AVCodecParameters>
         let timeBase: AVRational
-        /// When true, override the muxer's default codec FourCC
-        /// (`hvc1`) with `dvh1` so AVPlayer routes the stream to its
-        /// Dolby Vision decoder. Apple-only convention; non-Apple
-        /// decoders generally accept either tag.
-        let isDolbyVision: Bool
+        /// Override the muxer's default codec FourCC. Per the Apple
+        /// HLS authoring spec (and validated by DrHurt's KSPlayer
+        /// research, AetherEngine#1):
+        ///   - DV Profile 5 → `"dvh1"`
+        ///   - DV Profile 8.1 (HDR10-compat) → `"dvh1"`
+        ///   - DV Profile 8.4 (HLG-compat) → nil (use the muxer's
+        ///     default `hvc1`, the bitstream is interpreted as
+        ///     plain HLG-HEVC and AVPlayer engages DV via the
+        ///     `dvcC`/`dvvC` atom + `VIDEO-RANGE=HLG` declaration)
+        ///   - HDR10 / HDR10+ / HLG → nil (default `hvc1`)
+        /// Pass nil for "let libavformat decide" (which produces
+        /// `hvc1` for HEVC).
+        let codecTagOverride: String?
     }
 
     // MARK: - Properties
@@ -125,12 +133,9 @@ final class FMP4VideoMuxer {
             throw FMP4VideoMuxerError.copyParametersFailed(code: vCopy)
         }
         videoStream.pointee.time_base = video.timeBase
-        if video.isDolbyVision {
-            // Set codec FourCC to 'dvh1'. Apple reads the codec tag
-            // before the container's `dvcC`/`dvvC` atoms when deciding
-            // whether to engage the DV pipeline, so the tag must say
-            // "this is DV HEVC", not plain HEVC.
-            videoStream.pointee.codecpar.pointee.codec_tag = Self.mkTag("d", "v", "h", "1")
+        if let override = video.codecTagOverride,
+           let tag = Self.mkTag(fromFourCC: override) {
+            videoStream.pointee.codecpar.pointee.codec_tag = tag
         }
 
         // 4. Add the audio stream (if any).
@@ -342,12 +347,17 @@ final class FMP4VideoMuxer {
 
     /// Equivalent of FFmpeg's `MKTAG(a, b, c, d)` macro. Encodes a
     /// four-character code as a little-endian `UInt32` (byte 0 = `a`,
-    /// byte 3 = `d`).
-    private static func mkTag(_ a: Character, _ b: Character, _ c: Character, _ d: Character) -> UInt32 {
-        func code(_ ch: Character) -> UInt32 {
-            UInt32(ch.asciiValue ?? 0)
+    /// byte 3 = `d`). Returns nil if the input isn't exactly four
+    /// ASCII characters.
+    private static func mkTag(fromFourCC fourCC: String) -> UInt32? {
+        let chars = Array(fourCC)
+        guard chars.count == 4 else { return nil }
+        var tag: UInt32 = 0
+        for (i, ch) in chars.enumerated() {
+            guard let ascii = ch.asciiValue else { return nil }
+            tag |= UInt32(ascii) << (i * 8)
         }
-        return code(a) | (code(b) << 8) | (code(c) << 16) | (code(d) << 24)
+        return tag
     }
 }
 
