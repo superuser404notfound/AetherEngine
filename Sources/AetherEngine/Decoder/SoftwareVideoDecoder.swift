@@ -15,7 +15,11 @@ import Libswscale
 final class SoftwareVideoDecoder {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
-    private var swsContext: OpaquePointer?
+    // FFmpeg 8.x exposes `SwsContext` as a real struct in Swift, where 7.x
+    // surfaced it as an `OpaquePointer`. The function signatures (sws_get
+    // CachedContext / sws_scale / sws_freeContext) follow suit, so the
+    // stored pointer type has to match or every call site mismatches.
+    private var swsContext: UnsafeMutablePointer<SwsContext>?
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
     var onFrame: DecodedFrameHandler?
 
@@ -252,7 +256,9 @@ final class SoftwareVideoDecoder {
             swsContext,
             Int32(width), Int32(height), srcFmt,
             Int32(width), Int32(height), dstFmt,
-            SWS_BILINEAR, nil, nil, nil
+            // FFmpeg 8 turned the SWS_* constants into a typed `SwsFlags`
+            // enum; the C signature still wants a plain int, so unwrap.
+            Int32(SWS_BILINEAR.rawValue), nil, nil, nil
         )
         guard swsContext != nil else { return nil }
 
