@@ -150,6 +150,14 @@ final class HLSLocalServer: @unchecked Sendable {
         }
 
         l.newConnectionHandler = { [weak self] conn in
+            // Log every TCP-level transition so we can tell whether
+            // AVPlayer is even getting as far as opening a connection,
+            // and whether the connection is reaching `.ready` before
+            // we attempt a receive. Without this we silently lose any
+            // connection that fails before delivering bytes.
+            conn.stateUpdateHandler = { state in
+                EngineLog.emit("[HLSLocalServer] conn state=\(state)")
+            }
             conn.start(queue: self?.queue ?? .main)
             self?.readRequest(conn)
         }
@@ -194,9 +202,29 @@ final class HLSLocalServer: @unchecked Sendable {
     // MARK: - HTTP Request Handling
 
     private func readRequest(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, _, error in
-            guard let self = self, error == nil, let data = content,
-                  let request = String(data: data, encoding: .utf8) else { return }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
+            guard let self = self else { return }
+            if let error = error {
+                EngineLog.emit("[HLSLocalServer] receive error: \(error)")
+                connection.cancel()
+                return
+            }
+            if isComplete && (content == nil || content?.isEmpty == true) {
+                EngineLog.emit("[HLSLocalServer] connection closed by peer (no data)")
+                connection.cancel()
+                return
+            }
+            guard let data = content else {
+                // Spurious wake-up with no content and no error.
+                // Re-arm and wait for actual bytes.
+                self.readRequest(connection)
+                return
+            }
+            guard let request = String(data: data, encoding: .utf8) else {
+                EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(data.count)B), closing")
+                connection.cancel()
+                return
+            }
 
             let firstLine = request.components(separatedBy: "\r\n").first ?? ""
             let parts = firstLine.split(separator: " ")
