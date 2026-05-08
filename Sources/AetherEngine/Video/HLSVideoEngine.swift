@@ -23,11 +23,11 @@ final class HLSVideoEngine: @unchecked Sendable {
 
     // MARK: - Errors
 
-    enum HLSVideoEngineError: Error, CustomStringConvertible {
+    enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
         case openFailed(reason: String)
         case noVideoStream
         case unsupportedCodec(rawCodecID: UInt32)
-        case noKeyframeIndex
+        case zeroDuration
         case unsupportedDVProfile(profile: Int, compatID: Int)
         case muxerInit(underlying: Error)
         case alreadyStarted
@@ -38,13 +38,15 @@ final class HLSVideoEngine: @unchecked Sendable {
             case .openFailed(let r):     return "HLSVideoEngine: open failed (\(r))"
             case .noVideoStream:         return "HLSVideoEngine: source has no video stream"
             case .unsupportedCodec(let id): return "HLSVideoEngine: unsupported codec id \(id) (only HEVC supported)"
-            case .noKeyframeIndex:       return "HLSVideoEngine: source has no keyframe index (cannot build segment boundaries)"
+            case .zeroDuration:          return "HLSVideoEngine: source has zero duration (cannot build segment plan)"
             case .unsupportedDVProfile(let p, let c): return "HLSVideoEngine: unsupported Dolby Vision profile \(p).\(c)"
             case .muxerInit(let e):      return "HLSVideoEngine: muxer init failed (\(e))"
             case .alreadyStarted:        return "HLSVideoEngine: session already started"
             case .notStarted:            return "HLSVideoEngine: session not started"
             }
         }
+
+        var errorDescription: String? { description }
     }
 
     /// DV profile + base-layer compatibility classification per the
@@ -144,27 +146,33 @@ final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }
 
-        // 2. Read keyframe index from the demuxer. For MKV this is
-        //    populated from the cues at avformat_open_input time
-        //    (already done by Demuxer); no extra network I/O. For
-        //    MP4 it's populated from `stss`. Files with neither
-        //    fall back to a synthetic index built from a one-shot
-        //    linear scan, which would download the whole file —
-        //    so we refuse to start in that case (returning to the
-        //    caller, who falls back to AetherEngine).
-        let keyframes = readKeyframeIndex(stream: videoStream)
-        guard !keyframes.isEmpty else {
-            throw HLSVideoEngineError.noKeyframeIndex
-        }
-
-        // 3. Compute segment boundaries by walking keyframes in
-        //    ~targetSegmentDuration strides. Each segment starts
-        //    on a real keyframe, so the actual fragment duration
-        //    is what AVPlayer will see, not just an EXTINF guess.
+        // 2. Build the segment plan. The original implementation read
+        //    `avformat_index_get_entry` to enumerate every keyframe
+        //    and snap segment boundaries to real keyframes — but for
+        //    MKV files served over HTTP byte-range, the cues are
+        //    parsed lazily on first seek, not at
+        //    `avformat_find_stream_info` time, so the index is
+        //    always empty here and `noKeyframeIndex` (== Error 3)
+        //    fired on every native session. DrHurt's build-115
+        //    report.
+        //
+        //    Switch to uniform `targetSegmentDuration` segments
+        //    keyed off the source's reported duration. The actual
+        //    fragment cuts happen during `mediaSegment(at:)` where
+        //    we read packets and stop on the next IDR keyframe at
+        //    or after the segment's end-PTS, so the resulting
+        //    fragments are still keyframe-aligned even though the
+        //    plan doesn't know which keyframe in advance. The
+        //    EXTINF in the manifest is the nominal duration, the
+        //    `trun` durations in the moof reflect reality, and
+        //    AVPlayer reads the moof's `trun` and adjusts its
+        //    buffer math accordingly.
         let videoTimeBase = videoStream.pointee.time_base
         let durationSeconds = dem.duration
-        let plan = buildSegmentPlan(
-            keyframes: keyframes,
+        guard durationSeconds > 0 else {
+            throw HLSVideoEngineError.zeroDuration
+        }
+        let plan = buildUniformSegmentPlan(
             videoTimeBase: videoTimeBase,
             sourceDurationSeconds: durationSeconds
         )
@@ -326,62 +334,40 @@ final class HLSVideoEngine: @unchecked Sendable {
         stop()
     }
 
-    // MARK: - Keyframe index + segment planning
+    // MARK: - Segment planning
 
-    /// Pull every keyframe entry from the AVStream's index. Returns
-    /// timestamps in the stream's own time base.
-    private func readKeyframeIndex(stream: UnsafeMutablePointer<AVStream>) -> [Int64] {
-        let count = avformat_index_get_entries_count(stream)
-        guard count > 0 else { return [] }
-        var keyframes: [Int64] = []
-        keyframes.reserveCapacity(Int(count))
-        for i in 0..<count {
-            guard let entry = avformat_index_get_entry(stream, i) else { continue }
-            // AVINDEX_KEYFRAME = 0x0001
-            if (entry.pointee.flags & 0x0001) != 0 {
-                keyframes.append(entry.pointee.timestamp)
-            }
-        }
-        return keyframes
-    }
-
-    /// Walk keyframes in `targetSegmentDuration` strides to produce
-    /// segment boundaries. Each segment starts on a real keyframe
-    /// and ends just before the next selected keyframe; the last
-    /// segment ends at source duration.
-    private func buildSegmentPlan(
-        keyframes: [Int64],
+    /// Build a uniform-duration segment plan from the source's
+    /// reported duration. Each segment is `targetSegmentDuration`
+    /// seconds long except the last (which absorbs any remainder).
+    /// The actual keyframe alignment happens at fragment-generation
+    /// time in `VideoSegmentProvider.mediaSegment(at:)`: the demux
+    /// loop seeks to the segment start, reads packets, and stops at
+    /// the next IDR at-or-after the segment end. The fragment's
+    /// `trun` durations in the moof reflect what was actually
+    /// muxed, so the EXTINF / actual-duration mismatch is at most
+    /// one GOP and AVPlayer adapts.
+    private func buildUniformSegmentPlan(
         videoTimeBase: AVRational,
         sourceDurationSeconds: Double
     ) -> [Segment] {
-        guard !keyframes.isEmpty else { return [] }
-        let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        guard sourceDurationSeconds > 0 else { return [] }
         let stride = Self.targetSegmentDuration
-
-        var selected: [Int64] = [keyframes[0]]
-        var lastSelectedTime: Double = Double(keyframes[0]) * tb
-        for kf in keyframes.dropFirst() {
-            let kfTime = Double(kf) * tb
-            if kfTime - lastSelectedTime >= stride {
-                selected.append(kf)
-                lastSelectedTime = kfTime
-            }
-        }
-
-        // Synthesise a final boundary at source end so the last
-        // segment has a meaningful end-PTS.
-        let endPts = Int64(sourceDurationSeconds / tb)
+        let count = max(1, Int(ceil(sourceDurationSeconds / stride)))
+        let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        guard tb > 0 else { return [] }
 
         var plan: [Segment] = []
-        for (i, startPts) in selected.enumerated() {
-            let nextPts: Int64 = (i + 1 < selected.count) ? selected[i + 1] : endPts
-            let durationSeconds = Double(nextPts - startPts) * tb
-            let startSeconds = Double(startPts) * tb
+        plan.reserveCapacity(count)
+        for i in 0..<count {
+            let startSeconds = Double(i) * stride
+            let endSeconds = min(sourceDurationSeconds, Double(i + 1) * stride)
+            let startPts = Int64(startSeconds / tb)
+            let endPts = Int64(endSeconds / tb)
             plan.append(Segment(
                 startPts: startPts,
-                endPts: nextPts,
+                endPts: endPts,
                 startSeconds: startSeconds,
-                durationSeconds: max(0.001, durationSeconds)
+                durationSeconds: max(0.001, endSeconds - startSeconds)
             ))
         }
         return plan
