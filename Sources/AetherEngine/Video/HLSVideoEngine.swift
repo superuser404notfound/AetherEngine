@@ -197,6 +197,15 @@ final class HLSVideoEngine: @unchecked Sendable {
         let codecTagOverride: String?
         let videoRange: HLSVideoRange
         let codecsString: String
+        // The codec FourCC in the fMP4 sample-entry is set explicitly
+        // for every variant. Without an explicit tag the mp4 muxer
+        // picks its default which, for some FFmpeg versions and some
+        // input combinations, comes out as `hev1` (or `dvhe` for
+        // DV) instead of the `hvc1` / `dvh1` Apple's AVPlayer
+        // requires. Per DrHurt's reminder on AetherEngine#2, the
+        // CODECS attribute on the master playlist isn't enough on
+        // its own, the sample-entry FourCC inside the segments
+        // themselves has to match.
         switch dvVariant {
         case .profile5:
             codecTagOverride = "dvh1"
@@ -207,7 +216,11 @@ final class HLSVideoEngine: @unchecked Sendable {
             videoRange = .pq
             codecsString = "dvh1"
         case .profile84:
-            codecTagOverride = nil  // default 'hvc1', AVPlayer reads dvvC + VIDEO-RANGE=HLG to engage DV
+            // P8.4 carries an HLG-compat base layer. AVPlayer reads
+            // the dvvC atom + VIDEO-RANGE=HLG to engage the DV
+            // pipeline; the sample-entry tag stays `hvc1` because
+            // the bitstream is HEVC HLG underneath the DV metadata.
+            codecTagOverride = "hvc1"
             videoRange = .hlg
             codecsString = "hvc1"
         case .profile7:
@@ -220,8 +233,10 @@ final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
         case .none:
             // Phase-1 routing should keep non-DV out of this engine,
-            // but be defensive: play as plain HEVC HDR10/HLG/SDR.
-            codecTagOverride = nil
+            // but be defensive: play as plain HEVC HDR10/HLG/SDR
+            // with an explicit hvc1 tag so AVPlayer doesn't reject
+            // the segment because the muxer picked hev1 by default.
+            codecTagOverride = "hvc1"
             videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
             codecsString = "hvc1"
         }
