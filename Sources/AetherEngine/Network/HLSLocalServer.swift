@@ -145,9 +145,7 @@ final class HLSLocalServer: @unchecked Sendable {
         l.stateUpdateHandler = { [weak self] state in
             if case .ready = state {
                 self?.port = l.port?.rawValue ?? 0
-                #if DEBUG
-                print("[HLSLocalServer] Listening on port \(self?.port ?? 0)")
-                #endif
+                EngineLog.emit("[HLSLocalServer] Listening on port \(self?.port ?? 0)")
             }
         }
 
@@ -212,9 +210,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 return path
             }()
 
-            #if DEBUG
-            print("[HLSLocalServer] \(firstLine)")
-            #endif
+            EngineLog.emit("[HLSLocalServer] \(firstLine)")
 
             switch normalizedPath {
             case "/master.m3u8":

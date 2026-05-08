@@ -276,7 +276,11 @@ final class HLSVideoEngine: @unchecked Sendable {
         // this at variant-info parse time and filters streams it
         // can't decode. Per RFC 6381: comma-separated, video first,
         // audio after when present.
-        let manifestCodecs = audioHLSCodec.map { "\(codecsString),\($0)" } ?? codecsString
+        // `manifestCodecs` is recomputed after the muxer init below,
+        // because that step might fall back to video-only and we'd
+        // need to drop the audio half from CODECS to keep AVPlayer
+        // from waiting on a track we won't actually emit.
+        var manifestCodecs = audioHLSCodec.map { "\(codecsString),\($0)" } ?? codecsString
 
         // 6. Build the per-session muxer, generate the init segment.
         //    The muxer is reused across every fragment in this
@@ -289,18 +293,67 @@ final class HLSVideoEngine: @unchecked Sendable {
             timeBase: videoTimeBase,
             codecTagOverride: codecTagOverride
         )
-        let muxer: FMP4VideoMuxer
-        do {
-            muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
-        } catch {
-            throw HLSVideoEngineError.muxerInit(underlying: error)
+        // The muxer is built and the init segment is written in one
+        // attempt with audio, then retried video-only if that throws.
+        // Reason: FFmpeg's mov muxer requires pre-parsed extradata
+        // for some audio codecs (notably EAC3, where the dec3 box
+        // bytes have to be derived from the bitstream). MKV sources
+        // sometimes don't carry that extradata in CodecPrivate, so
+        // `avformat_write_header` returns -22 (EINVAL) before any
+        // packet has been read. DrHurt's build with the latest
+        // changes hit this for a P5 + EAC3 source. Falling back to a
+        // video-only mux at least gets DV mode engaged on the TV
+        // (with silent video) instead of dropping the whole .native
+        // route and reverting to AetherEngine's HDR10 base output.
+        // Helper that builds a muxer + writes its init segment.
+        // Used twice in the fallback path: first with audio, then
+        // (if that fails) without.
+        func buildMuxerAndInit(audio: FMP4VideoMuxer.StreamConfig?) throws -> (FMP4VideoMuxer, Data) {
+            let m = try FMP4VideoMuxer(video: videoConfig, audio: audio)
+            do {
+                let init_ = try m.writeInitSegment()
+                return (m, init_)
+            } catch {
+                m.close()
+                throw error
+            }
         }
+        let muxer: FMP4VideoMuxer
         let initSegmentData: Data
+        var audioWasIncluded = audioConfig != nil
         do {
-            initSegmentData = try muxer.writeInitSegment()
+            (muxer, initSegmentData) = try buildMuxerAndInit(audio: audioConfig)
         } catch {
-            muxer.close()
-            throw HLSVideoEngineError.muxerInit(underlying: error)
+            if audioConfig != nil {
+                // Engine init failure with audio is far more common
+                // than with video (the video bitstream is
+                // well-formed if the source is playable), so
+                // video-only is the right second attempt. DrHurt's
+                // build-118 P5+EAC3 hit this with `avformat_write_
+                // header failed (-22)` because FFmpeg's mov muxer
+                // needs pre-parsed dec3-box bytes for EAC3 and
+                // MKV-stored EAC3 doesn't always carry them as
+                // CodecPrivate. Falling back to video-only keeps
+                // the .native route alive (DV mode engages on the
+                // TV) at the cost of silent video; better than
+                // dropping back to AetherEngine's HDR10-only
+                // fallback for the whole session.
+                EngineLog.emit("[HLSVideoEngine] muxer/header init failed with audio (\(error.localizedDescription)), retrying video-only")
+                do {
+                    (muxer, initSegmentData) = try buildMuxerAndInit(audio: nil)
+                } catch {
+                    throw HLSVideoEngineError.muxerInit(underlying: error)
+                }
+                audioConfig = nil
+                audioHLSCodec = nil
+                resolvedAudioStreamIndex = -1
+                audioWasIncluded = false
+            } else {
+                throw HLSVideoEngineError.muxerInit(underlying: error)
+            }
+        }
+        if !audioWasIncluded {
+            manifestCodecs = codecsString
         }
 
         EngineLog.emit(
