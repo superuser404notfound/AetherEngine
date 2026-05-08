@@ -37,9 +37,12 @@ final class FMP4VideoMuxer {
 
     // MARK: - Errors
 
-    enum FMP4VideoMuxerError: Error, CustomStringConvertible {
-        case allocationFailed
+    enum FMP4VideoMuxerError: Error, CustomStringConvertible, LocalizedError {
+        case mp4MuxerNotAvailable(code: Int32)
+        case ioBufferAllocFailed
+        case ioContextAllocFailed
         case streamCreationFailed
+        case packetCloneFailed
         case copyParametersFailed(code: Int32)
         case headerFailed(code: Int32)
         case writeFailed(code: Int32)
@@ -47,14 +50,19 @@ final class FMP4VideoMuxer {
 
         var description: String {
             switch self {
-            case .allocationFailed: return "FMP4VideoMuxer: allocation failed"
-            case .streamCreationFailed: return "FMP4VideoMuxer: avformat_new_stream failed"
+            case .mp4MuxerNotAvailable(let code): return "FMP4VideoMuxer: avformat_alloc_output_context2 returned \(code) (mp4 muxer not registered, FFmpeg build missing --enable-muxer=mp4?)"
+            case .ioBufferAllocFailed:    return "FMP4VideoMuxer: av_malloc for AVIO buffer failed"
+            case .ioContextAllocFailed:   return "FMP4VideoMuxer: avio_alloc_context failed"
+            case .streamCreationFailed:   return "FMP4VideoMuxer: avformat_new_stream failed"
+            case .packetCloneFailed:      return "FMP4VideoMuxer: av_packet_clone failed"
             case .copyParametersFailed(let code): return "FMP4VideoMuxer: avcodec_parameters_copy failed (\(code))"
             case .headerFailed(let code): return "FMP4VideoMuxer: avformat_write_header failed (\(code))"
-            case .writeFailed(let code): return "FMP4VideoMuxer: write failed (\(code))"
-            case .closed: return "FMP4VideoMuxer: instance is closed"
+            case .writeFailed(let code):  return "FMP4VideoMuxer: write failed (\(code))"
+            case .closed:                 return "FMP4VideoMuxer: instance is closed"
             }
         }
+
+        var errorDescription: String? { description }
     }
 
     // MARK: - Configuration
@@ -113,7 +121,7 @@ final class FMP4VideoMuxer {
         var ctxOut: UnsafeMutablePointer<AVFormatContext>?
         let allocRet = avformat_alloc_output_context2(&ctxOut, nil, "mp4", nil)
         guard allocRet == 0, let ctx = ctxOut else {
-            throw FMP4VideoMuxerError.allocationFailed
+            throw FMP4VideoMuxerError.mp4MuxerNotAvailable(code: allocRet)
         }
         formatContext = ctx
 
@@ -160,7 +168,7 @@ final class FMP4VideoMuxer {
         //    output, the muxer never asks to seek backwards.
         guard let raw = av_malloc(Int(Self.ioBufferSize)) else {
             cleanup()
-            throw FMP4VideoMuxerError.allocationFailed
+            throw FMP4VideoMuxerError.ioBufferAllocFailed
         }
         let ioBuffer = raw.assumingMemoryBound(to: UInt8.self)
         let opaque = Unmanaged.passUnretained(self).toOpaque()
@@ -175,7 +183,7 @@ final class FMP4VideoMuxer {
         ) else {
             av_free(raw)
             cleanup()
-            throw FMP4VideoMuxerError.allocationFailed
+            throw FMP4VideoMuxerError.ioContextAllocFailed
         }
         avio.pointee.seekable = 0
         ioContext = avio
@@ -238,7 +246,7 @@ final class FMP4VideoMuxer {
             throw FMP4VideoMuxerError.writeFailed(code: -1)
         }
         guard let cloned = av_packet_clone(packet) else {
-            throw FMP4VideoMuxerError.allocationFailed
+            throw FMP4VideoMuxerError.packetCloneFailed
         }
         var pktPtr: UnsafeMutablePointer<AVPacket>? = cloned
         defer { av_packet_free(&pktPtr) }
