@@ -113,10 +113,23 @@ final class HLSLocalServer: @unchecked Sendable {
     /// URL the host hands to AVPlayer to start playback. Points at
     /// the master playlist if the provider has one, else the media
     /// playlist directly.
+    ///
+    /// Uses the IP literal `127.0.0.1` rather than the hostname
+    /// `localhost`. The hostname form needs DNS / nsswitch /
+    /// /etc/hosts to resolve, and AVPlayer on tvOS appears to hang
+    /// in its pre-flight before opening any TCP socket when
+    /// resolution doesn't return immediately (build 122
+    /// `timeControlStatus=waitingToPlay` with zero NWListener
+    /// state-update events). The IP literal sidesteps the resolver
+    /// entirely. ATS is covered either way: Sodalite's Info.plist
+    /// already has `NSAllowsArbitraryLoads` plus
+    /// `NSAllowsLocalNetworking`, so the original argument for
+    /// keeping the hostname (per-domain ATS exception avoidance)
+    /// no longer applies.
     var playlistURL: URL? {
         guard port > 0 else { return nil }
         let path = (provider?.masterCodecs != nil) ? "master.m3u8" : "media.m3u8"
-        return URL(string: "http://localhost:\(port)/\(path)")
+        return URL(string: "http://127.0.0.1:\(port)/\(path)")
     }
 
     // MARK: - Init
