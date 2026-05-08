@@ -55,7 +55,7 @@ final class HLSVideoEngine: @unchecked Sendable {
     /// `VIDEO-RANGE` we put on the master playlist depend on which
     /// variant we hit.
     fileprivate enum DVVariant {
-        case none           // not DV (would be a routing bug — phase 1 only sends DV here)
+        case none           // not DV (would be a routing bug phase 1 only sends DV here)
         case profile5       // P5 (IPT-PQ-c2, no HDR10 base)         → dvh1 + PQ
         case profile81      // P8 with HDR10-compat base              → dvh1 + PQ
         case profile84      // P8 with HLG-compat base                → hvc1 + HLG
@@ -148,7 +148,7 @@ final class HLSVideoEngine: @unchecked Sendable {
 
         // 2. Build the segment plan. The original implementation read
         //    `avformat_index_get_entry` to enumerate every keyframe
-        //    and snap segment boundaries to real keyframes — but for
+        //    and snap segment boundaries to real keyframes but for
         //    MKV files served over HTTP byte-range, the cues are
         //    parsed lazily on first seek, not at
         //    `avformat_find_stream_info` time, so the index is
@@ -233,7 +233,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         //    ALAC / MP3 / Opus stream-copy directly. TrueHD / DTS /
         //    DTS-HD MA are unsupported in AVPlayer's fMP4 decode and
         //    would need transcode-to-FLAC (DrHurt's `-c:a flac`
-        //    trick from AetherEngine#1) — a phase-7 expansion. For
+        //    trick from AetherEngine#1) a phase-7 expansion. For
         //    now we surface them as a routing-incompat signal so the
         //    host falls back to AetherEngine for the affected file.
         let audioStreamIndex = dem.audioStreamIndex

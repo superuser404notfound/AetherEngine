@@ -74,14 +74,14 @@ enum HLSVideoRange: String {
 /// rollout so the same socket and request loop can serve video too.
 ///
 /// Endpoints:
-///   - `/master.m3u8` — only when the provider has master-level
+///   - `/master.m3u8` only when the provider has master-level
 ///     metadata (codecs, resolution, video range). Required for
 ///     Dolby Vision because `VIDEO-RANGE=PQ` and the `CODECS=dvh1.…`
 ///     attribute live on `EXT-X-STREAM-INF`, not on a media playlist.
-///   - `/media.m3u8` — always present. EVENT or VOD depending on the
+///   - `/media.m3u8` always present. EVENT or VOD depending on the
 ///     provider.
-///   - `/init.mp4` — the `ftyp`+`moov` init segment.
-///   - `/seg{N}.mp4` — the N-th `moof`+`mdat` media segment.
+///   - `/init.mp4` the `ftyp`+`moov` init segment.
+///   - `/seg{N}.mp4` the N-th `moof`+`mdat` media segment.
 ///
 /// Listens on `localhost` (not `127.0.0.1`) so tvOS App Transport
 /// Security treats it as exempt without per-domain plist entries
