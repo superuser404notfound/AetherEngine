@@ -65,14 +65,28 @@ final class AudioBridge: @unchecked Sendable {
     private var decoderCtx: UnsafeMutablePointer<AVCodecContext>?
     private var encoderCtx: UnsafeMutablePointer<AVCodecContext>?
     private var swrCtx: OpaquePointer?
-    /// Audio FIFO that buffers resampled S16 PCM until we have at
-    /// least `encoderCtx.frame_size` samples to feed the encoder.
-    /// FLAC's libavcodec wrapper has `AV_CODEC_CAP_SMALL_LAST_FRAME`
-    /// but not `AV_CODEC_CAP_VARIABLE_FRAME_SIZE`, so non-final
-    /// frames must hit `frame_size` exactly (typically 4608 at
-    /// 48 kHz). EAC3 packets decode to 1536 samples each so we'd
-    /// otherwise hit `-22 EINVAL` on the first send.
+    /// Audio FIFO that buffers resampled PCM until we have at least
+    /// `encoderCtx.frame_size` samples to feed the encoder. FLAC's
+    /// libavcodec wrapper has `AV_CODEC_CAP_SMALL_LAST_FRAME` but
+    /// not `AV_CODEC_CAP_VARIABLE_FRAME_SIZE`, so non-final frames
+    /// must hit `frame_size` exactly (typically 4608 at 48 kHz).
+    /// EAC3 packets decode to 1536 samples each so we'd otherwise
+    /// hit `-22 EINVAL` on the first send.
     private var fifo: OpaquePointer?
+
+    /// PCM sample format used end-to-end through the bridge: the
+    /// resampler converts to it, the FIFO holds it, the encoder
+    /// consumes it. `S16` for lossy source codecs (EAC3, AC3 etc.)
+    /// where 16-bit precision matches the source's perceptual range.
+    /// `S32` with `bits_per_raw_sample=24` for lossless source codecs
+    /// (TrueHD, DTS-HD MA, FLAC source, ALAC source, raw 24/32-bit
+    /// PCM) so a lossless source goes through a lossless intermediate
+    /// and the FLAC output stays bit-perfect. Going S16 for lossless
+    /// source would silently dither away the bottom 8 bits, audible
+    /// in quiet passages.
+    private let pcmSampleFmt: AVSampleFormat
+    private let pcmBytesPerSample: Int32
+    private let pcmBitsPerRawSample: Int32
 
     /// AVCodecParameters describing the FLAC output stream. Caller
     /// hands this to `FMP4VideoMuxer` as the audio `StreamConfig`.
@@ -115,6 +129,35 @@ final class AudioBridge: @unchecked Sendable {
 
         // 1. Source decoder
         let srcCodecID = srcCodecpar.pointee.codec_id
+
+        // Pick the PCM intermediate format. Lossless source codecs
+        // get S32+24 to preserve their bit depth through the bridge;
+        // lossy ones use S16 because 16-bit is plenty for content
+        // that's already been perceptually compressed.
+        let isLosslessSource: Bool
+        switch srcCodecID {
+        case AV_CODEC_ID_TRUEHD,
+             AV_CODEC_ID_MLP,
+             AV_CODEC_ID_DTS,
+             AV_CODEC_ID_FLAC,
+             AV_CODEC_ID_ALAC,
+             AV_CODEC_ID_PCM_S24LE,
+             AV_CODEC_ID_PCM_S24BE,
+             AV_CODEC_ID_PCM_S32LE,
+             AV_CODEC_ID_PCM_S32BE:
+            isLosslessSource = true
+        default:
+            isLosslessSource = false
+        }
+        if isLosslessSource {
+            pcmSampleFmt = AV_SAMPLE_FMT_S32
+            pcmBytesPerSample = 4
+            pcmBitsPerRawSample = 24
+        } else {
+            pcmSampleFmt = AV_SAMPLE_FMT_S16
+            pcmBytesPerSample = 2
+            pcmBitsPerRawSample = 16
+        }
         guard let srcCodec = avcodec_find_decoder(srcCodecID) else {
             throw AudioBridgeError.decoderNotFound(codecID: srcCodecID.rawValue)
         }
@@ -158,7 +201,8 @@ final class AudioBridge: @unchecked Sendable {
             : 2
 
         enc.pointee.sample_rate = sampleRate
-        enc.pointee.sample_fmt = AV_SAMPLE_FMT_S16
+        enc.pointee.sample_fmt = pcmSampleFmt
+        enc.pointee.bits_per_raw_sample = pcmBitsPerRawSample
         enc.pointee.bit_rate = 0
         enc.pointee.time_base = AVRational(num: 1, den: sampleRate)
         var encLayout = AVChannelLayout()
@@ -206,7 +250,7 @@ final class AudioBridge: @unchecked Sendable {
         let swrRet = swr_alloc_set_opts2(
             &swrCtx,
             &enc.pointee.ch_layout,
-            AV_SAMPLE_FMT_S16,
+            pcmSampleFmt,
             sampleRate,
             &inLayout,
             inFmt,
@@ -224,12 +268,12 @@ final class AudioBridge: @unchecked Sendable {
             throw AudioBridgeError.resamplerInitFailed(code: initRet)
         }
 
-        // 5. Audio FIFO: buffer up to one second of S16 samples by
+        // 5. Audio FIFO: buffer up to one second of PCM samples by
         //    default (FFmpeg grows it on demand if we exceed). Used
         //    to chunk the resampler's output into encoder-sized
         //    frames.
         guard let fifoPtr = av_audio_fifo_alloc(
-            AV_SAMPLE_FMT_S16,
+            pcmSampleFmt,
             nChannels,
             sampleRate
         ) else {
@@ -342,13 +386,13 @@ final class AudioBridge: @unchecked Sendable {
         guard outNbSamples > 0 else { return }
 
         let nChannels = enc.pointee.ch_layout.nb_channels
-        let bytesPerSample: Int32 = 2  // S16
-        let bufferBytes = Int(outNbSamples * nChannels * bytesPerSample)
+        let bufferBytes = Int(outNbSamples * nChannels * pcmBytesPerSample)
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferBytes)
         defer { buffer.deallocate() }
 
-        // S16 (interleaved): swr_convert wants `uint8_t **out` where
-        // out[0] points at the interleaved sample buffer.
+        // Interleaved (non-planar) destination: swr_convert wants
+        // `uint8_t **out` where out[0] points at the interleaved
+        // sample buffer.
         var outPtr: UnsafeMutablePointer<UInt8>? = buffer
         let producedSamples = withUnsafeMutablePointer(to: &outPtr) { outBufPtr in
             withUnsafeMutablePointer(to: &sf.pointee.extended_data) { srcPtr in
@@ -404,14 +448,14 @@ final class AudioBridge: @unchecked Sendable {
             var outFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
             defer { av_frame_free(&outFrame) }
             guard let of = outFrame else { break }
-            of.pointee.format = AV_SAMPLE_FMT_S16.rawValue
+            of.pointee.format = pcmSampleFmt.rawValue
             of.pointee.nb_samples = chunkSize
             of.pointee.sample_rate = enc.pointee.sample_rate
             av_channel_layout_copy(&of.pointee.ch_layout, &enc.pointee.ch_layout)
             let allocRet = av_frame_get_buffer(of, 0)
             if allocRet < 0 { break }
 
-            // FIFO read into of.data[0] (S16 interleaved is non-planar).
+            // FIFO read into of.data[0] (interleaved is non-planar).
             let readSamples = withUnsafeMutablePointer(to: &of.pointee.data) { dataPtr in
                 dataPtr.withMemoryRebound(to: UnsafeMutableRawPointer?.self, capacity: 1) { rebound in
                     av_audio_fifo_read(fifo, rebound, chunkSize)
