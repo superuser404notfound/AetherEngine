@@ -47,6 +47,36 @@ protocol HLSSegmentProvider: AnyObject {
     var masterResolution: (width: Int, height: Int)? { get }
     var masterVideoRange: HLSVideoRange? { get }
     var masterBandwidth: Int? { get }
+
+    /// SUPPLEMENTAL-CODECS attribute on `EXT-X-STREAM-INF`. Per
+    /// Apple's HLS Authoring Spec Appendixes table, Dolby Vision
+    /// Profile 8.1 advertises plain HEVC in `CODECS` and signals DV
+    /// via `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"` (P8.4 uses
+    /// `dvh1.08.LL/db4h`). Profile 5 has no fallback variant and
+    /// puts `dvh1.05.LL` directly in CODECS, so SUPPLEMENTAL-CODECS
+    /// is nil there. AVPlayer's master-level codec filter is
+    /// stricter than the segment-level filter and silently drops
+    /// any variant whose primary CODECS it can't fall back to: a
+    /// bare `dvh1` master made AVPlayer fetch the master 2-3 times
+    /// and then never advance to media.m3u8.
+    var masterSupplementalCodecs: String? { get }
+
+    /// FRAME-RATE attribute, recommended by Apple's HLS Authoring
+    /// Spec for HDR / DV variants.
+    var masterFrameRate: Double? { get }
+
+    /// AVERAGE-BANDWIDTH attribute. Apple's spec marks this required
+    /// for HDR / DV variants. For VOD it's the same as BANDWIDTH;
+    /// for true ABR it's lower than peak.
+    var masterAverageBandwidth: Int? { get }
+
+    /// HDCP-LEVEL attribute. Apple Tech Talk 501 says `TYPE-1` is
+    /// required for resolutions >1920x1080 in HDR / DV streams.
+    var masterHDCPLevel: String? { get }
+
+    /// CLOSED-CAPTIONS attribute. Apple's reference DV samples set
+    /// this to `NONE` when there's no in-band CC track.
+    var masterClosedCaptions: String? { get }
 }
 
 extension HLSSegmentProvider {
@@ -54,6 +84,11 @@ extension HLSSegmentProvider {
     var masterResolution: (width: Int, height: Int)? { nil }
     var masterVideoRange: HLSVideoRange? { nil }
     var masterBandwidth: Int? { nil }
+    var masterSupplementalCodecs: String? { nil }
+    var masterFrameRate: Double? { nil }
+    var masterAverageBandwidth: Int? { nil }
+    var masterHDCPLevel: String? { nil }
+    var masterClosedCaptions: String? { nil }
 }
 
 enum HLSPlaylistType {
@@ -306,15 +341,35 @@ final class HLSLocalServer: @unchecked Sendable {
         lines.append("#EXT-X-VERSION:7")
         lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
 
+        // EXT-X-STREAM-INF attribute order follows Apple's HLS
+        // Authoring Spec Appendixes example: BANDWIDTH first,
+        // AVERAGE-BANDWIDTH next, then CODECS, then SUPPLEMENTAL-
+        // CODECS, then RESOLUTION / FRAME-RATE / VIDEO-RANGE, then
+        // HDCP-LEVEL / CLOSED-CAPTIONS at the end.
         var streamInfAttrs: [String] = []
         let bandwidth = provider.masterBandwidth ?? 5_000_000
         streamInfAttrs.append("BANDWIDTH=\(bandwidth)")
+        if let avg = provider.masterAverageBandwidth {
+            streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
+        }
         streamInfAttrs.append("CODECS=\"\(codecs)\"")
+        if let supplemental = provider.masterSupplementalCodecs {
+            streamInfAttrs.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"")
+        }
         if let resolution = provider.masterResolution {
             streamInfAttrs.append("RESOLUTION=\(resolution.width)x\(resolution.height)")
         }
+        if let frameRate = provider.masterFrameRate {
+            streamInfAttrs.append("FRAME-RATE=\(String(format: "%.3f", frameRate))")
+        }
         if let range = provider.masterVideoRange {
             streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
+        }
+        if let hdcp = provider.masterHDCPLevel {
+            streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
+        }
+        if let cc = provider.masterClosedCaptions {
+            streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
         lines.append("#EXT-X-STREAM-INF:\(streamInfAttrs.joined(separator: ","))")
         lines.append("media.m3u8")

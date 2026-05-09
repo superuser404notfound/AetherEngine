@@ -177,52 +177,70 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceDurationSeconds: durationSeconds
         )
 
-        // 4. Classify the DV variant and pick the codec-tag /
-        //    video-range / CODECS-string trio per DrHurt's empirical
-        //    AVPlayer profile table (AetherEngine#1):
+        // 4. Classify the DV variant and compute Apple's HLS Authoring
+        //    Spec Appendixes CODECS / SUPPLEMENTAL-CODECS strings for
+        //    the master playlist. Apple's table:
         //
-        //       Profile         | codec_tag | VIDEO-RANGE
-        //       ----------------+-----------+------------
-        //       P5 (compat 0)   | dvh1      | PQ
-        //       P8.1 (compat 1) | dvh1      | PQ
-        //       P8.4 (compat 4) | hvc1      | HLG
-        //       P7 / P8.2 / etc | unsupported, reject and let host fall back
+        //       Profile         | sample tag | primary CODECS         | SUPPLEMENTAL-CODECS    | VIDEO-RANGE
+        //       ----------------+------------+------------------------+------------------------+------------
+        //       P5  (compat 0)  | dvh1       | dvh1.05.<dvLevel>      | (none)                 | PQ
+        //       P8.1 (compat 1) | dvh1       | hvc1.2.4.L<hevcLevel>  | dvh1.08.<dvLevel>/db1p | PQ
+        //       P8.4 (compat 4) | hvc1       | hvc1.2.4.L<hev>.b0     | dvh1.08.<dvLevel>/db4h | HLG
         //
-        //    The earlier "all DV → dvh1 + PQ" approach was wrong for
-        //    P8.4: AVPlayer expects an HDR10-compat base layer when
-        //    it sees dvh1+PQ, but P8.4 carries HLG bytes underneath,
-        //    so the HDMI handshake gets confused.
+        //    The Profile 8.x branches advertise plain HEVC in primary
+        //    CODECS so AVPlayer can fall back on a non-DV decode path
+        //    when DV isn't supported, and signal DV via SUPPLEMENTAL-
+        //    CODECS with the matching base-layer brand (db1p HDR10,
+        //    db4h HLG). Earlier we shipped bare `dvh1` as primary,
+        //    which AVPlayer's master-codec-filter silently rejects
+        //    because it sees no fallback path. macOS QuickTime + tvOS
+        //    AVPlayer both reproduce the rejection 1:1; reverse-
+        //    engineered to match the Authoring Spec form via local
+        //    testing with the standalone `aetherctl` CLI.
+        //
+        //    The sample-entry FourCC (codec_tag) inside the fMP4
+        //    fragments stays `dvh1` for P5/P8.1 and `hvc1` for P8.4
+        //    regardless of master form: AVPlayer matches sample-entry
+        //    against primary CODECS and falls back to SUPPLEMENTAL on
+        //    DV-capable decoders.
         let dvRecord = doviConfigRecord(from: codecpar)
         let dvVariant = classifyDVVariant(dvRecord)
         let codecTagOverride: String?
         let videoRange: HLSVideoRange
-        let codecsString: String
-        // The codec FourCC in the fMP4 sample-entry is set explicitly
-        // for every variant. Without an explicit tag the mp4 muxer
-        // picks its default which, for some FFmpeg versions and some
-        // input combinations, comes out as `hev1` (or `dvhe` for
-        // DV) instead of the `hvc1` / `dvh1` Apple's AVPlayer
-        // requires. Per DrHurt's reminder on AetherEngine#2, the
-        // CODECS attribute on the master playlist isn't enough on
-        // its own, the sample-entry FourCC inside the segments
-        // themselves has to match.
+        let primaryCodecs: String
+        let supplementalCodecs: String?
+
+        // dv_level is the DV-internal level (1-13) from the dvcC /
+        // dvvC config box; defaults to 6 (UHD HDR) when the source
+        // didn't populate it. codecpar.level is HEVC's general_level
+        // _idc, which Apple's CODECS string takes verbatim as
+        // "L<value>" (e.g. 150 for L5.0). Falls back to 150 (UHD)
+        // for the same reason.
+        let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
+        let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
+        let hevcLevelRaw = Int(codecpar.pointee.level)
+        let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
+        let dvLevelStr = String(format: "%02d", dvLevel)
+
         switch dvVariant {
         case .profile5:
             codecTagOverride = "dvh1"
             videoRange = .pq
-            codecsString = "dvh1"
+            primaryCodecs = "dvh1.05.\(dvLevelStr)"
+            supplementalCodecs = nil
         case .profile81:
             codecTagOverride = "dvh1"
             videoRange = .pq
-            codecsString = "dvh1"
+            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+            supplementalCodecs = "dvh1.08.\(dvLevelStr)/db1p"
         case .profile84:
-            // P8.4 carries an HLG-compat base layer. AVPlayer reads
-            // the dvvC atom + VIDEO-RANGE=HLG to engage the DV
-            // pipeline; the sample-entry tag stays `hvc1` because
-            // the bitstream is HEVC HLG underneath the DV metadata.
+            // P8.4 carries an HLG-compat base layer. Sample-entry
+            // tag stays `hvc1` because the bitstream is HEVC HLG
+            // underneath the DV metadata.
             codecTagOverride = "hvc1"
             videoRange = .hlg
-            codecsString = "hvc1"
+            primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
+            supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
         case .profile7:
             throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
         case .profile82:
@@ -238,8 +256,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // the segment because the muxer picked hev1 by default.
             codecTagOverride = "hvc1"
             videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
-            codecsString = "hvc1"
+            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+            supplementalCodecs = nil
         }
+        let codecsString = primaryCodecs
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
 
@@ -356,8 +376,26 @@ public final class HLSVideoEngine: @unchecked Sendable {
             manifestCodecs = codecsString
         }
 
+        // Frame rate for the FRAME-RATE attribute. AVRational from
+        // `avg_frame_rate`; convert to Double, fall back nil when
+        // the source didn't fill it (the master playlist will then
+        // omit the attribute, which Apple's spec allows).
+        let avgFR = videoStream.pointee.avg_frame_rate
+        let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
+            ? Double(avgFR.num) / Double(avgFR.den)
+            : nil
+
+        // HDCP level: Apple Tech Talk 501 ("Authoring 4K and HDR HLS
+        // Streams") requires TYPE-1 (HDCP 2.2) for >1920x1080 HDR /
+        // DV content. Sub-1080p SDR streams can omit it. For our
+        // .native-route DV streams we always set it.
+        let hdcpLevel: String? = (dvVariant != .none) ? "TYPE-1" : nil
+
         EngineLog.emit(
-            "[HLSVideoEngine] prepared: codec=\(manifestCodecs) resolution=\(resolution.0)x\(resolution.1) "
+            "[HLSVideoEngine] prepared: codec=\(manifestCodecs)"
+            + (supplementalCodecs.map { " supplemental=\($0)" } ?? "")
+            + " resolution=\(resolution.0)x\(resolution.1) "
+            + "fps=\(frameRate.map { String(format: "%.3f", $0) } ?? "nil") "
             + "range=\(videoRange.rawValue) DV=\(dvVariant) segments=\(plan.count) "
             + "duration=\(String(format: "%.1f", durationSeconds))s init=\(initSegmentData.count)B"
         )
@@ -372,8 +410,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             initSegmentData: initSegmentData,
             segments: plan,
             codecsString: manifestCodecs,
+            supplementalCodecs: supplementalCodecs,
             resolution: resolution,
-            videoRange: videoRange
+            videoRange: videoRange,
+            frameRate: frameRate,
+            hdcpLevel: hdcpLevel
         )
         provider = prov
 
@@ -529,8 +570,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let segments: [HLSVideoEngine.Segment]
 
     private let codecsString: String
+    private let supplementalCodecsString: String?
     private let resolution: (Int, Int)
     private let videoRange: HLSVideoRange
+    private let frameRate: Double?
+    private let hdcpLevel: String?
 
     private let lock = NSLock()
     private var isClosed = false
@@ -544,8 +588,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         initSegmentData: Data,
         segments: [HLSVideoEngine.Segment],
         codecsString: String,
+        supplementalCodecs: String?,
         resolution: (Int, Int),
-        videoRange: HLSVideoRange
+        videoRange: HLSVideoRange,
+        frameRate: Double?,
+        hdcpLevel: String?
     ) {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -555,8 +602,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.initSegmentData = initSegmentData
         self.segments = segments
         self.codecsString = codecsString
+        self.supplementalCodecsString = supplementalCodecs
         self.resolution = resolution
         self.videoRange = videoRange
+        self.frameRate = frameRate
+        self.hdcpLevel = hdcpLevel
     }
 
     func close() {
@@ -589,6 +639,19 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         var videoCount = 0
         var audioCount = 0
         var didEnqueueAnyVideo = false
+        // After a seek, libavformat returns packets starting from the
+        // last keyframe at-or-before the requested time (standard
+        // backward-seek behaviour, required so the decoder can rebuild
+        // reference frames before the seek target). Re-feeding those
+        // pre-target packets into the per-session mp4 muxer breaks
+        // the per-stream monotonic-PTS invariant the muxer enforces:
+        // the second `av_interleaved_write_frame` call returns -22
+        // EINVAL because the new packet's PTS is lower than the
+        // previous fragment's last-written PTS. Skip everything until
+        // the first IDR at-or-after `seg.startPts`, so each fragment
+        // is self-contained and timestamps stay monotonic across
+        // fragments.
+        var foundSegmentStart = false
         do {
             while let packet = try demuxer.readPacket() {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
@@ -597,6 +660,22 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
+                    let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0
+                    if !foundSegmentStart {
+                        // Wait for the first IDR at-or-after the segment
+                        // start. Skip pre-roll non-key packets and any
+                        // keyframe that's still before the boundary
+                        // (the seek can land us mid-GOP).
+                        if isKey,
+                           packet.pointee.pts != Int64.min,
+                           packet.pointee.pts >= seg.startPts {
+                            foundSegmentStart = true
+                            // Fall through and emit this IDR as the
+                            // segment's first sample.
+                        } else {
+                            continue
+                        }
+                    }
                     // Stop reading once we've passed this segment's
                     // end boundary, but only on a keyframe (otherwise
                     // we'd cut in the middle of a GOP and break the
@@ -604,7 +683,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                     if didEnqueueAnyVideo,
                        packet.pointee.pts != Int64.min,
                        packet.pointee.pts >= seg.endPts,
-                       (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0 {
+                       isKey {
                         break
                     }
                     try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
@@ -612,7 +691,12 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                     videoCount += 1
                 } else if let aIdx = audioStreamIndex,
                           let aOutIdx = muxer.audioOutputIndex,
-                          streamIdx == aIdx {
+                          streamIdx == aIdx,
+                          foundSegmentStart {
+                    // Audio packets before the segment's first video
+                    // IDR are dropped; without a video frame to anchor
+                    // them they'd play earlier than the segment claims
+                    // to start.
                     try muxer.writePacket(packet, toStreamIndex: aOutIdx)
                     audioCount += 1
                 }
@@ -645,32 +729,27 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     }
 
     var playlistType: HLSPlaylistType { .vod }
-    // Returning nil here suppresses the master playlist entirely, so
-    // `HLSLocalServer.playlistURL` advertises `media.m3u8` directly
-    // and the `/master.m3u8` endpoint 404s. The audio path has always
-    // worked this way; the video path was generating a single-variant
-    // master with `CODECS="dvh1"` + `VIDEO-RANGE=PQ` + `RESOLUTION=
-    // 3840x2076`, and AVPlayer (verified on both macOS QuickTime and
-    // tvOS) silently parse-rejects that master, fetches it 2-3 times,
-    // then drops the session without ever attempting `media.m3u8`.
-    // No `errorLog`, no `failedToPlayToEndTime`, just AVPlayer parking
-    // in `waitingToPlay` forever. macOS QuickTime fed `media.m3u8`
-    // directly happily reads init.mp4, seg0..segN, and starts buffer
-    // ing; that's the architecture we adopt here.
-    //
-    // Trade-off: we lose the explicit `VIDEO-RANGE=PQ` / `CODECS=
-    // dvh1.08.06` signaling on the master variant. AVPlayer has to
-    // infer Dolby Vision from the init segment's `dvh1` sample-entry
-    // FourCC, the `dvvC` configuration box, and the `colr` atom's
-    // BT.2020 + PQ primaries / transfer. Apple's HLS DV documentation
-    // recommends master-level signaling but doesn't require it for
-    // single-variant streams; the segment-level signaling alone is
-    // enough for the HDMI DV handshake on a capable TV (verified
-    // empirically on the next test cycle).
-    var masterCodecs: String? { nil }
-    var masterResolution: (width: Int, height: Int)? { nil }
-    var masterVideoRange: HLSVideoRange? { nil }
-    var masterBandwidth: Int? { nil }
+    // Master playlist re-enabled with the Apple HLS Authoring Spec
+    // form: primary CODECS advertises plain HEVC for Profile 8.x
+    // (so AVPlayer can fall back on the HDR10 / HLG base layer when
+    // DV isn't decodable), DV is signalled via SUPPLEMENTAL-CODECS
+    // with the `db1p` (HDR10-base) or `db4h` (HLG-base) brand. P5
+    // streams have no fallback and put `dvh1.05.LL` directly in
+    // CODECS. Validated against macOS QuickTime via the standalone
+    // `aetherctl` CLI: bare `dvh1` master gets silently parse-
+    // rejected, the spec-correct form is accepted and AVPlayer
+    // proceeds through media.m3u8 → init.mp4 → seg0+ normally.
+    var masterCodecs: String? { codecsString }
+    var masterSupplementalCodecs: String? { supplementalCodecsString }
+    var masterResolution: (width: Int, height: Int)? {
+        return (resolution.0, resolution.1)
+    }
+    var masterVideoRange: HLSVideoRange? { videoRange }
+    var masterBandwidth: Int? { 5_000_000 }
+    var masterAverageBandwidth: Int? { 5_000_000 }
+    var masterFrameRate: Double? { frameRate }
+    var masterHDCPLevel: String? { hdcpLevel }
+    var masterClosedCaptions: String? { "NONE" }
 }
 
 /// `AV_PKT_FLAG_KEY` is `1 << 0` per FFmpeg's `packet.h` (and a C
