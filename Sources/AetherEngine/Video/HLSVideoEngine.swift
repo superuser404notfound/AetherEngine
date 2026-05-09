@@ -66,38 +66,59 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// Audio codec compatibility with AVPlayer's native fMP4 decode
     /// pipeline. AAC / AC3 / EAC3 (incl. Atmos JOC) / FLAC / ALAC /
-    /// MP3 stream-copy directly into fMP4 segments and AVPlayer
-    /// renders them. TrueHD / DTS / DTS-HD MA need transcode to FLAC
-    /// (DrHurt's `-c:a flac` trick) which is a phase-7 expansion;
-    /// for now we reject unsupported codecs and the host falls back
-    /// to AetherEngine.
+    /// MP3 / Opus stream-copy directly into fMP4 segments and AVPlayer
+    /// renders them. TrueHD / DTS / DTS-HD MA aren't legal in fMP4 at
+    /// all but FFmpeg has decoders for them; the `AudioBridge` decodes
+    /// to PCM and re-encodes losslessly as FLAC (DrHurt's `-c:a flac`
+    /// trick), which AVPlayer plays natively.
     fileprivate enum AudioCodecCompat {
         case aac, ac3, eac3, flac, alac, mp3, opus
+        case truehd, dts
         case unsupported
 
         static func from(_ codecID: AVCodecID) -> AudioCodecCompat {
             switch codecID {
-            case AV_CODEC_ID_AAC:  return .aac
-            case AV_CODEC_ID_AC3:  return .ac3
-            case AV_CODEC_ID_EAC3: return .eac3
-            case AV_CODEC_ID_FLAC: return .flac
-            case AV_CODEC_ID_ALAC: return .alac
-            case AV_CODEC_ID_MP3:  return .mp3
-            case AV_CODEC_ID_OPUS: return .opus
-            default:               return .unsupported
+            case AV_CODEC_ID_AAC:    return .aac
+            case AV_CODEC_ID_AC3:    return .ac3
+            case AV_CODEC_ID_EAC3:   return .eac3
+            case AV_CODEC_ID_FLAC:   return .flac
+            case AV_CODEC_ID_ALAC:   return .alac
+            case AV_CODEC_ID_MP3:    return .mp3
+            case AV_CODEC_ID_OPUS:   return .opus
+            case AV_CODEC_ID_TRUEHD: return .truehd
+            case AV_CODEC_ID_DTS:    return .dts
+            default:                 return .unsupported
             }
         }
 
+        /// CODECS string AVPlayer reads on the master playlist when
+        /// this codec is stream-copied directly. Empty for codecs
+        /// that always have to be bridged (TrueHD / DTS) since their
+        /// hlsCodecsString is `fLaC` after transcode anyway.
         var hlsCodecsString: String {
             switch self {
-            case .aac:  return "mp4a.40.2"
-            case .ac3:  return "ac-3"
-            case .eac3: return "ec-3"
-            case .flac: return "fLaC"
-            case .alac: return "alac"
-            case .mp3:  return "mp4a.40.34"
-            case .opus: return "opus"
+            case .aac:    return "mp4a.40.2"
+            case .ac3:    return "ac-3"
+            case .eac3:   return "ec-3"
+            case .flac:   return "fLaC"
+            case .alac:   return "alac"
+            case .mp3:    return "mp4a.40.34"
+            case .opus:   return "opus"
+            case .truehd: return ""
+            case .dts:    return ""
             case .unsupported: return ""
+            }
+        }
+
+        /// Codecs that aren't legal in fMP4 and always have to go
+        /// through `AudioBridge` for FLAC transcoding. Stream-copy
+        /// codecs may also fall through to the bridge if the muxer
+        /// rejects them at header-write time (typical for EAC3 from
+        /// MKV without pre-parsed `dec3` extradata).
+        var requiresBridge: Bool {
+            switch self {
+            case .truehd, .dts: return true
+            default:            return false
             }
         }
     }
@@ -276,22 +297,49 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
 
-        // 5. Pick the best audio stream and check codec compat with
-        //    AVPlayer. AAC / AC3 / EAC3 (incl. Atmos JOC) / FLAC /
-        //    ALAC / MP3 / Opus stream-copy directly. TrueHD / DTS /
-        //    DTS-HD MA are unsupported in AVPlayer's fMP4 decode and
-        //    would need transcode-to-FLAC (DrHurt's `-c:a flac`
-        //    trick from AetherEngine#1) a phase-7 expansion. For
-        //    now we surface them as a routing-incompat signal so the
-        //    host falls back to AetherEngine for the affected file.
+        // 5. Pick the best audio stream and choose stream-copy vs the
+        //    FLAC bridge (decode → S16 PCM → FLAC encode). TrueHD /
+        //    DTS / DTS-HD MA always go through the bridge because
+        //    they aren't legal in fMP4 to begin with. AAC / AC3 /
+        //    EAC3 / FLAC / ALAC / MP3 / Opus first try a stream-copy
+        //    path; if the mp4 muxer rejects them at header-write
+        //    time (the common case is EAC3 from MKV without pre-
+        //    parsed `dec3` extradata, which fails with -22 EINVAL),
+        //    we rebuild the muxer with the FLAC bridge in the catch
+        //    branch below.
         let audioStreamIndex = dem.audioStreamIndex
         var audioConfig: FMP4VideoMuxer.StreamConfig? = nil
         var audioHLSCodec: String? = nil
         var resolvedAudioStreamIndex: Int32 = -1
+        var audioBridge: AudioBridge? = nil
+        var audioStreamPtr: UnsafeMutablePointer<AVStream>? = nil
         if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
+            audioStreamPtr = audioStream
             let audioCodecID = audioStream.pointee.codecpar.pointee.codec_id
             let compat = AudioCodecCompat.from(audioCodecID)
-            if compat != .unsupported {
+            if compat.requiresBridge {
+                // TrueHD / DTS: decode + FLAC re-encode is the only
+                // legal way into fMP4 for these.
+                do {
+                    let bridge = try AudioBridge(
+                        srcCodecpar: audioStream.pointee.codecpar,
+                        srcTimeBase: audioStream.pointee.time_base
+                    )
+                    if let cp = bridge.encoderCodecpar {
+                        audioConfig = FMP4VideoMuxer.StreamConfig(
+                            codecpar: cp,
+                            timeBase: bridge.encoderTimeBase,
+                            codecTagOverride: nil
+                        )
+                        audioHLSCodec = "fLaC"
+                        resolvedAudioStreamIndex = audioStreamIndex
+                        audioBridge = bridge
+                        EngineLog.emit("[HLSVideoEngine] audio: codec=\(compat) (bridge required) → transcoding to FLAC")
+                    }
+                } catch {
+                    EngineLog.emit("[HLSVideoEngine] audio bridge init failed (\(error)); video-only fragment")
+                }
+            } else if compat != .unsupported {
                 audioConfig = FMP4VideoMuxer.StreamConfig(
                     codecpar: audioStream.pointee.codecpar,
                     timeBase: audioStream.pointee.time_base,
@@ -299,9 +347,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 )
                 audioHLSCodec = compat.hlsCodecsString
                 resolvedAudioStreamIndex = audioStreamIndex
-                EngineLog.emit("[HLSVideoEngine] audio: codec=\(compat) → muxing as `\(compat.hlsCodecsString)`")
+                EngineLog.emit("[HLSVideoEngine] audio: codec=\(compat) → muxing as `\(compat.hlsCodecsString)` (stream-copy)")
             } else {
-                EngineLog.emit("[HLSVideoEngine] audio codec id=\(audioCodecID.rawValue) unsupported in fMP4 (probably TrueHD/DTS); video-only fragment")
+                EngineLog.emit("[HLSVideoEngine] audio codec id=\(audioCodecID.rawValue) unsupported (no FFmpeg decoder?); video-only fragment")
             }
         }
 
@@ -357,21 +405,58 @@ public final class HLSVideoEngine: @unchecked Sendable {
         do {
             (muxer, initSegmentData) = try buildMuxerAndInit(audio: audioConfig)
         } catch {
-            if audioConfig != nil {
-                // Engine init failure with audio is far more common
-                // than with video (the video bitstream is
-                // well-formed if the source is playable), so
-                // video-only is the right second attempt. DrHurt's
-                // build-118 P5+EAC3 hit this with `avformat_write_
-                // header failed (-22)` because FFmpeg's mov muxer
-                // needs pre-parsed dec3-box bytes for EAC3 and
-                // MKV-stored EAC3 doesn't always carry them as
-                // CodecPrivate. Falling back to video-only keeps
-                // the .native route alive (DV mode engages on the
-                // TV) at the cost of silent video; better than
-                // dropping back to AetherEngine's HDR10-only
-                // fallback for the whole session.
-                EngineLog.emit("[HLSVideoEngine] muxer/header init failed with audio (\(error.localizedDescription)), retrying video-only")
+            // Stream-copy attempt failed. Try the FLAC bridge as a
+            // second pass before giving up on audio entirely.
+            // Typical trigger: EAC3 from MKV where the muxer can't
+            // derive `dec3` box bytes without pre-parsed extradata.
+            // DrHurt's build-118 P5+EAC3 hit this with `avformat_
+            // write_header failed (-22)`. The FLAC bridge always
+            // works because the encoder synthesises its own codec-
+            // private from PCM input. Loses Atmos JOC metadata
+            // because the spatial mix is decoded to multichannel
+            // PCM before re-encoding, but better than silent video.
+            if audioBridge == nil,
+               audioConfig != nil,
+               let audioStream = audioStreamPtr {
+                EngineLog.emit("[HLSVideoEngine] muxer/header init failed with audio (\(error.localizedDescription)), retrying with FLAC bridge")
+                do {
+                    let bridge = try AudioBridge(
+                        srcCodecpar: audioStream.pointee.codecpar,
+                        srcTimeBase: audioStream.pointee.time_base
+                    )
+                    if let cp = bridge.encoderCodecpar {
+                        let bridgedConfig = FMP4VideoMuxer.StreamConfig(
+                            codecpar: cp,
+                            timeBase: bridge.encoderTimeBase,
+                            codecTagOverride: nil
+                        )
+                        (muxer, initSegmentData) = try buildMuxerAndInit(audio: bridgedConfig)
+                        audioConfig = bridgedConfig
+                        audioHLSCodec = "fLaC"
+                        audioBridge = bridge
+                        audioWasIncluded = true
+                    } else {
+                        throw error
+                    }
+                } catch {
+                    // Bridge attempt also failed. Fall back to video-only.
+                    EngineLog.emit("[HLSVideoEngine] FLAC bridge attempt also failed (\(error)), retrying video-only")
+                    do {
+                        (muxer, initSegmentData) = try buildMuxerAndInit(audio: nil)
+                    } catch {
+                        throw HLSVideoEngineError.muxerInit(underlying: error)
+                    }
+                    audioConfig = nil
+                    audioHLSCodec = nil
+                    resolvedAudioStreamIndex = -1
+                    audioBridge = nil
+                    audioWasIncluded = false
+                }
+            } else if audioConfig != nil {
+                // Bridge was already in use and failed at header
+                // write, or audioStreamPtr is nil. Either way, fall
+                // back to video-only.
+                EngineLog.emit("[HLSVideoEngine] muxer/header init failed (\(error.localizedDescription)), retrying video-only")
                 do {
                     (muxer, initSegmentData) = try buildMuxerAndInit(audio: nil)
                 } catch {
@@ -380,6 +465,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 audioConfig = nil
                 audioHLSCodec = nil
                 resolvedAudioStreamIndex = -1
+                audioBridge = nil
                 audioWasIncluded = false
             } else {
                 throw HLSVideoEngineError.muxerInit(underlying: error)
@@ -387,6 +473,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         if !audioWasIncluded {
             manifestCodecs = codecsString
+        } else if audioHLSCodec != nil {
+            // Recompute in case the bridge fallback changed audioHLSCodec.
+            manifestCodecs = "\(codecsString),\(audioHLSCodec!)"
         }
 
         // Frame rate for the FRAME-RATE attribute. AVRational from
@@ -420,6 +509,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioStreamIndex: resolvedAudioStreamIndex >= 0 ? resolvedAudioStreamIndex : nil,
             videoTimeBase: videoTimeBase,
             muxer: muxer,
+            audioBridge: audioBridge,
             initSegmentData: initSegmentData,
             segments: plan,
             codecsString: manifestCodecs,
@@ -578,6 +668,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let audioStreamIndex: Int32?
     private let videoTimeBase: AVRational
     private let muxer: FMP4VideoMuxer
+    private let audioBridge: AudioBridge?
 
     private let initSegmentData: Data
     private let segments: [HLSVideoEngine.Segment]
@@ -598,6 +689,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         audioStreamIndex: Int32?,
         videoTimeBase: AVRational,
         muxer: FMP4VideoMuxer,
+        audioBridge: AudioBridge?,
         initSegmentData: Data,
         segments: [HLSVideoEngine.Segment],
         codecsString: String,
@@ -612,6 +704,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.audioStreamIndex = audioStreamIndex
         self.videoTimeBase = videoTimeBase
         self.muxer = muxer
+        self.audioBridge = audioBridge
         self.initSegmentData = initSegmentData
         self.segments = segments
         self.codecsString = codecsString
@@ -627,6 +720,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         guard !isClosed else { lock.unlock(); return }
         isClosed = true
         muxer.close()
+        audioBridge?.close()
         lock.unlock()
     }
 
@@ -648,6 +742,14 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         // seconds (it converts to AV_TIME_BASE internally and uses
         // avformat_seek_file for MKV-safe seek behaviour).
         demuxer.seek(to: seg.startSeconds)
+
+        // Reset the audio bridge's per-fragment state: drains its
+        // FIFO leftover and arms the encoder-PTS rebase so the next
+        // decoded source frame's pts becomes the FLAC stream base
+        // for this fragment. Without this, FLAC packet timestamps
+        // accumulate from the encoder's first-ever sample and drift
+        // out of alignment with video as fragments march on.
+        audioBridge?.startSegment()
 
         var videoCount = 0
         var audioCount = 0
@@ -710,8 +812,27 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                     // IDR are dropped; without a video frame to anchor
                     // them they'd play earlier than the segment claims
                     // to start.
-                    try muxer.writePacket(packet, toStreamIndex: aOutIdx)
-                    audioCount += 1
+                    if let bridge = audioBridge {
+                        // Decode source codec → S16 PCM → FLAC.
+                        // bridge.feed returns [AVPacket*] with
+                        // ownership transferred to us.
+                        let flacPackets = try bridge.feed(packet: packet)
+                        for fp in flacPackets {
+                            do {
+                                try muxer.writePacket(fp, toStreamIndex: aOutIdx)
+                            } catch {
+                                var pPtr: UnsafeMutablePointer<AVPacket>? = fp
+                                av_packet_free(&pPtr)
+                                throw error
+                            }
+                            var pPtr: UnsafeMutablePointer<AVPacket>? = fp
+                            av_packet_free(&pPtr)
+                            audioCount += 1
+                        }
+                    } else {
+                        try muxer.writePacket(packet, toStreamIndex: aOutIdx)
+                        audioCount += 1
+                    }
                 }
                 // Other streams (additional audio tracks, subtitles,
                 // attachments) are silently dropped. Audio-track
