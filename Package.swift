@@ -14,6 +14,11 @@ let package = Package(
             name: "AetherEngine",
             targets: ["AetherEngine"]
         ),
+        // Standalone CLI used for offline reproduction of the host-side
+        // HLSVideoEngine playback symptoms on macOS, without going
+        // through TestFlight + Apple TV. Builds only on macOS in
+        // practice (Apple platform reqs match the lib target).
+        .executable(name: "aetherctl", targets: ["aetherctl"]),
     ],
     dependencies: [
         // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
@@ -35,6 +40,11 @@ let package = Package(
                 .linkedFramework("VideoToolbox"),
                 .linkedFramework("AudioToolbox"),
             ]
+        ),
+        .executableTarget(
+            name: "aetherctl",
+            dependencies: ["AetherEngine"],
+            path: "Sources/aetherctl"
         ),
     ]
 )

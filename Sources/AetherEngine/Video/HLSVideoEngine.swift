@@ -19,11 +19,11 @@ import Libavutil
 /// Phase 4 of the rollout: video-only fragments. Audio routing into
 /// the same fMP4 stream lands in phase 6. AVPlayer will play silent
 /// video for now, which is enough to verify the DV signalling path.
-final class HLSVideoEngine: @unchecked Sendable {
+public final class HLSVideoEngine: @unchecked Sendable {
 
     // MARK: - Errors
 
-    enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
+    public enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
         case openFailed(reason: String)
         case noVideoStream
         case unsupportedCodec(rawCodecID: UInt32)
@@ -33,7 +33,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         case alreadyStarted
         case notStarted
 
-        var description: String {
+        public var description: String {
             switch self {
             case .openFailed(let r):     return "HLSVideoEngine: open failed (\(r))"
             case .noVideoStream:         return "HLSVideoEngine: source has no video stream"
@@ -46,7 +46,7 @@ final class HLSVideoEngine: @unchecked Sendable {
             }
         }
 
-        var errorDescription: String? { description }
+        public var errorDescription: String? { description }
     }
 
     /// DV profile + base-layer compatibility classification per the
@@ -115,7 +115,7 @@ final class HLSVideoEngine: @unchecked Sendable {
     /// authoring recommendation.
     private static let targetSegmentDuration: Double = 6.0
 
-    init(url: URL) {
+    public init(url: URL) {
         self.sourceURL = url
     }
 
@@ -123,7 +123,7 @@ final class HLSVideoEngine: @unchecked Sendable {
 
     /// Open the source, build the segment plan, start the server,
     /// return the URL the host hands to AVPlayer.
-    func start() throws -> URL {
+    public func start() throws -> URL {
         guard demuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
 
         // 1. Open the source. Reuses AetherEngine's existing AVIO +
@@ -389,7 +389,7 @@ final class HLSVideoEngine: @unchecked Sendable {
         return url
     }
 
-    func stop() {
+    public func stop() {
         server?.stop()
         server = nil
         provider?.close()
