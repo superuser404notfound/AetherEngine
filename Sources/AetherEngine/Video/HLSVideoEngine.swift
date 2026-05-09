@@ -177,32 +177,45 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceDurationSeconds: durationSeconds
         )
 
-        // 4. Classify the DV variant and compute Apple's HLS Authoring
-        //    Spec Appendixes CODECS / SUPPLEMENTAL-CODECS strings for
-        //    the master playlist. Apple's table:
+        // 4. Classify the DV variant and compute the master-playlist
+        //    CODECS string. For AVPlayer-only consumption (which is
+        //    our case: tvOS / iOS / macOS only, no other HLS clients
+        //    ever see this stream), the simpler `dvh1.<profile>.<dv
+        //    Level>` direct form is preferable to Apple's cross-
+        //    player-compatibility form (`hvc1.2.4.LXXX` + `SUPPLE
+        //    MENTAL-CODECS=dvh1.08.LL/db1p`). Both forms work for
+        //    AVPlayer when the master also carries the recommended
+        //    extras (AVERAGE-BANDWIDTH, FRAME-RATE, HDCP-LEVEL=
+        //    TYPE-1 for 4K HDR, CLOSED-CAPTIONS=NONE), but DrHurt's
+        //    empirical work across many DV files (issue #2) shows
+        //    that the `dvh1` direct form is more robust against
+        //    poorly-mastered sources where the HEVC base-layer
+        //    advertised in `hvc1.2.4.LXXX` doesn't quite match the
+        //    actual bitstream profile / level. SUPPLEMENTAL-CODECS
+        //    matters for non-DV-aware players that need a base-layer
+        //    fallback; AVPlayer is DV-aware and parses the dvvC /
+        //    dvcC config box from init.mp4 directly.
         //
-        //       Profile         | sample tag | primary CODECS         | SUPPLEMENTAL-CODECS    | VIDEO-RANGE
-        //       ----------------+------------+------------------------+------------------------+------------
-        //       P5  (compat 0)  | dvh1       | dvh1.05.<dvLevel>      | (none)                 | PQ
-        //       P8.1 (compat 1) | dvh1       | hvc1.2.4.L<hevcLevel>  | dvh1.08.<dvLevel>/db1p | PQ
-        //       P8.4 (compat 4) | hvc1       | hvc1.2.4.L<hev>.b0     | dvh1.08.<dvLevel>/db4h | HLG
+        //       Profile         | codec_tag | CODECS               | VIDEO-RANGE
+        //       ----------------+-----------+----------------------+------------
+        //       P5  (compat 0)  | dvh1      | dvh1.05.<dvLevel>    | PQ
+        //       P8.1 (compat 1) | dvh1      | dvh1.08.<dvLevel>    | PQ
+        //       P8.4 (compat 4) | hvc1      | hvc1.2.4.L<hev>.b0,  | HLG
+        //                       |           |  SUPPLEMENTAL=       |
+        //                       |           |  dvh1.08.LL/db4h     |
         //
-        //    The Profile 8.x branches advertise plain HEVC in primary
-        //    CODECS so AVPlayer can fall back on a non-DV decode path
-        //    when DV isn't supported, and signal DV via SUPPLEMENTAL-
-        //    CODECS with the matching base-layer brand (db1p HDR10,
-        //    db4h HLG). Earlier we shipped bare `dvh1` as primary,
-        //    which AVPlayer's master-codec-filter silently rejects
-        //    because it sees no fallback path. macOS QuickTime + tvOS
-        //    AVPlayer both reproduce the rejection 1:1; reverse-
-        //    engineered to match the Authoring Spec form via local
-        //    testing with the standalone `aetherctl` CLI.
+        //    P8.4 keeps the supplemental form because its base layer
+        //    is HLG-HEVC (codec_tag=hvc1) and we don't have a P8.4
+        //    test source to validate dvh1-direct against. Conservative
+        //    until we do.
         //
-        //    The sample-entry FourCC (codec_tag) inside the fMP4
-        //    fragments stays `dvh1` for P5/P8.1 and `hvc1` for P8.4
-        //    regardless of master form: AVPlayer matches sample-entry
-        //    against primary CODECS and falls back to SUPPLEMENTAL on
-        //    DV-capable decoders.
+        //    The bare `dvh1` we shipped through builds 121-124 was
+        //    rejected because it lacked the master-level extras
+        //    (AVERAGE-BANDWIDTH / FRAME-RATE / HDCP-LEVEL / CLOSED-
+        //    CAPTIONS); AVPlayer's master-codec-filter for HDR / DV
+        //    variants needs them. Verified empirically with the
+        //    standalone `aetherctl` CLI: dvh1 alone rejected, dvh1
+        //    plus extras accepted.
         let dvRecord = doviConfigRecord(from: codecpar)
         let dvVariant = classifyDVVariant(dvRecord)
         let codecTagOverride: String?
@@ -231,12 +244,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         case .profile81:
             codecTagOverride = "dvh1"
             videoRange = .pq
-            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-            supplementalCodecs = "dvh1.08.\(dvLevelStr)/db1p"
+            primaryCodecs = "dvh1.08.\(dvLevelStr)"
+            supplementalCodecs = nil
         case .profile84:
-            // P8.4 carries an HLG-compat base layer. Sample-entry
-            // tag stays `hvc1` because the bitstream is HEVC HLG
-            // underneath the DV metadata.
+            // P8.4 keeps the cross-player-compat form because the
+            // base layer is HLG-HEVC and we don't have a P8.4 test
+            // source. Sample-entry tag stays `hvc1`.
             codecTagOverride = "hvc1"
             videoRange = .hlg
             primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
