@@ -9,7 +9,15 @@
 // CLI lets us iterate locally.
 
 import Foundation
+import Darwin
 import AetherEngine
+
+// Disable stdout buffering so a `swift run aetherctl … > log.txt` or
+// `2>&1 | grep` pipeline sees engine prints in real time. Swift's
+// `print()` block-buffers when stdout isn't a tty, which masked the
+// engine's EngineLog output and only let FFmpeg's stderr through on
+// the first run.
+setbuf(stdout, nil)
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {

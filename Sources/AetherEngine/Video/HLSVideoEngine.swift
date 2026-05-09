@@ -645,11 +645,31 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     }
 
     var playlistType: HLSPlaylistType { .vod }
-    var masterCodecs: String? { codecsString }
-    var masterResolution: (width: Int, height: Int)? {
-        return (resolution.0, resolution.1)
-    }
-    var masterVideoRange: HLSVideoRange? { videoRange }
+    // Returning nil here suppresses the master playlist entirely, so
+    // `HLSLocalServer.playlistURL` advertises `media.m3u8` directly
+    // and the `/master.m3u8` endpoint 404s. The audio path has always
+    // worked this way; the video path was generating a single-variant
+    // master with `CODECS="dvh1"` + `VIDEO-RANGE=PQ` + `RESOLUTION=
+    // 3840x2076`, and AVPlayer (verified on both macOS QuickTime and
+    // tvOS) silently parse-rejects that master, fetches it 2-3 times,
+    // then drops the session without ever attempting `media.m3u8`.
+    // No `errorLog`, no `failedToPlayToEndTime`, just AVPlayer parking
+    // in `waitingToPlay` forever. macOS QuickTime fed `media.m3u8`
+    // directly happily reads init.mp4, seg0..segN, and starts buffer
+    // ing; that's the architecture we adopt here.
+    //
+    // Trade-off: we lose the explicit `VIDEO-RANGE=PQ` / `CODECS=
+    // dvh1.08.06` signaling on the master variant. AVPlayer has to
+    // infer Dolby Vision from the init segment's `dvh1` sample-entry
+    // FourCC, the `dvvC` configuration box, and the `colr` atom's
+    // BT.2020 + PQ primaries / transfer. Apple's HLS DV documentation
+    // recommends master-level signaling but doesn't require it for
+    // single-variant streams; the segment-level signaling alone is
+    // enough for the HDMI DV handshake on a capable TV (verified
+    // empirically on the next test cycle).
+    var masterCodecs: String? { nil }
+    var masterResolution: (width: Int, height: Int)? { nil }
+    var masterVideoRange: HLSVideoRange? { nil }
     var masterBandwidth: Int? { nil }
 }
 
