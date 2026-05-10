@@ -502,6 +502,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "duration=\(String(format: "%.1f", durationSeconds))s init=\(initSegmentData.count)B"
         )
 
+        // Hex-dump the init segment so testers can see ftyp / moov /
+        // sample-entry / hvcC / dvcC|dvvC structure straight from the
+        // overlay. Init segments for our DV streams come in around
+        // 900-920 bytes, well within reasonable log size. Lets us
+        // diagnose CoreMediaErrorDomain/-12927 class failures without
+        // needing to curl the loopback port and run mp4dump. Capped
+        // at 1 KB so a pathological future source can't blow up the
+        // log ring.
+        EngineLog.emit("[HLSVideoEngine] init.mp4 hex (\(initSegmentData.count)B):\n\(initSegmentData.prefix(1024).hexDump())")
+
         // 7. Wire the provider, the server, and serve the URL.
         let prov = VideoSegmentProvider(
             demuxer: dem,
@@ -892,3 +902,32 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 /// macro Swift can't import directly). Aliased here so callers don't
 /// have to re-derive the bit.
 private let AV_PKT_FLAG_KEY_VALUE: Int32 = 0x0001
+
+private extension Data {
+    /// Render bytes as an `xxd`-style hex dump: 16 bytes per row,
+    /// offset on the left, hex pairs in the middle, ASCII column
+    /// on the right. Designed for diagnostic-overlay log output;
+    /// non-printable bytes show as `.` in the ASCII column. Caller
+    /// is responsible for capping size before calling, this dumps
+    /// every byte of `self`.
+    func hexDump() -> String {
+        var result = ""
+        var offset = 0
+        for chunk in self.chunked(by: 16) {
+            let hex = chunk.map { String(format: "%02x", $0) }.joined(separator: " ")
+            let padded = hex.padding(toLength: 16 * 3 - 1, withPad: " ", startingAt: 0)
+            let ascii = chunk.map { (b: UInt8) -> Character in
+                (b >= 0x20 && b < 0x7f) ? Character(UnicodeScalar(b)) : "."
+            }
+            result += String(format: "%04x  %@  %@\n", offset, padded, String(ascii))
+            offset += chunk.count
+        }
+        return result
+    }
+
+    func chunked(by size: Int) -> [Data] {
+        stride(from: 0, to: count, by: size).map { i in
+            self.subdata(in: i..<Swift.min(i + size, count))
+        }
+    }
+}
