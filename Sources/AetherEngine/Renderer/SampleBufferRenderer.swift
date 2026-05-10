@@ -94,7 +94,7 @@ final class SampleBufferRenderer {
             layer.preferredDynamicRange = isHDR ? .high : .standard
         } else {
             #if os(iOS) || os(macOS)
-            if #available(iOS 16.0, macOS 13.0, *) {
+            if #available(iOS 17.0, macOS 14.0, *) {
                 layer.wantsExtendedDynamicRangeContent = isHDR
             }
             #endif
@@ -122,7 +122,7 @@ final class SampleBufferRenderer {
             displayLayer.preferredDynamicRange = isHDR ? .high : .standard
         } else {
             #if os(iOS) || os(macOS)
-            if #available(iOS 16.0, macOS 13.0, *) {
+            if #available(iOS 17.0, macOS 14.0, *) {
                 displayLayer.wantsExtendedDynamicRangeContent = isHDR
             }
             #endif
