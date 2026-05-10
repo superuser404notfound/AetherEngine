@@ -863,16 +863,18 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     }
 
     var playlistType: HLSPlaylistType { .vod }
-    // Master playlist re-enabled with the Apple HLS Authoring Spec
-    // form: primary CODECS advertises plain HEVC for Profile 8.x
-    // (so AVPlayer can fall back on the HDR10 / HLG base layer when
-    // DV isn't decodable), DV is signalled via SUPPLEMENTAL-CODECS
-    // with the `db1p` (HDR10-base) or `db4h` (HLG-base) brand. P5
-    // streams have no fallback and put `dvh1.05.LL` directly in
-    // CODECS. Validated against macOS QuickTime via the standalone
-    // `aetherctl` CLI: bare `dvh1` master gets silently parse-
-    // rejected, the spec-correct form is accepted and AVPlayer
-    // proceeds through media.m3u8 → init.mp4 → seg0+ normally.
+    // Master playlist accessors. P5 / P8.1 use bare `dvh1.05.<dvLevel>`
+    // / `dvh1.08.<dvLevel>` in CODECS with no SUPPLEMENTAL-CODECS;
+    // P8.4 keeps the cross-player-compat `hvc1.2.4.L<hev>.b0` +
+    // SUPPLEMENTAL=`dvh1.08.<dvLevel>/db4h` form because its base
+    // layer is HLG-HEVC. The master also carries AVERAGE-BANDWIDTH,
+    // FRAME-RATE, RESOLUTION, VIDEO-RANGE, HDCP-LEVEL=TYPE-1 (for
+    // 4K HDR per Apple Tech Talk 501) and CLOSED-CAPTIONS=NONE.
+    // Confirmed by ZeroQ-bit's empirical A/B against the Dolby Browser
+    // Test Kit source MP4s on tvOS AVPlayer (issue #2): bare `dvh1`
+    // is what AVPlayer wants for P8.1, the spec-canonical
+    // `hvc1.2.4.LXXX` + SUPPLEMENTAL form is parse-rejected before
+    // init.mp4 fetch.
     var masterCodecs: String? { codecsString }
     var masterSupplementalCodecs: String? { supplementalCodecsString }
     var masterResolution: (width: Int, height: Int)? {
