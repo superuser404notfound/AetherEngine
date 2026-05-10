@@ -76,10 +76,9 @@ final class SampleBufferRenderer {
         firstFrameLock.unlock()
     }
 
-    #if DEBUG
     private var loggedLayerFailed = false
+    private var loggedNotReady = false
     private var enqueueCount = 0
-    #endif
     private var hdr10PlusAttachedCount = 0
 
     init() {
@@ -266,13 +265,21 @@ final class SampleBufferRenderer {
         // pipeline state and resets status back to .unknown so the next
         // enqueue can render.
         if displayLayer.status == .failed {
-            #if DEBUG
             if !loggedLayerFailed {
                 loggedLayerFailed = true
-                print("[Renderer] display layer failed: \(displayLayer.error?.localizedDescription ?? "nil"), attempting recovery via flush()")
+                EngineLog.emit("[Renderer] display layer failed at enqueue #\(enqueueCount + 1): \(displayLayer.error?.localizedDescription ?? "nil"), attempting recovery via flush()")
             }
-            #endif
             displayLayer.flush()
+        }
+        // One-shot signal that the layer pushed back. AVPlayer-rooted
+        // playback never reaches this code path, only the .aether
+        // pipeline does, and the symptom from ZeroQ-bit's 4K remote
+        // MKV stall (issue #2) was "renderer stops consuming after
+        // ~N frames". If isReadyForMoreMediaData latches false and
+        // never recovers, we'd want to know.
+        if !displayLayer.isReadyForMoreMediaData, !loggedNotReady {
+            loggedNotReady = true
+            EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)")
         }
         displayLayer.enqueue(sampleBuffer)
 
@@ -283,15 +290,16 @@ final class SampleBufferRenderer {
         _hasRenderedFirstFrame = true
         firstFrameLock.unlock()
 
-        #if DEBUG
         enqueueCount += 1
-        if enqueueCount == 1 || enqueueCount == 30 {
-            print("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(displayLayer.isReadyForMoreMediaData) error=\(displayLayer.error?.localizedDescription ?? "nil")")
+        // Sparse progress trail so a stall after enqueue #30 (the
+        // existing log point) is distinguishable from "we just stop
+        // logging at #30 but actually keep enqueueing". Logging cost
+        // is bounded: at 60 fps for 1 hour we emit 4 lines total.
+        if enqueueCount == 1 || enqueueCount == 30 || enqueueCount == 100 || enqueueCount == 1000 || enqueueCount == 5000 {
+            EngineLog.emit("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(displayLayer.isReadyForMoreMediaData) error=\(displayLayer.error?.localizedDescription ?? "nil")")
         }
-        #endif
     }
 
-    #if DEBUG
     private var statusName: String {
         switch displayLayer.status {
         case .unknown: "unknown"
@@ -300,16 +308,14 @@ final class SampleBufferRenderer {
         @unknown default: "?"
         }
     }
-    #endif
 
     /// Reset per-session diagnostic counters. Call on load() so the
-    /// first-frame / 30th-frame status log fires for each new video,
-    /// not only the first one after app launch.
+    /// progress / status logs fire for each new video, not only the
+    /// first one after app launch.
     func resetDiagnostics() {
-        #if DEBUG
         enqueueCount = 0
         loggedLayerFailed = false
-        #endif
+        loggedNotReady = false
     }
 
     /// Explicit flush of the underlying AVSampleBufferDisplayLayer
