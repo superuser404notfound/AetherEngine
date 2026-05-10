@@ -143,6 +143,13 @@ final class HLSLocalServer: @unchecked Sendable {
     /// "first segment available" to "AVPlayer asked for it".
     private(set) var seg0FetchTime: Date?
 
+    /// One-shot flags so we log each playlist's full body once per
+    /// session instead of on every AVPlayer re-fetch. Lets us see
+    /// verbatim what got handed to AVPlayer without asking testers
+    /// to curl the loopback port.
+    private var loggedMasterPlaylist = false
+    private var loggedMediaPlaylist = false
+
     private(set) var port: UInt16 = 0
 
     /// URL the host hands to AVPlayer to start playback. Points at
@@ -223,6 +230,8 @@ final class HLSLocalServer: @unchecked Sendable {
         listener?.cancel()
         listener = nil
         port = 0
+        loggedMasterPlaylist = false
+        loggedMediaPlaylist = false
         bufferedProvider?.clear()
         seg0FetchTime = nil
     }
@@ -291,15 +300,26 @@ final class HLSLocalServer: @unchecked Sendable {
             switch normalizedPath {
             case "/master.m3u8":
                 if self.provider?.masterCodecs != nil {
+                    let body = self.buildMasterPlaylist()
+                    if !self.loggedMasterPlaylist {
+                        self.loggedMasterPlaylist = true
+                        EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)")
+                    }
                     self.respondData(connection,
-                                     data: Data(self.buildMasterPlaylist().utf8),
+                                     data: Data(body.utf8),
                                      contentType: "application/vnd.apple.mpegurl")
                 } else {
                     self.respond404(connection)
                 }
             case "/media.m3u8":
+                let body = self.buildMediaPlaylist()
+                if !self.loggedMediaPlaylist {
+                    self.loggedMediaPlaylist = true
+                    let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
+                    EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)")
+                }
                 self.respondData(connection,
-                                 data: Data(self.buildMediaPlaylist().utf8),
+                                 data: Data(body.utf8),
                                  contentType: "application/vnd.apple.mpegurl")
             case "/init.mp4":
                 let data = self.provider?.initSegment() ?? Data()
