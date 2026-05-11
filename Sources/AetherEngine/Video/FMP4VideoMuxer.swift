@@ -227,7 +227,89 @@ final class FMP4VideoMuxer {
             avio_flush(pb)
         }
         headerWritten = true
-        return drainCaptureBuffer()
+        let init_ = drainCaptureBuffer()
+        Self.logInitSegmentBoxSummary(init_)
+        return init_
+    }
+
+    /// One-line summary of the structural boxes inside the init
+    /// segment, emitted right after the muxer writes the header. The
+    /// existing hex dump prints the raw bytes but rolls out of the
+    /// 80-line LogTap ring buffer before the eventual playback
+    /// failure lands; this summary picks out exactly the boxes that
+    /// matter for AVPlayer's DV / HEVC acceptance and stays on a
+    /// single line so it survives the buffer.
+    ///
+    /// Specifically answers: did the mp4 muxer emit `dvcC` / `dvvC`
+    /// (the DV configuration boxes), and what video sample-entry
+    /// FourCC did it pick? AVPlayer's `Cannot Open` -11829 +
+    /// `CoreMediaErrorDomain -12848` on a P5 source typically means
+    /// the sample entry is `dvh1` but the DV config box is missing,
+    /// so AVPlayer parses the container as nominally-DV but can't
+    /// find the configuration record to validate against.
+    private static func logInitSegmentBoxSummary(_ data: Data) {
+        let videoSampleEntries: Set<String> = [
+            "hvc1", "hev1", "dvh1", "dvhe", "avc1", "avc3"
+        ]
+        var sampleEntry: String?
+        var hasHvcC = false
+        var hasDvcC = false
+        var hasDvvC = false
+        var hasFtyp = false
+        var hasMoov = false
+
+        // Walk every 4-byte ASCII run in the buffer looking for known
+        // box-name FourCCs. The init segment is a few KB so this is
+        // cheap, and a name-only scan stays robust against minor
+        // structural variations (we don't need to recurse into box
+        // sizes to answer the questions we care about).
+        let bytes = [UInt8](data)
+        if bytes.count >= 8 {
+            for i in 0...(bytes.count - 4) {
+                let b = (bytes[i], bytes[i+1], bytes[i+2], bytes[i+3])
+                guard Self.isASCIIBoxName(b) else { continue }
+                let tag = String(
+                    bytes: [b.0, b.1, b.2, b.3],
+                    encoding: .ascii
+                ) ?? ""
+                if videoSampleEntries.contains(tag), sampleEntry == nil {
+                    sampleEntry = tag
+                }
+                switch tag {
+                case "ftyp": hasFtyp = true
+                case "moov": hasMoov = true
+                case "hvcC": hasHvcC = true
+                case "dvcC": hasDvcC = true
+                case "dvvC": hasDvvC = true
+                default: break
+                }
+            }
+        }
+
+        let entryStr = sampleEntry ?? "?"
+        let summary = """
+            [FMP4VideoMuxer] init.mp4 bytes=\(data.count) \
+            sample-entry=\(entryStr) \
+            ftyp=\(hasFtyp ? "y" : "n") \
+            moov=\(hasMoov ? "y" : "n") \
+            hvcC=\(hasHvcC ? "y" : "n") \
+            dvcC=\(hasDvcC ? "y" : "MISSING") \
+            dvvC=\(hasDvvC ? "y" : "absent")
+            """
+        EngineLog.emit(summary)
+    }
+
+    /// True iff the four bytes form a plausible mp4 box name (ASCII
+    /// letters + digits). Filters out random binary that happens to
+    /// fall on a 4-byte boundary, so the scan above doesn't report
+    /// "samp" or other fragments embedded in coded data.
+    private static func isASCIIBoxName(_ b: (UInt8, UInt8, UInt8, UInt8)) -> Bool {
+        func isOK(_ c: UInt8) -> Bool {
+            (c >= 0x61 && c <= 0x7a) ||  // a-z
+            (c >= 0x41 && c <= 0x5a) ||  // A-Z
+            (c >= 0x30 && c <= 0x39)     // 0-9
+        }
+        return isOK(b.0) && isOK(b.1) && isOK(b.2) && isOK(b.3)
     }
 
     /// Hand one source packet to the muxer. The packet is cloned so
