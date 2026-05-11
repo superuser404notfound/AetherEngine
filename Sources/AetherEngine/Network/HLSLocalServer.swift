@@ -306,10 +306,11 @@ final class HLSLocalServer: @unchecked Sendable {
                         EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)")
                     }
                     self.respondData(connection,
+                                     path: normalizedPath,
                                      data: Data(body.utf8),
                                      contentType: "application/vnd.apple.mpegurl")
                 } else {
-                    self.respond404(connection)
+                    self.respond404(connection, path: normalizedPath, reason: "no masterCodecs")
                 }
             case "/media.m3u8":
                 let body = self.buildMediaPlaylist()
@@ -319,14 +320,15 @@ final class HLSLocalServer: @unchecked Sendable {
                     EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)")
                 }
                 self.respondData(connection,
+                                 path: normalizedPath,
                                  data: Data(body.utf8),
                                  contentType: "application/vnd.apple.mpegurl")
             case "/init.mp4":
                 let data = self.provider?.initSegment() ?? Data()
                 if data.isEmpty {
-                    self.respond404(connection)
+                    self.respond404(connection, path: normalizedPath, reason: "init.mp4 empty (provider not ready?)")
                 } else {
-                    self.respondData(connection, data: data, contentType: "video/mp4")
+                    self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
                 }
             default:
                 if normalizedPath.hasPrefix("/seg"), normalizedPath.hasSuffix(".mp4") {
@@ -336,15 +338,16 @@ final class HLSLocalServer: @unchecked Sendable {
                             self.seg0FetchTime = Date()
                         }
                         if let data = self.provider?.mediaSegment(at: index), !data.isEmpty {
-                            self.respondData(connection, data: data, contentType: "video/mp4")
+                            self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
                         } else {
-                            self.respond404(connection)
+                            let providerCount = self.provider?.segmentCount ?? -1
+                            self.respond404(connection, path: normalizedPath, reason: "segment[\(index)] empty (segmentCount=\(providerCount))")
                         }
                     } else {
-                        self.respond404(connection)
+                        self.respond404(connection, path: normalizedPath, reason: "unparseable seg index '\(indexStr)'")
                     }
                 } else {
-                    self.respond404(connection)
+                    self.respond404(connection, path: normalizedPath, reason: "unknown path")
                 }
             }
         }
@@ -431,18 +434,24 @@ final class HLSLocalServer: @unchecked Sendable {
 
     // MARK: - HTTP framing
 
-    private func respondData(_ connection: NWConnection, data: Data, contentType: String) {
+    private func respondData(_ connection: NWConnection, path: String, data: Data, contentType: String) {
         let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(data)
 
-        connection.send(content: payload, completion: .contentProcessed { [weak self] _ in
+        EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)")
+
+        connection.send(content: payload, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                EngineLog.emit("[HLSLocalServer] send failed for \(path): \(error)")
+            }
             self?.readRequest(connection)
         })
     }
 
-    private func respond404(_ connection: NWConnection) {
+    private func respond404(_ connection: NWConnection, path: String, reason: String) {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+        EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)")
         connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
             self?.readRequest(connection)
         })
