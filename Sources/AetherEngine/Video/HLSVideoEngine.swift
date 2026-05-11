@@ -502,15 +502,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
             + "duration=\(String(format: "%.1f", durationSeconds))s init=\(initSegmentData.count)B"
         )
 
-        // Hex-dump the init segment so testers can see ftyp / moov /
-        // sample-entry / hvcC / dvcC|dvvC structure straight from the
-        // overlay. Init segments for our DV streams come in around
-        // 900-920 bytes, well within reasonable log size. Lets us
-        // diagnose CoreMediaErrorDomain/-12927 class failures without
-        // needing to curl the loopback port and run mp4dump. Capped
-        // at 1 KB so a pathological future source can't blow up the
-        // log ring.
-        EngineLog.emit("[HLSVideoEngine] init.mp4 hex (\(initSegmentData.count)B):\n\(initSegmentData.prefix(1024).hexDump())")
+        // The earlier full-buffer hex dump used to live here but ate
+        // ~40 ring-buffer lines per session and pushed the much more
+        // actionable `[FMP4VideoMuxer] init.mp4 …` box summary out of
+        // the overlay's visible window before AVPlayer's eventual
+        // failure landed. The summary answers the same structural
+        // questions (sample-entry FourCC, hvcC / dvcC / dvvC presence)
+        // in one line. If a future failure needs byte-level detail
+        // again, the loopback port is still reachable from `aetherctl
+        // <source>` + `curl /init.mp4 | xxd` on macOS, without
+        // dominating the TestFlight overlay.
 
         // 7. Wire the provider, the server, and serve the URL.
         let prov = VideoSegmentProvider(
@@ -737,6 +738,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     // MARK: - HLSSegmentProvider
 
     func initSegment() -> Data? {
+        // Re-emit the box summary at fetch time too: the one written
+        // at writeInitSegment lands at session start, ~50 ring-buffer
+        // lines before AVPlayer's eventual parse failure, where it
+        // rolls out of the overlay's visible window. Re-emitting here
+        // places the same line right before the bytes go on the wire,
+        // so the overlay screenshot at failure time still shows it.
+        FMP4VideoMuxer.logInitSegmentBoxSummary(initSegmentData)
         return initSegmentData
     }
 

@@ -247,7 +247,11 @@ final class FMP4VideoMuxer {
     /// the sample entry is `dvh1` but the DV config box is missing,
     /// so AVPlayer parses the container as nominally-DV but can't
     /// find the configuration record to validate against.
-    private static func logInitSegmentBoxSummary(_ data: Data) {
+    /// Exposed for the HLS segment provider to re-emit on each
+    /// /init.mp4 fetch so the structural truth lands close to
+    /// AVPlayer's parse failure, not just at session start where the
+    /// overlay ring buffer rolls it off before the failure lands.
+    static func logInitSegmentBoxSummary(_ data: Data) {
         let videoSampleEntries: Set<String> = [
             "hvc1", "hev1", "dvh1", "dvhe", "avc1", "avc3"
         ]
