@@ -174,6 +174,21 @@ final class HLSLocalServer: @unchecked Sendable {
         return URL(string: "http://127.0.0.1:\(port)/\(path)")
     }
 
+    /// Direct media-playlist URL, bypassing the master-playlist
+    /// variant-selection step. Per DrHurt's note on AetherEngine#2:
+    /// when AVPlayer loads a media playlist directly rather than
+    /// via a master, it automatically tone-maps HDR / Dolby Vision
+    /// content to whatever the display can render — including SDR
+    /// when the user has disabled "Match Dynamic Range" in tvOS
+    /// Settings. The host route picks this URL instead of
+    /// `playlistURL` whenever the DV / HDR display handshake isn't
+    /// available, so AVPlayer stops rejecting `dvh1` assets with
+    /// `-11868 'Cannot Open'` and just plays them as SDR.
+    var mediaPlaylistURL: URL? {
+        guard port > 0 else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)/media.m3u8")
+    }
+
     // MARK: - Init
 
     /// Default init for the legacy audio path. Creates a built-in
