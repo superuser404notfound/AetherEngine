@@ -701,14 +701,35 @@ final class FMP4VideoMuxer {
         //      against playlist EXTINF cumulative for VOD playback.
         //
         // Audio packets carry valid DTS == PTS from the demuxer
-        // (audio has no reorder); only a monotonicity guard runs on
-        // that path.
-        Self.synthesiseVideoTiming(packets: videoPackets)
+        // (audio has no reorder), but their PTS must shift by the
+        // same wall-clock amount as video so the muxer's output
+        // tracks A/V sync. Without this, video's `maxShift` (typically
+        // ~1 frame for typical reorder) was added to video PTS only,
+        // and audio kept its source PTS — so audio played `maxShift`
+        // earlier than video. Per fragment that's a constant ~40 ms
+        // offset (subliminal), but `maxShift` varies between segments
+        // depending on the first GOP's reorder depth, and AVPlayer
+        // sees the offset jump at every segment boundary as audio
+        // drift versus video. Vincent's symptom: "läuft gut für ein
+        // paar Sekunden, dann hängt es kurz und endet im asynch
+        // chaos."
+        let videoShift = Self.synthesiseVideoTiming(packets: videoPackets)
 
         for pkt in videoPackets {
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
         }
-        if let audioIdx = muxer.audioOutputIndex {
+        if let audioIdx = muxer.audioOutputIndex, let audio = audio {
+            // Rescale `videoShift` from video source time_base to the
+            // audio source time_base, then apply uniformly. Audio
+            // packets have valid DTS so `sanitiseAudioTiming` only
+            // enforces monotonicity for the rare misordered MKV.
+            let audioShift: Int64
+            if videoShift > 0 {
+                audioShift = av_rescale_q(videoShift, video.timeBase, audio.timeBase)
+            } else {
+                audioShift = 0
+            }
+            Self.shiftAudioPts(packets: audioPackets, by: audioShift)
             Self.sanitiseAudioTiming(packets: audioPackets)
             for pkt in audioPackets {
                 try muxer.writePacket(pkt, toStreamIndex: audioIdx)
@@ -764,12 +785,13 @@ final class FMP4VideoMuxer {
     /// (natural_dts - source_pts) seen in the fragment. CTS offsets
     /// in the trun preserve display reorder; the IRAP itself gets a
     /// non-zero CTS but AVPlayer renders display order correctly.
+    @discardableResult
     static func synthesiseVideoTiming(
         packets: [UnsafeMutablePointer<AVPacket>]
-    ) {
-        guard !packets.isEmpty else { return }
+    ) -> Int64 {
+        guard !packets.isEmpty else { return 0 }
         let firstPts = packets[0].pointee.pts
-        guard firstPts != avNoPTS else { return }
+        guard firstPts != avNoPTS else { return 0 }
 
         // Gather PTS values for sorting. Defensive: skip NOPTS
         // entries (should not appear here after the segment-collect
@@ -781,7 +803,7 @@ final class FMP4VideoMuxer {
             let v = p.pointee.pts
             if v != avNoPTS { sortedPts.append(v) }
         }
-        guard sortedPts.count == packets.count else { return }
+        guard sortedPts.count == packets.count else { return 0 }
         sortedPts.sort()
 
         // Assign sorted PTS as DTS in decode order. Decode position
@@ -799,6 +821,22 @@ final class FMP4VideoMuxer {
         for i in 0..<packets.count {
             packets[i].pointee.dts = sortedPts[i]
             packets[i].pointee.pts &+= maxShift
+        }
+        return maxShift
+    }
+
+    /// Shift every audio packet's PTS (and DTS, since audio has
+    /// pts == dts) forward by `shift` ticks in the audio's source
+    /// time_base. Caller rescales `videoShift` to audio time_base
+    /// before passing in. No-op when `shift == 0`.
+    static func shiftAudioPts(
+        packets: [UnsafeMutablePointer<AVPacket>],
+        by shift: Int64
+    ) {
+        guard shift > 0 else { return }
+        for pkt in packets {
+            if pkt.pointee.pts != avNoPTS { pkt.pointee.pts &+= shift }
+            if pkt.pointee.dts != avNoPTS { pkt.pointee.dts &+= shift }
         }
     }
 
