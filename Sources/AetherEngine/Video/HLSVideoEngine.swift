@@ -804,12 +804,21 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     /// How far behind the muxer's last submitted DTS a segment's
     /// start has to land before we consider it a real backward
     /// scrub. Anything within this slack is treated as a normal
-    /// sequential / forward-scrub transition. 5 seconds in source
-    /// time base is wider than any realistic GOP overshoot
-    /// (typical HEVC GOPs are 1-3 s) and narrower than any user-
-    /// noticeable scrub-back, so the threshold cleanly separates
-    /// the two cases.
-    private let backwardSeekSlackSeconds: Double = 5.0
+    /// sequential / forward-scrub transition. The earlier 5 s
+    /// value was tuned for typical HEVC GOPs (1-3 s) but tripped
+    /// false positives on content with long GOPs: Vincent's
+    /// 1440x1080 MKV had a ~14 s GOP at one point, so seg N's
+    /// read loop overshot the nominal endPts by ~8 s past the
+    /// 5 s slack, and seg N+1's pre-emption check then fired on
+    /// every sequential request — triggering a useless muxer
+    /// rebuild + writeInitSegment per segment transition. 60 s
+    /// is well past any realistic single-GOP duration while
+    /// still narrow enough that a real backward scrub of more
+    /// than a minute gets caught. Smaller real backward scrubs
+    /// fall through to the reactive EINVAL handler in the read
+    /// loop, which is correct (and only ~5-10 ms slower than
+    /// pre-emptive detection per the timing diag).
+    private let backwardSeekSlackSeconds: Double = 60.0
 
     private let initSegmentData: Data
     private let segments: [HLSVideoEngine.Segment]
