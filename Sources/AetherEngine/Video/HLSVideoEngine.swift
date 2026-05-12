@@ -730,6 +730,32 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let lock = NSLock()
     private var isClosed = false
 
+    /// Highest source-time-base PTS we've actually submitted to the
+    /// muxer on the video stream across this session. Resets only
+    /// on close. Used to skip packets that a later segment's seek
+    /// re-reads from positions an earlier segment already wrote.
+    ///
+    /// The MKV demuxer, on `av_seek_frame`, marks the first returned
+    /// packet as a keyframe even when it isn't structurally an IDR
+    /// in the source. seg N's sequential read may have walked past
+    /// the same packet without seeing the KEY flag (so the loop kept
+    /// writing through to the next "real" keyframe), then seg N+1's
+    /// post-seek read sees the packet again, now flagged KEY, and
+    /// adopts it as its segment-start IDR. The same packet gets
+    /// queued for the muxer twice from two different segments, the
+    /// second write's DTS lands inside seg N's already-written
+    /// range, and the mp4 muxer rejects with EINVAL (it enforces
+    /// per-stream DTS monotonicity even across `frag_custom`
+    /// fragments).
+    ///
+    /// Tracking the highest written PTS and skipping anything at-or-
+    /// before it in subsequent reads dedupes the seek-overlap
+    /// without giving up on keyframe-aligned segment starts: the
+    /// loop simply walks forward until it finds the next packet
+    /// whose PTS is genuinely new, which is the next true random-
+    /// access point in source order.
+    private var lastWrittenVideoSrcPts: Int64?
+
     init(
         demuxer: Demuxer,
         videoStreamIndex: Int32,
@@ -830,6 +856,20 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
                 if streamIdx == videoStreamIndex {
                     let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0
+                    // Drop any packet a previous segment already
+                    // wrote to the muxer. After `av_seek_frame` the
+                    // demuxer artificially marks the first returned
+                    // packet as a keyframe; without this guard, a
+                    // packet that seg N walked past as non-key gets
+                    // re-presented as seg N+1's segment-start IDR,
+                    // and the mp4 muxer rejects the second write
+                    // with EINVAL because the DTS goes backwards
+                    // against seg N's last submission.
+                    if let last = lastWrittenVideoSrcPts,
+                       packet.pointee.pts != Int64.min,
+                       packet.pointee.pts <= last {
+                        continue
+                    }
                     if !foundSegmentStart {
                         // Wait for the first IDR at-or-after the segment
                         // start. Skip pre-roll non-key packets and any
@@ -856,6 +896,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                         break
                     }
                     try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
+                    if packet.pointee.pts != Int64.min {
+                        lastWrittenVideoSrcPts = packet.pointee.pts
+                    }
                     didEnqueueAnyVideo = true
                     videoCount += 1
                 } else if let aIdx = audioStreamIndex,
