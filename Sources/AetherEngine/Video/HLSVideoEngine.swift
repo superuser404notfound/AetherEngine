@@ -126,6 +126,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     // MARK: - State
 
     private let sourceURL: URL
+    /// Whether the host's display pipeline can actually engage Dolby
+    /// Vision mode on the HDMI handshake. When false (e.g. the user
+    /// disabled "Match Dynamic Range" in tvOS Settings, or the TV
+    /// just isn't DV-capable), DV-tagged fragments are rejected by
+    /// AVPlayer at asset-load time. We respond by downgrading the
+    /// muxed sample-entry tag to `hvc1` and emitting a plain HEVC
+    /// CODECS string — DV P8.1 then plays as its HDR10 base layer,
+    /// and AVPlayer's automatic tone-mapping (preferredDynamicRange
+    /// defaults to standard) handles the HDR10→SDR conversion. DV
+    /// P5 sources also play in this mode but lose colour fidelity,
+    /// since their bitstream is IPT-PQ-c2 rather than BT.2020 PQ.
+    private let dvModeAvailable: Bool
     private var demuxer: Demuxer?
     private var server: HLSLocalServer?
     private var provider: VideoSegmentProvider?
@@ -136,8 +148,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// authoring recommendation.
     private static let targetSegmentDuration: Double = 6.0
 
-    public init(url: URL) {
+    public init(url: URL, dvModeAvailable: Bool = true) {
         self.sourceURL = url
+        self.dvModeAvailable = dvModeAvailable
     }
 
     // MARK: - Public API
@@ -272,6 +285,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
             let safeProfile = profileIDC > 0 ? profileIDC : 100  // High
             let safeLevel = levelIDC > 0 ? levelIDC : 40         // 4.0
             primaryCodecs = String(format: "avc1.%02X%02X%02X", safeProfile, 0, safeLevel)
+            supplementalCodecs = nil
+            dvVariant = .none
+        } else if !dvModeAvailable {
+            // HEVC source on a non-DV display path. Skip DV variant
+            // detection entirely and emit plain HEVC with the source
+            // transfer characteristic (PQ for DV / HDR10 / HDR10+
+            // bases, HLG for HLG sources, SDR otherwise). AVPlayer's
+            // automatic preferredDynamicRange=standard tone-mapping
+            // handles the HDR→SDR conversion on the SDR panel that
+            // Match Content's "off" state effectively locks us into.
+            // This is the workaround for AVPlayer rejecting dvh1-
+            // tagged assets with `-11868 'Cannot Open'` whenever the
+            // user has Match Dynamic Range disabled in tvOS Settings.
+            codecTagOverride = "hvc1"
+            let hevcLevelRaw = Int(codecpar.pointee.level)
+            let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
+            let trc = codecpar.pointee.color_trc
+            if trc == AVCOL_TRC_ARIB_STD_B67 {
+                videoRange = .hlg
+            } else if trc == AVCOL_TRC_SMPTE2084 {
+                videoRange = .pq
+            } else {
+                videoRange = .sdr
+            }
+            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
             supplementalCodecs = nil
             dvVariant = .none
         } else {

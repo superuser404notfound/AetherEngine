@@ -317,9 +317,9 @@ public final class AetherEngine: ObservableObject {
     /// method is purely additive and does not interfere with the
     /// FFmpeg + VideoToolbox pipeline. The host must call
     /// `stopNativeVideoSession()` when the AVPlayer session ends.
-    public func startNativeVideoSession(url: URL) throws -> URL {
+    public func startNativeVideoSession(url: URL, dvModeAvailable: Bool = true) throws -> URL {
         stopNativeVideoSession()
-        let session = HLSVideoEngine(url: url)
+        let session = HLSVideoEngine(url: url, dvModeAvailable: dvModeAvailable)
         let playbackURL = try session.start()
         self.nativeVideoSession = session
         return playbackURL
