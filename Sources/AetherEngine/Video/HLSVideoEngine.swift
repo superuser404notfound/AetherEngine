@@ -189,27 +189,36 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }
 
-        // 2. Build the segment plan. The original implementation read
-        //    `avformat_index_get_entry` to enumerate every keyframe
-        //    and snap segment boundaries to real keyframes but for
-        //    MKV files served over HTTP byte-range, the cues are
-        //    parsed lazily on first seek, not at
-        //    `avformat_find_stream_info` time, so the index is
-        //    always empty here and `noKeyframeIndex` (== Error 3)
-        //    fired on every native session. DrHurt's build-115
-        //    report.
+        // 2. Build the segment plan. The previous uniform-stride
+        //    plan generated 6-second segments at fixed times, then
+        //    mediaSegment(at:) ran a runtime IRAP search to snap
+        //    each cut to a real keyframe. That worked for the muxer
+        //    (each fragment was self-contained), but the playlist's
+        //    EXTINF times never matched the fragment's actual
+        //    content range — for a source with irregular GOPs the
+        //    drift between "playlist says seg N is at 294–300" and
+        //    "fragment's tfdt says decode at 300.6" could reach
+        //    several seconds per fragment. AVPlayer used the tfdt
+        //    correctly but mapped scrubs through the playlist, so
+        //    after a handful of scrubs the player's idea of where
+        //    each fragment lives diverged from where its bytes
+        //    actually played, surfacing as the "video freezes,
+        //    audio continues" symptom Vincent kept seeing.
         //
-        //    Switch to uniform `targetSegmentDuration` segments
-        //    keyed off the source's reported duration. The actual
-        //    fragment cuts happen during `mediaSegment(at:)` where
-        //    we read packets and stop on the next IDR keyframe at
-        //    or after the segment's end-PTS, so the resulting
-        //    fragments are still keyframe-aligned even though the
-        //    plan doesn't know which keyframe in advance. The
-        //    EXTINF in the manifest is the nominal duration, the
-        //    `trun` durations in the moof reflect reality, and
-        //    AVPlayer reads the moof's `trun` and adjusts its
-        //    buffer math accordingly.
+        //    Fix: build the segment plan from real IRAP positions
+        //    in the source's libavformat index after the cue prewarm
+        //    seek has populated it. Each segment boundary is now a
+        //    known keyframe in the source — the playlist EXTINF and
+        //    the fragment tfdt agree exactly. The historical "index
+        //    always empty" problem (DrHurt's build-115) was solved
+        //    by adding the cue prewarm step below, but the segment
+        //    plan never started reading from the index until this
+        //    change.
+        //
+        //    Sources where the index is still empty after prewarm
+        //    (some non-MKV containers, malformed cue tables) fall
+        //    back to the uniform plan. Same runtime IRAP search
+        //    handles boundaries in that path.
         let videoTimeBase = videoStream.pointee.time_base
         let durationSeconds = dem.duration
         guard durationSeconds > 0 else {
@@ -219,27 +228,36 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Prewarm the MKV cue table. avformat_seek_file's first
         // invocation on an MKV source lazily parses the Cues element
         // from the file tail, which fans out into one or two HTTP
-        // byte-range reads through the AVIO callback. On Vincent's
-        // session-start TestFlight log the first forward scrub paid
-        // a 172 ms `seek=` cost from that lazy parse landing on the
-        // critical path between user-commit and first frame. Doing
-        // the seek here amortises the cost into session start —
-        // AVPlayer hasn't asked for init.mp4 yet (start() hasn't
-        // returned a URL) so the user-perceived latency is hidden.
-        // Subsequent seeks pay 1-10 ms because the parsed cues are
-        // cached on the AVFormatContext. The seek target is mid-
-        // duration rather than a corner so that any cached AVIO
-        // bytes left over after the prewarm are usable by
-        // mid-movie resume positions.
+        // byte-range reads through the AVIO callback. Mid-duration
+        // seek target so any cached AVIO bytes left over after the
+        // prewarm are still usable by mid-movie resume positions.
         let prewarmStart = DispatchTime.now()
         dem.seek(to: durationSeconds * 0.5)
         let prewarmMs = Double(DispatchTime.now().uptimeNanoseconds - prewarmStart.uptimeNanoseconds) / 1_000_000
         EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
 
-        let plan = buildUniformSegmentPlan(
-            videoTimeBase: videoTimeBase,
-            sourceDurationSeconds: durationSeconds
-        )
+        let keyframes = dem.indexedKeyframes(streamIndex: videoIndex)
+        let plan: [Segment]
+        if keyframes.count >= 2 {
+            plan = buildKeyframeSegmentPlan(
+                keyframes: keyframes,
+                videoTimeBase: videoTimeBase,
+                sourceDurationSeconds: durationSeconds
+            )
+            EngineLog.emit(
+                "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments",
+                category: .session
+            )
+        } else {
+            plan = buildUniformSegmentPlan(
+                videoTimeBase: videoTimeBase,
+                sourceDurationSeconds: durationSeconds
+            )
+            EngineLog.emit(
+                "[HLSVideoEngine] segment plan: uniform stride fallback (\(keyframes.count) IRAPs in index, need >=2)",
+                category: .session
+            )
+        }
 
         // 4. Classify the DV variant and compute the master-playlist
         //    CODECS string. For AVPlayer-only consumption (which is
@@ -689,6 +707,87 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 durationSeconds: max(0.001, endSeconds - startSeconds)
             ))
         }
+        return plan
+    }
+
+    /// Build a segment plan anchored at real keyframes from
+    /// libavformat's index. Each segment boundary is a known IRAP
+    /// position in the source, so the playlist's `EXTINF` time
+    /// matches the fragment's `tfdt` exactly — no drift between
+    /// "where AVPlayer maps a scrub" and "where the bytes actually
+    /// play".
+    ///
+    /// Segments coalesce consecutive short GOPs to approximate the
+    /// `targetSegmentDuration` (6 s). At 24 fps with 1 s GOPs that
+    /// merges 6 GOPs into one segment; at 1 GOP every 5 s, one GOP
+    /// per segment; at one IRAP every 12 s, the segment is 12 s
+    /// long (still spec-legal — HLS `EXT-X-TARGETDURATION` will
+    /// reflect the longest actual segment).
+    ///
+    /// The last keyframe in the list anchors the final segment,
+    /// which extends to `sourceDurationSeconds`. Sources whose
+    /// declared duration is slightly less than the last keyframe
+    /// (off-by-one in MKV duration math) still produce a non-empty
+    /// final segment.
+    private func buildKeyframeSegmentPlan(
+        keyframes: [Int64],
+        videoTimeBase: AVRational,
+        sourceDurationSeconds: Double
+    ) -> [Segment] {
+        guard keyframes.count >= 2 else { return [] }
+        let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        guard tb > 0 else { return [] }
+        let target = Self.targetSegmentDuration
+
+        // FFmpeg's index entries should arrive in DTS order from the
+        // MKV Cues element, but defensively sort by timestamp so a
+        // misordered cue table doesn't produce backward segment
+        // boundaries.
+        let sorted = keyframes.sorted()
+
+        var plan: [Segment] = []
+        plan.reserveCapacity(sorted.count)
+        var i = 0
+        while i < sorted.count {
+            let segStartPts = sorted[i]
+            let segStartSeconds = Double(segStartPts) * tb
+
+            // Walk forward until either we cross the target duration
+            // or we run out of keyframes. The first IRAP whose
+            // distance from segStartPts exceeds `target` becomes the
+            // segment end (and the next segment's start).
+            var j = i + 1
+            while j < sorted.count {
+                let candidateSeconds = Double(sorted[j] - segStartPts) * tb
+                if candidateSeconds >= target { break }
+                j += 1
+            }
+
+            let segEndPts: Int64
+            let segEndSeconds: Double
+            if j < sorted.count {
+                segEndPts = sorted[j]
+                segEndSeconds = Double(segEndPts) * tb
+            } else {
+                // Last segment runs to end-of-file. Compute endPts
+                // from declared duration even if the demuxer's
+                // duration is slightly past the last keyframe; the
+                // muxer will simply read until EOF or until packets
+                // run dry.
+                segEndSeconds = sourceDurationSeconds
+                segEndPts = Int64(sourceDurationSeconds / tb)
+            }
+
+            plan.append(Segment(
+                startPts: segStartPts,
+                endPts: segEndPts,
+                startSeconds: segStartSeconds,
+                durationSeconds: max(0.001, segEndSeconds - segStartSeconds)
+            ))
+
+            i = j
+        }
+
         return plan
     }
 

@@ -236,6 +236,51 @@ final class Demuxer {
         return ctx.pointee.streams[Int(index)]
     }
 
+    /// Enumerate the source's keyframe positions for the given stream
+    /// from libavformat's index, returning each entry's `timestamp`
+    /// field in the stream's native timebase.
+    ///
+    /// MKV / Matroska sources populate their index from the `Cues`
+    /// element, which is parsed lazily on the first seek. To get a
+    /// useful answer from this method on those sources, the caller
+    /// must have already issued a seek (the cue-prewarm in
+    /// `HLSVideoEngine.start()` does this). Sources that ship a
+    /// keyframe index in their header (MP4 `stss`, MPEG-TS pcr-based,
+    /// etc.) populate it during `avformat_find_stream_info` and are
+    /// ready immediately.
+    ///
+    /// Returns an empty array when the index is empty or the stream
+    /// index is invalid — callers should treat that as "no usable
+    /// index, fall back to a uniform-stride plan".
+    ///
+    /// FFmpeg's index entries are all keyframe seek points by
+    /// definition; the `AVINDEX_KEYFRAME` bit is checked defensively
+    /// in case a future libavformat version starts mixing
+    /// non-keyframe seek targets in.
+    func indexedKeyframes(streamIndex: Int32) -> [Int64] {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext,
+              streamIndex >= 0,
+              streamIndex < Int32(ctx.pointee.nb_streams),
+              let stream = ctx.pointee.streams[Int(streamIndex)] else {
+            return []
+        }
+        let count = avformat_index_get_entries_count(stream)
+        guard count > 0 else { return [] }
+        var result: [Int64] = []
+        result.reserveCapacity(Int(count))
+        for i in 0..<count {
+            guard let entry = avformat_index_get_entry(stream, i) else { continue }
+            // AVINDEX_KEYFRAME = 0x0001
+            if entry.pointee.flags & 0x0001 != 0,
+               entry.pointee.timestamp != Int64.min {
+                result.append(entry.pointee.timestamp)
+            }
+        }
+        return result
+    }
+
     /// Read the next packet from the container.
     /// Returns the packet on success, nil at EOF.
     /// Throws on read errors (network failure, corrupt data, etc).
