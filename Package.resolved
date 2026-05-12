@@ -1,5 +1,5 @@
 {
-  "originHash" : "0ce5428f46d6c3b9f25035f30c783b84d3883c9fcd44c873bde9ebadbc657a22",
+  "originHash" : "d7bbde1f5d8c8b86938fa93c5cd598ba250f93f5f53d5e4531eada69ccd04f74",
   "pins" : [
     {
       "identity" : "ffmpegbuild",
@@ -7,7 +7,7 @@
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
         "branch" : "main",
-        "revision" : "ebbca7f4b7fb5f772af9378d5030e54669c46704"
+        "revision" : "66730537da51f642ba13b07db5cafe939b0bfe48"
       }
     }
   ],
