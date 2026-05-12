@@ -594,6 +594,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioStreamIndex: resolvedAudioStreamIndex >= 0 ? resolvedAudioStreamIndex : nil,
             videoTimeBase: videoTimeBase,
             videoCodecID: codecpar.pointee.codec_id,
+            videoConfig: videoConfig,
+            audioConfig: audioConfig,
             muxer: muxer,
             audioBridge: audioBridge,
             initSegmentData: initSegmentData,
@@ -776,8 +778,28 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     /// (HEVC vs H.264). Stored at session start so the per-packet
     /// parse doesn't have to re-walk the demuxer's stream list.
     private let videoCodecID: AVCodecID
-    private let muxer: FMP4VideoMuxer
+    /// Stream configs cached so the session-wide muxer can be torn
+    /// down and rebuilt with identical track shape whenever a
+    /// backward scrub leaves its `last_dts` stale. The muxer's mp4
+    /// implementation enforces per-stream DTS monotonicity across
+    /// fragments and a fresh instance is the only way to clear it
+    /// without disturbing the audio bridge's per-session encoder
+    /// state.
+    private let videoConfig: FMP4VideoMuxer.StreamConfig
+    private let audioConfig: FMP4VideoMuxer.StreamConfig?
+    /// Mutable so backward-seek detection can swap in a fresh
+    /// instance with cleared state.
+    private var muxer: FMP4VideoMuxer
     private let audioBridge: AudioBridge?
+
+    /// Source-time-base PTS of the last video packet the current
+    /// muxer instance successfully accepted. Compared against the
+    /// next segment's `startPts` to detect a backward jump: if the
+    /// caller is asking for a segment that lives behind the muxer's
+    /// last write, the muxer's monotonic-DTS gate would reject the
+    /// first packet with EINVAL. Resetting the muxer before the
+    /// write avoids that without per-segment teardown.
+    private var lastSubmittedVideoSrcPts: Int64?
 
     private let initSegmentData: Data
     private let segments: [HLSVideoEngine.Segment]
@@ -798,6 +820,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         audioStreamIndex: Int32?,
         videoTimeBase: AVRational,
         videoCodecID: AVCodecID,
+        videoConfig: FMP4VideoMuxer.StreamConfig,
+        audioConfig: FMP4VideoMuxer.StreamConfig?,
         muxer: FMP4VideoMuxer,
         audioBridge: AudioBridge?,
         initSegmentData: Data,
@@ -814,6 +838,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.audioStreamIndex = audioStreamIndex
         self.videoTimeBase = videoTimeBase
         self.videoCodecID = videoCodecID
+        self.videoConfig = videoConfig
+        self.audioConfig = audioConfig
         self.muxer = muxer
         self.audioBridge = audioBridge
         self.initSegmentData = initSegmentData
@@ -855,6 +881,46 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         lock.lock()
         defer { lock.unlock() }
         guard !isClosed else { return nil }
+
+        // Backward-seek muxer reset. The mp4 muxer enforces per-
+        // stream DTS monotonicity across `frag_custom` fragments,
+        // so a session-wide muxer that has been writing forward
+        // up to source-PTS X cannot accept a packet at source-PTS
+        // < X — the first writePacket of a behind-the-cursor
+        // segment returns EINVAL. AVPlayer's scrub-backward UX
+        // hits this cleanly: every backward jump strands the muxer
+        // with state from the previously-played forward range.
+        //
+        // Detection: compare the segment's nominal start-PTS to
+        // the source-time PTS of the muxer's last successful video
+        // write. If the segment is behind, tear down and rebuild
+        // the muxer with the same configs. The audio bridge keeps
+        // its session-wide encoder state across the reset, so the
+        // FLAC stream stays continuous from AVPlayer's perspective.
+        //
+        // Forward play (and forward scrubs) skip this branch
+        // entirely — the muxer keeps running with its current
+        // state, no reinit cost.
+        if let lastPts = lastSubmittedVideoSrcPts,
+           seg.startPts < lastPts {
+            EngineLog.emit(
+                "[HLSVideoEngine] backward-seek detected: seg\(index) startPts=\(seg.startPts) < lastSubmittedPts=\(lastPts), resetting muxer"
+            )
+            muxer.close()
+            do {
+                muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
+                _ = try muxer.writeInitSegment()
+            } catch {
+                EngineLog.emit("[HLSVideoEngine] muxer reset failed at seg\(index): \(error)")
+                return nil
+            }
+            lastSubmittedVideoSrcPts = nil
+            // Audio bridge stays alive on purpose. Drain its
+            // per-fragment FIFO so the FLAC stream doesn't carry
+            // stale samples from the previous timeline into the
+            // new muxer's first fragment.
+            audioBridge?.startSegment()
+        }
 
         // Seek to the start of this segment. Demuxer.seek expects
         // seconds (it converts to AV_TIME_BASE internally and uses
@@ -935,6 +1001,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                         break
                     }
                     try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
+                    if packet.pointee.pts != Int64.min {
+                        lastSubmittedVideoSrcPts = packet.pointee.pts
+                    }
                     didEnqueueAnyVideo = true
                     videoCount += 1
                 } else if let aIdx = audioStreamIndex,
