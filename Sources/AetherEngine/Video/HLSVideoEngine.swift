@@ -563,6 +563,26 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let streamIdx = packet.pointee.stream_index
                 seenStreamIdx.insert(streamIdx)
                 if streamIdx == videoIndex, !gotVideo {
+                    // Rewrite pts/dts to 0 before submitting. The
+                    // fragment portion of this throwaway muxer's
+                    // output is discarded — only the moov metadata
+                    // (hvcC / avcC / dec3 etc) matters. But movenc
+                    // remembers the first packet's dts as the
+                    // track's `start_dts` and emits an `edts/elst`
+                    // empty-edit in the moov whose duration equals
+                    // that start_dts in mvhd timescale. The packet
+                    // we see here comes from wherever the cue
+                    // prewarm landed (typically `durationSeconds *
+                    // 0.5`), so on a multi-hour source the elst
+                    // tells AVPlayer to skip half the asset's
+                    // playable duration before showing anything,
+                    // and the resulting offset between asset time
+                    // and HLS playlist EXTINF cumulative time
+                    // produces the cross-segment-boundary stalls
+                    // and A/V drift Vincent kept reporting after
+                    // the first segment played cleanly.
+                    packet.pointee.pts = 0
+                    packet.pointee.dts = 0
                     try m.writePacket(packet, toStreamIndex: m.videoOutputIndex)
                     gotVideo = true
                 } else if streamIdx == resolvedAudioStreamIndex,
@@ -571,12 +591,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     if let bridge = audioBridge {
                         let flacPackets = try bridge.feed(packet: packet)
                         for fp in flacPackets {
+                            // Same elst-defence as video. Audio
+                            // packets here are only for dec3 etc;
+                            // monotonic small timestamps starting
+                            // at 0 keep movenc from emitting an
+                            // empty edit on the audio track.
+                            fp.pointee.pts = Int64(audioWritten)
+                            fp.pointee.dts = Int64(audioWritten)
                             try m.writePacket(fp, toStreamIndex: aOutIdx)
                             var pPtr: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&pPtr)
                             audioWritten += 1
                         }
                     } else {
+                        packet.pointee.pts = Int64(audioWritten)
+                        packet.pointee.dts = Int64(audioWritten)
                         try m.writePacket(packet, toStreamIndex: aOutIdx)
                         audioWritten += 1
                     }
