@@ -490,6 +490,78 @@ final class FMP4VideoMuxer {
         cleanup()
     }
 
+    // MARK: - Stateless fragment generation
+
+    /// One-shot fragment muxing. Spins up a fresh `FMP4VideoMuxer`,
+    /// writes the init segment (discarded — the session-wide init.mp4
+    /// is captured once at session start and served separately), feeds
+    /// the supplied packets, flushes the resulting `moof`+`mdat`, and
+    /// tears the muxer down.
+    ///
+    /// Why this exists: the long-lived muxer model used in the
+    /// original `HLSVideoEngine` enforces per-stream DTS monotonicity
+    /// across every fragment of the session. That's a poor fit for an
+    /// on-demand HLS server where AVPlayer can request segments in
+    /// arbitrary order (scrub) and our IRAP-boundary detection isn't
+    /// perfectly accurate. Cross-fragment DTS overlap then triggers
+    /// EINVAL inside libavformat, which the stateful path papered over
+    /// with pre-emptive + reactive muxer resets — each of which created
+    /// fresh sequence-number resets and produced subtle playback
+    /// hangs.
+    ///
+    /// Going stateless removes that whole class of failure. Each
+    /// fragment is muxed by an isolated FFmpeg muxer instance with no
+    /// recollection of prior fragments. `tfdt` carries the absolute
+    /// decode time of the fragment's first sample, which is the only
+    /// timing the AVPlayer-side timeline needs — mfhd.sequence_number
+    /// resets to 1 every fragment, which AVPlayer treats as a per-
+    /// fragment dedup hint per the HLS/CMAF spec (the long-lived path
+    /// already verified empirically that AVPlayer doesn't enforce
+    /// monotonicity across fragments).
+    ///
+    /// Per-fragment overhead: one extra `avformat_write_header` call
+    /// (~1–3 ms on Apple TV) plus the muxer alloc + cleanup. Negligible
+    /// against the demux+seek+packet-read cost already paid per
+    /// fragment.
+    ///
+    /// Packet lifetimes: the caller retains ownership of the supplied
+    /// packets. The muxer's `writePacket` clones internally, so the
+    /// originals can be freed by the caller after this function
+    /// returns. Packets are submitted to the muxer in the order given,
+    /// per-stream (video first, then audio); FFmpeg's interleaver
+    /// reorders them in the output `mdat` as needed.
+    ///
+    /// `audioOutputIndex` must be 1 when `audio` is non-nil, matching
+    /// the stream creation order in `init(video:audio:)`.
+    static func writeFragmentStateless(
+        video: StreamConfig,
+        audio: StreamConfig?,
+        videoPackets: [UnsafeMutablePointer<AVPacket>],
+        audioPackets: [UnsafeMutablePointer<AVPacket>]
+    ) throws -> Data {
+        let muxer = try FMP4VideoMuxer(video: video, audio: audio)
+        defer { muxer.close() }
+
+        _ = try muxer.writeInitSegment()
+        // Drop the init bytes the fresh header produced. The session-
+        // wide init.mp4 captured once at session start is what the
+        // HLS server hands to AVPlayer; per-fragment init regeneration
+        // here is just a libavformat prerequisite for `av_write_frame`
+        // to accept any packets at all.
+        _ = muxer.drainCaptureBuffer()
+
+        for pkt in videoPackets {
+            try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
+        }
+        if let audioIdx = muxer.audioOutputIndex {
+            for pkt in audioPackets {
+                try muxer.writePacket(pkt, toStreamIndex: audioIdx)
+            }
+        }
+
+        return try muxer.flushFragment()
+    }
+
     // MARK: - Internal
 
     fileprivate func handleWrite(buf: UnsafePointer<UInt8>, size: Int32) -> Int32 {

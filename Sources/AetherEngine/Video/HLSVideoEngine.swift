@@ -21,51 +21,6 @@ import Libavutil
 /// video for now, which is enough to verify the DV signalling path.
 public final class HLSVideoEngine: @unchecked Sendable {
 
-    // MARK: - Diagnostics
-
-    /// Cumulative muxer-reset stats for the current session. Sodalite's
-    /// Support / Diagnostics view can poll this; the host doesn't have
-    /// to subscribe to anything because the values are derived state
-    /// that only updates on observable boundary events (scrub, EINVAL).
-    ///
-    /// `preemptive` counts resets triggered by the DTS-watermark check
-    /// up front in `mediaSegment(at:)`. `reactive` counts resets
-    /// triggered by `av_interleaved_write_frame` returning EINVAL on
-    /// the first write of a fragment — i.e. the slack window missed a
-    /// real backward seek. A healthy session should have many
-    /// `preemptive` and zero `reactive`; the inverse means the slack
-    /// is mistuned for the source's GOP length.
-    public struct ResetStats: Sendable, Equatable {
-        public var total: Int
-        public var preemptive: Int
-        public var reactive: Int
-        /// Wall-clock duration of the most recent reset (close old
-        /// muxer + build new + write init segment + drain audio
-        /// bridge). Used to flag pathological resets that take long
-        /// enough to be user-visible.
-        public var lastDurationMs: Double
-        /// Free-form `reason` string from the most recent reset
-        /// (e.g. `"backward-seek pre-empt seg42 ..."`). Useful when
-        /// a user reports "playback paused for a second" and we
-        /// want to correlate against scrub history.
-        public var lastReason: String
-
-        public init(total: Int = 0, preemptive: Int = 0, reactive: Int = 0, lastDurationMs: Double = 0, lastReason: String = "") {
-            self.total = total
-            self.preemptive = preemptive
-            self.reactive = reactive
-            self.lastDurationMs = lastDurationMs
-            self.lastReason = lastReason
-        }
-    }
-
-    /// Snapshot of the current reset counters. Reads from the provider
-    /// under its lock so partial updates aren't observable. Returns a
-    /// zero-valued snapshot before `start()` has wired the provider.
-    public var resetStats: ResetStats {
-        provider?.resetStatsSnapshot() ?? ResetStats()
-    }
-
     // MARK: - Errors
 
     public enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
@@ -503,58 +458,43 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // from waiting on a track we won't actually emit.
         var manifestCodecs = audioHLSCodec.map { "\(codecsString),\($0)" } ?? codecsString
 
-        // 6. Build the per-session muxer, generate the init segment.
-        //    The muxer is reused across every fragment in this
-        //    session; segments may be requested out of order (seeks)
-        //    but per ISO BMFF the `mfhd.sequence_number` is only a
-        //    "recommended monotonic" hint, not load-bearing for
-        //    AVPlayer playback.
+        // 6. Capture the init segment. A throwaway muxer is built per
+        //    the resolved stream configs, its `avformat_write_header`
+        //    produces the `ftyp`+`moov` bytes we'll serve as
+        //    /init.mp4 throughout the session, and we then dispose
+        //    the muxer. Each subsequent fragment is muxed by an
+        //    independent fresh `FMP4VideoMuxer` instance — that's the
+        //    stateless-fragment model that eliminates the cross-
+        //    fragment DTS-monotonicity coupling. The captured init
+        //    bytes bind the track IDs and codec configs every later
+        //    fragment must reference; since the same `StreamConfig`
+        //    drives every per-fragment muxer, libavformat picks the
+        //    same track IDs and box layout deterministically.
         let videoConfig = FMP4VideoMuxer.StreamConfig(
             codecpar: codecpar,
             timeBase: videoTimeBase,
             codecTagOverride: codecTagOverride
         )
-        // The muxer is built and the init segment is written in one
-        // attempt with audio, then retried video-only if that throws.
-        // Reason: FFmpeg's mov muxer requires pre-parsed extradata
-        // for some audio codecs (notably EAC3, where the dec3 box
-        // bytes have to be derived from the bitstream). MKV sources
-        // sometimes don't carry that extradata in CodecPrivate, so
-        // `avformat_write_header` returns -22 (EINVAL) before any
-        // packet has been read. DrHurt's build with the latest
-        // changes hit this for a P5 + EAC3 source. Falling back to a
-        // video-only mux at least gets DV mode engaged on the TV
-        // (with silent video) instead of dropping the whole .native
-        // route and reverting to AetherEngine's HDR10 base output.
-        // Helper that builds a muxer + writes its init segment.
-        // Used twice in the fallback path: first with audio, then
-        // (if that fails) without.
-        func buildMuxerAndInit(audio: FMP4VideoMuxer.StreamConfig?) throws -> (FMP4VideoMuxer, Data) {
+        // FFmpeg's mov muxer requires pre-parsed extradata for some
+        // audio codecs (notably EAC3, where the dec3 box bytes have
+        // to be derived from the bitstream). MKV sources sometimes
+        // don't carry that extradata in CodecPrivate, so
+        // avformat_write_header returns -22 (EINVAL) before any
+        // packet has been read. The fallback chain is: stream-copy
+        // first, FLAC bridge second (decode → S16 PCM → FLAC, which
+        // always works because the encoder synthesises its own
+        // codec-private from PCM input — loses Atmos JOC, but better
+        // than silent video), video-only last.
+        func captureInit(audio: FMP4VideoMuxer.StreamConfig?) throws -> Data {
             let m = try FMP4VideoMuxer(video: videoConfig, audio: audio)
-            do {
-                let init_ = try m.writeInitSegment()
-                return (m, init_)
-            } catch {
-                m.close()
-                throw error
-            }
+            defer { m.close() }
+            return try m.writeInitSegment()
         }
-        let muxer: FMP4VideoMuxer
         let initSegmentData: Data
         var audioWasIncluded = audioConfig != nil
         do {
-            (muxer, initSegmentData) = try buildMuxerAndInit(audio: audioConfig)
+            initSegmentData = try captureInit(audio: audioConfig)
         } catch {
-            // Stream-copy attempt failed. Try the FLAC bridge as a
-            // second pass before giving up on audio entirely.
-            // Typical trigger: EAC3 from MKV where the muxer can't
-            // derive `dec3` box bytes without pre-parsed extradata.
-            // DrHurt's build-118 P5+EAC3 hit this with `avformat_
-            // write_header failed (-22)`. The FLAC bridge always
-            // works because the encoder synthesises its own codec-
-            // private from PCM input. Loses Atmos JOC metadata
-            // because the spatial mix is decoded to multichannel
-            // PCM before re-encoding, but better than silent video.
             if audioBridge == nil,
                audioConfig != nil,
                let audioStream = audioStreamPtr {
@@ -570,7 +510,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                             timeBase: bridge.encoderTimeBase,
                             codecTagOverride: nil
                         )
-                        (muxer, initSegmentData) = try buildMuxerAndInit(audio: bridgedConfig)
+                        initSegmentData = try captureInit(audio: bridgedConfig)
                         audioConfig = bridgedConfig
                         audioHLSCodec = "fLaC"
                         audioBridge = bridge
@@ -579,10 +519,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         throw error
                     }
                 } catch {
-                    // Bridge attempt also failed. Fall back to video-only.
                     EngineLog.emit("[HLSVideoEngine] FLAC bridge attempt also failed (\(error)), retrying video-only")
                     do {
-                        (muxer, initSegmentData) = try buildMuxerAndInit(audio: nil)
+                        initSegmentData = try captureInit(audio: nil)
                     } catch {
                         throw HLSVideoEngineError.muxerInit(underlying: error)
                     }
@@ -593,12 +532,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     audioWasIncluded = false
                 }
             } else if audioConfig != nil {
-                // Bridge was already in use and failed at header
-                // write, or audioStreamPtr is nil. Either way, fall
-                // back to video-only.
                 EngineLog.emit("[HLSVideoEngine] muxer/header init failed (\(error.localizedDescription)), retrying video-only")
                 do {
-                    (muxer, initSegmentData) = try buildMuxerAndInit(audio: nil)
+                    initSegmentData = try captureInit(audio: nil)
                 } catch {
                     throw HLSVideoEngineError.muxerInit(underlying: error)
                 }
@@ -662,7 +598,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoCodecID: codecpar.pointee.codec_id,
             videoConfig: videoConfig,
             audioConfig: audioConfig,
-            muxer: muxer,
             audioBridge: audioBridge,
             initSegmentData: initSegmentData,
             segments: plan,
@@ -831,8 +766,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
 /// `HLSSegmentProvider` impl that generates each fMP4 fragment on
 /// demand the first time AVPlayer GETs `seg{N}.mp4`. Holds the
-/// session's demuxer + muxer behind a serial lock; concurrent
-/// fetches block each other instead of racing the demuxer.
+/// session's demuxer behind a serial lock; concurrent fetches block
+/// each other instead of racing the demuxer.
+///
+/// Each fragment is muxed by a fresh `FMP4VideoMuxer` instance via
+/// `writeFragmentStateless`. The provider never holds a long-lived
+/// muxer — the session's init.mp4 was captured once at session start
+/// and is served byte-identical to every AVPlayer request, while each
+/// media-segment fragment carries the absolute `tfdt` that lets
+/// AVPlayer position it on the timeline independent of fragment
+/// order. This removes the cross-fragment DTS-monotonicity coupling
+/// that the long-lived-muxer model imposed and that didn't survive
+/// imperfect IRAP boundary detection.
 private final class VideoSegmentProvider: HLSSegmentProvider {
 
     private let demuxer: Demuxer
@@ -844,47 +789,17 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     /// (HEVC vs H.264). Stored at session start so the per-packet
     /// parse doesn't have to re-walk the demuxer's stream list.
     private let videoCodecID: AVCodecID
-    /// Stream configs cached so the session-wide muxer can be torn
-    /// down and rebuilt with identical track shape whenever a
-    /// backward scrub leaves its `last_dts` stale. The muxer's mp4
-    /// implementation enforces per-stream DTS monotonicity across
-    /// fragments and a fresh instance is the only way to clear it
-    /// without disturbing the audio bridge's per-session encoder
-    /// state.
+    /// Stream configs reused for every per-fragment fresh muxer.
+    /// Same configs → identical track IDs + codec configs → moof +
+    /// mdat fragments stay binary-compatible with the session-wide
+    /// init.mp4 served to AVPlayer.
     private let videoConfig: FMP4VideoMuxer.StreamConfig
     private let audioConfig: FMP4VideoMuxer.StreamConfig?
-    /// Mutable so backward-seek detection can swap in a fresh
-    /// instance with cleared state.
-    private var muxer: FMP4VideoMuxer
+    /// Per-session decode → S16 PCM → FLAC encoder. Stays long-lived
+    /// so its FLAC stream timestamps stay continuous across fragments;
+    /// `startSegment()` drains the FIFO and rearms PTS rebase at the
+    /// start of each `mediaSegment(at:)` call.
     private let audioBridge: AudioBridge?
-
-    /// Source-time-base DTS of the last successfully muxed video
-    /// packet. Tracking DTS (not PTS) avoids the B-frame false
-    /// positive that the earlier PTS-based detector produced: in
-    /// HEVC with B-frames, PTS > DTS for some packets, so seg N's
-    /// last packet (in DTS order) can have a PTS well past seg
-    /// N+1's nominal startPts even when the underlying DTS stream
-    /// is perfectly monotonic. DTS comparison is unambiguous.
-    private var lastSubmittedVideoSrcDts: Int64?
-
-    /// How far behind the muxer's last submitted DTS a segment's
-    /// start has to land before we consider it a real backward
-    /// scrub. Anything within this slack is treated as a normal
-    /// sequential / forward-scrub transition. The earlier 5 s
-    /// value was tuned for typical HEVC GOPs (1-3 s) but tripped
-    /// false positives on content with long GOPs: Vincent's
-    /// 1440x1080 MKV had a ~14 s GOP at one point, so seg N's
-    /// read loop overshot the nominal endPts by ~8 s past the
-    /// 5 s slack, and seg N+1's pre-emption check then fired on
-    /// every sequential request — triggering a useless muxer
-    /// rebuild + writeInitSegment per segment transition. 60 s
-    /// is well past any realistic single-GOP duration while
-    /// still narrow enough that a real backward scrub of more
-    /// than a minute gets caught. Smaller real backward scrubs
-    /// fall through to the reactive EINVAL handler in the read
-    /// loop, which is correct (and only ~5-10 ms slower than
-    /// pre-emptive detection per the timing diag).
-    private let backwardSeekSlackSeconds: Double = 60.0
 
     private let initSegmentData: Data
     private let segments: [HLSVideoEngine.Segment]
@@ -898,11 +813,6 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
     private let lock = NSLock()
     private var isClosed = false
-
-    /// Cumulative reset counters for the session. Mutated only under
-    /// `lock`, mirrored into the public-facing snapshot on each
-    /// observable boundary.
-    private var resetStats = HLSVideoEngine.ResetStats()
 
     /// LRU cache of generated segment bytes, keyed by segment
     /// index. Cache hits serve immediately without touching the
@@ -933,7 +843,6 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         videoCodecID: AVCodecID,
         videoConfig: FMP4VideoMuxer.StreamConfig,
         audioConfig: FMP4VideoMuxer.StreamConfig?,
-        muxer: FMP4VideoMuxer,
         audioBridge: AudioBridge?,
         initSegmentData: Data,
         segments: [HLSVideoEngine.Segment],
@@ -951,7 +860,6 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.videoCodecID = videoCodecID
         self.videoConfig = videoConfig
         self.audioConfig = audioConfig
-        self.muxer = muxer
         self.audioBridge = audioBridge
         self.initSegmentData = initSegmentData
         self.segments = segments
@@ -967,7 +875,6 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         lock.lock()
         guard !isClosed else { lock.unlock(); return }
         isClosed = true
-        muxer.close()
         audioBridge?.close()
         segmentCache.removeAll(keepingCapacity: false)
         cacheOrder.removeAll(keepingCapacity: false)
@@ -987,73 +894,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         return initSegmentData
     }
 
-    /// Tear down the current muxer instance and rebuild a fresh one
-    /// with the same stream configs. Called both pre-emptively
-    /// (when a backward seek is detected from the DTS watermark)
-    /// and reactively (when av_interleaved_write_frame returns
-    /// EINVAL on the first write of a segment). After the rebuild
-    /// the audio bridge's per-fragment FIFO is drained and the
-    /// encoder PTS is rearmed so the FLAC stream stays consistent
-    /// with the new video timeline.
-    ///
-    /// The segment cache is *not* cleared on reset. The mp4 muxer's
-    /// `mfhd.sequence_number` does restart at 1 with the fresh
-    /// instance, but every fragment we've already cached was
-    /// written by an earlier muxer instance and is structurally
-    /// self-contained (cached init.mp4 + cached moof+mdat). AVPlayer
-    /// reads the `tfdt` for timeline position and only cares about
-    /// `mfhd.sequence_number` for de-duplication within a fragment
-    /// reload, not for global monotonicity — the spec allows
-    /// arbitrary sequence numbers across segments. Keeping the
-    /// cache survives backward-scrub-bounce patterns (user
-    /// scrubs forward, scrubs back into cached region, scrubs
-    /// forward again — all three cache hits).
-    ///
-    /// `preemptive` flips the counter bucket: true for the up-front
-    /// DTS-watermark check, false for the in-loop EINVAL recovery.
-    /// Both buckets are useful — a healthy session should have most
-    /// resets in `preemptive`, and `reactive`>0 means our slack
-    /// window is undersized for the source's GOP length.
-    private func resetMuxer(reason: String, preemptive: Bool) throws {
-        let started = DispatchTime.now()
-        muxer.close()
-        muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
-        _ = try muxer.writeInitSegment()
-        audioBridge?.startSegment()
-        lastSubmittedVideoSrcDts = nil
-        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
-
-        resetStats.total += 1
-        if preemptive { resetStats.preemptive += 1 } else { resetStats.reactive += 1 }
-        resetStats.lastDurationMs = elapsedMs
-        resetStats.lastReason = reason
-
-        EngineLog.emit(
-            "[HLSVideoEngine] muxer reset (\(preemptive ? "pre-empt" : "reactive")) " +
-            "took=\(String(format: "%.1f", elapsedMs))ms total=\(resetStats.total) " +
-            "(pre=\(resetStats.preemptive) re=\(resetStats.reactive)) reason=\(reason)",
-            category: .scrub
-        )
-    }
-
-    /// Public accessor for the cumulative reset counters. Held under
-    /// `lock` so a concurrent reset cannot tear the snapshot.
-    func resetStatsSnapshot() -> HLSVideoEngine.ResetStats {
-        lock.lock()
-        defer { lock.unlock() }
-        return resetStats
-    }
-
     func mediaSegment(at index: Int) -> Data? {
         guard index >= 0, index < segments.count else { return nil }
         let seg = segments[index]
 
-        // Short request ID for log correlation. Each AVPlayer GET that
-        // makes it past the cache lane gets its own 8-char trace token,
-        // so a Console.app filter on `req=` lines up all the events
-        // (seek, IDR search, mux, flush, reset) from a single fetch.
-        // 8 hex chars from a UUID is far more than enough collision
-        // resistance for a single session's worth of segment fetches.
+        // Short request ID for log correlation. Console.app filter on
+        // `req=` lines up seek / IDR-search / mux / cache events from
+        // one AVPlayer GET into one timeline.
         let req = String(UUID().uuidString.prefix(8))
 
         lock.lock()
@@ -1062,11 +909,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
         let totalStart = DispatchTime.now()
 
-        // Cache fast path. If AVPlayer has fetched this exact
-        // segment before in the current session, the bytes are
-        // already in memory and we skip the entire demux / mux /
-        // bridge pipeline. Move the entry to the back of the LRU
-        // order so it survives the next eviction.
+        // Cache fast path. AVPlayer re-fetches segments on scrub-back
+        // patterns and during prefetch; cached fragments skip the
+        // whole demux + mux pipeline.
         if let cached = segmentCache[index] {
             cacheOrder.removeAll(where: { $0 == index })
             cacheOrder.append(index)
@@ -1078,84 +923,53 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
             return cached
         }
 
-        // Pre-emptive backward-seek detection. The session-wide mp4
-        // muxer holds a per-stream `last_dts` that the muxer
-        // enforces monotonically across fragments; if the user has
-        // scrubbed back to a position earlier than the muxer's
-        // current cursor, the *first* write of this segment would
-        // come back with EINVAL and we'd have to reset + retry
-        // reactively — a roundtrip we can skip by checking up
-        // front. The 5 s slack covers normal GOP-boundary overshoot
-        // (seg N's last packet typically lands ~0.5 s past
-        // `seg.endPts` because the loop breaks on the next IDR
-        // rather than the nominal end), so forward play never
-        // trips this branch.
-        if let lastDts = lastSubmittedVideoSrcDts {
-            let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
-            let slackTicks: Int64 = tb > 0
-                ? Int64(backwardSeekSlackSeconds / tb)
-                : 0
-            if lastDts > seg.startPts + slackTicks {
-                do {
-                    try resetMuxer(
-                        reason: "seg\(index) req=\(req) startPts=\(seg.startPts) < lastDts=\(lastDts) - slack=\(slackTicks)",
-                        preemptive: true
-                    )
-                } catch {
-                    EngineLog.emit(
-                        "[HLSVideoEngine] seg\(index) req=\(req) pre-empt muxer reset failed: \(error)",
-                        category: .scrub
-                    )
-                    return nil
-                }
-            }
-        }
-
-        // Seek to the start of this segment. Demuxer.seek expects
-        // seconds (it converts to AV_TIME_BASE internally and uses
-        // avformat_seek_file for MKV-safe seek behaviour).
+        // Seek the demuxer to this segment's start. Demuxer.seek
+        // expects seconds; it converts to AV_TIME_BASE internally
+        // and lands on the MKV cue ≤ target.
         let seekStart = DispatchTime.now()
         demuxer.seek(to: seg.startSeconds)
         let seekMs = Double(DispatchTime.now().uptimeNanoseconds - seekStart.uptimeNanoseconds) / 1_000_000
 
         // Reset the audio bridge's per-fragment state: drains its
-        // FIFO leftover and arms the encoder-PTS rebase so the next
+        // FIFO leftover and arms the encoder PTS rebase so the next
         // decoded source frame's pts becomes the FLAC stream base
         // for this fragment. Without this, FLAC packet timestamps
         // accumulate from the encoder's first-ever sample and drift
         // out of alignment with video as fragments march on.
         audioBridge?.startSegment()
 
+        // Collected packets owned by us — each is `av_packet_clone`d
+        // so its data buffer is refcounted independently of the
+        // demuxer's internal lifetime. Freed in the defer below,
+        // including the failure path.
+        var collectedVideo: [UnsafeMutablePointer<AVPacket>] = []
+        var collectedAudio: [UnsafeMutablePointer<AVPacket>] = []
+        defer {
+            for p in collectedVideo {
+                var ptr: UnsafeMutablePointer<AVPacket>? = p
+                av_packet_free(&ptr)
+            }
+            for p in collectedAudio {
+                var ptr: UnsafeMutablePointer<AVPacket>? = p
+                av_packet_free(&ptr)
+            }
+        }
+
         let readStart = DispatchTime.now()
-        // Wall-clock deadline for the read+mux loop. A 6 s target
-        // segment generally finishes in 200-600 ms on Apple TV against
-        // a local Jellyfin server; allowing 15 s gives ~25x headroom
-        // for slow links, lazy MKV cue parsing, or unusually long
-        // GOPs while still capping the worst case where a pathological
-        // source (no mid-stream keyframes, stalled HTTP byte-range)
-        // would otherwise run unbounded and pin the provider lock.
-        // The packet-count cap below (~30 s of source) covers the
-        // "no IDR ever" case in fast-source-time space; this deadline
-        // covers the "each packet read is slow" case in wall-clock
-        // space.
+        // Wall-clock deadline for the read loop. A 6 s target segment
+        // generally finishes in 200-600 ms on Apple TV against a
+        // local Jellyfin server; 15 s gives ~25x headroom for slow
+        // links and long GOPs while capping the worst case where a
+        // pathological source pins the provider lock.
         let segmentReadDeadlineNs = DispatchTime.now().uptimeNanoseconds + UInt64(15_000_000_000)
 
-        var videoCount = 0
-        var audioCount = 0
-        var didEnqueueAnyVideo = false
-        // After a seek, libavformat returns packets starting from the
-        // last keyframe at-or-before the requested time (standard
-        // backward-seek behaviour, required so the decoder can rebuild
-        // reference frames before the seek target). Re-feeding those
-        // pre-target packets into the per-session mp4 muxer breaks
-        // the per-stream monotonic-PTS invariant the muxer enforces:
-        // the second `av_interleaved_write_frame` call returns -22
-        // EINVAL because the new packet's PTS is lower than the
-        // previous fragment's last-written PTS. Skip everything until
-        // the first IDR at-or-after `seg.startPts`, so each fragment
-        // is self-contained and timestamps stay monotonic across
-        // fragments.
         var foundSegmentStart = false
+        // After a seek, libavformat returns packets starting from
+        // the last keyframe at-or-before the requested time (the
+        // decoder needs reference frames before the seek target).
+        // Skip everything until the first IRAP at-or-after
+        // `seg.startPts`, so the fragment's first sample is a sync
+        // sample and AVPlayer can decode from it cold.
         do {
             while let packet = try demuxer.readPacket() {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
@@ -1166,254 +980,133 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 if streamIdx == videoStreamIndex {
                     // RAP detection combines two signals:
                     //
-                    // 1. NAL-payload parse (primary, authoritative): walks
-                    //    the length-prefixed NAL units and looks for HEVC
-                    //    type 16-21 (IRAP) or H.264 type 5 (IDR). Pure
-                    //    function of the bitstream, no demuxer state
-                    //    involved, so the same source position always
-                    //    yields the same answer.
+                    // 1. NAL-payload parse (primary, authoritative):
+                    //    walks the length-prefixed NAL units looking
+                    //    for HEVC type 16-21 (IRAP) or H.264 type 5
+                    //    (IDR). Pure function of the bitstream.
+                    // 2. `AV_PKT_FLAG_KEY` (secondary, sequential-
+                    //    only): the MKV demuxer marks RAPs with KEY,
+                    //    reliable in sequential reads but artificially
+                    //    set on the first post-seek packet. We exclude
+                    //    that one by gating on `!collectedVideo.isEmpty`
+                    //    — index 0 is post-seek (unreliable), 1+ are
+                    //    sequential (reliable).
                     //
-                    // 2. `AV_PKT_FLAG_KEY` (secondary, sequential-only):
-                    //    the MKV demuxer marks packets at random-access
-                    //    positions with the KEY flag. Reliable for
-                    //    sequential reads but DELIBERATELY unreliable
-                    //    on the first packet returned after
-                    //    `av_seek_frame` — that one is artificially
-                    //    flagged KEY even when its NAL header says
-                    //    otherwise. We exclude it by gating on
-                    //    `videoCount > 0`: every mediaSegment(at:) call
-                    //    seeks first and reads forward, so video packet
-                    //    index 0 is post-seek (unreliable flag) and
-                    //    indices 1+ are sequential (reliable flag).
-                    //
-                    // The combination handles two failure modes that
-                    // both produce cross-fragment DTS overlap and the
-                    // characteristic "non monotonically increasing dts"
-                    // muxer EINVAL during forward play:
-                    //
-                    //   a. NAL parser misses an IRAP that the demuxer
-                    //      flag correctly marks (some HEVC streams pack
-                    //      unusual prefix SEI / AUD ordering that
-                    //      confuses the length-prefix walker).
-                    //   b. Demuxer flag misses an IRAP that the NAL
-                    //      parser correctly detects (the post-seek
-                    //      first-packet case, addressed by the
-                    //      videoCount > 0 gate).
-                    //
-                    // When the two signals disagree on a sequential
-                    // packet, emit a structured `RAP-DISAGREE` log line
-                    // so we can surface the source's actual NAL layout
-                    // for the next round of parser hardening.
+                    // Combination catches IRAPs whose NAL layout
+                    // confuses the length-prefix walker (some HEVC
+                    // streams pack SEI / AUD orderings the parser
+                    // doesn't unwind), while the post-seek artifact
+                    // is still excluded.
                     let isRAP_nal = Self.packetContainsRandomAccessPoint(
                         packet, codecID: videoCodecID
                     )
                     let isRAP_flag = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
-                    let isSequentialRead = videoCount > 0
+                    let isSequentialRead = !collectedVideo.isEmpty
                     let isRAP = isRAP_nal || (isSequentialRead && isRAP_flag)
-                    if isSequentialRead, isRAP_nal != isRAP_flag {
-                        EngineLog.emit(
-                            "[HLSVideoEngine] seg\(index) req=\(req) RAP-DISAGREE pkt#\(videoCount) " +
-                            "src(pts=\(packet.pointee.pts) dts=\(packet.pointee.dts) size=\(packet.pointee.size)) " +
-                            "nal=\(isRAP_nal ? "Y" : "n") flag=\(isRAP_flag ? "Y" : "n") → combined=\(isRAP ? "RAP" : "non")",
-                            category: .scrub
-                        )
-                    }
+
                     if !foundSegmentStart {
-                        // Wait for the first IDR at-or-after the segment
-                        // start. Three gating conditions:
-                        //
-                        //   1. isRAP — the packet is a random-access
-                        //      point per our combined NAL+flag check.
-                        //   2. pts >= seg.startPts — at-or-after the
-                        //      segment's nominal start (the seek can
-                        //      land us mid-GOP from a prior IDR).
-                        //   3. dts > muxer's last-submitted DTS — the
-                        //      IRAP isn't *stale* relative to the
-                        //      muxer's view of the timeline.
-                        //
-                        // Gate (3) handles the cross-segment DTS-overlap
-                        // failure mode that survives even imperfect
-                        // RAP detection: seg N-1's read loop occasionally
-                        // misclassifies a real IRAP as non-RAP and writes
-                        // it as part of its own fragment, advancing the
-                        // muxer's per-stream last_dts past that IRAP's
-                        // position. seg N then seeks back to its nominal
-                        // start, FFmpeg's cue-table seek lands on that
-                        // same IRAP (it's known in the file index), and
-                        // the muxer rejects the write with EINVAL because
-                        // last_dts >= new_dts.
-                        //
-                        // Treating the muxer state as ground truth — if
-                        // we've already submitted a packet with DTS X,
-                        // any subsequent IRAP at DTS <= X is stale and
-                        // must be skipped — fixes this without needing
-                        // perfect RAP detection. The next non-stale
-                        // IRAP further in the read stream becomes seg N's
-                        // actual start. seg N's tfdt reflects that
-                        // position; AVPlayer reads the tfdt and plays
-                        // from there.
-                        //
-                        // After a muxer reset (pre-empt or reactive),
-                        // lastSubmittedVideoSrcDts is nil and gate (3)
-                        // is vacuous, so post-scrub segments aren't
-                        // artificially constrained.
-                        let dtsOK = lastSubmittedVideoSrcDts.map { lastDts in
-                            packet.pointee.dts != Int64.min && packet.pointee.dts > lastDts
-                        } ?? true
                         if isRAP,
                            packet.pointee.pts != Int64.min,
-                           packet.pointee.pts >= seg.startPts,
-                           dtsOK {
+                           packet.pointee.pts >= seg.startPts {
                             foundSegmentStart = true
-                            // Fall through and emit this IDR as the
-                            // segment's first sample.
+                            // Fall through and collect this IRAP as
+                            // the fragment's first sample.
                         } else {
-                            if isRAP,
-                               packet.pointee.pts != Int64.min,
-                               packet.pointee.pts >= seg.startPts,
-                               !dtsOK,
-                               let lastDts = lastSubmittedVideoSrcDts {
-                                EngineLog.emit(
-                                    "[HLSVideoEngine] seg\(index) req=\(req) SKIP-STALE-IRAP " +
-                                    "src(pts=\(packet.pointee.pts) dts=\(packet.pointee.dts)) " +
-                                    "lastSubmittedDts=\(lastDts) — searching for next non-stale IRAP",
-                                    category: .scrub
-                                )
-                            }
                             continue
                         }
                     }
-                    // Stop reading once we've passed this segment's
-                    // end boundary, but only on a RAP (otherwise we'd
-                    // cut in the middle of a GOP and break the next
-                    // segment's IDR alignment).
-                    if didEnqueueAnyVideo,
+                    // Stop reading at the next IRAP at-or-after the
+                    // segment's nominal end so each fragment cuts at
+                    // a GOP boundary. Without this, fragments would
+                    // share GOPs and decoders would struggle to
+                    // start cold on the second one.
+                    if !collectedVideo.isEmpty,
                        packet.pointee.pts != Int64.min,
                        packet.pointee.pts >= seg.endPts,
                        isRAP {
                         break
                     }
-                    // Normalise AV_PKT_FLAG_KEY to match our
-                    // authoritative NAL-parse RAP detection before
-                    // handing the packet to the mp4 muxer. The MKV
-                    // demuxer sets this flag inconsistently after
-                    // `av_seek_frame` (the first post-seek packet is
-                    // sometimes marked KEY even when its NAL header
-                    // says otherwise, and real IDRs in the middle of
-                    // post-seek packet runs sometimes have the flag
-                    // cleared). The mp4 muxer reads `packet.flags`
-                    // directly to populate the fragment's sample-
-                    // dependency table: a fragment whose video track
-                    // ends up with no sync samples is structurally
-                    // unplayable for AVPlayer — the symptom Vincent
-                    // hit is "audio plays, video frozen on the
-                    // previous fragment's last frame". The NAL parse
-                    // is the bitstream's ground truth, so force the
-                    // packet flag to mirror it.
+                    // Normalise AV_PKT_FLAG_KEY to match our RAP
+                    // verdict. The mp4 muxer reads `packet.flags`
+                    // to populate the fragment's sample-dependency
+                    // table; a fragment whose first sample doesn't
+                    // claim KEY is structurally unplayable for
+                    // AVPlayer ("audio plays, video frozen").
                     if isRAP {
                         packet.pointee.flags |= AV_PKT_FLAG_KEY
                     } else {
                         packet.pointee.flags &= ~AV_PKT_FLAG_KEY
                     }
-                    do {
-                        try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
-                    } catch let muxerError as FMP4VideoMuxer.FMP4VideoMuxerError {
-                        // Reactive reset as a safety net for the
-                        // case where pre-emptive detection missed
-                        // a backward seek (e.g. lastSubmittedVideo
-                        // SrcDts was nil because this is the very
-                        // first segment, or the threshold was set
-                        // too wide). Same recovery path:
-                        // close + rebuild + retry the write.
-                        guard case .writeFailed(let code) = muxerError,
-                              code == -22,
-                              !didEnqueueAnyVideo else {
-                            throw muxerError
-                        }
-                        try resetMuxer(
-                            reason: "seg\(index) req=\(req) EINVAL on first video write",
-                            preemptive: false
-                        )
-                        try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
+                    if let cloned = av_packet_clone(packet) {
+                        collectedVideo.append(cloned)
                     }
-                    if packet.pointee.dts != Int64.min {
-                        lastSubmittedVideoSrcDts = packet.pointee.dts
-                    }
-                    didEnqueueAnyVideo = true
-                    videoCount += 1
                 } else if let aIdx = audioStreamIndex,
-                          let aOutIdx = muxer.audioOutputIndex,
                           streamIdx == aIdx,
                           foundSegmentStart {
                     // Audio packets before the segment's first video
-                    // IDR are dropped; without a video frame to anchor
-                    // them they'd play earlier than the segment claims
-                    // to start.
+                    // IRAP are dropped; without a video frame to
+                    // anchor them they'd play earlier than the
+                    // fragment claims to start.
                     if let bridge = audioBridge {
                         // Decode source codec → S16 PCM → FLAC.
-                        // bridge.feed returns [AVPacket*] with
-                        // ownership transferred to us.
+                        // `bridge.feed` transfers ownership of the
+                        // returned AVPacket pointers to us; they
+                        // flow into the collected-audio buffer and
+                        // are freed by the defer above.
                         let flacPackets = try bridge.feed(packet: packet)
-                        for fp in flacPackets {
-                            do {
-                                try muxer.writePacket(fp, toStreamIndex: aOutIdx)
-                            } catch {
-                                var pPtr: UnsafeMutablePointer<AVPacket>? = fp
-                                av_packet_free(&pPtr)
-                                throw error
-                            }
-                            var pPtr: UnsafeMutablePointer<AVPacket>? = fp
-                            av_packet_free(&pPtr)
-                            audioCount += 1
-                        }
-                    } else {
-                        try muxer.writePacket(packet, toStreamIndex: aOutIdx)
-                        audioCount += 1
+                        collectedAudio.append(contentsOf: flacPackets)
+                    } else if let cloned = av_packet_clone(packet) {
+                        collectedAudio.append(cloned)
                     }
                 }
                 // Other streams (additional audio tracks, subtitles,
-                // attachments) are silently dropped. Audio-track
-                // switching mid-session would require re-priming the
-                // muxer and is a phase-7 concern.
+                // attachments) are silently dropped.
 
-                // Safety bound #1: never read more than ~30 s worth
-                // of packets for one segment, regardless of where the
-                // next keyframe is. Pathological sources without
-                // mid-stream keyframes can otherwise gobble the
-                // whole file.
-                if videoCount + audioCount > 3600 {
+                // Safety bound #1: packet count (~30 s of source at
+                // typical 24-60 fps mixes). Pathological sources
+                // without mid-stream keyframes would otherwise gobble
+                // the whole file.
+                if collectedVideo.count + collectedAudio.count > 3600 {
                     EngineLog.emit(
-                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND packet-count v=\(videoCount) a=\(audioCount), giving up on next-IDR boundary",
+                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND packet-count v=\(collectedVideo.count) a=\(collectedAudio.count), giving up on next-IDR boundary",
                         category: .session
                     )
                     break
                 }
-                // Safety bound #2: wall-clock deadline. Source-time
-                // packet-count alone isn't enough — a slow link or a
-                // stalled HTTP byte-range can drag a single segment
-                // generation past the user's patience while staying
-                // well under 3600 packets. Cap the loop at 15 s of
-                // real time so the provider lock cannot be held
-                // indefinitely. Emitting under .session because this
-                // is a flow-control event, not a scrub.
+                // Safety bound #2: wall-clock deadline. Caps
+                // pathological slow-HTTP cases that stay well under
+                // the packet-count limit.
                 if DispatchTime.now().uptimeNanoseconds > segmentReadDeadlineNs {
                     let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
                     EngineLog.emit(
-                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND wall-clock \(String(format: "%.0f", elapsedMs))ms v=\(videoCount) a=\(audioCount), emitting partial fragment",
+                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND wall-clock \(String(format: "%.0f", elapsedMs))ms v=\(collectedVideo.count) a=\(collectedAudio.count), emitting partial fragment",
                         category: .session
                     )
                     break
                 }
             }
             let readMs = Double(DispatchTime.now().uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
-            let flushStart = DispatchTime.now()
-            let bytes = try muxer.flushFragment()
-            let flushMs = Double(DispatchTime.now().uptimeNanoseconds - flushStart.uptimeNanoseconds) / 1_000_000
+
+            // Stateless mux: fresh FMP4VideoMuxer per fragment, no
+            // cross-fragment DTS-monotonicity state. The session's
+            // init.mp4 was captured once at session start; this
+            // call only returns moof+mdat bytes. See
+            // `FMP4VideoMuxer.writeFragmentStateless` for the
+            // architectural rationale.
+            let muxStart = DispatchTime.now()
+            let bytes = try FMP4VideoMuxer.writeFragmentStateless(
+                video: videoConfig,
+                audio: audioConfig,
+                videoPackets: collectedVideo,
+                audioPackets: collectedAudio
+            )
+            let muxMs = Double(DispatchTime.now().uptimeNanoseconds - muxStart.uptimeNanoseconds) / 1_000_000
             let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
+
             EngineLog.emit(
-                "[HLSVideoEngine] seg\(index) req=\(req): v=\(videoCount) a=\(audioCount) → \(bytes.count) B " +
+                "[HLSVideoEngine] seg\(index) req=\(req): v=\(collectedVideo.count) a=\(collectedAudio.count) → \(bytes.count) B " +
                 "(start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s) " +
-                "timing: seek=\(String(format: "%.1f", seekMs))ms read+mux=\(String(format: "%.1f", readMs))ms flush=\(String(format: "%.1f", flushMs))ms total=\(String(format: "%.1f", totalMs))ms",
+                "timing: seek=\(String(format: "%.1f", seekMs))ms read=\(String(format: "%.1f", readMs))ms mux=\(String(format: "%.1f", muxMs))ms total=\(String(format: "%.1f", totalMs))ms",
                 category: .session
             )
             storeInCache(index: index, bytes: bytes)
