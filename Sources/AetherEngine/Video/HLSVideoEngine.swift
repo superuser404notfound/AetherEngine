@@ -563,6 +563,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let streamIdx = packet.pointee.stream_index
                 seenStreamIdx.insert(streamIdx)
                 if streamIdx == videoIndex, !gotVideo {
+                    // The captured packets are only used to populate
+                    // moov atoms (notably dec3 / hvcC details).
+                    // Their actual timestamps are irrelevant since
+                    // the moof + mdat fragment portion of this
+                    // muxer's output is discarded. But the muxer
+                    // still rejects NOPTS dts during validation,
+                    // so seed dts from pts before submitting.
+                    if packet.pointee.dts == Int64.min {
+                        packet.pointee.dts = packet.pointee.pts != Int64.min
+                            ? packet.pointee.pts
+                            : 0
+                    }
                     try m.writePacket(packet, toStreamIndex: m.videoOutputIndex)
                     gotVideo = true
                 } else if streamIdx == resolvedAudioStreamIndex,
@@ -571,12 +583,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     if let bridge = audioBridge {
                         let flacPackets = try bridge.feed(packet: packet)
                         for fp in flacPackets {
+                            if fp.pointee.dts == Int64.min {
+                                fp.pointee.dts = fp.pointee.pts != Int64.min
+                                    ? fp.pointee.pts
+                                    : 0
+                            }
                             try m.writePacket(fp, toStreamIndex: aOutIdx)
                             var pPtr: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&pPtr)
                             audioWritten += 1
                         }
                     } else {
+                        if packet.pointee.dts == Int64.min {
+                            packet.pointee.dts = packet.pointee.pts != Int64.min
+                                ? packet.pointee.pts
+                                : 0
+                        }
                         try m.writePacket(packet, toStreamIndex: aOutIdx)
                         audioWritten += 1
                     }
