@@ -1220,16 +1220,66 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                     }
                     if !foundSegmentStart {
                         // Wait for the first IDR at-or-after the segment
-                        // start. Skip pre-roll non-RAP packets and any
-                        // RAP that's still before the boundary (the
-                        // seek can land us mid-GOP).
+                        // start. Three gating conditions:
+                        //
+                        //   1. isRAP — the packet is a random-access
+                        //      point per our combined NAL+flag check.
+                        //   2. pts >= seg.startPts — at-or-after the
+                        //      segment's nominal start (the seek can
+                        //      land us mid-GOP from a prior IDR).
+                        //   3. dts > muxer's last-submitted DTS — the
+                        //      IRAP isn't *stale* relative to the
+                        //      muxer's view of the timeline.
+                        //
+                        // Gate (3) handles the cross-segment DTS-overlap
+                        // failure mode that survives even imperfect
+                        // RAP detection: seg N-1's read loop occasionally
+                        // misclassifies a real IRAP as non-RAP and writes
+                        // it as part of its own fragment, advancing the
+                        // muxer's per-stream last_dts past that IRAP's
+                        // position. seg N then seeks back to its nominal
+                        // start, FFmpeg's cue-table seek lands on that
+                        // same IRAP (it's known in the file index), and
+                        // the muxer rejects the write with EINVAL because
+                        // last_dts >= new_dts.
+                        //
+                        // Treating the muxer state as ground truth — if
+                        // we've already submitted a packet with DTS X,
+                        // any subsequent IRAP at DTS <= X is stale and
+                        // must be skipped — fixes this without needing
+                        // perfect RAP detection. The next non-stale
+                        // IRAP further in the read stream becomes seg N's
+                        // actual start. seg N's tfdt reflects that
+                        // position; AVPlayer reads the tfdt and plays
+                        // from there.
+                        //
+                        // After a muxer reset (pre-empt or reactive),
+                        // lastSubmittedVideoSrcDts is nil and gate (3)
+                        // is vacuous, so post-scrub segments aren't
+                        // artificially constrained.
+                        let dtsOK = lastSubmittedVideoSrcDts.map { lastDts in
+                            packet.pointee.dts != Int64.min && packet.pointee.dts > lastDts
+                        } ?? true
                         if isRAP,
                            packet.pointee.pts != Int64.min,
-                           packet.pointee.pts >= seg.startPts {
+                           packet.pointee.pts >= seg.startPts,
+                           dtsOK {
                             foundSegmentStart = true
                             // Fall through and emit this IDR as the
                             // segment's first sample.
                         } else {
+                            if isRAP,
+                               packet.pointee.pts != Int64.min,
+                               packet.pointee.pts >= seg.startPts,
+                               !dtsOK,
+                               let lastDts = lastSubmittedVideoSrcDts {
+                                EngineLog.emit(
+                                    "[HLSVideoEngine] seg\(index) req=\(req) SKIP-STALE-IRAP " +
+                                    "src(pts=\(packet.pointee.pts) dts=\(packet.pointee.dts)) " +
+                                    "lastSubmittedDts=\(lastDts) — searching for next non-stale IRAP",
+                                    category: .scrub
+                                )
+                            }
                             continue
                         }
                     }
