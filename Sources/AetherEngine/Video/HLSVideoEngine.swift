@@ -1063,6 +1063,18 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         let segmentReadDeadlineNs = DispatchTime.now().uptimeNanoseconds + UInt64(15_000_000_000)
 
         var foundSegmentStart = false
+        // PTS of the IRAP we accepted as this segment's first sample.
+        // Used to filter out RADL leading pictures (HEVC NAL types 6/7,
+        // "Random Access Decodable Leading") that the source emits
+        // AFTER the IRAP in decode order but whose display PTS lies
+        // BEFORE the IRAP. They reference the IRAP and decode fine,
+        // but in a random-access segment they would produce frames
+        // displayed in the previous segment's timeline range — and the
+        // mp4 muxer rejects them because their PTS steps backward
+        // from the IRAP's. Skipping them is semantically correct: at
+        // a random-access boundary, the first displayable frame is
+        // the IRAP itself.
+        var segmentStartPTS: Int64 = Int64.min
         // After a seek, libavformat returns packets starting from
         // the last keyframe at-or-before the requested time (the
         // decoder needs reference frames before the seek target).
@@ -1108,11 +1120,19 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                            packet.pointee.pts != Int64.min,
                            packet.pointee.pts >= seg.startPts {
                             foundSegmentStart = true
+                            segmentStartPTS = packet.pointee.pts
                             // Fall through and collect this IRAP as
                             // the fragment's first sample.
                         } else {
                             continue
                         }
+                    } else if packet.pointee.pts != Int64.min,
+                              packet.pointee.pts < segmentStartPTS {
+                        // RADL leading picture filter — see segmentStartPTS
+                        // comment above. These frames display before the
+                        // IRAP we accepted, so they have no place in this
+                        // segment's timeline.
+                        continue
                     }
                     // Stop reading at the next IRAP at-or-after the
                     // segment's nominal end so each fragment cuts at

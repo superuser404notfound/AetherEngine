@@ -559,11 +559,54 @@ final class FMP4VideoMuxer {
         // fragment box-summary log spam.
         _ = try muxer.writeInitSegment(logSummary: false)
 
+        // Per-stream synthetic-DTS state. The FFmpeg mp4 muxer
+        // enforces strict-monotonic DTS per stream; many real-world
+        // MKV/HEVC sources don't carry DTS on every packet (the
+        // first packet returned after `av_seek_frame` commonly has
+        // `dts == AV_NOPTS_VALUE`, and some encoders simply omit
+        // DTS in favour of PTS-only timing). The mov muxer falls
+        // back to PTS in that case, but then a subsequent packet
+        // whose real DTS happens to equal that prior PTS produces
+        // a `non monotonically increasing dts` rejection — even
+        // though the source timeline is perfectly valid.
+        //
+        // Sanitise here: ensure each packet's `dts` is set and
+        // strictly greater than the previous packet's submitted
+        // DTS on the same stream. We try to preserve the source
+        // signal first (use the real `dts`, or fall back to `pts`)
+        // and only bump by one tick when needed to break a tie.
+        // Sample durations come from `packet.duration` (set by the
+        // demuxer) and feed the mp4 muxer's `trun` per-sample
+        // duration column, so the small DTS adjustments don't
+        // affect decoded playback timing.
+        var lastDtsByStream: [Int: Int64] = [:]
+
+        func sanitiseDTS(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int) {
+            var dts = pkt.pointee.dts
+            let pts = pkt.pointee.pts
+            let prev = lastDtsByStream[streamIndex]
+
+            if dts == avNoPTS {
+                // Source didn't carry DTS. PTS is almost always
+                // present; fall back to it. If even PTS is unset
+                // (extreme edge case), use prev+1 as a degenerate
+                // monotonic placeholder.
+                dts = pts != avNoPTS ? pts : ((prev ?? 0) + 1)
+            }
+            if let p = prev, dts <= p {
+                dts = p &+ 1
+            }
+            pkt.pointee.dts = dts
+            lastDtsByStream[streamIndex] = dts
+        }
+
         for pkt in videoPackets {
+            sanitiseDTS(pkt, streamIndex: muxer.videoOutputIndex)
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
         }
         if let audioIdx = muxer.audioOutputIndex {
             for pkt in audioPackets {
+                sanitiseDTS(pkt, streamIndex: audioIdx)
                 try muxer.writePacket(pkt, toStreamIndex: audioIdx)
             }
         }
