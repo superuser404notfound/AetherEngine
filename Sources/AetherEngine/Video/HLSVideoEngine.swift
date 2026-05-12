@@ -792,18 +792,24 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private var muxer: FMP4VideoMuxer
     private let audioBridge: AudioBridge?
 
-    // Pre-emptive backward-seek detection lived here briefly but
-    // produced false positives on every B-frame reordered segment:
-    // the source PTS of seg N's last submitted packet (in DTS
-    // order, with PTS > DTS for B-frames) can easily exceed the
-    // nominal `startPts` of seg N+1, even though the *DTS* path is
-    // perfectly monotonic. Comparing PTS to nominal startPts fired
-    // the reset on every sequential transition, regressing to
-    // per-segment-muxer behaviour with all of its audio-bridge
-    // glitches. Replaced by a reactive reset triggered only when
-    // the muxer actually rejects the first write of a fragment
-    // with EINVAL, which happens exclusively on real user
-    // backward scrubs.
+    /// Source-time-base DTS of the last successfully muxed video
+    /// packet. Tracking DTS (not PTS) avoids the B-frame false
+    /// positive that the earlier PTS-based detector produced: in
+    /// HEVC with B-frames, PTS > DTS for some packets, so seg N's
+    /// last packet (in DTS order) can have a PTS well past seg
+    /// N+1's nominal startPts even when the underlying DTS stream
+    /// is perfectly monotonic. DTS comparison is unambiguous.
+    private var lastSubmittedVideoSrcDts: Int64?
+
+    /// How far behind the muxer's last submitted DTS a segment's
+    /// start has to land before we consider it a real backward
+    /// scrub. Anything within this slack is treated as a normal
+    /// sequential / forward-scrub transition. 5 seconds in source
+    /// time base is wider than any realistic GOP overshoot
+    /// (typical HEVC GOPs are 1-3 s) and narrower than any user-
+    /// noticeable scrub-back, so the threshold cleanly separates
+    /// the two cases.
+    private let backwardSeekSlackSeconds: Double = 5.0
 
     private let initSegmentData: Data
     private let segments: [HLSVideoEngine.Segment]
@@ -817,6 +823,27 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
     private let lock = NSLock()
     private var isClosed = false
+
+    /// LRU cache of generated segment bytes, keyed by segment
+    /// index. Cache hits serve immediately without touching the
+    /// demuxer / muxer / audio bridge — the dominant cost in our
+    /// pipeline. Sized to ~30 entries which at typical Cars 4K DV
+    /// bitrate (~14 MB / 6 s) caps at ~420 MB resident — fine on
+    /// Apple TV's RAM budget — and covers the common scrub
+    /// patterns: AVPlayer's same-segment double-fetch, the user
+    /// scrubbing back into a span they just played, and the
+    /// forward buffer's overlap with the next playback range.
+    private static let segmentCacheCapacity = 30
+    /// Cached fragment payloads. Eviction uses `cacheOrder` to
+    /// pop the least-recently-used entry. NSCache would be
+    /// tempting but it's GC-aware and may evict aggressively
+    /// under memory pressure; a hand-rolled LRU keeps the cap
+    /// strict and the residency predictable.
+    private var segmentCache: [Int: Data] = [:]
+    /// Most-recent-last access order. Mutated on every hit and
+    /// every store; eviction pops the front when the cache
+    /// exceeds capacity.
+    private var cacheOrder: [Int] = []
 
     init(
         demuxer: Demuxer,
@@ -862,6 +889,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         isClosed = true
         muxer.close()
         audioBridge?.close()
+        segmentCache.removeAll(keepingCapacity: false)
+        cacheOrder.removeAll(keepingCapacity: false)
         lock.unlock()
     }
 
@@ -878,6 +907,36 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         return initSegmentData
     }
 
+    /// Tear down the current muxer instance and rebuild a fresh one
+    /// with the same stream configs. Called both pre-emptively
+    /// (when a backward seek is detected from the DTS watermark)
+    /// and reactively (when av_interleaved_write_frame returns
+    /// EINVAL on the first write of a segment). After the rebuild
+    /// the audio bridge's per-fragment FIFO is drained and the
+    /// encoder PTS is rearmed so the FLAC stream stays consistent
+    /// with the new video timeline.
+    ///
+    /// The segment cache is *not* cleared on reset. The mp4 muxer's
+    /// `mfhd.sequence_number` does restart at 1 with the fresh
+    /// instance, but every fragment we've already cached was
+    /// written by an earlier muxer instance and is structurally
+    /// self-contained (cached init.mp4 + cached moof+mdat). AVPlayer
+    /// reads the `tfdt` for timeline position and only cares about
+    /// `mfhd.sequence_number` for de-duplication within a fragment
+    /// reload, not for global monotonicity — the spec allows
+    /// arbitrary sequence numbers across segments. Keeping the
+    /// cache survives backward-scrub-bounce patterns (user
+    /// scrubs forward, scrubs back into cached region, scrubs
+    /// forward again — all three cache hits).
+    private func resetMuxer(reason: String) throws {
+        EngineLog.emit("[HLSVideoEngine] muxer reset (\(reason))")
+        muxer.close()
+        muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
+        _ = try muxer.writeInitSegment()
+        audioBridge?.startSegment()
+        lastSubmittedVideoSrcDts = nil
+    }
+
     func mediaSegment(at index: Int) -> Data? {
         guard index >= 0, index < segments.count else { return nil }
         let seg = segments[index]
@@ -885,6 +944,44 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         lock.lock()
         defer { lock.unlock() }
         guard !isClosed else { return nil }
+
+        // Cache fast path. If AVPlayer has fetched this exact
+        // segment before in the current session, the bytes are
+        // already in memory and we skip the entire demux / mux /
+        // bridge pipeline. Move the entry to the back of the LRU
+        // order so it survives the next eviction.
+        if let cached = segmentCache[index] {
+            cacheOrder.removeAll(where: { $0 == index })
+            cacheOrder.append(index)
+            return cached
+        }
+
+        // Pre-emptive backward-seek detection. The session-wide mp4
+        // muxer holds a per-stream `last_dts` that the muxer
+        // enforces monotonically across fragments; if the user has
+        // scrubbed back to a position earlier than the muxer's
+        // current cursor, the *first* write of this segment would
+        // come back with EINVAL and we'd have to reset + retry
+        // reactively — a roundtrip we can skip by checking up
+        // front. The 5 s slack covers normal GOP-boundary overshoot
+        // (seg N's last packet typically lands ~0.5 s past
+        // `seg.endPts` because the loop breaks on the next IDR
+        // rather than the nominal end), so forward play never
+        // trips this branch.
+        if let lastDts = lastSubmittedVideoSrcDts {
+            let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+            let slackTicks: Int64 = tb > 0
+                ? Int64(backwardSeekSlackSeconds / tb)
+                : 0
+            if lastDts > seg.startPts + slackTicks {
+                do {
+                    try resetMuxer(reason: "backward-seek pre-empt seg\(index) startPts=\(seg.startPts) < lastDts=\(lastDts) - slack=\(slackTicks)")
+                } catch {
+                    EngineLog.emit("[HLSVideoEngine] seg\(index) pre-empt muxer reset failed: \(error)")
+                    return nil
+                }
+            }
+        }
 
         // Seek to the start of this segment. Demuxer.seek expects
         // seconds (it converts to AV_TIME_BASE internally and uses
@@ -967,42 +1064,23 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                     do {
                         try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
                     } catch let muxerError as FMP4VideoMuxer.FMP4VideoMuxerError {
+                        // Reactive reset as a safety net for the
+                        // case where pre-emptive detection missed
+                        // a backward seek (e.g. lastSubmittedVideo
+                        // SrcDts was nil because this is the very
+                        // first segment, or the threshold was set
+                        // too wide). Same recovery path:
+                        // close + rebuild + retry the write.
                         guard case .writeFailed(let code) = muxerError,
                               code == -22,
                               !didEnqueueAnyVideo else {
                             throw muxerError
                         }
-                        // First write of this segment was rejected
-                        // by the mp4 muxer's per-stream DTS
-                        // monotonicity gate with EINVAL. The only
-                        // way to reach that gate on packet zero is
-                        // a stale session muxer holding `last_dts`
-                        // from a previously-played forward range
-                        // that's ahead of where AVPlayer is asking
-                        // for now (canonical case: user scrubbed
-                        // backward). The muxer has no public API
-                        // for clearing its per-track state, so we
-                        // rebuild the instance with the same
-                        // configs and retry the write. The cached
-                        // init.mp4 served from session start is
-                        // structurally identical to what the fresh
-                        // muxer would emit (same StreamConfigs →
-                        // same moov), so AVPlayer never sees a
-                        // moov change.
-                        //
-                        // Audio bridge stays alive across the
-                        // reset: its FLAC encoder keeps producing
-                        // monotonic packets. `startSegment()`
-                        // drains the FIFO's leftover and re-bases
-                        // the encoder PTS off the next decoded
-                        // source frame, exactly what we want at a
-                        // fragment boundary anyway.
-                        EngineLog.emit("[HLSVideoEngine] seg\(index) first-write EINVAL, resetting muxer for backward-seek and retrying")
-                        muxer.close()
-                        muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
-                        _ = try muxer.writeInitSegment()
-                        audioBridge?.startSegment()
+                        try resetMuxer(reason: "seg\(index) reactive (EINVAL on first write)")
                         try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
+                    }
+                    if packet.pointee.dts != Int64.min {
+                        lastSubmittedVideoSrcDts = packet.pointee.dts
                     }
                     didEnqueueAnyVideo = true
                     videoCount += 1
@@ -1050,10 +1128,26 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
             }
             let bytes = try muxer.flushFragment()
             EngineLog.emit("[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B (start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s)")
+            storeInCache(index: index, bytes: bytes)
             return bytes
         } catch {
             EngineLog.emit("[HLSVideoEngine] seg\(index) generation failed: \(error)")
             return nil
+        }
+    }
+
+    /// Stash the freshly-generated segment in the LRU cache.
+    /// Evicts the least-recently-used entry when the cache exceeds
+    /// `segmentCacheCapacity`. Caller must hold `lock`.
+    private func storeInCache(index: Int, bytes: Data) {
+        if segmentCache[index] != nil {
+            cacheOrder.removeAll(where: { $0 == index })
+        }
+        segmentCache[index] = bytes
+        cacheOrder.append(index)
+        while cacheOrder.count > Self.segmentCacheCapacity {
+            let oldest = cacheOrder.removeFirst()
+            segmentCache.removeValue(forKey: oldest)
         }
     }
 
