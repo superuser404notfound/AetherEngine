@@ -945,6 +945,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         defer { lock.unlock() }
         guard !isClosed else { return nil }
 
+        let totalStart = DispatchTime.now()
+
         // Cache fast path. If AVPlayer has fetched this exact
         // segment before in the current session, the bytes are
         // already in memory and we skip the entire demux / mux /
@@ -953,6 +955,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         if let cached = segmentCache[index] {
             cacheOrder.removeAll(where: { $0 == index })
             cacheOrder.append(index)
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
+            EngineLog.emit("[HLSVideoEngine] seg\(index): CACHE HIT \(cached.count) B (lookup=\(String(format: "%.1f", elapsed))ms)")
             return cached
         }
 
@@ -986,7 +990,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         // Seek to the start of this segment. Demuxer.seek expects
         // seconds (it converts to AV_TIME_BASE internally and uses
         // avformat_seek_file for MKV-safe seek behaviour).
+        let seekStart = DispatchTime.now()
         demuxer.seek(to: seg.startSeconds)
+        let seekMs = Double(DispatchTime.now().uptimeNanoseconds - seekStart.uptimeNanoseconds) / 1_000_000
 
         // Reset the audio bridge's per-fragment state: drains its
         // FIFO leftover and arms the encoder-PTS rebase so the next
@@ -995,6 +1001,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         // accumulate from the encoder's first-ever sample and drift
         // out of alignment with video as fragments march on.
         audioBridge?.startSegment()
+
+        let readStart = DispatchTime.now()
 
         var videoCount = 0
         var audioCount = 0
@@ -1126,8 +1134,16 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 // whole file.
                 if videoCount + audioCount > 3600 { break }
             }
+            let readMs = Double(DispatchTime.now().uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
+            let flushStart = DispatchTime.now()
             let bytes = try muxer.flushFragment()
-            EngineLog.emit("[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B (start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s)")
+            let flushMs = Double(DispatchTime.now().uptimeNanoseconds - flushStart.uptimeNanoseconds) / 1_000_000
+            let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B " +
+                "(start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s) " +
+                "timing: seek=\(String(format: "%.1f", seekMs))ms read+mux=\(String(format: "%.1f", readMs))ms flush=\(String(format: "%.1f", flushMs))ms total=\(String(format: "%.1f", totalMs))ms"
+            )
             storeInCache(index: index, bytes: bytes)
             return bytes
         } catch {
