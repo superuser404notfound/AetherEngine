@@ -215,6 +215,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard durationSeconds > 0 else {
             throw HLSVideoEngineError.zeroDuration
         }
+
+        // Prewarm the MKV cue table. avformat_seek_file's first
+        // invocation on an MKV source lazily parses the Cues element
+        // from the file tail, which fans out into one or two HTTP
+        // byte-range reads through the AVIO callback. On Vincent's
+        // session-start TestFlight log the first forward scrub paid
+        // a 172 ms `seek=` cost from that lazy parse landing on the
+        // critical path between user-commit and first frame. Doing
+        // the seek here amortises the cost into session start —
+        // AVPlayer hasn't asked for init.mp4 yet (start() hasn't
+        // returned a URL) so the user-perceived latency is hidden.
+        // Subsequent seeks pay 1-10 ms because the parsed cues are
+        // cached on the AVFormatContext. The seek target is mid-
+        // duration rather than a corner so that any cached AVIO
+        // bytes left over after the prewarm are usable by
+        // mid-movie resume positions.
+        let prewarmStart = DispatchTime.now()
+        dem.seek(to: durationSeconds * 0.5)
+        let prewarmMs = Double(DispatchTime.now().uptimeNanoseconds - prewarmStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
+
         let plan = buildUniformSegmentPlan(
             videoTimeBase: videoTimeBase,
             sourceDurationSeconds: durationSeconds
