@@ -503,10 +503,111 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // always works because the encoder synthesises its own
         // codec-private from PCM input — loses Atmos JOC, but better
         // than silent video), video-only last.
+        //
+        // With `delay_moov` set in the muxer's movflags, the canonical
+        // init capture sequence is:
+        //   1. avformat_write_header (writes nothing into the capture
+        //      buffer, just primes the muxer to accept packets)
+        //   2. Feed one packet of each output stream so libavformat
+        //      has parsed enough source bits to populate moov boxes
+        //      that require packet-derived info (notably `dec3` for
+        //      EAC3, populated from `handle_eac3` syncframe parsing)
+        //   3. flushFragment writes `ftyp` + `moov` + `moof` + `mdat`
+        //      all together
+        //   4. Walk the output buffer for the first `moof` box and
+        //      return only the prefix (`ftyp` + `moov`) as init.mp4
+        //
+        // The fragment portion (`moof` + `mdat`) of the init capture
+        // is discarded because the captured packets came from
+        // wherever the cue prewarm left the demuxer cursor, and have
+        // no relation to seg 0's nominal time range. The first real
+        // mediaSegment call will seek the demuxer to its own start
+        // and emit the proper seg 0 fragment from there.
         func captureInit(audio: FMP4VideoMuxer.StreamConfig?) throws -> Data {
             let m = try FMP4VideoMuxer(video: videoConfig, audio: audio)
             defer { m.close() }
-            return try m.writeInitSegment()
+            _ = try m.writeInitSegment(logSummary: false)
+
+            // Seek to mid-duration so the packets we read are well
+            // into the source's normal block layout (not at the very
+            // start where the demuxer can return partial / drop-on-
+            // start frames that fail `handle_eac3`'s syncframe
+            // parser). The cue prewarm just put us mid-file too;
+            // an explicit seek here keeps captureInit deterministic
+            // across fallback retries.
+            dem.seek(to: durationSeconds * 0.5)
+
+            var gotVideo = false
+            // EAC3's `handle_eac3` only sets `ec3_done = 1` once it
+            // has seen a second packet for substream 0 (it confirms
+            // the substream structure rather than committing on the
+            // first sighting). For AC3 a single packet is enough.
+            // Feed at least two audio packets to cover both cases.
+            // The audio bridge needs similar latitude before it can
+            // emit its first FLAC packet (its encoder buffers
+            // samples).
+            let audioPacketsNeeded = (audio == nil) ? 0 : 10
+            var audioWritten = 0
+            // Hard cap on packets read in case a malformed source has
+            // no usable packets of one type.
+            var packetsScanned = 0
+            let maxScan = 500
+
+            var seenStreamIdx: Set<Int32> = []
+            while (!gotVideo || audioWritten < audioPacketsNeeded) && packetsScanned < maxScan {
+                packetsScanned += 1
+                guard let packet = try dem.readPacket() else { break }
+                var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
+                defer { av_packet_free(&pktPtr) }
+
+                let streamIdx = packet.pointee.stream_index
+                seenStreamIdx.insert(streamIdx)
+                if streamIdx == videoIndex, !gotVideo {
+                    try m.writePacket(packet, toStreamIndex: m.videoOutputIndex)
+                    gotVideo = true
+                } else if streamIdx == resolvedAudioStreamIndex,
+                          let aOutIdx = m.audioOutputIndex,
+                          audioWritten < audioPacketsNeeded {
+                    if let bridge = audioBridge {
+                        let flacPackets = try bridge.feed(packet: packet)
+                        for fp in flacPackets {
+                            try m.writePacket(fp, toStreamIndex: aOutIdx)
+                            var pPtr: UnsafeMutablePointer<AVPacket>? = fp
+                            av_packet_free(&pPtr)
+                            audioWritten += 1
+                        }
+                    } else {
+                        try m.writePacket(packet, toStreamIndex: aOutIdx)
+                        audioWritten += 1
+                    }
+                }
+            }
+
+            EngineLog.emit(
+                "[HLSVideoEngine] initCapture: scanned=\(packetsScanned) gotVideo=\(gotVideo) audioWritten=\(audioWritten)/\(audioPacketsNeeded) bridge=\(audioBridge != nil ? "yes" : "no")",
+                category: .session
+            )
+
+            // Drain the interleaver first so codec-specific
+            // syncframe parsers (notably `handle_eac3` populating
+            // the track's `eac3_priv` from each EAC3 packet) run
+            // BEFORE moov is written. Without this drain the first
+            // flush emits a moov with a broken `dec3` atom because
+            // the muxer never saw the EAC3 syncframes.
+            //
+            // After the drain, the first flush writes `ftyp` +
+            // `moov` and returns; that is exactly the init.mp4 we
+            // serve to AVPlayer. The fragment portion (which the
+            // second flush would emit) is unused here because the
+            // captured packets came from the cue-prewarm position
+            // and have no relation to seg 0's nominal range. The
+            // first real mediaSegment call will seek the demuxer
+            // to its own start and emit the proper seg 0 fragment
+            // from scratch.
+            try m.drainInterleaver()
+            let init_ = try m.flushFragment()
+            FMP4VideoMuxer.logInitSegmentBoxSummary(init_)
+            return init_
         }
         let initSegmentData: Data
         var audioWasIncluded = audioConfig != nil
@@ -528,11 +629,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                             timeBase: bridge.encoderTimeBase,
                             codecTagOverride: nil
                         )
-                        initSegmentData = try captureInit(audio: bridgedConfig)
+                        // Install the bridge state BEFORE retrying so
+                        // the captureInit closure routes audio packets
+                        // through it. Roll back on failure so the
+                        // next fallback path sees a clean state.
+                        audioBridge = bridge
                         audioConfig = bridgedConfig
                         audioHLSCodec = "fLaC"
-                        audioBridge = bridge
-                        audioWasIncluded = true
+                        do {
+                            initSegmentData = try captureInit(audio: bridgedConfig)
+                            audioWasIncluded = true
+                        } catch {
+                            audioBridge = nil
+                            audioConfig = nil
+                            audioHLSCodec = nil
+                            throw error
+                        }
                     } else {
                         throw error
                     }

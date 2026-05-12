@@ -214,18 +214,32 @@ final class FMP4VideoMuxer {
 
     // MARK: - Public API
 
-    /// Writes the init segment (`ftyp` + empty `moov`) and returns
-    /// the captured bytes. Must be called once before any
-    /// `writePacket` / `flushFragment`. Idempotent: if called again,
-    /// throws because libavformat doesn't support re-running
-    /// `avformat_write_header` on the same context.
+    /// Prepare the muxer for `writePacket` / `flushFragment`. Returns
+    /// any bytes that landed in the capture buffer as a side effect
+    /// of `avformat_write_header`. With the `delay_moov` movflag (set
+    /// below), the libavformat mp4 muxer DOES NOT emit `ftyp` or
+    /// `moov` here, so the returned Data is typically empty. The
+    /// init bytes (`ftyp` + `moov`) materialise during the first
+    /// `flushFragment` call together with the first fragment's
+    /// `moof` + `mdat`; callers split those two halves apart using
+    /// `findBoxOffset(_:fourCC:)`.
+    ///
+    /// Why `delay_moov`: the mov muxer writes the `dec3` (EC3
+    /// configuration) atom inside `moov` from track parameters that
+    /// only become available once `handle_eac3` has parsed an actual
+    /// EAC3 syncframe. Without `delay_moov`, `avformat_write_header`
+    /// tries to emit `dec3` before any packet has been queued and
+    /// fails with `Cannot write moov atom before EAC3 packets
+    /// parsed.` The libavformat HLS muxer itself sets exactly
+    /// `+frag_custom+dash+delay_moov` at `hlsenc.c:867` for the same
+    /// reason; we land on the equivalent combination.
     ///
     /// `logSummary` controls whether the structural box summary is
-    /// emitted to the diagnostic log. Default true for the session-
-    /// wide init.mp4 generation; per-fragment muxers in the stateless
-    /// fragment path pass false because they reproduce identical
-    /// init bytes for every segment and the log would spam ~1 line
-    /// per fragment.
+    /// emitted after the first packet flush. Default true for the
+    /// session-wide init capture; per-fragment muxers in the
+    /// stateless fragment path pass false because they reproduce
+    /// identical init bytes for every segment and the log would
+    /// spam roughly one line per fragment.
     func writeInitSegment(logSummary: Bool = true) throws -> Data {
         guard !isClosed, let ctx = formatContext else {
             throw FMP4VideoMuxerError.closed
@@ -236,9 +250,13 @@ final class FMP4VideoMuxer {
 
         var opts: OpaquePointer? = nil  // AVDictionary*
         defer { av_dict_free(&opts) }
+        // delay_moov implies empty_moov in the mov muxer (see
+        // movenc.c around the `if (mov->flags & FF_MOV_FLAG_DELAY_MOOV)
+        // mov->flags |= FF_MOV_FLAG_EMPTY_MOOV;` line). We list both
+        // for documentation clarity.
         av_dict_set(&opts,
                     "movflags",
-                    "frag_custom+empty_moov+default_base_moof+cmaf",
+                    "frag_custom+empty_moov+default_base_moof+cmaf+delay_moov",
                     0)
 
         clearCaptureBuffer()
@@ -252,7 +270,10 @@ final class FMP4VideoMuxer {
         }
         headerWritten = true
         let init_ = drainCaptureBuffer()
-        if logSummary {
+        if logSummary, !init_.isEmpty {
+            // With delay_moov this buffer is typically empty until
+            // the first flush. The summary log will fire from the
+            // init-capture pass instead, once moov has materialised.
             Self.logInitSegmentBoxSummary(init_)
         }
         return init_
@@ -332,6 +353,54 @@ final class FMP4VideoMuxer {
             dvvC=\(hasDvvC ? "y" : "n")
             """
         EngineLog.emit(summary, category: .muxer)
+    }
+
+    /// Walk an ISO BMFF byte buffer at the top level and return the
+    /// offset of the first box matching `fourCC`. Returns nil if not
+    /// found.
+    ///
+    /// Used to split the `ftyp+moov` prefix from the `moof+mdat`
+    /// fragment payload in the output of a `delay_moov`-configured
+    /// muxer (where both end up in the same `av_write_frame(NULL)`
+    /// flush). The walker follows the ISO BMFF box-size convention:
+    ///   - 4 bytes size (big-endian)
+    ///   - 4 bytes type (FourCC)
+    ///   - payload (size minus 8 bytes)
+    ///   - size == 1 means an 8-byte extended size follows the type
+    ///   - size == 0 means the box runs to end of buffer
+    static func findBoxOffset(_ data: Data, fourCC: String) -> Int? {
+        guard fourCC.utf8.count == 4 else { return nil }
+        let target = Array(fourCC.utf8)
+        let bytes = [UInt8](data)
+        var offset = 0
+        while offset + 8 <= bytes.count {
+            let sizeRaw = (UInt32(bytes[offset]) << 24)
+                        | (UInt32(bytes[offset + 1]) << 16)
+                        | (UInt32(bytes[offset + 2]) << 8)
+                        |  UInt32(bytes[offset + 3])
+            let type = (bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7])
+            if type.0 == target[0], type.1 == target[1], type.2 == target[2], type.3 == target[3] {
+                return offset
+            }
+            let advance: Int
+            if sizeRaw == 1 {
+                // 64-bit extended size follows.
+                guard offset + 16 <= bytes.count else { return nil }
+                var ext: UInt64 = 0
+                for i in 0..<8 {
+                    ext = (ext << 8) | UInt64(bytes[offset + 8 + i])
+                }
+                advance = Int(ext)
+            } else if sizeRaw == 0 {
+                // Box runs to end of buffer, nothing further to find.
+                return nil
+            } else {
+                advance = Int(sizeRaw)
+            }
+            guard advance >= 8, offset &+ advance <= bytes.count else { return nil }
+            offset &+= advance
+        }
+        return nil
     }
 
     /// True iff the four bytes form a plausible mp4 box name (ASCII
@@ -470,12 +539,45 @@ final class FMP4VideoMuxer {
         }
     }
 
-    /// Force the muxer to emit a fragment containing every packet
-    /// fed since the previous flush (or since the init segment, on
-    /// first call). With `frag_custom` movflag this is the only way
-    /// fragments get written: `av_write_frame` with a NULL packet is
-    /// the explicit flush trigger, and the muxer responds by writing
-    /// one `moof`+`mdat` for the accumulated samples.
+    /// Drain the interleaver. `av_interleaved_write_frame(ctx, NULL)`
+    /// pushes every queued packet through `mov_write_packet`, which
+    /// is what runs codec-specific syncframe parsing such as
+    /// `handle_eac3`. Critical to call this BEFORE the first
+    /// `flushFragment` when `delay_moov` is set: otherwise the
+    /// first flush writes moov using whatever track state the muxer
+    /// has at that moment, which for EAC3 means no parsed
+    /// syncframe yet and thus a broken `dec3` atom (size=0).
+    func drainInterleaver() throws {
+        guard !isClosed, let ctx = formatContext, headerWritten else {
+            throw FMP4VideoMuxerError.closed
+        }
+        let ret = av_interleaved_write_frame(ctx, nil)
+        if ret < 0 {
+            EngineLog.emit("[FMP4VideoMuxer] drainInterleaver FAIL ret=\(ret)", category: .muxer)
+            throw FMP4VideoMuxerError.writeFailed(code: ret)
+        }
+        if let pb = ctx.pointee.pb {
+            avio_flush(pb)
+        }
+    }
+
+    /// Force the muxer to emit whatever boxes belong at this flush
+    /// boundary. With `frag_custom` + `delay_moov` the muxer splits
+    /// the output across two flush calls:
+    ///
+    ///   - The first call writes `ftyp` + `moov` and returns early
+    ///     without consuming queued packets (see `mov_flush_fragment`
+    ///     in libavformat/movenc.c, the `if (!mov->moov_written)`
+    ///     branch with the early `return 0;` inside the
+    ///     `FF_MOV_FLAG_DELAY_MOOV` block).
+    ///   - The second call writes `moof` + `mdat` from packets that
+    ///     have been processed by `mov_write_packet`.
+    ///
+    /// Callers that want the segment payload `moof` + `mdat` should
+    /// `drainInterleaver()` first (so codec-specific syncframe
+    /// parsing populates the moov's track-config atoms like `dec3`),
+    /// then call this method twice: discard the first return, keep
+    /// the second.
     func flushFragment() throws -> Data {
         guard !isClosed, let ctx = formatContext, headerWritten else {
             throw FMP4VideoMuxerError.closed
@@ -581,7 +683,21 @@ final class FMP4VideoMuxer {
         // affect decoded playback timing.
         var lastDtsByStream: [Int: Int64] = [:]
 
-        func sanitiseDTS(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int) {
+        /// Sanitise `pkt.dts` to be strictly monotonic per stream and
+        /// non-negative-PTS-offset (dts <= pts). Returns `true` if the
+        /// packet should be muxed, `false` if it should be dropped.
+        ///
+        /// The drop signal fires when keeping dts strictly above the
+        /// previous packet's dts would push it past the packet's own
+        /// PTS, i.e. produce `pts < dts`. That happens for HEVC RASL /
+        /// RADL leading pictures coming out of order from the demuxer:
+        /// their natural DTS equals their PTS but they arrive after a
+        /// later-PTS packet, so monotonicity would require bumping
+        /// DTS into the future of PTS. The mp4 muxer rejects such
+        /// packets with an unconditional `pts < dts` check. Dropping
+        /// them is semantically correct at random-access boundaries,
+        /// see the comment in `HLSVideoEngine.mediaSegment(at:)`.
+        func sanitiseDTS(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int) -> Bool {
             var dts = pkt.pointee.dts
             let pts = pkt.pointee.pts
             let prev = lastDtsByStream[streamIndex]
@@ -596,21 +712,42 @@ final class FMP4VideoMuxer {
             if let p = prev, dts <= p {
                 dts = p &+ 1
             }
+            if pts != avNoPTS, dts > pts {
+                // Would create pts < dts at the muxer. Drop.
+                return false
+            }
             pkt.pointee.dts = dts
             lastDtsByStream[streamIndex] = dts
+            return true
         }
 
         for pkt in videoPackets {
-            sanitiseDTS(pkt, streamIndex: muxer.videoOutputIndex)
+            guard sanitiseDTS(pkt, streamIndex: muxer.videoOutputIndex) else { continue }
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
         }
         if let audioIdx = muxer.audioOutputIndex {
             for pkt in audioPackets {
-                sanitiseDTS(pkt, streamIndex: audioIdx)
+                guard sanitiseDTS(pkt, streamIndex: audioIdx) else { continue }
                 try muxer.writePacket(pkt, toStreamIndex: audioIdx)
             }
         }
 
+        // With `frag_custom` + `delay_moov` the output is produced
+        // in three steps:
+        //
+        //   1. drainInterleaver: pushes every queued packet through
+        //      `mov_write_packet`, which is what runs codec-specific
+        //      syncframe parsers like `handle_eac3`. Required so
+        //      moov has access to track-config info derived from
+        //      packet data (e.g. EAC3's `dec3` atom).
+        //   2. First flushFragment: emits `ftyp` + `moov`. The
+        //      session-wide init.mp4 was already captured at session
+        //      start, so we discard these bytes.
+        //   3. Second flushFragment: emits `moof` + `mdat` from
+        //      packets that mov_write_packet stashed in the muxer's
+        //      mdat buffer.
+        try muxer.drainInterleaver()
+        _ = try muxer.flushFragment()
         return try muxer.flushFragment()
     }
 
