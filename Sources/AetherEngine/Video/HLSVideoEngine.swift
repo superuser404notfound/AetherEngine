@@ -1127,6 +1127,18 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         audioBridge?.startSegment()
 
         let readStart = DispatchTime.now()
+        // Wall-clock deadline for the read+mux loop. A 6 s target
+        // segment generally finishes in 200-600 ms on Apple TV against
+        // a local Jellyfin server; allowing 15 s gives ~25x headroom
+        // for slow links, lazy MKV cue parsing, or unusually long
+        // GOPs while still capping the worst case where a pathological
+        // source (no mid-stream keyframes, stalled HTTP byte-range)
+        // would otherwise run unbounded and pin the provider lock.
+        // The packet-count cap below (~30 s of source) covers the
+        // "no IDR ever" case in fast-source-time space; this deadline
+        // covers the "each packet read is slow" case in wall-clock
+        // space.
+        let segmentReadDeadlineNs = DispatchTime.now().uptimeNanoseconds + UInt64(15_000_000_000)
 
         var videoCount = 0
         var audioCount = 0
@@ -1276,12 +1288,34 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 // switching mid-session would require re-priming the
                 // muxer and is a phase-7 concern.
 
-                // Safety bound: never read more than ~30 s worth of
-                // packets for one segment, regardless of where the
+                // Safety bound #1: never read more than ~30 s worth
+                // of packets for one segment, regardless of where the
                 // next keyframe is. Pathological sources without
                 // mid-stream keyframes can otherwise gobble the
                 // whole file.
-                if videoCount + audioCount > 3600 { break }
+                if videoCount + audioCount > 3600 {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND packet-count v=\(videoCount) a=\(audioCount), giving up on next-IDR boundary",
+                        category: .session
+                    )
+                    break
+                }
+                // Safety bound #2: wall-clock deadline. Source-time
+                // packet-count alone isn't enough — a slow link or a
+                // stalled HTTP byte-range can drag a single segment
+                // generation past the user's patience while staying
+                // well under 3600 packets. Cap the loop at 15 s of
+                // real time so the provider lock cannot be held
+                // indefinitely. Emitting under .session because this
+                // is a flow-control event, not a scrub.
+                if DispatchTime.now().uptimeNanoseconds > segmentReadDeadlineNs {
+                    let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
+                    EngineLog.emit(
+                        "[HLSVideoEngine] seg\(index) req=\(req) BOUND wall-clock \(String(format: "%.0f", elapsedMs))ms v=\(videoCount) a=\(audioCount), emitting partial fragment",
+                        category: .session
+                    )
+                    break
+                }
             }
             let readMs = Double(DispatchTime.now().uptimeNanoseconds - readStart.uptimeNanoseconds) / 1_000_000
             let flushStart = DispatchTime.now()
