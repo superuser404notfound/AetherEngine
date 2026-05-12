@@ -700,20 +700,37 @@ final class FMP4VideoMuxer {
         //      24 fps with delay=4) versus the source — negligible
         //      against playlist EXTINF cumulative for VOD playback.
         //
-        // Audio packets carry valid DTS == PTS from the demuxer
-        // (audio has no reorder), but their PTS must shift by the
-        // same wall-clock amount as video so the muxer's output
-        // tracks A/V sync. Without this, video's `maxShift` (typically
-        // ~1 frame for typical reorder) was added to video PTS only,
-        // and audio kept its source PTS — so audio played `maxShift`
-        // earlier than video. Per fragment that's a constant ~40 ms
-        // offset (subliminal), but `maxShift` varies between segments
-        // depending on the first GOP's reorder depth, and AVPlayer
-        // sees the offset jump at every segment boundary as audio
-        // drift versus video. Vincent's symptom: "läuft gut für ein
-        // paar Sekunden, dann hängt es kurz und endet im asynch
-        // chaos."
-        let videoShift = Self.synthesiseVideoTiming(packets: videoPackets)
+        // Pick a session-wide constant PTS shift instead of computing
+        // one per fragment. The previous per-fragment `maxShift` was
+        // typically ~1 frame, but the value varied between fragments
+        // depending on the first GOP's reorder pattern. AVPlayer saw
+        // the IRAP's CTS (and the resulting first-displayed-frame
+        // timing) jump between fragments, producing the brief stall
+        // and A/V chaos at segment boundaries Vincent reported even
+        // after the audio-side shift compensated for absolute A/V
+        // offset.
+        //
+        // Constant shift = `video_delay * frame_duration` from the
+        // codecpar metadata. video_delay is the HEVC / H.264 reorder
+        // buffer size (4 frames for HEVC main-tier, 2-3 for typical
+        // H.264). frame_duration comes from the first packet's
+        // `duration` field, which the demuxer fills from each frame
+        // and stays consistent for CFR sources. Multiplying gives the
+        // maximum possible (sorted_pts[i] - source_pts[i]) for any
+        // packet in any fragment under that source's reorder depth,
+        // so the per-fragment pts >= dts constraint always holds with
+        // this single value. The IRAP's CTS becomes a fixed
+        // ~video_delay frames across every fragment of the session;
+        // AVPlayer's decoder pipeline sees identical per-sample
+        // timing structure at every random-access boundary.
+        let videoDelay = max(1, Int(video.codecpar.pointee.video_delay))
+        let frameDuration: Int64 = videoPackets.first.map { Int64($0.pointee.duration) } ?? 1
+        let sessionShift = max(1, Int64(videoDelay) * frameDuration)
+
+        let videoShift = Self.synthesiseVideoTiming(
+            packets: videoPackets,
+            minShift: sessionShift
+        )
 
         for pkt in videoPackets {
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
@@ -787,7 +804,8 @@ final class FMP4VideoMuxer {
     /// non-zero CTS but AVPlayer renders display order correctly.
     @discardableResult
     static func synthesiseVideoTiming(
-        packets: [UnsafeMutablePointer<AVPacket>]
+        packets: [UnsafeMutablePointer<AVPacket>],
+        minShift: Int64 = 0
     ) -> Int64 {
         guard !packets.isEmpty else { return 0 }
         let firstPts = packets[0].pointee.pts
@@ -812,7 +830,15 @@ final class FMP4VideoMuxer {
         // frame cadence (no uniform-duration rounding drift across
         // long segments at non-integer-ratio framerates like
         // 23.976 fps).
-        var maxShift: Int64 = 0
+        //
+        // Apply at least `minShift` to satisfy the session-wide
+        // constant-shift invariant the caller passes in. If a
+        // pathological fragment with deeper reorder than the codec's
+        // declared `video_delay` ever shows up, raise the shift to
+        // satisfy that single fragment — the IRAP's CTS jumps for
+        // that one segment only, accepting one boundary glitch over
+        // a hard mux failure.
+        var maxShift: Int64 = minShift
         for i in 0..<packets.count {
             let needed = sortedPts[i] &- packets[i].pointee.pts
             if needed > maxShift { maxShift = needed }
