@@ -1164,22 +1164,60 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    // Detect random-access points by parsing the
-                    // packet's NAL payload rather than trusting
-                    // `AV_PKT_FLAG_KEY`. The MKV demuxer marks the
-                    // first returned packet after `av_seek_frame`
-                    // as a keyframe even when sequential reads of
-                    // the same packet didn't see the flag — so the
-                    // two loops disagree on where the GOP boundary
-                    // sits, and seg N walks past an IDR that seg
-                    // N+1 then adopts as its segment-start, causing
-                    // a cross-fragment DTS overlap → muxer EINVAL.
-                    // The NAL payload is the same bytes in either
-                    // context, so the parse returns a consistent
-                    // answer.
-                    let isRAP = Self.packetContainsRandomAccessPoint(
+                    // RAP detection combines two signals:
+                    //
+                    // 1. NAL-payload parse (primary, authoritative): walks
+                    //    the length-prefixed NAL units and looks for HEVC
+                    //    type 16-21 (IRAP) or H.264 type 5 (IDR). Pure
+                    //    function of the bitstream, no demuxer state
+                    //    involved, so the same source position always
+                    //    yields the same answer.
+                    //
+                    // 2. `AV_PKT_FLAG_KEY` (secondary, sequential-only):
+                    //    the MKV demuxer marks packets at random-access
+                    //    positions with the KEY flag. Reliable for
+                    //    sequential reads but DELIBERATELY unreliable
+                    //    on the first packet returned after
+                    //    `av_seek_frame` — that one is artificially
+                    //    flagged KEY even when its NAL header says
+                    //    otherwise. We exclude it by gating on
+                    //    `videoCount > 0`: every mediaSegment(at:) call
+                    //    seeks first and reads forward, so video packet
+                    //    index 0 is post-seek (unreliable flag) and
+                    //    indices 1+ are sequential (reliable flag).
+                    //
+                    // The combination handles two failure modes that
+                    // both produce cross-fragment DTS overlap and the
+                    // characteristic "non monotonically increasing dts"
+                    // muxer EINVAL during forward play:
+                    //
+                    //   a. NAL parser misses an IRAP that the demuxer
+                    //      flag correctly marks (some HEVC streams pack
+                    //      unusual prefix SEI / AUD ordering that
+                    //      confuses the length-prefix walker).
+                    //   b. Demuxer flag misses an IRAP that the NAL
+                    //      parser correctly detects (the post-seek
+                    //      first-packet case, addressed by the
+                    //      videoCount > 0 gate).
+                    //
+                    // When the two signals disagree on a sequential
+                    // packet, emit a structured `RAP-DISAGREE` log line
+                    // so we can surface the source's actual NAL layout
+                    // for the next round of parser hardening.
+                    let isRAP_nal = Self.packetContainsRandomAccessPoint(
                         packet, codecID: videoCodecID
                     )
+                    let isRAP_flag = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+                    let isSequentialRead = videoCount > 0
+                    let isRAP = isRAP_nal || (isSequentialRead && isRAP_flag)
+                    if isSequentialRead, isRAP_nal != isRAP_flag {
+                        EngineLog.emit(
+                            "[HLSVideoEngine] seg\(index) req=\(req) RAP-DISAGREE pkt#\(videoCount) " +
+                            "src(pts=\(packet.pointee.pts) dts=\(packet.pointee.dts) size=\(packet.pointee.size)) " +
+                            "nal=\(isRAP_nal ? "Y" : "n") flag=\(isRAP_flag ? "Y" : "n") → combined=\(isRAP ? "RAP" : "non")",
+                            category: .scrub
+                        )
+                    }
                     if !foundSegmentStart {
                         // Wait for the first IDR at-or-after the segment
                         // start. Skip pre-roll non-RAP packets and any
