@@ -374,18 +374,26 @@ final class FMP4VideoMuxer {
         let ret = av_interleaved_write_frame(ctx, cloned)
         if ret < 0 {
             // DrHurt's P8.1 MKV stalls at seg4 with "write failed
-            // (-22)" (EINVAL), and the old diag couldn't tell us
-            // which packet AVPlayer's downstream rejected. -22 from
-            // mp4's av_interleaved_write_frame usually means
-            // non-monotonic DTS or an unset PTS at a fragment
-            // boundary; without source + rescaled timestamps in the
-            // log the cause is invisible.
+            // (-22)" (EINVAL). Diag split into two lines so each
+            // survives the overlay's lineLimit(1) truncation: the
+            // first carries time bases + raw codes (the answer to
+            // "did the rescale produce AV_NOPTS_VALUE?"), the
+            // second carries the timestamp/size detail. AV_NOPTS_
+            // VALUE in the rescaled output means av_rescale_q saw
+            // a zero numerator or denominator on outTb, which is
+            // the actual root cause we need to chase.
             let kind = toStreamIndex == videoOutputIndex ? "video" : "audio"
+            let outIsNoPTS = cloned.pointee.pts == Self.avNoPTS || cloned.pointee.dts == Self.avNoPTS
             EngineLog.emit(
-                "[FMP4VideoMuxer] writePacket FAIL ret=\(ret) stream=\(kind)(\(toStreamIndex)) " +
-                "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration) tb=\(sourceTb.num)/\(sourceTb.den)) " +
-                "out(pts=\(cloned.pointee.pts) dts=\(cloned.pointee.dts) dur=\(cloned.pointee.duration) tb=\(outTb.num)/\(outTb.den)) " +
-                "size=\(pktSize) key=\(isKey ? 1 : 0) flags=0x\(String(pktFlags, radix: 16))"
+                "[FMP4VideoMuxer] writePacket FAIL #1 ret=\(ret) stream=\(kind)(\(toStreamIndex)) " +
+                "tb_src=\(sourceTb.num)/\(sourceTb.den) tb_out=\(outTb.num)/\(outTb.den) " +
+                "outNoPTS=\(outIsNoPTS ? "Y" : "n") size=\(pktSize) key=\(isKey ? 1 : 0)"
+            )
+            EngineLog.emit(
+                "[FMP4VideoMuxer] writePacket FAIL #2 " +
+                "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration)) " +
+                "out(pts=\(cloned.pointee.pts) dts=\(cloned.pointee.dts) dur=\(cloned.pointee.duration)) " +
+                "flags=0x\(String(pktFlags, radix: 16))"
             )
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
