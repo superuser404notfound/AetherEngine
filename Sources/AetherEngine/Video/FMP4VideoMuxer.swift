@@ -347,6 +347,19 @@ final class FMP4VideoMuxer {
         }
         let outTb = outStream.pointee.time_base
 
+        // Capture source-side timestamps before rescaling so the
+        // failure-path diag can surface them. Without these the
+        // overlay only shows the rescaled values, which doesn't help
+        // pinpoint whether the bug is "demuxer gave us bogus PTS" or
+        // "rescale produced a non-monotonic DTS" or "muxer
+        // boundary-aligned PTS got rejected by the mp4 muxer".
+        let srcPts = cloned.pointee.pts
+        let srcDts = cloned.pointee.dts
+        let srcDuration = cloned.pointee.duration
+        let pktSize = Int(cloned.pointee.size)
+        let pktFlags = cloned.pointee.flags
+        let isKey = (pktFlags & AV_PKT_FLAG_KEY) != 0
+
         if cloned.pointee.pts != Self.avNoPTS {
             cloned.pointee.pts = av_rescale_q(cloned.pointee.pts, sourceTb, outTb)
         }
@@ -360,6 +373,20 @@ final class FMP4VideoMuxer {
 
         let ret = av_interleaved_write_frame(ctx, cloned)
         if ret < 0 {
+            // DrHurt's P8.1 MKV stalls at seg4 with "write failed
+            // (-22)" (EINVAL), and the old diag couldn't tell us
+            // which packet AVPlayer's downstream rejected. -22 from
+            // mp4's av_interleaved_write_frame usually means
+            // non-monotonic DTS or an unset PTS at a fragment
+            // boundary; without source + rescaled timestamps in the
+            // log the cause is invisible.
+            let kind = toStreamIndex == videoOutputIndex ? "video" : "audio"
+            EngineLog.emit(
+                "[FMP4VideoMuxer] writePacket FAIL ret=\(ret) stream=\(kind)(\(toStreamIndex)) " +
+                "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration) tb=\(sourceTb.num)/\(sourceTb.den)) " +
+                "out(pts=\(cloned.pointee.pts) dts=\(cloned.pointee.dts) dur=\(cloned.pointee.duration) tb=\(outTb.num)/\(outTb.den)) " +
+                "size=\(pktSize) key=\(isKey ? 1 : 0) flags=0x\(String(pktFlags, radix: 16))"
+            )
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
     }
@@ -376,6 +403,7 @@ final class FMP4VideoMuxer {
         }
         let ret = av_write_frame(ctx, nil)
         if ret < 0 {
+            EngineLog.emit("[FMP4VideoMuxer] flushFragment FAIL ret=\(ret)")
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
         if let pb = ctx.pointee.pb {
