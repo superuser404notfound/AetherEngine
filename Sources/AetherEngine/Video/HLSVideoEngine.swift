@@ -588,21 +588,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // dominating the TestFlight overlay.
 
         // 7. Wire the provider, the server, and serve the URL.
-        // The original `muxer` instance built the init segment that
-        // AVPlayer fetches; from here on each `mediaSegment` call
-        // creates a fresh per-segment muxer with the same configs,
-        // so we no longer thread the session-wide muxer through the
-        // provider. Close it explicitly so its AVFormatContext +
-        // capture buffer release immediately rather than waiting on
-        // ARC; the per-segment muxers handle the per-fragment work.
-        muxer.close()
         let prov = VideoSegmentProvider(
             demuxer: dem,
             videoStreamIndex: videoIndex,
             audioStreamIndex: resolvedAudioStreamIndex >= 0 ? resolvedAudioStreamIndex : nil,
             videoTimeBase: videoTimeBase,
-            videoConfig: videoConfig,
-            audioConfig: audioConfig,
+            muxer: muxer,
             audioBridge: audioBridge,
             initSegmentData: initSegmentData,
             segments: plan,
@@ -779,21 +770,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let videoStreamIndex: Int32
     private let audioStreamIndex: Int32?
     private let videoTimeBase: AVRational
-    /// Per-segment muxer configs. We build a fresh `FMP4VideoMuxer`
-    /// for every `mediaSegment(at:)` call, so each fragment's muxer
-    /// state starts from scratch. Previously a single per-session
-    /// muxer threaded all fragments, but that made the mp4 muxer's
-    /// per-stream `last_dts` enforcement bleed across fragments —
-    /// any segment whose seek landed a packet at lower DTS than the
-    /// previous fragment's last write hit `av_interleaved_write_
-    /// frame` ret=-22 EINVAL. AVPlayer's scrub-backward UX exposed
-    /// this badly: every backward seek went through a few-second
-    /// load before AVPlayer found a segment whose first packet
-    /// happened to have a higher DTS than the muxer's last write.
-    /// Per-segment muxer state isolation makes cross-fragment DTS
-    /// monotonicity a non-concern.
-    private let videoConfig: FMP4VideoMuxer.StreamConfig
-    private let audioConfig: FMP4VideoMuxer.StreamConfig?
+    private let muxer: FMP4VideoMuxer
     private let audioBridge: AudioBridge?
 
     private let initSegmentData: Data
@@ -814,8 +791,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         videoStreamIndex: Int32,
         audioStreamIndex: Int32?,
         videoTimeBase: AVRational,
-        videoConfig: FMP4VideoMuxer.StreamConfig,
-        audioConfig: FMP4VideoMuxer.StreamConfig?,
+        muxer: FMP4VideoMuxer,
         audioBridge: AudioBridge?,
         initSegmentData: Data,
         segments: [HLSVideoEngine.Segment],
@@ -830,8 +806,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.videoStreamIndex = videoStreamIndex
         self.audioStreamIndex = audioStreamIndex
         self.videoTimeBase = videoTimeBase
-        self.videoConfig = videoConfig
-        self.audioConfig = audioConfig
+        self.muxer = muxer
         self.audioBridge = audioBridge
         self.initSegmentData = initSegmentData
         self.segments = segments
@@ -847,6 +822,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         lock.lock()
         guard !isClosed else { lock.unlock(); return }
         isClosed = true
+        muxer.close()
         audioBridge?.close()
         lock.unlock()
     }
@@ -884,27 +860,6 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         // accumulate from the encoder's first-ever sample and drift
         // out of alignment with video as fragments march on.
         audioBridge?.startSegment()
-
-        // Per-segment muxer. Fresh state per fragment means the mp4
-        // muxer's `last_dts` enforcement never has cross-fragment
-        // values to compare against — every segment starts as if
-        // it's the first packet stream the muxer has seen. The
-        // writeInitSegment call writes ftyp+moov into the muxer's
-        // capture buffer, which we drain into `_ =` because the
-        // cached `initSegmentData` from session start is what
-        // AVPlayer fetches for /init.mp4; the per-segment muxer's
-        // own header bytes are discarded. After writePacket loops
-        // run, flushFragment emits the moof+mdat pair we hand back
-        // to the HLS server.
-        let segMuxer: FMP4VideoMuxer
-        do {
-            segMuxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
-            _ = try segMuxer.writeInitSegment()
-        } catch {
-            EngineLog.emit("[HLSVideoEngine] seg\(index) muxer init failed: \(error)")
-            return nil
-        }
-        defer { segMuxer.close() }
 
         var videoCount = 0
         var audioCount = 0
@@ -972,11 +927,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                        isKey {
                         break
                     }
-                    try segMuxer.writePacket(packet, toStreamIndex: segMuxer.videoOutputIndex)
+                    try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
                     didEnqueueAnyVideo = true
                     videoCount += 1
                 } else if let aIdx = audioStreamIndex,
-                          let aOutIdx = segMuxer.audioOutputIndex,
+                          let aOutIdx = muxer.audioOutputIndex,
                           streamIdx == aIdx,
                           foundSegmentStart {
                     // Audio packets before the segment's first video
@@ -990,7 +945,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                         let flacPackets = try bridge.feed(packet: packet)
                         for fp in flacPackets {
                             do {
-                                try segMuxer.writePacket(fp, toStreamIndex: aOutIdx)
+                                try muxer.writePacket(fp, toStreamIndex: aOutIdx)
                             } catch {
                                 var pPtr: UnsafeMutablePointer<AVPacket>? = fp
                                 av_packet_free(&pPtr)
@@ -1001,7 +956,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                             audioCount += 1
                         }
                     } else {
-                        try segMuxer.writePacket(packet, toStreamIndex: aOutIdx)
+                        try muxer.writePacket(packet, toStreamIndex: aOutIdx)
                         audioCount += 1
                     }
                 }
@@ -1017,7 +972,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 // whole file.
                 if videoCount + audioCount > 3600 { break }
             }
-            let bytes = try segMuxer.flushFragment()
+            let bytes = try muxer.flushFragment()
             EngineLog.emit("[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B (start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s)")
             return bytes
         } catch {
