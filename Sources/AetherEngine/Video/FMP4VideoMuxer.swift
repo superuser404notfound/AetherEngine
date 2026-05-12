@@ -219,17 +219,7 @@ final class FMP4VideoMuxer {
     /// `writePacket` / `flushFragment`. Idempotent: if called again,
     /// throws because libavformat doesn't support re-running
     /// `avformat_write_header` on the same context.
-    /// `fragmentIndex` becomes the `mfhd.sequence_number` for the
-    /// first fragment this muxer emits, and the mp4 muxer increments
-    /// it from there. Per-segment muxer instances must pass the
-    /// segment's 1-based index here so the moof sequence numbers
-    /// stay monotonic across the whole session — without that,
-    /// every fresh muxer starts the counter back at 1 and AVPlayer
-    /// sees duplicate `mfhd.sequence_number=1` boxes, which it
-    /// rejects or de-duplicates depending on the playback path.
-    /// Default 1 keeps backward-compatible behaviour for the
-    /// init-segment-only muxer at session start.
-    func writeInitSegment(fragmentIndex: Int = 1) throws -> Data {
+    func writeInitSegment() throws -> Data {
         guard !isClosed, let ctx = formatContext else {
             throw FMP4VideoMuxerError.closed
         }
@@ -243,12 +233,6 @@ final class FMP4VideoMuxer {
                     "movflags",
                     "frag_custom+empty_moov+default_base_moof+cmaf",
                     0)
-        // Set the per-muxer fragment counter (MOVMuxContext.fragments)
-        // — see movenc.c:5423 where it's written into mfhd as the
-        // sequence_number and movenc.c:6672 where it auto-increments
-        // per moof. AV_OPT default is 1 (movenc.c:86), we override
-        // when the host wants a session-wide monotonic sequence.
-        av_dict_set(&opts, "fragment_index", "\(fragmentIndex)", 0)
 
         clearCaptureBuffer()
 
