@@ -563,30 +563,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let streamIdx = packet.pointee.stream_index
                 seenStreamIdx.insert(streamIdx)
                 if streamIdx == videoIndex, !gotVideo {
-                    // The captured packets are only used to populate
-                    // moov atoms (notably dec3 / hvcC details).
-                    // Their actual timestamps are irrelevant since
-                    // the moof + mdat fragment portion of this
-                    // muxer's output is discarded.
-                    //
-                    // CRITICAL: rewrite pts/dts to 0 before
-                    // submitting. movenc.c uses the first packet's
-                    // dts to populate `start_dts` on the track, then
-                    // writes an `edts/elst` box in the moov whose
-                    // empty-edit duration equals `start_dts` (in
-                    // mvhd timescale). If we leave the source pts in
-                    // place — which is wherever the cue prewarm
-                    // landed, typically mid-file — AVPlayer reads
-                    // that elst and skips the corresponding amount
-                    // of asset time before showing anything. For
-                    // Vincent's "Wilde Jungs" source (cue prewarm at
-                    // 695 s) that elst said "skip 11 minutes", and
-                    // the playback got confused once the first
-                    // segment ended because AVPlayer's asset
-                    // timeline was offset from the playlist's EXTINF
-                    // cumulative.
-                    packet.pointee.pts = 0
-                    packet.pointee.dts = 0
                     try m.writePacket(packet, toStreamIndex: m.videoOutputIndex)
                     gotVideo = true
                 } else if streamIdx == resolvedAudioStreamIndex,
@@ -595,20 +571,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     if let bridge = audioBridge {
                         let flacPackets = try bridge.feed(packet: packet)
                         for fp in flacPackets {
-                            // Same elst defence as video — strictly
-                            // monotonic per-packet timestamps starting
-                            // at 0, so movenc doesn't emit an empty
-                            // edit on the audio track either.
-                            fp.pointee.pts = Int64(audioWritten)
-                            fp.pointee.dts = Int64(audioWritten)
                             try m.writePacket(fp, toStreamIndex: aOutIdx)
                             var pPtr: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&pPtr)
                             audioWritten += 1
                         }
                     } else {
-                        packet.pointee.pts = Int64(audioWritten)
-                        packet.pointee.dts = Int64(audioWritten)
                         try m.writePacket(packet, toStreamIndex: aOutIdx)
                         audioWritten += 1
                     }

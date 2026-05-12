@@ -661,94 +661,73 @@ final class FMP4VideoMuxer {
         // fragment box-summary log spam.
         _ = try muxer.writeInitSegment(logSummary: false)
 
-        // Synthesise per-packet DTS so the FFmpeg mp4 muxer accepts
-        // every packet without `pts < dts` or `non monotonically
-        // increasing dts` rejections.
+        // Per-stream synthetic-DTS state. The FFmpeg mp4 muxer
+        // enforces strict-monotonic DTS per stream; many real-world
+        // MKV/HEVC sources don't carry DTS on every packet (the
+        // first packet returned after `av_seek_frame` commonly has
+        // `dts == AV_NOPTS_VALUE`, and some encoders simply omit
+        // DTS in favour of PTS-only timing). The mov muxer falls
+        // back to PTS in that case, but then a subsequent packet
+        // whose real DTS happens to equal that prior PTS produces
+        // a `non monotonically increasing dts` rejection — even
+        // though the source timeline is perfectly valid.
         //
-        // MKV sources never carry per-packet DTS for HEVC / H.264
-        // streams with B-frame reorder: libavformat's MKV demuxer
-        // leaves `pkt.dts = AV_NOPTS_VALUE` until enough packets have
-        // been read to determine the reorder pattern (typically the
-        // first `video_delay` packets each segment, since our
-        // demuxer.seek() invalidates the reorder buffer at each
-        // boundary). The previous sanitiser papered over this by
-        // setting `dts = pts` and bumping by one tick on ties — but
-        // that broke the trun sample-duration column for HEVC streams
-        // with B-frame reorder. The output's `pkt.duration` values
-        // got derived from DTS spacing instead of source duration,
-        // producing 1ms-spaced sample durations the AVPlayer HEVC
-        // decoder couldn't display correctly. Symptom: video frozen
-        // on first frame, audio plays through (HEVC) or video jumps
-        // between scenes because frames displayed in decode rather
-        // than display order (H.264).
-        //
-        // New approach mirrors what `ffmpeg -c copy` does internally:
-        //
-        //   1. Compute natural decode time per packet by accumulating
-        //      `pkt.duration` from the first packet's PTS. This gives
-        //      uniform 1-frame-per-step DTS spacing that AVPlayer's
-        //      decoder timing expects.
-        //   2. Find the maximum amount by which any natural DTS
-        //      exceeds its packet's PTS (B-frames in reorder have
-        //      PTS lower than their decode position).
-        //   3. Shift every output PTS forward by that amount so
-        //      `pts >= dts` holds for every packet. The CTS offset
-        //      (`pts - dts`) is preserved as stored in the trun box,
-        //      which the AVPlayer decoder uses to put frames back in
-        //      display order. The shift moves the first displayed
-        //      frame by ~`video_delay * frame_duration` (~168 ms at
-        //      24 fps with delay=4) versus the source — negligible
-        //      against playlist EXTINF cumulative for VOD playback.
-        //
-        // Pick a session-wide constant PTS shift instead of computing
-        // one per fragment. The previous per-fragment `maxShift` was
-        // typically ~1 frame, but the value varied between fragments
-        // depending on the first GOP's reorder pattern. AVPlayer saw
-        // the IRAP's CTS (and the resulting first-displayed-frame
-        // timing) jump between fragments, producing the brief stall
-        // and A/V chaos at segment boundaries Vincent reported even
-        // after the audio-side shift compensated for absolute A/V
-        // offset.
-        //
-        // Constant shift = `video_delay * frame_duration` from the
-        // codecpar metadata. video_delay is the HEVC / H.264 reorder
-        // buffer size (4 frames for HEVC main-tier, 2-3 for typical
-        // H.264). frame_duration comes from the first packet's
-        // `duration` field, which the demuxer fills from each frame
-        // and stays consistent for CFR sources. Multiplying gives the
-        // maximum possible (sorted_pts[i] - source_pts[i]) for any
-        // packet in any fragment under that source's reorder depth,
-        // so the per-fragment pts >= dts constraint always holds with
-        // this single value. The IRAP's CTS becomes a fixed
-        // ~video_delay frames across every fragment of the session;
-        // AVPlayer's decoder pipeline sees identical per-sample
-        // timing structure at every random-access boundary.
-        let videoDelay = max(1, Int(video.codecpar.pointee.video_delay))
-        let frameDuration: Int64 = videoPackets.first.map { Int64($0.pointee.duration) } ?? 1
-        let sessionShift = max(1, Int64(videoDelay) * frameDuration)
+        // Sanitise here: ensure each packet's `dts` is set and
+        // strictly greater than the previous packet's submitted
+        // DTS on the same stream. We try to preserve the source
+        // signal first (use the real `dts`, or fall back to `pts`)
+        // and only bump by one tick when needed to break a tie.
+        // Sample durations come from `packet.duration` (set by the
+        // demuxer) and feed the mp4 muxer's `trun` per-sample
+        // duration column, so the small DTS adjustments don't
+        // affect decoded playback timing.
+        var lastDtsByStream: [Int: Int64] = [:]
 
-        let videoShift = Self.synthesiseVideoTiming(
-            packets: videoPackets,
-            minShift: sessionShift
-        )
+        /// Sanitise `pkt.dts` to be strictly monotonic per stream and
+        /// non-negative-PTS-offset (dts <= pts). Returns `true` if the
+        /// packet should be muxed, `false` if it should be dropped.
+        ///
+        /// The drop signal fires when keeping dts strictly above the
+        /// previous packet's dts would push it past the packet's own
+        /// PTS, i.e. produce `pts < dts`. That happens for HEVC RASL /
+        /// RADL leading pictures coming out of order from the demuxer:
+        /// their natural DTS equals their PTS but they arrive after a
+        /// later-PTS packet, so monotonicity would require bumping
+        /// DTS into the future of PTS. The mp4 muxer rejects such
+        /// packets with an unconditional `pts < dts` check. Dropping
+        /// them is semantically correct at random-access boundaries,
+        /// see the comment in `HLSVideoEngine.mediaSegment(at:)`.
+        func sanitiseDTS(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int) -> Bool {
+            var dts = pkt.pointee.dts
+            let pts = pkt.pointee.pts
+            let prev = lastDtsByStream[streamIndex]
+
+            if dts == avNoPTS {
+                // Source didn't carry DTS. PTS is almost always
+                // present; fall back to it. If even PTS is unset
+                // (extreme edge case), use prev+1 as a degenerate
+                // monotonic placeholder.
+                dts = pts != avNoPTS ? pts : ((prev ?? 0) + 1)
+            }
+            if let p = prev, dts <= p {
+                dts = p &+ 1
+            }
+            if pts != avNoPTS, dts > pts {
+                // Would create pts < dts at the muxer. Drop.
+                return false
+            }
+            pkt.pointee.dts = dts
+            lastDtsByStream[streamIndex] = dts
+            return true
+        }
 
         for pkt in videoPackets {
+            guard sanitiseDTS(pkt, streamIndex: muxer.videoOutputIndex) else { continue }
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
         }
-        if let audioIdx = muxer.audioOutputIndex, let audio = audio {
-            // Rescale `videoShift` from video source time_base to the
-            // audio source time_base, then apply uniformly. Audio
-            // packets have valid DTS so `sanitiseAudioTiming` only
-            // enforces monotonicity for the rare misordered MKV.
-            let audioShift: Int64
-            if videoShift > 0 {
-                audioShift = av_rescale_q(videoShift, video.timeBase, audio.timeBase)
-            } else {
-                audioShift = 0
-            }
-            Self.shiftAudioPts(packets: audioPackets, by: audioShift)
-            Self.sanitiseAudioTiming(packets: audioPackets)
+        if let audioIdx = muxer.audioOutputIndex {
             for pkt in audioPackets {
+                guard sanitiseDTS(pkt, streamIndex: audioIdx) else { continue }
                 try muxer.writePacket(pkt, toStreamIndex: audioIdx)
             }
         }
@@ -770,124 +749,6 @@ final class FMP4VideoMuxer {
         try muxer.drainInterleaver()
         _ = try muxer.flushFragment()
         return try muxer.flushFragment()
-    }
-
-    /// Compute and apply DTS values plus a forward PTS shift so the
-    /// FFmpeg mp4 muxer accepts every packet. See the comment in
-    /// `writeFragmentStateless` for the rationale; this is the
-    /// implementation.
-    ///
-    /// Packets are mutated in-place. Caller passes them in decode
-    /// order — the same order `Demuxer.readPacket` yields after a
-    /// `seek` — and the first packet must be a random-access point
-    /// (IRAP for HEVC, IDR for H.264) whose `pts` is the segment's
-    /// nominal start. The `HLSVideoEngine.mediaSegment(at:)` collect
-    /// loop already enforces both conditions (RADL leading-picture
-    /// filter excludes anything with PTS below the IRAP).
-    ///
-    /// Algorithm: take the packets' PTS values, sort them, and assign
-    /// the n-th sorted PTS as the DTS of the n-th decode-order
-    /// packet. The first packet (IRAP, smallest PTS after RADL
-    /// filtering) gets the smallest sorted PTS as its DTS — they're
-    /// equal, so `tfdt` reads the source's IRAP timestamp exactly,
-    /// which AVPlayer maps to the right asset-timeline position.
-    /// Subsequent packets get the next sorted PTS values, which gives
-    /// uniformly-spaced decode timing that tracks the source's true
-    /// frame cadence without integer-division drift. The reference
-    /// FFmpeg `-c copy` pipeline produces nearly identical output.
-    ///
-    /// PTS shift handles the `pts < dts` rejection in `mux.c:567`:
-    /// B-frames have PTS lower than their decode position's natural
-    /// DTS, so we shift every output PTS forward by the largest
-    /// (natural_dts - source_pts) seen in the fragment. CTS offsets
-    /// in the trun preserve display reorder; the IRAP itself gets a
-    /// non-zero CTS but AVPlayer renders display order correctly.
-    @discardableResult
-    static func synthesiseVideoTiming(
-        packets: [UnsafeMutablePointer<AVPacket>],
-        minShift: Int64 = 0
-    ) -> Int64 {
-        guard !packets.isEmpty else { return 0 }
-        let firstPts = packets[0].pointee.pts
-        guard firstPts != avNoPTS else { return 0 }
-
-        // Gather PTS values for sorting. Defensive: skip NOPTS
-        // entries (should not appear here after the segment-collect
-        // RADL / pts<dts filters, but the synthesis must stay
-        // monotonic if they do slip through).
-        var sortedPts: [Int64] = []
-        sortedPts.reserveCapacity(packets.count)
-        for p in packets {
-            let v = p.pointee.pts
-            if v != avNoPTS { sortedPts.append(v) }
-        }
-        guard sortedPts.count == packets.count else { return 0 }
-        sortedPts.sort()
-
-        // Assign sorted PTS as DTS in decode order. Decode position
-        // n receives the n-th-smallest display time as its decode
-        // time, which means DTS values track the source's actual
-        // frame cadence (no uniform-duration rounding drift across
-        // long segments at non-integer-ratio framerates like
-        // 23.976 fps).
-        //
-        // Apply at least `minShift` to satisfy the session-wide
-        // constant-shift invariant the caller passes in. If a
-        // pathological fragment with deeper reorder than the codec's
-        // declared `video_delay` ever shows up, raise the shift to
-        // satisfy that single fragment — the IRAP's CTS jumps for
-        // that one segment only, accepting one boundary glitch over
-        // a hard mux failure.
-        var maxShift: Int64 = minShift
-        for i in 0..<packets.count {
-            let needed = sortedPts[i] &- packets[i].pointee.pts
-            if needed > maxShift { maxShift = needed }
-        }
-
-        for i in 0..<packets.count {
-            packets[i].pointee.dts = sortedPts[i]
-            packets[i].pointee.pts &+= maxShift
-        }
-        return maxShift
-    }
-
-    /// Shift every audio packet's PTS (and DTS, since audio has
-    /// pts == dts) forward by `shift` ticks in the audio's source
-    /// time_base. Caller rescales `videoShift` to audio time_base
-    /// before passing in. No-op when `shift == 0`.
-    static func shiftAudioPts(
-        packets: [UnsafeMutablePointer<AVPacket>],
-        by shift: Int64
-    ) {
-        guard shift > 0 else { return }
-        for pkt in packets {
-            if pkt.pointee.pts != avNoPTS { pkt.pointee.pts &+= shift }
-            if pkt.pointee.dts != avNoPTS { pkt.pointee.dts &+= shift }
-        }
-    }
-
-    /// Monotonic-DTS guard for audio packets. Audio codecs we handle
-    /// (AC3 / EAC3 / AAC / FLAC / ALAC / MP3 / Opus) have no decode
-    /// reorder, so demuxer-supplied DTS == PTS; the rare exception
-    /// is the first packet after a seek whose DTS may be NOPTS, or
-    /// occasional sources with non-monotonic block ordering.
-    static func sanitiseAudioTiming(
-        packets: [UnsafeMutablePointer<AVPacket>]
-    ) {
-        var prevDts: Int64 = Int64.min
-        for pkt in packets {
-            var dts = pkt.pointee.dts
-            if dts == avNoPTS {
-                dts = pkt.pointee.pts != avNoPTS
-                    ? pkt.pointee.pts
-                    : (prevDts == Int64.min ? 0 : prevDts &+ 1)
-            }
-            if dts <= prevDts {
-                dts = prevDts &+ 1
-            }
-            pkt.pointee.dts = dts
-            prevDts = dts
-        }
     }
 
     // MARK: - Internal
