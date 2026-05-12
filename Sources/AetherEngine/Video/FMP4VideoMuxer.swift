@@ -110,6 +110,23 @@ final class FMP4VideoMuxer {
     private var headerWritten = false
     private var isClosed = false
 
+    /// Last output-time-base DTS we successfully submitted to the
+    /// muxer, indexed by stream output index. Used purely for
+    /// failure-path diag: if seg N's first packet has out-DTS less
+    /// than or equal to seg N-1's last out-DTS for the same stream,
+    /// the mp4 muxer rejects with EINVAL because it enforces
+    /// monotonic DTS even across `frag_custom` fragments. Seeing
+    /// that side-by-side in the log tells us the segment-boundary
+    /// detection is letting overlapping packets through.
+    private var lastSubmittedDts: [Int: Int64] = [:]
+    private var lastSubmittedPts: [Int: Int64] = [:]
+    /// Monotonic counter of packets successfully submitted on each
+    /// output stream. Resets only on muxer close. Combined with the
+    /// segment provider's `seg{N}: v=X a=Y` line tells us how many
+    /// packets the previous segment wrote before we hit the failure
+    /// on the current one.
+    private var submittedCount: [Int: Int] = [:]
+
     // MARK: - Init
 
     init(video: StreamConfig, audio: StreamConfig?) throws {
@@ -390,7 +407,20 @@ final class FMP4VideoMuxer {
         let outDts = cloned.pointee.dts
         let outDuration = cloned.pointee.duration
 
+        let prevDts = lastSubmittedDts[toStreamIndex] ?? Int64.min
+        let prevPts = lastSubmittedPts[toStreamIndex] ?? Int64.min
+        let prevCount = submittedCount[toStreamIndex] ?? 0
+
         let ret = av_interleaved_write_frame(ctx, cloned)
+        if ret >= 0 {
+            // Track per-stream last-submitted timestamps for the
+            // next-packet failure diag. Only update on success so
+            // a rejected packet's values don't poison subsequent
+            // comparisons.
+            lastSubmittedDts[toStreamIndex] = outDts
+            lastSubmittedPts[toStreamIndex] = outPts
+            submittedCount[toStreamIndex] = prevCount + 1
+        }
         if ret < 0 {
             // DrHurt's P8.1 MKV stalls at seg4 with "write failed
             // (-22)" (EINVAL). Diag split into two lines so each
@@ -410,6 +440,19 @@ final class FMP4VideoMuxer {
                 "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration)) " +
                 "out(pts=\(outPts) dts=\(outDts) dur=\(outDuration)) " +
                 "flags=0x\(String(pktFlags, radix: 16))"
+            )
+            // Cross-segment monotonicity diag. Compares the offending
+            // packet's out-DTS to the last successfully-submitted
+            // DTS on the same stream. If `dtsΔ <= 0` the muxer is
+            // rejecting because of non-monotonic DTS — that's
+            // exactly the case the mp4 muxer enforces across
+            // fragments, regardless of `frag_custom` / cmaf.
+            let dtsDelta = outDts &- prevDts
+            EngineLog.emit(
+                "[FMP4VideoMuxer] writePacket FAIL #3 " +
+                "prevSubmitted(pts=\(prevPts) dts=\(prevDts) count=\(prevCount)) " +
+                "dtsΔ=\(dtsDelta) " +
+                "monotonic=\(outDts > prevDts ? "y" : "NO")"
             )
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
