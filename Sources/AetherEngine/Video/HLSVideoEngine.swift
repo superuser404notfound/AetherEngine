@@ -21,6 +21,51 @@ import Libavutil
 /// video for now, which is enough to verify the DV signalling path.
 public final class HLSVideoEngine: @unchecked Sendable {
 
+    // MARK: - Diagnostics
+
+    /// Cumulative muxer-reset stats for the current session. Sodalite's
+    /// Support / Diagnostics view can poll this; the host doesn't have
+    /// to subscribe to anything because the values are derived state
+    /// that only updates on observable boundary events (scrub, EINVAL).
+    ///
+    /// `preemptive` counts resets triggered by the DTS-watermark check
+    /// up front in `mediaSegment(at:)`. `reactive` counts resets
+    /// triggered by `av_interleaved_write_frame` returning EINVAL on
+    /// the first write of a fragment — i.e. the slack window missed a
+    /// real backward seek. A healthy session should have many
+    /// `preemptive` and zero `reactive`; the inverse means the slack
+    /// is mistuned for the source's GOP length.
+    public struct ResetStats: Sendable, Equatable {
+        public var total: Int
+        public var preemptive: Int
+        public var reactive: Int
+        /// Wall-clock duration of the most recent reset (close old
+        /// muxer + build new + write init segment + drain audio
+        /// bridge). Used to flag pathological resets that take long
+        /// enough to be user-visible.
+        public var lastDurationMs: Double
+        /// Free-form `reason` string from the most recent reset
+        /// (e.g. `"backward-seek pre-empt seg42 ..."`). Useful when
+        /// a user reports "playback paused for a second" and we
+        /// want to correlate against scrub history.
+        public var lastReason: String
+
+        public init(total: Int = 0, preemptive: Int = 0, reactive: Int = 0, lastDurationMs: Double = 0, lastReason: String = "") {
+            self.total = total
+            self.preemptive = preemptive
+            self.reactive = reactive
+            self.lastDurationMs = lastDurationMs
+            self.lastReason = lastReason
+        }
+    }
+
+    /// Snapshot of the current reset counters. Reads from the provider
+    /// under its lock so partial updates aren't observable. Returns a
+    /// zero-valued snapshot before `start()` has wired the provider.
+    public var resetStats: ResetStats {
+        provider?.resetStatsSnapshot() ?? ResetStats()
+    }
+
     // MARK: - Errors
 
     public enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
@@ -854,6 +899,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let lock = NSLock()
     private var isClosed = false
 
+    /// Cumulative reset counters for the session. Mutated only under
+    /// `lock`, mirrored into the public-facing snapshot on each
+    /// observable boundary.
+    private var resetStats = HLSVideoEngine.ResetStats()
+
     /// LRU cache of generated segment bytes, keyed by segment
     /// index. Cache hits serve immediately without touching the
     /// demuxer / muxer / audio bridge — the dominant cost in our
@@ -958,18 +1008,53 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     /// cache survives backward-scrub-bounce patterns (user
     /// scrubs forward, scrubs back into cached region, scrubs
     /// forward again — all three cache hits).
-    private func resetMuxer(reason: String) throws {
-        EngineLog.emit("[HLSVideoEngine] muxer reset (\(reason))")
+    ///
+    /// `preemptive` flips the counter bucket: true for the up-front
+    /// DTS-watermark check, false for the in-loop EINVAL recovery.
+    /// Both buckets are useful — a healthy session should have most
+    /// resets in `preemptive`, and `reactive`>0 means our slack
+    /// window is undersized for the source's GOP length.
+    private func resetMuxer(reason: String, preemptive: Bool) throws {
+        let started = DispatchTime.now()
         muxer.close()
         muxer = try FMP4VideoMuxer(video: videoConfig, audio: audioConfig)
         _ = try muxer.writeInitSegment()
         audioBridge?.startSegment()
         lastSubmittedVideoSrcDts = nil
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
+
+        resetStats.total += 1
+        if preemptive { resetStats.preemptive += 1 } else { resetStats.reactive += 1 }
+        resetStats.lastDurationMs = elapsedMs
+        resetStats.lastReason = reason
+
+        EngineLog.emit(
+            "[HLSVideoEngine] muxer reset (\(preemptive ? "pre-empt" : "reactive")) " +
+            "took=\(String(format: "%.1f", elapsedMs))ms total=\(resetStats.total) " +
+            "(pre=\(resetStats.preemptive) re=\(resetStats.reactive)) reason=\(reason)",
+            category: .scrub
+        )
+    }
+
+    /// Public accessor for the cumulative reset counters. Held under
+    /// `lock` so a concurrent reset cannot tear the snapshot.
+    func resetStatsSnapshot() -> HLSVideoEngine.ResetStats {
+        lock.lock()
+        defer { lock.unlock() }
+        return resetStats
     }
 
     func mediaSegment(at index: Int) -> Data? {
         guard index >= 0, index < segments.count else { return nil }
         let seg = segments[index]
+
+        // Short request ID for log correlation. Each AVPlayer GET that
+        // makes it past the cache lane gets its own 8-char trace token,
+        // so a Console.app filter on `req=` lines up all the events
+        // (seek, IDR search, mux, flush, reset) from a single fetch.
+        // 8 hex chars from a UUID is far more than enough collision
+        // resistance for a single session's worth of segment fetches.
+        let req = String(UUID().uuidString.prefix(8))
 
         lock.lock()
         defer { lock.unlock() }
@@ -986,7 +1071,10 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
             cacheOrder.removeAll(where: { $0 == index })
             cacheOrder.append(index)
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
-            EngineLog.emit("[HLSVideoEngine] seg\(index): CACHE HIT \(cached.count) B (lookup=\(String(format: "%.1f", elapsed))ms)")
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index) req=\(req): CACHE HIT \(cached.count) B (lookup=\(String(format: "%.1f", elapsed))ms)",
+                category: .session
+            )
             return cached
         }
 
@@ -1009,9 +1097,15 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 : 0
             if lastDts > seg.startPts + slackTicks {
                 do {
-                    try resetMuxer(reason: "backward-seek pre-empt seg\(index) startPts=\(seg.startPts) < lastDts=\(lastDts) - slack=\(slackTicks)")
+                    try resetMuxer(
+                        reason: "seg\(index) req=\(req) startPts=\(seg.startPts) < lastDts=\(lastDts) - slack=\(slackTicks)",
+                        preemptive: true
+                    )
                 } catch {
-                    EngineLog.emit("[HLSVideoEngine] seg\(index) pre-empt muxer reset failed: \(error)")
+                    EngineLog.emit(
+                        "[HLSVideoEngine] seg\(index) req=\(req) pre-empt muxer reset failed: \(error)",
+                        category: .scrub
+                    )
                     return nil
                 }
             }
@@ -1136,7 +1230,10 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                               !didEnqueueAnyVideo else {
                             throw muxerError
                         }
-                        try resetMuxer(reason: "seg\(index) reactive (EINVAL on first write)")
+                        try resetMuxer(
+                            reason: "seg\(index) req=\(req) EINVAL on first video write",
+                            preemptive: false
+                        )
                         try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
                     }
                     if packet.pointee.dts != Int64.min {
@@ -1192,14 +1289,18 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
             let flushMs = Double(DispatchTime.now().uptimeNanoseconds - flushStart.uptimeNanoseconds) / 1_000_000
             let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
             EngineLog.emit(
-                "[HLSVideoEngine] seg\(index): v=\(videoCount) a=\(audioCount) → \(bytes.count) B " +
+                "[HLSVideoEngine] seg\(index) req=\(req): v=\(videoCount) a=\(audioCount) → \(bytes.count) B " +
                 "(start=\(String(format: "%.2f", seg.startSeconds))s dur=\(String(format: "%.2f", seg.durationSeconds))s) " +
-                "timing: seek=\(String(format: "%.1f", seekMs))ms read+mux=\(String(format: "%.1f", readMs))ms flush=\(String(format: "%.1f", flushMs))ms total=\(String(format: "%.1f", totalMs))ms"
+                "timing: seek=\(String(format: "%.1f", seekMs))ms read+mux=\(String(format: "%.1f", readMs))ms flush=\(String(format: "%.1f", flushMs))ms total=\(String(format: "%.1f", totalMs))ms",
+                category: .session
             )
             storeInCache(index: index, bytes: bytes)
             return bytes
         } catch {
-            EngineLog.emit("[HLSVideoEngine] seg\(index) generation failed: \(error)")
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index) req=\(req) generation failed: \(error)",
+                category: .session
+            )
             return nil
         }
     }

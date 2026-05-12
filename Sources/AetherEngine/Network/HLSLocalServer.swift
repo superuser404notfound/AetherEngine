@@ -215,7 +215,7 @@ final class HLSLocalServer: @unchecked Sendable {
         l.stateUpdateHandler = { [weak self] state in
             if case .ready = state {
                 self?.port = l.port?.rawValue ?? 0
-                EngineLog.emit("[HLSLocalServer] Listening on port \(self?.port ?? 0)")
+                EngineLog.emit("[HLSLocalServer] Listening on port \(self?.port ?? 0)", category: .hlsServer)
             }
         }
 
@@ -226,7 +226,7 @@ final class HLSLocalServer: @unchecked Sendable {
             // we attempt a receive. Without this we silently lose any
             // connection that fails before delivering bytes.
             conn.stateUpdateHandler = { state in
-                EngineLog.emit("[HLSLocalServer] conn state=\(state)")
+                EngineLog.emit("[HLSLocalServer] conn state=\(state)", category: .hlsServer)
             }
             conn.start(queue: self?.queue ?? .main)
             self?.readRequest(conn)
@@ -277,12 +277,12 @@ final class HLSLocalServer: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
             guard let self = self else { return }
             if let error = error {
-                EngineLog.emit("[HLSLocalServer] receive error: \(error)")
+                EngineLog.emit("[HLSLocalServer] receive error: \(error)", category: .hlsServer)
                 connection.cancel()
                 return
             }
             if isComplete && (content == nil || content?.isEmpty == true) {
-                EngineLog.emit("[HLSLocalServer] connection closed by peer (no data)")
+                EngineLog.emit("[HLSLocalServer] connection closed by peer (no data)", category: .hlsServer)
                 connection.cancel()
                 return
             }
@@ -293,7 +293,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 return
             }
             guard let request = String(data: data, encoding: .utf8) else {
-                EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(data.count)B), closing")
+                EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(data.count)B), closing", category: .hlsServer)
                 connection.cancel()
                 return
             }
@@ -310,7 +310,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 return path
             }()
 
-            EngineLog.emit("[HLSLocalServer] \(firstLine)")
+            EngineLog.emit("[HLSLocalServer] \(firstLine)", category: .hlsServer)
 
             switch normalizedPath {
             case "/master.m3u8":
@@ -318,7 +318,7 @@ final class HLSLocalServer: @unchecked Sendable {
                     let body = self.buildMasterPlaylist()
                     if !self.loggedMasterPlaylist {
                         self.loggedMasterPlaylist = true
-                        EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)")
+                        EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)", category: .hlsServer)
                     }
                     self.respondData(connection,
                                      path: normalizedPath,
@@ -332,7 +332,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 if !self.loggedMediaPlaylist {
                     self.loggedMediaPlaylist = true
                     let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
-                    EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)")
+                    EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)", category: .hlsServer)
                 }
                 self.respondData(connection,
                                  path: normalizedPath,
@@ -454,11 +454,11 @@ final class HLSLocalServer: @unchecked Sendable {
         var payload = Data(header.utf8)
         payload.append(data)
 
-        EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)")
+        EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)", category: .hlsServer)
 
         connection.send(content: payload, completion: .contentProcessed { [weak self] error in
             if let error = error {
-                EngineLog.emit("[HLSLocalServer] send failed for \(path): \(error)")
+                EngineLog.emit("[HLSLocalServer] send failed for \(path): \(error)", category: .hlsServer)
             }
             self?.readRequest(connection)
         })
@@ -466,7 +466,7 @@ final class HLSLocalServer: @unchecked Sendable {
 
     private func respond404(_ connection: NWConnection, path: String, reason: String) {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
-        EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)")
+        EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)", category: .hlsServer)
         connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
             self?.readRequest(connection)
         })

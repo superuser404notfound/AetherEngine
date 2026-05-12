@@ -322,7 +322,7 @@ final class FMP4VideoMuxer {
             dvcC=\(hasDvcC ? "y" : "n") \
             dvvC=\(hasDvvC ? "y" : "n")
             """
-        EngineLog.emit(summary)
+        EngineLog.emit(summary, category: .muxer)
     }
 
     /// True iff the four bytes form a plausible mp4 box name (ASCII
@@ -433,13 +433,15 @@ final class FMP4VideoMuxer {
             EngineLog.emit(
                 "[FMP4VideoMuxer] writePacket FAIL #1 ret=\(ret) stream=\(kind)(\(toStreamIndex)) " +
                 "tb_src=\(sourceTb.num)/\(sourceTb.den) tb_out=\(outTb.num)/\(outTb.den) " +
-                "outNoPTS=\(outIsNoPTS ? "Y" : "n") size=\(pktSize) key=\(isKey ? 1 : 0)"
+                "outNoPTS=\(outIsNoPTS ? "Y" : "n") size=\(pktSize) key=\(isKey ? 1 : 0)",
+                category: .muxer
             )
             EngineLog.emit(
                 "[FMP4VideoMuxer] writePacket FAIL #2 " +
                 "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration)) " +
                 "out(pts=\(outPts) dts=\(outDts) dur=\(outDuration)) " +
-                "flags=0x\(String(pktFlags, radix: 16))"
+                "flags=0x\(String(pktFlags, radix: 16))",
+                category: .muxer
             )
             // Cross-segment monotonicity diag. Compares the offending
             // packet's out-DTS to the last successfully-submitted
@@ -452,7 +454,8 @@ final class FMP4VideoMuxer {
                 "[FMP4VideoMuxer] writePacket FAIL #3 " +
                 "prevSubmitted(pts=\(prevPts) dts=\(prevDts) count=\(prevCount)) " +
                 "dtsΔ=\(dtsDelta) " +
-                "monotonic=\(outDts > prevDts ? "y" : "NO")"
+                "monotonic=\(outDts > prevDts ? "y" : "NO")",
+                category: .muxer
             )
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
@@ -470,7 +473,7 @@ final class FMP4VideoMuxer {
         }
         let ret = av_write_frame(ctx, nil)
         if ret < 0 {
-            EngineLog.emit("[FMP4VideoMuxer] flushFragment FAIL ret=\(ret)")
+            EngineLog.emit("[FMP4VideoMuxer] flushFragment FAIL ret=\(ret)", category: .muxer)
             throw FMP4VideoMuxerError.writeFailed(code: ret)
         }
         if let pb = ctx.pointee.pb {
