@@ -744,55 +744,61 @@ final class FMP4VideoMuxer {
     /// `seek` — and the first packet must be a random-access point
     /// (IRAP for HEVC, IDR for H.264) whose `pts` is the segment's
     /// nominal start. The `HLSVideoEngine.mediaSegment(at:)` collect
-    /// loop already enforces both conditions.
+    /// loop already enforces both conditions (RADL leading-picture
+    /// filter excludes anything with PTS below the IRAP).
+    ///
+    /// Algorithm: take the packets' PTS values, sort them, and assign
+    /// the n-th sorted PTS as the DTS of the n-th decode-order
+    /// packet. The first packet (IRAP, smallest PTS after RADL
+    /// filtering) gets the smallest sorted PTS as its DTS — they're
+    /// equal, so `tfdt` reads the source's IRAP timestamp exactly,
+    /// which AVPlayer maps to the right asset-timeline position.
+    /// Subsequent packets get the next sorted PTS values, which gives
+    /// uniformly-spaced decode timing that tracks the source's true
+    /// frame cadence without integer-division drift. The reference
+    /// FFmpeg `-c copy` pipeline produces nearly identical output.
+    ///
+    /// PTS shift handles the `pts < dts` rejection in `mux.c:567`:
+    /// B-frames have PTS lower than their decode position's natural
+    /// DTS, so we shift every output PTS forward by the largest
+    /// (natural_dts - source_pts) seen in the fragment. CTS offsets
+    /// in the trun preserve display reorder; the IRAP itself gets a
+    /// non-zero CTS but AVPlayer renders display order correctly.
     static func synthesiseVideoTiming(
         packets: [UnsafeMutablePointer<AVPacket>]
     ) {
         guard !packets.isEmpty else { return }
-        // Anchor on the first packet's PTS (= the IRAP's display
-        // time; for an IRAP without RASL leading pictures, this
-        // equals its natural decode time).
         let firstPts = packets[0].pointee.pts
         guard firstPts != avNoPTS else { return }
 
-        // Compute natural decode times by cumulating per-packet
-        // durations. `pkt.duration` is set by the MKV / mp4 demuxer
-        // for every packet and adapts to VFR sources. Fall back to a
-        // global frame duration only if a specific packet's value
-        // is missing.
-        let fallbackDuration: Int64 = {
-            for pkt in packets {
-                let d = pkt.pointee.duration
-                if d > 0 { return d }
-            }
-            return 1
-        }()
-
-        var naturalDts = [Int64](repeating: 0, count: packets.count)
-        var cursor = firstPts
-        for i in 0..<packets.count {
-            naturalDts[i] = cursor
-            let d = packets[i].pointee.duration > 0 ? packets[i].pointee.duration : fallbackDuration
-            cursor &+= d
+        // Gather PTS values for sorting. Defensive: skip NOPTS
+        // entries (should not appear here after the segment-collect
+        // RADL / pts<dts filters, but the synthesis must stay
+        // monotonic if they do slip through).
+        var sortedPts: [Int64] = []
+        sortedPts.reserveCapacity(packets.count)
+        for p in packets {
+            let v = p.pointee.pts
+            if v != avNoPTS { sortedPts.append(v) }
         }
+        guard sortedPts.count == packets.count else { return }
+        sortedPts.sort()
 
-        // Find the largest amount by which any natural DTS sits
-        // above its packet's PTS. B-frames have lower PTS than their
-        // decode position; the shift compensates so output_pts =
-        // source_pts + shift stays >= output_dts = natural_dts.
+        // Assign sorted PTS as DTS in decode order. Decode position
+        // n receives the n-th-smallest display time as its decode
+        // time, which means DTS values track the source's actual
+        // frame cadence (no uniform-duration rounding drift across
+        // long segments at non-integer-ratio framerates like
+        // 23.976 fps).
         var maxShift: Int64 = 0
         for i in 0..<packets.count {
-            let pts = packets[i].pointee.pts
-            guard pts != avNoPTS else { continue }
-            let needed = naturalDts[i] &- pts
+            let needed = sortedPts[i] &- packets[i].pointee.pts
             if needed > maxShift { maxShift = needed }
         }
 
         for i in 0..<packets.count {
-            packets[i].pointee.dts = naturalDts[i]
-            if packets[i].pointee.pts != avNoPTS {
-                packets[i].pointee.pts &+= maxShift
-            }
+            packets[i].pointee.dts = sortedPts[i]
+            packets[i].pointee.pts &+= maxShift
         }
     }
 
