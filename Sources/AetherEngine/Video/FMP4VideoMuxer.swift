@@ -291,14 +291,19 @@ final class FMP4VideoMuxer {
         }
 
         let entryStr = sampleEntry ?? "?"
+        // Box-presence flags as plain y/n. Interpretation depends on
+        // the source: non-DV HEVC and DV P5 don't carry dvvC, DV P8+
+        // doesn't carry dvcC, all are valid configurations. Callers
+        // judge whether an absence is correct or unexpected; this
+        // log just reports the structural truth.
         let summary = """
             [FMP4VideoMuxer] init.mp4 bytes=\(data.count) \
             sample-entry=\(entryStr) \
             ftyp=\(hasFtyp ? "y" : "n") \
             moov=\(hasMoov ? "y" : "n") \
             hvcC=\(hasHvcC ? "y" : "n") \
-            dvcC=\(hasDvcC ? "y" : "MISSING") \
-            dvvC=\(hasDvvC ? "y" : "absent")
+            dvcC=\(hasDvcC ? "y" : "n") \
+            dvvC=\(hasDvvC ? "y" : "n")
             """
         EngineLog.emit(summary)
     }
@@ -371,6 +376,20 @@ final class FMP4VideoMuxer {
         }
         cloned.pointee.pos = -1
 
+        // Snapshot the rescaled timestamps BEFORE we call
+        // av_interleaved_write_frame. Vincent's seg18 retest with
+        // the split FAIL diag showed `out(pts=AV_NOPTS_VALUE)` for
+        // a packet whose source PTS would rescale cleanly to a
+        // valid Int64 against the logged tb_out=1/16000 — which
+        // can only happen if `write_frame` clobbers the packet's
+        // PTS/DTS on rejection. Reading them after the call gives
+        // us the post-rejection state, not what we actually
+        // submitted. Capture them here so the log reflects what
+        // the muxer was asked to write.
+        let outPts = cloned.pointee.pts
+        let outDts = cloned.pointee.dts
+        let outDuration = cloned.pointee.duration
+
         let ret = av_interleaved_write_frame(ctx, cloned)
         if ret < 0 {
             // DrHurt's P8.1 MKV stalls at seg4 with "write failed
@@ -378,12 +397,9 @@ final class FMP4VideoMuxer {
             // survives the overlay's lineLimit(1) truncation: the
             // first carries time bases + raw codes (the answer to
             // "did the rescale produce AV_NOPTS_VALUE?"), the
-            // second carries the timestamp/size detail. AV_NOPTS_
-            // VALUE in the rescaled output means av_rescale_q saw
-            // a zero numerator or denominator on outTb, which is
-            // the actual root cause we need to chase.
+            // second carries the timestamp/size detail.
             let kind = toStreamIndex == videoOutputIndex ? "video" : "audio"
-            let outIsNoPTS = cloned.pointee.pts == Self.avNoPTS || cloned.pointee.dts == Self.avNoPTS
+            let outIsNoPTS = outPts == Self.avNoPTS || outDts == Self.avNoPTS
             EngineLog.emit(
                 "[FMP4VideoMuxer] writePacket FAIL #1 ret=\(ret) stream=\(kind)(\(toStreamIndex)) " +
                 "tb_src=\(sourceTb.num)/\(sourceTb.den) tb_out=\(outTb.num)/\(outTb.den) " +
@@ -392,7 +408,7 @@ final class FMP4VideoMuxer {
             EngineLog.emit(
                 "[FMP4VideoMuxer] writePacket FAIL #2 " +
                 "src(pts=\(srcPts) dts=\(srcDts) dur=\(srcDuration)) " +
-                "out(pts=\(cloned.pointee.pts) dts=\(cloned.pointee.dts) dur=\(cloned.pointee.duration)) " +
+                "out(pts=\(outPts) dts=\(outDts) dur=\(outDuration)) " +
                 "flags=0x\(String(pktFlags, radix: 16))"
             )
             throw FMP4VideoMuxerError.writeFailed(code: ret)
