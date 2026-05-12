@@ -1099,6 +1099,28 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                        isRAP {
                         break
                     }
+                    // Normalise AV_PKT_FLAG_KEY to match our
+                    // authoritative NAL-parse RAP detection before
+                    // handing the packet to the mp4 muxer. The MKV
+                    // demuxer sets this flag inconsistently after
+                    // `av_seek_frame` (the first post-seek packet is
+                    // sometimes marked KEY even when its NAL header
+                    // says otherwise, and real IDRs in the middle of
+                    // post-seek packet runs sometimes have the flag
+                    // cleared). The mp4 muxer reads `packet.flags`
+                    // directly to populate the fragment's sample-
+                    // dependency table: a fragment whose video track
+                    // ends up with no sync samples is structurally
+                    // unplayable for AVPlayer — the symptom Vincent
+                    // hit is "audio plays, video frozen on the
+                    // previous fragment's last frame". The NAL parse
+                    // is the bitstream's ground truth, so force the
+                    // packet flag to mirror it.
+                    if isRAP {
+                        packet.pointee.flags |= AV_PKT_FLAG_KEY
+                    } else {
+                        packet.pointee.flags &= ~AV_PKT_FLAG_KEY
+                    }
                     do {
                         try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
                     } catch let muxerError as FMP4VideoMuxer.FMP4VideoMuxerError {
