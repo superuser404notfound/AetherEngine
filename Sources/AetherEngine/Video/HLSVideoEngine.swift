@@ -593,6 +593,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoStreamIndex: videoIndex,
             audioStreamIndex: resolvedAudioStreamIndex >= 0 ? resolvedAudioStreamIndex : nil,
             videoTimeBase: videoTimeBase,
+            videoCodecID: codecpar.pointee.codec_id,
             muxer: muxer,
             audioBridge: audioBridge,
             initSegmentData: initSegmentData,
@@ -770,6 +771,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let videoStreamIndex: Int32
     private let audioStreamIndex: Int32?
     private let videoTimeBase: AVRational
+    /// Codec ID for the video stream — used by the random-access-point
+    /// detection in `mediaSegment` to pick the right NAL-type table
+    /// (HEVC vs H.264). Stored at session start so the per-packet
+    /// parse doesn't have to re-walk the demuxer's stream list.
+    private let videoCodecID: AVCodecID
     private let muxer: FMP4VideoMuxer
     private let audioBridge: AudioBridge?
 
@@ -791,6 +797,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         videoStreamIndex: Int32,
         audioStreamIndex: Int32?,
         videoTimeBase: AVRational,
+        videoCodecID: AVCodecID,
         muxer: FMP4VideoMuxer,
         audioBridge: AudioBridge?,
         initSegmentData: Data,
@@ -806,6 +813,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.videoStreamIndex = videoStreamIndex
         self.audioStreamIndex = audioStreamIndex
         self.videoTimeBase = videoTimeBase
+        self.videoCodecID = videoCodecID
         self.muxer = muxer
         self.audioBridge = audioBridge
         self.initSegmentData = initSegmentData
@@ -885,29 +893,28 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 let streamIdx = packet.pointee.stream_index
 
                 if streamIdx == videoStreamIndex {
-                    let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY_VALUE) != 0
-                    // The dedupe shortcut that lived here in
-                    // 348c120 fixed the cross-segment DTS-monotonic
-                    // EINVAL but introduced a worse bug: every
-                    // segment whose nominal end fell mid-GOP got
-                    // shifted forward by ~2 s of source time, so
-                    // AVPlayer's per-fragment tfdt no longer
-                    // matched the manifest's EXTINF position. The
-                    // result was "3-4 frames then long lag" stutter
-                    // through the whole session because the buffer
-                    // kept draining at every boundary. Reverted —
-                    // the proper fix needs IDR detection that
-                    // doesn't rely on AV_PKT_FLAG_KEY (which the
-                    // MKV demuxer is inconsistent about between
-                    // sequential and post-seek reads), or
-                    // per-segment muxer state isolation. Tracked
-                    // separately.
+                    // Detect random-access points by parsing the
+                    // packet's NAL payload rather than trusting
+                    // `AV_PKT_FLAG_KEY`. The MKV demuxer marks the
+                    // first returned packet after `av_seek_frame`
+                    // as a keyframe even when sequential reads of
+                    // the same packet didn't see the flag — so the
+                    // two loops disagree on where the GOP boundary
+                    // sits, and seg N walks past an IDR that seg
+                    // N+1 then adopts as its segment-start, causing
+                    // a cross-fragment DTS overlap → muxer EINVAL.
+                    // The NAL payload is the same bytes in either
+                    // context, so the parse returns a consistent
+                    // answer.
+                    let isRAP = Self.packetContainsRandomAccessPoint(
+                        packet, codecID: videoCodecID
+                    )
                     if !foundSegmentStart {
                         // Wait for the first IDR at-or-after the segment
-                        // start. Skip pre-roll non-key packets and any
-                        // keyframe that's still before the boundary
-                        // (the seek can land us mid-GOP).
-                        if isKey,
+                        // start. Skip pre-roll non-RAP packets and any
+                        // RAP that's still before the boundary (the
+                        // seek can land us mid-GOP).
+                        if isRAP,
                            packet.pointee.pts != Int64.min,
                            packet.pointee.pts >= seg.startPts {
                             foundSegmentStart = true
@@ -918,13 +925,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                         }
                     }
                     // Stop reading once we've passed this segment's
-                    // end boundary, but only on a keyframe (otherwise
-                    // we'd cut in the middle of a GOP and break the
-                    // next segment's IDR alignment).
+                    // end boundary, but only on a RAP (otherwise we'd
+                    // cut in the middle of a GOP and break the next
+                    // segment's IDR alignment).
                     if didEnqueueAnyVideo,
                        packet.pointee.pts != Int64.min,
                        packet.pointee.pts >= seg.endPts,
-                       isKey {
+                       isRAP {
                         break
                     }
                     try muxer.writePacket(packet, toStreamIndex: muxer.videoOutputIndex)
@@ -1012,6 +1019,78 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
+
+    /// Detect a random-access point by walking the packet's NAL
+    /// payload, used in place of `AV_PKT_FLAG_KEY` because the MKV
+    /// demuxer sets that flag inconsistently between sequential
+    /// reads and post-seek reads (the first packet returned after
+    /// `av_seek_frame` is artificially marked as a keyframe even
+    /// when sequential reads of the same packet didn't see the
+    /// flag). NAL payload bytes are identical in either context,
+    /// so the parse returns a stable answer for the same source
+    /// packet regardless of where the demuxer's cursor was.
+    ///
+    /// Random-access NAL unit types:
+    ///   - HEVC (per ITU-T H.265 Annex 7.4.2.2 table 7-1):
+    ///       16 = BLA_W_LP
+    ///       17 = BLA_W_RADL
+    ///       18 = BLA_N_LP
+    ///       19 = IDR_W_RADL
+    ///       20 = IDR_N_LP
+    ///       21 = CRA_NUT
+    ///     NAL header is 2 bytes; type lives in bits 1-6 of byte 0
+    ///     (`(byte0 >> 1) & 0x3F`).
+    ///   - H.264 (per ITU-T H.264 7.4.1 table 7-1):
+    ///       5 = IDR slice
+    ///     NAL header is 1 byte; type lives in bits 0-4 of byte 0
+    ///     (`byte0 & 0x1F`).
+    ///
+    /// MKV and mp4 both frame NALs with a 4-byte big-endian length
+    /// prefix in front of each unit, not Annex-B start codes. This
+    /// matches the existing length-prefix walker in
+    /// `VideoDecoder.extractHDR10PlusBytesFromHEVCBitstream`.
+    ///
+    /// A keyframe packet typically contains the parameter sets
+    /// before the IDR (HEVC: VPS+SPS+PPS+IDR; H.264: SPS+PPS+IDR),
+    /// so the scan walks every NAL and returns on the first RAP.
+    fileprivate static func packetContainsRandomAccessPoint(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        codecID: AVCodecID
+    ) -> Bool {
+        guard let data = packet.pointee.data else { return false }
+        let size = Int(packet.pointee.size)
+        let isHEVC = codecID == AV_CODEC_ID_HEVC
+        let isH264 = codecID == AV_CODEC_ID_H264
+        guard isHEVC || isH264, size >= 5 else { return false }
+
+        var offset = 0
+        while offset + 4 <= size {
+            let b0 = UInt32(data[offset])
+            let b1 = UInt32(data[offset + 1])
+            let b2 = UInt32(data[offset + 2])
+            let b3 = UInt32(data[offset + 3])
+            let nalLen = Int((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+            offset += 4
+            // Defensive bounds: an invalid length prefix (e.g. a
+            // pathological / corrupt packet) shouldn't crash the
+            // engine. Treat as "no RAP detected" and let the
+            // surrounding loop continue on `AV_PKT_FLAG_KEY` or
+            // the packet's natural failure path.
+            guard nalLen > 0, offset + nalLen <= size, offset < size else {
+                return false
+            }
+            let header0 = data[offset]
+            if isHEVC {
+                let nalType = (header0 >> 1) & 0x3F
+                if nalType >= 16 && nalType <= 21 { return true }
+            } else { // H.264
+                let nalType = header0 & 0x1F
+                if nalType == 5 { return true }
+            }
+            offset += nalLen
+        }
+        return false
+    }
 }
 
 /// `AV_PKT_FLAG_KEY` is `1 << 0` per FFmpeg's `packet.h` (and a C
