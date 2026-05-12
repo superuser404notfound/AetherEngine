@@ -75,6 +75,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var server: HLSLocalServer?
     private var provider: VideoSegmentProvider?
 
+    /// Captured at `start()` so the restart path can spin up a fresh
+    /// producer at any segment index without re-running the full
+    /// DV-classification / codec-pick logic.
+    private var videoStreamIndex: Int32 = -1
+    private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
+    private var segmentPlan: [Segment] = []
+
+    /// Serializes restart requests so multiple AVPlayer GETs racing
+    /// the same scrub can't tear down and rebuild the producer in
+    /// parallel.
+    private let restartLock = NSLock()
+
     /// Approximate target segment duration in seconds. The hls muxer
     /// snaps cut points to keyframes at-or-after this threshold, so
     /// actual durations are 6s + GOP length variance. 6s matches
@@ -267,16 +279,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
             timeBase: videoTimeBase,
             codecTagOverride: codecTagOverride
         )
+        self.videoStreamIndex = videoIndex
+        self.savedVideoConfig = videoConfig
+        self.segmentPlan = plan
+
         let prod: HLSSegmentProducer
         do {
-            prod = try HLSSegmentProducer(
-                demuxer: dem,
-                videoStreamIndex: videoIndex,
-                video: videoConfig,
-                cache: segmentCache,
-                baseIndex: 0,
-                targetSegmentDurationSeconds: Self.targetSegmentDuration
-            )
+            prod = try makeProducer(baseIndex: 0)
         } catch {
             stop()
             throw HLSVideoEngineError.muxerInit(underlying: error)
@@ -293,7 +302,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             resolution: resolution,
             videoRange: videoRange,
             frameRate: frameRate,
-            hdcpLevel: hdcpLevel
+            hdcpLevel: hdcpLevel,
+            restartHandler: { [weak self] idx in
+                self?.restartProducer(at: idx)
+            }
         )
         self.provider = prov
 
@@ -331,19 +343,103 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     public func stop() {
+        restartLock.lock()
         producer?.stop()
+        let p = producer
+        producer = nil
+        restartLock.unlock()
+        // Wait outside the lock so deinit on the producer (which may
+        // touch the engine via weakly-captured closures) doesn't
+        // re-enter restartLock.
+        _ = p?.waitForFinish(timeout: 3.0)
+
         server?.stop()
         cache?.close()
         provider = nil
         server = nil
-        producer = nil
         cache = nil
+        savedVideoConfig = nil
+        segmentPlan = []
         demuxer?.close()
         demuxer = nil
     }
 
     deinit {
         stop()
+    }
+
+    // MARK: - Producer construction + restart
+
+    /// Allocate and configure a new `HLSSegmentProducer` rooted at
+    /// the given absolute segment index. Used both for the initial
+    /// session bring-up (baseIndex=0) and for the backward / forward
+    /// scrub restart path.
+    private func makeProducer(baseIndex: Int) throws -> HLSSegmentProducer {
+        guard let dem = demuxer, let cache = cache, let cfg = savedVideoConfig else {
+            throw HLSVideoEngineError.notStarted
+        }
+        return try HLSSegmentProducer(
+            demuxer: dem,
+            videoStreamIndex: videoStreamIndex,
+            video: cfg,
+            cache: cache,
+            baseIndex: baseIndex,
+            targetSegmentDurationSeconds: Self.targetSegmentDuration
+        )
+    }
+
+    /// Tear down the current producer, seek the demuxer to the start
+    /// of segment `idx`, and spin up a fresh producer with
+    /// `baseIndex = idx`. Triggered by `VideoSegmentProvider` when
+    /// AVPlayer requests a segment that's outside the current LRU's
+    /// reach in either direction.
+    ///
+    /// The same `init.mp4` bytes are reproduced across restarts
+    /// because the muxer's stream configuration is byte-deterministic
+    /// for a fixed `StreamConfig`. AVPlayer cached the init segment
+    /// from the original session bring-up and never re-fetches it, so
+    /// the cache.setInit overwrite during restart is a no-op from
+    /// AVPlayer's perspective.
+    private func restartProducer(at idx: Int) {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+
+        guard idx >= 0, idx < segmentPlan.count, demuxer != nil else { return }
+
+        let restartStart = DispatchTime.now()
+
+        if let old = producer {
+            old.stop()
+            let ok = old.waitForFinish(timeout: 5.0)
+            if !ok {
+                EngineLog.emit(
+                    "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it",
+                    category: .session
+                )
+            }
+        }
+        producer = nil
+
+        let target = segmentPlan[idx].startSeconds
+        demuxer?.seek(to: target)
+
+        do {
+            let newProd = try makeProducer(baseIndex: idx)
+            producer = newProd
+            newProd.start()
+        } catch {
+            EngineLog.emit(
+                "[HLSVideoEngine] restart at idx=\(idx) failed: \(error)",
+                category: .session
+            )
+            return
+        }
+
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit(
+            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", target))s, restart took \(String(format: "%.0f", elapsedMs))ms)",
+            category: .session
+        )
     }
 
     // MARK: - Segment planning
@@ -515,9 +611,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
 /// timeout (the producer is on a worker thread, so blocking the HTTP
 /// server's connection thread is the natural backpressure model).
 ///
-/// Phase A: no scrub-restart logic; cache misses past timeout return
-/// nil and let AVPlayer's own retry logic handle it. Phase B adds the
-/// "muxer is ahead, can't go back" restart trigger.
+/// Scrub policy:
+///  - In-cache: fast path, no waiting.
+///  - Forward seek within `forwardWaitWindow` of cache.max: wait for
+///    the producer to catch up. AVPlayer's normal sequential playback
+///    falls in this bucket.
+///  - Forward seek beyond that, or any backward seek beyond cache.min:
+///    fire `restartHandler` so the engine can teardown + reseek
+///    + spin up a fresh producer rooted at the new segment index,
+///    then re-block on cache.fetch.
 private final class VideoSegmentProvider: HLSSegmentProvider {
 
     private let cache: SegmentCache
@@ -530,6 +632,20 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     private let frameRate: Double?
     private let hdcpLevel: String?
 
+    /// Closure into the engine that tears down the current producer
+    /// and brings up a fresh one rooted at the given absolute segment
+    /// index. Synchronous: returns after the new producer's pump has
+    /// started writing, which is typically within 50-200 ms on Apple
+    /// TV against a local Jellyfin source.
+    private let restartHandler: ((Int) -> Void)?
+
+    /// Forward-distance threshold beyond which a fetch triggers a
+    /// restart instead of waiting for the producer to catch up. At
+    /// 6 s segments, 8 segments ≈ 48 s of source content; further
+    /// than that and waiting is slower than tearing down and
+    /// resuming at the target.
+    private static let forwardWaitWindow = 8
+
     init(
         cache: SegmentCache,
         segments: [HLSVideoEngine.Segment],
@@ -538,7 +654,8 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         resolution: (Int, Int),
         videoRange: HLSVideoRange,
         frameRate: Double?,
-        hdcpLevel: String?
+        hdcpLevel: String?,
+        restartHandler: ((Int) -> Void)? = nil
     ) {
         self.cache = cache
         self.segments = segments
@@ -548,6 +665,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         self.videoRange = videoRange
         self.frameRate = frameRate
         self.hdcpLevel = hdcpLevel
+        self.restartHandler = restartHandler
     }
 
     // MARK: - HLSSegmentProvider
@@ -559,16 +677,45 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     func mediaSegment(at index: Int) -> Data? {
         guard index >= 0, index < segments.count else { return nil }
         let totalStart = DispatchTime.now()
+
+        // Fast path: serve from cache without touching the producer.
+        if let hit = cache.peek(index: index) {
+            return logServed(index: index, bytes: hit, totalStart: totalStart, restarted: false)
+        }
+
+        // Decide whether to restart the producer or wait it out. With
+        // an empty cache (producer just started), always wait — a
+        // restart at index 0 would churn for no benefit.
+        let range = cache.indexRange()
+        let needsRestart: Bool
+        if let r = range {
+            needsRestart = (index < r.0) || (index > r.1 + Self.forwardWaitWindow)
+        } else {
+            needsRestart = false
+        }
+
+        if needsRestart, let restart = restartHandler {
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty")), restarting producer",
+                category: .session
+            )
+            restart(index)
+        }
+
         let bytes = cache.fetch(index: index, timeout: 30.0)
+        return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: needsRestart)
+    }
+
+    private func logServed(index: Int, bytes: Data?, totalStart: DispatchTime, restarted: Bool) -> Data? {
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
         if let bytes = bytes {
             EngineLog.emit(
-                "[HLSVideoEngine] seg\(index): served \(bytes.count) B (wait=\(String(format: "%.1f", elapsedMs))ms cache=\(cache.count))",
+                "[HLSVideoEngine] seg\(index): served \(bytes.count) B (wait=\(String(format: "%.1f", elapsedMs))ms cache=\(cache.count) restarted=\(restarted))",
                 category: .session
             )
         } else {
             EngineLog.emit(
-                "[HLSVideoEngine] seg\(index): cache miss after \(String(format: "%.0f", elapsedMs))ms (cache=\(cache.count))",
+                "[HLSVideoEngine] seg\(index): cache miss after \(String(format: "%.0f", elapsedMs))ms (cache=\(cache.count) restarted=\(restarted))",
                 category: .session
             )
         }

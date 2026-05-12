@@ -91,7 +91,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let stateLock = NSLock()
     private var pumpStarted = false
     private var shouldStop = false
-    private(set) var didFinish = false
+
+    /// Set once the pump exits (EOF, error, or `stop()`). Read by
+    /// `waitForFinish(timeout:)` so the host can synchronously
+    /// tear down this producer before constructing a successor at a
+    /// different `baseIndex` (the backward-scrub restart path).
+    private let finishCondition = NSCondition()
+    private var didFinishFlag = false
+    var didFinish: Bool {
+        finishCondition.lock()
+        defer { finishCondition.unlock() }
+        return didFinishFlag
+    }
 
     // MARK: - Init
 
@@ -212,14 +223,32 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
     }
 
-    /// Signal the pump to stop at the next loop iteration. Does not
-    /// wait for the worker to actually exit; caller should wait on
-    /// `didFinish` via cache.close + a short timeout if synchronous
-    /// shutdown is required.
+    /// Signal the pump to stop at the next loop iteration. Async —
+    /// the pump may be blocked inside `demuxer.readPacket` waiting on
+    /// an HTTP byte-range read, which can take up to its own network
+    /// timeout to return. Use `waitForFinish(timeout:)` if you need
+    /// the pump to actually be gone before proceeding (the restart
+    /// path does).
     func stop() {
         stateLock.lock()
         shouldStop = true
         stateLock.unlock()
+    }
+
+    /// Block until the pump has exited or `timeout` elapses. Returns
+    /// `true` if the pump finished, `false` on timeout (in which
+    /// case the caller can choose to leak this instance and proceed
+    /// with a fresh producer; the lingering pump will finish on its
+    /// own once the demuxer read returns).
+    func waitForFinish(timeout: TimeInterval) -> Bool {
+        finishCondition.lock()
+        defer { finishCondition.unlock() }
+        if didFinishFlag { return true }
+        let deadline = Date().addingTimeInterval(timeout)
+        while !didFinishFlag {
+            if !finishCondition.wait(until: deadline) { return false }
+        }
+        return true
     }
 
     // MARK: - Pump
@@ -295,9 +324,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             category: .session
         )
 
-        stateLock.lock()
-        didFinish = true
-        stateLock.unlock()
+        finishCondition.lock()
+        didFinishFlag = true
+        finishCondition.broadcast()
+        finishCondition.unlock()
     }
 
     // MARK: - IO trampoline plumbing (called from the C callbacks below)
