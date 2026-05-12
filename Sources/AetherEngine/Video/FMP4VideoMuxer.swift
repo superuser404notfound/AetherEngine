@@ -219,7 +219,14 @@ final class FMP4VideoMuxer {
     /// `writePacket` / `flushFragment`. Idempotent: if called again,
     /// throws because libavformat doesn't support re-running
     /// `avformat_write_header` on the same context.
-    func writeInitSegment() throws -> Data {
+    ///
+    /// `logSummary` controls whether the structural box summary is
+    /// emitted to the diagnostic log. Default true for the session-
+    /// wide init.mp4 generation; per-fragment muxers in the stateless
+    /// fragment path pass false because they reproduce identical
+    /// init bytes for every segment and the log would spam ~1 line
+    /// per fragment.
+    func writeInitSegment(logSummary: Bool = true) throws -> Data {
         guard !isClosed, let ctx = formatContext else {
             throw FMP4VideoMuxerError.closed
         }
@@ -245,7 +252,9 @@ final class FMP4VideoMuxer {
         }
         headerWritten = true
         let init_ = drainCaptureBuffer()
-        Self.logInitSegmentBoxSummary(init_)
+        if logSummary {
+            Self.logInitSegmentBoxSummary(init_)
+        }
         return init_
     }
 
@@ -542,13 +551,13 @@ final class FMP4VideoMuxer {
         let muxer = try FMP4VideoMuxer(video: video, audio: audio)
         defer { muxer.close() }
 
-        _ = try muxer.writeInitSegment()
-        // Drop the init bytes the fresh header produced. The session-
-        // wide init.mp4 captured once at session start is what the
-        // HLS server hands to AVPlayer; per-fragment init regeneration
-        // here is just a libavformat prerequisite for `av_write_frame`
-        // to accept any packets at all.
-        _ = muxer.drainCaptureBuffer()
+        // The init bytes here are discarded — the session-wide
+        // init.mp4 captured once at session start is what the HLS
+        // server hands to AVPlayer. Writing the header is just a
+        // libavformat prerequisite for `av_write_frame` to accept
+        // any packets. `logSummary: false` suppresses the per-
+        // fragment box-summary log spam.
+        _ = try muxer.writeInitSegment(logSummary: false)
 
         for pkt in videoPackets {
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
