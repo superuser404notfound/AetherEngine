@@ -37,7 +37,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             switch self {
             case .openFailed(let r):     return "HLSVideoEngine: open failed (\(r))"
             case .noVideoStream:         return "HLSVideoEngine: source has no video stream"
-            case .unsupportedCodec(let id): return "HLSVideoEngine: unsupported codec id \(id) (only HEVC supported)"
+            case .unsupportedCodec(let id): return "HLSVideoEngine: unsupported codec id \(id) (only HEVC and H.264 supported)"
             case .zeroDuration:          return "HLSVideoEngine: source has zero duration (cannot build segment plan)"
             case .unsupportedDVProfile(let p, let c): return "HLSVideoEngine: unsupported Dolby Vision profile \(p).\(c)"
             case .muxerInit(let e):      return "HLSVideoEngine: muxer init failed (\(e))"
@@ -163,7 +163,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.noVideoStream
         }
         let codecpar = videoStream.pointee.codecpar!
-        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else {
+        // H.264 acceptance was added so the diagnostic
+        // `devForceHLSWrapper` toggle can exercise the HLS-fMP4
+        // remux path on H.264 sources too, not just HEVC. The mp4
+        // muxer auto-detects avcC vs hvcC from codec_id and writes
+        // the right config box; we just have to remember to override
+        // the sample-entry tag to "avc1" (it would default to "h264"
+        // which AVPlayer would reject).
+        let isHEVC = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+        let isH264 = codecpar.pointee.codec_id == AV_CODEC_ID_H264
+        guard isHEVC || isH264 else {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }
 
@@ -237,61 +246,88 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    variants needs them. Verified empirically with the
         //    standalone `aetherctl` CLI: dvh1 alone rejected, dvh1
         //    plus extras accepted.
-        let dvRecord = doviConfigRecord(from: codecpar)
-        let dvVariant = classifyDVVariant(dvRecord)
         let codecTagOverride: String?
         let videoRange: HLSVideoRange
         let primaryCodecs: String
         let supplementalCodecs: String?
+        // Hoisted out of the codec branch below so downstream
+        // diagnostics (HDCP-LEVEL tagging, the engine.start summary
+        // line) can reference it for both codec paths. H.264 always
+        // reports `.none` — no Dolby Vision on H.264 by spec.
+        let dvVariant: DVVariant
 
-        // dv_level is the DV-internal level (1-13) from the dvcC /
-        // dvvC config box; defaults to 6 (UHD HDR) when the source
-        // didn't populate it. codecpar.level is HEVC's general_level
-        // _idc, which Apple's CODECS string takes verbatim as
-        // "L<value>" (e.g. 150 for L5.0). Falls back to 150 (UHD)
-        // for the same reason.
-        let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
-        let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
-        let hevcLevelRaw = Int(codecpar.pointee.level)
-        let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
-        let dvLevelStr = String(format: "%02d", dvLevel)
-
-        switch dvVariant {
-        case .profile5:
-            codecTagOverride = "dvh1"
-            videoRange = .pq
-            primaryCodecs = "dvh1.05.\(dvLevelStr)"
-            supplementalCodecs = nil
-        case .profile81:
-            codecTagOverride = "dvh1"
-            videoRange = .pq
-            primaryCodecs = "dvh1.08.\(dvLevelStr)"
-            supplementalCodecs = nil
-        case .profile84:
-            // P8.4 keeps the cross-player-compat form because the
-            // base layer is HLG-HEVC and we don't have a P8.4 test
-            // source. Sample-entry tag stays `hvc1`.
-            codecTagOverride = "hvc1"
-            videoRange = .hlg
-            primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
-            supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
-        case .profile7:
-            throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
-        case .profile82:
-            throw HLSVideoEngineError.unsupportedDVProfile(profile: 8, compatID: 2)
-        case .unknown:
-            let p = Int(dvRecord?.dv_profile ?? 0)
-            let c = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 0)
-            throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
-        case .none:
-            // Phase-1 routing should keep non-DV out of this engine,
-            // but be defensive: play as plain HEVC HDR10/HLG/SDR
-            // with an explicit hvc1 tag so AVPlayer doesn't reject
-            // the segment because the muxer picked hev1 by default.
-            codecTagOverride = "hvc1"
+        if isH264 {
+            // H.264 path. Sample-entry tag is `avc1` (FFmpeg defaults
+            // to "h264" which AVPlayer rejects). CODECS string per
+            // RFC 6381: `avc1.<profile_idc><constraint_flags><level
+            // _idc>` as six hex digits. We don't have the constraint
+            // flags from codecpar (they live in the SPS bitstream),
+            // so emit them as `00` — AVPlayer is forgiving here as
+            // long as profile_idc and level_idc are sane. Falls back
+            // to High @ L4.0 if codecpar didn't populate them.
+            codecTagOverride = "avc1"
             videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
-            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+            let profileIDC = Int(codecpar.pointee.profile)
+            let levelIDC = Int(codecpar.pointee.level)
+            let safeProfile = profileIDC > 0 ? profileIDC : 100  // High
+            let safeLevel = levelIDC > 0 ? levelIDC : 40         // 4.0
+            primaryCodecs = String(format: "avc1.%02X%02X%02X", safeProfile, 0, safeLevel)
             supplementalCodecs = nil
+            dvVariant = .none
+        } else {
+            // HEVC path — walks through DV variant detection.
+            let dvRecord = doviConfigRecord(from: codecpar)
+            dvVariant = classifyDVVariant(dvRecord)
+
+            // dv_level is the DV-internal level (1-13) from the dvcC /
+            // dvvC config box; defaults to 6 (UHD HDR) when the source
+            // didn't populate it. codecpar.level is HEVC's general_level
+            // _idc, which Apple's CODECS string takes verbatim as
+            // "L<value>" (e.g. 150 for L5.0). Falls back to 150 (UHD)
+            // for the same reason.
+            let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
+            let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
+            let hevcLevelRaw = Int(codecpar.pointee.level)
+            let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
+            let dvLevelStr = String(format: "%02d", dvLevel)
+
+            switch dvVariant {
+            case .profile5:
+                codecTagOverride = "dvh1"
+                videoRange = .pq
+                primaryCodecs = "dvh1.05.\(dvLevelStr)"
+                supplementalCodecs = nil
+            case .profile81:
+                codecTagOverride = "dvh1"
+                videoRange = .pq
+                primaryCodecs = "dvh1.08.\(dvLevelStr)"
+                supplementalCodecs = nil
+            case .profile84:
+                // P8.4 keeps the cross-player-compat form because the
+                // base layer is HLG-HEVC and we don't have a P8.4 test
+                // source. Sample-entry tag stays `hvc1`.
+                codecTagOverride = "hvc1"
+                videoRange = .hlg
+                primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
+                supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
+            case .profile7:
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
+            case .profile82:
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: 8, compatID: 2)
+            case .unknown:
+                let p = Int(dvRecord?.dv_profile ?? 0)
+                let c = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 0)
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
+            case .none:
+                // Phase-1 routing should keep non-DV out of this engine,
+                // but be defensive: play as plain HEVC HDR10/HLG/SDR
+                // with an explicit hvc1 tag so AVPlayer doesn't reject
+                // the segment because the muxer picked hev1 by default.
+                codecTagOverride = "hvc1"
+                videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
+                primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+                supplementalCodecs = nil
+            }
         }
         let codecsString = primaryCodecs
 
