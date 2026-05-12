@@ -1244,38 +1244,21 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                         // IRAP — see segmentStartPTS comment above.
                         continue
                     }
-                    // Drop any packet whose `pts < dts`. These are HEVC
-                    // RASL or RADL leading pictures: they display before
-                    // their parent IRAP (PTS lower) but decode after it
-                    // (DTS higher) — perfectly valid in the HEVC stream,
-                    // but the FFmpeg mp4 muxer rejects them with an
-                    // unconditional `pts (X) < dts (Y) in stream Z`
-                    // check before its CTS-offset machinery ever runs.
-                    // The mp4 spec itself can carry these via trun v1
-                    // negative composition offsets, but libavformat's
-                    // check fires earlier.
-                    //
-                    // The narrower `pts < segmentStartPTS` filter above
-                    // only catches leading pictures of the segment's
-                    // first IRAP. In multi-GOP segments coalesced by
-                    // the keyframe-aligned plan, inner IRAPs also have
-                    // leading pictures whose PTS may sit comfortably
-                    // inside the segment's range but still satisfy
-                    // pts<dts — those slip past the narrower filter
-                    // and produce the muxer rejection.
-                    //
-                    // Dropping these frames sacrifices at most a few
-                    // frames of display at inner-GOP transitions
-                    // (decoder repeats the previous frame). For HLS
-                    // random-access playback that's an acceptable
-                    // trade-off; the alternative is the segment failing
-                    // entirely with -22 EINVAL, which is what we saw in
-                    // the field.
-                    if packet.pointee.pts != Int64.min,
-                       packet.pointee.dts != Int64.min,
-                       packet.pointee.pts < packet.pointee.dts {
-                        continue
-                    }
+                    // Previous code dropped packets with pts < dts here
+                    // to satisfy the mp4 muxer's check at mux.c:567.
+                    // That was wrong: B-frames in HEVC reorder commonly
+                    // satisfy pts < dts as they sit deeper in the
+                    // decoder's reorder buffer than their display time.
+                    // Dropping them deletes reference frames that
+                    // later P-frames rely on, and the HEVC decoder
+                    // hits "Could not find ref with POC X" / "Error
+                    // constructing the frame RPS" — verified by
+                    // ffmpeg-decoding our own seg0 output against a
+                    // clean Big Buck Bunny MKV source. The fix is to
+                    // shift PTS forward in the muxer (see
+                    // FMP4VideoMuxer.synthesiseVideoTiming) so every
+                    // packet satisfies pts >= dts without losing any
+                    // frames.
                     // Stop reading at the next IRAP at-or-after the
                     // segment's nominal end so each fragment cuts at
                     // a GOP boundary. Without this, fragments would

@@ -661,73 +661,38 @@ final class FMP4VideoMuxer {
         // fragment box-summary log spam.
         _ = try muxer.writeInitSegment(logSummary: false)
 
-        // Per-stream synthetic-DTS state. The FFmpeg mp4 muxer
-        // enforces strict-monotonic DTS per stream; many real-world
-        // MKV/HEVC sources don't carry DTS on every packet (the
-        // first packet returned after `av_seek_frame` commonly has
-        // `dts == AV_NOPTS_VALUE`, and some encoders simply omit
-        // DTS in favour of PTS-only timing). The mov muxer falls
-        // back to PTS in that case, but then a subsequent packet
-        // whose real DTS happens to equal that prior PTS produces
-        // a `non monotonically increasing dts` rejection — even
-        // though the source timeline is perfectly valid.
+        // Synthesise per-packet DTS so the FFmpeg mp4 muxer accepts
+        // every packet without dropping any B-frame reference pictures.
         //
-        // Sanitise here: ensure each packet's `dts` is set and
-        // strictly greater than the previous packet's submitted
-        // DTS on the same stream. We try to preserve the source
-        // signal first (use the real `dts`, or fall back to `pts`)
-        // and only bump by one tick when needed to break a tie.
-        // Sample durations come from `packet.duration` (set by the
-        // demuxer) and feed the mp4 muxer's `trun` per-sample
-        // duration column, so the small DTS adjustments don't
-        // affect decoded playback timing.
-        var lastDtsByStream: [Int: Int64] = [:]
-
-        /// Sanitise `pkt.dts` to be strictly monotonic per stream and
-        /// non-negative-PTS-offset (dts <= pts). Returns `true` if the
-        /// packet should be muxed, `false` if it should be dropped.
-        ///
-        /// The drop signal fires when keeping dts strictly above the
-        /// previous packet's dts would push it past the packet's own
-        /// PTS, i.e. produce `pts < dts`. That happens for HEVC RASL /
-        /// RADL leading pictures coming out of order from the demuxer:
-        /// their natural DTS equals their PTS but they arrive after a
-        /// later-PTS packet, so monotonicity would require bumping
-        /// DTS into the future of PTS. The mp4 muxer rejects such
-        /// packets with an unconditional `pts < dts` check. Dropping
-        /// them is semantically correct at random-access boundaries,
-        /// see the comment in `HLSVideoEngine.mediaSegment(at:)`.
-        func sanitiseDTS(_ pkt: UnsafeMutablePointer<AVPacket>, streamIndex: Int) -> Bool {
-            var dts = pkt.pointee.dts
-            let pts = pkt.pointee.pts
-            let prev = lastDtsByStream[streamIndex]
-
-            if dts == avNoPTS {
-                // Source didn't carry DTS. PTS is almost always
-                // present; fall back to it. If even PTS is unset
-                // (extreme edge case), use prev+1 as a degenerate
-                // monotonic placeholder.
-                dts = pts != avNoPTS ? pts : ((prev ?? 0) + 1)
-            }
-            if let p = prev, dts <= p {
-                dts = p &+ 1
-            }
-            if pts != avNoPTS, dts > pts {
-                // Would create pts < dts at the muxer. Drop.
-                return false
-            }
-            pkt.pointee.dts = dts
-            lastDtsByStream[streamIndex] = dts
-            return true
-        }
+        // Background: MKV sources don't carry per-packet DTS for HEVC /
+        // H.264 streams with B-frame reorder. libavformat's demuxer
+        // leaves `pkt.dts = AV_NOPTS_VALUE` until enough packets have
+        // been read to determine the reorder pattern (typically the
+        // first `video_delay` packets after each seek). Our previous
+        // approach set `dts = pts` and dropped packets that violated
+        // the muxer's `pts < dts` check at mux.c:567. That dropped
+        // legitimate B-frame reference pictures, and the HEVC decoder
+        // then hit "Could not find ref with POC X" / "Error
+        // constructing the frame RPS" when later P-frames referenced
+        // them. Verified by ffmpeg-decoding our seg0 output against a
+        // clean Big Buck Bunny MKV source: source decodes silently,
+        // our output spams POC errors. Symptom on Apple TV: the
+        // various "video frozen / asynch chaos" reports.
+        //
+        // Approach: compute DTS as the n-th-smallest source PTS in
+        // the fragment (sorted PTS assigned in decode order), then
+        // shift every output PTS forward by the maximum amount
+        // needed to satisfy `pts >= dts` for every packet. CTS
+        // offsets in the trun preserve display reorder. Mirrors
+        // what `ffmpeg -c copy` does internally; no frames lost.
+        Self.synthesiseVideoTiming(packets: videoPackets)
+        Self.sanitiseAudioTiming(packets: audioPackets)
 
         for pkt in videoPackets {
-            guard sanitiseDTS(pkt, streamIndex: muxer.videoOutputIndex) else { continue }
             try muxer.writePacket(pkt, toStreamIndex: muxer.videoOutputIndex)
         }
         if let audioIdx = muxer.audioOutputIndex {
             for pkt in audioPackets {
-                guard sanitiseDTS(pkt, streamIndex: audioIdx) else { continue }
                 try muxer.writePacket(pkt, toStreamIndex: audioIdx)
             }
         }
@@ -749,6 +714,63 @@ final class FMP4VideoMuxer {
         try muxer.drainInterleaver()
         _ = try muxer.flushFragment()
         return try muxer.flushFragment()
+    }
+
+    /// Sort source PTS values and assign sorted_pts[i] as the i-th
+    /// decode-order packet's DTS. The first packet (the IRAP after
+    /// RADL filtering) gets the smallest sorted PTS = the IRAP's
+    /// own PTS as its DTS, so tfdt matches the source IRAP
+    /// timestamp. Output PTS then shifts forward uniformly by the
+    /// maximum (sorted_pts[i] - source_pts[i]) seen, so every
+    /// packet satisfies pts >= dts without dropping any frames.
+    static func synthesiseVideoTiming(
+        packets: [UnsafeMutablePointer<AVPacket>]
+    ) {
+        guard !packets.isEmpty else { return }
+        guard packets[0].pointee.pts != avNoPTS else { return }
+
+        var sortedPts: [Int64] = []
+        sortedPts.reserveCapacity(packets.count)
+        for p in packets {
+            let v = p.pointee.pts
+            if v != avNoPTS { sortedPts.append(v) }
+        }
+        guard sortedPts.count == packets.count else { return }
+        sortedPts.sort()
+
+        var maxShift: Int64 = 0
+        for i in 0..<packets.count {
+            let needed = sortedPts[i] &- packets[i].pointee.pts
+            if needed > maxShift { maxShift = needed }
+        }
+
+        for i in 0..<packets.count {
+            packets[i].pointee.dts = sortedPts[i]
+            packets[i].pointee.pts &+= maxShift
+        }
+    }
+
+    /// Audio packets have no decode reorder; pts == dts from the
+    /// demuxer for every codec we handle here. Only need a guard
+    /// against rare NOPTS-dts seek artefacts and non-monotonic
+    /// MKV block ordering.
+    static func sanitiseAudioTiming(
+        packets: [UnsafeMutablePointer<AVPacket>]
+    ) {
+        var prevDts: Int64 = Int64.min
+        for pkt in packets {
+            var dts = pkt.pointee.dts
+            if dts == avNoPTS {
+                dts = pkt.pointee.pts != avNoPTS
+                    ? pkt.pointee.pts
+                    : (prevDts == Int64.min ? 0 : prevDts &+ 1)
+            }
+            if dts <= prevDts {
+                dts = prevDts &+ 1
+            }
+            pkt.pointee.dts = dts
+            prevDts = dts
+        }
     }
 
     // MARK: - Internal
