@@ -254,9 +254,20 @@ final class FMP4VideoMuxer {
         // movenc.c around the `if (mov->flags & FF_MOV_FLAG_DELAY_MOOV)
         // mov->flags |= FF_MOV_FLAG_EMPTY_MOOV;` line). We list both
         // for documentation clarity.
+        // Match exactly what FFmpeg's HLS muxer sets internally at
+        // libavformat/hlsenc.c:867 when `hls_segment_type fmp4` is
+        // selected. The `dash` movflag implies fragment + empty_moov
+        // + default_base_moof + separate_moof + negative_cts_offsets
+        // AND tells movenc to emit `styp` per fragment and to write
+        // a `sidx` segment index — both required by Apple's HLS-fmp4
+        // spec and missing from our previous `cmaf`-based output.
+        // The byte-for-byte diff against
+        //   ffmpeg -f hls -hls_segment_type fmp4 ...
+        // confirmed `styp` + `sidx` are the structural pieces AVPlayer
+        // needed (compared on a Big Buck Bunny HEVC sample).
         av_dict_set(&opts,
                     "movflags",
-                    "frag_custom+empty_moov+default_base_moof+cmaf+delay_moov",
+                    "frag_custom+dash+delay_moov",
                     0)
 
         clearCaptureBuffer()
@@ -713,8 +724,39 @@ final class FMP4VideoMuxer {
         //      mdat buffer.
         try muxer.drainInterleaver()
         _ = try muxer.flushFragment()
-        return try muxer.flushFragment()
+        let moofMdat = try muxer.flushFragment()
+
+        // Prepend an HLS-fmp4 `styp` (segment type) box to the
+        // moof+mdat output. Apple's HLS-fmp4 spec requires each
+        // segment to start with `styp`, but the libavformat `mp4`
+        // muxer never emits it — only the outer `hls`/`dash`
+        // muxers (which we don't use because they're sequential
+        // and can't satisfy our lazy on-demand HLS architecture)
+        // call into a separate `write_styp_tag` helper inside
+        // `hlsenc.c` / `dashenc.c`. The byte content matches what
+        // FFmpeg's hls muxer writes verbatim:
+        //   size=24, type=styp, major=msdh, minor=0, compat=msdh,
+        //   compat=msix
+        // Verified byte-for-byte against
+        //   ffmpeg -f hls -hls_segment_type fmp4 ...
+        // reference output.
+        return Self.hlsStypBox + moofMdat
     }
+
+    /// 24-byte ISO BMFF segment type (`styp`) box, as written by
+    /// `libavformat/hlsenc.c` at the start of each HLS-fmp4 segment.
+    /// Compatible brands `msdh` + `msix` are the DASH-IF / Apple-HLS
+    /// fmp4 conformance points.
+    private static let hlsStypBox: Data = {
+        var d = Data(capacity: 24)
+        d.append(contentsOf: [0x00, 0x00, 0x00, 0x18])  // size = 24
+        d.append(contentsOf: [0x73, 0x74, 0x79, 0x70])  // 'styp'
+        d.append(contentsOf: [0x6d, 0x73, 0x64, 0x68])  // major 'msdh'
+        d.append(contentsOf: [0x00, 0x00, 0x00, 0x00])  // minor = 0
+        d.append(contentsOf: [0x6d, 0x73, 0x64, 0x68])  // compat 'msdh'
+        d.append(contentsOf: [0x6d, 0x73, 0x69, 0x78])  // compat 'msix'
+        return d
+    }()
 
     /// Sort source PTS values and assign sorted_pts[i] as the i-th
     /// decode-order packet's DTS. The first packet (the IRAP after

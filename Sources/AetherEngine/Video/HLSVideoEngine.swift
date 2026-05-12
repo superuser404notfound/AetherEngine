@@ -528,14 +528,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
             defer { m.close() }
             _ = try m.writeInitSegment(logSummary: false)
 
-            // Seek to mid-duration so the packets we read are well
-            // into the source's normal block layout (not at the very
-            // start where the demuxer can return partial / drop-on-
-            // start frames that fail `handle_eac3`'s syncframe
-            // parser). The cue prewarm just put us mid-file too;
-            // an explicit seek here keeps captureInit deterministic
-            // across fallback retries.
-            dem.seek(to: durationSeconds * 0.5)
+            // Seek back to the file's first IRAP for captureInit so
+            // the packets we feed movenc have small pts values near
+            // 0. movenc uses the first packet's dts as the track's
+            // `start_dts` and emits an `edts/elst` empty edit of
+            // that magnitude in mvhd timescale. With a packet from
+            // mid-file the elst tells AVPlayer to skip half the
+            // asset's duration before showing anything; with a
+            // packet from file start, movenc writes the small
+            // B-frame-reorder compensation edit (~67 ms at 30 fps,
+            // has_b_frames=2) the reference `ffmpeg -f hls ...`
+            // pipeline emits.
+            //
+            // The cue prewarm above already populated libavformat's
+            // index of keyframes, so seeking back to 0 here is
+            // cheap (no re-parsing of MKV cues). The HLS segment
+            // provider's own per-segment seeks (in
+            // VideoSegmentProvider.mediaSegment) reposition the
+            // demuxer wherever they need before reading packets.
+            dem.seek(to: 0)
 
             var gotVideo = false
             // EAC3's `handle_eac3` only sets `ec3_done = 1` once it
@@ -563,26 +574,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let streamIdx = packet.pointee.stream_index
                 seenStreamIdx.insert(streamIdx)
                 if streamIdx == videoIndex, !gotVideo {
-                    // Rewrite pts/dts to 0 before submitting. The
-                    // fragment portion of this throwaway muxer's
-                    // output is discarded — only the moov metadata
-                    // (hvcC / avcC / dec3 etc) matters. But movenc
-                    // remembers the first packet's dts as the
-                    // track's `start_dts` and emits an `edts/elst`
-                    // empty-edit in the moov whose duration equals
-                    // that start_dts in mvhd timescale. The packet
-                    // we see here comes from wherever the cue
-                    // prewarm landed (typically `durationSeconds *
-                    // 0.5`), so on a multi-hour source the elst
-                    // tells AVPlayer to skip half the asset's
-                    // playable duration before showing anything,
-                    // and the resulting offset between asset time
-                    // and HLS playlist EXTINF cumulative time
-                    // produces the cross-segment-boundary stalls
-                    // and A/V drift Vincent kept reporting after
-                    // the first segment played cleanly.
-                    packet.pointee.pts = 0
-                    packet.pointee.dts = 0
+                    // Submit the packet with its natural source pts.
+                    // movenc uses the first packet's pts/dts to
+                    // populate the track's `start_dts` and emits an
+                    // `edts/elst` empty-edit in the moov whose
+                    // duration compensates for B-frame reorder so
+                    // AVPlayer's asset timeline lines up with the
+                    // first displayable frame. Comparison against
+                    // `ffmpeg -f hls -hls_segment_type fmp4` reference
+                    // output on a Big Buck Bunny HEVC sample showed
+                    // an elst with `duration=67ms, media_time=-1`
+                    // (empty edit) followed by `media_time=1072` —
+                    // the 67ms covers two frames of reorder at 30 fps.
+                    // We rely on the caller (HLSVideoEngine.start)
+                    // to seek the demuxer back to file start before
+                    // entering captureInit so this packet's pts is
+                    // near zero (typical 67 ms instead of the
+                    // half-duration value the cue prewarm leaves on
+                    // the demuxer cursor).
                     try m.writePacket(packet, toStreamIndex: m.videoOutputIndex)
                     gotVideo = true
                 } else if streamIdx == resolvedAudioStreamIndex,
@@ -591,21 +600,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     if let bridge = audioBridge {
                         let flacPackets = try bridge.feed(packet: packet)
                         for fp in flacPackets {
-                            // Same elst-defence as video. Audio
-                            // packets here are only for dec3 etc;
-                            // monotonic small timestamps starting
-                            // at 0 keep movenc from emitting an
-                            // empty edit on the audio track.
-                            fp.pointee.pts = Int64(audioWritten)
-                            fp.pointee.dts = Int64(audioWritten)
                             try m.writePacket(fp, toStreamIndex: aOutIdx)
                             var pPtr: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&pPtr)
                             audioWritten += 1
                         }
                     } else {
-                        packet.pointee.pts = Int64(audioWritten)
-                        packet.pointee.dts = Int64(audioWritten)
                         try m.writePacket(packet, toStreamIndex: aOutIdx)
                         audioWritten += 1
                     }
