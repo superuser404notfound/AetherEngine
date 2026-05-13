@@ -154,12 +154,18 @@ public final class AetherEngine: ObservableObject {
         boundView = nil
     }
 
-    /// Attach the AVPlayerLayer for the active native session to the
-    /// bound view. No-op when there's no session (boundView retains
-    /// nothing to show; layer attaches on the next load).
+    /// Attach the active session's render layer to the bound view.
+    /// Picks `nativeHost.playerLayer` (AVPlayerLayer) when the native
+    /// AVPlayer path is active, `softwareHost.displayLayer`
+    /// (AVSampleBufferDisplayLayer) for the SW dav1d path. No-op when
+    /// neither host exists — the layer attaches on the next load.
     func presentCurrentLayer() {
-        guard let view = boundView, let host = nativeHost else { return }
-        view.attach(host.playerLayer)
+        guard let view = boundView else { return }
+        if let host = nativeHost {
+            view.attach(host.playerLayer)
+        } else if let host = softwareHost {
+            view.attach(host.displayLayer)
+        }
     }
 
     // MARK: - Display + native state
@@ -182,6 +188,17 @@ public final class AetherEngine: ObservableObject {
     /// engine's own @Published mirrors. Cancelled on stopInternal so
     /// a new session doesn't accumulate them.
     private var nativeCancellables: Set<AnyCancellable> = []
+
+    /// Software-decode host for codecs AVPlayer cannot decode on the
+    /// active platform (today: AV1 on Apple TV, where Apple ships
+    /// dav1d on iOS / macOS but not on tvOS and no Apple TV chip has
+    /// HW AV1). Non-nil between `load` and `stop` when the source's
+    /// video stream routed through the SW pipeline.
+    private var softwareHost: SoftwarePlaybackHost?
+
+    /// Combine subscriptions from `softwareHost`'s @Published mirrors.
+    /// Cancelled on stopInternal alongside `nativeCancellables`.
+    private var softwareCancellables: Set<AnyCancellable> = []
 
     /// The URL of the current playback session. Used by
     /// `reloadAtCurrentPosition()` to rebuild the pipeline after
@@ -304,6 +321,7 @@ public final class AetherEngine: ObservableObject {
         var detectedFormat: VideoFormat = .sdr
         var detectedRate: Double? = nil
         var detectedDVProfile: Bool = false
+        var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
         var probedAudioTracks: [TrackInfo] = []
         var probedSubtitleTracks: [TrackInfo] = []
         var probedDefaultAudioIndex: Int32 = -1
@@ -315,6 +333,7 @@ public final class AetherEngine: ObservableObject {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
                 detectedRate = Self.detectFrameRate(stream: stream)
                 detectedDVProfile = (detectedFormat == .dolbyVision)
+                detectedCodecID = stream.pointee.codecpar.pointee.codec_id
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
             }
@@ -360,28 +379,41 @@ public final class AetherEngine: ObservableObject {
             }
         }
 
-        // 3. Native-only: open HLSVideoEngine + NativeAVPlayerHost.
-        //    Errors propagate to the caller; there's no aether fallback
-        //    after 1.0.0.
+        // 3. Dispatch by codec. AVPlayer on tvOS can't decode AV1
+        //    (Apple's bundled dav1d ships on iOS / macOS only and no
+        //    Apple TV chip has HW AV1), so AV1 sources route through
+        //    the SW dav1d pipeline. Everything else uses the native
+        //    AVPlayer path which carries Atmos / DV / HDR signaling.
+        let useSoftwarePath = (detectedCodecID == AV_CODEC_ID_AV1)
+        EngineLog.emit("[AetherEngine] dispatch: codec=\(detectedCodecID.rawValue) → \(useSoftwarePath ? "software" : "native")", category: .engine)
+
         do {
-            try await loadNative(
-                url: url,
-                startPosition: startPosition,
-                audioSourceStreamIndex: audioSourceStreamIndex
-            )
-            playbackBackend = .native
-            presentCurrentLayer()
-            // Auto-play after load. AVPlayer's
-            // `automaticallyWaitsToMinimizeStalling = true` (default)
-            // handles "play before ready" correctly: it transitions
-            // through `waitingToPlayAtSpecifiedRate`, buffers, and
-            // starts playing once enough segments are in. The legacy
-            // aether load() auto-started its own demux loop the same
-            // way; preserving that contract means hosts that call
-            // `engine.load(...)` get playing pixels without an extra
-            // `engine.play()` round-trip.
-            nativeHost?.play()
-            state = .playing
+            if useSoftwarePath {
+                try await loadSoftware(
+                    url: url,
+                    startPosition: startPosition,
+                    audioSourceStreamIndex: audioSourceStreamIndex
+                )
+                playbackBackend = .software
+                presentCurrentLayer()
+                softwareHost?.play()
+                state = .playing
+            } else {
+                try await loadNative(
+                    url: url,
+                    startPosition: startPosition,
+                    audioSourceStreamIndex: audioSourceStreamIndex
+                )
+                playbackBackend = .native
+                presentCurrentLayer()
+                // Auto-play after load. AVPlayer's
+                // `automaticallyWaitsToMinimizeStalling = true` (default)
+                // handles "play before ready" correctly: it transitions
+                // through `waitingToPlayAtSpecifiedRate`, buffers, and
+                // starts playing once enough segments are in.
+                nativeHost?.play()
+                state = .playing
+            }
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
@@ -444,17 +476,75 @@ public final class AetherEngine: ObservableObject {
         host.load(url: playbackURL, startPosition: startPosition)
     }
 
+    /// Open a `SoftwarePlaybackHost` against the source and wire its
+    /// @Published mirror into the engine's own surface. Used when the
+    /// source's video codec isn't decodable by AVPlayer on the active
+    /// platform (today: AV1 on Apple TV). Same lifecycle shape as
+    /// `loadNative`: host loads the URL itself (no HLS-fMP4 wrapper —
+    /// the SW pipeline reads the source directly through its own
+    /// Demuxer).
+    private func loadSoftware(
+        url: URL,
+        startPosition: Double?,
+        audioSourceStreamIndex: Int32?
+    ) async throws {
+        let host = SoftwarePlaybackHost()
+        self.softwareHost = host
+
+        softwareCancellables.removeAll()
+        host.$currentTime
+            .sink { [weak self] value in self?.currentTime = value }
+            .store(in: &softwareCancellables)
+        host.$duration
+            .sink { [weak self] value in
+                if value > 0 { self?.duration = value }
+            }
+            .store(in: &softwareCancellables)
+        host.$isReady
+            .sink { [weak self] ready in
+                guard let self = self else { return }
+                if ready, self.state == .loading {
+                    self.state = .paused
+                }
+            }
+            .store(in: &softwareCancellables)
+        host.$failureMessage
+            .compactMap { $0 }
+            .sink { [weak self] msg in self?.state = .error(msg) }
+            .store(in: &softwareCancellables)
+        host.$didReachEnd
+            .filter { $0 }
+            .sink { [weak self] _ in
+                self?.state = .idle
+            }
+            .store(in: &softwareCancellables)
+
+        try await host.load(
+            url: url,
+            startPosition: startPosition,
+            audioSourceStreamIndex: audioSourceStreamIndex
+        )
+    }
+
     // MARK: - Transport
 
     public func play() {
-        nativeHost?.play()
+        if let host = softwareHost {
+            host.play()
+        } else {
+            nativeHost?.play()
+        }
         if state == .paused || state == .loading {
             state = .playing
         }
     }
 
     public func pause() {
-        nativeHost?.pause()
+        if let host = softwareHost {
+            host.pause()
+        } else {
+            nativeHost?.pause()
+        }
         if state == .playing {
             state = .paused
         }
@@ -481,7 +571,11 @@ public final class AetherEngine: ObservableObject {
     public func seek(to seconds: Double) async {
         let target = max(0, min(seconds, duration))
         state = .seeking
-        nativeHost?.seek(to: target)
+        if let host = softwareHost {
+            await host.seek(to: target)
+        } else {
+            nativeHost?.seek(to: target)
+        }
         currentTime = target
 
         // Re-arm the side subtitle demuxer at the new playhead so cues
@@ -509,14 +603,23 @@ public final class AetherEngine: ObservableObject {
 
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
-        get { nativeHost?.avPlayer.volume ?? 1.0 }
-        set { nativeHost?.avPlayer.volume = newValue }
+        get { softwareHost?.volume ?? nativeHost?.avPlayer.volume ?? 1.0 }
+        set {
+            softwareHost?.volume = newValue
+            nativeHost?.avPlayer.volume = newValue
+        }
     }
 
-    /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically
-    /// via AVPlayer's `audioTimePitchAlgorithm`.
+    /// Set playback speed (0.5-2.0). On the native AVPlayer path audio
+    /// pitch adjusts via `audioTimePitchAlgorithm`; on the SW path the
+    /// rate goes through the synchronizer and audio plays at the
+    /// changed rate without pitch correction.
     public func setRate(_ rate: Float) {
-        nativeHost?.setRate(rate)
+        if let host = softwareHost {
+            host.setRate(rate)
+        } else {
+            nativeHost?.setRate(rate)
+        }
     }
 
     // MARK: - Audio / subtitle track selection
@@ -946,6 +1049,16 @@ public final class AetherEngine: ObservableObject {
         nativeHost = nil
         nativeVideoSession?.stop()
         nativeVideoSession = nil
+
+        // Mirror teardown for the SW path. stop() halts the demux loop,
+        // releases the decoders / synchronizer / display layer, and
+        // closes the host's own Demuxer. The display layer is owned by
+        // the renderer and detaches from the bound view via the view's
+        // own attach() on the next presentCurrentLayer call.
+        softwareCancellables.removeAll()
+        softwareHost?.stop()
+        softwareHost = nil
+
         displayCriteria.reset()
         playbackBackend = .none
 

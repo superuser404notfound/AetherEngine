@@ -21,11 +21,18 @@ public enum PlaybackBackend: String, Sendable, Equatable {
     /// No session loaded.
     case none
     /// Legacy FFmpeg + VideoToolbox + AVSampleBufferDisplayLayer path.
-    /// Removed in 1.0.0.
+    /// Removed in 1.0.0; reserved for compatibility with hosts that
+    /// still switch on this value.
     case aether
-    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. After 1.0.0
-    /// this is the only path.
+    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. Default path
+    /// for codecs AVPlayer can decode natively (HEVC / H.264 / VP9 on
+    /// supported hardware).
     case native
+    /// FFmpeg / dav1d + AVSampleBufferDisplayLayer path. Used when the
+    /// source's video codec isn't decodable by AVPlayer on the active
+    /// platform — primarily AV1 on tvOS where Apple ships no SW decoder
+    /// and no Apple TV chip has HW AV1.
+    case software
 }
 
 /// Static snapshot of what the current display can present.

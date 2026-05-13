@@ -17,7 +17,7 @@ private let AVERROR_EOF_VALUE: Int32 = -541478725
 /// Thread safety: `readPacket()` and `seek()` are serialized via an
 /// internal lock, so `seek()` can safely be called from any thread
 /// (e.g. main actor) while the demux loop reads on a background queue.
-final class Demuxer {
+final class Demuxer: @unchecked Sendable {
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// Serializes access to formatContext between readPacket() (demux queue)
