@@ -207,6 +207,11 @@ public final class AetherEngine: ObservableObject {
     private var sourceVideoWidth: Int32 = 0
     private var sourceVideoHeight: Int32 = 0
 
+    /// Cap the per-session subtitle event diagnostic logs so the in-
+    /// app overlay stays readable. Reset on `load()` so each new
+    /// session gets a fresh budget.
+    private var subtitleCueDiagnosticCount: Int = 0
+
     // MARK: - Init
 
     /// Lifecycle notification observers, stored for cleanup.
@@ -273,6 +278,7 @@ public final class AetherEngine: ObservableObject {
         progress = 0
         audioTracks = []
         subtitleTracks = []
+        subtitleCueDiagnosticCount = 0
 
         // 1. Brief demuxer probe to grab format + frame rate + track
         //    metadata. The HLSVideoEngine spun up below re-opens
@@ -655,6 +661,21 @@ public final class AetherEngine: ObservableObject {
     @MainActor
     private func applySubtitleEvent(_ event: EmbeddedSubtitleDecoder.SubtitleEvent) {
         guard isSubtitleActive else { return }
+
+        // Diagnostic: for the first ~20 cues after activation, log
+        // each cue's time range alongside engine.currentTime (=
+        // AVPlayer.currentTime). Lets us spot whether the source-side
+        // PTS and the AVPlayer-side clock differ systematically.
+        if subtitleCueDiagnosticCount < 20, let firstCue = event.cues.first {
+            subtitleCueDiagnosticCount += 1
+            EngineLog.emit(
+                "[applySubtitleEvent #\(subtitleCueDiagnosticCount)] " +
+                "cueStart=\(String(format: "%.3f", firstCue.startTime))s " +
+                "cueEnd=\(String(format: "%.3f", firstCue.endTime))s " +
+                "engine.currentTime=\(String(format: "%.3f", currentTime))s",
+                category: .engine
+            )
+        }
 
         // PGS clear-event trim: each PGS event implicitly terminates
         // whatever was on screen. Truncate any image cue whose
