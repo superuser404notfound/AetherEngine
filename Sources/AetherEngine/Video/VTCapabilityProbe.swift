@@ -31,21 +31,31 @@ enum VTCapabilityProbe {
     }()
 
     /// True iff VideoToolbox can decode AV1 on the current device.
-    /// Apple ships AV1 as a software decoder via integrated dav1d on
-    /// tvOS 17+ / iOS 17+ / macOS 14+ — `VTIsHardwareDecodeSupported`
-    /// returns false on every Apple TV (no chip ships HW AV1; the A17
-    /// Pro / M3 only land in iPhone and Mac respectively) but AVPlayer
-    /// still plays AV1 sources via dav1d. Gate on availability, not
-    /// the HW check.
+    ///
+    /// Earlier versions of this probe assumed Apple ships an AV1 SW
+    /// decoder (dav1d) on every Apple platform from iOS 17 / tvOS 17 /
+    /// macOS 14, and returned `true` unconditionally on those OS
+    /// versions. That assumption is wrong for tvOS: dav1d ships only
+    /// on iOS / macOS, and current Apple TV hardware has no HW AV1
+    /// decoder, so AVPlayer fails mid-load with a decode error.
+    ///
+    /// Gate strictly on `VTIsHardwareDecodeSupported` (same shape as
+    /// the VP9 probe). On tvOS this evaluates to false on every chip
+    /// shipping today; the engine refuses AV1 sources up front with a
+    /// clean `unsupportedCodec` instead of muxing them and letting
+    /// AVPlayer blow up. If Apple ever ships HW AV1 on Apple TV (or
+    /// adds a tvOS-side SW decoder that VT advertises post-supplemental-
+    /// registration) this probe lights up automatically.
     static let av1Available: Bool = {
         if #available(tvOS 26.2, iOS 19.0, macOS 16.0, *) {
             VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_AV1)
         }
         if #available(tvOS 17.0, iOS 17.0, macOS 14.0, *) {
-            EngineLog.emit("[VTProbe] codec=av01 swSupported=true (dav1d)", category: .engine)
-            return true
+            let supported = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
+            EngineLog.emit("[VTProbe] codec=av01 hwSupported=\(supported)", category: .engine)
+            return supported
         }
-        EngineLog.emit("[VTProbe] codec=av01 swSupported=false (pre-iOS17/tvOS17)", category: .engine)
+        EngineLog.emit("[VTProbe] codec=av01 hwSupported=false (pre-iOS17/tvOS17)", category: .engine)
         return false
     }()
 

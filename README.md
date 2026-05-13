@@ -27,8 +27,8 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Area        | Details                                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV (demux side; AVPlayer plays the engine's HLS-fMP4 wrapper)                           |
-| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox; VP9 on A12+ / Apple TV 4K (Gen 2+)                                               |
-| SW decode   | AV1 via Apple's bundled dav1d decoder in VideoToolbox (tvOS 17+ / iOS 17+ / macOS 14+). AetherEngine itself ships no SW codec; AVPlayer handles all decode |
+| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox; VP9 on A12+ (Apple TV 4K Gen 2+); AV1 on any chip with HW AV1 (none on Apple TV as of 2026) |
+| SW decode   | AetherEngine ships no SW decoder. Apple's bundled dav1d in VideoToolbox covers AV1 on iOS 17+ / macOS 14+ but is **not** on tvOS — `VTCapabilityProbe` gates AV1 strictly on `VTIsHardwareDecodeSupported` and refuses AV1 up front when VT won't decode it |
 | HDR10       | BT.2020 + PQ signaled via the HLS-fMP4 wrapper; AVPlayer hands the bitstream to the system HDR pipeline                     |
 | HDR10+      | Per-frame ST 2094-40 dynamic metadata preserved through stream-copy into the HLS-fMP4 wrapper                               |
 | Dolby Vision| Profile 5 / 8.1 / 8.4. Stream-copied into HLS-fMP4 with `dvh1` / `dvhe` track type and the source's `dvcC` box intact, so tvOS triggers the HDMI DV handshake and DV-capable TVs switch into DV mode |
