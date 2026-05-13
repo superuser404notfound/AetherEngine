@@ -35,8 +35,9 @@ public enum EngineLog {
         /// segment-cache lifecycle, muxer resets, anything in
         /// `VideoSegmentProvider.mediaSegment(at:)`.
         case session
-        /// `FMP4VideoMuxer` internals: init segment construction,
-        /// per-fragment packet writes, flush, box summaries.
+        /// `HLSSegmentProducer` muxer-side internals: init segment
+        /// construction, per-fragment packet writes, flush, box
+        /// summaries.
         case muxer
         /// `Demuxer` / `AVIOReader`: source open, seek, packet reads,
         /// HTTP byte-range fetch decisions.

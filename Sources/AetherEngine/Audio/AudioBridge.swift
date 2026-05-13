@@ -4,10 +4,14 @@ import Libavutil
 import Libswresample
 
 /// Source-to-FLAC transcoding bridge for the HLS-fMP4 video pipeline's
-/// audio sidecar. Decodes a source audio stream (EAC3, TrueHD, DTS,
-/// DTS-HD MA) to PCM, resamples to S16, re-encodes losslessly as FLAC,
-/// and emits encoded FLAC packets the FMP4VideoMuxer can stream-copy
-/// into the same fragments as the HEVC video.
+/// audio sidecar. Decodes a source audio stream (TrueHD, DTS,
+/// DTS-HD MA, Vorbis, PCM, MP2) to PCM, resamples, re-encodes
+/// losslessly as FLAC, and emits encoded FLAC packets the
+/// `HLSSegmentProducer` writes alongside the video stream in the same
+/// fMP4 fragments. (EAC3 doesn't usually need bridging since AVPlayer
+/// can decode it natively; the EAC3-from-MKV-without-`dec3`-extradata
+/// header-write failure is what makes it the lone fMP4-legal codec
+/// that sometimes falls back to this path.)
 ///
 /// The motivation: AVPlayer's fMP4 decode path supports AAC / AC3 /
 /// EAC3 (incl. Atmos JOC) / FLAC / ALAC / MP3 / Opus directly, but
@@ -89,7 +93,8 @@ final class AudioBridge: @unchecked Sendable {
     private let pcmBitsPerRawSample: Int32
 
     /// AVCodecParameters describing the FLAC output stream. Caller
-    /// hands this to `FMP4VideoMuxer` as the audio `StreamConfig`.
+    /// hands this to `HLSSegmentProducer.AudioConfig.codecpar` and
+    /// the producer installs it on the muxer's audio output stream.
     /// Owned by the bridge; freed in `close()`.
     private(set) var encoderCodecpar: UnsafeMutablePointer<AVCodecParameters>?
 
