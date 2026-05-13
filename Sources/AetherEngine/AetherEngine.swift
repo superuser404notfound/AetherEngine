@@ -58,6 +58,13 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var progress: Float = 0
     @Published public private(set) var audioTracks: [TrackInfo] = []
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
+    /// Active audio track's container stream index (matches `TrackInfo.id`),
+    /// or `nil` while no audio is wired (audio-less source or before the
+    /// first `load(url:)` resolves). Updated synchronously when
+    /// `selectAudioTrack(index:)` reloads the pipeline; the host's
+    /// picker reflects what the engine actually muxed rather than the
+    /// last optimistic UI write.
+    @Published public private(set) var activeAudioTrackIndex: Int?
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
     /// Which internal backend rendered the current session.
@@ -265,10 +272,20 @@ public final class AetherEngine: ObservableObject {
     ///   - url: Media source (http/https/file).
     ///   - startPosition: Seconds into the stream to start at (resume).
     ///   - options: Engine-internal toggles. See `LoadOptions`.
+    ///   - audioSourceStreamIndex: Optional container stream index for
+    ///     the audio track to mux into the output. When non-nil, this is
+    ///     used instead of `av_find_best_stream`'s automatic pick. Lets
+    ///     the host honor a saved language preference on the very first
+    ///     frame without bouncing through a separate
+    ///     `selectAudioTrack` reload (which would cost a second of
+    ///     "default-language audio plus black frame" at session start).
+    ///     Validated against the container; an invalid index falls back
+    ///     to the auto pick.
     public func load(
         url: URL,
         startPosition: Double? = nil,
-        options: LoadOptions = .init()
+        options: LoadOptions = .init(),
+        audioSourceStreamIndex: Int32? = nil
     ) async throws {
         stopInternal()
         loadedURL = url
@@ -289,6 +306,7 @@ public final class AetherEngine: ObservableObject {
         var detectedDVProfile: Bool = false
         var probedAudioTracks: [TrackInfo] = []
         var probedSubtitleTracks: [TrackInfo] = []
+        var probedDefaultAudioIndex: Int32 = -1
         let probe = Demuxer()
         do {
             try probe.open(url: url)
@@ -302,6 +320,7 @@ public final class AetherEngine: ObservableObject {
             }
             probedAudioTracks = probe.audioTrackInfos()
             probedSubtitleTracks = probe.subtitleTrackInfos()
+            probedDefaultAudioIndex = probe.audioStreamIndex
             probe.close()
         } catch {
             EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
@@ -310,6 +329,20 @@ public final class AetherEngine: ObservableObject {
         videoFormat = detectedFormat
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
+        // Mirror the audio stream HLSVideoEngine will actually pick.
+        // When the host passed an override, that takes precedence; if
+        // the override is invalid we fall back to the auto pick to
+        // match the engine's own internal cascade. nil when the source
+        // has no audio at all, so the host can hide the picker without
+        // having to recompute the default itself.
+        let resolvedInitialAudio: Int32
+        if let override = audioSourceStreamIndex,
+           probedAudioTracks.contains(where: { $0.id == Int(override) }) {
+            resolvedInitialAudio = override
+        } else {
+            resolvedInitialAudio = probedDefaultAudioIndex
+        }
+        activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
         let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
         EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) format=\(detectedFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
 
@@ -331,7 +364,11 @@ public final class AetherEngine: ObservableObject {
         //    Errors propagate to the caller; there's no aether fallback
         //    after 1.0.0.
         do {
-            try await loadNative(url: url, startPosition: startPosition)
+            try await loadNative(
+                url: url,
+                startPosition: startPosition,
+                audioSourceStreamIndex: audioSourceStreamIndex
+            )
             playbackBackend = .native
             presentCurrentLayer()
             // Auto-play after load. AVPlayer's
@@ -353,11 +390,19 @@ public final class AetherEngine: ObservableObject {
 
     /// Open HLSVideoEngine against the source, wire NativeAVPlayerHost
     /// to its loopback URL, forward host @Published into the engine's
-    /// own published mirrors.
-    private func loadNative(url: URL, startPosition: Double?) async throws {
+    /// own published mirrors. `audioSourceStreamIndex` overrides the
+    /// auto-picked audio stream when non-nil; used by the mid-playback
+    /// audio-track-switch path so the new pipeline picks up the host's
+    /// chosen language without a separate API entry point.
+    private func loadNative(
+        url: URL,
+        startPosition: Double?,
+        audioSourceStreamIndex: Int32? = nil
+    ) async throws {
         let session = HLSVideoEngine(
             url: url,
-            dvModeAvailable: Self.displayCapabilities.supportsDolbyVision
+            dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
+            audioSourceStreamIndexOverride: audioSourceStreamIndex
         )
         let playbackURL = try session.start()
         self.nativeVideoSession = session
@@ -476,14 +521,105 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Audio / subtitle track selection
 
-    /// Audio track selection during playback. Native-only architecture
-    /// would route this through `AVMediaSelection`; that wiring is a
-    /// tracked follow-up. Today it's a no-op; the source's default
-    /// audio stream plays.
+    /// Switch the active audio track mid-playback. The engine restarts
+    /// its HLS pipeline with the new source audio stream as the muxed
+    /// audio output, swaps AVPlayer to the freshly served playlist, and
+    /// resumes at the current playhead.
+    ///
+    /// Roughly 0.5-1 s of black frame is expected during the swap
+    /// because `AVPlayer.replaceCurrentItem` always tears the render
+    /// surface down. The HDMI HDR-mode handshake is suppressed (the
+    /// video stream isn't changing), so the panel doesn't re-negotiate.
+    ///
+    /// `index` is the audio track's container stream index, matching
+    /// `TrackInfo.id` from `audioTracks`. Calls with an out-of-range
+    /// index, an index pointing at a non-audio stream, or the index
+    /// that's already active are no-ops.
     public func selectAudioTrack(index: Int) {
-        // Tracked: AVMediaSelection routing. For now `audioTracks`
-        // stays empty and the host hides the picker.
-        _ = index
+        guard let url = loadedURL else { return }
+        guard audioTracks.contains(where: { $0.id == index }) else {
+            EngineLog.emit(
+                "[AetherEngine] selectAudioTrack: index=\(index) not in audioTracks (\(audioTracks.map { $0.id })), ignored",
+                category: .engine
+            )
+            return
+        }
+        if activeAudioTrackIndex == index { return }
+
+        let resumeAt = currentTime
+        let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
+            ? loadedSidecarURL
+            : nil
+        let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
+        EngineLog.emit(
+            "[AetherEngine] selectAudioTrack: switching to stream \(index) at \(String(format: "%.2f", resumeAt))s (embeddedSub=\(embeddedStreamToResume), sidecar=\(sidecarToResume?.lastPathComponent ?? "nil"))",
+            category: .engine
+        )
+
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            await self.reloadWithAudioOverride(
+                url: url,
+                resumeAt: resumeAt,
+                audioStreamIndex: Int32(index),
+                embeddedSubtitleStreamToResume: embeddedStreamToResume,
+                sidecarToResume: sidecarToResume
+            )
+        }
+    }
+
+    /// The sidecar subtitle URL the host most recently activated, kept
+    /// so `selectAudioTrack` can rehydrate the same selection after the
+    /// pipeline reload. Cleared by `clearSubtitle` and `stopInternal`.
+    private var loadedSidecarURL: URL?
+
+    /// Perform the audio-track-switch reload. Tears the current native
+    /// session down, brings a fresh `HLSVideoEngine` up with the new
+    /// audio source stream override, swaps AVPlayer to the new playlist
+    /// URL at `resumeAt`, and re-arms whichever subtitle source was
+    /// active before the switch.
+    private func reloadWithAudioOverride(
+        url: URL,
+        resumeAt: Double,
+        audioStreamIndex: Int32,
+        embeddedSubtitleStreamToResume: Int32,
+        sidecarToResume: URL?
+    ) async {
+        state = .loading
+        let previousAudioIndex = activeAudioTrackIndex
+        stopInternal()
+        loadedURL = url
+
+        do {
+            try await loadNative(
+                url: url,
+                startPosition: resumeAt > 1 ? resumeAt : nil,
+                audioSourceStreamIndex: audioStreamIndex
+            )
+            playbackBackend = .native
+            activeAudioTrackIndex = Int(audioStreamIndex)
+            presentCurrentLayer()
+            nativeHost?.play()
+            state = .playing
+        } catch {
+            EngineLog.emit(
+                "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",
+                category: .engine
+            )
+            activeAudioTrackIndex = previousAudioIndex
+            state = .error("Audio track switch failed: \(error.localizedDescription)")
+            return
+        }
+
+        // Resume whichever subtitle source the host had active. The
+        // sidecar branch wins because `loadedSidecarURL` is set only
+        // when the active source is sidecar; the embedded branch
+        // restarts the side-demuxer at the new playhead.
+        if let sidecar = sidecarToResume {
+            selectSidecarSubtitle(url: sidecar)
+        } else if embeddedSubtitleStreamToResume >= 0 {
+            selectSubtitleTrack(index: Int(embeddedSubtitleStreamToResume))
+        }
     }
 
     /// Activate an embedded subtitle stream from the source. A side
@@ -742,6 +878,7 @@ public final class AetherEngine: ObservableObject {
         embeddedSubtitleTask = nil
         activeEmbeddedSubtitleStreamIndex = -1
 
+        loadedSidecarURL = url
         isSubtitleActive = true
         subtitleCues = []
         isLoadingSubtitles = true
@@ -777,6 +914,7 @@ public final class AetherEngine: ObservableObject {
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
         activeEmbeddedSubtitleStreamIndex = -1
+        loadedSidecarURL = nil
         isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false
@@ -807,9 +945,15 @@ public final class AetherEngine: ObservableObject {
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
         activeEmbeddedSubtitleStreamIndex = -1
+        loadedSidecarURL = nil
         isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false
+        // Audio-track state belongs to the host's picker; clear it so a
+        // stale index from the previous session can't be re-applied via
+        // `selectAudioTrack` before the next `load(url:)` repopulates
+        // `audioTracks`.
+        activeAudioTrackIndex = nil
     }
 
     // MARK: - Format / frame-rate probing

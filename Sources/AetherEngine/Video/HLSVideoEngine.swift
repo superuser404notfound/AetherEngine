@@ -137,6 +137,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let sourceURL: URL
     private let dvModeAvailable: Bool
 
+    /// Optional caller-chosen audio source stream index. When `nil` the
+    /// engine falls back to `av_find_best_stream(AVMEDIA_TYPE_AUDIO)`,
+    /// which picks whichever stream libavformat ranks highest (typically
+    /// the container's default flag, then bitrate). When set, the start
+    /// path uses this stream for the muxed audio output, enabling host
+    /// driven mid-playback audio track switching via the
+    /// `AetherEngine.selectAudioTrack(index:)` reload.
+    private let audioSourceStreamIndexOverride: Int32?
+
     private var demuxer: Demuxer?
     private var cache: SegmentCache?
     private var producer: HLSSegmentProducer?
@@ -174,9 +183,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// larger playlist footprint is negligible.
     private static let targetSegmentDuration: Double = 4.0
 
-    public init(url: URL, dvModeAvailable: Bool = true) {
+    public init(
+        url: URL,
+        dvModeAvailable: Bool = true,
+        audioSourceStreamIndexOverride: Int32? = nil
+    ) {
         self.sourceURL = url
         self.dvModeAvailable = dvModeAvailable
+        self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
     }
 
     // MARK: - Public API
@@ -442,7 +456,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //     MKV without a parsed `dec3` extradata is the typical
         //     EINVAL), we retry with the FLAC bridge; if that also
         //     fails we ship video-only.
-        let audioStreamIndex = dem.audioStreamIndex
+        //
+        // Source selection: caller can override the auto-picked stream
+        // (host-driven audio track switching). Override is validated
+        // against the container; an invalid index logs and falls back
+        // to libavformat's pick so a stale picker selection from a
+        // previous title can't strand playback without audio.
+        let autoAudioStreamIndex = dem.audioStreamIndex
+        let audioStreamIndex: Int32
+        if let override = audioSourceStreamIndexOverride {
+            if Self.isAudioStream(demuxer: dem, index: override) {
+                audioStreamIndex = override
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: override accepted, sourceStreamIndex=\(override) (auto would have picked \(autoAudioStreamIndex))",
+                    category: .session
+                )
+            } else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: override sourceStreamIndex=\(override) invalid (not an audio stream), falling back to auto=\(autoAudioStreamIndex)",
+                    category: .session
+                )
+                audioStreamIndex = autoAudioStreamIndex
+            }
+        } else {
+            audioStreamIndex = autoAudioStreamIndex
+        }
         var streamCopyAudio: HLSSegmentProducer.AudioConfig?
         var bridgePreferred = false
         var audioHLSCodecs: String?
@@ -898,6 +936,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
             return false
         }
         return true
+    }
+
+    /// Validate that `index` points at an audio stream in the demuxer's
+    /// container. Used to gate `audioSourceStreamIndexOverride` so a
+    /// stale picker selection (e.g. a stream index from a previous
+    /// title) can't make `start()` filter packets nobody is producing.
+    private static func isAudioStream(demuxer: Demuxer, index: Int32) -> Bool {
+        guard index >= 0, let stream = demuxer.stream(at: index) else {
+            return false
+        }
+        return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
     }
 
     private func classifyDVVariant(_ record: AVDOVIDecoderConfigurationRecord?) -> DVVariant {
