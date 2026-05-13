@@ -292,20 +292,10 @@ public final class AetherEngine: ObservableObject {
     ///   - url: Media source (http/https/file).
     ///   - startPosition: Seconds into the stream to start at (resume).
     ///   - options: Engine-internal toggles. See `LoadOptions`.
-    ///   - audioSourceStreamIndex: Optional container stream index for
-    ///     the audio track to mux into the output. When non-nil, this is
-    ///     used instead of `av_find_best_stream`'s automatic pick. Lets
-    ///     the host honor a saved language preference on the very first
-    ///     frame without bouncing through a separate
-    ///     `selectAudioTrack` reload (which would cost a second of
-    ///     "default-language audio plus black frame" at session start).
-    ///     Validated against the container; an invalid index falls back
-    ///     to the auto pick.
     public func load(
         url: URL,
         startPosition: Double? = nil,
-        options: LoadOptions = .init(),
-        audioSourceStreamIndex: Int32? = nil
+        options: LoadOptions = .init()
     ) async throws {
         stopInternal()
         loadedURL = url
@@ -349,20 +339,17 @@ public final class AetherEngine: ObservableObject {
         videoFormat = detectedFormat
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
-        // Mirror the audio stream HLSVideoEngine will actually pick.
-        // When the host passed an override, that takes precedence; if
-        // the override is invalid we fall back to the auto pick to
-        // match the engine's own internal cascade. nil when the source
-        // has no audio at all, so the host can hide the picker without
-        // having to recompute the default itself.
-        let resolvedInitialAudio: Int32
-        if let override = audioSourceStreamIndex,
-           probedAudioTracks.contains(where: { $0.id == Int(override) }) {
-            resolvedInitialAudio = override
-        } else {
-            resolvedInitialAudio = probedDefaultAudioIndex
-        }
-        activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
+        // Mirror the audio stream HLSVideoEngine will pick as
+        // `DEFAULT=YES` in the master playlist — `av_find_best_stream`
+        // chooses the container's default-disposition audio. nil when
+        // the source has no audio at all, so the host can hide the
+        // picker without having to recompute the default itself.
+        // Hosts wanting a different initial language call
+        // `selectAudioTrack` immediately after `load`; the
+        // AVMediaSelection path is seamless and queues until the asset
+        // is ready, so the host doesn't need to bake the preference
+        // into engine-side state.
+        activeAudioTrackIndex = probedDefaultAudioIndex >= 0 ? Int(probedDefaultAudioIndex) : nil
         let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
         EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) format=\(detectedFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
 
@@ -386,8 +373,7 @@ public final class AetherEngine: ObservableObject {
         do {
             try await loadNative(
                 url: url,
-                startPosition: startPosition,
-                audioSourceStreamIndex: audioSourceStreamIndex
+                startPosition: startPosition
             )
             playbackBackend = .native
             presentCurrentLayer()
@@ -410,19 +396,14 @@ public final class AetherEngine: ObservableObject {
 
     /// Open HLSVideoEngine against the source, wire NativeAVPlayerHost
     /// to its loopback URL, forward host @Published into the engine's
-    /// own published mirrors. `audioSourceStreamIndex` overrides the
-    /// auto-picked audio stream when non-nil; used by the mid-playback
-    /// audio-track-switch path so the new pipeline picks up the host's
-    /// chosen language without a separate API entry point.
+    /// own published mirrors.
     private func loadNative(
         url: URL,
-        startPosition: Double?,
-        audioSourceStreamIndex: Int32? = nil
+        startPosition: Double?
     ) async throws {
         let session = HLSVideoEngine(
             url: url,
-            dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
-            audioSourceStreamIndexOverride: audioSourceStreamIndex
+            dvModeAvailable: Self.displayCapabilities.supportsDolbyVision
         )
         let playbackURL = try session.start()
         self.nativeVideoSession = session

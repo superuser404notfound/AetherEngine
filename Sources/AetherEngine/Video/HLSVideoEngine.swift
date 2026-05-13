@@ -123,13 +123,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     private let sourceURL: URL
     private let dvModeAvailable: Bool
-    /// Caller-chosen audio source stream index. When non-nil, the
-    /// audio rendition spun up for this stream is marked
-    /// `DEFAULT=YES` in the master playlist so AVPlayer picks it as
-    /// the initial audio selection. When nil, `av_find_best_stream`
-    /// picks the default (typically the container's default-disposition
-    /// audio track).
-    private let preferredDefaultAudioStreamIndex: Int32?
 
     /// Video rendition state.
     private var videoDemuxer: Demuxer?
@@ -165,12 +158,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     public init(
         url: URL,
-        dvModeAvailable: Bool = true,
-        audioSourceStreamIndexOverride: Int32? = nil
+        dvModeAvailable: Bool = true
     ) {
         self.sourceURL = url
         self.dvModeAvailable = dvModeAvailable
-        self.preferredDefaultAudioStreamIndex = audioSourceStreamIndexOverride
     }
 
     /// Public descriptor for one audio rendition published in
@@ -321,16 +312,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
         self.videoProducer = vProducer
 
-        // 7. Resolve which source audio stream becomes the default
-        //    rendition. Override wins when valid; otherwise auto.
-        let autoAudioStreamIndex = dem.audioStreamIndex
-        let defaultAudioStreamIndex: Int32
-        if let override = preferredDefaultAudioStreamIndex,
-           Self.isAudioStream(demuxer: dem, index: override) {
-            defaultAudioStreamIndex = override
-        } else {
-            defaultAudioStreamIndex = autoAudioStreamIndex
-        }
+        // 7. Pick the rendition that gets `DEFAULT=YES` in the master
+        //    playlist — the container's auto-best audio per
+        //    `av_find_best_stream`. Hosts that want a different initial
+        //    selection call `AetherEngine.selectAudioTrack` right
+        //    after load; the AVMediaSelection path is seamless and
+        //    queues if the asset isn't ready yet, so the host doesn't
+        //    have to pre-bake its preference into engine state.
+        let defaultAudioStreamIndex = dem.audioStreamIndex
 
         // 8. Enumerate every audio stream in the container and spawn
         //    one rendition per track. Each gets its own demuxer (one
@@ -1078,13 +1067,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             return false
         }
         return true
-    }
-
-    private static func isAudioStream(demuxer: Demuxer, index: Int32) -> Bool {
-        guard index >= 0, let stream = demuxer.stream(at: index) else {
-            return false
-        }
-        return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
     }
 
     private func classifyDVVariant(_ record: AVDOVIDecoderConfigurationRecord?) -> DVVariant {
