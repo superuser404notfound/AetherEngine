@@ -306,28 +306,53 @@ public final class HLSVideoEngine: @unchecked Sendable {
             defaultAudioStreamIndex = autoAudioStreamIndex
         }
 
-        // 8. Build the audio rendition for the default track. Phase 3
-        //    extends this to all audio tracks; Phase 1+2 spawns only
-        //    one rendition so the existing reload-based switch path
-        //    keeps working unchanged.
+        // 8. Enumerate every audio stream in the container and spawn
+        //    one rendition per track. Each gets its own demuxer (one
+        //    extra HTTP connection to the source per track) so that
+        //    AVMediaSelection can switch between them without the
+        //    host having to bounce the pipeline.
+        //
+        //    The DEFAULT=YES flag goes on the rendition matching the
+        //    host's audio-track preference; AVPlayer picks that one
+        //    as the initial selection. Per-rendition spawn failures
+        //    are logged + skipped — if exactly one track is
+        //    intractable (e.g. a damaged DTS-X core), the user still
+        //    gets the rest.
+        //
+        //    Bandwidth: N+1 HTTP connections to the source for N
+        //    audio tracks. Audio packets themselves are small, but
+        //    each demuxer pulls the full source byte stream because
+        //    libavformat doesn't byte-skip non-target streams for
+        //    container formats like MKV. Acceptable on LAN; bandwidth-
+        //    constrained setups are a follow-up.
+        let allAudioStreamIndexes: [Int32] = dem.audioTrackInfos().map { Int32($0.id) }
         var audioCodecsForMaster: String? = nil
-        if defaultAudioStreamIndex >= 0,
-           let audioStream = dem.stream(at: defaultAudioStreamIndex) {
+        for streamIdx in allAudioStreamIndexes {
+            guard let audioStream = dem.stream(at: streamIdx) else { continue }
+            let isDefault = (streamIdx == defaultAudioStreamIndex)
             do {
                 let rendition = try spawnAudioRendition(
-                    sourceStreamIndex: defaultAudioStreamIndex,
+                    sourceStreamIndex: streamIdx,
                     sourceAudioStream: audioStream,
                     sourceDurationSeconds: durationSeconds,
-                    isDefault: true
+                    isDefault: isDefault
                 )
                 audioRenditions.append(rendition)
-                audioCodecsForMaster = rendition.info.codecs
+                if isDefault {
+                    audioCodecsForMaster = rendition.info.codecs
+                }
             } catch {
                 EngineLog.emit(
-                    "[HLSVideoEngine] audio rendition spawn failed for stream=\(defaultAudioStreamIndex): \(error), shipping video-only",
+                    "[HLSVideoEngine] audio rendition spawn failed for stream=\(streamIdx) (isDefault=\(isDefault)): \(error), skipping",
                     category: .session
                 )
             }
+        }
+        // If the chosen default failed but others succeeded, surface
+        // the first surviving rendition's codec on the master variant
+        // so the EXT-X-STREAM-INF CODECS attribute stays accurate.
+        if audioCodecsForMaster == nil, let first = audioRenditions.first {
+            audioCodecsForMaster = first.info.codecs
         }
 
         // 9. Build the server with video rendition metadata, register
