@@ -108,9 +108,16 @@ final class EmbeddedSubtitleDecoder {
     /// Decode `packet` against the active codec. Returns `nil` if
     /// nothing usable; otherwise a `SubtitleEvent` with cues + PGS
     /// trim info.
+    ///
+    /// `streamStartTime` is the AVStream's `start_time` (in stream
+    /// time_base units), subtracted from packet PTS so the resulting
+    /// cue startTime is in absolute source seconds matching AVPlayer's
+    /// clock. Pass `Int64.min` for streams without a defined
+    /// start_time.
     func decode(
         packet: UnsafeMutablePointer<AVPacket>,
-        streamTimeBase: AVRational
+        streamTimeBase: AVRational,
+        streamStartTime: Int64
     ) -> SubtitleEvent? {
         guard let ctx = codecContext else { return nil }
 
@@ -148,9 +155,17 @@ final class EmbeddedSubtitleDecoder {
         guard ret >= 0, gotSub != 0 else { return nil }
 
         let tbSec = Double(streamTimeBase.num) / Double(streamTimeBase.den)
-        let pktPTS = packet.pointee.pts == Int64.min
-            ? 0.0
-            : Double(packet.pointee.pts) * tbSec
+        // Subtract stream->start_time so the resulting playback time
+        // is in absolute source seconds. Some sources (especially
+        // those re-muxed from broadcast or edited from longer files)
+        // set a non-zero start_time on subtitle streams; without this
+        // subtraction the cue's startTime ends up offset from AVPlayer's
+        // clock by stream_start_time seconds. AV_NOPTS_VALUE (Int64.min)
+        // means "no defined start", treat as zero offset.
+        let startTimeOffset: Int64 = streamStartTime == Int64.min ? 0 : streamStartTime
+        let rawPTS = packet.pointee.pts
+        let adjustedPTS = (rawPTS == Int64.min) ? 0 : (rawPTS - startTimeOffset)
+        let pktPTS = Double(adjustedPTS) * tbSec
         let startOffset = Double(sub.start_display_time) / 1000.0
         let endOffset: Double
         if sub.end_display_time > 0 {

@@ -530,10 +530,11 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Side-demuxer read loop. Opens a fresh `Demuxer` against the
-    /// source URL, seeks to slightly before the requested start time
-    /// (so bitmap codecs catch their PCS / SETUP segments), and
-    /// streams subtitle packets through an `EmbeddedSubtitleDecoder`,
-    /// emitting cues back into the engine on the main actor.
+    /// source URL, prewarms the cue table by seeking mid-file (so the
+    /// MKV demuxer's cue index is loaded before the real seek), then
+    /// seeks slightly before the requested start time and streams
+    /// subtitle packets through an `EmbeddedSubtitleDecoder`, emitting
+    /// cues back into the engine on the main actor.
     nonisolated private func runEmbeddedSubtitleReader(
         url: URL, streamIndex: Int32, startAt: Double,
         videoWidth: Int32, videoHeight: Int32
@@ -550,13 +551,23 @@ public final class AetherEngine: ObservableObject {
         }
         defer { demuxer.close() }
 
-        // Seek slightly before the playhead so bitmap subtitle codecs
-        // (PGS / DVB / HDMV) catch their state-machine SETUP segments
-        // before the first END / EVENT segment, otherwise the decoder
-        // accumulates state from a partial event and produces broken
-        // cues. 2 s is enough headroom in practice; PGS PCS / WDS /
-        // ODS / PDS segments arrive at every transition.
-        demuxer.seek(to: max(0, startAt - 2.0))
+        // Prewarm the cue table by seeking mid-file before the actual
+        // playhead seek. MKV cues live at the end of the file; a fresh
+        // demuxer doesn't load them until first seek. Without this
+        // prewarm, the seek-to-playhead lands inaccurately and we
+        // either miss subtitle packets near the playhead or land far
+        // away from where we asked. HLSVideoEngine does the same thing
+        // for the same reason; we mirror it on the side demuxer.
+        let duration = demuxer.duration
+        if duration > 0 {
+            demuxer.seek(to: duration * 0.5)
+        }
+
+        // Now the real seek. Slightly before the playhead so bitmap
+        // subtitle codecs (PGS / DVB / HDMV) catch their state-machine
+        // SETUP segments before the first END / EVENT segment.
+        let seekTo = max(0, startAt - 2.0)
+        demuxer.seek(to: seekTo)
 
         guard let stream = demuxer.stream(at: streamIndex),
               let decoder = EmbeddedSubtitleDecoder(
@@ -573,35 +584,67 @@ public final class AetherEngine: ObservableObject {
         }
 
         let tb = stream.pointee.time_base
-        EngineLog.emit("[AetherEngine] embedded subtitle reader started: stream=\(streamIndex) startAt=\(String(format: "%.2f", startAt))s codec=\(decoder.codecID.rawValue)", category: .engine)
+        let streamStartTime = stream.pointee.start_time
+        EngineLog.emit(
+            "[AetherEngine] embedded subtitle reader started: stream=\(streamIndex) " +
+            "startAt=\(String(format: "%.2f", startAt))s seekTo=\(String(format: "%.2f", seekTo))s " +
+            "codec=\(decoder.codecID.rawValue) tb=\(tb.num)/\(tb.den) " +
+            "streamStart=\(streamStartTime)",
+            category: .engine
+        )
 
         await MainActor.run { [weak self] in
             self?.isLoadingSubtitles = false
         }
 
+        var totalPacketsRead = 0
+        var subtitlePacketsRead = 0
+        var cuesEmitted = 0
+        var firstCueLogged = false
+
         while !Task.isCancelled {
             guard let pkt = try? demuxer.readPacket() else {
-                // EOF or fatal error. Exit gracefully; the cues
-                // emitted so far stay in subtitleCues.
                 break
             }
+            totalPacketsRead += 1
             let streamIdx = pkt.pointee.stream_index
             if streamIdx != streamIndex {
                 var p: UnsafeMutablePointer<AVPacket>? = pkt
                 av_packet_free(&p)
                 continue
             }
-            let event = decoder.decode(packet: pkt, streamTimeBase: tb)
+            subtitlePacketsRead += 1
+            let pktPTS = pkt.pointee.pts
+            let event = decoder.decode(
+                packet: pkt,
+                streamTimeBase: tb,
+                streamStartTime: streamStartTime
+            )
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             av_packet_free(&p)
             if let event {
+                cuesEmitted += event.cues.count
+                if !firstCueLogged, let firstCue = event.cues.first {
+                    EngineLog.emit(
+                        "[AetherEngine] subtitle first cue: pktPTS=\(pktPTS) → " +
+                        "startTime=\(String(format: "%.3f", firstCue.startTime))s " +
+                        "endTime=\(String(format: "%.3f", firstCue.endTime))s",
+                        category: .engine
+                    )
+                    firstCueLogged = true
+                }
                 await MainActor.run { [weak self] in
                     self?.applySubtitleEvent(event)
                 }
             }
         }
 
-        EngineLog.emit("[AetherEngine] embedded subtitle reader exited (cancelled=\(Task.isCancelled))", category: .engine)
+        EngineLog.emit(
+            "[AetherEngine] embedded subtitle reader exited (cancelled=\(Task.isCancelled)) " +
+            "packetsRead=\(totalPacketsRead) subtitlePackets=\(subtitlePacketsRead) " +
+            "cuesEmitted=\(cuesEmitted)",
+            category: .engine
+        )
     }
 
     /// Apply a decoded subtitle event from HLSVideoEngine's embedded
