@@ -138,6 +138,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// to all audio tracks discovered at probe time.
     private var audioRenditions: [AudioRenditionState] = []
 
+    /// Session-global zero point in AV_TIME_BASE microseconds. Set
+    /// once at start() from the first video keyframe's PTS. Producers
+    /// drop packets with PTS strictly less than this value so every
+    /// rendition's leading edge aligns to the same source moment;
+    /// see `HLSSegmentProducer.skipPacketsBeforePts` for the
+    /// muxer-level rationale.
+    private var sessionReferencePtsUs: Int64 = 0
+
     private var server: HLSLocalServer?
 
     /// Serializes restart requests for the video producer so multiple
@@ -261,6 +269,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         videoSegmentPlan = plan
 
+        // 3b. Latch the session reference PTS = first video keyframe
+        //     in microseconds. Every producer (video + audio) uses
+        //     this to skip packets earlier than the reference so the
+        //     renditions' first emitted samples land at the same
+        //     source moment in wall-clock terms.
+        let timeBaseQ = AVRational(num: 1, den: AV_TIME_BASE)
+        if !plan.isEmpty {
+            sessionReferencePtsUs = av_rescale_q(plan[0].startPts, videoTimeBase, timeBaseQ)
+        } else {
+            sessionReferencePtsUs = 0
+        }
+        let videoSkipBefore: Int64 = av_rescale_q(sessionReferencePtsUs, timeBaseQ, videoTimeBase)
+
         // 4. Classify DV variant + pick CODECS / codecTag overrides.
         let videoCodecRouting = try classifyVideoCodec(
             codecpar: codecpar,
@@ -308,7 +329,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             kind: .video(videoConfig),
             cache: segmentCache,
             baseIndex: 0,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration
+            targetSegmentDurationSeconds: Self.targetSegmentDuration,
+            skipPacketsBeforePts: videoSkipBefore
         )
         self.videoProducer = vProducer
 
@@ -493,6 +515,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
         } catch {
             throw HLSVideoEngineError.openFailed(reason: "audio demuxer open: \(error)")
         }
+        // Cue prewarm. MKV's index lives in the `Cues` element at the
+        // file tail and gets parsed lazily on the first non-zero seek.
+        // Without prewarm, seek(to: 0) on a fresh demuxer falls back
+        // to libavformat's heuristic byte seek (typically byte 0 of
+        // the Segment element), which can land at a different point
+        // than the video demuxer's already-cue-aware seek(to: 0)
+        // would. The audio producer's first emitted packet then has a
+        // different source PTS than expected, the muxer's tfdt[0]
+        // moves, and AVPlayer's per-rendition wall-clock alignment
+        // drifts a few audio frames. Mirroring the video demuxer's
+        // prewarm dance keeps both demuxers landing on the same
+        // source position.
+        if sourceDurationSeconds > 0 {
+            audioDemuxer.seek(to: sourceDurationSeconds * 0.5)
+        }
         audioDemuxer.seek(to: 0)
 
         // Probe the stream from the audio demuxer's own context. The
@@ -573,6 +610,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let audioCache = SegmentCache()
         let provider = AudioSegmentProvider(cache: audioCache, segments: audioPlan)
 
+        // Convert the session reference (in AV_TIME_BASE microseconds)
+        // to this rendition's source stream time_base so the producer
+        // pump can filter packets without rescaling per packet.
+        let timeBaseQ = AVRational(num: 1, den: AV_TIME_BASE)
+        let audioSkipBefore: Int64 = av_rescale_q(
+            sessionReferencePtsUs, timeBaseQ, audioTimeBase
+        )
+
         // Build track metadata for the master playlist entry.
         let trackInfo = singleTrackInfo(from: localAudioStream, index: Int(sourceStreamIndex))
         let renditionID = String(sourceStreamIndex)
@@ -595,7 +640,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 kind: .audio(audioConfig),
                 cache: audioCache,
                 baseIndex: 0,
-                targetSegmentDurationSeconds: Self.targetSegmentDuration
+                targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                skipPacketsBeforePts: audioSkipBefore
             )
         } catch where !usesBridge {
             EngineLog.emit(
@@ -626,7 +672,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     kind: .audio(audioConfig),
                     cache: audioCache,
                     baseIndex: 0,
-                    targetSegmentDurationSeconds: Self.targetSegmentDuration
+                    targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                    skipPacketsBeforePts: audioSkipBefore
                 )
             } catch {
                 br.close()
@@ -653,6 +700,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             config: audioConfig,
             bridge: bridge,
             segmentPlan: audioPlan,
+            sourceStreamTimeBase: audioTimeBase,
+            skipPacketsBeforePts: audioSkipBefore,
             producer: producer
         )
         provider.restartHandler = { [weak self, weak rendition] idx in
@@ -702,13 +751,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let absoluteTargetSeconds = Double(absoluteTargetPts) * Double(videoTb.num) / Double(videoTb.den)
         videoDemuxer?.seek(to: absoluteTargetSeconds)
 
+        let videoSkipBefore: Int64 = av_rescale_q(
+            sessionReferencePtsUs,
+            AVRational(num: 1, den: AV_TIME_BASE),
+            cfg.timeBase
+        )
         do {
             let newProd = try HLSSegmentProducer(
                 demuxer: videoDemuxer!,
                 kind: .video(cfg),
                 cache: cache,
                 baseIndex: idx,
-                targetSegmentDurationSeconds: Self.targetSegmentDuration
+                targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                skipPacketsBeforePts: videoSkipBefore
             )
             videoProducer = newProd
             newProd.start()
@@ -760,7 +815,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 kind: .audio(rendition.config),
                 cache: rendition.cache,
                 baseIndex: idx,
-                targetSegmentDurationSeconds: Self.targetSegmentDuration
+                targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                skipPacketsBeforePts: rendition.skipPacketsBeforePts
             )
             rendition.producer = newProd
             newProd.start()
@@ -1159,6 +1215,15 @@ private final class AudioRenditionState {
     let config: HLSSegmentProducer.AudioConfig
     let bridge: AudioBridge?
     let segmentPlan: [Segment]
+    /// Audio-source-stream time_base. Carried so the restart path
+    /// can recompute the producer's skip threshold against this
+    /// rendition's own tb.
+    let sourceStreamTimeBase: AVRational
+    /// Drop packets with pts strictly less than this value (in
+    /// `sourceStreamTimeBase`). Computed from the session's global
+    /// reference (first video keyframe in microseconds) and used by
+    /// every producer this rendition spawns.
+    let skipPacketsBeforePts: Int64
     var producer: HLSSegmentProducer?
     let restartLock = NSLock()
 
@@ -1170,6 +1235,8 @@ private final class AudioRenditionState {
         config: HLSSegmentProducer.AudioConfig,
         bridge: AudioBridge?,
         segmentPlan: [Segment],
+        sourceStreamTimeBase: AVRational,
+        skipPacketsBeforePts: Int64,
         producer: HLSSegmentProducer?
     ) {
         self.info = info
@@ -1179,6 +1246,8 @@ private final class AudioRenditionState {
         self.config = config
         self.bridge = bridge
         self.segmentPlan = segmentPlan
+        self.sourceStreamTimeBase = sourceStreamTimeBase
+        self.skipPacketsBeforePts = skipPacketsBeforePts
         self.producer = producer
     }
 }

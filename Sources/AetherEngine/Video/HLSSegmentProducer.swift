@@ -98,6 +98,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// scrub-target index here.
     private let baseIndex: Int
 
+    /// Drop packets with pts strictly less than this value (in the
+    /// producer's source-stream time_base). Used to align the leading
+    /// edge of every rendition to the same source moment (typically
+    /// the first video keyframe's PTS), so AVPlayer's per-rendition
+    /// wall-clock 0 = the same source content across video + audio.
+    /// `Int64.min` disables the filter.
+    ///
+    /// Why this matters: libavformat's mov sub-muxer normalises each
+    /// track's tfdt[0] to 0 by subtracting the first packet's DTS
+    /// (start_dts latching). With independent producers per rendition,
+    /// the video and audio tracks each have their own start_dts, and
+    /// both renditions emit tfdt[0]=0 on their first fragment. AVPlayer
+    /// plays both at wall-clock 0. If the source's first audio packet
+    /// is at a different PTS than the first video keyframe (audio
+    /// frame quantisation, source-encoding offsets, leading audio in
+    /// re-muxed sources), the content at wall-clock 0 differs between
+    /// renditions. Skipping pre-reference audio packets forces audio's
+    /// first sample to be at-or-after the video reference, capping
+    /// residual desync at one audio frame (~22 ms at 48 kHz AAC).
+    private let skipPacketsBeforePts: Int64
+
     /// Source stream's time_base. Carried into pump so packet pts/dts
     /// can be rescaled from source units to the muxer's chosen output
     /// time_base before each `av_write_frame`.
@@ -152,12 +173,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         kind: Kind,
         cache: SegmentCache,
         baseIndex: Int = 0,
-        targetSegmentDurationSeconds: Double = 6.0
+        targetSegmentDurationSeconds: Double = 6.0,
+        skipPacketsBeforePts: Int64 = Int64.min
     ) throws {
         self.demuxer = demuxer
         self.kind = kind
         self.cache = cache
         self.baseIndex = baseIndex
+        self.skipPacketsBeforePts = skipPacketsBeforePts
 
         switch kind {
         case .video(let cfg):
@@ -358,6 +381,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // Each rendition owns its own demuxer cursor, so
                     // other streams are still demuxed but discarded
                     // here.
+                    continue
+                }
+
+                // Reference-alignment filter. Skip packets before the
+                // session's global zero (typically the first video
+                // keyframe's PTS) so every rendition's first emitted
+                // packet is at-or-after the same source moment. Without
+                // this, the audio rendition's first packet can be a
+                // few audio frames before the video keyframe and end
+                // up driving the audio track's start_dts behind the
+                // video's, producing a small but persistent A/V offset
+                // that's the same across all audio renditions (so
+                // track switches don't fix it).
+                if skipPacketsBeforePts != Int64.min,
+                   packet.pointee.pts != Int64.min,  // AV_NOPTS_VALUE
+                   packet.pointee.pts < skipPacketsBeforePts {
                     continue
                 }
 
