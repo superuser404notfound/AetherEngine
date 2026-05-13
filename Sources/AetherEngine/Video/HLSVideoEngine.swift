@@ -699,8 +699,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         producer = nil
 
-        let target = segmentPlan[idx].startSeconds
-        demuxer?.seek(to: target)
+        // Seek the demuxer to the ABSOLUTE source-PTS of the target
+        // segment's first keyframe, not to the relative playlist time.
+        // segmentPlan[N].startSeconds is relative to startPts0 (the
+        // first video keyframe's PTS). If startPts0 != 0 (common when
+        // a source has B-frames buffered at the head or has been
+        // re-muxed with a non-zero start), seeking with the relative
+        // value lands a-keyframe-or-more behind the intended one
+        // (av_seek_frame's AVSEEK_FLAG_BACKWARD rolls back from the
+        // target, and sorted[N] > target-in-relative-source-time when
+        // startPts0 > 0). The muxer then emits seg-N with content
+        // starting at sorted[N-1]'s source time, AVPlayer's playlist
+        // clock advances per EXTINFs (which are correct as keyframe
+        // diffs), and embedded subtitle cue.startTime stays in
+        // absolute source-PTS. Net effect: subtitles appear up to one
+        // segment duration AHEAD of the corresponding audio.
+        let absoluteTargetPts = segmentPlan[idx].startPts
+        let videoTb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+        let absoluteTargetSeconds = Double(absoluteTargetPts) * Double(videoTb.num) / Double(videoTb.den)
+        demuxer?.seek(to: absoluteTargetSeconds)
         // Re-arm the FLAC bridge's PTS rebase off the new demuxer
         // cursor. Without this, the bridge's encoder timeline keeps
         // climbing from where the old producer left off, drifting
@@ -721,7 +738,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
         EngineLog.emit(
-            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", target))s, restart took \(String(format: "%.0f", elapsedMs))ms)",
+            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s [absolute source-PTS], restart took \(String(format: "%.0f", elapsedMs))ms)",
             category: .session
         )
     }
