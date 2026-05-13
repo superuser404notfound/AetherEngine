@@ -123,33 +123,21 @@ final class DisplayCriteriaController {
         )
         guard let desc = formatDesc else { return false }
 
-        // Refresh-rate matching gates on a separate user toggle
-        // (Apple TV → Settings → Video and Audio → Match Content →
-        // Match Frame Rate). When OFF, omit the rate so we don't
-        // force a refresh-rate switch the user has disabled.
-        // `isDisplayCriteriaMatchingForFrameRateEnabled` is the
-        // public API for that toggle.
-        let frameRateEnabled: Bool = {
-            if #available(tvOS 17.0, *) {
-                return displayManager.isDisplayCriteriaMatchingForFrameRateEnabled
-            } else {
-                return false
-            }
-        }()
-
-        let criteria: AVDisplayCriteria
-        if let rate = frameRate, frameRateEnabled {
-            criteria = AVDisplayCriteria(refreshRate: Float(rate), formatDescription: desc)
-        } else {
-            // AVDisplayCriteria has no public "no refresh rate" init;
-            // fall back to 24.0 which the panel will treat as a
-            // dynamic-range-only hint when frame-rate matching is off.
-            // The system ignores the rate field in that case.
-            criteria = AVDisplayCriteria(refreshRate: 24.0, formatDescription: desc)
-        }
+        // AVDisplayManager exposes one combined toggle
+        // (`isDisplayCriteriaMatchingEnabled`) that gates the entire
+        // handshake. Apple TV's Settings split it into Match Dynamic
+        // Range and Match Frame Rate but tvOS doesn't surface the
+        // frame-rate sub-toggle to apps; the system internally
+        // decides whether to honour the rate field based on the
+        // user's setting. Passing the real rate here is correct in
+        // both cases: when Match Frame Rate is on, tvOS uses it;
+        // when off, tvOS ignores it and keeps the panel's current
+        // rate (dynamic-range switch still happens).
+        let effectiveRate = Float(frameRate ?? 24.0)
+        let criteria = AVDisplayCriteria(refreshRate: effectiveRate, formatDescription: desc)
         displayManager.preferredDisplayCriteria = criteria
 
-        EngineLog.emit("[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "auto") frameRateMatch=\(frameRateEnabled)", category: .engine)
+        EngineLog.emit("[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)")", category: .engine)
         return true
         #else
         return false
