@@ -353,14 +353,6 @@ public final class AetherEngine: ObservableObject {
             url: url,
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision
         )
-        // Wire subtitle event callback BEFORE start() so any cues that
-        // arrive during the initial pump don't get dropped. Callback
-        // fires on the producer's worker queue; bridge to main actor.
-        session.onSubtitleEvent = { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.applySubtitleEvent(event)
-            }
-        }
         let playbackURL = try session.start()
         self.nativeVideoSession = session
 
@@ -511,7 +503,6 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
-        nativeVideoSession?.setActiveSubtitleStream(nil)
 
         guard let url = loadedURL else { return }
 
@@ -669,9 +660,7 @@ public final class AetherEngine: ObservableObject {
     /// decode.
     public func selectSidecarSubtitle(url: URL) {
         cancelSidecarTask()
-        // Sidecar replaces any active embedded stream (whether the
-        // legacy HLS-pump routing or the side-demuxer reader).
-        nativeVideoSession?.setActiveSubtitleStream(nil)
+        // Sidecar replaces any active embedded stream.
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
         activeEmbeddedSubtitleStreamIndex = -1
@@ -704,15 +693,13 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// Turn subtitles off and clear cached cues. Tears down the
-    /// sidecar decode task, the side-demuxer embedded reader, and
-    /// the HLS-pump embedded routing in one shot.
+    /// Turn subtitles off and clear cached cues. Tears down both the
+    /// sidecar SRT decode task and the side-demuxer embedded reader.
     public func clearSubtitle() {
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
         activeEmbeddedSubtitleStreamIndex = -1
-        nativeVideoSession?.setActiveSubtitleStream(nil)
         isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false

@@ -157,29 +157,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var audioBridge: AudioBridge?
     private var segmentPlan: [Segment] = []
 
-    /// Source video frame dimensions, captured at start() so the
-    /// embedded subtitle decoder can normalize bitmap rect positions
-    /// against the canvas.
-    private var sourceVideoWidth: Int32 = 0
-    private var sourceVideoHeight: Int32 = 0
-
-    /// Active subtitle decoder, set by `setActiveSubtitleStream`.
-    /// Owned by the engine (not the producer) so producer restarts
-    /// don't lose the decoder's accumulated state (dedupe set + cue
-    /// IDs); the producer's subtitlePacketHandler is just a thin
-    /// closure that forwards into the engine-owned decoder.
-    private var subtitleDecoder: EmbeddedSubtitleDecoder?
-
-    /// Remembered active subtitle stream index so producer restarts
-    /// can re-arm the wiring after rebuilding the producer.
-    private var pendingSubtitleStreamIndex: Int32 = -1
-
-    /// Callback fired for each subtitle event the embedded decoder
-    /// emits. Set by AetherEngine (host wires the engine's
-    /// `subtitleCues` through this). Internal because the
-    /// `SubtitleEvent` type is internal to the module.
-    var onSubtitleEvent: (@Sendable (EmbeddedSubtitleDecoder.SubtitleEvent) -> Void)?
-
     /// Serializes restart requests so multiple AVPlayer GETs racing
     /// the same scrub can't tear down and rebuild the producer in
     /// parallel.
@@ -421,8 +398,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
-        self.sourceVideoWidth = codecpar.pointee.width
-        self.sourceVideoHeight = codecpar.pointee.height
 
         let avgFR = videoStream.pointee.avg_frame_rate
         let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
@@ -506,7 +481,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioHLSCodecs: &audioHLSCodecs
         )
         self.producer = prod
-        armSubtitleWiringIfNeeded(on: prod)
 
         // 7. Wire the provider, the server, and serve the URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
@@ -572,8 +546,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         server?.stop()
         cache?.close()
         audioBridge?.close()
-        subtitleDecoder = nil
-        pendingSubtitleStreamIndex = -1
         provider = nil
         server = nil
         cache = nil
@@ -587,59 +559,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     deinit {
         stop()
-    }
-
-    // MARK: - Subtitle routing
-
-    /// Activate (or deactivate) an embedded subtitle stream. Pass a
-    /// stream index into the demuxer to instantiate an
-    /// `EmbeddedSubtitleDecoder` against it and route the producer's
-    /// subtitle packets through. Pass `nil` to tear it down.
-    ///
-    /// The decoder survives producer restarts (scrubs) so its dedupe
-    /// state + cue-ID counter persist; the producer's packet handler
-    /// is re-armed automatically after each restart.
-    func setActiveSubtitleStream(_ streamIndex: Int32?) {
-        if let idx = streamIndex,
-           idx >= 0,
-           let dem = demuxer,
-           let stream = dem.stream(at: idx),
-           let decoder = EmbeddedSubtitleDecoder(
-               stream: stream,
-               sourceVideoWidth: sourceVideoWidth,
-               sourceVideoHeight: sourceVideoHeight
-           ) {
-            self.subtitleDecoder = decoder
-            self.pendingSubtitleStreamIndex = idx
-            if let p = producer {
-                armSubtitleWiringIfNeeded(on: p)
-            }
-            EngineLog.emit("[HLSVideoEngine] subtitle decoder armed: stream=\(idx) codec=\(decoder.codecID.rawValue)", category: .session)
-        } else {
-            self.subtitleDecoder = nil
-            self.pendingSubtitleStreamIndex = -1
-            producer?.setActiveSubtitleStream(nil)
-            producer?.subtitlePacketHandler = nil
-            EngineLog.emit("[HLSVideoEngine] subtitle decoder cleared", category: .session)
-        }
-    }
-
-    /// Re-arm the producer's subtitle hook after a (re-)build of the
-    /// producer. Idempotent: no-op when no subtitle stream is active.
-    private func armSubtitleWiringIfNeeded(on producer: HLSSegmentProducer) {
-        guard pendingSubtitleStreamIndex >= 0, subtitleDecoder != nil else {
-            producer.setActiveSubtitleStream(nil)
-            producer.subtitlePacketHandler = nil
-            return
-        }
-        producer.subtitlePacketHandler = { [weak self] pkt, tb in
-            guard let self = self,
-                  let dec = self.subtitleDecoder,
-                  let event = dec.decode(packet: pkt, streamTimeBase: tb)
-            else { return }
-            self.onSubtitleEvent?(event)
-        }
-        producer.setActiveSubtitleStream(pendingSubtitleStreamIndex)
     }
 
     // MARK: - Producer construction + restart
@@ -784,7 +703,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         do {
             let newProd = try makeProducer(baseIndex: idx)
             producer = newProd
-            armSubtitleWiringIfNeeded(on: newProd)
             newProd.start()
         } catch {
             EngineLog.emit(
