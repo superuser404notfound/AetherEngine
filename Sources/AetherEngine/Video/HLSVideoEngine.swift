@@ -173,6 +173,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.preferredDefaultAudioStreamIndex = audioSourceStreamIndexOverride
     }
 
+    /// Public descriptor for one audio rendition published in
+    /// master.m3u8. `AetherEngine` uses this to map between
+    /// container-stream-indexes (what hosts pass through the
+    /// `selectAudioTrack(index:)` API) and `AVMediaSelectionOption`s
+    /// (what AVPlayer's `select(option:in:)` API consumes). The order
+    /// of this array matches the order of EXT-X-MEDIA entries in the
+    /// master playlist, which in turn matches the order
+    /// `AVMediaSelectionGroup.options` enumerates after asset load.
+    public struct AudioRenditionDescriptor: Sendable {
+        public let sourceStreamIndex: Int32
+        public let name: String
+        public let language: String?
+        public let isDefault: Bool
+    }
+
+    public var audioRenditionDescriptors: [AudioRenditionDescriptor] {
+        audioRenditions.map { rendition in
+            AudioRenditionDescriptor(
+                sourceStreamIndex: Int32(rendition.info.id) ?? -1,
+                name: rendition.info.name,
+                language: rendition.info.language,
+                isDefault: rendition.info.isDefault
+            )
+        }
+    }
+
     // MARK: - Public API
 
     public func start() throws -> URL {
