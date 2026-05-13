@@ -25,6 +25,10 @@ final class NativeAVPlayerHost {
     @Published private(set) var duration: Double = 0
     @Published private(set) var rate: Float = 0
     @Published private(set) var failureMessage: String?
+    /// True after the AVPlayer item reaches the end of its stream.
+    /// Engine flips state to .idle so host end-of-content flows
+    /// (auto-dismiss, next-episode countdown if no marker) fire.
+    @Published private(set) var didReachEnd: Bool = false
 
     // MARK: - Output
 
@@ -241,6 +245,22 @@ final class NativeAVPlayerHost {
         }
         notificationObservers.append(stalledObs)
 
+        // End-of-stream: AVPlayer fires didPlayToEndTime when the
+        // last sample is rendered. Flip the published flag so the
+        // engine knows the session reached its natural end (engine
+        // forwards that to state = .idle).
+        let didEndObs = NotificationCenter.default.addObserver(
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            EngineLog.emit("[NativeAVPlayerHost] #\(sid) didPlayToEndTime", category: .engine)
+            Task { @MainActor in
+                self?.didReachEnd = true
+            }
+        }
+        notificationObservers.append(didEndObs)
+
         // Periodic time observer at 100 ms drives the scrub bar
         // and the resume-position progress reporter. The closure is
         // already invoked on `.main`, so the `MainActor` mutation
@@ -396,6 +416,7 @@ final class NativeAVPlayerHost {
         avPlayer.replaceCurrentItem(with: nil)
         playerItem = nil
         isReady = false
+        didReachEnd = false
         currentTime = 0
         duration = 0
         rate = 0

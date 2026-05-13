@@ -971,6 +971,15 @@ public final class AetherEngine: ObservableObject {
                 self?.state = .error(msg)
             }
             .store(in: &nativeCancellables)
+        host.$didReachEnd
+            .filter { $0 }
+            .sink { [weak self] _ in
+                // AVPlayer reached end-of-stream. Flip state to .idle
+                // so the host's end-of-content flow (auto-dismiss,
+                // next-episode countdown if no outro marker) fires.
+                self?.state = .idle
+            }
+            .store(in: &nativeCancellables)
 
         // Hand the loopback URL to the player.
         host.load(url: playbackURL, startPosition: startPosition)
