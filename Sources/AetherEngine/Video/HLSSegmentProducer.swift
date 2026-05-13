@@ -556,22 +556,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if url.hasPrefix("seg-"), url.hasSuffix(".m4s") {
             let inner = url.dropFirst("seg-".count).dropLast(".m4s".count)
             if let absIdx = Int(inner) {
-                EngineLog.emit(
-                    "[HLSSegmentProducer] seg-\(absIdx).m4s captured (\(data.count) B)",
-                    category: .session
-                )
-                cache.store(index: absIdx, data: data)
-                // Backpressure: block the pump if we're racing more
-                // than `bufferAheadSegments` past AVPlayer's actual
-                // playhead. Without this the pump finishes the entire
-                // source in milliseconds on a local Jellyfin server;
-                // the cache window evicts segments AVPlayer hasn't
-                // reached yet; AVPlayer's next sequential fetch
-                // misses; `mediaSegment(at:)` flags it as out-of-range
-                // and fires a restart for a segment we just
-                // over-produced. Pacing here keeps the cache window
-                // centred on the playhead so sequential fetches are
-                // always hits.
+                // Backpressure FIRST, store SECOND. Doing the store
+                // before the wait lets `pruneOutsideWindow` evict the
+                // just-written segment whenever the cache window
+                // hasn't slid to include `absIdx` yet (race window:
+                // AVPlayer fetch latency greater than muxer cut
+                // interval, e.g. H.264 with ~2-3 MB segments on a
+                // local LAN where the muxer runs ahead of AVPlayer's
+                // network reads). Waiting first keeps the window
+                // centred such that every stored segment fits.
                 //
                 // Poll with short 1 s waits so `stop()` can shut us
                 // down promptly during a restart instead of stranding
@@ -580,6 +573,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 while !checkShouldStop() {
                     if cache.awaitFetchHighWater(reaching: target, timeout: 1.0) { break }
                 }
+                if checkShouldStop() { return }
+
+                EngineLog.emit(
+                    "[HLSSegmentProducer] seg-\(absIdx).m4s captured (\(data.count) B)",
+                    category: .session
+                )
+                cache.store(index: absIdx, data: data)
                 return
             }
         }
