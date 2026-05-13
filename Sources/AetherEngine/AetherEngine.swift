@@ -296,6 +296,17 @@ public final class AetherEngine: ObservableObject {
             try await loadNative(url: url, startPosition: startPosition)
             playbackBackend = .native
             presentCurrentLayer()
+            // Auto-play after load. AVPlayer's
+            // `automaticallyWaitsToMinimizeStalling = true` (default)
+            // handles "play before ready" correctly: it transitions
+            // through `waitingToPlayAtSpecifiedRate`, buffers, and
+            // starts playing once enough segments are in. The legacy
+            // aether load() auto-started its own demux loop the same
+            // way; preserving that contract means hosts that call
+            // `engine.load(...)` get playing pixels without an extra
+            // `engine.play()` round-trip.
+            nativeHost?.play()
+            state = .playing
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
