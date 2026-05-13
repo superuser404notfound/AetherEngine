@@ -55,6 +55,36 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let codecTagOverride: String?
     }
 
+    /// Audio output wiring. The producer is agnostic about whether
+    /// the audio is a stream-copy passthrough (e.g. EAC3-JOC Atmos)
+    /// or a FLAC bridge (TrueHD / DTS / Vorbis / PCM / MP2 decoded
+    /// then re-encoded as FLAC). Both shapes funnel through the
+    /// same av_write_frame path; the `bridge` field decides which.
+    struct AudioConfig {
+        /// codecpar installed on the muxer's audio output stream. For
+        /// stream-copy this is the source's codecpar; for FLAC bridge
+        /// this is `AudioBridge.encoderCodecpar`.
+        let codecpar: UnsafePointer<AVCodecParameters>
+        /// time_base set on the muxer stream. The muxer will rewrite
+        /// this to its own auto-picked timescale at write_header time
+        /// (similar to the video stream), but we still need to set
+        /// the input value so libavformat knows the requested base.
+        let timeBase: AVRational
+        /// Source stream index to filter packets from in the demuxer.
+        let sourceStreamIndex: Int32
+        /// Time base of packets handed to `av_write_frame`. For
+        /// stream-copy this is the source's time_base (the demuxer's
+        /// packets are in source units). For FLAC bridge this is
+        /// `AudioBridge.encoderTimeBase` (the bridge re-stamps the
+        /// FLAC packets it emits into its encoder's time_base).
+        let inputTimeBase: AVRational
+        /// Optional decode-then-FLAC-encode bridge. Non-nil means the
+        /// pump routes each source audio packet through `bridge.feed`
+        /// and muxes the returned FLAC packets; nil means the source
+        /// packet is muxed directly (stream-copy).
+        let bridge: AudioBridge?
+    }
+
     // MARK: - State
 
     private let demuxer: Demuxer
@@ -77,6 +107,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// after avformat_write_header. Used as the destination time_base
     /// for `av_packet_rescale_ts` on every video packet.
     private var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
+
+    /// Audio wiring info, nil for video-only sessions.
+    private let audioConfig: AudioConfig?
+    /// Audio output stream index in the muxer (1 when audio is wired,
+    /// unused otherwise). Hardcoded since we add at most one audio
+    /// stream and it's always added after the video stream.
+    private let audioOutputStreamIndex: Int32 = 1
+    /// Muxer's chosen time_base for the output audio stream, latched
+    /// after avformat_write_header. Same dance as `muxerVideoTimeBase`.
+    private var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
@@ -110,12 +150,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         demuxer: Demuxer,
         videoStreamIndex: Int32,
         video: StreamConfig,
+        audio: AudioConfig? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
         targetSegmentDurationSeconds: Double = 6.0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
+        self.audioConfig = audio
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
@@ -162,6 +204,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
             videoStream.pointee.codecpar.pointee.codec_tag = tag
         }
 
+        // 4b. Add the audio output stream (if any). Stream-copy and
+        //     FLAC-bridge cases use exactly the same wiring here —
+        //     the bridge's `encoderCodecpar` is structured identically
+        //     to a stream-copy codecpar from the caller's point of view.
+        if let audio = audio {
+            guard let audioStream = avformat_new_stream(ctx, nil) else {
+                cleanup()
+                throw ProducerError.streamCreationFailed
+            }
+            let aCopy = avcodec_parameters_copy(audioStream.pointee.codecpar, audio.codecpar)
+            guard aCopy >= 0 else {
+                cleanup()
+                throw ProducerError.copyParametersFailed(code: aCopy)
+            }
+            audioStream.pointee.time_base = audio.timeBase
+        }
+
         // 5. Configure hls muxer options. The mp4 sub-muxer's movflags
         //    are set inside hls_mux_init at libavformat/hlsenc.c:867
         //    (`+frag_custom+dash+delay_moov`); we do not override them.
@@ -188,19 +247,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // Latch the muxer stream's time_base after write_header. The
         // hls muxer (via its mov sub-muxer) rewrites the output stream
         // time_base to its own auto-picked timescale (e.g. 1/16000 for
-        // a 30 fps source), but the source packets we feed still carry
-        // source-time-base pts/dts. Without rescaling, every pkt.pts
-        // looks ~16x smaller than it should and hlsenc's split
-        // threshold against `hls_time * vs->number` never fires — the
-        // entire source ends up as a single segment. We use this value
-        // as the destination time_base for `av_packet_rescale_ts` on
-        // every packet in the pump loop.
+        // a 30 fps video, 1/<sampleRate> for audio), but the source
+        // packets we feed still carry source-time-base pts/dts. Without
+        // rescaling, every pkt.pts looks scaled wrong and hlsenc's
+        // split threshold against `hls_time * vs->number` never fires
+        // — the entire source ends up as a single segment. We use these
+        // values as the destination time_base for `av_packet_rescale_ts`
+        // on every packet in the pump loop.
         muxerVideoTimeBase = ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
+        if audio != nil {
+            muxerAudioTimeBase = ctx.pointee.streams.advanced(by: 1).pointee!.pointee.time_base
+        }
 
+        let audioDesc = audio.map { a -> String in
+            let mode = a.bridge != nil ? "bridge" : "stream-copy"
+            return " audio=\(mode) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den) muxerTb=\(muxerAudioTimeBase.num)/\(muxerAudioTimeBase.den)"
+        } ?? ""
         EngineLog.emit(
             "[HLSSegmentProducer] muxer init OK (baseIndex=\(baseIndex), targetDur=\(hlsTimeStr)s, "
             + "srcTb=\(video.timeBase.num)/\(video.timeBase.den) "
-            + "muxerTb=\(muxerVideoTimeBase.num)/\(muxerVideoTimeBase.den))",
+            + "muxerTb=\(muxerVideoTimeBase.num)/\(muxerVideoTimeBase.den))"
+            + audioDesc,
             category: .session
         )
     }
@@ -276,13 +343,49 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
                 defer { av_packet_free(&pktPtr) }
 
-                if packet.pointee.stream_index != videoStreamIndex {
-                    // Phase A is video-only; drop everything else.
+                let pktStreamIdx = packet.pointee.stream_index
+
+                // Audio path. Either stream-copy the source packet
+                // straight into the muxer, or hand it to the FLAC
+                // bridge and mux whatever the encoder spits back out.
+                if let audio = audioConfig, pktStreamIdx == audio.sourceStreamIndex {
+                    if let bridge = audio.bridge {
+                        // Decode + resample + FLAC-encode. Each call
+                        // returns 0..N encoded FLAC packets stamped in
+                        // `bridge.encoderTimeBase` — caller takes
+                        // ownership and frees after muxing.
+                        let flacPackets: [UnsafeMutablePointer<AVPacket>]
+                        do {
+                            flacPackets = try bridge.feed(packet: packet)
+                        } catch {
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] audio bridge.feed failed at pkt#\(packetsRead): \(error)",
+                                category: .session
+                            )
+                            continue
+                        }
+                        for fp in flacPackets {
+                            fp.pointee.stream_index = audioOutputStreamIndex
+                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxerAudioTimeBase)
+                            _ = av_write_frame(ctx, fp)
+                            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+                            av_packet_free(&fpVar)
+                        }
+                    } else {
+                        packet.pointee.stream_index = audioOutputStreamIndex
+                        av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
+                        _ = av_write_frame(ctx, packet)
+                    }
                     continue
                 }
 
-                // Remap to the muxer's output index (single video stream
-                // in Phase A).
+                if pktStreamIdx != videoStreamIndex {
+                    // Subtitles, additional audio tracks, attachments,
+                    // unknown streams — dropped silently.
+                    continue
+                }
+
+                // Video path.
                 packet.pointee.stream_index = videoOutputStreamIndex
 
                 // Rescale pts/dts/duration from source time_base to the

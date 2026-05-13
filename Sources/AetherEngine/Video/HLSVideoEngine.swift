@@ -64,6 +64,74 @@ public final class HLSVideoEngine: @unchecked Sendable {
         case unknown        // anything else                          → reject
     }
 
+    /// Source audio codec routed to either fMP4 stream-copy or the
+    /// FLAC bridge. Stream-copy preserves Atmos / DTS-HD metadata
+    /// (EAC3-JOC stays Atmos); the bridge decodes to S16 PCM and
+    /// re-encodes losslessly as FLAC so AVPlayer plays codecs that
+    /// aren't legal in fMP4. See `project_audio_rework` memory for
+    /// the full trade-off matrix (TrueHD-MAT Atmos loses its object
+    /// metadata on the FLAC re-encode; lossless 7.1 PCM survives).
+    fileprivate enum AudioCodecCompat {
+        // fMP4-legal: stream-copy, no decode.
+        case aac, ac3, eac3, flac, alac, mp3, opus
+        // Not legal in fMP4: bridge through `AudioBridge` (decode →
+        // S16 PCM → FLAC encode).
+        case truehd, dts
+        case vorbis, pcm, mp2
+        case unsupported
+
+        static func from(_ codecID: AVCodecID) -> AudioCodecCompat {
+            switch codecID {
+            case AV_CODEC_ID_AAC:    return .aac
+            case AV_CODEC_ID_AC3:    return .ac3
+            case AV_CODEC_ID_EAC3:   return .eac3
+            case AV_CODEC_ID_FLAC:   return .flac
+            case AV_CODEC_ID_ALAC:   return .alac
+            case AV_CODEC_ID_MP3:    return .mp3
+            case AV_CODEC_ID_OPUS:   return .opus
+            case AV_CODEC_ID_TRUEHD: return .truehd
+            case AV_CODEC_ID_DTS:    return .dts
+            case AV_CODEC_ID_VORBIS: return .vorbis
+            case AV_CODEC_ID_MP2:    return .mp2
+            case AV_CODEC_ID_PCM_S16LE,
+                 AV_CODEC_ID_PCM_S24LE,
+                 AV_CODEC_ID_PCM_F32LE,
+                 AV_CODEC_ID_PCM_S16BE,
+                 AV_CODEC_ID_PCM_S32LE,
+                 AV_CODEC_ID_PCM_U8:
+                return .pcm
+            default: return .unsupported
+            }
+        }
+
+        /// CODECS attribute string for the master playlist when this
+        /// codec is stream-copied. Empty for codecs that always bridge
+        /// (they show up as `fLaC` after the encode, computed by the
+        /// engine rather than the enum).
+        var hlsCodecsString: String {
+            switch self {
+            case .aac:    return "mp4a.40.2"
+            case .ac3:    return "ac-3"
+            case .eac3:   return "ec-3"
+            case .flac:   return "fLaC"
+            case .alac:   return "alac"
+            case .mp3:    return "mp4a.40.34"
+            case .opus:   return "opus"
+            case .truehd, .dts, .vorbis, .pcm, .mp2, .unsupported:
+                return ""
+            }
+        }
+
+        /// Codecs that aren't legal in fMP4 and always have to go
+        /// through `AudioBridge` for FLAC transcoding.
+        var requiresBridge: Bool {
+            switch self {
+            case .truehd, .dts, .vorbis, .pcm, .mp2: return true
+            default: return false
+            }
+        }
+    }
+
     // MARK: - State
 
     private let sourceURL: URL
@@ -80,6 +148,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// DV-classification / codec-pick logic.
     private var videoStreamIndex: Int32 = -1
     private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
+    private var savedAudioConfig: HLSSegmentProducer.AudioConfig?
+    /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
+    /// Owned by the engine (not the producer) so that producer
+    /// restarts on scrub don't lose the bridge's encoder state. The
+    /// bridge's `startSegment()` is called before each restart so the
+    /// FLAC encoder PTS rebases off the new demuxer cursor.
+    private var audioBridge: AudioBridge?
     private var segmentPlan: [Segment] = []
 
     /// Serializes restart requests so multiple AVPlayer GETs racing
@@ -283,17 +358,63 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.savedVideoConfig = videoConfig
         self.segmentPlan = plan
 
-        let prod: HLSSegmentProducer
-        do {
-            prod = try makeProducer(baseIndex: 0)
-        } catch {
-            stop()
-            throw HLSVideoEngineError.muxerInit(underlying: error)
+        // 6a. Pick the audio routing: stream-copy for codecs legal in
+        //     fMP4, FLAC bridge for those that aren't, drop for the
+        //     unsupported tail. The fallback cascade tries stream-copy
+        //     first (the common case is `ec-3` for streaming UHD with
+        //     Atmos JOC); if the muxer rejects the header (EAC3 from
+        //     MKV without a parsed `dec3` extradata is the typical
+        //     EINVAL), we retry with the FLAC bridge; if that also
+        //     fails we ship video-only.
+        let audioStreamIndex = dem.audioStreamIndex
+        var streamCopyAudio: HLSSegmentProducer.AudioConfig?
+        var bridgePreferred = false
+        var audioHLSCodecs: String?
+
+        if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
+            let codecID = audioStream.pointee.codecpar.pointee.codec_id
+            let compat = AudioCodecCompat.from(codecID)
+            if compat.requiresBridge {
+                bridgePreferred = true
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: codec=\(compat) (bridge required) — decoding + FLAC re-encode",
+                    category: .session
+                )
+            } else if compat != .unsupported {
+                streamCopyAudio = HLSSegmentProducer.AudioConfig(
+                    codecpar: audioStream.pointee.codecpar,
+                    timeBase: audioStream.pointee.time_base,
+                    sourceStreamIndex: audioStreamIndex,
+                    inputTimeBase: audioStream.pointee.time_base,
+                    bridge: nil
+                )
+                audioHLSCodecs = compat.hlsCodecsString
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(compat.hlsCodecsString)`",
+                    category: .session
+                )
+            } else {
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: codec id=\(codecID.rawValue) unsupported, video-only",
+                    category: .session
+                )
+            }
         }
+
+        // 6b. Attempt the cascade. The bridge instance, if needed, is
+        //     constructed up-front so it survives across restarts.
+        let prod: HLSSegmentProducer
+        prod = try buildProducerWithAudioCascade(
+            preferBridge: bridgePreferred,
+            streamCopyAudio: streamCopyAudio,
+            sourceAudioStreamIndex: audioStreamIndex,
+            sourceAudioStream: audioStreamIndex >= 0 ? dem.stream(at: audioStreamIndex) : nil,
+            audioHLSCodecs: &audioHLSCodecs
+        )
         self.producer = prod
 
         // 7. Wire the provider, the server, and serve the URL.
-        let manifestCodecs = primaryCodecs
+        let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
         let prov = VideoSegmentProvider(
             cache: segmentCache,
             segments: plan,
@@ -355,10 +476,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         server?.stop()
         cache?.close()
+        audioBridge?.close()
         provider = nil
         server = nil
         cache = nil
         savedVideoConfig = nil
+        savedAudioConfig = nil
+        audioBridge = nil
         segmentPlan = []
         demuxer?.close()
         demuxer = nil
@@ -382,10 +506,89 @@ public final class HLSVideoEngine: @unchecked Sendable {
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
             video: cfg,
+            audio: savedAudioConfig,
             cache: cache,
             baseIndex: baseIndex,
             targetSegmentDurationSeconds: Self.targetSegmentDuration
         )
+    }
+
+    /// Try the stream-copy → FLAC-bridge → video-only cascade for the
+    /// initial producer construction. Inspired by the equivalent
+    /// cascade the old per-fragment FMP4VideoMuxer ran during init
+    /// capture; the failure mode it covers is the EAC3-from-MKV case
+    /// where the source codecpar lacks the `dec3` extradata the mp4
+    /// muxer needs to write the audio track's sample-entry. The same
+    /// bytes that fed AVPlayer through stream-copy under the old
+    /// architecture now fail header write here too — the fix on both
+    /// sides is the same FLAC bridge fallback.
+    private func buildProducerWithAudioCascade(
+        preferBridge: Bool,
+        streamCopyAudio: HLSSegmentProducer.AudioConfig?,
+        sourceAudioStreamIndex: Int32,
+        sourceAudioStream: UnsafeMutablePointer<AVStream>?,
+        audioHLSCodecs: inout String?
+    ) throws -> HLSSegmentProducer {
+        // If the source already needs the bridge (TrueHD / DTS / Vorbis
+        // / PCM / MP2), skip the stream-copy attempt — we know the
+        // muxer won't accept those codecs in fMP4 anyway.
+        if !preferBridge, let cfg = streamCopyAudio {
+            self.savedAudioConfig = cfg
+            do {
+                return try makeProducer(baseIndex: 0)
+            } catch {
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio stream-copy header write failed (\(error)), retrying with FLAC bridge",
+                    category: .session
+                )
+                // Fall through to bridge attempt.
+            }
+        }
+
+        // FLAC bridge attempt. Requires a source audio stream.
+        if let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0 {
+            do {
+                let bridge = try AudioBridge(
+                    srcCodecpar: audioStream.pointee.codecpar,
+                    srcTimeBase: audioStream.pointee.time_base
+                )
+                if let cp = bridge.encoderCodecpar {
+                    let cfg = HLSSegmentProducer.AudioConfig(
+                        codecpar: cp,
+                        timeBase: bridge.encoderTimeBase,
+                        sourceStreamIndex: sourceAudioStreamIndex,
+                        inputTimeBase: bridge.encoderTimeBase,
+                        bridge: bridge
+                    )
+                    self.savedAudioConfig = cfg
+                    self.audioBridge = bridge
+                    do {
+                        let prod = try makeProducer(baseIndex: 0)
+                        audioHLSCodecs = "fLaC"
+                        return prod
+                    } catch {
+                        EngineLog.emit(
+                            "[HLSVideoEngine] FLAC bridge header write failed (\(error)), falling back to video-only",
+                            category: .session
+                        )
+                        self.savedAudioConfig = nil
+                        self.audioBridge = nil
+                        bridge.close()
+                    }
+                }
+            } catch {
+                EngineLog.emit(
+                    "[HLSVideoEngine] AudioBridge init failed (\(error)), falling back to video-only",
+                    category: .session
+                )
+            }
+        }
+
+        // Video-only fallback.
+        self.savedAudioConfig = nil
+        self.audioBridge = nil
+        audioHLSCodecs = nil
+        return try makeProducer(baseIndex: 0)
     }
 
     /// Tear down the current producer, seek the demuxer to the start
@@ -422,6 +625,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         let target = segmentPlan[idx].startSeconds
         demuxer?.seek(to: target)
+        // Re-arm the FLAC bridge's PTS rebase off the new demuxer
+        // cursor. Without this, the bridge's encoder timeline keeps
+        // climbing from where the old producer left off, drifting
+        // out of alignment with the freshly-seeked video PTS.
+        audioBridge?.startSegment()
 
         do {
             let newProd = try makeProducer(baseIndex: idx)
