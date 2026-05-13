@@ -110,6 +110,45 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
+    // MARK: - View binding (Phase 1)
+
+    /// The view currently bound to this engine, if any. Weak so a host
+    /// that drops its view reference doesn't leak the surface through
+    /// the engine singleton.
+    private weak var boundView: AetherPlayerView?
+
+    /// Bind a render surface to this engine. The engine attaches the
+    /// active video layer to the view immediately and re-attaches a
+    /// fresh layer whenever a session swap happens internally.
+    ///
+    /// Pass the view from your view hierarchy (UIKit/AppKit) or use the
+    /// `AetherPlayerSurface` SwiftUI wrapper which calls this for you.
+    /// Calling `bind` again with a different view detaches the old one.
+    public func bind(view: AetherPlayerView) {
+        if let existing = boundView, existing !== view {
+            existing.detach()
+        }
+        boundView = view
+        presentCurrentLayer()
+    }
+
+    /// Unbind a previously bound view. Idempotent; safe to call when
+    /// nothing is bound or when a different view is bound.
+    public func unbind(view: AetherPlayerView) {
+        guard boundView === view else { return }
+        view.detach()
+        boundView = nil
+    }
+
+    /// Attach whichever layer the active backend currently exposes to
+    /// the bound view. Called by `bind` and by backend transitions.
+    /// During phases 1-3 only the aether path is wired here; phase 1.5
+    /// fills in the native-backend branch.
+    func presentCurrentLayer() {
+        guard let view = boundView else { return }
+        view.attach(videoRenderer.displayLayer)
+    }
+
     /// The URL and position of the current playback session.
     /// Used by `reloadAtCurrentPosition()` to rebuild the pipeline
     /// after background suspension invalidates VT sessions and AVIO.
