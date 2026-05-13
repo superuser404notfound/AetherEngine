@@ -309,6 +309,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    /// Thread-safe read of `shouldStop`. Used by the dispatchSinkOutput
+    /// backpressure loop to poll for cancellation between short cache
+    /// waits.
+    fileprivate func checkShouldStop() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return shouldStop
+    }
+
     /// Block until the pump has exited or `timeout` elapses. Returns
     /// `true` if the pump finished, `false` on timeout (in which
     /// case the caller can choose to leak this instance and proceed
@@ -518,20 +527,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 cache.store(index: absIdx, data: data)
                 // Backpressure: block the pump if we're racing more
                 // than `bufferAheadSegments` past AVPlayer's actual
-                // playhead. Without this the pump finishes the
-                // entire source in milliseconds on a local Jellyfin
-                // server; the LRU evicts segments AVPlayer hasn't
+                // playhead. Without this the pump finishes the entire
+                // source in milliseconds on a local Jellyfin server;
+                // the cache window evicts segments AVPlayer hasn't
                 // reached yet; AVPlayer's next sequential fetch
-                // misses cache; `mediaSegment(at:)` flags it as
-                // out-of-range and fires a restart for a segment
-                // we just over-produced. Pacing here keeps the
-                // cache window centred on the playhead so sequential
-                // fetches are always hits and only real scrubs
-                // trigger restarts.
-                _ = cache.awaitFetchHighWater(
-                    reaching: absIdx - Self.bufferAheadSegments,
-                    timeout: 60.0
-                )
+                // misses; `mediaSegment(at:)` flags it as out-of-range
+                // and fires a restart for a segment we just
+                // over-produced. Pacing here keeps the cache window
+                // centred on the playhead so sequential fetches are
+                // always hits.
+                //
+                // Poll with short 1 s waits so `stop()` can shut us
+                // down promptly during a restart instead of stranding
+                // the pump in a 60 s sleep.
+                let target = absIdx - Self.bufferAheadSegments
+                while !checkShouldStop() {
+                    if cache.awaitFetchHighWater(reaching: target, timeout: 1.0) { break }
+                }
                 return
             }
         }

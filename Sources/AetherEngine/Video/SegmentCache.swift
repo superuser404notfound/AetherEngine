@@ -45,10 +45,16 @@ final class SegmentCache {
     /// up and return nil instead of looping forever.
     private var closed = false
 
-    /// Highest absolute segment index AVPlayer has actually fetched
-    /// (via `fetch` or `peek` hits). The producer pump uses this to
-    /// pace itself; cache pruning uses it as the window centre.
-    private var highWaterFetchIndex: Int = -1
+    /// AVPlayer's current target segment index, declared by the
+    /// provider at the top of each `mediaSegment(at:)` call. Both
+    /// pruning and producer-backpressure read this. Not monotonic:
+    /// a backward scrub legitimately moves the target back, so the
+    /// cache window can slide either direction. Initial value -1
+    /// means "no request yet"; pruning with the default window
+    /// `[-16, 19]` is a no-op for the producer's natural start
+    /// (segments 0..19 fit), and the first real declareTarget snaps
+    /// it into the player's actual region.
+    private var currentTargetIndex: Int = -1
 
     init(forwardWindow: Int = 20, backwardWindow: Int = 15) {
         self.forwardWindow = forwardWindow
@@ -83,37 +89,42 @@ final class SegmentCache {
 
     // MARK: - Reader side
 
-    /// Non-blocking lookup. Raises the producer-backpressure high-water
-    /// mark on hit, which slides the cache window forward and may evict
-    /// stale back-edge entries.
+    /// Declare AVPlayer's current target segment index. Slides the
+    /// cache window to centre on that target, evicts any entries
+    /// outside the new window, and wakes any pump worker waiting in
+    /// `awaitFetchHighWater`. Called by the provider at the top of
+    /// each `mediaSegment(at:)` so the cache learns the player's
+    /// intent BEFORE the producer's restart-fires-and-immediately-
+    /// evicts-its-own-output race window opens.
+    func declareTarget(_ index: Int) {
+        condition.lock()
+        defer { condition.unlock() }
+        if index != currentTargetIndex {
+            currentTargetIndex = index
+            pruneOutsideWindow()
+            condition.broadcast()
+        }
+    }
+
+    /// Non-blocking lookup.
     func peek(index: Int) -> Data? {
         condition.lock()
         defer { condition.unlock() }
-        let hit = entries[index]
-        if hit != nil { markFetched(index: index) }
-        return hit
+        return entries[index]
     }
 
     /// Blocking lookup. Returns nil on timeout, on close, or when the
-    /// producer never stores this index. Raises the high-water mark
-    /// on hit, same as `peek`.
+    /// producer never stores this index.
     func fetch(index: Int, timeout: TimeInterval = 15.0) -> Data? {
         condition.lock()
         defer { condition.unlock() }
-        if let hit = entries[index] {
-            markFetched(index: index)
-            return hit
-        }
+        if let hit = entries[index] { return hit }
         if closed { return nil }
         let deadline = Date().addingTimeInterval(timeout)
         while !closed, entries[index] == nil {
             if !condition.wait(until: deadline) { break }
         }
-        if let hit = entries[index] {
-            markFetched(index: index)
-            return hit
-        }
-        return nil
+        return entries[index]
     }
 
     /// Blocking init lookup. Same semantics as `fetch(index:)` but for
@@ -130,22 +141,28 @@ final class SegmentCache {
         return initSegment
     }
 
-    /// Pump-side backpressure: block until AVPlayer's fetch high-water
+    /// Pump-side backpressure: block until AVPlayer's declared target
     /// reaches `target`, or `timeout` elapses, or the cache is closed.
     /// The producer calls this right after storing segment N with
     /// `target = N - forwardWindow` so it can't race more than
     /// `forwardWindow` segments past AVPlayer's actual playhead.
     /// Returns `true` on progress, `false` on close / timeout.
-    func awaitFetchHighWater(reaching target: Int, timeout: TimeInterval = 60.0) -> Bool {
+    ///
+    /// Short timeouts let the caller poll its own shouldStop flag
+    /// between awaits — the producer restart path uses 1 s waits in
+    /// a check-stop-then-await loop so it can be torn down within a
+    /// second of `stop()` being called instead of leaking for the
+    /// full 60 s.
+    func awaitFetchHighWater(reaching target: Int, timeout: TimeInterval = 1.0) -> Bool {
         condition.lock()
         defer { condition.unlock() }
-        if highWaterFetchIndex >= target { return true }
+        if currentTargetIndex >= target { return true }
         if closed { return false }
         let deadline = Date().addingTimeInterval(timeout)
-        while !closed, highWaterFetchIndex < target {
+        while !closed, currentTargetIndex < target {
             if !condition.wait(until: deadline) { break }
         }
-        return highWaterFetchIndex >= target
+        return currentTargetIndex >= target
     }
 
     // MARK: - Diagnostics
@@ -168,24 +185,13 @@ final class SegmentCache {
 
     // MARK: - Internal
 
-    /// Combined high-water bump + window slide. Both fetch and peek
-    /// call this on hit; the broadcast wakes any pump worker blocked
-    /// in `awaitFetchHighWater`.
-    private func markFetched(index: Int) {
-        if index > highWaterFetchIndex {
-            highWaterFetchIndex = index
-            pruneOutsideWindow()
-            condition.broadcast()
-        }
-    }
-
-    /// Drop any entries outside `[highWater - backwardWindow, highWater
-    /// + forwardWindow]`. Bounds the cache to a fixed segment window
-    /// regardless of how fast the producer ran or how AVPlayer's fetch
-    /// pattern interleaved with the stores.
+    /// Drop any entries outside `[currentTarget - backwardWindow,
+    /// currentTarget + forwardWindow]`. Bounds the cache to a fixed
+    /// segment window centred on AVPlayer's declared target,
+    /// regardless of how fast the producer ran.
     private func pruneOutsideWindow() {
-        let lo = highWaterFetchIndex - backwardWindow
-        let hi = highWaterFetchIndex + forwardWindow
+        let lo = currentTargetIndex - backwardWindow
+        let hi = currentTargetIndex + forwardWindow
         for k in Array(entries.keys) {
             if k < lo || k > hi {
                 entries.removeValue(forKey: k)

@@ -886,20 +886,42 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         guard index >= 0, index < segments.count else { return nil }
         let totalStart = DispatchTime.now()
 
-        // Fast path: serve from cache without touching the producer.
+        // Declare AVPlayer's target FIRST so the cache window slides
+        // to centre on `index` before any subsequent producer store
+        // runs `pruneOutsideWindow`. Without this, a resume-style
+        // jump to seg-55 races with the producer's first store: the
+        // producer (after restart at 55) writes seg-55, the cache
+        // prunes with the still-default target=-1 / window=[-16,19],
+        // seg-55 is evicted before `fetch(55)` ever sees it, and
+        // AVPlayer times out on a segment that did exist for ~10 µs.
+        cache.declareTarget(index)
+
+        // Fast path: serve from cache.
         if let hit = cache.peek(index: index) {
             return logServed(index: index, bytes: hit, totalStart: totalStart, restarted: false)
         }
 
-        // Decide whether to restart the producer or wait it out. With
-        // an empty cache (producer just started), always wait — a
-        // restart at index 0 would churn for no benefit.
+        // Decide whether to restart the producer or wait. Three cases:
+        //   - range is empty → the producer hasn't produced (or hasn't
+        //     produced anything in our current window after declareTarget
+        //     pruned). If the requested index is beyond the producer's
+        //     plausible cold-start reach (a few seg-0s), restart at
+        //     `index`. Otherwise wait — the producer is about to write
+        //     seg-0 / seg-1 / seg-2 and we don't want to thrash.
+        //   - index below the cache's low edge → backward seek past
+        //     the kept window, restart.
+        //   - index too far above the cache's high edge → forward
+        //     seek past where the producer can reach via backpressure,
+        //     restart.
         let range = cache.indexRange()
         let needsRestart: Bool
         if let r = range {
             needsRestart = (index < r.0) || (index > r.1 + Self.forwardWaitWindow)
         } else {
-            needsRestart = false
+            // Empty cache. Producer's plausible cold-start reach is
+            // ~3 segments; anything past that and we know we want a
+            // restart at the requested index rather than wait.
+            needsRestart = index > 2
         }
 
         if needsRestart, let restart = restartHandler {
