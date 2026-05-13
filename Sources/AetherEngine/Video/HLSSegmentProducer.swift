@@ -120,6 +120,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
+    /// How many segments the pump is allowed to race ahead of the
+    /// highest segment AVPlayer has actually fetched. With the
+    /// default `SegmentCache.capacity = 30` this leaves ~10 segments
+    /// of headroom behind the playhead for cheap short-range backward
+    /// scrubs without triggering a producer-restart.
+    private static let bufferAheadSegments = 20
+
     /// Worker queue running the read → write_frame pump. One per
     /// producer instance; the queue is serial, no concurrent writes
     /// to the format context. Closed when `stop()` is called.
@@ -509,6 +516,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     category: .session
                 )
                 cache.store(index: absIdx, data: data)
+                // Backpressure: block the pump if we're racing more
+                // than `bufferAheadSegments` past AVPlayer's actual
+                // playhead. Without this the pump finishes the
+                // entire source in milliseconds on a local Jellyfin
+                // server; the LRU evicts segments AVPlayer hasn't
+                // reached yet; AVPlayer's next sequential fetch
+                // misses cache; `mediaSegment(at:)` flags it as
+                // out-of-range and fires a restart for a segment
+                // we just over-produced. Pacing here keeps the
+                // cache window centred on the playhead so sequential
+                // fetches are always hits and only real scrubs
+                // trigger restarts.
+                _ = cache.awaitFetchHighWater(
+                    reaching: absIdx - Self.bufferAheadSegments,
+                    timeout: 60.0
+                )
                 return
             }
         }
