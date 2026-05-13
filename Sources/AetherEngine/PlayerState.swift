@@ -11,6 +11,67 @@ public enum PlaybackState: Sendable, Equatable {
     case error(String)
 }
 
+/// Which internal backend is rendering the current session.
+///
+/// Engine-internal in spirit; exposed read-only on `AetherEngine` so
+/// diagnostic overlays / TestFlight badges can show which path drove
+/// a given playback. Hosts should not switch behavior on this value;
+/// the engine handles all backend-specific concerns internally.
+public enum PlaybackBackend: String, Sendable, Equatable {
+    /// No session loaded.
+    case none
+    /// Legacy FFmpeg + VideoToolbox + AVSampleBufferDisplayLayer path.
+    /// Removed in 1.0.0.
+    case aether
+    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. After 1.0.0
+    /// this is the only path.
+    case native
+}
+
+/// Static snapshot of what the current display can present.
+///
+/// Lifted from Sodalite's `DisplayCapabilities.swift`; exposed by the
+/// engine so hosts have one source of truth.
+public struct DisplayCapabilities: Sendable, Equatable {
+    /// True iff the display can show any HDR (HDR10, HDR10+, HLG, or DV).
+    public let supportsHDR: Bool
+    /// True iff the display can show Dolby Vision.
+    public let supportsDolbyVision: Bool
+    /// True iff the display can show HDR10.
+    public let supportsHDR10: Bool
+    /// True iff the display can show HLG.
+    public let supportsHLG: Bool
+
+    public init(supportsHDR: Bool, supportsDolbyVision: Bool, supportsHDR10: Bool, supportsHLG: Bool) {
+        self.supportsHDR = supportsHDR
+        self.supportsDolbyVision = supportsDolbyVision
+        self.supportsHDR10 = supportsHDR10
+        self.supportsHLG = supportsHLG
+    }
+}
+
+/// Options for the unified `AetherEngine.load(url:options:)` entry
+/// point. All flags default to safe values; hosts only need to set
+/// what differs from default.
+public struct LoadOptions: Sendable, Equatable {
+    /// When `true`, omit BT.2020 / transfer / YCbCr matrix extensions
+    /// from the AVDisplayCriteria format description so AVPlayer falls
+    /// back to reading the actual bitstream's color metadata at session
+    /// start. Diagnostic lever only; default off.
+    public var omitCriteriaColorExtensions: Bool
+    /// When `true`, skip the display-criteria handshake entirely. Used
+    /// by previews and `aetherctl` where there's no panel to switch.
+    public var suppressDisplayCriteria: Bool
+
+    public init(
+        omitCriteriaColorExtensions: Bool = false,
+        suppressDisplayCriteria: Bool = false
+    ) {
+        self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
+        self.suppressDisplayCriteria = suppressDisplayCriteria
+    }
+}
+
 /// The detected video dynamic range format.
 ///
 /// `hdr10Plus` shares the underlying HDR10 base layer with `hdr10`,

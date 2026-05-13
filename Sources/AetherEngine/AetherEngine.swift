@@ -3,6 +3,7 @@ import QuartzCore
 import CoreMedia
 import CoreVideo
 import AVFoundation
+import Combine
 import Compression
 import Libavformat
 import Libavcodec
@@ -59,6 +60,12 @@ public final class AetherEngine: ObservableObject {
     /// loop, or a sidecar file URL fully decoded up-front. Empty when
     /// no subtitle is active or the source is a graphic format the
     /// engine doesn't render yet.
+    /// Which internal backend rendered the current session.
+    /// Diagnostic only; hosts should not switch behavior on this value.
+    /// Set by `load(url:options:)` on success; reset to `.none` on
+    /// `stop()` / `stopInternal()`.
+    @Published public private(set) var playbackBackend: PlaybackBackend = .none
+
     @Published public private(set) var subtitleCues: [SubtitleCue] = []
     /// True while a sidecar file is being downloaded + decoded.
     /// Embedded tracks populate cues lazily as the demuxer reads
@@ -102,12 +109,36 @@ public final class AetherEngine: ObservableObject {
     /// Synchronizer/controlTimebase state from a previous playback.
     /// The host view must remove the old sublayer and add the new one.
     /// See `SampleBufferRenderer.onLayerReplaced` for the why.
-    public var onVideoLayerReplaced: ((CALayer) -> Void)? {
-        didSet {
-            videoRenderer.onLayerReplaced = { [weak self] newLayer in
-                self?.onVideoLayerReplaced?(newLayer)
-            }
-        }
+    ///
+    /// Hosts using `bind(view:)` don't need to set this; the engine
+    /// updates the bound `AetherPlayerView` automatically.
+    public var onVideoLayerReplaced: ((CALayer) -> Void)?
+
+    // MARK: - Capabilities
+
+    /// Snapshot of what the active display can present right now.
+    ///
+    /// Reads `AVPlayer.eligibleForHDRPlayback` and `AVPlayer.availableHDRModes`
+    /// at call time. tvOS and iOS report panel capabilities; macOS reports
+    /// the built-in display only and may under-report external displays.
+    public static var displayCapabilities: DisplayCapabilities {
+        #if os(tvOS) || os(iOS)
+        let hdrEligible = AVPlayer.eligibleForHDRPlayback
+        let modes = AVPlayer.availableHDRModes
+        return DisplayCapabilities(
+            supportsHDR: hdrEligible,
+            supportsDolbyVision: modes.contains(.dolbyVision),
+            supportsHDR10: modes.contains(.hdr10),
+            supportsHLG: modes.contains(.hlg)
+        )
+        #else
+        return DisplayCapabilities(
+            supportsHDR: AVPlayer.eligibleForHDRPlayback,
+            supportsDolbyVision: false,
+            supportsHDR10: false,
+            supportsHLG: false
+        )
+        #endif
     }
 
     // MARK: - View binding (Phase 1)
@@ -116,6 +147,21 @@ public final class AetherEngine: ObservableObject {
     /// that drops its view reference doesn't leak the surface through
     /// the engine singleton.
     private weak var boundView: AetherPlayerView?
+
+    /// Engine-owned HDMI HDR handshake controller. Programs
+    /// `AVDisplayManager.preferredDisplayCriteria` from the format +
+    /// frame rate the demuxer probes; no-op on iOS / macOS.
+    private let displayCriteria = DisplayCriteriaController()
+
+    /// The native AVPlayer + AVPlayerLayer host active for the current
+    /// session, when `playbackBackend == .native`. Non-nil between the
+    /// new `load(url:options:)` and `stopInternal`.
+    private var nativeHost: NativeAVPlayerHost?
+
+    /// Combine subscriptions from `nativeHost`'s @Published into the
+    /// engine's own @Published mirrors. Cancelled on stopInternal so a
+    /// new session doesn't accumulate them.
+    private var nativeCancellables: Set<AnyCancellable> = []
 
     /// Bind a render surface to this engine. The engine attaches the
     /// active video layer to the view immediately and re-attaches a
@@ -141,12 +187,19 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// Attach whichever layer the active backend currently exposes to
-    /// the bound view. Called by `bind` and by backend transitions.
-    /// During phases 1-3 only the aether path is wired here; phase 1.5
-    /// fills in the native-backend branch.
+    /// the bound view. Called by `bind`, by backend transitions
+    /// (`load(url:options:)` switching to native), and by the aether
+    /// renderer's `onLayerReplaced` hook on session restart.
     func presentCurrentLayer() {
         guard let view = boundView else { return }
-        view.attach(videoRenderer.displayLayer)
+        let layer: CALayer
+        switch playbackBackend {
+        case .native:
+            layer = nativeHost?.playerLayer ?? videoRenderer.displayLayer
+        case .aether, .none:
+            layer = videoRenderer.displayLayer
+        }
+        view.attach(layer)
     }
 
     /// The URL and position of the current playback session.
@@ -333,6 +386,19 @@ public final class AetherEngine: ObservableObject {
         // Display layer timing is configured in load() based on which
         // audio engine is active (synchronizer for PCM, controlTimebase for AVPlayer).
         setupLifecycleObservers()
+
+        // Hook the aether renderer's layer-swap callback so the bound
+        // AetherPlayerView re-attaches when a fresh display layer is
+        // recreated mid-session (every `load()` does this). Also chain
+        // through to the legacy `onVideoLayerReplaced` callback for
+        // hosts still on the old API.
+        videoRenderer.onLayerReplaced = { [weak self] newLayer in
+            guard let self = self else { return }
+            Task { @MainActor in
+                self.presentCurrentLayer()
+                self.onVideoLayerReplaced?(newLayer)
+            }
+        }
     }
 
     // MARK: - Public API
@@ -755,13 +821,219 @@ public final class AetherEngine: ObservableObject {
                 print("[AetherEngine] First-frame timeout, load() returning anyway")
             }
             #endif
+
+            playbackBackend = .aether
+            presentCurrentLayer()
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
             throw error
         }
     }
 
+    // MARK: - Unified entry point (Phase 1.5)
+
+    /// Load a media file or stream URL through the native AVPlayer
+    /// pipeline (HLS-fMP4 over loopback). Replaces any current
+    /// playback. This is the unified entry point that hosts using
+    /// `bind(view:)` should call.
+    ///
+    /// Behavior:
+    /// 1. Tears down the previous session.
+    /// 2. Briefly opens the demuxer to detect format + frame rate.
+    /// 3. Programs `AVDisplayCriteria` from the detected metadata
+    ///    (DV → `dvh1`, others → `hvc1`; refresh rate snapped to a
+    ///    standard rate; honours Match Content + Match Frame Rate).
+    /// 4. Waits for the panel mode-switch to settle.
+    /// 5. Spins up `HLSVideoEngine` + `NativeAVPlayerHost`.
+    /// 6. Falls back to the legacy aether pipeline on
+    ///    `HLSVideoEngineError.unsupportedCodec` /
+    ///    `.unsupportedDVProfile` so VP9 / AV1 / DV P7 sources keep
+    ///    playing during the Phase 1-3 transition. After 1.0.0 the
+    ///    fallback is removed and these throw.
+    ///
+    /// - Parameters:
+    ///   - url: Media source (http/https/file).
+    ///   - startPosition: Seconds into the stream to start at (resume).
+    ///   - tonemapHDRToSDR: Forwarded to the aether fallback path
+    ///     only; ignored when the native path succeeds (AVPlayer
+    ///     handles tone-mapping internally based on panel
+    ///     capabilities).
+    ///   - options: Engine-internal toggles. See `LoadOptions`.
+    public func load(
+        url: URL,
+        startPosition: Double? = nil,
+        tonemapHDRToSDR: Bool = false,
+        options: LoadOptions
+    ) async throws {
+        stopInternal()
+        loadedURL = url
+        state = .loading
+        currentTime = 0
+        duration = 0
+        progress = 0
+
+        // 1. Brief demuxer probe to grab format + frame rate.
+        var detectedFormat: VideoFormat = .sdr
+        var detectedRate: Double? = nil
+        var detectedDVProfile: Bool = false
+        do {
+            try demuxer.open(url: url)
+            let videoIdx = demuxer.videoStreamIndex
+            if videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) {
+                detectedFormat = Self.detectVideoFormat(stream: stream)
+                detectedRate = Self.detectFrameRate(stream: stream)
+                detectedDVProfile = (detectedFormat == .dolbyVision)
+            }
+            demuxer.close()
+        } catch {
+            // Probe failure isn't fatal here; load down the fallback
+            // path which will report a real error if the source is
+            // genuinely broken.
+            EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
+        }
+
+        videoFormat = detectedFormat
+        let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
+
+        // 2. Display-criteria handshake.
+        if !options.suppressDisplayCriteria {
+            let codecTag: FourCharCode? = detectedDVProfile ? 0x64766831 : nil
+            let willSwitch = displayCriteria.apply(
+                format: detectedFormat,
+                frameRate: snappedRate,
+                codecTag: codecTag,
+                omitColorExtensions: options.omitCriteriaColorExtensions
+            )
+            if willSwitch {
+                await displayCriteria.waitForSwitch()
+            }
+        }
+
+        // 3. Try native; on rejection, fall through to aether.
+        do {
+            try await loadNative(url: url, startPosition: startPosition)
+            playbackBackend = .native
+            presentCurrentLayer()
+        } catch let err as HLSVideoEngine.HLSVideoEngineError {
+            switch err {
+            case .unsupportedCodec, .unsupportedDVProfile:
+                EngineLog.emit("[AetherEngine] native rejected (\(err)); falling back to aether", category: .engine)
+                // Fallback path: legacy aether load. tonemapHDRToSDR is
+                // honored here.
+                try await load(url: url, startPosition: startPosition, tonemapHDRToSDR: tonemapHDRToSDR)
+            default:
+                state = .error("Failed to load: \(err.localizedDescription)")
+                throw err
+            }
+        } catch {
+            state = .error("Failed to load: \(error.localizedDescription)")
+            throw error
+        }
+    }
+
+    /// Native-backend load: open HLSVideoEngine against the source,
+    /// hand the loopback URL to NativeAVPlayerHost, wire its
+    /// @Published into the engine's mirrors.
+    private func loadNative(url: URL, startPosition: Double?) async throws {
+        // Open native video session (HLSVideoEngine).
+        let session = HLSVideoEngine(url: url, dvModeAvailable: Self.displayCapabilities.supportsDolbyVision)
+        let playbackURL = try session.start()
+        self.nativeVideoSession = session
+
+        // Spin up the AVPlayer host.
+        let host = NativeAVPlayerHost()
+        self.nativeHost = host
+
+        // Forward host @Published into engine @Published.
+        // duration / currentTime / rate flow continuously; isReady
+        // flips state from .loading to .paused; failureMessage
+        // surfaces as .error.
+        nativeCancellables.removeAll()
+        host.$currentTime
+            .sink { [weak self] value in self?.currentTime = value }
+            .store(in: &nativeCancellables)
+        host.$duration
+            .sink { [weak self] value in
+                if value > 0 { self?.duration = value }
+            }
+            .store(in: &nativeCancellables)
+        host.$isReady
+            .sink { [weak self] ready in
+                guard let self = self else { return }
+                if ready, self.state == .loading {
+                    self.state = .paused
+                }
+            }
+            .store(in: &nativeCancellables)
+        host.$failureMessage
+            .compactMap { $0 }
+            .sink { [weak self] msg in
+                self?.state = .error(msg)
+            }
+            .store(in: &nativeCancellables)
+
+        // Hand the loopback URL to the player.
+        host.load(url: playbackURL, startPosition: startPosition)
+    }
+
+    // MARK: - Format / frame-rate probing
+
+    private static func detectVideoFormat(stream: UnsafeMutablePointer<AVStream>) -> VideoFormat {
+        let codecpar = stream.pointee.codecpar.pointee
+        let transfer = codecpar.color_trc
+        // PQ + DV side data → dolbyVision; PQ alone → hdr10 (or hdr10Plus
+        // when ST 2094-40 is present, which we don't probe here at the
+        // load-level; aether path's deeper probe sets that later if
+        // needed). HLG → hlg. Everything else → sdr.
+        if transfer == AVCOL_TRC_SMPTE2084 {
+            // Crude DV check via stream metadata; full classification
+            // happens inside HLSVideoEngine.
+            return Self.streamHasDV(stream: stream) ? .dolbyVision : .hdr10
+        }
+        if transfer == AVCOL_TRC_ARIB_STD_B67 {
+            return .hlg
+        }
+        return .sdr
+    }
+
+    private static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
+        // Scan side-data array for AV_PKT_DATA_DOVI_CONF.
+        let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
+        guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {
+            return false
+        }
+        for i in 0..<nb {
+            if sideData[i].type == AV_PKT_DATA_DOVI_CONF {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func detectFrameRate(stream: UnsafeMutablePointer<AVStream>) -> Double? {
+        let avg = stream.pointee.avg_frame_rate
+        if avg.den > 0 && avg.num > 0 {
+            return Double(avg.num) / Double(avg.den)
+        }
+        let r = stream.pointee.r_frame_rate
+        if r.den > 0 && r.num > 0 {
+            return Double(r.num) / Double(r.den)
+        }
+        return nil
+    }
+
     public func play() {
+        if playbackBackend == .native {
+            // Native backend ignores the .loading guard: AVPlayer's
+            // automaticallyWaitsToMinimizeStalling makes "play before
+            // ready" the canonical pattern (rate=1 triggers the asset
+            // load if it hasn't started yet).
+            nativeHost?.play()
+            if state == .paused || state == .loading {
+                state = .playing
+            }
+            return
+        }
         guard state == .paused else { return }
         isPlaying = true
         if audioMode == .atmos {
@@ -773,6 +1045,13 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
+        if playbackBackend == .native {
+            nativeHost?.pause()
+            if state == .playing {
+                state = .paused
+            }
+            return
+        }
         guard state == .playing else { return }
         isPlaying = false
         if audioMode == .atmos {
@@ -798,11 +1077,31 @@ public final class AetherEngine: ObservableObject {
     public func reloadAtCurrentPosition() async throws {
         guard let url = loadedURL else { return }
         let pos = currentTime
-        try await load(url: url, startPosition: pos > 1 ? pos : nil)
+        // Reload through whichever backend was active. The new load
+        // path reapplies display-criteria so foreground-from-background
+        // recovers the HDR/DV mode on the second go-around.
+        if playbackBackend == .native {
+            try await load(url: url, startPosition: pos > 1 ? pos : nil, options: .init())
+        } else {
+            try await load(url: url, startPosition: pos > 1 ? pos : nil)
+        }
     }
 
     public func seek(to seconds: Double) async {
         let target = max(0, min(seconds, duration))
+
+        if playbackBackend == .native {
+            state = .seeking
+            nativeHost?.seek(to: target)
+            currentTime = target
+            // AVPlayer surfaces post-seek readiness via its own KVO;
+            // the engine's state follows the host's @Published mirrors.
+            // We optimistically flip back to .playing here so the host
+            // UI doesn't get stuck on .seeking when the seek lands fast.
+            state = .playing
+            return
+        }
+
         state = .seeking
 
         // Pause the demux loop so it stops calling readPacket().
@@ -876,6 +1175,10 @@ public final class AetherEngine: ObservableObject {
 
     /// Set playback speed (0.5–2.0). Audio pitch adjusts automatically.
     public func setRate(_ rate: Float) {
+        if playbackBackend == .native {
+            nativeHost?.setRate(rate)
+            return
+        }
         if audioMode == .atmos {
             hlsAudioEngine?.setRate(rate)
         } else {
@@ -1634,6 +1937,20 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Internal
 
     private func stopInternal() {
+        // Native backend teardown first: stop the AVPlayer fetching
+        // before tearing down the loopback HLS server, otherwise
+        // AVPlayer's segment requests race the server shutdown and
+        // produce noisy errors in the log. Always reset display
+        // criteria so a previous DV/HDR session doesn't leak the
+        // panel mode into the next playback.
+        nativeCancellables.removeAll()
+        nativeHost?.tearDown()
+        nativeHost = nil
+        nativeVideoSession?.stop()
+        nativeVideoSession = nil
+        displayCriteria.reset()
+        playbackBackend = .none
+
         stopRequested = true
         isPlaying = false
         stopTimeUpdates()
