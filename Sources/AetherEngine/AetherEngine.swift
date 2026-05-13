@@ -546,13 +546,8 @@ public final class AetherEngine: ObservableObject {
         }
         if activeAudioTrackIndex == index { return }
 
-        let resumeAt = currentTime
-        let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
-            ? loadedSidecarURL
-            : nil
-        let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
         EngineLog.emit(
-            "[AetherEngine] selectAudioTrack: switching to stream \(index) at \(String(format: "%.2f", resumeAt))s (embeddedSub=\(embeddedStreamToResume), sidecar=\(sidecarToResume?.lastPathComponent ?? "nil"))",
+            "[AetherEngine] selectAudioTrack: scheduling switch to stream \(index)",
             category: .engine
         )
 
@@ -560,10 +555,7 @@ public final class AetherEngine: ObservableObject {
             guard let self = self else { return }
             await self.reloadWithAudioOverride(
                 url: url,
-                resumeAt: resumeAt,
-                audioStreamIndex: Int32(index),
-                embeddedSubtitleStreamToResume: embeddedStreamToResume,
-                sidecarToResume: sidecarToResume
+                audioStreamIndex: Int32(index)
             )
         }
     }
@@ -576,15 +568,30 @@ public final class AetherEngine: ObservableObject {
     /// Perform the audio-track-switch reload. Tears the current native
     /// session down, brings a fresh `HLSVideoEngine` up with the new
     /// audio source stream override, swaps AVPlayer to the new playlist
-    /// URL at `resumeAt`, and re-arms whichever subtitle source was
-    /// active before the switch.
+    /// URL at the current playhead, and re-arms whichever subtitle
+    /// source was active when this task actually began executing.
+    ///
+    /// Subtitle and playhead state are snapshotted INSIDE the task body
+    /// rather than at the call site, because hosts commonly chain a
+    /// `selectSubtitleTrack` call right after `selectAudioTrack` (e.g.
+    /// auto-subs-for-foreign-audio): the chained call lands on the
+    /// MainActor before this task body runs, and snapshotting at call
+    /// time would miss it, leaving the picker showing a subtitle that
+    /// the post-reload state never actually re-armed.
     private func reloadWithAudioOverride(
         url: URL,
-        resumeAt: Double,
-        audioStreamIndex: Int32,
-        embeddedSubtitleStreamToResume: Int32,
-        sidecarToResume: URL?
+        audioStreamIndex: Int32
     ) async {
+        let resumeAt = currentTime
+        let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
+        let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
+            ? loadedSidecarURL
+            : nil
+        EngineLog.emit(
+            "[AetherEngine] reload begin: audioStream=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s embeddedSub=\(embeddedStreamToResume) sidecar=\(sidecarToResume?.lastPathComponent ?? "nil")",
+            category: .engine
+        )
+
         state = .loading
         let previousAudioIndex = activeAudioTrackIndex
         stopInternal()
@@ -611,14 +618,15 @@ public final class AetherEngine: ObservableObject {
             return
         }
 
-        // Resume whichever subtitle source the host had active. The
-        // sidecar branch wins because `loadedSidecarURL` is set only
-        // when the active source is sidecar; the embedded branch
-        // restarts the side-demuxer at the new playhead.
+        // Resume whichever subtitle source the host had active when
+        // this task started running. The sidecar branch wins because
+        // `loadedSidecarURL` is set only when the active source is
+        // sidecar; the embedded branch restarts the side-demuxer at
+        // the new playhead.
         if let sidecar = sidecarToResume {
             selectSidecarSubtitle(url: sidecar)
-        } else if embeddedSubtitleStreamToResume >= 0 {
-            selectSubtitleTrack(index: Int(embeddedSubtitleStreamToResume))
+        } else if embeddedStreamToResume >= 0 {
+            selectSubtitleTrack(index: Int(embeddedStreamToResume))
         }
     }
 
