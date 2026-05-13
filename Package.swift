@@ -35,6 +35,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
+                .linkedFramework("AVKit"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("VideoToolbox"),

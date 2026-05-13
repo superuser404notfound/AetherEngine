@@ -7,6 +7,10 @@ import AVFoundation
 import UIKit
 #endif
 
+#if os(tvOS)
+import AVKit
+#endif
+
 /// HDMI HDR-mode handshake controller. tvOS exposes a public
 /// AVDisplayManager API (tvOS 11.2+) that lets the app program the
 /// preferred display mode (codec, dynamic range, refresh rate) before
