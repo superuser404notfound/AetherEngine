@@ -141,28 +141,37 @@ final class SegmentCache {
         return initSegment
     }
 
-    /// Pump-side backpressure: block until AVPlayer's declared target
-    /// reaches `target`, or `timeout` elapses, or the cache is closed.
-    /// The producer calls this right after storing segment N with
-    /// `target = N - forwardWindow` so it can't race more than
-    /// `forwardWindow` segments past AVPlayer's actual playhead.
-    /// Returns `true` on progress, `false` on close / timeout.
+    /// Pump-side backpressure: wait once for `target` to be reached,
+    /// or for `timeout`, or for any explicit broadcast (declareTarget,
+    /// store, wakeWaiters). One-shot: returns to the caller on the
+    /// first wake-up event regardless of whether `target` was met, so
+    /// the caller's outer loop can re-check its own cancellation
+    /// state between waits. Returns `true` if the target is now met,
+    /// `false` otherwise.
     ///
-    /// Short timeouts let the caller poll its own shouldStop flag
-    /// between awaits — the producer restart path uses 1 s waits in
-    /// a check-stop-then-await loop so it can be torn down within a
-    /// second of `stop()` being called instead of leaking for the
-    /// full 60 s.
+    /// This shape pairs with `wakeWaiters()` to let `producer.stop()`
+    /// pull the pump out of a long sleep within microseconds instead
+    /// of waiting up to the full `timeout`.
     func awaitFetchHighWater(reaching target: Int, timeout: TimeInterval = 1.0) -> Bool {
         condition.lock()
         defer { condition.unlock() }
         if currentTargetIndex >= target { return true }
         if closed { return false }
         let deadline = Date().addingTimeInterval(timeout)
-        while !closed, currentTargetIndex < target {
-            if !condition.wait(until: deadline) { break }
-        }
+        _ = condition.wait(until: deadline)
         return currentTargetIndex >= target
+    }
+
+    /// Broadcast on the cache's condition variable without changing
+    /// any state. Used by `HLSSegmentProducer.stop()` so any pump
+    /// currently parked in `awaitFetchHighWater` returns immediately
+    /// to its outer shouldStop-check loop, instead of waiting for its
+    /// timeout to fire (which costs up to 1 s of scrub latency per
+    /// restart on a mid-stream stop).
+    func wakeWaiters() {
+        condition.lock()
+        condition.broadcast()
+        condition.unlock()
     }
 
     // MARK: - Diagnostics

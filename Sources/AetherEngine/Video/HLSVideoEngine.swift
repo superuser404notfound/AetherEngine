@@ -164,9 +164,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// Approximate target segment duration in seconds. The hls muxer
     /// snaps cut points to keyframes at-or-after this threshold, so
-    /// actual durations are 6s + GOP length variance. 6s matches
-    /// Apple's HLS Authoring Spec recommendation.
-    private static let targetSegmentDuration: Double = 6.0
+    /// actual durations are this + GOP length variance. Apple's HLS
+    /// Authoring Spec recommends 6 s as the target; we drop to 4 s
+    /// here because initial playback latency is dominated by the
+    /// time the producer takes to demux + mux the first segment
+    /// before AVPlayer can begin playback (~370 ms at 6 s on a 24 fps
+    /// 1440p source over LAN). 4 s halves that, stays comfortably
+    /// inside the spec's 2-6 s acceptable range, and the slightly
+    /// larger playlist footprint is negligible.
+    private static let targetSegmentDuration: Double = 4.0
 
     public init(url: URL, dvModeAvailable: Bool = true) {
         self.sourceURL = url

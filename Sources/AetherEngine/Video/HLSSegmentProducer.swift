@@ -302,11 +302,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// an HTTP byte-range read, which can take up to its own network
     /// timeout to return. Use `waitForFinish(timeout:)` if you need
     /// the pump to actually be gone before proceeding (the restart
-    /// path does).
+    /// path does). Also wakes any pump currently parked in
+    /// `cache.awaitFetchHighWater` so the restart path doesn't pay
+    /// up to a second of latency waiting for the backpressure poll
+    /// to time out on its own.
     func stop() {
         stateLock.lock()
         shouldStop = true
         stateLock.unlock()
+        cache.wakeWaiters()
     }
 
     /// Thread-safe read of `shouldStop`. Used by the dispatchSinkOutput
