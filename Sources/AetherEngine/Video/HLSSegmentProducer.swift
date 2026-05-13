@@ -139,6 +139,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pumpStarted = false
     private var shouldStop = false
 
+    /// Source-stream index of the currently active embedded subtitle
+    /// track, or -1 for none. Settable mid-pump from the main actor;
+    /// pump reads under `stateLock`.
+    private var activeSubtitleStreamIndex: Int32 = -1
+
+    /// Handler invoked for each packet on the active subtitle stream.
+    /// Caller is responsible for decoding + emitting cues; the pump
+    /// hands the packet borrowed (freed on `defer` of the loop body),
+    /// so the handler must finish its work before returning. Settable
+    /// mid-pump from the main actor; pump reads under `stateLock`.
+    var subtitlePacketHandler: ((UnsafeMutablePointer<AVPacket>, AVRational) -> Void)?
+
+    /// Set or clear the active subtitle stream. Thread-safe with the
+    /// pump loop's read under `stateLock`. Pass `nil` (or a negative
+    /// index) to disable subtitle routing.
+    func setActiveSubtitleStream(_ index: Int32?) {
+        stateLock.lock()
+        activeSubtitleStreamIndex = index ?? -1
+        stateLock.unlock()
+    }
+
     /// Set once the pump exits (EOF, error, or `stop()`). Read by
     /// `waitForFinish(timeout:)` so the host can synchronously
     /// tear down this producer before constructing a successor at a
@@ -400,8 +421,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 }
 
                 if pktStreamIdx != videoStreamIndex {
-                    // Subtitles, additional audio tracks, attachments,
-                    // unknown streams — dropped silently.
+                    // Route packets on the active subtitle stream to
+                    // the host's handler (decode + emit cues). Other
+                    // streams (additional audio tracks, attachments,
+                    // unknown) are still dropped silently.
+                    stateLock.lock()
+                    let subIdx = activeSubtitleStreamIndex
+                    let handler = subtitlePacketHandler
+                    stateLock.unlock()
+                    if subIdx >= 0, pktStreamIdx == subIdx, let handler {
+                        if let stream = demuxer.stream(at: pktStreamIdx) {
+                            handler(packet, stream.pointee.time_base)
+                        }
+                    }
                     continue
                 }
 

@@ -250,13 +250,18 @@ public final class AetherEngine: ObservableObject {
         currentTime = 0
         duration = 0
         progress = 0
+        audioTracks = []
+        subtitleTracks = []
 
-        // 1. Brief demuxer probe to grab format + frame rate. The
-        //    HLSVideoEngine spun up below re-opens internally; the
-        //    double-open keeps the failure-mode matrix small.
+        // 1. Brief demuxer probe to grab format + frame rate + track
+        //    metadata. The HLSVideoEngine spun up below re-opens
+        //    internally; the double-open keeps the failure-mode matrix
+        //    small.
         var detectedFormat: VideoFormat = .sdr
         var detectedRate: Double? = nil
         var detectedDVProfile: Bool = false
+        var probedAudioTracks: [TrackInfo] = []
+        var probedSubtitleTracks: [TrackInfo] = []
         let probe = Demuxer()
         do {
             try probe.open(url: url)
@@ -266,12 +271,16 @@ public final class AetherEngine: ObservableObject {
                 detectedRate = Self.detectFrameRate(stream: stream)
                 detectedDVProfile = (detectedFormat == .dolbyVision)
             }
+            probedAudioTracks = probe.audioTrackInfos()
+            probedSubtitleTracks = probe.subtitleTrackInfos()
             probe.close()
         } catch {
             EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
         }
 
         videoFormat = detectedFormat
+        audioTracks = probedAudioTracks
+        subtitleTracks = probedSubtitleTracks
         let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
         EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) format=\(detectedFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
 
@@ -321,6 +330,14 @@ public final class AetherEngine: ObservableObject {
             url: url,
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision
         )
+        // Wire subtitle event callback BEFORE start() so any cues that
+        // arrive during the initial pump don't get dropped. Callback
+        // fires on the producer's worker queue; bridge to main actor.
+        session.onSubtitleEvent = { [weak self] event in
+            Task { @MainActor [weak self] in
+                self?.applySubtitleEvent(event)
+            }
+        }
         let playbackURL = try session.start()
         self.nativeVideoSession = session
 
@@ -437,15 +454,66 @@ public final class AetherEngine: ObservableObject {
         _ = index
     }
 
-    /// Embedded subtitle stream selection. Same AVMediaSelection
-    /// follow-up as `selectAudioTrack`; today a no-op. Use
-    /// `selectSidecarSubtitle(url:)` for SRT files; that path works
-    /// end-to-end.
+    /// Activate an embedded subtitle stream from the source. Routes
+    /// the demuxer's packets for that stream through an
+    /// `EmbeddedSubtitleDecoder` inside HLSVideoEngine; cues land in
+    /// `subtitleCues` as they're decoded. Supports text codecs
+    /// (SubRip / ASS / SSA / WebVTT / mov_text) and bitmap codecs
+    /// (PGS / DVB / DVD / XSUB) with full canvas-relative
+    /// positioning.
     public func selectSubtitleTrack(index: Int) {
-        _ = index
-        isSubtitleActive = false
+        cancelSidecarTask()
+        isSubtitleActive = true
         subtitleCues = []
         isLoadingSubtitles = false
+        nativeVideoSession?.setActiveSubtitleStream(Int32(index))
+    }
+
+    /// Apply a decoded subtitle event from HLSVideoEngine's embedded
+    /// decoder. Handles PGS clear-event semantics (trim previously
+    /// displayed bitmap cues so they actually disappear at the right
+    /// moment) and inserts new cues sorted by start time so the
+    /// overlay's lookup stays correct after backward scrubs.
+    @MainActor
+    private func applySubtitleEvent(_ event: EmbeddedSubtitleDecoder.SubtitleEvent) {
+        guard isSubtitleActive else { return }
+
+        // PGS clear-event trim: each PGS event implicitly terminates
+        // whatever was on screen. Truncate any image cue whose
+        // interval straddles the new event's start so it disappears
+        // at the right moment instead of staying up for the
+        // UINT32_MAX (~50-day) default the decoder hands us.
+        if let trimAt = event.pgsTrimAt {
+            for i in 0..<subtitleCues.count {
+                guard case .image = subtitleCues[i].body else { continue }
+                let cue = subtitleCues[i]
+                if cue.startTime < trimAt && cue.endTime > trimAt {
+                    subtitleCues[i] = SubtitleCue(
+                        id: cue.id,
+                        startTime: cue.startTime,
+                        endTime: trimAt,
+                        body: cue.body
+                    )
+                }
+            }
+        }
+
+        // Cues mostly arrive in DTS order, but a backward scrub can
+        // make a fresh packet land before existing cues. Insert each
+        // in sorted position so the overlay's lookup (binary search
+        // then walk for overlapping cues) stays correct.
+        for cue in event.cues {
+            var lo = 0, hi = subtitleCues.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if subtitleCues[mid].startTime < cue.startTime {
+                    lo = mid + 1
+                } else {
+                    hi = mid
+                }
+            }
+            subtitleCues.insert(cue, at: lo)
+        }
     }
 
     /// Decode a sidecar subtitle file (`.srt` / `.ass` / `.vtt` /
@@ -457,6 +525,8 @@ public final class AetherEngine: ObservableObject {
     /// decode.
     public func selectSidecarSubtitle(url: URL) {
         cancelSidecarTask()
+        // Sidecar replaces any active embedded stream.
+        nativeVideoSession?.setActiveSubtitleStream(nil)
 
         isSubtitleActive = true
         subtitleCues = []
@@ -486,9 +556,12 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// Turn subtitles off and clear cached cues.
+    /// Turn subtitles off and clear cached cues. Tears down both the
+    /// sidecar decode task and the embedded subtitle routing in
+    /// HLSVideoEngine.
     public func clearSubtitle() {
         cancelSidecarTask()
+        nativeVideoSession?.setActiveSubtitleStream(nil)
         isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false
