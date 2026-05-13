@@ -6,21 +6,13 @@ import Libavutil
 /// Session that turns a remote video source (typically a Jellyfin
 /// MKV) into a local HLS-fMP4 stream AVPlayer can play.
 ///
-/// Architecture: a single libavformat `hls` muxer instance runs for
-/// the duration of the session, fed by the engine's `Demuxer`. Custom
-/// `s->io_open` / `s->io_close2` callbacks (see `HLSSegmentProducer`)
-/// redirect every fragment write into a `SegmentCache`. The local HTTP
-/// server hands AVPlayer fragments from that cache, blocking on a
-/// condition variable when AVPlayer requests an index that hasn't been
-/// muxed yet. This replaces the previous self-built per-fragment
-/// muxer + lazy generator + manual PTS-shift compensation. The
-/// libavformat HLS-fmp4 output is byte-identical to `ffmpeg -f hls
-/// -hls_segment_type fmp4`, which is the reference Apple's HLS spec
-/// is defined against; we no longer carry the burden of reproducing
-/// it ourselves.
-///
-/// Phase A: video-only, strict-forward producer (no backward-scrub
-/// teardown, no audio bridge). Audio + scrub-restart follow.
+/// Architecture: one `HLSSegmentProducer` per HLS rendition published
+/// through `HLSLocalServer`. The video rendition is mandatory; audio
+/// renditions are spawned one-per-source-audio-track and shown to
+/// AVPlayer as `EXT-X-MEDIA TYPE=AUDIO` entries in the master
+/// playlist, enabling AVMediaSelection-based seamless audio switching
+/// without item reload. Each producer owns its own `Demuxer`, its own
+/// `SegmentCache`, and its own pump worker queue.
 public final class HLSVideoEngine: @unchecked Sendable {
 
     // MARK: - Errors
@@ -69,13 +61,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (EAC3-JOC stays Atmos); the bridge decodes to S16 PCM and
     /// re-encodes losslessly as FLAC so AVPlayer plays codecs that
     /// aren't legal in fMP4. See `project_audio_rework` memory for
-    /// the full trade-off matrix (TrueHD-MAT Atmos loses its object
-    /// metadata on the FLAC re-encode; lossless 7.1 PCM survives).
+    /// the full trade-off matrix.
     fileprivate enum AudioCodecCompat {
         // fMP4-legal: stream-copy, no decode.
         case aac, ac3, eac3, flac, alac, mp3, opus
-        // Not legal in fMP4: bridge through `AudioBridge` (decode →
-        // S16 PCM → FLAC encode).
+        // Not legal in fMP4: bridge through `AudioBridge`.
         case truehd, dts
         case vorbis, pcm, mp2
         case unsupported
@@ -104,10 +94,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
 
-        /// CODECS attribute string for the master playlist when this
-        /// codec is stream-copied. Empty for codecs that always bridge
-        /// (they show up as `fLaC` after the encode, computed by the
-        /// engine rather than the enum).
+        /// CODECS attribute string when this codec is stream-copied.
+        /// Empty for codecs that always bridge (they become `fLaC`
+        /// after re-encode).
         var hlsCodecsString: String {
             switch self {
             case .aac:    return "mp4a.40.2"
@@ -122,8 +111,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
 
-        /// Codecs that aren't legal in fMP4 and always have to go
-        /// through `AudioBridge` for FLAC transcoding.
         var requiresBridge: Bool {
             switch self {
             case .truehd, .dts, .vorbis, .pcm, .mp2: return true
@@ -136,51 +123,44 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     private let sourceURL: URL
     private let dvModeAvailable: Bool
+    /// Caller-chosen audio source stream index. When non-nil, the
+    /// audio rendition spun up for this stream is marked
+    /// `DEFAULT=YES` in the master playlist so AVPlayer picks it as
+    /// the initial audio selection. When nil, `av_find_best_stream`
+    /// picks the default (typically the container's default-disposition
+    /// audio track).
+    private let preferredDefaultAudioStreamIndex: Int32?
 
-    /// Optional caller-chosen audio source stream index. When `nil` the
-    /// engine falls back to `av_find_best_stream(AVMEDIA_TYPE_AUDIO)`,
-    /// which picks whichever stream libavformat ranks highest (typically
-    /// the container's default flag, then bitrate). When set, the start
-    /// path uses this stream for the muxed audio output, enabling host
-    /// driven mid-playback audio track switching via the
-    /// `AetherEngine.selectAudioTrack(index:)` reload.
-    private let audioSourceStreamIndexOverride: Int32?
-
-    private var demuxer: Demuxer?
-    private var cache: SegmentCache?
-    private var producer: HLSSegmentProducer?
-    private var server: HLSLocalServer?
-    private var provider: VideoSegmentProvider?
-
-    /// Captured at `start()` so the restart path can spin up a fresh
-    /// producer at any segment index without re-running the full
-    /// DV-classification / codec-pick logic.
+    /// Video rendition state.
+    private var videoDemuxer: Demuxer?
+    private var videoCache: SegmentCache?
+    private var videoProducer: HLSSegmentProducer?
+    private var videoProvider: VideoSegmentProvider?
     private var videoStreamIndex: Int32 = -1
     private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
-    private var savedAudioConfig: HLSSegmentProducer.AudioConfig?
-    /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
-    /// Owned by the engine (not the producer) so that producer
-    /// restarts on scrub don't lose the bridge's encoder state. The
-    /// bridge's `startSegment()` is called before each restart so the
-    /// FLAC encoder PTS rebases off the new demuxer cursor.
-    private var audioBridge: AudioBridge?
-    private var segmentPlan: [Segment] = []
+    private var videoSegmentPlan: [Segment] = []
 
-    /// Serializes restart requests so multiple AVPlayer GETs racing
-    /// the same scrub can't tear down and rebuild the producer in
-    /// parallel.
-    private let restartLock = NSLock()
+    /// Audio renditions in the order they were spawned. Phase 1+2:
+    /// at most one entry (the default audio track). Phase 3 expands
+    /// to all audio tracks discovered at probe time.
+    private var audioRenditions: [AudioRenditionState] = []
+
+    private var server: HLSLocalServer?
+
+    /// Serializes restart requests for the video producer so multiple
+    /// AVPlayer GETs racing the same scrub can't tear down and rebuild
+    /// in parallel. Each audio rendition has its own restart lock.
+    private let videoRestartLock = NSLock()
 
     /// Approximate target segment duration in seconds. The hls muxer
-    /// snaps cut points to keyframes at-or-after this threshold, so
-    /// actual durations are this + GOP length variance. Apple's HLS
-    /// Authoring Spec recommends 6 s as the target; we drop to 4 s
-    /// here because initial playback latency is dominated by the
-    /// time the producer takes to demux + mux the first segment
-    /// before AVPlayer can begin playback (~370 ms at 6 s on a 24 fps
-    /// 1440p source over LAN). 4 s halves that, stays comfortably
-    /// inside the spec's 2-6 s acceptable range, and the slightly
-    /// larger playlist footprint is negligible.
+    /// snaps cut points to keyframes at-or-after this threshold for
+    /// video (so actual durations are this + GOP variance) and to
+    /// audio-packet boundaries for audio (so actual durations are
+    /// this + audio-frame variance, ±32ms). Apple's HLS Authoring
+    /// Spec recommends 6 s; we drop to 4 s here so initial playback
+    /// latency (dominated by the producer's time to demux + mux the
+    /// first segment) halves while staying inside the spec's 2-6 s
+    /// acceptable range.
     private static let targetSegmentDuration: Double = 4.0
 
     public init(
@@ -190,22 +170,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
     ) {
         self.sourceURL = url
         self.dvModeAvailable = dvModeAvailable
-        self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
+        self.preferredDefaultAudioStreamIndex = audioSourceStreamIndexOverride
     }
 
     // MARK: - Public API
 
     public func start() throws -> URL {
-        guard demuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
+        guard videoDemuxer == nil else { throw HLSVideoEngineError.alreadyStarted }
 
-        // 1. Open the source.
+        // 1. Open the primary (video) demuxer. Audio renditions get
+        //    their own demuxers later.
         let dem = Demuxer()
         do {
             try dem.open(url: sourceURL)
         } catch {
             throw HLSVideoEngineError.openFailed(reason: "\(error)")
         }
-        demuxer = dem
+        videoDemuxer = dem
 
         let videoIndex = dem.videoStreamIndex
         guard videoIndex >= 0, let videoStream = dem.stream(at: videoIndex) else {
@@ -217,11 +198,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let isVP9 = codecpar.pointee.codec_id == AV_CODEC_ID_VP9
         let isAV1 = codecpar.pointee.codec_id == AV_CODEC_ID_AV1
 
-        // VP9 / AV1 gate on a runtime VT capability probe so we don't
-        // mux a stream into fMP4 and hand AVPlayer a source it can't
-        // decode. Apple ships VP9 / AV1 as supplemental decoders that
-        // need explicit registration before the hardware check is
-        // valid; VTCapabilityProbe does that once and caches.
         let vp9OK = isVP9 && VTCapabilityProbe.vp9Available
         let av1OK = isAV1 && Self.av1ProfileIsAccepted(codecpar: codecpar) && VTCapabilityProbe.av1Available
         guard isHEVC || isH264 || vp9OK || av1OK else {
@@ -237,23 +213,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // 2. Prewarm the MKV cue table so libavformat's keyframe index
         //    is populated. avformat_seek_file's first invocation on an
         //    MKV source lazily parses the Cues element from the file
-        //    tail, which fans out into one or two HTTP byte-range
-        //    reads. Mid-duration target so the prewarm doesn't strand
-        //    the demuxer cursor far from where playback starts.
+        //    tail.
         let prewarmStart = DispatchTime.now()
         dem.seek(to: durationSeconds * 0.5)
         let prewarmMs = Double(DispatchTime.now().uptimeNanoseconds - prewarmStart.uptimeNanoseconds) / 1_000_000
         EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
 
-        // 3. Build the segment plan from real keyframes in the index,
-        //    using the SAME cut algorithm libavformat's hls muxer uses
-        //    internally (first keyframe at-or-after `(segIdx+1) * hls_time`
-        //    absolute from start_pts). When the index doesn't have
-        //    enough entries we fall back to a uniform stride; the
-        //    muxer may then end up making a slightly different number
-        //    of segments than we planned, but Phase A doesn't test
-        //    that path and Phase B's restart machinery handles any
-        //    drift at scrub time.
+        // 3. Build the video segment plan from real keyframes.
         let keyframes = dem.indexedKeyframes(streamIndex: videoIndex)
         let plan: [Segment]
         if keyframes.count >= 2 {
@@ -262,45 +228,537 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoTimeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
-            let firstKeyframePts = keyframes.sorted().first ?? 0
-            let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
-            let videoStreamStart = videoStream.pointee.start_time
-            let formatStart = dem.formatStartTime
             EngineLog.emit(
-                "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments " +
-                "[firstKeyframePts=\(firstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
-                "videoStream.start_time=\(videoStreamStart) format.start_time=\(formatStart)us " +
-                "plan[0].startSeconds=\(String(format: "%.3f", plan.first?.startSeconds ?? -1))]",
+                "[HLSVideoEngine] video segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments",
                 category: .session
             )
         } else {
             plan = buildUniformSegmentPlan(
-                videoTimeBase: videoTimeBase,
+                timeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
             EngineLog.emit(
-                "[HLSVideoEngine] segment plan: uniform stride fallback (\(keyframes.count) IRAPs in index, need >=2)",
+                "[HLSVideoEngine] video segment plan: uniform stride fallback (\(keyframes.count) IRAPs in index, need >=2)",
                 category: .session
             )
         }
+        videoSegmentPlan = plan
 
-        // 4. Classify the DV variant and pick the master-playlist
-        //    CODECS string + codec_tag override. Same routing rules as
-        //    before: P5 / P8.1 use bare `dvh1.<profile>.<dvLevel>`
-        //    direct form; P8.4 keeps the cross-player-compat `hvc1.2.4
-        //    .LXX` + SUPPLEMENTAL `dvh1.08.LL/db4h` because its base
-        //    layer is HLG-HEVC. With dvModeAvailable=false the engine
-        //    downgrades any DV source to plain HEVC (hvc1) so AVPlayer
-        //    doesn't reject the asset on a non-DV-capable display.
+        // 4. Classify DV variant + pick CODECS / codecTag overrides.
+        let videoCodecRouting = try classifyVideoCodec(
+            codecpar: codecpar,
+            isHEVC: isHEVC,
+            isH264: isH264,
+            isVP9: isVP9,
+            isAV1: isAV1
+        )
+
+        let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
+        let avgFR = videoStream.pointee.avg_frame_rate
+        let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
+            ? Double(avgFR.num) / Double(avgFR.den)
+            : nil
+        let hdcpLevel: String? = (videoCodecRouting.dvVariant != .none) ? "TYPE-1" : nil
+
+        // 5. Position the demuxer at the file's first packet so the
+        //    video producer's pump starts from byte zero.
+        dem.seek(to: 0)
+
+        // 6. Build the video cache + provider + config + producer.
+        let segmentCache = SegmentCache()
+        self.videoCache = segmentCache
+
+        let videoConfig = HLSSegmentProducer.StreamConfig(
+            codecpar: codecpar,
+            timeBase: videoTimeBase,
+            codecTagOverride: videoCodecRouting.codecTagOverride,
+            sourceStreamIndex: videoIndex
+        )
+        self.videoStreamIndex = videoIndex
+        self.savedVideoConfig = videoConfig
+
+        let vProvider = VideoSegmentProvider(
+            cache: segmentCache,
+            segments: plan,
+            restartHandler: { [weak self] idx in
+                self?.restartVideoProducer(at: idx)
+            }
+        )
+        self.videoProvider = vProvider
+
+        let vProducer = try HLSSegmentProducer(
+            demuxer: dem,
+            kind: .video(videoConfig),
+            cache: segmentCache,
+            baseIndex: 0,
+            targetSegmentDurationSeconds: Self.targetSegmentDuration
+        )
+        self.videoProducer = vProducer
+
+        // 7. Resolve which source audio stream becomes the default
+        //    rendition. Override wins when valid; otherwise auto.
+        let autoAudioStreamIndex = dem.audioStreamIndex
+        let defaultAudioStreamIndex: Int32
+        if let override = preferredDefaultAudioStreamIndex,
+           Self.isAudioStream(demuxer: dem, index: override) {
+            defaultAudioStreamIndex = override
+        } else {
+            defaultAudioStreamIndex = autoAudioStreamIndex
+        }
+
+        // 8. Build the audio rendition for the default track. Phase 3
+        //    extends this to all audio tracks; Phase 1+2 spawns only
+        //    one rendition so the existing reload-based switch path
+        //    keeps working unchanged.
+        var audioCodecsForMaster: String? = nil
+        if defaultAudioStreamIndex >= 0,
+           let audioStream = dem.stream(at: defaultAudioStreamIndex) {
+            do {
+                let rendition = try spawnAudioRendition(
+                    sourceStreamIndex: defaultAudioStreamIndex,
+                    sourceAudioStream: audioStream,
+                    sourceDurationSeconds: durationSeconds,
+                    isDefault: true
+                )
+                audioRenditions.append(rendition)
+                audioCodecsForMaster = rendition.info.codecs
+            } catch {
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio rendition spawn failed for stream=\(defaultAudioStreamIndex): \(error), shipping video-only",
+                    category: .session
+                )
+            }
+        }
+
+        // 9. Build the server with video rendition metadata, register
+        //    audio renditions, then start it.
+        let videoInfo = HLSVideoRenditionInfo(
+            codecs: videoCodecRouting.primaryCodecs,
+            supplementalCodecs: videoCodecRouting.supplementalCodecs,
+            resolution: (resolution.0, resolution.1),
+            videoRange: videoCodecRouting.videoRange,
+            frameRate: frameRate,
+            bandwidth: 5_000_000,
+            averageBandwidth: 5_000_000,
+            hdcpLevel: hdcpLevel,
+            closedCaptions: "NONE"
+        )
+        let srv = HLSLocalServer(videoProvider: vProvider, videoInfo: videoInfo)
+        for rendition in audioRenditions {
+            srv.registerAudioRendition(info: rendition.info, provider: rendition.provider)
+        }
+        try srv.start()
+        self.server = srv
+
+        // 10. Kick the pumps. AVPlayer's HTTP fetches block on each
+        //     cache.fetch until the requested index lands.
+        vProducer.start()
+        for rendition in audioRenditions {
+            rendition.producer?.start()
+        }
+
+        guard let url = srv.playlistURL else {
+            stop()
+            throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
+        }
+
+        EngineLog.emit(
+            "[HLSVideoEngine] prepared: codec=\(videoCodecRouting.primaryCodecs)"
+            + (videoCodecRouting.supplementalCodecs.map { " supplemental=\($0)" } ?? "")
+            + " resolution=\(resolution.0)x\(resolution.1) "
+            + "fps=\(frameRate.map { String(format: "%.3f", $0) } ?? "nil") "
+            + "range=\(videoCodecRouting.videoRange.rawValue) "
+            + "DV=\(videoCodecRouting.dvVariant) "
+            + "videoSegments=\(plan.count) "
+            + "audioRenditions=\(audioRenditions.count)"
+            + (audioCodecsForMaster.map { " audioCodecs=\($0)" } ?? "")
+            + " duration=\(String(format: "%.1f", durationSeconds))s "
+            + "url=\(url.absoluteString) "
+            + "(dvModeAvailable=\(dvModeAvailable))"
+        )
+        return url
+    }
+
+    public func stop() {
+        // Stop pumps first; let them drain. Each producer's stop()
+        // is async + cache.wakeWaiters() so it unblocks fast.
+        videoRestartLock.lock()
+        videoProducer?.stop()
+        let oldVideoProducer = videoProducer
+        videoProducer = nil
+        videoRestartLock.unlock()
+        _ = oldVideoProducer?.waitForFinish(timeout: 3.0)
+
+        for rendition in audioRenditions {
+            rendition.restartLock.lock()
+            rendition.producer?.stop()
+            let oldProducer = rendition.producer
+            rendition.producer = nil
+            rendition.restartLock.unlock()
+            _ = oldProducer?.waitForFinish(timeout: 3.0)
+        }
+
+        server?.stop()
+        videoCache?.close()
+        videoProvider = nil
+        server = nil
+        videoCache = nil
+        savedVideoConfig = nil
+        videoSegmentPlan = []
+        videoStreamIndex = -1
+
+        for rendition in audioRenditions {
+            rendition.cache.close()
+            rendition.bridge?.close()
+            rendition.demuxer.close()
+        }
+        audioRenditions = []
+
+        videoDemuxer?.close()
+        videoDemuxer = nil
+    }
+
+    deinit {
+        stop()
+    }
+
+    // MARK: - Audio rendition spawn
+
+    /// Open a dedicated demuxer for one source audio track, build its
+    /// segment plan + cache + provider + producer config, and return
+    /// the `AudioRenditionState` ready to register with the server.
+    /// The producer is constructed but not yet started; caller starts
+    /// it after server.start() so the pump doesn't race the server's
+    /// readiness.
+    private func spawnAudioRendition(
+        sourceStreamIndex: Int32,
+        sourceAudioStream: UnsafeMutablePointer<AVStream>,
+        sourceDurationSeconds: Double,
+        isDefault: Bool
+    ) throws -> AudioRenditionState {
+        // Open a fresh demuxer for this rendition. Each rendition
+        // needs its own pump cursor, and the existing video demuxer
+        // is owned by the video producer's pump.
+        //
+        // Bandwidth cost: each demuxer fetches all source bytes
+        // (libavformat doesn't byte-skip non-target streams for most
+        // containers, MKV in particular), then filters in-memory.
+        // For a 4K HEVC source at 25 Mbps and one audio rendition,
+        // that's roughly 25 Mbps × 2 = 50 Mbps of source traffic.
+        // Acceptable on LAN; bandwidth-constrained setups may want a
+        // master-demuxer fan-out as a follow-up.
+        let audioDemuxer = Demuxer()
+        do {
+            try audioDemuxer.open(url: sourceURL)
+        } catch {
+            throw HLSVideoEngineError.openFailed(reason: "audio demuxer open: \(error)")
+        }
+        audioDemuxer.seek(to: 0)
+
+        // Probe the stream from the audio demuxer's own context. The
+        // stream pointer passed in (`sourceAudioStream`) belongs to
+        // the VIDEO demuxer; we shouldn't pin codecpar pointers from
+        // it into a config used by another demuxer's pump because the
+        // video demuxer may close before this rendition does. Look
+        // up the equivalent stream in the audio demuxer.
+        guard let localAudioStream = audioDemuxer.stream(at: sourceStreamIndex) else {
+            audioDemuxer.close()
+            throw HLSVideoEngineError.openFailed(reason: "audio stream \(sourceStreamIndex) missing from fresh demuxer")
+        }
+
+        let codecID = localAudioStream.pointee.codecpar.pointee.codec_id
+        let compat = AudioCodecCompat.from(codecID)
+        let usesBridge = compat.requiresBridge
+
+        // Build the AudioConfig + optional bridge.
+        var bridge: AudioBridge? = nil
+        var audioConfig: HLSSegmentProducer.AudioConfig
+        var hlsCodecs: String
+
+        if usesBridge {
+            let br = try AudioBridge(
+                srcCodecpar: localAudioStream.pointee.codecpar,
+                srcTimeBase: localAudioStream.pointee.time_base
+            )
+            guard let encoderCp = br.encoderCodecpar else {
+                br.close()
+                audioDemuxer.close()
+                throw HLSVideoEngineError.openFailed(reason: "audio bridge: encoder codecpar nil after init")
+            }
+            bridge = br
+            audioConfig = HLSSegmentProducer.AudioConfig(
+                codecpar: encoderCp,
+                timeBase: br.encoderTimeBase,
+                sourceStreamIndex: sourceStreamIndex,
+                inputTimeBase: br.encoderTimeBase,
+                bridge: br
+            )
+            hlsCodecs = "fLaC"
+            EngineLog.emit(
+                "[HLSVideoEngine] audio rendition \(sourceStreamIndex): codec=\(compat) (bridged → fLaC)",
+                category: .session
+            )
+        } else if !compat.hlsCodecsString.isEmpty {
+            audioConfig = HLSSegmentProducer.AudioConfig(
+                codecpar: localAudioStream.pointee.codecpar,
+                timeBase: localAudioStream.pointee.time_base,
+                sourceStreamIndex: sourceStreamIndex,
+                inputTimeBase: localAudioStream.pointee.time_base,
+                bridge: nil
+            )
+            hlsCodecs = compat.hlsCodecsString
+            EngineLog.emit(
+                "[HLSVideoEngine] audio rendition \(sourceStreamIndex): codec=\(compat) stream-copy → \(hlsCodecs)",
+                category: .session
+            )
+        } else {
+            audioDemuxer.close()
+            throw HLSVideoEngineError.openFailed(reason: "audio stream \(sourceStreamIndex) codec=\(compat) unsupported")
+        }
+
+        // Build the audio segment plan. Uniform 4 s stride keyed off
+        // the source duration. hlsenc will cut at audio-packet
+        // boundaries within ~32 ms of each threshold, so each
+        // advertised EXTINF (always 4 s here) is within audio-frame
+        // accuracy of the actual segment duration. AVPlayer
+        // reconciles audio vs. video at PTS level inside the fMP4
+        // fragments, not at EXTINF level, so the residual drift is
+        // invisible.
+        let audioTimeBase = localAudioStream.pointee.time_base
+        let audioPlan = buildUniformSegmentPlan(
+            timeBase: audioTimeBase,
+            sourceDurationSeconds: sourceDurationSeconds
+        )
+
+        let audioCache = SegmentCache()
+        let provider = AudioSegmentProvider(cache: audioCache, segments: audioPlan)
+
+        // Build track metadata for the master playlist entry.
+        let trackInfo = singleTrackInfo(from: localAudioStream, index: Int(sourceStreamIndex))
+        let renditionID = String(sourceStreamIndex)
+        let renditionInfo = HLSAudioRendition(
+            id: renditionID,
+            name: trackInfo.name,
+            language: trackInfo.language,
+            isDefault: isDefault,
+            codecs: hlsCodecs,
+            channels: trackInfo.channels
+        )
+
+        // Try to build the producer. Stream-copy of EAC3 from MKV
+        // sometimes fails write_header (missing `dec3` extradata);
+        // if that happens, retry through the FLAC bridge.
+        let producer: HLSSegmentProducer
+        do {
+            producer = try HLSSegmentProducer(
+                demuxer: audioDemuxer,
+                kind: .audio(audioConfig),
+                cache: audioCache,
+                baseIndex: 0,
+                targetSegmentDurationSeconds: Self.targetSegmentDuration
+            )
+        } catch where !usesBridge {
+            EngineLog.emit(
+                "[HLSVideoEngine] audio rendition \(sourceStreamIndex) stream-copy write_header failed: \(error), retrying via FLAC bridge",
+                category: .session
+            )
+            let br = try AudioBridge(
+                srcCodecpar: localAudioStream.pointee.codecpar,
+                srcTimeBase: localAudioStream.pointee.time_base
+            )
+            guard let encoderCp = br.encoderCodecpar else {
+                br.close()
+                audioDemuxer.close()
+                throw HLSVideoEngineError.openFailed(reason: "audio bridge fallback: encoder codecpar nil")
+            }
+            bridge = br
+            audioConfig = HLSSegmentProducer.AudioConfig(
+                codecpar: encoderCp,
+                timeBase: br.encoderTimeBase,
+                sourceStreamIndex: sourceStreamIndex,
+                inputTimeBase: br.encoderTimeBase,
+                bridge: br
+            )
+            hlsCodecs = "fLaC"
+            do {
+                producer = try HLSSegmentProducer(
+                    demuxer: audioDemuxer,
+                    kind: .audio(audioConfig),
+                    cache: audioCache,
+                    baseIndex: 0,
+                    targetSegmentDurationSeconds: Self.targetSegmentDuration
+                )
+            } catch {
+                br.close()
+                audioDemuxer.close()
+                throw error
+            }
+        } catch {
+            audioDemuxer.close()
+            throw error
+        }
+
+        let rendition = AudioRenditionState(
+            info: HLSAudioRendition(
+                id: renditionID,
+                name: renditionInfo.name,
+                language: renditionInfo.language,
+                isDefault: renditionInfo.isDefault,
+                codecs: hlsCodecs,
+                channels: renditionInfo.channels
+            ),
+            demuxer: audioDemuxer,
+            cache: audioCache,
+            provider: provider,
+            config: audioConfig,
+            bridge: bridge,
+            segmentPlan: audioPlan,
+            producer: producer
+        )
+        provider.restartHandler = { [weak self, weak rendition] idx in
+            guard let self = self, let rendition = rendition else { return }
+            self.restartAudioProducer(rendition: rendition, at: idx)
+        }
+        return rendition
+    }
+
+    // MARK: - Producer restart
+
+    /// Tear down the current video producer, seek the video demuxer to
+    /// the start of segment `idx`, and spin up a fresh producer with
+    /// `baseIndex = idx`. Triggered by `VideoSegmentProvider` when
+    /// AVPlayer requests a segment that's outside the current cache
+    /// window.
+    private func restartVideoProducer(at idx: Int) {
+        videoRestartLock.lock()
+        defer { videoRestartLock.unlock() }
+
+        guard idx >= 0,
+              idx < videoSegmentPlan.count,
+              videoDemuxer != nil,
+              let cache = videoCache,
+              let cfg = savedVideoConfig else { return }
+
+        let restartStart = DispatchTime.now()
+
+        if let old = videoProducer {
+            old.stop()
+            let ok = old.waitForFinish(timeout: 5.0)
+            if !ok {
+                EngineLog.emit(
+                    "[HLSVideoEngine] video restart at idx=\(idx): old producer didn't exit within 5s, abandoning",
+                    category: .session
+                )
+            }
+        }
+        videoProducer = nil
+
+        // Seek the demuxer to the ABSOLUTE source-PTS of the target
+        // segment's first keyframe, not to the relative playlist time
+        // — see the original Phase B restart logic for the
+        // rationale (B-frame head padding / non-zero start_pts).
+        let absoluteTargetPts = videoSegmentPlan[idx].startPts
+        let videoTb = cfg.timeBase
+        let absoluteTargetSeconds = Double(absoluteTargetPts) * Double(videoTb.num) / Double(videoTb.den)
+        videoDemuxer?.seek(to: absoluteTargetSeconds)
+
+        do {
+            let newProd = try HLSSegmentProducer(
+                demuxer: videoDemuxer!,
+                kind: .video(cfg),
+                cache: cache,
+                baseIndex: idx,
+                targetSegmentDurationSeconds: Self.targetSegmentDuration
+            )
+            videoProducer = newProd
+            newProd.start()
+        } catch {
+            EngineLog.emit(
+                "[HLSVideoEngine] video restart at idx=\(idx) failed: \(error)",
+                category: .session
+            )
+            return
+        }
+
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit(
+            "[HLSVideoEngine] video producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s, took \(String(format: "%.0f", elapsedMs))ms)",
+            category: .session
+        )
+    }
+
+    /// Tear down + rebuild one audio rendition's producer at `idx`.
+    /// Triggered by `AudioSegmentProvider` on out-of-range fetch.
+    private func restartAudioProducer(rendition: AudioRenditionState, at idx: Int) {
+        rendition.restartLock.lock()
+        defer { rendition.restartLock.unlock() }
+
+        guard idx >= 0, idx < rendition.segmentPlan.count else { return }
+
+        let restartStart = DispatchTime.now()
+
+        if let old = rendition.producer {
+            old.stop()
+            let ok = old.waitForFinish(timeout: 5.0)
+            if !ok {
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio restart id=\(rendition.info.id) idx=\(idx): old producer didn't exit within 5s, abandoning",
+                    category: .session
+                )
+            }
+        }
+        rendition.producer = nil
+
+        let targetSeconds = rendition.segmentPlan[idx].startSeconds
+        rendition.demuxer.seek(to: targetSeconds)
+        // Re-arm the FLAC bridge's PTS rebase off the new cursor.
+        rendition.bridge?.startSegment()
+
+        do {
+            let newProd = try HLSSegmentProducer(
+                demuxer: rendition.demuxer,
+                kind: .audio(rendition.config),
+                cache: rendition.cache,
+                baseIndex: idx,
+                targetSegmentDurationSeconds: Self.targetSegmentDuration
+            )
+            rendition.producer = newProd
+            newProd.start()
+        } catch {
+            EngineLog.emit(
+                "[HLSVideoEngine] audio restart id=\(rendition.info.id) idx=\(idx) failed: \(error)",
+                category: .session
+            )
+            return
+        }
+
+        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
+        EngineLog.emit(
+            "[HLSVideoEngine] audio producer id=\(rendition.info.id) restarted at idx=\(idx) (seek=\(String(format: "%.2f", targetSeconds))s, took \(String(format: "%.0f", elapsedMs))ms)",
+            category: .session
+        )
+    }
+
+    // MARK: - Video codec classification
+
+    private struct VideoCodecRouting {
         let codecTagOverride: String?
         let videoRange: HLSVideoRange
         let primaryCodecs: String
         let supplementalCodecs: String?
         let dvVariant: DVVariant
+    }
 
+    private func classifyVideoCodec(
+        codecpar: UnsafePointer<AVCodecParameters>,
+        isHEVC: Bool,
+        isH264: Bool,
+        isVP9: Bool,
+        isAV1: Bool
+    ) throws -> VideoCodecRouting {
         if isVP9 {
-            codecTagOverride = "vp09"
             let trc = codecpar.pointee.color_trc
+            let videoRange: HLSVideoRange
             if trc == AVCOL_TRC_ARIB_STD_B67 {
                 videoRange = .hlg
             } else if trc == AVCOL_TRC_SMPTE2084 {
@@ -308,27 +766,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
             } else {
                 videoRange = .sdr
             }
-            // Apple HLS Authoring Spec CODECS form:
-            // vp09.<profile>.<level>.<bitDepth>.<chroma>.<colorPrimaries>.
-            //     <transfer>.<matrix>.<videoFullRangeFlag>
-            // Use conservative defaults pulled from codecpar; muxer
-            // will write the matching `vpcC` box.
             let profile = Int(codecpar.pointee.profile)
             let safeProfile = (profile >= 0 && profile <= 3) ? profile : 0
             let level = Int(codecpar.pointee.level)
-            let safeLevel = level > 0 ? level : 41   // Level 4.1, 4K30 ceiling
+            let safeLevel = level > 0 ? level : 41
             let bitDepth = Int(codecpar.pointee.bits_per_raw_sample) > 0
                 ? Int(codecpar.pointee.bits_per_raw_sample)
                 : (videoRange == .sdr ? 8 : 10)
-            primaryCodecs = String(
+            let primaryCodecs = String(
                 format: "vp09.%02d.%02d.%02d.01.01.01.01.00",
                 safeProfile, safeLevel, bitDepth
             )
-            supplementalCodecs = nil
-            dvVariant = .none
+            return VideoCodecRouting(
+                codecTagOverride: "vp09",
+                videoRange: videoRange,
+                primaryCodecs: primaryCodecs,
+                supplementalCodecs: nil,
+                dvVariant: .none
+            )
         } else if isAV1 {
-            codecTagOverride = "av01"
             let trc = codecpar.pointee.color_trc
+            let videoRange: HLSVideoRange
             if trc == AVCOL_TRC_ARIB_STD_B67 {
                 videoRange = .hlg
             } else if trc == AVCOL_TRC_SMPTE2084 {
@@ -336,36 +794,41 @@ public final class HLSVideoEngine: @unchecked Sendable {
             } else {
                 videoRange = .sdr
             }
-            // Apple HLS Authoring Spec CODECS form:
-            // av01.<profile>.<level><tier>.<bitDepth>.<...>
-            // Profile is 0 (Main), level expressed as `NN` from
-            // codecpar.level if available.
             let level = Int(codecpar.pointee.level)
-            let safeLevel = (level >= 0 && level <= 31) ? level : 8 // 4.0
+            let safeLevel = (level >= 0 && level <= 31) ? level : 8
             let bitDepth = Int(codecpar.pointee.bits_per_raw_sample) > 0
                 ? Int(codecpar.pointee.bits_per_raw_sample)
                 : (videoRange == .sdr ? 8 : 10)
-            primaryCodecs = String(
+            let primaryCodecs = String(
                 format: "av01.0.%02dM.%02d.0.111.01.01.01.0",
                 safeLevel, bitDepth
             )
-            supplementalCodecs = nil
-            dvVariant = .none
+            return VideoCodecRouting(
+                codecTagOverride: "av01",
+                videoRange: videoRange,
+                primaryCodecs: primaryCodecs,
+                supplementalCodecs: nil,
+                dvVariant: .none
+            )
         } else if isH264 {
-            codecTagOverride = "avc1"
-            videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
+            let videoRange: HLSVideoRange = isHDRTransfer(codecpar) ? .pq : .sdr
             let profileIDC = Int(codecpar.pointee.profile)
             let levelIDC = Int(codecpar.pointee.level)
-            let safeProfile = profileIDC > 0 ? profileIDC : 100  // High
-            let safeLevel = levelIDC > 0 ? levelIDC : 40         // 4.0
-            primaryCodecs = String(format: "avc1.%02X%02X%02X", safeProfile, 0, safeLevel)
-            supplementalCodecs = nil
-            dvVariant = .none
+            let safeProfile = profileIDC > 0 ? profileIDC : 100
+            let safeLevel = levelIDC > 0 ? levelIDC : 40
+            let primaryCodecs = String(format: "avc1.%02X%02X%02X", safeProfile, 0, safeLevel)
+            return VideoCodecRouting(
+                codecTagOverride: "avc1",
+                videoRange: videoRange,
+                primaryCodecs: primaryCodecs,
+                supplementalCodecs: nil,
+                dvVariant: .none
+            )
         } else if !dvModeAvailable {
-            codecTagOverride = "hvc1"
             let hevcLevelRaw = Int(codecpar.pointee.level)
             let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
             let trc = codecpar.pointee.color_trc
+            let videoRange: HLSVideoRange
             if trc == AVCOL_TRC_ARIB_STD_B67 {
                 videoRange = .hlg
             } else if trc == AVCOL_TRC_SMPTE2084 {
@@ -373,12 +836,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
             } else {
                 videoRange = .sdr
             }
-            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-            supplementalCodecs = nil
-            dvVariant = .none
+            return VideoCodecRouting(
+                codecTagOverride: "hvc1",
+                videoRange: videoRange,
+                primaryCodecs: "hvc1.2.4.L\(hevcLevel)",
+                supplementalCodecs: nil,
+                dvVariant: .none
+            )
         } else {
             let dvRecord = doviConfigRecord(from: codecpar)
-            dvVariant = classifyDVVariant(dvRecord)
+            let dvVariant = classifyDVVariant(dvRecord)
 
             let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
             let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
@@ -388,20 +855,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
             switch dvVariant {
             case .profile5:
-                codecTagOverride = "dvh1"
-                videoRange = .pq
-                primaryCodecs = "dvh1.05.\(dvLevelStr)"
-                supplementalCodecs = nil
+                return VideoCodecRouting(
+                    codecTagOverride: "dvh1",
+                    videoRange: .pq,
+                    primaryCodecs: "dvh1.05.\(dvLevelStr)",
+                    supplementalCodecs: nil,
+                    dvVariant: .profile5
+                )
             case .profile81:
-                codecTagOverride = "dvh1"
-                videoRange = .pq
-                primaryCodecs = "dvh1.08.\(dvLevelStr)"
-                supplementalCodecs = nil
+                return VideoCodecRouting(
+                    codecTagOverride: "dvh1",
+                    videoRange: .pq,
+                    primaryCodecs: "dvh1.08.\(dvLevelStr)",
+                    supplementalCodecs: nil,
+                    dvVariant: .profile81
+                )
             case .profile84:
-                codecTagOverride = "hvc1"
-                videoRange = .hlg
-                primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
-                supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
+                return VideoCodecRouting(
+                    codecTagOverride: "hvc1",
+                    videoRange: .hlg,
+                    primaryCodecs: "hvc1.2.4.L\(hevcLevel).b0",
+                    supplementalCodecs: "dvh1.08.\(dvLevelStr)/db4h",
+                    dvVariant: .profile84
+                )
             case .profile7:
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
             case .profile82:
@@ -411,394 +887,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let c = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 0)
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
             case .none:
-                codecTagOverride = "hvc1"
-                videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
-                primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-                supplementalCodecs = nil
-            }
-        }
-
-        let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
-
-        let avgFR = videoStream.pointee.avg_frame_rate
-        let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
-            ? Double(avgFR.num) / Double(avgFR.den)
-            : nil
-        let hdcpLevel: String? = (dvVariant != .none) ? "TYPE-1" : nil
-
-        // 5. Position the demuxer at the file's first packet so the
-        //    producer's pump starts from byte zero. The cue prewarm
-        //    above moved the cursor mid-file; libavformat's index is
-        //    populated now, this seek-to-0 is cheap.
-        dem.seek(to: 0)
-
-        // 6. Build the segment cache + producer. The producer's
-        //    constructor calls avformat_write_header which opens the
-        //    init.mp4 sink (no bytes yet) and primes the muxer for
-        //    av_write_frame. Pump runs on a worker queue.
-        let segmentCache = SegmentCache()
-        self.cache = segmentCache
-
-        let videoConfig = HLSSegmentProducer.StreamConfig(
-            codecpar: codecpar,
-            timeBase: videoTimeBase,
-            codecTagOverride: codecTagOverride
-        )
-        self.videoStreamIndex = videoIndex
-        self.savedVideoConfig = videoConfig
-        self.segmentPlan = plan
-
-        // 6a. Pick the audio routing: stream-copy for codecs legal in
-        //     fMP4, FLAC bridge for those that aren't, drop for the
-        //     unsupported tail. The fallback cascade tries stream-copy
-        //     first (the common case is `ec-3` for streaming UHD with
-        //     Atmos JOC); if the muxer rejects the header (EAC3 from
-        //     MKV without a parsed `dec3` extradata is the typical
-        //     EINVAL), we retry with the FLAC bridge; if that also
-        //     fails we ship video-only.
-        //
-        // Source selection: caller can override the auto-picked stream
-        // (host-driven audio track switching). Override is validated
-        // against the container; an invalid index logs and falls back
-        // to libavformat's pick so a stale picker selection from a
-        // previous title can't strand playback without audio.
-        let autoAudioStreamIndex = dem.audioStreamIndex
-        let audioStreamIndex: Int32
-        if let override = audioSourceStreamIndexOverride {
-            if Self.isAudioStream(demuxer: dem, index: override) {
-                audioStreamIndex = override
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: override accepted, sourceStreamIndex=\(override) (auto would have picked \(autoAudioStreamIndex))",
-                    category: .session
-                )
-            } else {
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: override sourceStreamIndex=\(override) invalid (not an audio stream), falling back to auto=\(autoAudioStreamIndex)",
-                    category: .session
-                )
-                audioStreamIndex = autoAudioStreamIndex
-            }
-        } else {
-            audioStreamIndex = autoAudioStreamIndex
-        }
-        var streamCopyAudio: HLSSegmentProducer.AudioConfig?
-        var bridgePreferred = false
-        var audioHLSCodecs: String?
-
-        if audioStreamIndex >= 0, let audioStream = dem.stream(at: audioStreamIndex) {
-            let codecID = audioStream.pointee.codecpar.pointee.codec_id
-            let compat = AudioCodecCompat.from(codecID)
-            if compat.requiresBridge {
-                bridgePreferred = true
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec=\(compat) (bridge required) — decoding + FLAC re-encode",
-                    category: .session
-                )
-            } else if compat != .unsupported {
-                streamCopyAudio = HLSSegmentProducer.AudioConfig(
-                    codecpar: audioStream.pointee.codecpar,
-                    timeBase: audioStream.pointee.time_base,
-                    sourceStreamIndex: audioStreamIndex,
-                    inputTimeBase: audioStream.pointee.time_base,
-                    bridge: nil
-                )
-                audioHLSCodecs = compat.hlsCodecsString
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(compat.hlsCodecsString)`",
-                    category: .session
-                )
-            } else {
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec id=\(codecID.rawValue) unsupported, video-only",
-                    category: .session
+                let videoRange: HLSVideoRange = isHDRTransfer(codecpar) ? .pq : .sdr
+                return VideoCodecRouting(
+                    codecTagOverride: "hvc1",
+                    videoRange: videoRange,
+                    primaryCodecs: "hvc1.2.4.L\(hevcLevel)",
+                    supplementalCodecs: nil,
+                    dvVariant: .none
                 )
             }
         }
-
-        // 6b. Attempt the cascade. The bridge instance, if needed, is
-        //     constructed up-front so it survives across restarts.
-        let prod: HLSSegmentProducer
-        prod = try buildProducerWithAudioCascade(
-            preferBridge: bridgePreferred,
-            streamCopyAudio: streamCopyAudio,
-            sourceAudioStreamIndex: audioStreamIndex,
-            sourceAudioStream: audioStreamIndex >= 0 ? dem.stream(at: audioStreamIndex) : nil,
-            audioHLSCodecs: &audioHLSCodecs
-        )
-        self.producer = prod
-
-        // 7. Wire the provider, the server, and serve the URL.
-        let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
-        let prov = VideoSegmentProvider(
-            cache: segmentCache,
-            segments: plan,
-            codecsString: manifestCodecs,
-            supplementalCodecs: supplementalCodecs,
-            resolution: resolution,
-            videoRange: videoRange,
-            frameRate: frameRate,
-            hdcpLevel: hdcpLevel,
-            restartHandler: { [weak self] idx in
-                self?.restartProducer(at: idx)
-            }
-        )
-        self.provider = prov
-
-        EngineLog.emit(
-            "[HLSVideoEngine] prepared: codec=\(manifestCodecs)"
-            + (supplementalCodecs.map { " supplemental=\($0)" } ?? "")
-            + " resolution=\(resolution.0)x\(resolution.1) "
-            + "fps=\(frameRate.map { String(format: "%.3f", $0) } ?? "nil") "
-            + "range=\(videoRange.rawValue) DV=\(dvVariant) segments=\(plan.count) "
-            + "duration=\(String(format: "%.1f", durationSeconds))s"
-        )
-
-        let srv = HLSLocalServer(provider: prov)
-        try srv.start()
-        self.server = srv
-
-        // 8. Kick the pump. Producer is now writing init + segments
-        //    into the cache as fast as the demuxer can feed packets;
-        //    AVPlayer's HTTP fetches block on cache.fetch until the
-        //    requested index lands.
-        prod.start()
-
-        let resolvedURL: URL?
-        if dvModeAvailable {
-            resolvedURL = srv.playlistURL
-        } else {
-            resolvedURL = srv.mediaPlaylistURL
-        }
-        guard let url = resolvedURL else {
-            stop()
-            throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
-        }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable))")
-        return url
-    }
-
-    public func stop() {
-        restartLock.lock()
-        producer?.stop()
-        let p = producer
-        producer = nil
-        restartLock.unlock()
-        // Wait outside the lock so deinit on the producer (which may
-        // touch the engine via weakly-captured closures) doesn't
-        // re-enter restartLock.
-        _ = p?.waitForFinish(timeout: 3.0)
-
-        server?.stop()
-        cache?.close()
-        audioBridge?.close()
-        provider = nil
-        server = nil
-        cache = nil
-        savedVideoConfig = nil
-        savedAudioConfig = nil
-        audioBridge = nil
-        segmentPlan = []
-        demuxer?.close()
-        demuxer = nil
-    }
-
-    deinit {
-        stop()
-    }
-
-    // MARK: - Producer construction + restart
-
-    /// Allocate and configure a new `HLSSegmentProducer` rooted at
-    /// the given absolute segment index. Used both for the initial
-    /// session bring-up (baseIndex=0) and for the backward / forward
-    /// scrub restart path.
-    private func makeProducer(baseIndex: Int) throws -> HLSSegmentProducer {
-        guard let dem = demuxer, let cache = cache, let cfg = savedVideoConfig else {
-            throw HLSVideoEngineError.notStarted
-        }
-        return try HLSSegmentProducer(
-            demuxer: dem,
-            videoStreamIndex: videoStreamIndex,
-            video: cfg,
-            audio: savedAudioConfig,
-            cache: cache,
-            baseIndex: baseIndex,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration
-        )
-    }
-
-    /// Try the stream-copy → FLAC-bridge → video-only cascade for the
-    /// initial producer construction. Inspired by the equivalent
-    /// cascade the old per-fragment FMP4VideoMuxer ran during init
-    /// capture; the failure mode it covers is the EAC3-from-MKV case
-    /// where the source codecpar lacks the `dec3` extradata the mp4
-    /// muxer needs to write the audio track's sample-entry. The same
-    /// bytes that fed AVPlayer through stream-copy under the old
-    /// architecture now fail header write here too — the fix on both
-    /// sides is the same FLAC bridge fallback.
-    private func buildProducerWithAudioCascade(
-        preferBridge: Bool,
-        streamCopyAudio: HLSSegmentProducer.AudioConfig?,
-        sourceAudioStreamIndex: Int32,
-        sourceAudioStream: UnsafeMutablePointer<AVStream>?,
-        audioHLSCodecs: inout String?
-    ) throws -> HLSSegmentProducer {
-        // If the source already needs the bridge (TrueHD / DTS / Vorbis
-        // / PCM / MP2), skip the stream-copy attempt — we know the
-        // muxer won't accept those codecs in fMP4 anyway.
-        if !preferBridge, let cfg = streamCopyAudio {
-            self.savedAudioConfig = cfg
-            do {
-                return try makeProducer(baseIndex: 0)
-            } catch {
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio stream-copy header write failed (\(error)), retrying with FLAC bridge",
-                    category: .session
-                )
-                // Fall through to bridge attempt.
-            }
-        }
-
-        // FLAC bridge attempt. Requires a source audio stream.
-        if let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0 {
-            do {
-                let bridge = try AudioBridge(
-                    srcCodecpar: audioStream.pointee.codecpar,
-                    srcTimeBase: audioStream.pointee.time_base
-                )
-                if let cp = bridge.encoderCodecpar {
-                    let cfg = HLSSegmentProducer.AudioConfig(
-                        codecpar: cp,
-                        timeBase: bridge.encoderTimeBase,
-                        sourceStreamIndex: sourceAudioStreamIndex,
-                        inputTimeBase: bridge.encoderTimeBase,
-                        bridge: bridge
-                    )
-                    self.savedAudioConfig = cfg
-                    self.audioBridge = bridge
-                    do {
-                        let prod = try makeProducer(baseIndex: 0)
-                        audioHLSCodecs = "fLaC"
-                        return prod
-                    } catch {
-                        EngineLog.emit(
-                            "[HLSVideoEngine] FLAC bridge header write failed (\(error)), falling back to video-only",
-                            category: .session
-                        )
-                        self.savedAudioConfig = nil
-                        self.audioBridge = nil
-                        bridge.close()
-                    }
-                }
-            } catch {
-                EngineLog.emit(
-                    "[HLSVideoEngine] AudioBridge init failed (\(error)), falling back to video-only",
-                    category: .session
-                )
-            }
-        }
-
-        // Video-only fallback.
-        self.savedAudioConfig = nil
-        self.audioBridge = nil
-        audioHLSCodecs = nil
-        return try makeProducer(baseIndex: 0)
-    }
-
-    /// Tear down the current producer, seek the demuxer to the start
-    /// of segment `idx`, and spin up a fresh producer with
-    /// `baseIndex = idx`. Triggered by `VideoSegmentProvider` when
-    /// AVPlayer requests a segment that's outside the current LRU's
-    /// reach in either direction.
-    ///
-    /// The same `init.mp4` bytes are reproduced across restarts
-    /// because the muxer's stream configuration is byte-deterministic
-    /// for a fixed `StreamConfig`. AVPlayer cached the init segment
-    /// from the original session bring-up and never re-fetches it, so
-    /// the cache.setInit overwrite during restart is a no-op from
-    /// AVPlayer's perspective.
-    private func restartProducer(at idx: Int) {
-        restartLock.lock()
-        defer { restartLock.unlock() }
-
-        guard idx >= 0, idx < segmentPlan.count, demuxer != nil else { return }
-
-        let restartStart = DispatchTime.now()
-
-        if let old = producer {
-            old.stop()
-            let ok = old.waitForFinish(timeout: 5.0)
-            if !ok {
-                EngineLog.emit(
-                    "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it",
-                    category: .session
-                )
-            }
-        }
-        producer = nil
-
-        // Seek the demuxer to the ABSOLUTE source-PTS of the target
-        // segment's first keyframe, not to the relative playlist time.
-        // segmentPlan[N].startSeconds is relative to startPts0 (the
-        // first video keyframe's PTS). If startPts0 != 0 (common when
-        // a source has B-frames buffered at the head or has been
-        // re-muxed with a non-zero start), seeking with the relative
-        // value lands a-keyframe-or-more behind the intended one
-        // (av_seek_frame's AVSEEK_FLAG_BACKWARD rolls back from the
-        // target, and sorted[N] > target-in-relative-source-time when
-        // startPts0 > 0). The muxer then emits seg-N with content
-        // starting at sorted[N-1]'s source time, AVPlayer's playlist
-        // clock advances per EXTINFs (which are correct as keyframe
-        // diffs), and embedded subtitle cue.startTime stays in
-        // absolute source-PTS. Net effect: subtitles appear up to one
-        // segment duration AHEAD of the corresponding audio.
-        let absoluteTargetPts = segmentPlan[idx].startPts
-        let videoTb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
-        let absoluteTargetSeconds = Double(absoluteTargetPts) * Double(videoTb.num) / Double(videoTb.den)
-        demuxer?.seek(to: absoluteTargetSeconds)
-        // Re-arm the FLAC bridge's PTS rebase off the new demuxer
-        // cursor. Without this, the bridge's encoder timeline keeps
-        // climbing from where the old producer left off, drifting
-        // out of alignment with the freshly-seeked video PTS.
-        audioBridge?.startSegment()
-
-        do {
-            let newProd = try makeProducer(baseIndex: idx)
-            producer = newProd
-            newProd.start()
-        } catch {
-            EngineLog.emit(
-                "[HLSVideoEngine] restart at idx=\(idx) failed: \(error)",
-                category: .session
-            )
-            return
-        }
-
-        let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - restartStart.uptimeNanoseconds) / 1_000_000
-        EngineLog.emit(
-            "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s [absolute source-PTS], restart took \(String(format: "%.0f", elapsedMs))ms)",
-            category: .session
-        )
     }
 
     // MARK: - Segment planning
 
     /// Build a uniform-duration segment plan from the source's
-    /// reported duration. Used only as a fallback when libavformat's
-    /// keyframe index is too sparse for the keyframe-aligned plan.
-    /// The hls muxer will still snap actual cut points to real
-    /// keyframes, so EXTINF / actual-duration drift accumulates with
-    /// each segment in this fallback path. Phase B's restart machinery
-    /// renegotiates timeline alignment after scrubs, so the drift
-    /// stays bounded within one playback span.
+    /// reported duration. Used for audio renditions (always) and for
+    /// video when libavformat's keyframe index is too sparse for the
+    /// keyframe-aligned plan.
     private func buildUniformSegmentPlan(
-        videoTimeBase: AVRational,
+        timeBase: AVRational,
         sourceDurationSeconds: Double
     ) -> [Segment] {
         guard sourceDurationSeconds > 0 else { return [] }
         let stride = Self.targetSegmentDuration
         let count = max(1, Int(ceil(sourceDurationSeconds / stride)))
-        let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        let tb = Double(timeBase.num) / Double(timeBase.den)
         guard tb > 0 else { return [] }
 
         var plan: [Segment] = []
@@ -818,22 +932,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return plan
     }
 
-    /// Build a segment plan from real keyframes using libavformat's
-    /// hls muxer cut algorithm: segment N ends at the first keyframe
-    /// whose absolute distance from `start_pts` reaches `(N+1) *
-    /// targetSegmentDuration`. `start_pts` is taken as the first
-    /// keyframe in the index (sorted ascending), which matches the
-    /// muxer's behaviour of latching `vs->start_pts` to the first
-    /// packet's pts.
-    ///
-    /// This algorithm replaces the previous one which walked the
-    /// keyframe list with a relative threshold per segment. The
-    /// relative walk diverged from libavformat's cut algorithm on
-    /// sources with irregular GOPs (e.g. keyframes at 0, 5.8, 11.5,
-    /// 17.4, 23.3 produce 3 segments under absolute thresholds but
-    /// only 2 under the relative walk), which would translate into
-    /// playlist drift the moment the muxer actually cut differently
-    /// from what we'd advertised.
+    /// Build a video segment plan from real keyframes using
+    /// libavformat's hls muxer cut algorithm: segment N ends at the
+    /// first keyframe whose absolute distance from the first index
+    /// keyframe's PTS reaches `(N+1) * targetSegmentDuration`.
     private func buildKeyframeSegmentPlan(
         keyframes: [Int64],
         videoTimeBase: AVRational,
@@ -913,24 +1015,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return trc == AVCOL_TRC_SMPTE2084 || trc == AVCOL_TRC_ARIB_STD_B67
     }
 
-    /// AV1 Main / Profile 0 only, level cap at 5.3 (≤ 4K). Apple's HW
-    /// decoder doesn't handle Profile 1 (4:2:2), Profile 2 (4:4:4 / 12-bit),
-    /// or levels 6.0+ (8K). Rejecting non-Profile-0 / 8K up front keeps
-    /// the native path from handing AVPlayer a stream it'll throw away.
     private static func av1ProfileIsAccepted(codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
         let profile = codecpar.pointee.profile
-        // FFmpeg encodes "profile not set" as FF_PROFILE_UNKNOWN (-99).
-        // Treat unknown as 0 (Main) since that's the dominant case in
-        // the wild; if it's actually 1 / 2 the decoder will reject and
-        // engine.load falls back to aether.
         if profile != -99 && profile != 0 {
             EngineLog.emit("[HLSVideoEngine] AV1 profile=\(profile) rejected (Main/Profile 0 only)", category: .session)
             return false
         }
         let level = codecpar.pointee.level
-        // AV1 level encoding: per AV1 spec, levels 0..23 map to 2.0..7.3.
-        // FFmpeg stores the seq_level_idx (0..23). Cap at level 13
-        // (5.3 → 4K @ 60fps); Apple HW tops out around there.
         if level >= 0 && level > 13 {
             EngineLog.emit("[HLSVideoEngine] AV1 level=\(level) rejected (cap at 5.3 / level 13)", category: .session)
             return false
@@ -938,10 +1029,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return true
     }
 
-    /// Validate that `index` points at an audio stream in the demuxer's
-    /// container. Used to gate `audioSourceStreamIndexOverride` so a
-    /// stale picker selection (e.g. a stream index from a previous
-    /// title) can't make `start()` filter packets nobody is producing.
     private static func isAudioStream(demuxer: Demuxer, index: Int32) -> Bool {
         guard index >= 0, let stream = demuxer.stream(at: index) else {
             return false
@@ -961,89 +1048,131 @@ public final class HLSVideoEngine: @unchecked Sendable {
             case 1: return .profile81
             case 2: return .profile82
             case 4: return .profile84
-            default: return .profile81  // P8.6 etc → treat as P8.1
+            default: return .profile81
             }
         }
         return .unknown
     }
 
-    // MARK: - Segment plan model
+    // MARK: - Track metadata lookup
 
-    fileprivate struct Segment {
-        let startPts: Int64
-        let endPts: Int64
-        let startSeconds: Double
-        let durationSeconds: Double
+    /// Build a `TrackInfo` for a single audio stream. Mirrors the
+    /// logic in `Demuxer.audioTrackInfos()` but takes a caller-known
+    /// stream pointer so we avoid enumerating all streams again.
+    private func singleTrackInfo(
+        from stream: UnsafeMutablePointer<AVStream>,
+        index: Int
+    ) -> TrackInfo {
+        let codecpar = stream.pointee.codecpar!
+        let codecName: String
+        if let codec = avcodec_find_decoder(codecpar.pointee.codec_id) {
+            codecName = String(cString: codec.pointee.name)
+        } else {
+            codecName = "unknown"
+        }
+        let language = metadataValue(stream.pointee.metadata, key: "language")
+        let title = metadataValue(stream.pointee.metadata, key: "title")
+        let name: String
+        if let title = title, !title.isEmpty {
+            name = title
+        } else if let lang = language {
+            name = "\(lang.uppercased()) (\(codecName))"
+        } else {
+            name = "Track \(index) (\(codecName))"
+        }
+        let isDefault = (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0
+        let channels = Int(codecpar.pointee.ch_layout.nb_channels)
+        let isAtmos = (codecpar.pointee.codec_id == AV_CODEC_ID_EAC3)
+            && codecpar.pointee.profile == 30
+        return TrackInfo(
+            id: index,
+            name: name,
+            codec: codecName,
+            language: language,
+            channels: channels,
+            isDefault: isDefault,
+            isAtmos: isAtmos
+        )
+    }
+
+    private func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
+        guard let dict = dict else { return nil }
+        guard let entry = av_dict_get(dict, key, nil, 0) else { return nil }
+        return String(cString: entry.pointee.value)
     }
 }
 
-// MARK: - Cache-backed provider
+// MARK: - Segment plan model
 
-/// Thin `HLSSegmentProvider` over a `SegmentCache`. The cache is
-/// populated by the session's `HLSSegmentProducer`. AVPlayer GETs are
-/// served from cache hits when the producer is ahead of the playhead;
-/// misses block on the cache's per-index condvar with a generous
-/// timeout (the producer is on a worker thread, so blocking the HTTP
-/// server's connection thread is the natural backpressure model).
-///
-/// Scrub policy:
-///  - In-cache: fast path, no waiting.
-///  - Forward seek within `forwardWaitWindow` of cache.max: wait for
-///    the producer to catch up. AVPlayer's normal sequential playback
-///    falls in this bucket.
-///  - Forward seek beyond that, or any backward seek beyond cache.min:
-///    fire `restartHandler` so the engine can teardown + reseek
-///    + spin up a fresh producer rooted at the new segment index,
-///    then re-block on cache.fetch.
-private final class VideoSegmentProvider: HLSSegmentProvider {
+fileprivate struct Segment {
+    let startPts: Int64
+    let endPts: Int64
+    let startSeconds: Double
+    let durationSeconds: Double
+}
 
-    private let cache: SegmentCache
-    private let segments: [HLSVideoEngine.Segment]
+// MARK: - Audio rendition state
 
-    private let codecsString: String
-    private let supplementalCodecsString: String?
-    private let resolution: (Int, Int)
-    private let videoRange: HLSVideoRange
-    private let frameRate: Double?
-    private let hdcpLevel: String?
+/// Aggregates everything one alternate audio rendition needs: its
+/// own demuxer, segment cache, provider, producer config + producer
+/// instance, optional FLAC bridge, segment plan, and a per-rendition
+/// restart lock. Owned by `HLSVideoEngine` and torn down in
+/// `stop()`.
+private final class AudioRenditionState {
+    let info: HLSAudioRendition
+    let demuxer: Demuxer
+    let cache: SegmentCache
+    let provider: AudioSegmentProvider
+    let config: HLSSegmentProducer.AudioConfig
+    let bridge: AudioBridge?
+    let segmentPlan: [Segment]
+    var producer: HLSSegmentProducer?
+    let restartLock = NSLock()
 
-    /// Closure into the engine that tears down the current producer
-    /// and brings up a fresh one rooted at the given absolute segment
-    /// index. Synchronous: returns after the new producer's pump has
-    /// started writing, which is typically within 50-200 ms on Apple
-    /// TV against a local Jellyfin source.
-    private let restartHandler: ((Int) -> Void)?
+    init(
+        info: HLSAudioRendition,
+        demuxer: Demuxer,
+        cache: SegmentCache,
+        provider: AudioSegmentProvider,
+        config: HLSSegmentProducer.AudioConfig,
+        bridge: AudioBridge?,
+        segmentPlan: [Segment],
+        producer: HLSSegmentProducer?
+    ) {
+        self.info = info
+        self.demuxer = demuxer
+        self.cache = cache
+        self.provider = provider
+        self.config = config
+        self.bridge = bridge
+        self.segmentPlan = segmentPlan
+        self.producer = producer
+    }
+}
+
+// MARK: - Cache-backed providers
+
+/// Shared restart + cache logic for both video and audio renditions.
+/// Each rendition has its own cache; on a fetch that's outside the
+/// current cache window, the restart handler fires to tear down +
+/// rebuild that rendition's producer at the requested index.
+private class CachedSegmentProvider: HLSSegmentProvider {
+    let cache: SegmentCache
+    let segments: [Segment]
+    var restartHandler: ((Int) -> Void)?
 
     /// Forward-distance threshold beyond which a fetch triggers a
     /// restart instead of waiting for the producer to catch up. At
-    /// 6 s segments, 8 segments ≈ 48 s of source content; further
-    /// than that and waiting is slower than tearing down and
-    /// resuming at the target.
+    /// 4 s segments, 8 segments ≈ 32 s of source content; further
+    /// than that and waiting is slower than tearing down + resuming
+    /// at the target.
     private static let forwardWaitWindow = 8
 
-    init(
-        cache: SegmentCache,
-        segments: [HLSVideoEngine.Segment],
-        codecsString: String,
-        supplementalCodecs: String?,
-        resolution: (Int, Int),
-        videoRange: HLSVideoRange,
-        frameRate: Double?,
-        hdcpLevel: String?,
-        restartHandler: ((Int) -> Void)? = nil
-    ) {
+    init(cache: SegmentCache, segments: [Segment], restartHandler: ((Int) -> Void)? = nil) {
         self.cache = cache
         self.segments = segments
-        self.codecsString = codecsString
-        self.supplementalCodecsString = supplementalCodecs
-        self.resolution = resolution
-        self.videoRange = videoRange
-        self.frameRate = frameRate
-        self.hdcpLevel = hdcpLevel
         self.restartHandler = restartHandler
     }
-
-    // MARK: - HLSSegmentProvider
 
     func initSegment() -> Data? {
         return cache.fetchInit(timeout: 30.0)
@@ -1055,31 +1184,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
         // Declare AVPlayer's target FIRST so the cache window slides
         // to centre on `index` before any subsequent producer store
-        // runs `pruneOutsideWindow`. Without this, a resume-style
-        // jump to seg-55 races with the producer's first store: the
-        // producer (after restart at 55) writes seg-55, the cache
-        // prunes with the still-default target=-1 / window=[-16,19],
-        // seg-55 is evicted before `fetch(55)` ever sees it, and
-        // AVPlayer times out on a segment that did exist for ~10 µs.
+        // runs `pruneOutsideWindow`.
         cache.declareTarget(index)
 
-        // Fast path: serve from cache.
         if let hit = cache.peek(index: index) {
             return logServed(index: index, bytes: hit, totalStart: totalStart, restarted: false)
         }
 
-        // Decide whether to restart the producer or wait. Three cases:
-        //   - range is empty → the producer hasn't produced (or hasn't
-        //     produced anything in our current window after declareTarget
-        //     pruned). If the requested index is beyond the producer's
-        //     plausible cold-start reach (a few seg-0s), restart at
-        //     `index`. Otherwise wait — the producer is about to write
-        //     seg-0 / seg-1 / seg-2 and we don't want to thrash.
-        //   - index below the cache's low edge → backward seek past
-        //     the kept window, restart.
-        //   - index too far above the cache's high edge → forward
-        //     seek past where the producer can reach via backpressure,
-        //     restart.
         let range = cache.indexRange()
         let needsRestart: Bool
         if let r = range {
@@ -1127,15 +1238,16 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
     }
 
     var playlistType: HLSPlaylistType { .vod }
-    var masterCodecs: String? { codecsString }
-    var masterSupplementalCodecs: String? { supplementalCodecsString }
-    var masterResolution: (width: Int, height: Int)? {
-        return (resolution.0, resolution.1)
-    }
-    var masterVideoRange: HLSVideoRange? { videoRange }
-    var masterBandwidth: Int? { 5_000_000 }
-    var masterAverageBandwidth: Int? { 5_000_000 }
-    var masterFrameRate: Double? { frameRate }
-    var masterHDCPLevel: String? { hdcpLevel }
-    var masterClosedCaptions: String? { "NONE" }
+}
+
+/// Video rendition provider. Same shared cache+restart behavior as
+/// the audio provider; kept as a distinct type so HLSLocalServer can
+/// identify the video provider via `===`.
+private final class VideoSegmentProvider: CachedSegmentProvider {
+}
+
+/// Audio rendition provider. Symmetric to `VideoSegmentProvider`;
+/// distinct type so the master-builder can tell renditions apart from
+/// the video stream.
+private final class AudioSegmentProvider: CachedSegmentProvider {
 }

@@ -3,92 +3,33 @@ import Network
 
 // MARK: - Segment Provider Protocol
 
-/// Source of HLS segment bytes for `HLSLocalServer`.
+/// Source of HLS segment bytes for one rendition.
 ///
-/// Two production implementations exist:
-///   - `BufferedSegmentProvider` (built into `HLSLocalServer`) for the
-///     live audio passthrough case where segments are pushed in via
-///     `setInitSegment` / `addMediaSegment` and held in memory until
-///     the session ends.
-///   - The video path's lazy on-demand provider (Phase 4) that
-///     synthesises each segment when AVPlayer fetches it, never
-///     holding more than one or two in memory at a time. Necessary
-///     because a 2h 4K video at 6 s / 10 MB segments would otherwise
-///     require ~120 GB of resident memory.
+/// One provider = one rendition. Video gets a `VideoSegmentProvider`,
+/// each audio rendition gets its own `AudioSegmentProvider`. The
+/// provider abstracts whether segments are produced live by a
+/// libavformat `HLSSegmentProducer` (the normal case) or by some
+/// future static source.
 protocol HLSSegmentProvider: AnyObject {
     /// Init segment bytes (`ftyp` + empty `moov`). Returns nil when
-    /// the muxer hasn't produced one yet (live-audio bring-up).
+    /// the muxer hasn't produced one yet.
     func initSegment() -> Data?
 
     /// Bytes for media segment `index` (0-based). Returns nil if the
-    /// segment isn't available yet (live append) or out of range. The
-    /// server responds with 404 for nil; callers should not call this
-    /// for indices beyond `segmentCount`.
+    /// segment isn't available yet or is out of range.
     func mediaSegment(at index: Int) -> Data?
 
-    /// Number of segments currently known. May grow over time for
-    /// `.event` playlists, fixed for `.vod` playlists.
+    /// Number of segments in this rendition.
     var segmentCount: Int { get }
 
     /// Duration in seconds of segment `index`. May vary per segment
     /// when boundaries snap to source keyframes (the video case);
-    /// returns the same value for every index in the audio case.
+    /// uniform for audio renditions.
     func segmentDuration(at index: Int) -> Double
 
-    /// Apple HLS playlist type. `.event` for live appended audio,
-    /// `.vod` for the fully-known video case.
+    /// Apple HLS playlist type. Renditions backed by libavformat-driven
+    /// HLSSegmentProducer pumps are always `.vod`.
     var playlistType: HLSPlaylistType { get }
-
-    /// Optional master-playlist metadata. When `masterCodecs` is
-    /// non-nil, the server publishes a `master.m3u8` containing one
-    /// variant referencing `media.m3u8` plus these attributes; when
-    /// nil, only the media playlist is published.
-    var masterCodecs: String? { get }
-    var masterResolution: (width: Int, height: Int)? { get }
-    var masterVideoRange: HLSVideoRange? { get }
-    var masterBandwidth: Int? { get }
-
-    /// SUPPLEMENTAL-CODECS attribute on `EXT-X-STREAM-INF`. Per
-    /// Apple's HLS Authoring Spec Appendixes table, Dolby Vision
-    /// Profile 8.1 advertises plain HEVC in `CODECS` and signals DV
-    /// via `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"` (P8.4 uses
-    /// `dvh1.08.LL/db4h`). Profile 5 has no fallback variant and
-    /// puts `dvh1.05.LL` directly in CODECS, so SUPPLEMENTAL-CODECS
-    /// is nil there. AVPlayer's master-level codec filter is
-    /// stricter than the segment-level filter and silently drops
-    /// any variant whose primary CODECS it can't fall back to: a
-    /// bare `dvh1` master made AVPlayer fetch the master 2-3 times
-    /// and then never advance to media.m3u8.
-    var masterSupplementalCodecs: String? { get }
-
-    /// FRAME-RATE attribute, recommended by Apple's HLS Authoring
-    /// Spec for HDR / DV variants.
-    var masterFrameRate: Double? { get }
-
-    /// AVERAGE-BANDWIDTH attribute. Apple's spec marks this required
-    /// for HDR / DV variants. For VOD it's the same as BANDWIDTH;
-    /// for true ABR it's lower than peak.
-    var masterAverageBandwidth: Int? { get }
-
-    /// HDCP-LEVEL attribute. Apple Tech Talk 501 says `TYPE-1` is
-    /// required for resolutions >1920x1080 in HDR / DV streams.
-    var masterHDCPLevel: String? { get }
-
-    /// CLOSED-CAPTIONS attribute. Apple's reference DV samples set
-    /// this to `NONE` when there's no in-band CC track.
-    var masterClosedCaptions: String? { get }
-}
-
-extension HLSSegmentProvider {
-    var masterCodecs: String? { nil }
-    var masterResolution: (width: Int, height: Int)? { nil }
-    var masterVideoRange: HLSVideoRange? { nil }
-    var masterBandwidth: Int? { nil }
-    var masterSupplementalCodecs: String? { nil }
-    var masterFrameRate: Double? { nil }
-    var masterAverageBandwidth: Int? { nil }
-    var masterHDCPLevel: String? { nil }
-    var masterClosedCaptions: String? { nil }
 }
 
 enum HLSPlaylistType {
@@ -102,21 +43,83 @@ enum HLSVideoRange: String {
     case hlg = "HLG"
 }
 
+// MARK: - Video rendition metadata
+
+/// Master-playlist attributes for the video variant. Carried on the
+/// video provider so the server can synthesize the EXT-X-STREAM-INF
+/// line without reaching back into HLSVideoEngine.
+struct HLSVideoRenditionInfo {
+    /// CODECS attribute primary value (video codec only — the audio
+    /// rendition's codec is appended at master-build time).
+    let codecs: String
+    /// SUPPLEMENTAL-CODECS attribute on `EXT-X-STREAM-INF`. Per
+    /// Apple's HLS Authoring Spec Appendixes table, Dolby Vision
+    /// Profile 8.1 advertises plain HEVC in `CODECS` and signals DV
+    /// via `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"` (P8.4 uses
+    /// `dvh1.08.LL/db4h`). Profile 5 has no fallback variant and
+    /// puts `dvh1.05.LL` directly in CODECS, so SUPPLEMENTAL-CODECS
+    /// is nil there. AVPlayer's master-level codec filter is
+    /// stricter than the segment-level filter and silently drops
+    /// any variant whose primary CODECS it can't fall back to.
+    let supplementalCodecs: String?
+    let resolution: (width: Int, height: Int)
+    let videoRange: HLSVideoRange
+    let frameRate: Double?
+    let bandwidth: Int
+    let averageBandwidth: Int
+    /// HDCP-LEVEL attribute. Apple Tech Talk 501 says `TYPE-1` is
+    /// required for resolutions >1920x1080 in HDR / DV streams.
+    let hdcpLevel: String?
+    /// CLOSED-CAPTIONS attribute. Apple's reference DV samples set
+    /// this to `NONE` when there's no in-band CC track.
+    let closedCaptions: String?
+}
+
+// MARK: - Audio rendition metadata
+
+/// Master-playlist attributes for one audio rendition (one
+/// EXT-X-MEDIA TYPE=AUDIO line). Holders register one of these
+/// alongside an `HLSSegmentProvider` via `registerAudioRendition`.
+struct HLSAudioRendition {
+    /// Stable identifier used to construct the per-rendition URL
+    /// paths (e.g. `audio_<id>.m3u8`). In practice the source-
+    /// container stream index as a decimal string so the host's
+    /// AVMediaSelection→engine.audioTracks mapping has a key it can
+    /// round-trip.
+    let id: String
+    /// Human-readable NAME attribute on the EXT-X-MEDIA line.
+    let name: String
+    /// LANGUAGE attribute, BCP-47 (`en`, `de`, `ja`). Optional.
+    let language: String?
+    /// DEFAULT attribute. Exactly one rendition per GROUP-ID should
+    /// be DEFAULT=YES; AVPlayer picks that one as the initial audio
+    /// selection.
+    let isDefault: Bool
+    /// CODECS attribute for this rendition (e.g. `mp4a.40.2`, `ec-3`,
+    /// `fLaC`). Appended to the variant's CODECS attribute too.
+    let codecs: String
+    /// CHANNELS attribute. AAC stereo = "2", 5.1 = "6", 7.1 = "8".
+    /// HLS spec encodes channel count as a string.
+    let channels: Int
+}
+
 // MARK: - Local HLS Server
 
-/// Loopback HTTP server feeding HLS-fMP4 to AVPlayer. Originally the
-/// audio-only `HLSAudioServer`; generalised in phase 3 of the DV
-/// rollout so the same socket and request loop can serve video too.
+/// Loopback HTTP server feeding HLS-fMP4 to AVPlayer. Serves a master
+/// playlist that references one video rendition (`video.m3u8`) plus
+/// zero or more alternate audio renditions (`audio_<id>.m3u8`). Each
+/// rendition is fed by a separate `HLSSegmentProducer` upstream.
 ///
 /// Endpoints:
-///   - `/master.m3u8` only when the provider has master-level
-///     metadata (codecs, resolution, video range). Required for
-///     Dolby Vision because `VIDEO-RANGE=PQ` and the `CODECS=dvh1.…`
-///     attribute live on `EXT-X-STREAM-INF`, not on a media playlist.
-///   - `/media.m3u8` always present. EVENT or VOD depending on the
-///     provider.
-///   - `/init.mp4` the `ftyp`+`moov` init segment.
-///   - `/seg{N}.mp4` the N-th `moof`+`mdat` media segment.
+///   - `/master.m3u8` — master with EXT-X-STREAM-INF referencing the
+///     video rendition, plus one EXT-X-MEDIA TYPE=AUDIO per registered
+///     audio rendition.
+///   - `/video.m3u8` — video rendition's media playlist (VOD).
+///   - `/video_init.mp4` — video rendition's init segment.
+///   - `/video_seg-{N}.m4s` — video rendition's media segment N.
+///   - `/audio_<id>.m3u8` — audio rendition `<id>`'s media playlist.
+///   - `/audio_<id>_init.mp4` — audio rendition `<id>`'s init segment.
+///   - `/audio_<id>_seg-{N}.m4s` — audio rendition `<id>`'s media segment N.
 ///
 /// Listens on `localhost` (not `127.0.0.1`) so tvOS App Transport
 /// Security treats it as exempt without per-domain plist entries
@@ -124,85 +127,88 @@ enum HLSVideoRange: String {
 final class HLSLocalServer: @unchecked Sendable {
 
     private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.aetherengine.hls")
+    /// Concurrent so two AVPlayer GETs (e.g. video segment + audio
+    /// segment for the same playhead) can each block in cache.fetch
+    /// without starving each other. The previous serial queue worked
+    /// for the single-rendition pipeline (only one outstanding GET);
+    /// alternate renditions create per-track GETs that overlap in
+    /// time and a serial queue would serialise their fetches.
+    private let queue = DispatchQueue(label: "com.aetherengine.hls", attributes: .concurrent)
 
-    /// External provider, set via `init(provider:)`. Mutually
-    /// exclusive with `bufferedProvider`.
-    private weak var externalProvider: HLSSegmentProvider?
-    /// Built-in buffered provider for the legacy audio path. Lives
-    /// behind `setInitSegment` / `addMediaSegment`. Nil when an
-    /// external provider is supplied.
-    private var bufferedProvider: BufferedSegmentProvider?
+    /// Video rendition. Required — every session has video.
+    private let videoProvider: HLSSegmentProvider
+    private let videoInfo: HLSVideoRenditionInfo
 
-    private var provider: HLSSegmentProvider? {
-        externalProvider ?? bufferedProvider
+    /// Audio renditions, in registration order. Each entry is one
+    /// EXT-X-MEDIA TYPE=AUDIO entry in master.m3u8 and is served at
+    /// `/audio_<id>.m3u8` + friends.
+    private struct AudioEntry {
+        let info: HLSAudioRendition
+        let provider: HLSSegmentProvider
     }
+    private var audioEntries: [AudioEntry] = []
+    private let audioLock = NSLock()
 
-    /// Wall-clock time when seg0 was first fetched by AVPlayer. Used
-    /// by the audio engine to measure HLS pipeline latency from
-    /// "first segment available" to "AVPlayer asked for it".
+    /// Wall-clock time when video seg0 was first fetched by AVPlayer.
+    /// Used for pipeline-latency diagnostics.
     private(set) var seg0FetchTime: Date?
 
     /// One-shot flags so we log each playlist's full body once per
-    /// session instead of on every AVPlayer re-fetch. Lets us see
-    /// verbatim what got handed to AVPlayer without asking testers
-    /// to curl the loopback port.
+    /// session instead of on every AVPlayer re-fetch.
     private var loggedMasterPlaylist = false
-    private var loggedMediaPlaylist = false
+    private var loggedVideoPlaylist = false
+    private var loggedAudioPlaylists: Set<String> = []
 
     private(set) var port: UInt16 = 0
 
-    /// URL the host hands to AVPlayer to start playback. Points at
-    /// the master playlist if the provider has one, else the media
-    /// playlist directly.
+    /// URL the host hands to AVPlayer to start playback — always the
+    /// master playlist. The previous "media-playlist-direct" bypass
+    /// (used to force AVPlayer's auto-tone-mapping path on non-DV
+    /// displays) doesn't survive the multi-rendition split: serving
+    /// `video.m3u8` directly would play silent video because audio
+    /// now lives in alternate renditions. For non-DV displays the
+    /// engine already downgrades DV sources to plain HEVC in the
+    /// master CODECS attribute (`HLSVideoEngine.start()` at the
+    /// `!dvModeAvailable` branch), which is enough on its own.
     ///
     /// Uses the IP literal `127.0.0.1` rather than the hostname
     /// `localhost`. The hostname form needs DNS / nsswitch /
     /// /etc/hosts to resolve, and AVPlayer on tvOS appears to hang
     /// in its pre-flight before opening any TCP socket when
-    /// resolution doesn't return immediately (build 122
-    /// `timeControlStatus=waitingToPlay` with zero NWListener
-    /// state-update events). The IP literal sidesteps the resolver
-    /// entirely. ATS is covered either way: Sodalite's Info.plist
-    /// already has `NSAllowsArbitraryLoads` plus
-    /// `NSAllowsLocalNetworking`, so the original argument for
-    /// keeping the hostname (per-domain ATS exception avoidance)
-    /// no longer applies.
+    /// resolution doesn't return immediately. The IP literal
+    /// sidesteps the resolver entirely.
     var playlistURL: URL? {
         guard port > 0 else { return nil }
-        let path = (provider?.masterCodecs != nil) ? "master.m3u8" : "media.m3u8"
-        return URL(string: "http://127.0.0.1:\(port)/\(path)")
-    }
-
-    /// Direct media-playlist URL, bypassing the master-playlist
-    /// variant-selection step. Per DrHurt's note on AetherEngine#2:
-    /// when AVPlayer loads a media playlist directly rather than
-    /// via a master, it automatically tone-maps HDR / Dolby Vision
-    /// content to whatever the display can render — including SDR
-    /// when the user has disabled "Match Dynamic Range" in tvOS
-    /// Settings. The host route picks this URL instead of
-    /// `playlistURL` whenever the DV / HDR display handshake isn't
-    /// available, so AVPlayer stops rejecting `dvh1` assets with
-    /// `-11868 'Cannot Open'` and just plays them as SDR.
-    var mediaPlaylistURL: URL? {
-        guard port > 0 else { return nil }
-        return URL(string: "http://127.0.0.1:\(port)/media.m3u8")
+        return URL(string: "http://127.0.0.1:\(port)/master.m3u8")
     }
 
     // MARK: - Init
 
-    /// Default init for the legacy audio path. Creates a built-in
-    /// `BufferedSegmentProvider`; `setInitSegment` / `addMediaSegment`
-    /// route into it.
-    init() {
-        self.bufferedProvider = BufferedSegmentProvider()
+    init(videoProvider: HLSSegmentProvider, videoInfo: HLSVideoRenditionInfo) {
+        self.videoProvider = videoProvider
+        self.videoInfo = videoInfo
     }
 
-    /// Init with a caller-supplied provider for the video path.
-    /// `setInitSegment` and `addMediaSegment` are no-ops in this mode.
-    init(provider: HLSSegmentProvider) {
-        self.externalProvider = provider
-        self.bufferedProvider = nil
+    /// Register an audio rendition. Called by `HLSVideoEngine` once
+    /// per audio source track it spins a producer up for. Must be
+    /// called before `start()` so master.m3u8's first build sees all
+    /// renditions.
+    func registerAudioRendition(info: HLSAudioRendition, provider: HLSSegmentProvider) {
+        audioLock.lock()
+        audioEntries.append(AudioEntry(info: info, provider: provider))
+        audioLock.unlock()
+    }
+
+    private func audioEntry(forID id: String) -> AudioEntry? {
+        audioLock.lock()
+        defer { audioLock.unlock() }
+        return audioEntries.first { $0.info.id == id }
+    }
+
+    private func snapshotAudioEntries() -> [AudioEntry] {
+        audioLock.lock()
+        defer { audioLock.unlock() }
+        return audioEntries
     }
 
     // MARK: - Lifecycle
@@ -223,8 +229,7 @@ final class HLSLocalServer: @unchecked Sendable {
             // Log every TCP-level transition so we can tell whether
             // AVPlayer is even getting as far as opening a connection,
             // and whether the connection is reaching `.ready` before
-            // we attempt a receive. Without this we silently lose any
-            // connection that fails before delivering bytes.
+            // we attempt a receive.
             conn.stateUpdateHandler = { state in
                 EngineLog.emit("[HLSLocalServer] conn state=\(state)", category: .hlsServer)
             }
@@ -246,29 +251,12 @@ final class HLSLocalServer: @unchecked Sendable {
         listener = nil
         port = 0
         loggedMasterPlaylist = false
-        loggedMediaPlaylist = false
-        bufferedProvider?.clear()
+        loggedVideoPlaylist = false
+        loggedAudioPlaylists.removeAll()
         seg0FetchTime = nil
-    }
-
-    // MARK: - Buffered-provider passthrough (legacy audio API)
-
-    /// Set the init segment bytes (legacy audio API). Routes into
-    /// the built-in buffered provider; throws nothing for the
-    /// external-provider mode but silently does nothing.
-    func setInitSegment(_ data: Data) {
-        bufferedProvider?.setInitSegment(data)
-    }
-
-    /// Append a media segment (legacy audio API). Same caveat as
-    /// `setInitSegment`.
-    func addMediaSegment(_ data: Data, duration: Double) {
-        bufferedProvider?.addMediaSegment(data, duration: duration)
-    }
-
-    /// Number of segments currently published.
-    var segmentCount: Int {
-        provider?.segmentCount ?? 0
+        audioLock.lock()
+        audioEntries.removeAll()
+        audioLock.unlock()
     }
 
     // MARK: - HTTP Request Handling
@@ -302,121 +290,218 @@ final class HLSLocalServer: @unchecked Sendable {
             let parts = firstLine.split(separator: " ")
             let path = parts.count >= 2 ? String(parts[1]) : "/"
 
-            // The audio path historically used /audio.m3u8 as the
-            // media playlist URL. Keep accepting it as an alias so
-            // HLSAudioEngine doesn't have to change.
-            let normalizedPath: String = {
-                if path == "/audio.m3u8" { return "/media.m3u8" }
-                return path
-            }()
-
             EngineLog.emit("[HLSLocalServer] \(firstLine)", category: .hlsServer)
 
-            switch normalizedPath {
-            case "/master.m3u8":
-                if self.provider?.masterCodecs != nil {
-                    let body = self.buildMasterPlaylist()
-                    if !self.loggedMasterPlaylist {
-                        self.loggedMasterPlaylist = true
-                        EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)", category: .hlsServer)
-                    }
-                    self.respondData(connection,
-                                     path: normalizedPath,
-                                     data: Data(body.utf8),
-                                     contentType: "application/vnd.apple.mpegurl")
-                } else {
-                    self.respond404(connection, path: normalizedPath, reason: "no masterCodecs")
-                }
-            case "/media.m3u8":
-                let body = self.buildMediaPlaylist()
-                if !self.loggedMediaPlaylist {
-                    self.loggedMediaPlaylist = true
-                    let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
-                    EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)", category: .hlsServer)
-                }
-                self.respondData(connection,
-                                 path: normalizedPath,
-                                 data: Data(body.utf8),
-                                 contentType: "application/vnd.apple.mpegurl")
-            case "/init.mp4":
-                let data = self.provider?.initSegment() ?? Data()
-                if data.isEmpty {
-                    self.respond404(connection, path: normalizedPath, reason: "init.mp4 empty (provider not ready?)")
-                } else {
-                    self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
-                }
-            default:
-                if normalizedPath.hasPrefix("/seg"), normalizedPath.hasSuffix(".mp4") {
-                    let indexStr = normalizedPath.dropFirst(4).dropLast(4)
-                    if let index = Int(indexStr), index >= 0 {
-                        if index == 0 && self.seg0FetchTime == nil {
-                            self.seg0FetchTime = Date()
-                        }
-                        if let data = self.provider?.mediaSegment(at: index), !data.isEmpty {
-                            self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
-                        } else {
-                            let providerCount = self.provider?.segmentCount ?? -1
-                            self.respond404(connection, path: normalizedPath, reason: "segment[\(index)] empty (segmentCount=\(providerCount))")
-                        }
-                    } else {
-                        self.respond404(connection, path: normalizedPath, reason: "unparseable seg index '\(indexStr)'")
-                    }
-                } else {
-                    self.respond404(connection, path: normalizedPath, reason: "unknown path")
-                }
-            }
+            self.route(path: path, connection: connection)
         }
+    }
+
+    private func route(path: String, connection: NWConnection) {
+        switch path {
+        case "/master.m3u8":
+            let body = buildMasterPlaylist()
+            if !loggedMasterPlaylist {
+                loggedMasterPlaylist = true
+                EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)", category: .hlsServer)
+            }
+            respondData(connection,
+                        path: path,
+                        data: Data(body.utf8),
+                        contentType: "application/vnd.apple.mpegurl")
+
+        case "/video.m3u8":
+            let body = buildMediaPlaylist(for: videoProvider)
+            if !loggedVideoPlaylist {
+                loggedVideoPlaylist = true
+                let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
+                EngineLog.emit("[HLSLocalServer] video.m3u8 head:\n\(head)", category: .hlsServer)
+            }
+            respondData(connection,
+                        path: path,
+                        data: Data(body.utf8),
+                        contentType: "application/vnd.apple.mpegurl")
+
+        case "/video_init.mp4":
+            let data = videoProvider.initSegment() ?? Data()
+            if data.isEmpty {
+                respond404(connection, path: path, reason: "video init.mp4 empty (provider not ready?)")
+            } else {
+                respondData(connection, path: path, data: data, contentType: "video/mp4")
+            }
+
+        default:
+            if let segIndex = parseSegmentIndex(path: path, prefix: "/video_seg-", suffix: ".m4s") {
+                if segIndex == 0 && seg0FetchTime == nil {
+                    seg0FetchTime = Date()
+                }
+                serveSegment(connection, path: path, provider: videoProvider, index: segIndex)
+                return
+            }
+
+            if let (audioID, suffix) = parseAudioPath(path) {
+                guard let entry = audioEntry(forID: audioID) else {
+                    respond404(connection, path: path, reason: "unknown audio rendition id=\(audioID)")
+                    return
+                }
+                switch suffix {
+                case .playlist:
+                    let body = buildMediaPlaylist(for: entry.provider)
+                    if !loggedAudioPlaylists.contains(audioID) {
+                        loggedAudioPlaylists.insert(audioID)
+                        let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
+                        EngineLog.emit("[HLSLocalServer] audio_\(audioID).m3u8 head:\n\(head)", category: .hlsServer)
+                    }
+                    respondData(connection,
+                                path: path,
+                                data: Data(body.utf8),
+                                contentType: "application/vnd.apple.mpegurl")
+                case .initSegment:
+                    let data = entry.provider.initSegment() ?? Data()
+                    if data.isEmpty {
+                        respond404(connection, path: path, reason: "audio init empty (provider not ready?)")
+                    } else {
+                        respondData(connection, path: path, data: data, contentType: "video/mp4")
+                    }
+                case .segment(let idx):
+                    serveSegment(connection, path: path, provider: entry.provider, index: idx)
+                }
+                return
+            }
+
+            respond404(connection, path: path, reason: "unknown path")
+        }
+    }
+
+    private func serveSegment(_ connection: NWConnection, path: String, provider: HLSSegmentProvider, index: Int) {
+        guard index >= 0 else {
+            respond404(connection, path: path, reason: "negative segment index \(index)")
+            return
+        }
+        if let data = provider.mediaSegment(at: index), !data.isEmpty {
+            respondData(connection, path: path, data: data, contentType: "video/mp4")
+        } else {
+            respond404(connection, path: path, reason: "segment[\(index)] empty (segmentCount=\(provider.segmentCount))")
+        }
+    }
+
+    // MARK: - Path parsing
+
+    private enum AudioPathSuffix {
+        case playlist
+        case initSegment
+        case segment(Int)
+    }
+
+    /// Parse `/audio_<id>.m3u8`, `/audio_<id>_init.mp4`,
+    /// `/audio_<id>_seg-<N>.m4s` into (id, suffix). Returns nil for
+    /// non-audio paths. The id is whatever comes after `/audio_` up to
+    /// the first suffix marker — opaque to the parser, must match what
+    /// `registerAudioRendition` was called with.
+    private func parseAudioPath(_ path: String) -> (id: String, suffix: AudioPathSuffix)? {
+        let prefix = "/audio_"
+        guard path.hasPrefix(prefix) else { return nil }
+        let tail = path.dropFirst(prefix.count)
+        // Order matters: longer suffix tested first so the id parser
+        // doesn't accidentally swallow "_seg-N" / "_init" tokens.
+        if tail.hasSuffix(".m3u8") {
+            let id = String(tail.dropLast(".m3u8".count))
+            return (id, .playlist)
+        }
+        if tail.hasSuffix("_init.mp4") {
+            let id = String(tail.dropLast("_init.mp4".count))
+            return (id, .initSegment)
+        }
+        if tail.hasSuffix(".m4s") {
+            let body = tail.dropLast(".m4s".count)
+            guard let segMarker = body.range(of: "_seg-") else { return nil }
+            let id = String(body[..<segMarker.lowerBound])
+            let idxStr = body[segMarker.upperBound...]
+            guard let idx = Int(idxStr) else { return nil }
+            return (id, .segment(idx))
+        }
+        return nil
+    }
+
+    /// Parse `/<prefix><N><suffix>` and return N, or nil.
+    private func parseSegmentIndex(path: String, prefix: String, suffix: String) -> Int? {
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let inner = path.dropFirst(prefix.count).dropLast(suffix.count)
+        return Int(inner)
     }
 
     // MARK: - Playlist construction
 
     private func buildMasterPlaylist() -> String {
-        guard let provider = provider, let codecs = provider.masterCodecs else {
-            return "#EXTM3U\n"
-        }
         var lines: [String] = []
         lines.append("#EXTM3U")
         lines.append("#EXT-X-VERSION:7")
         lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
 
+        // EXT-X-MEDIA per audio rendition.
+        let audios = snapshotAudioEntries()
+        let audioGroupID = "audio"
+        for entry in audios {
+            var attrs: [String] = []
+            attrs.append("TYPE=AUDIO")
+            attrs.append("GROUP-ID=\"\(audioGroupID)\"")
+            attrs.append("NAME=\"\(escapeAttr(entry.info.name))\"")
+            if let lang = entry.info.language {
+                attrs.append("LANGUAGE=\"\(lang)\"")
+            }
+            attrs.append("DEFAULT=\(entry.info.isDefault ? "YES" : "NO")")
+            attrs.append("AUTOSELECT=YES")
+            attrs.append("CHANNELS=\"\(entry.info.channels)\"")
+            attrs.append("URI=\"audio_\(entry.info.id).m3u8\"")
+            lines.append("#EXT-X-MEDIA:\(attrs.joined(separator: ","))")
+        }
+
         // EXT-X-STREAM-INF attribute order follows Apple's HLS
         // Authoring Spec Appendixes example: BANDWIDTH first,
         // AVERAGE-BANDWIDTH next, then CODECS, then SUPPLEMENTAL-
         // CODECS, then RESOLUTION / FRAME-RATE / VIDEO-RANGE, then
-        // HDCP-LEVEL / CLOSED-CAPTIONS at the end.
+        // AUDIO / HDCP-LEVEL / CLOSED-CAPTIONS.
         var streamInfAttrs: [String] = []
-        let bandwidth = provider.masterBandwidth ?? 5_000_000
-        streamInfAttrs.append("BANDWIDTH=\(bandwidth)")
-        if let avg = provider.masterAverageBandwidth {
-            streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
+        streamInfAttrs.append("BANDWIDTH=\(videoInfo.bandwidth)")
+        streamInfAttrs.append("AVERAGE-BANDWIDTH=\(videoInfo.averageBandwidth)")
+
+        // CODECS combines video + default-audio rendition's codec when
+        // an audio rendition exists. AVPlayer's master-level codec
+        // filter checks every codec listed here against its decoder
+        // support; missing the audio codec lets some setups reject
+        // the variant entirely.
+        let defaultAudio = audios.first(where: { $0.info.isDefault }) ?? audios.first
+        let combinedCodecs: String
+        if let a = defaultAudio {
+            combinedCodecs = "\(videoInfo.codecs),\(a.info.codecs)"
+        } else {
+            combinedCodecs = videoInfo.codecs
         }
-        streamInfAttrs.append("CODECS=\"\(codecs)\"")
-        if let supplemental = provider.masterSupplementalCodecs {
+        streamInfAttrs.append("CODECS=\"\(combinedCodecs)\"")
+        if let supplemental = videoInfo.supplementalCodecs {
             streamInfAttrs.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"")
         }
-        if let resolution = provider.masterResolution {
-            streamInfAttrs.append("RESOLUTION=\(resolution.width)x\(resolution.height)")
-        }
-        if let frameRate = provider.masterFrameRate {
+        streamInfAttrs.append("RESOLUTION=\(videoInfo.resolution.width)x\(videoInfo.resolution.height)")
+        if let frameRate = videoInfo.frameRate {
             streamInfAttrs.append("FRAME-RATE=\(String(format: "%.3f", frameRate))")
         }
-        if let range = provider.masterVideoRange {
-            streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
+        streamInfAttrs.append("VIDEO-RANGE=\(videoInfo.videoRange.rawValue)")
+        if !audios.isEmpty {
+            streamInfAttrs.append("AUDIO=\"\(audioGroupID)\"")
         }
-        if let hdcp = provider.masterHDCPLevel {
+        if let hdcp = videoInfo.hdcpLevel {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
         }
-        if let cc = provider.masterClosedCaptions {
+        if let cc = videoInfo.closedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
         lines.append("#EXT-X-STREAM-INF:\(streamInfAttrs.joined(separator: ","))")
-        lines.append("media.m3u8")
+        lines.append("video.m3u8")
         return lines.joined(separator: "\n") + "\n"
     }
 
-    private func buildMediaPlaylist() -> String {
-        guard let provider = provider else { return "#EXTM3U\n" }
+    private func buildMediaPlaylist(for provider: HLSSegmentProvider) -> String {
         let count = provider.segmentCount
+        let isAudio = provider !== videoProvider
 
         // Compute target duration as ceil of the longest segment.
         // Spec requires this be >= every EXTINF in the playlist.
@@ -426,6 +511,7 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         let targetDuration = Int(ceil(max(1.0, maxDuration)))
 
+        let prefix = isAudio ? audioURLPrefix(for: provider) : "video"
         var lines: [String] = []
         lines.append("#EXTM3U")
         lines.append("#EXT-X-VERSION:7")
@@ -435,16 +521,39 @@ final class HLSLocalServer: @unchecked Sendable {
         case .vod:   lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
         case .event: lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
         }
-        lines.append("#EXT-X-MAP:URI=\"init.mp4\"")
+        lines.append("#EXT-X-MAP:URI=\"\(prefix)_init.mp4\"")
         for i in 0..<count {
             let dur = provider.segmentDuration(at: i)
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
-            lines.append("seg\(i).mp4")
+            lines.append("\(prefix)_seg-\(i).m4s")
         }
         if provider.playlistType == .vod {
             lines.append("#EXT-X-ENDLIST")
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Look up the URL path prefix (`audio_<id>`) for a given audio
+    /// provider so its own media playlist references the right files.
+    /// Falls back to "video" if the provider isn't registered as an
+    /// audio rendition — defensive; callers shouldn't reach this for
+    /// the video provider.
+    private func audioURLPrefix(for provider: HLSSegmentProvider) -> String {
+        audioLock.lock()
+        defer { audioLock.unlock() }
+        if let entry = audioEntries.first(where: { $0.provider === provider }) {
+            return "audio_\(entry.info.id)"
+        }
+        return "video"
+    }
+
+    /// Quote double-quotes inside an HLS attribute string. HLS attribute
+    /// values inside `"..."` don't have an escape mechanism; the spec
+    /// says they "should not contain double quotes". For our metadata
+    /// (track names from container metadata) we strip quotes by
+    /// substitution to keep the manifest parseable.
+    private func escapeAttr(_ s: String) -> String {
+        return s.replacingOccurrences(of: "\"", with: "'")
     }
 
     // MARK: - HTTP framing
@@ -471,67 +580,4 @@ final class HLSLocalServer: @unchecked Sendable {
             self?.readRequest(connection)
         })
     }
-}
-
-// MARK: - Buffered Segment Provider (for the legacy audio path)
-
-/// In-memory provider that backs the `HLSLocalServer` when no
-/// external provider is supplied. The audio engine's segments are
-/// small (~16 KB at 0.5 s each) so holding them all in memory is
-/// fine for the duration of a session. The video path uses a
-/// different (lazy) provider that never holds more than one or two
-/// segments at a time.
-private final class BufferedSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
-    private let lock = NSLock()
-    private var initData: Data?
-    private var segments: [Data] = []
-    private var perSegmentDuration: Double = 2.048
-
-    func setInitSegment(_ data: Data) {
-        lock.lock()
-        initData = data
-        lock.unlock()
-    }
-
-    func addMediaSegment(_ data: Data, duration: Double) {
-        lock.lock()
-        segments.append(data)
-        perSegmentDuration = duration
-        lock.unlock()
-    }
-
-    func clear() {
-        lock.lock()
-        initData = nil
-        segments.removeAll()
-        lock.unlock()
-    }
-
-    // HLSSegmentProvider conformance
-
-    func initSegment() -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-        return initData
-    }
-
-    func mediaSegment(at index: Int) -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-        return (index >= 0 && index < segments.count) ? segments[index] : nil
-    }
-
-    var segmentCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return segments.count
-    }
-
-    func segmentDuration(at index: Int) -> Double {
-        lock.lock()
-        defer { lock.unlock() }
-        return perSegmentDuration
-    }
-
-    var playlistType: HLSPlaylistType { .event }
 }
