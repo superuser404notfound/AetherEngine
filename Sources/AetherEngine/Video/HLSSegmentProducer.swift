@@ -3,23 +3,26 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
-/// Drives libavformat's `hls` muxer for the duration of one rendition
-/// (one elementary stream: video XOR one audio track). Replaces the
-/// previous design where a single producer multiplexed video + an
-/// optional audio side-band into one fMP4 stream.
+/// Drives libavformat's `hls` muxer for the duration of one playback
+/// session. Replaces the previous self-built `FMP4VideoMuxer` + lazy
+/// per-segment-fragment generator pair with a single long-lived
+/// `AVFormatContext` whose segment writes are redirected, via custom
+/// `s->io_open` / `s->io_close2` callbacks, into a `SegmentCache`.
 ///
-/// One producer = one stream = one fMP4 output = one `HLSSegmentCache`.
-/// Pump loop reads from the producer's own `Demuxer`, filters packets
-/// on `sourceStreamIndex`, and writes them as muxer output stream 0.
-/// Caller (HLSVideoEngine) constructs one of these per HLS rendition
-/// it publishes through `HLSLocalServer`: one video producer for the
-/// video rendition, one audio producer per audio rendition.
+/// Why this design: the libavformat HLS-fmp4 output is the same
+/// pipeline `ffmpeg -f hls -hls_segment_type fmp4` emits, byte-for-byte
+/// proven against reference fixtures. The previous design replicated
+/// pieces of this pipeline outside libavformat (per-fragment muxer
+/// instantiation, manual init capture, manual PTS-shift compensation
+/// for B-frame reorder) and accumulated subtle structural drift that
+/// caused AVPlayer to lose A/V sync after a handful of seconds. Letting
+/// libavformat own the entire mux + segment-cut decision tree removes
+/// that whole surface.
 ///
-/// The multi-rendition split is what enables AVMediaSelection-based
-/// seamless audio switching in AVPlayer: each rendition is a self-
-/// contained EXT-X-MEDIA TYPE=AUDIO entry the player can switch into
-/// at PTS-alignment time, without tearing the video render surface
-/// down.
+/// Strict-forward-only in this phase: the muxer pumps from the demuxer
+/// in source order and writes segments 0, 1, 2 ... into the cache.
+/// Backward scrubs are handled in Phase B by tearing this instance
+/// down and constructing a new one with a non-zero `baseIndex`.
 final class HLSSegmentProducer: @unchecked Sendable {
 
     // MARK: - Errors
@@ -40,124 +43,106 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
     }
 
-    /// Per-stream codec config for the video kind.
+    /// Per-stream codec config carried from `HLSVideoEngine` into the
+    /// muxer setup. Same shape as the previous `FMP4VideoMuxer.StreamConfig`
+    /// so the caller's wire-up stays familiar.
     struct StreamConfig {
         let codecpar: UnsafePointer<AVCodecParameters>
         let timeBase: AVRational
         /// Override the codec_tag emitted by the mp4 sub-muxer. Used to
-        /// force `dvh1` / `hvc1` / `avc1` / `vp09` / `av01` instead of
-        /// FFmpeg's defaults of `hev1` / `h264`, which AVPlayer rejects.
+        /// force `dvh1` / `hvc1` / `avc1` instead of FFmpeg's defaults
+        /// of `hev1` / `h264`, which AVPlayer rejects.
         let codecTagOverride: String?
-        /// Source-container stream index. Pump filters packets on this
-        /// index; everything else is discarded.
-        let sourceStreamIndex: Int32
     }
 
-    /// Per-stream codec config for the audio kind. Supports both
-    /// stream-copy passthrough (e.g. EAC3-JOC Atmos) and FLAC re-encode
-    /// via `AudioBridge` for codecs that aren't legal in fMP4.
+    /// Audio output wiring. The producer is agnostic about whether
+    /// the audio is a stream-copy passthrough (e.g. EAC3-JOC Atmos)
+    /// or a FLAC bridge (TrueHD / DTS / Vorbis / PCM / MP2 decoded
+    /// then re-encoded as FLAC). Both shapes funnel through the
+    /// same av_write_frame path; the `bridge` field decides which.
     struct AudioConfig {
         /// codecpar installed on the muxer's audio output stream. For
         /// stream-copy this is the source's codecpar; for FLAC bridge
         /// this is `AudioBridge.encoderCodecpar`.
         let codecpar: UnsafePointer<AVCodecParameters>
-        /// time_base set on the muxer stream. The muxer rewrites this
-        /// to its own auto-picked timescale at write_header time, but
-        /// we still need to set the input value so libavformat knows
-        /// the requested base.
+        /// time_base set on the muxer stream. The muxer will rewrite
+        /// this to its own auto-picked timescale at write_header time
+        /// (similar to the video stream), but we still need to set
+        /// the input value so libavformat knows the requested base.
         let timeBase: AVRational
         /// Source stream index to filter packets from in the demuxer.
         let sourceStreamIndex: Int32
         /// Time base of packets handed to `av_write_frame`. For
-        /// stream-copy this is the source's time_base. For FLAC bridge
-        /// this is `AudioBridge.encoderTimeBase` (the bridge re-stamps
-        /// the FLAC packets it emits into its encoder's time_base).
+        /// stream-copy this is the source's time_base (the demuxer's
+        /// packets are in source units). For FLAC bridge this is
+        /// `AudioBridge.encoderTimeBase` (the bridge re-stamps the
+        /// FLAC packets it emits into its encoder's time_base).
         let inputTimeBase: AVRational
-        /// Optional decode-then-FLAC-encode bridge. Non-nil routes each
-        /// source audio packet through `bridge.feed` and muxes the
-        /// returned FLAC packets; nil means stream-copy.
+        /// Optional decode-then-FLAC-encode bridge. Non-nil means the
+        /// pump routes each source audio packet through `bridge.feed`
+        /// and muxes the returned FLAC packets; nil means the source
+        /// packet is muxed directly (stream-copy).
         let bridge: AudioBridge?
-    }
-
-    /// Discriminated kind: a producer pumps either video XOR one audio
-    /// track, never both. The single-stream invariant is what makes
-    /// the pump loop trivial and the muxer's segment-cut decisions
-    /// per-rendition independent.
-    enum Kind {
-        case video(StreamConfig)
-        case audio(AudioConfig)
     }
 
     // MARK: - State
 
     private let demuxer: Demuxer
-    private let kind: Kind
+    private let videoStreamIndex: Int32
+    private let videoOutputStreamIndex: Int32 = 0
     private let cache: SegmentCache
     /// Absolute index offset for segments produced by this instance.
-    /// Initial bring-up uses 0; the restart machinery passes the
+    /// Phase A always uses 0; Phase B's restart machinery passes the
     /// scrub-target index here.
     private let baseIndex: Int
 
-    /// Drop packets with pts strictly less than this value (in the
-    /// producer's source-stream time_base). Used to align the leading
-    /// edge of every rendition to the same source moment (typically
-    /// the first video keyframe's PTS), so AVPlayer's per-rendition
-    /// wall-clock 0 = the same source content across video + audio.
-    /// `Int64.min` disables the filter.
-    ///
-    /// Why this matters: libavformat's mov sub-muxer normalises each
-    /// track's tfdt[0] to 0 by subtracting the first packet's DTS
-    /// (start_dts latching). With independent producers per rendition,
-    /// the video and audio tracks each have their own start_dts, and
-    /// both renditions emit tfdt[0]=0 on their first fragment. AVPlayer
-    /// plays both at wall-clock 0. If the source's first audio packet
-    /// is at a different PTS than the first video keyframe (audio
-    /// frame quantisation, source-encoding offsets, leading audio in
-    /// re-muxed sources), the content at wall-clock 0 differs between
-    /// renditions. Skipping pre-reference audio packets forces audio's
-    /// first sample to be at-or-after the video reference, capping
-    /// residual desync at one audio frame (~22 ms at 48 kHz AAC).
-    private let skipPacketsBeforePts: Int64
+    /// Source video stream's time_base. Carried from caller so the
+    /// pump can rescale packet timestamps before handing them to the
+    /// muxer (avformat_write_header tends to rewrite the muxer
+    /// stream's time_base to its own preferred value, e.g. 1/16000 for
+    /// 30fps video, which would otherwise make pts=8333 read as 0.52s
+    /// instead of 8.333s and suppress every segment cut).
+    private let sourceVideoTimeBase: AVRational
+    /// Muxer's chosen time_base for the output video stream, latched
+    /// after avformat_write_header. Used as the destination time_base
+    /// for `av_packet_rescale_ts` on every video packet.
+    private var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
 
-    /// Source stream's time_base. Carried into pump so packet pts/dts
-    /// can be rescaled from source units to the muxer's chosen output
-    /// time_base before each `av_write_frame`.
-    private let sourceTimeBase: AVRational
-    /// Muxer's chosen time_base for the output stream, latched after
-    /// `avformat_write_header`. Used as the destination time_base for
-    /// `av_packet_rescale_ts`. The hls muxer (via its mov sub-muxer)
-    /// rewrites the output stream's time_base to its own auto-picked
-    /// timescale (e.g. 1/16000 for 30 fps video, 1/<sampleRate> for
-    /// audio); source packets still carry source-time-base pts/dts so
-    /// we must rescale every packet before writing it.
-    private var muxerTimeBase: AVRational = AVRational(num: 1, den: 1)
-
-    /// Source-container stream index the pump filters on. Cached out
-    /// of the Kind so the hot loop doesn't have to switch each packet.
-    private let sourceStreamIndex: Int32
+    /// Audio wiring info, nil for video-only sessions.
+    private let audioConfig: AudioConfig?
+    /// Audio output stream index in the muxer (1 when audio is wired,
+    /// unused otherwise). Hardcoded since we add at most one audio
+    /// stream and it's always added after the video stream.
+    private let audioOutputStreamIndex: Int32 = 1
+    /// Muxer's chosen time_base for the output audio stream, latched
+    /// after avformat_write_header. Same dance as `muxerVideoTimeBase`.
+    private var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// How many segments the pump is allowed to race ahead of the
-    /// highest segment AVPlayer has actually fetched. With the cache's
-    /// default `forwardWindow = 20` this leaves headroom behind the
-    /// playhead for cheap short-range backward scrubs without
-    /// triggering a producer restart.
+    /// highest segment AVPlayer has actually fetched. With the
+    /// default `SegmentCache.capacity = 30` this leaves ~10 segments
+    /// of headroom behind the playhead for cheap short-range backward
+    /// scrubs without triggering a producer-restart.
     private static let bufferAheadSegments = 20
 
     /// Worker queue running the read → write_frame pump. One per
-    /// producer instance; serial, no concurrent writes to the format
-    /// context. Closed when `stop()` is called.
-    private let pumpQueue: DispatchQueue
+    /// producer instance; the queue is serial, no concurrent writes
+    /// to the format context. Closed when `stop()` is called.
+    private let pumpQueue = DispatchQueue(
+        label: "AetherEngine.HLSSegmentProducer.pump",
+        qos: .userInitiated
+    )
 
     private let stateLock = NSLock()
     private var pumpStarted = false
     private var shouldStop = false
 
     /// Set once the pump exits (EOF, error, or `stop()`). Read by
-    /// `waitForFinish(timeout:)` so the host can synchronously tear
-    /// this producer down before constructing a successor at a
-    /// different `baseIndex` (the scrub-restart path).
+    /// `waitForFinish(timeout:)` so the host can synchronously
+    /// tear down this producer before constructing a successor at a
+    /// different `baseIndex` (the backward-scrub restart path).
     private let finishCondition = NSCondition()
     private var didFinishFlag = false
     var didFinish: Bool {
@@ -170,34 +155,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     init(
         demuxer: Demuxer,
-        kind: Kind,
+        videoStreamIndex: Int32,
+        video: StreamConfig,
+        audio: AudioConfig? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
-        targetSegmentDurationSeconds: Double = 6.0,
-        skipPacketsBeforePts: Int64 = Int64.min
+        targetSegmentDurationSeconds: Double = 6.0
     ) throws {
         self.demuxer = demuxer
-        self.kind = kind
+        self.videoStreamIndex = videoStreamIndex
+        self.audioConfig = audio
         self.cache = cache
         self.baseIndex = baseIndex
-        self.skipPacketsBeforePts = skipPacketsBeforePts
-
-        switch kind {
-        case .video(let cfg):
-            self.sourceStreamIndex = cfg.sourceStreamIndex
-            self.sourceTimeBase = cfg.timeBase
-            self.pumpQueue = DispatchQueue(
-                label: "AetherEngine.HLSSegmentProducer.video.pump",
-                qos: .userInitiated
-            )
-        case .audio(let cfg):
-            self.sourceStreamIndex = cfg.sourceStreamIndex
-            self.sourceTimeBase = cfg.inputTimeBase
-            self.pumpQueue = DispatchQueue(
-                label: "AetherEngine.HLSSegmentProducer.audio.pump",
-                qos: .userInitiated
-            )
-        }
+        self.sourceVideoTimeBase = video.timeBase
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -223,32 +193,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
         ctx.pointee.io_open = hlsProducerIOOpen
         ctx.pointee.io_close2 = hlsProducerIOClose2
 
-        // 4. Add the single output stream. Per-kind codec parameter and
-        //    time-base; the mp4 sub-muxer rescales to its own track
-        //    timescale automatically at write_header.
-        guard let outStream = avformat_new_stream(ctx, nil) else {
+        // 4. Add the video output stream. Time base is the source's;
+        //    the mp4 sub-muxer rescales to its track timescale (mvhd /
+        //    mdhd) automatically.
+        guard let videoStream = avformat_new_stream(ctx, nil) else {
             cleanup()
             throw ProducerError.streamCreationFailed
         }
-        switch kind {
-        case .video(let cfg):
-            let copyRet = avcodec_parameters_copy(outStream.pointee.codecpar, cfg.codecpar)
-            guard copyRet >= 0 else {
+        let vCopy = avcodec_parameters_copy(videoStream.pointee.codecpar, video.codecpar)
+        guard vCopy >= 0 else {
+            cleanup()
+            throw ProducerError.copyParametersFailed(code: vCopy)
+        }
+        videoStream.pointee.time_base = video.timeBase
+        if let override = video.codecTagOverride,
+           let tag = Self.mkTag(fromFourCC: override) {
+            videoStream.pointee.codecpar.pointee.codec_tag = tag
+        }
+
+        // 4b. Add the audio output stream (if any). Stream-copy and
+        //     FLAC-bridge cases use exactly the same wiring here —
+        //     the bridge's `encoderCodecpar` is structured identically
+        //     to a stream-copy codecpar from the caller's point of view.
+        if let audio = audio {
+            guard let audioStream = avformat_new_stream(ctx, nil) else {
                 cleanup()
-                throw ProducerError.copyParametersFailed(code: copyRet)
+                throw ProducerError.streamCreationFailed
             }
-            outStream.pointee.time_base = cfg.timeBase
-            if let override = cfg.codecTagOverride,
-               let tag = Self.mkTag(fromFourCC: override) {
-                outStream.pointee.codecpar.pointee.codec_tag = tag
-            }
-        case .audio(let cfg):
-            let copyRet = avcodec_parameters_copy(outStream.pointee.codecpar, cfg.codecpar)
-            guard copyRet >= 0 else {
+            let aCopy = avcodec_parameters_copy(audioStream.pointee.codecpar, audio.codecpar)
+            guard aCopy >= 0 else {
                 cleanup()
-                throw ProducerError.copyParametersFailed(code: copyRet)
+                throw ProducerError.copyParametersFailed(code: aCopy)
             }
-            outStream.pointee.time_base = cfg.timeBase
+            audioStream.pointee.time_base = audio.timeBase
         }
 
         // 5. Configure hls muxer options. The mp4 sub-muxer's movflags
@@ -274,20 +251,30 @@ final class HLSSegmentProducer: @unchecked Sendable {
             throw ProducerError.writeHeaderFailed(code: ret)
         }
 
-        muxerTimeBase = ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
-
-        let kindDesc: String
-        switch kind {
-        case .video:
-            kindDesc = "video stream=\(sourceStreamIndex)"
-        case .audio(let cfg):
-            let mode = cfg.bridge != nil ? "bridge" : "stream-copy"
-            kindDesc = "audio stream=\(sourceStreamIndex) mode=\(mode)"
+        // Latch the muxer stream's time_base after write_header. The
+        // hls muxer (via its mov sub-muxer) rewrites the output stream
+        // time_base to its own auto-picked timescale (e.g. 1/16000 for
+        // a 30 fps video, 1/<sampleRate> for audio), but the source
+        // packets we feed still carry source-time-base pts/dts. Without
+        // rescaling, every pkt.pts looks scaled wrong and hlsenc's
+        // split threshold against `hls_time * vs->number` never fires
+        // — the entire source ends up as a single segment. We use these
+        // values as the destination time_base for `av_packet_rescale_ts`
+        // on every packet in the pump loop.
+        muxerVideoTimeBase = ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
+        if audio != nil {
+            muxerAudioTimeBase = ctx.pointee.streams.advanced(by: 1).pointee!.pointee.time_base
         }
+
+        let audioDesc = audio.map { a -> String in
+            let mode = a.bridge != nil ? "bridge" : "stream-copy"
+            return " audio=\(mode) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den) muxerTb=\(muxerAudioTimeBase.num)/\(muxerAudioTimeBase.den)"
+        } ?? ""
         EngineLog.emit(
-            "[HLSSegmentProducer] muxer init OK (\(kindDesc), baseIndex=\(baseIndex), targetDur=\(hlsTimeStr)s, "
-            + "srcTb=\(sourceTimeBase.num)/\(sourceTimeBase.den) "
-            + "muxerTb=\(muxerTimeBase.num)/\(muxerTimeBase.den))",
+            "[HLSSegmentProducer] muxer init OK (baseIndex=\(baseIndex), targetDur=\(hlsTimeStr)s, "
+            + "srcTb=\(video.timeBase.num)/\(video.timeBase.den) "
+            + "muxerTb=\(muxerVideoTimeBase.num)/\(muxerVideoTimeBase.den))"
+            + audioDesc,
             category: .session
         )
     }
@@ -310,15 +297,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
     }
 
-    /// Signal the pump to stop at the next loop iteration. Async — the
-    /// pump may be blocked inside `demuxer.readPacket` waiting on an
-    /// HTTP byte-range read, which can take up to its own network
+    /// Signal the pump to stop at the next loop iteration. Async —
+    /// the pump may be blocked inside `demuxer.readPacket` waiting on
+    /// an HTTP byte-range read, which can take up to its own network
     /// timeout to return. Use `waitForFinish(timeout:)` if you need
     /// the pump to actually be gone before proceeding (the restart
     /// path does). Also wakes any pump currently parked in
-    /// `cache.awaitFetchHighWater` so the restart path doesn't pay up
-    /// to a second of latency waiting for the backpressure poll to
-    /// time out on its own.
+    /// `cache.awaitFetchHighWater` so the restart path doesn't pay
+    /// up to a second of latency waiting for the backpressure poll
+    /// to time out on its own.
     func stop() {
         stateLock.lock()
         shouldStop = true
@@ -336,10 +323,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     /// Block until the pump has exited or `timeout` elapses. Returns
-    /// `true` if the pump finished, `false` on timeout (in which case
-    /// the caller can choose to leak this instance and proceed with a
-    /// fresh producer; the lingering pump will finish on its own once
-    /// the demuxer read returns).
+    /// `true` if the pump finished, `false` on timeout (in which
+    /// case the caller can choose to leak this instance and proceed
+    /// with a fresh producer; the lingering pump will finish on its
+    /// own once the demuxer read returns).
     func waitForFinish(timeout: TimeInterval) -> Bool {
         finishCondition.lock()
         defer { finishCondition.unlock() }
@@ -376,50 +363,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
                 defer { av_packet_free(&pktPtr) }
 
-                if packet.pointee.stream_index != sourceStreamIndex {
-                    // Not our stream (other tracks, attachments, etc).
-                    // Each rendition owns its own demuxer cursor, so
-                    // other streams are still demuxed but discarded
-                    // here.
-                    continue
-                }
+                let pktStreamIdx = packet.pointee.stream_index
 
-                // Reference-alignment filter. Skip packets before the
-                // session's global zero (typically the first video
-                // keyframe's PTS) so every rendition's first emitted
-                // packet is at-or-after the same source moment. Without
-                // this, the audio rendition's first packet can be a
-                // few audio frames before the video keyframe and end
-                // up driving the audio track's start_dts behind the
-                // video's, producing a small but persistent A/V offset
-                // that's the same across all audio renditions (so
-                // track switches don't fix it).
-                if skipPacketsBeforePts != Int64.min,
-                   packet.pointee.pts != Int64.min,  // AV_NOPTS_VALUE
-                   packet.pointee.pts < skipPacketsBeforePts {
-                    continue
-                }
-
-                switch kind {
-                case .video:
-                    packet.pointee.stream_index = 0
-                    av_packet_rescale_ts(packet, sourceTimeBase, muxerTimeBase)
-                    let ret = av_write_frame(ctx, packet)
-                    if ret < 0 {
-                        lastError = ret
-                        EngineLog.emit(
-                            "[HLSSegmentProducer] video av_write_frame failed at packet \(packetsRead): \(ret)",
-                            category: .session
-                        )
-                        break readLoop
-                    }
-                    packetsWritten += 1
-
-                case .audio(let cfg):
-                    if let bridge = cfg.bridge {
+                // Audio path. Either stream-copy the source packet
+                // straight into the muxer, or hand it to the FLAC
+                // bridge and mux whatever the encoder spits back out.
+                if let audio = audioConfig, pktStreamIdx == audio.sourceStreamIndex {
+                    if let bridge = audio.bridge {
                         // Decode + resample + FLAC-encode. Each call
                         // returns 0..N encoded FLAC packets stamped in
-                        // `bridge.encoderTimeBase`; caller takes
+                        // `bridge.encoderTimeBase` — caller takes
                         // ownership and frees after muxing.
                         let flacPackets: [UnsafeMutablePointer<AVPacket>]
                         do {
@@ -432,28 +385,50 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             continue
                         }
                         for fp in flacPackets {
-                            fp.pointee.stream_index = 0
-                            av_packet_rescale_ts(fp, cfg.inputTimeBase, muxerTimeBase)
+                            fp.pointee.stream_index = audioOutputStreamIndex
+                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxerAudioTimeBase)
                             _ = av_write_frame(ctx, fp)
                             var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&fpVar)
                         }
-                        packetsWritten += 1
                     } else {
-                        packet.pointee.stream_index = 0
-                        av_packet_rescale_ts(packet, cfg.inputTimeBase, muxerTimeBase)
-                        let ret = av_write_frame(ctx, packet)
-                        if ret < 0 {
-                            lastError = ret
-                            EngineLog.emit(
-                                "[HLSSegmentProducer] audio av_write_frame failed at packet \(packetsRead): \(ret)",
-                                category: .session
-                            )
-                            break readLoop
-                        }
-                        packetsWritten += 1
+                        packet.pointee.stream_index = audioOutputStreamIndex
+                        av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
+                        _ = av_write_frame(ctx, packet)
                     }
+                    continue
                 }
+
+                if pktStreamIdx != videoStreamIndex {
+                    // Subtitles, additional audio tracks, attachments,
+                    // unknown streams — dropped silently. Embedded
+                    // subtitles travel through a side Demuxer owned by
+                    // AetherEngine, not through this pump.
+                    continue
+                }
+
+                // Video path.
+                packet.pointee.stream_index = videoOutputStreamIndex
+
+                // Rescale pts/dts/duration from source time_base to the
+                // muxer's chosen output time_base. The hls muxer
+                // (auto-picked, e.g. 1/16000 for 30 fps) is rarely the
+                // same as the source (commonly 1/1000 for MKV); without
+                // this rescale, the muxer's cut threshold against
+                // `hls_time` interprets source-base values as fractional
+                // seconds and no segment cut ever triggers.
+                av_packet_rescale_ts(packet, sourceVideoTimeBase, muxerVideoTimeBase)
+
+                let ret = av_write_frame(ctx, packet)
+                if ret < 0 {
+                    lastError = ret
+                    EngineLog.emit(
+                        "[HLSSegmentProducer] av_write_frame failed at packet \(packetsRead): \(ret)",
+                        category: .session
+                    )
+                    break readLoop
+                }
+                packetsWritten += 1
             }
         } catch {
             EngineLog.emit(
@@ -556,8 +531,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // just-written segment whenever the cache window
                 // hasn't slid to include `absIdx` yet (race window:
                 // AVPlayer fetch latency greater than muxer cut
-                // interval). Waiting first keeps the window centred
-                // such that every stored segment fits.
+                // interval, e.g. H.264 with ~2-3 MB segments on a
+                // local LAN where the muxer runs ahead of AVPlayer's
+                // network reads). Waiting first keeps the window
+                // centred such that every stored segment fits.
                 //
                 // Poll with short 1 s waits so `stop()` can shut us
                 // down promptly during a restart instead of stranding
@@ -577,8 +554,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
         // playlist.m3u8 (or any other path) — we generate our own
-        // playlist from the pre-planned segment list, so any bytes
-        // hlsenc writes here are discarded.
+        // playlist from the pre-planned keyframe segment list, so any
+        // bytes hlsenc writes here are discarded.
     }
 
     // MARK: - Cleanup
