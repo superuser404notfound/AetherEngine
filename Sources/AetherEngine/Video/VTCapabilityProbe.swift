@@ -30,10 +30,14 @@ enum VTCapabilityProbe {
     /// whether the hardware can decode it. Returns false if the
     /// registration fails or hardware decode is unsupported.
     private static func registerAndCheck(_ codecType: CMVideoCodecType) -> Bool {
-        if #available(iOS 14.0, tvOS 14.0, macOS 11.0, *) {
+        // The supplemental-decoder registration call only landed in
+        // the SDK with tvOS 26.2 / iOS 19 / macOS 16; on older runtimes
+        // Apple ships the decoders built-in so the registration is a
+        // no-op anyway.
+        if #available(tvOS 26.2, iOS 19.0, macOS 16.0, *) {
             VTRegisterSupplementalVideoDecoderIfAvailable(codecType)
         }
-        if #available(iOS 17.0, tvOS 17.0, macOS 14.0, *) {
+        if #available(tvOS 17.0, iOS 17.0, macOS 14.0, *) {
             let supported = VTIsHardwareDecodeSupported(codecType)
             EngineLog.emit("[VTProbe] codec=\(fourccString(codecType)) hwSupported=\(supported)", category: .engine)
             return supported
