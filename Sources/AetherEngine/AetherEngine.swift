@@ -186,6 +186,27 @@ public final class AetherEngine: ObservableObject {
     /// cues.
     private var sidecarTask: Task<Void, Never>?
 
+    /// In-flight embedded-subtitle reader Task. Runs a side Demuxer
+    /// against the same source URL, seeked to the current playhead,
+    /// reading subtitle packets directly. Bypasses the main HLS pump
+    /// (which has already raced past the playhead by ~60-80 s when
+    /// subtitle activation happens mid-playback, so its subtitle
+    /// packets near the visible time have already been read and
+    /// discarded). Cancelled + restarted on track change, on
+    /// `clearSubtitle`, on `seek`, and on `stop`.
+    private var embeddedSubtitleTask: Task<Void, Never>?
+
+    /// Active embedded subtitle stream index, or -1 for none. Used by
+    /// `seek` to know whether to re-arm the side demuxer at the new
+    /// playback position.
+    private var activeEmbeddedSubtitleStreamIndex: Int32 = -1
+
+    /// Source video dimensions captured at `load()` probe time. The
+    /// embedded subtitle decoder uses these as a canvas-size fallback
+    /// when a bitmap codec's PCS hasn't been parsed yet.
+    private var sourceVideoWidth: Int32 = 0
+    private var sourceVideoHeight: Int32 = 0
+
     // MARK: - Init
 
     /// Lifecycle notification observers, stored for cleanup.
@@ -270,6 +291,8 @@ public final class AetherEngine: ObservableObject {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
                 detectedRate = Self.detectFrameRate(stream: stream)
                 detectedDVProfile = (detectedFormat == .dolbyVision)
+                sourceVideoWidth = stream.pointee.codecpar.pointee.width
+                sourceVideoHeight = stream.pointee.codecpar.pointee.height
             }
             probedAudioTracks = probe.audioTrackInfos()
             probedSubtitleTracks = probe.subtitleTrackInfos()
@@ -417,6 +440,17 @@ public final class AetherEngine: ObservableObject {
         state = .seeking
         nativeHost?.seek(to: target)
         currentTime = target
+
+        // Re-arm the side subtitle demuxer at the new playhead so cues
+        // for the post-scrub content surface immediately. Skip when
+        // sidecar SRT is active (it pre-decoded the whole file).
+        if activeEmbeddedSubtitleStreamIndex >= 0, let url = loadedURL {
+            let streamIdx = activeEmbeddedSubtitleStreamIndex
+            embeddedSubtitleTask?.cancel()
+            subtitleCues = []
+            startEmbeddedSubtitleTask(url: url, streamIndex: streamIdx, startAt: target)
+        }
+
         // AVPlayer surfaces post-seek readiness via its own KVO; the
         // engine optimistically flips back to .playing so the host UI
         // doesn't stick on .seeking when the seek lands fast.
@@ -454,19 +488,129 @@ public final class AetherEngine: ObservableObject {
         _ = index
     }
 
-    /// Activate an embedded subtitle stream from the source. Routes
-    /// the demuxer's packets for that stream through an
-    /// `EmbeddedSubtitleDecoder` inside HLSVideoEngine; cues land in
-    /// `subtitleCues` as they're decoded. Supports text codecs
-    /// (SubRip / ASS / SSA / WebVTT / mov_text) and bitmap codecs
-    /// (PGS / DVB / DVD / XSUB) with full canvas-relative
-    /// positioning.
+    /// Activate an embedded subtitle stream from the source. A side
+    /// Demuxer opens the source independently of the main HLS pump,
+    /// seeks to (just before) the current playback position, and
+    /// streams subtitle packets through an `EmbeddedSubtitleDecoder`.
+    /// Cues land in `subtitleCues` typically within 1-2 seconds of
+    /// activation.
+    ///
+    /// Supports text codecs (SubRip / ASS / SSA / WebVTT / mov_text)
+    /// and bitmap codecs (PGS / DVB / DVD / XSUB) with full canvas-
+    /// relative positioning.
+    ///
+    /// Why a side demuxer instead of routing through the main HLS
+    /// pump: when activation happens mid-playback, the main pump has
+    /// already raced ~60-80 s ahead of the playhead and discarded
+    /// every subtitle packet in that window. Re-reading from the
+    /// playhead via a side demuxer is the cheapest way to catch cues
+    /// for content the user is about to see. The side demuxer also
+    /// re-seeks on `engine.seek` so scrubs surface cues at the new
+    /// position immediately.
     public func selectSubtitleTrack(index: Int) {
         cancelSidecarTask()
+        embeddedSubtitleTask?.cancel()
+        embeddedSubtitleTask = nil
+        nativeVideoSession?.setActiveSubtitleStream(nil)
+
+        guard let url = loadedURL else { return }
+
         isSubtitleActive = true
         subtitleCues = []
-        isLoadingSubtitles = false
-        nativeVideoSession?.setActiveSubtitleStream(Int32(index))
+        isLoadingSubtitles = true
+        activeEmbeddedSubtitleStreamIndex = Int32(index)
+
+        startEmbeddedSubtitleTask(url: url, streamIndex: Int32(index), startAt: currentTime)
+    }
+
+    /// Spin up the side-demuxer Task that streams cues into the
+    /// engine. Captured-on-init: the URL, the stream index, the
+    /// start position, and the source video dimensions. The Task's
+    /// run loop is cancellable; `cancel()` triggers a clean exit.
+    private func startEmbeddedSubtitleTask(url: URL, streamIndex: Int32, startAt: Double) {
+        let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
+        let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
+        embeddedSubtitleTask = Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.runEmbeddedSubtitleReader(
+                url: url, streamIndex: streamIndex, startAt: startAt,
+                videoWidth: w, videoHeight: h
+            )
+        }
+    }
+
+    /// Side-demuxer read loop. Opens a fresh `Demuxer` against the
+    /// source URL, seeks to slightly before the requested start time
+    /// (so bitmap codecs catch their PCS / SETUP segments), and
+    /// streams subtitle packets through an `EmbeddedSubtitleDecoder`,
+    /// emitting cues back into the engine on the main actor.
+    nonisolated private func runEmbeddedSubtitleReader(
+        url: URL, streamIndex: Int32, startAt: Double,
+        videoWidth: Int32, videoHeight: Int32
+    ) async {
+        let demuxer = Demuxer()
+        do {
+            try demuxer.open(url: url)
+        } catch {
+            EngineLog.emit("[AetherEngine] embedded subtitle open failed: \(error)", category: .engine)
+            await MainActor.run { [weak self] in
+                self?.isLoadingSubtitles = false
+            }
+            return
+        }
+        defer { demuxer.close() }
+
+        // Seek slightly before the playhead so bitmap subtitle codecs
+        // (PGS / DVB / HDMV) catch their state-machine SETUP segments
+        // before the first END / EVENT segment, otherwise the decoder
+        // accumulates state from a partial event and produces broken
+        // cues. 2 s is enough headroom in practice; PGS PCS / WDS /
+        // ODS / PDS segments arrive at every transition.
+        demuxer.seek(to: max(0, startAt - 2.0))
+
+        guard let stream = demuxer.stream(at: streamIndex),
+              let decoder = EmbeddedSubtitleDecoder(
+                  stream: stream,
+                  sourceVideoWidth: videoWidth,
+                  sourceVideoHeight: videoHeight
+              )
+        else {
+            EngineLog.emit("[AetherEngine] embedded subtitle decoder open failed for stream=\(streamIndex)", category: .engine)
+            await MainActor.run { [weak self] in
+                self?.isLoadingSubtitles = false
+            }
+            return
+        }
+
+        let tb = stream.pointee.time_base
+        EngineLog.emit("[AetherEngine] embedded subtitle reader started: stream=\(streamIndex) startAt=\(String(format: "%.2f", startAt))s codec=\(decoder.codecID.rawValue)", category: .engine)
+
+        await MainActor.run { [weak self] in
+            self?.isLoadingSubtitles = false
+        }
+
+        while !Task.isCancelled {
+            guard let pkt = try? demuxer.readPacket() else {
+                // EOF or fatal error. Exit gracefully; the cues
+                // emitted so far stay in subtitleCues.
+                break
+            }
+            let streamIdx = pkt.pointee.stream_index
+            if streamIdx != streamIndex {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                av_packet_free(&p)
+                continue
+            }
+            let event = decoder.decode(packet: pkt, streamTimeBase: tb)
+            var p: UnsafeMutablePointer<AVPacket>? = pkt
+            av_packet_free(&p)
+            if let event {
+                await MainActor.run { [weak self] in
+                    self?.applySubtitleEvent(event)
+                }
+            }
+        }
+
+        EngineLog.emit("[AetherEngine] embedded subtitle reader exited (cancelled=\(Task.isCancelled))", category: .engine)
     }
 
     /// Apply a decoded subtitle event from HLSVideoEngine's embedded
@@ -525,8 +669,12 @@ public final class AetherEngine: ObservableObject {
     /// decode.
     public func selectSidecarSubtitle(url: URL) {
         cancelSidecarTask()
-        // Sidecar replaces any active embedded stream.
+        // Sidecar replaces any active embedded stream (whether the
+        // legacy HLS-pump routing or the side-demuxer reader).
         nativeVideoSession?.setActiveSubtitleStream(nil)
+        embeddedSubtitleTask?.cancel()
+        embeddedSubtitleTask = nil
+        activeEmbeddedSubtitleStreamIndex = -1
 
         isSubtitleActive = true
         subtitleCues = []
@@ -556,11 +704,14 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// Turn subtitles off and clear cached cues. Tears down both the
-    /// sidecar decode task and the embedded subtitle routing in
-    /// HLSVideoEngine.
+    /// Turn subtitles off and clear cached cues. Tears down the
+    /// sidecar decode task, the side-demuxer embedded reader, and
+    /// the HLS-pump embedded routing in one shot.
     public func clearSubtitle() {
         cancelSidecarTask()
+        embeddedSubtitleTask?.cancel()
+        embeddedSubtitleTask = nil
+        activeEmbeddedSubtitleStreamIndex = -1
         nativeVideoSession?.setActiveSubtitleStream(nil)
         isSubtitleActive = false
         subtitleCues = []
@@ -589,6 +740,9 @@ public final class AetherEngine: ObservableObject {
         playbackBackend = .none
 
         cancelSidecarTask()
+        embeddedSubtitleTask?.cancel()
+        embeddedSubtitleTask = nil
+        activeEmbeddedSubtitleStreamIndex = -1
         isSubtitleActive = false
         subtitleCues = []
         isLoadingSubtitles = false
