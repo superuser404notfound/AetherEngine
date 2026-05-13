@@ -248,8 +248,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoTimeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
+            let firstKeyframePts = keyframes.sorted().first ?? 0
+            let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+            let videoStreamStart = videoStream.pointee.start_time
+            let formatStart = dem.formatStartTime
             EngineLog.emit(
-                "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments",
+                "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments " +
+                "[firstKeyframePts=\(firstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
+                "videoStream.start_time=\(videoStreamStart) format.start_time=\(formatStart)us " +
+                "plan[0].startSeconds=\(String(format: "%.3f", plan.first?.startSeconds ?? -1))]",
                 category: .session
             )
         } else {

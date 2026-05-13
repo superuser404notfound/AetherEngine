@@ -591,11 +591,24 @@ public final class AetherEngine: ObservableObject {
 
         let tb = stream.pointee.time_base
         let streamStartTime = stream.pointee.start_time
+
+        // Comprehensive offset diagnostics: log every PTS-reference
+        // value we have access to so we can correlate cue startTime
+        // (source PTS based) with AVPlayer.currentTime (HLS playlist
+        // based). If videoStream.start_time or format.start_time is
+        // non-zero, that's the offset between source-time and
+        // playlist-time.
+        let formatStart = demuxer.formatStartTime
+        let videoStream = demuxer.videoStreamIndex >= 0 ? demuxer.stream(at: demuxer.videoStreamIndex) : nil
+        let videoStreamStart = videoStream?.pointee.start_time ?? 0
+        let videoTb = videoStream?.pointee.time_base ?? AVRational(num: 1, den: 1)
         EngineLog.emit(
             "[AetherEngine] embedded subtitle reader started: stream=\(streamIndex) " +
             "startAt=\(String(format: "%.2f", startAt))s seekTo=\(String(format: "%.2f", seekTo))s " +
-            "codec=\(decoder.codecID.rawValue) tb=\(tb.num)/\(tb.den) " +
-            "streamStart=\(streamStartTime)",
+            "codec=\(decoder.codecID.rawValue) " +
+            "subTb=\(tb.num)/\(tb.den) subStart=\(streamStartTime) " +
+            "videoTb=\(videoTb.num)/\(videoTb.den) videoStart=\(videoStreamStart) " +
+            "format.start_time=\(formatStart)us",
             category: .engine
         )
 

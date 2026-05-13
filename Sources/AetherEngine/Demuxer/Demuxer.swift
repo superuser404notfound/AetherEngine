@@ -135,6 +135,16 @@ final class Demuxer {
         return dur > 0 ? Double(dur) / Double(AV_TIME_BASE) : 0
     }
 
+    /// AVFormatContext.start_time in microseconds (AV_TIME_BASE units),
+    /// or 0 / AV_NOPTS_VALUE if unknown. Many MKV / TS sources have a
+    /// non-zero format start_time when re-muxed from broadcast or
+    /// edited from longer files; subtracting it from packet PTS yields
+    /// playback time relative to the start of the file's content.
+    var formatStartTime: Int64 {
+        guard let ctx = formatContext else { return 0 }
+        return ctx.pointee.start_time
+    }
+
     /// Index of the best video stream, or -1 if none.
     var videoStreamIndex: Int32 {
         guard let ctx = formatContext else { return -1 }
