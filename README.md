@@ -61,8 +61,9 @@ var body: some View {
 let surface = AetherPlayerView()
 player.bind(view: surface)
 
-try await player.load(url: videoURL)                 // or
-try await player.load(url: videoURL, startPosition: 347.5)
+try await player.load(url: videoURL)                                        // or
+try await player.load(url: videoURL, startPosition: 347.5)                  // resume
+try await player.load(url: videoURL, options: .init(httpHeaders: headers))  // auth
 
 player.play()
 player.pause()
