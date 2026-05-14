@@ -389,6 +389,7 @@ public final class AetherEngine: ObservableObject {
         //    internally; the double-open keeps the failure-mode matrix
         //    small.
         var detectedFormat: VideoFormat = .sdr
+        var effectiveFormat: VideoFormat = .sdr
         var detectedRate: Double? = nil
         var detectedDVProfile: Bool = false
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
@@ -401,8 +402,9 @@ public final class AetherEngine: ObservableObject {
             let videoIdx = probe.videoStreamIndex
             if videoIdx >= 0, let stream = probe.stream(at: videoIdx) {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
+                effectiveFormat = Self.effectiveVideoFormat(detected: detectedFormat, stream: stream)
                 detectedRate = Self.detectFrameRate(stream: stream)
-                detectedDVProfile = (detectedFormat == .dolbyVision)
+                detectedDVProfile = (effectiveFormat == .dolbyVision)
                 detectedCodecID = stream.pointee.codecpar.pointee.codec_id
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
@@ -415,7 +417,12 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
         }
 
-        videoFormat = detectedFormat
+        // Publish the effective format (what the panel actually presents)
+        // not the source's claimed format. HLSVideoEngine already downgrades
+        // a DV asset to plain hvc1 when dvModeAvailable=false, so a DV file
+        // on a non-DV TV plays as HDR10 (PQ base) or HLG (P8.4 base); the
+        // badge needs to match.
+        videoFormat = effectiveFormat
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         // Mirror the audio stream HLSVideoEngine will actually pick.
@@ -433,13 +440,14 @@ public final class AetherEngine: ObservableObject {
         }
         activeAudioTrackIndex = resolvedInitialAudio >= 0 ? Int(resolvedInitialAudio) : nil
         let snappedRate = FrameRateSnap.snap(detectedRate ?? 0)
-        EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) format=\(detectedFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
+        EngineLog.emit("[AetherEngine] load url=\(url.absoluteString) source-format=\(detectedFormat) effective-format=\(effectiveFormat) rate=\(snappedRate.map { String(format: "%.3f", $0) } ?? "n/a")", category: .engine)
 
-        // 2. Display-criteria handshake.
+        // 2. Display-criteria handshake. Drive from the effective format so
+        //    a non-DV panel doesn't get asked to switch into dvh1 mode.
         if !options.suppressDisplayCriteria {
             let codecTag: FourCharCode? = detectedDVProfile ? 0x64766831 : nil
             let willSwitch = displayCriteria.apply(
-                format: detectedFormat,
+                format: effectiveFormat,
                 frameRate: snappedRate,
                 codecTag: codecTag,
                 omitColorExtensions: options.omitCriteriaColorExtensions
@@ -1213,6 +1221,31 @@ public final class AetherEngine: ObservableObject {
         }
         if transfer == AVCOL_TRC_ARIB_STD_B67 {
             return .hlg
+        }
+        return .sdr
+    }
+
+    /// Clamp the source-detected format to what the active display can
+    /// actually present. AVPlayer renders DV's HDR10 (PQ) or HLG base
+    /// layer on a non-DV panel — HLSVideoEngine forces this by emitting
+    /// plain `hvc1` when `dvModeAvailable=false` — so the engine publishes
+    /// the base format the panel ends up showing, not the source's DV
+    /// claim. Picks the base from the source `color_trc`: PQ → hdr10,
+    /// HLG → hlg. SDR-base DV (P8.2) collapses to .sdr; HLSVideoEngine
+    /// refuses to serve it anyway so the badge never reaches the UI.
+    private static func effectiveVideoFormat(
+        detected: VideoFormat,
+        stream: UnsafeMutablePointer<AVStream>
+    ) -> VideoFormat {
+        guard detected == .dolbyVision else { return detected }
+        let caps = displayCapabilities
+        if caps.supportsDolbyVision { return .dolbyVision }
+        let trc = stream.pointee.codecpar.pointee.color_trc
+        if trc == AVCOL_TRC_ARIB_STD_B67 {
+            return caps.supportsHLG ? .hlg : .sdr
+        }
+        if trc == AVCOL_TRC_SMPTE2084 {
+            return caps.supportsHDR10 ? .hdr10 : .sdr
         }
         return .sdr
     }
