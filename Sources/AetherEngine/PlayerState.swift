@@ -81,14 +81,26 @@ public struct LoadOptions: Sendable, Equatable {
     /// Default is empty (no extra headers).
     public var httpHeaders: [String: String]
 
+    /// Experimental: keep the source's `dvh1` codec tag on the HLS
+    /// track even when the active display can't render Dolby Vision,
+    /// instead of downgrading to plain `hvc1`. AVPlayer is then asked
+    /// to ingest a DV asset and tone-map internally (DV → HDR10 on an
+    /// HDR10 panel, DV → SDR on an SDR panel). Whether this actually
+    /// works is hardware-dependent; the production default is `false`
+    /// (matches the long-standing safe path that just strips DV).
+    /// Used by `aetherctl --keep-dvh1` for A/B testing on macOS.
+    public var keepDvh1TagWithoutDV: Bool
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
-        httpHeaders: [String: String] = [:]
+        httpHeaders: [String: String] = [:],
+        keepDvh1TagWithoutDV: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
         self.httpHeaders = httpHeaders
+        self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
     }
 }
 

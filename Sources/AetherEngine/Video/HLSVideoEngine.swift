@@ -151,6 +151,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let sourceHTTPHeaders: [String: String]
     private let dvModeAvailable: Bool
 
+    /// Experimental override: when true, keep the source's `dvh1`
+    /// codec tag (and the full DV classification path) even though
+    /// `dvModeAvailable=false`. AVPlayer is then asked to ingest a
+    /// DV-tagged HLS asset on a non-DV display and tone-map internally.
+    /// Driven from `LoadOptions.keepDvh1TagWithoutDV`; merged into the
+    /// computed `effectiveDvMode` below.
+    private let keepDvh1TagWithoutDV: Bool
+
+    /// `dvModeAvailable || keepDvh1TagWithoutDV`. The classification +
+    /// codec-tag + playlist-URL selection branches all key off this so
+    /// the override is one boolean OR away from the existing logic.
+    private var effectiveDvMode: Bool { dvModeAvailable || keepDvh1TagWithoutDV }
+
     /// Optional caller-chosen audio source stream index. When `nil` the
     /// engine falls back to `av_find_best_stream(AVMEDIA_TYPE_AUDIO)`,
     /// which picks whichever stream libavformat ranks highest (typically
@@ -209,11 +222,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
         dvModeAvailable: Bool = true,
+        keepDvh1TagWithoutDV: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
         self.dvModeAvailable = dvModeAvailable
+        self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
     }
 
@@ -349,7 +364,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // Dolby Vision RPU, classify resolves to one of the
             // av1Profile10x variants and we emit the matching `dav1`
             // codec tag + Apple HLS Authoring Spec CODECS string.
-            let dvRecord = dvModeAvailable ? doviConfigRecord(from: codecpar) : nil
+            let dvRecord = effectiveDvMode ? doviConfigRecord(from: codecpar) : nil
             let resolvedVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_AV1)
             dvVariant = resolvedVariant
 
@@ -442,7 +457,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             case .profile5, .profile81, .profile84, .profile7, .profile82:
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: -1, compatID: -1)
             }
-        } else if !dvModeAvailable {
+        } else if !effectiveDvMode {
             codecTagOverride = "hvc1"
             let hevcLevelRaw = Int(codecpar.pointee.level)
             let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
@@ -649,7 +664,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.start()
 
         let resolvedURL: URL?
-        if dvModeAvailable {
+        if effectiveDvMode {
             resolvedURL = srv.playlistURL
         } else {
             resolvedURL = srv.mediaPlaylistURL
@@ -658,7 +673,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) keepDvh1=\(keepDvh1TagWithoutDV))")
         return url
     }
 

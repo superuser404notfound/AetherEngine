@@ -40,9 +40,20 @@ private func printUsage() {
 
     Usage:
       aetherctl probe <url>
-      aetherctl serve <url>
-      aetherctl validate <url>
+      aetherctl serve [--no-dv] [--keep-dvh1] <url>
+      aetherctl validate [--no-dv] [--keep-dvh1] <url>
       aetherctl <url>             (alias for `serve`)
+
+    Flags (serve / validate only):
+      --no-dv        Pin HLSVideoEngine to dvModeAvailable=false, i.e.
+                     pretend the display can't render Dolby Vision.
+                     Mirrors what AetherEngine.loadNative passes on a
+                     non-DV TV / on macOS (where displayCapabilities
+                     reports supportsDolbyVision=false anyway).
+      --keep-dvh1    With --no-dv: keep the source's `dvh1` codec tag
+                     on the HLS track instead of downgrading to `hvc1`.
+                     Lets you A/B whether AVPlayer accepts a DV-tagged
+                     asset on a non-DV display and tone-maps internally.
 
     Subcommands:
       probe     Open the demuxer, dump format + streams + duration, exit.
@@ -135,7 +146,7 @@ private func runProbe(url: URL) -> Int32 {
 
 // MARK: - serve
 
-private func runServe(url: URL) -> Never {
+private func runServe(url: URL, dvModeAvailable: Bool, keepDvh1: Bool) -> Never {
     // Mirror what the tvOS app does: route every engine log to stdout
     // instead of into a host overlay buffer, so the CLI session reads
     // linearly.
@@ -148,10 +159,19 @@ private func runServe(url: URL) -> Never {
         print("[\(timestamp)] \(line)")
     }
 
-    print("aetherctl serve: \(url.absoluteString)")
+    let flags = [
+        dvModeAvailable ? nil : "--no-dv",
+        keepDvh1 ? "--keep-dvh1" : nil
+    ].compactMap { $0 }
+    let flagSuffix = flags.isEmpty ? "" : " [\(flags.joined(separator: " "))]"
+    print("aetherctl serve: \(url.absoluteString)\(flagSuffix)")
     print("")
 
-    let engine = HLSVideoEngine(url: url)
+    let engine = HLSVideoEngine(
+        url: url,
+        dvModeAvailable: dvModeAvailable,
+        keepDvh1TagWithoutDV: keepDvh1
+    )
     let playbackURL: URL
     do {
         playbackURL = try engine.start()
@@ -187,7 +207,7 @@ private func runServe(url: URL) -> Never {
 
 // MARK: - validate
 
-private func runValidate(url: URL) -> Int32 {
+private func runValidate(url: URL, dvModeAvailable: Bool, keepDvh1: Bool) -> Int32 {
     EngineLog.handler = { line in
         let timestamp = ISO8601DateFormatter.string(
             from: Date(),
@@ -197,10 +217,19 @@ private func runValidate(url: URL) -> Int32 {
         print("[\(timestamp)] \(line)")
     }
 
-    print("aetherctl validate: \(url.absoluteString)")
+    let flags = [
+        dvModeAvailable ? nil : "--no-dv",
+        keepDvh1 ? "--keep-dvh1" : nil
+    ].compactMap { $0 }
+    let flagSuffix = flags.isEmpty ? "" : " [\(flags.joined(separator: " "))]"
+    print("aetherctl validate: \(url.absoluteString)\(flagSuffix)")
     print("")
 
-    let engine = HLSVideoEngine(url: url)
+    let engine = HLSVideoEngine(
+        url: url,
+        dvModeAvailable: dvModeAvailable,
+        keepDvh1TagWithoutDV: keepDvh1
+    )
     let playbackURL: URL
     do {
         playbackURL = try engine.start()
@@ -259,22 +288,35 @@ if first == "--help" || first == "-h" || first == "help" {
     exit(0)
 }
 
-// Subcommand path: explicit subcommand + url argument.
+/// Pluck a boolean flag out of the rest-args list, returning whether
+/// it was present. Modifies `rest` in place. Unknown args stay in
+/// `rest` so the URL positional ends up there.
+private func takeFlag(_ name: String, from rest: inout [String]) -> Bool {
+    guard let idx = rest.firstIndex(of: name) else { return false }
+    rest.remove(at: idx)
+    return true
+}
+
+// Subcommand path: explicit subcommand + flags + url.
 if ["probe", "serve", "validate"].contains(first) {
-    guard args.count >= 3 else {
+    var rest = Array(args.dropFirst(2))
+    let noDV = takeFlag("--no-dv", from: &rest)
+    let keepDvh1 = takeFlag("--keep-dvh1", from: &rest)
+    guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
         print("")
         printUsage()
         exit(64)
     }
-    let url = parseSourceURL(args[2])
+    let url = parseSourceURL(urlArg)
+    let dvModeAvailable = !noDV
     switch first {
     case "probe":
         exit(runProbe(url: url))
     case "serve":
-        runServe(url: url)  // never returns
+        runServe(url: url, dvModeAvailable: dvModeAvailable, keepDvh1: keepDvh1)
     case "validate":
-        exit(runValidate(url: url))
+        exit(runValidate(url: url, dvModeAvailable: dvModeAvailable, keepDvh1: keepDvh1))
     default:
         printUsage()
         exit(64)
@@ -283,4 +325,4 @@ if ["probe", "serve", "validate"].contains(first) {
 
 // Bare URL: backwards-compatible `aetherctl <url>` == `aetherctl serve <url>`.
 let url = parseSourceURL(first)
-runServe(url: url)
+runServe(url: url, dvModeAvailable: true, keepDvh1: false)
