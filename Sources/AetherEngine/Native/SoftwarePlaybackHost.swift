@@ -86,6 +86,16 @@ final class SoftwarePlaybackHost {
     /// after a pause without the host needing to know its history.
     private var lastRate: Float = 1.0
 
+    /// Source-position seconds the host opened at, captured so the
+    /// demux loop can align the synchronizer's master clock to the
+    /// first decoded sample's PTS. Cold-start at 0 is fine because
+    /// the source's first packet PTS is also ~0; resume / audio-switch
+    /// reload with a non-zero startPosition would otherwise leave the
+    /// clock at .zero while samples arrive with PTS=startPosition,
+    /// causing the synchronizer to wait `startPosition` seconds
+    /// before rendering — visible as "frozen frame, no audio".
+    private var initialClockTime: CMTime = .zero
+
     nonisolated var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
@@ -162,6 +172,18 @@ final class SoftwarePlaybackHost {
 
         if let start = startPosition, start > 0 {
             dem.seek(to: start)
+            // Mirror the same skip-PTS + clock-alignment dance the
+            // seek() path performs, so the demux loop drops pre-
+            // keyframe frames and the synchronizer starts ticking at
+            // the resume offset (not at .zero) once the first audio
+            // sample arrives.
+            let startTime = CMTime(seconds: start, preferredTimescale: 90000)
+            videoDecoder.skipUntilPTS = startTime
+            renderer.setSkipThreshold(startTime)
+            initialClockTime = startTime
+            currentTime = start
+        } else {
+            initialClockTime = .zero
         }
 
         startTimeUpdates()
@@ -302,6 +324,8 @@ final class SoftwarePlaybackHost {
         let aIdx = audioStreamIndex
         let rndr = renderer
         let condition = demuxCondition
+        let initialClock = initialClockTime
+        let initialRate = lastRate
         let getIsPlaying: @Sendable () -> Bool = { [weak self] in self?.isPlaying ?? false }
         let getStopRequested: @Sendable () -> Bool = { [weak self] in self?.stopRequested ?? true }
         let onError: @Sendable (String) -> Void = { [weak self] msg in
@@ -325,6 +349,8 @@ final class SoftwarePlaybackHost {
                 renderer: rndr,
                 displayLayer: layer.value,
                 condition: condition,
+                initialClockTime: initialClock,
+                initialRate: initialRate,
                 isPlaying: getIsPlaying,
                 stopRequested: getStopRequested,
                 onError: onError,
@@ -350,6 +376,8 @@ final class SoftwarePlaybackHost {
         renderer: SampleBufferRenderer,
         displayLayer: AVSampleBufferDisplayLayer,
         condition: NSCondition,
+        initialClockTime: CMTime,
+        initialRate: Float,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
@@ -403,12 +431,17 @@ final class SoftwarePlaybackHost {
                     aOut.enqueue(sampleBuffer: buf)
                 }
                 // Kick the synchronizer the first time we've actually
-                // enqueued audio. start() is guarded by _isStarted so
-                // repeated calls are harmless; this just bridges the
-                // gap between play() flipping isPlaying=true and the
-                // first sample being available to anchor the clock.
+                // enqueued audio. seekClock is idempotent against
+                // repeated calls (it sets _isStarted and start() then
+                // no-ops), and it sets the clock to `initialClockTime`
+                // which is the resume / audio-switch start position
+                // (.zero on cold-start). Without this alignment the
+                // synchronizer would tick from .zero while samples
+                // arrive PTS-stamped at the resume offset, freezing
+                // playback for `initialClockTime` seconds while the
+                // queue fills up and trips err=-12080.
                 if !buffers.isEmpty {
-                    aOut.start(at: .zero)
+                    aOut.seekClock(to: initialClockTime, rate: initialRate)
                 }
             }
 
