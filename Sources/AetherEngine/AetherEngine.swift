@@ -274,6 +274,67 @@ public final class AetherEngine: ObservableObject {
         setupLifecycleObservers()
     }
 
+    // MARK: - Probe
+
+    /// One-shot read of a source's container + stream metadata,
+    /// without spinning up the HLS server or any decoders. Returns
+    /// the same kind of info `load(url:)` collects internally before
+    /// dispatching, packaged as a `SourceProbe` for hosts and CLI
+    /// tools that just want to know "what's in this file?".
+    ///
+    /// Network sources fetch a HEAD probe + a small initial range
+    /// for libavformat's stream info pass; total bytes pulled depend
+    /// on the container but typically a few MB. File sources read
+    /// from disk directly via FFmpeg's file protocol.
+    ///
+    /// - Parameters:
+    ///   - url: Media source (`file://`, `http://`, or `https://`).
+    ///   - options: Forwarded for `httpHeaders` only; other flags are
+    ///     ignored since no playback session starts.
+    /// - Throws: Any error the demuxer raises during open / probe.
+    public nonisolated static func probe(
+        url: URL,
+        options: LoadOptions = .init()
+    ) throws -> SourceProbe {
+        let demuxer = Demuxer()
+        try demuxer.open(url: url, extraHeaders: options.httpHeaders)
+        defer { demuxer.close() }
+
+        var detectedFormat: VideoFormat = .sdr
+        var detectedRate: Double? = nil
+        var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
+        var width: Int32 = 0
+        var height: Int32 = 0
+        let videoIdx = demuxer.videoStreamIndex
+        if videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) {
+            detectedFormat = Self.detectVideoFormat(stream: stream)
+            detectedRate = Self.detectFrameRate(stream: stream)
+            detectedCodecID = stream.pointee.codecpar.pointee.codec_id
+            width = stream.pointee.codecpar.pointee.width
+            height = stream.pointee.codecpar.pointee.height
+        }
+        let codecName: String? = {
+            guard detectedCodecID != AV_CODEC_ID_NONE,
+                  let cstr = avcodec_get_name(detectedCodecID) else { return nil }
+            return String(cString: cstr)
+        }()
+        let snappedRate = detectedRate.flatMap { FrameRateSnap.snap($0) }
+
+        return SourceProbe(
+            url: url,
+            durationSeconds: demuxer.duration,
+            videoFormat: detectedFormat,
+            videoCodecID: Int32(bitPattern: detectedCodecID.rawValue),
+            videoCodecName: codecName,
+            videoWidth: width,
+            videoHeight: height,
+            videoFrameRate: snappedRate,
+            isDolbyVision: detectedFormat == .dolbyVision,
+            audioTracks: demuxer.audioTrackInfos(),
+            subtitleTracks: demuxer.subtitleTrackInfos()
+        )
+    }
+
     // MARK: - Public load
 
     /// Load a media file or stream URL. Replaces any current playback.
@@ -1140,7 +1201,7 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Format / frame-rate probing
 
-    private static func detectVideoFormat(stream: UnsafeMutablePointer<AVStream>) -> VideoFormat {
+    private nonisolated static func detectVideoFormat(stream: UnsafeMutablePointer<AVStream>) -> VideoFormat {
         let codecpar = stream.pointee.codecpar.pointee
         let transfer = codecpar.color_trc
         // PQ + DV side data → dolbyVision; PQ alone → hdr10. HLG → hlg.
@@ -1156,7 +1217,7 @@ public final class AetherEngine: ObservableObject {
         return .sdr
     }
 
-    private static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
+    private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {
         let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
         guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {
             return false
@@ -1169,7 +1230,7 @@ public final class AetherEngine: ObservableObject {
         return false
     }
 
-    private static func detectFrameRate(stream: UnsafeMutablePointer<AVStream>) -> Double? {
+    private nonisolated static func detectFrameRate(stream: UnsafeMutablePointer<AVStream>) -> Double? {
         let avg = stream.pointee.avg_frame_rate
         if avg.den > 0 && avg.num > 0 {
             return Double(avg.num) / Double(avg.den)

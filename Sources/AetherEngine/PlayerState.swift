@@ -109,6 +109,70 @@ public enum VideoFormat: Sendable, Equatable {
     case hlg
 }
 
+/// One-shot read of a media source's container + stream metadata.
+/// Returned from `AetherEngine.probe(url:options:)`; no HLS server is
+/// spun up, no decoders are opened. Intended for "what's in this
+/// file?" debugging and host-side detail surfaces. The probe does the
+/// same demuxer-open dance `load(url:)` does internally but tears down
+/// immediately after reading metadata.
+public struct SourceProbe: Sendable {
+    /// The URL that was probed (echoed back for convenience).
+    public let url: URL
+    /// Total duration in seconds, or 0 if the source's container does
+    /// not advertise one (live streams, pipes).
+    public let durationSeconds: Double
+    /// HDR / DV classification of the video track. `.sdr` for sources
+    /// without HDR signaling or without a video track at all.
+    public let videoFormat: VideoFormat
+    /// FFmpeg AVCodecID raw value of the video stream's codec, or
+    /// `AV_CODEC_ID_NONE.rawValue` (0) if there is no video track.
+    public let videoCodecID: Int32
+    /// Best-effort human-readable codec name (e.g. "hevc", "h264",
+    /// "av1", "vp9"). `nil` when libavcodec doesn't expose one.
+    public let videoCodecName: String?
+    /// Pixel width of the video frame, 0 if no video track.
+    public let videoWidth: Int32
+    /// Pixel height of the video frame, 0 if no video track.
+    public let videoHeight: Int32
+    /// Frame rate snapped to a standard rate (23.976, 24, 25, ...) or
+    /// `nil` when the source does not advertise one or has no video.
+    public let videoFrameRate: Double?
+    /// True if the video track signals Dolby Vision (any profile).
+    public let isDolbyVision: Bool
+    /// Audio tracks in source order. Empty when the source has no
+    /// audio.
+    public let audioTracks: [TrackInfo]
+    /// Subtitle tracks in source order, both embedded text and
+    /// bitmap (PGS / DVB) variants.
+    public let subtitleTracks: [TrackInfo]
+
+    public init(
+        url: URL,
+        durationSeconds: Double,
+        videoFormat: VideoFormat,
+        videoCodecID: Int32,
+        videoCodecName: String?,
+        videoWidth: Int32,
+        videoHeight: Int32,
+        videoFrameRate: Double?,
+        isDolbyVision: Bool,
+        audioTracks: [TrackInfo],
+        subtitleTracks: [TrackInfo]
+    ) {
+        self.url = url
+        self.durationSeconds = durationSeconds
+        self.videoFormat = videoFormat
+        self.videoCodecID = videoCodecID
+        self.videoCodecName = videoCodecName
+        self.videoWidth = videoWidth
+        self.videoHeight = videoHeight
+        self.videoFrameRate = videoFrameRate
+        self.isDolbyVision = isDolbyVision
+        self.audioTracks = audioTracks
+        self.subtitleTracks = subtitleTracks
+    }
+}
+
 /// Metadata about an audio or subtitle track in the loaded media.
 public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// Track index as reported by FFmpeg's AVStream.

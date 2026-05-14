@@ -6,3 +6,8 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 build/
+
+# Generated test clips from Scripts/fetch-fixtures.sh + user-supplied
+# samples in Fixtures/user/. Both are local-only by design; the script
+# regenerates the synthetic clips on demand.
+Fixtures/

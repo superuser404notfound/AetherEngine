@@ -219,6 +219,46 @@ Sources/AetherEngine/
 | AVFoundation                                                       | System    | AVPlayer + AVDisplayManager (native path); AVSampleBufferDisplayLayer + AVSampleBufferRenderSynchronizer (SW path) |
 | CoreMedia                                                          | System    | Sample descriptions, format-description tagging, CMTimebase                |
 
+## aetherctl
+
+A standalone macOS CLI is shipped alongside the library for repro
+work without going through TestFlight + Apple TV. Three subcommands,
+all operating on a media source URL (`file://` or `http(s)://`):
+
+```bash
+swift run aetherctl probe <url>     # dump container + streams + duration, exit
+swift run aetherctl serve <url>     # park the engine's loopback HLS-fMP4 server
+swift run aetherctl validate <url>  # serve + run mediastreamvalidator, exit
+swift run aetherctl <url>           # alias for serve (backwards compat)
+```
+
+`probe` opens the demuxer, prints the codec / resolution / frame rate
+of the video track, the audio track list (codec, channels, language,
+Atmos flag), the subtitle track list, then exits. No HLS server is
+started.
+
+`serve` is the original behavior. The CLI prints the loopback URL and
+parks until Ctrl-C; from another terminal you can:
+
+```bash
+curl -i  http://127.0.0.1:<port>/master.m3u8
+curl -o  /tmp/init.mp4   http://127.0.0.1:<port>/init.mp4
+mediastreamvalidator http://127.0.0.1:<port>/master.m3u8
+mp4dump --verbosity 1 /tmp/init.mp4
+ffprobe -v debug /tmp/seg0.mp4
+open 'http://127.0.0.1:<port>/master.m3u8'   # macOS QuickTime
+```
+
+`validate` is the same plus an inline `xcrun mediastreamvalidator`
+run against the loopback manifest, with the report printed and the
+engine torn down on completion.
+
+For repeatable runs, `Scripts/fetch-fixtures.sh` generates a small
+set of synthetic FFmpeg test clips in `./Fixtures/` (H.264 SDR,
+HEVC HDR10, AV1, VP9) covering both the native AVPlayer path and
+the software fallback. Real-world DV / Atmos / multichannel sources
+go in `./Fixtures/user/` (gitignored).
+
 ## Non-goals
 
 Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
