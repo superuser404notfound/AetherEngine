@@ -81,21 +81,22 @@ public struct LoadOptions: Sendable, Equatable {
     /// Default is empty (no extra headers).
     public var httpHeaders: [String: String]
 
-    /// Experimental: keep the source's `dvh1` codec tag on the HLS
-    /// track even when the active display can't render Dolby Vision,
-    /// instead of downgrading to plain `hvc1`. AVPlayer is then asked
-    /// to ingest a DV asset and tone-map internally (DV → HDR10 on an
-    /// HDR10 panel, DV → SDR on an SDR panel). Whether this actually
-    /// works is hardware-dependent; the production default is `false`
-    /// (matches the long-standing safe path that just strips DV).
-    /// Used by `aetherctl --keep-dvh1` for A/B testing on macOS.
+    /// Keep the source's `dvh1` codec tag on the HLS track even when the
+    /// active display can't render Dolby Vision, instead of downgrading
+    /// to plain `hvc1`. AVPlayer ingests the DV asset and tone-maps
+    /// internally using the per-frame DV trim metadata (DV → HDR10 on
+    /// an HDR10 panel, DV → SDR on an SDR panel); strip the tag and
+    /// VideoToolbox drops the RPU side data, falling back to static
+    /// HDR10. Default on; verified across Dolby's reference P5 / P8.1 /
+    /// P8.4 samples on macOS AVPlayer. Set false only to reproduce the
+    /// legacy `hvc1` downgrade for debugging.
     public var keepDvh1TagWithoutDV: Bool
 
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
         httpHeaders: [String: String] = [:],
-        keepDvh1TagWithoutDV: Bool = false
+        keepDvh1TagWithoutDV: Bool = true
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
