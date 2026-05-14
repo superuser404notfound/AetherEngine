@@ -643,20 +643,61 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceAudioStream: UnsafeMutablePointer<AVStream>?,
         audioHLSCodecs: inout String?
     ) throws -> HLSSegmentProducer {
+        // Detect if the source is EAC3+JOC Atmos so we can flag any
+        // stream-copy → FLAC-bridge fallback as an Atmos downgrade.
+        // EAC3 profile=30 is the JOC marker libavformat's demuxer sets
+        // on Atmos streams. If this fallback ever fires the user is
+        // silently getting lossless bed-channel FLAC instead of Atmos
+        // (object metadata is lost in the PCM intermediate), so we
+        // want this loud in the log so it surfaces before someone
+        // notices their AVR's Atmos indicator stayed off.
+        let sourceIsAtmos: Bool = {
+            guard let stream = sourceAudioStream else { return false }
+            return stream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_EAC3
+                && stream.pointee.codecpar.pointee.profile == 30
+        }()
+
         // If the source already needs the bridge (TrueHD / DTS / Vorbis
         // / PCM / MP2), skip the stream-copy attempt — we know the
         // muxer won't accept those codecs in fMP4 anyway.
         if !preferBridge, let cfg = streamCopyAudio {
             self.savedAudioConfig = cfg
             do {
-                return try makeProducer(baseIndex: 0)
+                let prod = try makeProducer(baseIndex: 0)
+                if sourceIsAtmos {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact",
+                        category: .session
+                    )
+                }
+                return prod
             } catch {
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio stream-copy header write failed (\(error)), retrying with FLAC bridge",
-                    category: .session
-                )
+                if sourceIsAtmos {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] WARNING: Atmos downgrade — EAC3+JOC stream-copy rejected by mp4 muxer (\(error)). "
+                        + "Falling back to FLAC bridge: bed channels stay lossless, but object metadata is lost. "
+                        + "Source: \(sourceAudioStream?.pointee.codecpar.pointee.profile.description ?? "?") profile, "
+                        + "channels=\(sourceAudioStream?.pointee.codecpar.pointee.ch_layout.nb_channels ?? -1). "
+                        + "If you see this in production, capture the source MKV — dec3 extradata reconstruction can recover Atmos.",
+                        category: .session
+                    )
+                } else {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] audio stream-copy header write failed (\(error)), retrying with FLAC bridge",
+                        category: .session
+                    )
+                }
                 // Fall through to bridge attempt.
             }
+        } else if preferBridge && sourceIsAtmos {
+            // Caller pre-decided bridge before reaching here. For Atmos
+            // that's wrong — only legacy / non-fMP4-legal codecs should
+            // pre-bridge. Diagnose this explicitly so a future codec-
+            // table mistake doesn't silently degrade Atmos.
+            EngineLog.emit(
+                "[HLSVideoEngine] WARNING: Atmos source pre-routed to FLAC bridge without stream-copy attempt — Atmos lost. Investigate the codec compatibility table.",
+                category: .session
+            )
         }
 
         // FLAC bridge attempt. Requires a source audio stream.
