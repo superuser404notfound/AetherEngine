@@ -106,6 +106,18 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return displayLayer
     }
 
+    /// Public wrapper around `queueTarget.isReadyForMoreMediaData` so the
+    /// engine's demux loop can back-pressure against the actual queue.
+    /// Reading the layer's own `isReadyForMoreMediaData` is misleading
+    /// after the iOS 18 / tvOS 18 / macOS 15 split: queue ops route
+    /// through `sampleBufferRenderer`, but the layer's own property
+    /// stays optimistically true and never reflects actual back-pressure,
+    /// so the loop happily over-enqueues into a full renderer queue and
+    /// trips `FigVideoQueueRemote err=-12080`.
+    var isReadyForMoreMediaData: Bool {
+        queueTarget.isReadyForMoreMediaData
+    }
+
     private var queueStatus: AVQueuedSampleBufferRenderingStatus {
         if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
             return displayLayer.sampleBufferRenderer.status

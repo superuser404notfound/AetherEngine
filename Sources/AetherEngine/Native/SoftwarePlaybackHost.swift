@@ -235,16 +235,22 @@ final class SoftwarePlaybackHost {
         // Drop frames before the seek target until a keyframe lines up.
         // SoftwareVideoDecoder honors `skipUntilPTS` internally per
         // pre-collapse contract.
-        let skipPTS = CMTime(seconds: seconds, preferredTimescale: 90000)
-        videoDecoder.skipUntilPTS = skipPTS
-        renderer.setSkipThreshold(skipPTS)
+        let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+        videoDecoder.skipUntilPTS = targetTime
+        renderer.setSkipThreshold(targetTime)
 
         currentTime = seconds
 
         if wasPlaying {
-            // Caller invoked seek mid-playback; resume.
-            audioOutput?.start(at: .zero)
-            audioOutput?.setRate(lastRate)
+            // Jump the synchronizer's master clock to the seek target so
+            // PTS-stamped samples decoded after the seek align with the
+            // clock. Calling `start(at: .zero)` here would wedge the
+            // queue: samples come back with PTS=seekTarget but the clock
+            // is at 0, so the synchronizer waits seekTarget seconds
+            // before rendering — visible as "frozen frame, no audio"
+            // until the wait elapses, plus the renderer's queue fills
+            // up and trips err=-12080 from FigVideoQueueRemote.
+            audioOutput?.seekClock(to: targetTime, rate: lastRate)
             isPlaying = true
         }
     }
@@ -379,7 +385,10 @@ final class SoftwarePlaybackHost {
             let streamIdx = packet.pointee.stream_index
 
             if streamIdx == videoStreamIndex {
-                while !displayLayer.isReadyForMoreMediaData && !stopRequested() {
+                // Back-pressure against the renderer's actual queue, not
+                // the display layer's deprecated property — see
+                // `SampleBufferRenderer.isReadyForMoreMediaData` doc.
+                while !renderer.isReadyForMoreMediaData && !stopRequested() {
                     Thread.sleep(forTimeInterval: 0.005)
                 }
                 if stopRequested() {

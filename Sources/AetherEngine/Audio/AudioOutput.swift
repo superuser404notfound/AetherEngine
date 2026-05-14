@@ -189,4 +189,19 @@ final class AudioOutput: @unchecked Sendable {
         renderer.flush()
         _isStarted = false
     }
+
+    /// Jump the synchronizer's master clock to a specific time and
+    /// resume at the given rate atomically. Used by seek paths so PTS-
+    /// stamped samples decoded after the seek align with the clock,
+    /// without falling-through-time race windows that
+    /// `pause → flush → setRate` would expose. Idempotent on
+    /// `_isStarted` (post-seek the synchronizer is started by definition,
+    /// so subsequent demux-loop `start(at:)` calls are no-ops).
+    func seekClock(to time: CMTime, rate: Float) {
+        lock.lock()
+        defer { lock.unlock() }
+        _rate = rate
+        synchronizer.setRate(rate, time: time)
+        _isStarted = true
+    }
 }
