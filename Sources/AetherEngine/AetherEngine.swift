@@ -697,19 +697,39 @@ public final class AetherEngine: ObservableObject {
 
         state = .loading
         let previousAudioIndex = activeAudioTrackIndex
+        // Snapshot the active backend BEFORE stopInternal wipes it.
+        // The reload has to land on whichever pipeline currently owns
+        // playback — calling loadNative on a SW-routed source would
+        // throw `unsupportedCodec` (HLSVideoEngine accepts HEVC / H.264
+        // / VP9 / probed-AV1, not SW-only AV1) and leave the user
+        // staring at a "playback stopped" error after picking a
+        // different audio track.
+        let wasOnSoftwarePath = (playbackBackend == .software)
         stopInternal()
         loadedURL = url
 
         do {
-            try await loadNative(
-                url: url,
-                startPosition: resumeAt > 1 ? resumeAt : nil,
-                audioSourceStreamIndex: audioStreamIndex
-            )
-            playbackBackend = .native
-            activeAudioTrackIndex = Int(audioStreamIndex)
-            presentCurrentLayer()
-            nativeHost?.play()
+            if wasOnSoftwarePath {
+                try await loadSoftware(
+                    url: url,
+                    startPosition: resumeAt > 1 ? resumeAt : nil,
+                    audioSourceStreamIndex: audioStreamIndex
+                )
+                playbackBackend = .software
+                activeAudioTrackIndex = Int(audioStreamIndex)
+                presentCurrentLayer()
+                softwareHost?.play()
+            } else {
+                try await loadNative(
+                    url: url,
+                    startPosition: resumeAt > 1 ? resumeAt : nil,
+                    audioSourceStreamIndex: audioStreamIndex
+                )
+                playbackBackend = .native
+                activeAudioTrackIndex = Int(audioStreamIndex)
+                presentCurrentLayer()
+                nativeHost?.play()
+            }
             state = .playing
         } catch {
             EngineLog.emit(
