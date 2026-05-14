@@ -15,6 +15,7 @@ import Libavutil
 final class AVIOReader: @unchecked Sendable {
 
     private let url: URL
+    private let extraHeaders: [String: String]
     private let session: URLSession
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
@@ -50,13 +51,25 @@ final class AVIOReader: @unchecked Sendable {
     private let streamLock = NSLock()
     private let streamDataReady = DispatchSemaphore(value: 0)
 
-    init(url: URL) {
+    init(url: URL, extraHeaders: [String: String] = [:]) {
         self.url = url
+        self.extraHeaders = extraHeaders
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForResource = 60
         config.httpMaximumConnectionsPerHost = 2
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
+    }
+
+    /// Apply the caller-supplied extra headers to a request. Used by
+    /// every site that builds a URLRequest against the source URL
+    /// (probe HEAD, Range fetch, streaming GET) so auth headers flow
+    /// consistently. Range / method / timeout are set elsewhere and
+    /// not overridden here.
+    private func applyExtraHeaders(_ request: inout URLRequest) {
+        for (name, value) in extraHeaders {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
     }
 
     func open() throws {
@@ -290,6 +303,7 @@ final class AVIOReader: @unchecked Sendable {
     private func streamDownloadSync() {
         var request = URLRequest(url: url)
         request.timeoutInterval = 0  // No timeout for live streams
+        applyExtraHeaders(&request)
 
         let semaphore = DispatchSemaphore(value: 0)
 
@@ -399,6 +413,7 @@ final class AVIOReader: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 5
+        applyExtraHeaders(&request)
 
         do {
             let (_, response) = try syncRequest(request)
@@ -430,6 +445,7 @@ final class AVIOReader: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
         request.timeoutInterval = 15
+        applyExtraHeaders(&request)
 
         var lastError: Error?
         for attempt in 0..<Self.maxRetries {

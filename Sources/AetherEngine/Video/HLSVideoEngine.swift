@@ -148,6 +148,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     // MARK: - State
 
     private let sourceURL: URL
+    private let sourceHTTPHeaders: [String: String]
     private let dvModeAvailable: Bool
 
     /// Optional caller-chosen audio source stream index. When `nil` the
@@ -198,10 +199,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     public init(
         url: URL,
+        sourceHTTPHeaders: [String: String] = [:],
         dvModeAvailable: Bool = true,
         audioSourceStreamIndexOverride: Int32? = nil
     ) {
         self.sourceURL = url
+        self.sourceHTTPHeaders = sourceHTTPHeaders
         self.dvModeAvailable = dvModeAvailable
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
     }
@@ -214,7 +217,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // 1. Open the source.
         let dem = Demuxer()
         do {
-            try dem.open(url: sourceURL)
+            try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders)
         } catch {
             throw HLSVideoEngineError.openFailed(reason: "\(error)")
         }

@@ -29,11 +29,16 @@ final class Demuxer: @unchecked Sendable {
     private var avioReader: AVIOReader?
 
     /// Open a media URL and probe its streams.
-    func open(url: URL) throws {
+    ///
+    /// `extraHeaders` are attached to every HTTP request the AVIO
+    /// reader issues against `url` (HEAD probe + Range / streaming
+    /// GETs). Ignored for `file://` URLs. Pass auth tokens or any
+    /// other server-required headers here. Default empty.
+    func open(url: URL, extraHeaders: [String: String] = [:]) throws {
         let isHTTP = url.scheme == "http" || url.scheme == "https"
 
         if isHTTP {
-            try openHTTP(url: url)
+            try openHTTP(url: url, extraHeaders: extraHeaders)
         } else {
             try openLocal(url: url)
         }
@@ -60,9 +65,9 @@ final class Demuxer: @unchecked Sendable {
     }
 
     /// Open an HTTP(S) URL via custom AVIO context + URLSession.
-    private func openHTTP(url: URL) throws {
+    private func openHTTP(url: URL, extraHeaders: [String: String]) throws {
         // 1. Create and open the AVIO reader (performs HEAD request)
-        let reader = AVIOReader(url: url)
+        let reader = AVIOReader(url: url, extraHeaders: extraHeaders)
         try reader.open()
         avioReader = reader
 

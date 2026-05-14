@@ -207,6 +207,12 @@ public final class AetherEngine: ObservableObject {
     /// background suspension.
     private var loadedURL: URL?
 
+    /// Extra HTTP headers the host passed via `LoadOptions.httpHeaders`
+    /// for the current session. Replayed on every internal reopen of
+    /// the source URL (selectAudioTrack reload, embedded subtitle side
+    /// demuxer) so auth survives mid-playback pipeline rebuilds.
+    private var loadedHTTPHeaders: [String: String] = [:]
+
     /// In-flight sidecar subtitle decode. Cancelled on subtitle
     /// clear / track switch so a stale decode can't overwrite fresh
     /// cues.
@@ -308,6 +314,7 @@ public final class AetherEngine: ObservableObject {
     ) async throws {
         stopInternal()
         loadedURL = url
+        loadedHTTPHeaders = options.httpHeaders
         state = .loading
         currentTime = 0
         duration = 0
@@ -329,7 +336,7 @@ public final class AetherEngine: ObservableObject {
         var probedDefaultAudioIndex: Int32 = -1
         let probe = Demuxer()
         do {
-            try probe.open(url: url)
+            try probe.open(url: url, extraHeaders: options.httpHeaders)
             let videoIdx = probe.videoStreamIndex
             if videoIdx >= 0, let stream = probe.stream(at: videoIdx) {
                 detectedFormat = Self.detectVideoFormat(stream: stream)
@@ -416,6 +423,7 @@ public final class AetherEngine: ObservableObject {
             if useSoftwarePath {
                 try await loadSoftware(
                     url: url,
+                    sourceHTTPHeaders: options.httpHeaders,
                     startPosition: startPosition,
                     audioSourceStreamIndex: audioSourceStreamIndex
                 )
@@ -426,6 +434,7 @@ public final class AetherEngine: ObservableObject {
             } else {
                 try await loadNative(
                     url: url,
+                    sourceHTTPHeaders: options.httpHeaders,
                     startPosition: startPosition,
                     audioSourceStreamIndex: audioSourceStreamIndex
                 )
@@ -453,11 +462,13 @@ public final class AetherEngine: ObservableObject {
     /// chosen language without a separate API entry point.
     private func loadNative(
         url: URL,
+        sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
         audioSourceStreamIndex: Int32? = nil
     ) async throws {
         let session = HLSVideoEngine(
             url: url,
+            sourceHTTPHeaders: sourceHTTPHeaders,
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
             audioSourceStreamIndexOverride: audioSourceStreamIndex
         )
@@ -510,6 +521,7 @@ public final class AetherEngine: ObservableObject {
     /// Demuxer).
     private func loadSoftware(
         url: URL,
+        sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
         audioSourceStreamIndex: Int32?
     ) async throws {
@@ -546,6 +558,7 @@ public final class AetherEngine: ObservableObject {
 
         try await host.load(
             url: url,
+            sourceHTTPHeaders: sourceHTTPHeaders,
             startPosition: startPosition,
             audioSourceStreamIndex: audioSourceStreamIndex
         )
@@ -737,6 +750,7 @@ public final class AetherEngine: ObservableObject {
             if wasOnSoftwarePath {
                 try await loadSoftware(
                     url: url,
+                    sourceHTTPHeaders: loadedHTTPHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
                     audioSourceStreamIndex: audioStreamIndex
                 )
@@ -747,6 +761,7 @@ public final class AetherEngine: ObservableObject {
             } else {
                 try await loadNative(
                     url: url,
+                    sourceHTTPHeaders: loadedHTTPHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
                     audioSourceStreamIndex: audioStreamIndex
                 )
@@ -819,9 +834,10 @@ public final class AetherEngine: ObservableObject {
     private func startEmbeddedSubtitleTask(url: URL, streamIndex: Int32, startAt: Double) {
         let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
         let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
+        let headers = loadedHTTPHeaders
         embeddedSubtitleTask = Task.detached(priority: .userInitiated) { [weak self] in
             await self?.runEmbeddedSubtitleReader(
-                url: url, streamIndex: streamIndex, startAt: startAt,
+                url: url, headers: headers, streamIndex: streamIndex, startAt: startAt,
                 videoWidth: w, videoHeight: h
             )
         }
@@ -834,12 +850,12 @@ public final class AetherEngine: ObservableObject {
     /// subtitle packets through an `EmbeddedSubtitleDecoder`, emitting
     /// cues back into the engine on the main actor.
     nonisolated private func runEmbeddedSubtitleReader(
-        url: URL, streamIndex: Int32, startAt: Double,
+        url: URL, headers: [String: String], streamIndex: Int32, startAt: Double,
         videoWidth: Int32, videoHeight: Int32
     ) async {
         let demuxer = Demuxer()
         do {
-            try demuxer.open(url: url)
+            try demuxer.open(url: url, extraHeaders: headers)
         } catch {
             EngineLog.emit("[AetherEngine] embedded subtitle open failed: \(error)", category: .engine)
             await MainActor.run { [weak self] in

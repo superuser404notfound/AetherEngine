@@ -127,11 +127,12 @@ final class SoftwarePlaybackHost {
 
     func load(
         url: URL,
+        sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
         audioSourceStreamIndex: Int32?
     ) async throws {
         let dem = Demuxer()
-        try dem.open(url: url)
+        try dem.open(url: url, extraHeaders: sourceHTTPHeaders)
         self.demuxer = dem
         self.duration = dem.duration
 

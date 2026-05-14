@@ -69,13 +69,26 @@ public struct LoadOptions: Sendable, Equatable {
     /// When `true`, skip the display-criteria handshake entirely. Used
     /// by previews and `aetherctl` where there's no panel to switch.
     public var suppressDisplayCriteria: Bool
+    /// Extra HTTP headers to attach to every request the engine makes
+    /// against the source URL (HEAD probe, Range chunks in seekable
+    /// mode, the single GET in streaming mode, and the side-demuxer
+    /// runs for embedded subtitles). Use this for `Authorization`
+    /// tokens, custom auth headers, or anything else the source server
+    /// requires. Headers are NOT forwarded to AVPlayer (AVPlayer hits
+    /// the engine's loopback HLS server, not the source). Headers are
+    /// NOT applied to sidecar subtitle fetches via
+    /// `selectSidecarSubtitle(url:)`; that path has its own load entry.
+    /// Default is empty (no extra headers).
+    public var httpHeaders: [String: String]
 
     public init(
         omitCriteriaColorExtensions: Bool = false,
-        suppressDisplayCriteria: Bool = false
+        suppressDisplayCriteria: Bool = false,
+        httpHeaders: [String: String] = [:]
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
+        self.httpHeaders = httpHeaders
     }
 }
 
