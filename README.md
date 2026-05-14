@@ -18,7 +18,9 @@
 
 ## What it is
 
-A player engine that gets the hard parts right (HDR, Dolby Vision, Dolby Atmos, container coverage, codec coverage) and exposes either a SwiftUI `AetherPlayerView` or the raw `AVPlayerLayer` plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Bind the view, call `play()`, read the published properties for state.
+A player engine that gets the hard parts right (HDR, Dolby Vision, Dolby Atmos, container coverage, codec coverage) and exposes a single `AetherPlayerView` (UIKit / AppKit) or `AetherPlayerSurface` (SwiftUI) plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Bind the view, call `play()`, read the published properties for state.
+
+The view is polymorphic: under the hood the engine swaps the hosted CALayer (`AVPlayerLayer` for the native AVPlayer path, `AVSampleBufferDisplayLayer` for the SW dav1d fallback path) per session without the host having to know.
 
 You provide the transport bar. You provide the dropdowns. You provide the pretty.
 
@@ -26,9 +28,9 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 
 | Area        | Details                                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV (demux side; AVPlayer plays the engine's HLS-fMP4 wrapper)                           |
-| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox; VP9 on A12+ (Apple TV 4K Gen 2+); AV1 on any chip with HW AV1 (none on Apple TV as of 2026) |
-| SW decode   | AetherEngine ships no SW decoder. Apple's bundled dav1d in VideoToolbox covers AV1 on iOS 17+ / macOS 14+ but is **not** on tvOS — `VTCapabilityProbe` gates AV1 strictly on `VTIsHardwareDecodeSupported` and refuses AV1 up front when VT won't decode it |
+| Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV (demux side)                                                                         |
+| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox; VP9 on A12+ (Apple TV 4K Gen 2+); AV1 on any chip with HW AV1 (none on Apple TV as of 2026), Apple's bundled dav1d on iOS 17+ / macOS 14+ |
+| SW decode   | AV1 via libavcodec/dav1d + `AVSampleBufferDisplayLayer` on platforms where AVPlayer has no AV1 path (primarily Apple TV). Engine dispatches by codec at load time: AV1 → SW pipeline, everything else → native AVPlayer path |
 | HDR10       | BT.2020 + PQ signaled via the HLS-fMP4 wrapper; AVPlayer hands the bitstream to the system HDR pipeline                     |
 | HDR10+      | Per-frame ST 2094-40 dynamic metadata preserved through stream-copy into the HLS-fMP4 wrapper                               |
 | Dolby Vision| Profile 5 / 8.1 / 8.4. Stream-copied into HLS-fMP4 with `dvh1` / `dvhe` track type and the source's `dvcC` box intact, so tvOS triggers the HDMI DV handshake and DV-capable TVs switch into DV mode |
@@ -95,7 +97,9 @@ Install via Swift Package Manager:
 
 ## Playback pipeline
 
-AetherEngine takes a remote video source (typically a Jellyfin MKV), demuxes it with libavformat, and re-muxes the elementary streams on the fly into HLS-fMP4. Local HTTP server on `127.0.0.1:<port>` serves the rolling playlist. `AVPlayer` plays the local URL. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, and all audio routing.
+AetherEngine has two playback pipelines, picked once at `load(url:)` based on the source's video codec:
+
+**Native AVPlayer pipeline (default).** Demux the source with libavformat, re-mux the elementary streams on the fly into HLS-fMP4, serve them from a local HTTP server on `127.0.0.1:<port>`, point `AVPlayer` at the playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, all audio routing. This is the path for HEVC / H.264 / VP9 — every codec AVPlayer can decode natively. Atmos passthrough, DV HDMI handshake, HDR10 / HDR10+ system-side tone-mapping all live on this path.
 
 ```
 Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache ──► HLSLocalServer
@@ -103,17 +107,33 @@ Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache
                                                                          ▼
                                                                      AVPlayer
                                                                          │
-                                                                         ├─► VideoToolbox (HW or system dav1d)
+                                                                         ├─► VideoToolbox (HW decode)
                                                                          └─► AVR / speakers (Atmos via MAT 2.0)
 ```
 
-Why HLS-fMP4 instead of feeding `AVPlayer` the source URL directly: AVPlayer's progressive-download path won't accept arbitrary MKV containers, and even for MP4 sources it's brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants. The HLS-fMP4 wrapper is the most permissive surface AVPlayer exposes; libavformat's `hls` muxer produces bytes byte-identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
+**Software decoder pipeline (AV1 fallback).** Demux the source, run video packets through libavcodec/dav1d into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used when AVPlayer can't decode the source's video codec — today that means AV1 on Apple TV, where Apple ships dav1d on iOS and macOS but not on tvOS, and no Apple TV chip has HW AV1.
+
+```
+Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──► SampleBufferRenderer
+                          │                                            │
+                          │                                            ▼
+                          │                            AVSampleBufferDisplayLayer
+                          │                                            ▲
+                          └─► AudioDecoder ──► AudioOutput ────────────┘
+                                                  │             (synchronizer drives the layer's
+                                                  ▼              control timebase → A/V sync)
+                                              AVR / speakers
+```
+
+AV1 sources in the wild almost never carry Dolby Vision (DV is HEVC-profile-driven) or Atmos (mastering runs in HEVC overwhelmingly), so the SW pipeline's lack of those capabilities is a theoretical limitation rather than a real one. The dispatch happens once at load time; hosts see a unified `@Published` state surface either way.
+
+Why HLS-fMP4 for the native path instead of feeding `AVPlayer` the source URL directly: AVPlayer's progressive-download path won't accept arbitrary MKV containers, and even for MP4 sources it's brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants. The HLS-fMP4 wrapper is the most permissive surface AVPlayer exposes; libavformat's `hls` muxer produces bytes byte-identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
 
 ### Dolby Atmos
 
-EAC3+JOC packets are stream-copied through the muxer with the original `dec3` extradata preserved. AVPlayer reads the segment, recognises JOC from the `dec3` box (`numDepSub=1`, `depChanLoc=0x0100`), and hands the bitstream to the HDMI output as Dolby MAT 2.0. The AVR lights up the Atmos indicator.
+EAC3+JOC packets are stream-copied through the muxer with the original `dec3` extradata preserved. AVPlayer reads the segment, recognises JOC from the `dec3` box (`numDepSub=1`, `depChanLoc=0x0100`), and hands the bitstream to the HDMI output as Dolby MAT 2.0. The AVR lights up the Atmos indicator. The engine emits an explicit `[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact` diagnostic on every Atmos session so the path is unambiguous in the log.
 
-For codecs that fMP4 doesn't accept directly (TrueHD, DTS, DTS-HD MA, sometimes EAC3 from MKV when the `dec3` extradata can't be reconstructed), `AudioBridge` decodes to PCM and re-encodes losslessly as FLAC. This preserves bit-exact channel data for 5.1 / 7.1 surround but, by definition, loses spatial Atmos / TrueHD-MA metadata (it's a PCM derivative). The trade-off is per-source: keep the spatial mix when the wrapper can carry it, fall back to lossless 5.1 / 7.1 when it can't.
+For codecs that fMP4 doesn't accept directly (TrueHD, DTS, DTS-HD MA), `AudioBridge` decodes to PCM and re-encodes losslessly as FLAC. This preserves bit-exact channel data for 5.1 / 7.1 surround but, by definition, loses spatial Atmos / TrueHD-MA object metadata (it's a PCM derivative). The trade-off is per-source: keep the spatial mix when the wrapper can carry it, fall back to lossless 5.1 / 7.1 when it can't. If a JOC source ever falls through to the bridge for whatever reason the engine logs a loud `WARNING: Atmos downgrade — ...` so the silent quality regression doesn't go unnoticed.
 
 ## HDR routing
 
@@ -154,42 +174,49 @@ The host stays in charge of the actual paint: text styling, overlay layout, fade
 
 ```
 Sources/AetherEngine/
-├── AetherEngine.swift                       Public API + orchestration + subtitle stream decode
-├── PlayerState.swift                        PlaybackState, VideoFormat, TrackInfo, SubtitleCue, SubtitleImage
+├── AetherEngine.swift                       Public API + codec dispatch + subtitle stream decode
+├── PlayerState.swift                        PlaybackState, VideoFormat, PlaybackBackend, TrackInfo, SubtitleCue, SubtitleImage
 ├── Audio/
-│   └── AudioBridge.swift                    Stream-copy or lossless FLAC transcode per source audio codec
+│   ├── AudioBridge.swift                    Native path: stream-copy or lossless FLAC transcode per source audio codec
+│   ├── AudioDecoder.swift                   SW path: libavcodec → PCM → CMSampleBuffer with channel-layout tagging
+│   └── AudioOutput.swift                    SW path: AVSampleBufferAudioRenderer + Synchronizer (master clock)
 ├── Decoder/
 │   ├── EmbeddedSubtitleDecoder.swift        Inline subtitle decode from demuxed packets
-│   └── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only)
+│   ├── SoftwareVideoDecoder.swift           SW path: libavcodec/dav1d → CVPixelBuffer (NV12 / P010), HDR10+ side data
+│   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only)
+│   └── VideoDecoderTypes.swift              DecodedFrameHandler typealias + VideoDecoderError
 ├── Demuxer/
 │   ├── AVIOReader.swift                     URLSession → avio_alloc_context
 │   └── Demuxer.swift                        libavformat wrapper
 ├── Diagnostics/
 │   └── EngineLog.swift                      Gated OSLog emission
 ├── Display/
-│   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints
+│   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints (native path)
 │   └── FrameRateSnap.swift                  Snap to standard rates (23.976, 24, 25, 29.97, 30, 50, 59.94, 60)
 ├── Native/
-│   └── NativeAVPlayerHost.swift             AVPlayer host bound to the loopback HLS-fMP4 URL
+│   ├── NativeAVPlayerHost.swift             Native path: AVPlayer host bound to the loopback HLS-fMP4 URL
+│   └── SoftwarePlaybackHost.swift           SW path: demux loop + decoders + renderer + synchronizer orchestration
 ├── Network/
-│   └── HLSLocalServer.swift                 Local HTTP server (127.0.0.1) serving playlist + segments
+│   └── HLSLocalServer.swift                 Native path: local HTTP server (127.0.0.1) serving playlist + segments
+├── Renderer/
+│   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments
 ├── Video/
-│   ├── HLSVideoEngine.swift                 Session orchestrator: muxer wiring, DV signaling, scrub teardown
-│   ├── HLSSegmentProducer.swift             Drives libavformat's hls-fmp4 muxer; custom io_open hooks segment writes
-│   ├── SegmentCache.swift                   Producer/consumer segment store with backpressure + scrub-aware eviction
-│   └── VTCapabilityProbe.swift              VP9 / AV1 system support probe (registers supplemental decoders)
+│   ├── HLSVideoEngine.swift                 Native path: session orchestrator (muxer wiring, DV signaling, scrub teardown)
+│   ├── HLSSegmentProducer.swift             Native path: drives libavformat's hls-fmp4 muxer; custom io_open hooks segment writes
+│   ├── SegmentCache.swift                   Native path: producer/consumer segment store with backpressure + scrub-aware eviction
+│   └── VTCapabilityProbe.swift              VP9 / AV1 system-decode probe (gates codec routing)
 └── View/
-    └── AetherPlayerView.swift               SwiftUI wrapper around the AVPlayerLayer the engine owns
+    └── AetherPlayerView.swift               Polymorphic surface: hosts either AVPlayerLayer (native) or AVSampleBufferDisplayLayer (SW)
 ```
 
 ## Dependencies
 
 | Package                                                            | License   | Purpose                                                                  |
 | ------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------ |
-| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0  | Slim FFmpeg 7.1 (avcodec / avformat / avutil / swresample) for demux + HLS-fMP4 mux + AudioBridge FLAC encode |
-| VideoToolbox                                                       | System    | All video decode (HW + Apple's bundled software AV1)                     |
-| AVFoundation                                                       | System    | AVPlayer playback, AVDisplayManager HDMI handshake                       |
-| CoreMedia                                                          | System    | Sample descriptions, format-description tagging                          |
+| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0  | Slim FFmpeg 7.1 (avcodec / avformat / avutil / swresample / swscale) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010 |
+| VideoToolbox                                                       | System    | Native path video decode (HW where available, Apple's bundled SW dav1d on iOS / macOS) |
+| AVFoundation                                                       | System    | AVPlayer + AVDisplayManager (native path); AVSampleBufferDisplayLayer + AVSampleBufferRenderSynchronizer (SW path) |
+| CoreMedia                                                          | System    | Sample descriptions, format-description tagging, CMTimebase                |
 
 ## Non-goals
 
