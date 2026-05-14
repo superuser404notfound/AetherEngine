@@ -2,20 +2,18 @@ import Foundation
 import os
 
 /// Single point where the engine emits human-readable diagnostic
-/// lines. Three sinks fan out from every call:
+/// lines. Sinks (always OSLog, then either host handler or stdout):
 ///
-///   1. **OSLog** (`os.Logger`) — structured per-category logging that
+///   1. **OSLog** (`os.Logger`): structured per-category logging that
 ///      shows up in Console.app and `log stream` and survives Release
 ///      builds without a debugger. Filterable per subsystem/category,
 ///      e.g. `log stream --predicate 'subsystem == "de.superuser404.AetherEngine" AND category == "muxer"'`.
-///   2. **stdout** (`print`) — kept as a no-cost fallback so paired-Mac
-///      Xcode runs and the macOS `aetherctl` CLI keep their existing
-///      flow.
-///   3. **Host handler** — invoked synchronously on the emit thread,
-///      lets a host like Sodalite mirror diagnostics into an in-app
-///      overlay or ring buffer. Required because tvOS Release builds
-///      often redirect stdout to /dev/null when no debugger is
-///      attached, and because handlers can outlive a `#if DEBUG` gate.
+///   2. **Host handler OR stdout** (mutually exclusive): if a host has
+///      installed `handler` (e.g. Sodalite mirroring into an in-app
+///      ring buffer), the line goes there. Otherwise it falls back to
+///      `print(line)` so the macOS `aetherctl` CLI keeps live stdout
+///      output. Gating these against each other avoids the duplicate
+///      lines that Xcode console shows when OSLog and stdout both fire.
 ///
 /// Centralising on `EngineLog.emit(...)` means the call site never
 /// has to gate on build config or thread-safety; the dispatch happens
@@ -84,16 +82,21 @@ public enum EngineLog {
     }
 
     /// Emit one diagnostic line under a specific category. Always
-    /// writes to OSLog and stdout, additionally calls the registered
-    /// host handler if any. Cheap when no handler is installed.
+    /// writes to OSLog. If the host installed a handler the line goes
+    /// to the handler, otherwise it falls back to stdout via `print`.
+    /// Picking one of the two avoids Xcode console duplicates where
+    /// OSLog and stdout would otherwise both render the same line.
     ///
     /// The OSLog `\(..., privacy: .public)` interpolation marks the
-    /// payload as non-sensitive — engine logs never contain user
-    /// data, just file paths / timestamps / byte counts — so Console
-    /// shows the full string instead of `<private>`.
+    /// payload as non-sensitive (engine logs never contain user data,
+    /// just file paths, timestamps, byte counts) so Console shows the
+    /// full string instead of `<private>`.
     public static func emit(_ line: String, category: Category) {
         loggers[category]?.log("\(line, privacy: .public)")
-        print(line)
-        handler?(line)
+        if let handler {
+            handler(line)
+        } else {
+            print(line)
+        }
     }
 }

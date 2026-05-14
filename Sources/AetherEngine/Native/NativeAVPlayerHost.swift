@@ -8,8 +8,10 @@ import Combine
 /// exposes the HDMI HDR-mode handshake to Dolby Vision through
 /// `AVPlayer`-rooted playback, not through `AVSampleBufferDisplayLayer`.
 ///
-/// After the Phase 4 collapse this is the only video render path.
-/// Until then, the legacy aether sample-buffer path coexists.
+/// This is the AVPlayer render path for sources that decode through
+/// AVPlayer's HLS-fMP4 pipeline (HEVC, H.264, and AV1 on devices with
+/// hardware AV1 decode). The dav1d software fallback for AV1 without
+/// HW support and the VP9 path both live in `SoftwarePlaybackHost`.
 ///
 /// Display-criteria handling lives in `DisplayCriteriaController`,
 /// invoked from `AetherEngine.load(url:options:)` before the AVPlayer

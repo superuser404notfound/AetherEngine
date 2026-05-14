@@ -14,22 +14,6 @@ import CoreMedia
 /// requests during fast spin-up.
 enum VTCapabilityProbe {
 
-    /// True iff VideoToolbox can decode VP9 on the current device.
-    /// VP9 has real hardware decoders on Apple silicon from A12+
-    /// (Apple TV 4K gen 2+) so a `VTIsHardwareDecodeSupported` probe
-    /// is the right gate.
-    static let vp9Available: Bool = {
-        if #available(tvOS 26.2, iOS 19.0, macOS 16.0, *) {
-            VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
-        }
-        if #available(tvOS 17.0, iOS 17.0, macOS 14.0, *) {
-            let supported = VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9)
-            EngineLog.emit("[VTProbe] codec=vp09 hwSupported=\(supported)", category: .engine)
-            return supported
-        }
-        return false
-    }()
-
     /// True iff AVPlayer's HLS-fMP4 pipeline can decode AV1 on the
     /// current device.
     ///

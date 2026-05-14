@@ -362,14 +362,6 @@ final class SampleBufferRenderer: @unchecked Sendable {
         loggedNotReady = false
     }
 
-    /// Explicit flush of the underlying queue target without clearing
-    /// the currently displayed frame. Used by AetherEngine before
-    /// assigning a new controlTimebase to coax the queue out of any
-    /// leftover synchronizer state.
-    func flushDisplayLayer() {
-        queueTarget.flush()
-    }
-
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Reuse the format description unless dimensions or pixel format
         // changed, rebuilding per frame wastes an allocation and Core
