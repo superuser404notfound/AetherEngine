@@ -717,6 +717,16 @@ public final class AetherEngine: ObservableObject {
         progress = 0
     }
 
+    /// The active `AVPlayer` instance, when the native AVKit path is in
+    /// use. Returns `nil` when the software (AVSampleBufferDisplayLayer)
+    /// path is active or no session is loaded. Exposed so hosts can hand
+    /// the player to `MPNowPlayingSession(players:)` for automatic
+    /// publishing of elapsed-time / rate / state into the system Now
+    /// Playing surface (the supported path on tvOS 14+).
+    public var currentAVPlayer: AVPlayer? {
+        return nativeHost?.avPlayer
+    }
+
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { softwareHost?.volume ?? nativeHost?.avPlayer.volume ?? 1.0 }
