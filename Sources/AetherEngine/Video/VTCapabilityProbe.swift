@@ -30,22 +30,29 @@ enum VTCapabilityProbe {
         return false
     }()
 
-    /// True iff VideoToolbox can decode AV1 on the current device.
+    /// True iff AVPlayer's HLS-fMP4 pipeline can decode AV1 on the
+    /// current device.
     ///
-    /// Earlier versions of this probe assumed Apple ships an AV1 SW
-    /// decoder (dav1d) on every Apple platform from iOS 17 / tvOS 17 /
-    /// macOS 14, and returned `true` unconditionally on those OS
-    /// versions. That assumption is wrong for tvOS: dav1d ships only
-    /// on iOS / macOS, and current Apple TV hardware has no HW AV1
-    /// decoder, so AVPlayer fails mid-load with a decode error.
+    /// Gated strictly on `VTIsHardwareDecodeSupported` after running
+    /// `VTRegisterSupplementalVideoDecoderIfAvailable`. Apple's
+    /// marketing for "dav1d in macOS 14+ / iOS 17+" suggests AV1 SW
+    /// decode is universally available — but in practice (verified
+    /// 2026-05-14 on M1 macOS 26.4), `VTIsHardwareDecodeSupported`
+    /// returns false and `AVURLAsset.isPlayable` returns false for
+    /// AV1 sources on chips without HW AV1, even after explicit
+    /// supplemental-decoder registration. Apple's HLS-fMP4 path
+    /// requires HW AV1 in practice; the dav1d shipped on macOS / iOS
+    /// is reachable via direct file playback on some devices but not
+    /// via AVPlayer's HLS pipeline.
     ///
-    /// Gate strictly on `VTIsHardwareDecodeSupported` (same shape as
-    /// the VP9 probe). On tvOS this evaluates to false on every chip
-    /// shipping today; the engine refuses AV1 sources up front with a
-    /// clean `unsupportedCodec` instead of muxing them and letting
-    /// AVPlayer blow up. If Apple ever ships HW AV1 on Apple TV (or
-    /// adds a tvOS-side SW decoder that VT advertises post-supplemental-
-    /// registration) this probe lights up automatically.
+    /// Net effect:
+    ///
+    /// - M3+ Mac / iPhone 15 Pro+ / future HW-AV1 Apple TV chip →
+    ///   `true` → AV1 sources route through the native AVPlayer path
+    ///   with Atmos / DV / HDR signaling intact.
+    /// - Everything else (M1 / M2 Mac, A12-A16 iPhone, all current
+    ///   Apple TV chips) → `false` → AV1 routes through
+    ///   `SoftwarePlaybackHost`'s dav1d pipeline.
     static let av1Available: Bool = {
         if #available(tvOS 26.2, iOS 19.0, macOS 16.0, *) {
             VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_AV1)

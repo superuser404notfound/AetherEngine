@@ -52,16 +52,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     /// DV profile + base-layer compatibility classification per the
-    /// table in DrHurt's KSPlayer notes (AetherEngine#1) and Apple's
-    /// HLS Authoring Spec.
+    /// table in DrHurt's KSPlayer notes (AetherEngine#1), Apple's HLS
+    /// Authoring Spec, and Dolby's ETSI TS 103 572. HEVC profiles
+    /// 5 / 8 carry HEVC streams; profile 10 carries AV1 streams.
     fileprivate enum DVVariant {
-        case none           // not DV
-        case profile5       // P5 (IPT-PQ-c2, no HDR10 base)         → dvh1 + PQ
-        case profile81      // P8 with HDR10-compat base              → dvh1 + PQ
-        case profile84      // P8 with HLG-compat base                → hvc1 + HLG
-        case profile7       // P7 dual-layer (Apple TV cannot decode) → reject
-        case profile82      // P8 with SDR-compat base (rare)         → reject
-        case unknown        // anything else                          → reject
+        case none              // not DV
+        case profile5          // HEVC P5  (IPT-PQ-c2, no base)     → dvh1 + PQ
+        case profile81         // HEVC P8.1 with HDR10-compat base  → dvh1 + PQ
+        case profile84         // HEVC P8.4 with HLG-compat base    → hvc1 + HLG + SUPPLEMENTAL dvh1
+        case profile7          // HEVC P7 dual-layer                → reject
+        case profile82         // HEVC P8.2 with SDR-compat base    → reject
+        case av1Profile10      // AV1 P10.0 (no base)               → dav1 + PQ
+        case av1Profile101     // AV1 P10.1 with HDR10-compat base  → dav1 + PQ
+        case av1Profile104     // AV1 P10.4 with HLG-compat base    → av01 + HLG + SUPPLEMENTAL dav1
+        case av1Profile102     // AV1 P10.2 with SDR-compat base    → reject
+        case unknown           // anything else                     → reject
     }
 
     /// Source audio codec routed to either fMP4 stream-copy or the
@@ -222,22 +227,26 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let codecpar = videoStream.pointee.codecpar!
         let isHEVC = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
         let isH264 = codecpar.pointee.codec_id == AV_CODEC_ID_H264
+        let isAV1 = codecpar.pointee.codec_id == AV_CODEC_ID_AV1
 
-        // Accepted codecs are HEVC and H.264 only.
+        // Accepted codecs: HEVC, H.264, AV1 (when AVPlayer can decode
+        // it on the active platform).
         //
-        // AV1 and VP9 are explicitly NOT in this guard because
-        // `AetherEngine.load` dispatches them to `SoftwarePlaybackHost`
-        // (dav1d / libvpx via libavcodec + `AVSampleBufferDisplayLayer`)
-        // rather than this engine. AV1 because AVPlayer on tvOS has no
-        // AV1 decoder; VP9 because AVPlayer's HLS manifest parser
-        // empirically rejects the `vp09` CODECS attribute even though
-        // VideoToolbox can HW-decode the codec.
+        // AV1 is gated on `VTCapabilityProbe.av1Available`, which
+        // returns true on iOS 17+ / macOS 14+ (Apple ships dav1d via
+        // VideoToolbox) and false on tvOS (no SW dav1d on tvOS, no HW
+        // AV1 on any current Apple TV chip). When the gate says false
+        // for AV1, `AetherEngine.load`'s dispatch routes the source
+        // through `SoftwarePlaybackHost` instead of reaching this
+        // engine, so the guard below never sees an AV1 source on
+        // unsupported platforms.
         //
-        // If a future Apple platform ships HW AV1 + an AVPlayer-HLS
-        // path that accepts the codec (same for VP9), the dispatch in
-        // `AetherEngine.load` can route those sources here and the
-        // accept-list + codec-tag generation re-added.
-        guard isHEVC || isH264 else {
+        // VP9 is explicitly NOT here: AVPlayer's HLS manifest parser
+        // rejects the `vp09` CODECS attribute even though VideoToolbox
+        // can HW-decode VP9 (empirically verified). `AetherEngine.load`
+        // dispatches all VP9 sources to `SoftwarePlaybackHost`.
+        let av1OK = isAV1 && VTCapabilityProbe.av1Available
+        guard isHEVC || isH264 || av1OK else {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }
 
@@ -321,6 +330,107 @@ public final class HLSVideoEngine: @unchecked Sendable {
             primaryCodecs = String(format: "avc1.%02X%02X%02X", safeProfile, 0, safeLevel)
             supplementalCodecs = nil
             dvVariant = .none
+        } else if isAV1 {
+            // AV1 path. When dvModeAvailable is false (device can't do
+            // DV at all), we deliberately skip the DV side-data probe
+            // so classify returns .none → plain AV1 codec string.
+            // When dvModeAvailable is true and the source carries
+            // Dolby Vision RPU, classify resolves to one of the
+            // av1Profile10x variants and we emit the matching `dav1`
+            // codec tag + Apple HLS Authoring Spec CODECS string.
+            let dvRecord = dvModeAvailable ? doviConfigRecord(from: codecpar) : nil
+            let resolvedVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_AV1)
+            dvVariant = resolvedVariant
+
+            // AV1 codec-string fields (per Apple HLS Authoring Spec +
+            // AV1 codec-string IETF draft):
+            //
+            //   av01.<profile>.<level><tier>.<bitDepth>.
+            //        <monochrome>.<chromaSubX><chromaSubY><chromaPos>.
+            //        <colorPrim>.<transfer>.<matrix>.<videoFullRange>
+            //
+            // Profile 0 (Main) is the dominant case in the wild —
+            // higher profiles cover 4:2:2 / 4:4:4 / 12-bit which Apple
+            // doesn't accept in HLS-fMP4 today, but dav1d decodes them
+            // so we let the muxer try; FFmpeg writes the `av1C` box
+            // automatically from the codecpar.
+            let av1ProfileRaw = Int(codecpar.pointee.profile)
+            let av1Profile = (av1ProfileRaw >= 0 && av1ProfileRaw <= 2) ? av1ProfileRaw : 0
+            let av1LevelRaw = Int(codecpar.pointee.level)
+            // FFmpeg's seq_level_idx encoding: 0..23 → AV1 levels 2.0..7.3.
+            // Default to 8 (= level 4.0) when the source doesn't expose
+            // a value, matching ~4K @ 30fps.
+            let av1Level = (av1LevelRaw >= 0 && av1LevelRaw <= 23) ? av1LevelRaw : 8
+            let bitDepthRaw = Int(codecpar.pointee.bits_per_raw_sample)
+            let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
+            let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
+            let dvLevelStr = String(format: "%02d", dvLevel)
+
+            switch resolvedVariant {
+            case .av1Profile10:
+                // P10.0: DV-only, no HDR10 / HLG base layer. AVPlayer
+                // refuses the asset on non-DV displays per Apple's
+                // spec for `dav1` track type. Same shape as HEVC P5.
+                codecTagOverride = "dav1"
+                videoRange = .pq
+                primaryCodecs = "dav1.10.\(dvLevelStr)"
+                supplementalCodecs = nil
+            case .av1Profile101:
+                // P10.1: HDR10-compat base layer. Same `dav1` codec
+                // tag — the HDR10 fallback is implicit in the
+                // bitstream and the decoder picks it up when DV isn't
+                // available. Analogous to HEVC P8.1.
+                codecTagOverride = "dav1"
+                videoRange = .pq
+                primaryCodecs = "dav1.10.\(dvLevelStr)"
+                supplementalCodecs = nil
+            case .av1Profile104:
+                // P10.4: HLG-compat base. Plain `av01` codec tag so
+                // non-DV hosts present the HLG base layer; DV signaled
+                // via the supplemental codecs string. Analogous to
+                // HEVC P8.4 ↔ hvc1.2.4.LXX.b0 + dvh1.08.LL/db4h.
+                codecTagOverride = "av01"
+                videoRange = .hlg
+                let bd = bitDepthRaw > 0 ? bitDepthRaw : 10
+                primaryCodecs = String(
+                    format: "av01.%d.%02dM.%02d.0.111.09.18.09.0",
+                    av1Profile, av1Level, bd
+                )
+                supplementalCodecs = "dav1.10.\(dvLevelStr)/db4h"
+            case .av1Profile102:
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: 10, compatID: 2)
+            case .unknown:
+                let p = Int(dvRecord?.dv_profile ?? 0)
+                let c = Int(dvRecord?.dv_bl_signal_compatibility_id ?? 0)
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: p, compatID: c)
+            case .none:
+                // Plain AV1, no DV. Pick color signaling per the
+                // source's transfer characteristic so AVPlayer hands
+                // the right colorspace to the display.
+                codecTagOverride = "av01"
+                let trc = codecpar.pointee.color_trc
+                let cp: Int, tc: Int, mc: Int, bd: Int
+                if trc == AVCOL_TRC_ARIB_STD_B67 {
+                    videoRange = .hlg; cp = 9; tc = 18; mc = 9
+                    bd = bitDepthRaw > 0 ? bitDepthRaw : 10
+                } else if trc == AVCOL_TRC_SMPTE2084 {
+                    videoRange = .pq; cp = 9; tc = 16; mc = 9
+                    bd = bitDepthRaw > 0 ? bitDepthRaw : 10
+                } else {
+                    videoRange = .sdr; cp = 1; tc = 1; mc = 1
+                    bd = bitDepthRaw > 0 ? bitDepthRaw : 8
+                }
+                primaryCodecs = String(
+                    format: "av01.%d.%02dM.%02d.0.111.%02d.%02d.%02d.0",
+                    av1Profile, av1Level, bd, cp, tc, mc
+                )
+                supplementalCodecs = nil
+            // HEVC DV variants can't reach this switch (classifyDVVariant
+            // is called with AV_CODEC_ID_AV1) but Swift's exhaustivity
+            // check needs explicit handling.
+            case .profile5, .profile81, .profile84, .profile7, .profile82:
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: -1, compatID: -1)
+            }
         } else if !dvModeAvailable {
             codecTagOverride = "hvc1"
             let hevcLevelRaw = Int(codecpar.pointee.level)
@@ -338,7 +448,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             dvVariant = .none
         } else {
             let dvRecord = doviConfigRecord(from: codecpar)
-            dvVariant = classifyDVVariant(dvRecord)
+            dvVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_HEVC)
 
             let dvLevelRaw = Int(dvRecord?.dv_level ?? 0)
             let dvLevel = dvLevelRaw > 0 ? dvLevelRaw : 6
@@ -375,6 +485,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
                 primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
                 supplementalCodecs = nil
+            // AV1 DV variants unreachable here (classify was called with
+            // AV_CODEC_ID_HEVC) but exhaustivity needs them.
+            case .av1Profile10, .av1Profile101, .av1Profile104, .av1Profile102:
+                throw HLSVideoEngineError.unsupportedDVProfile(profile: -1, compatID: -1)
             }
         }
 
@@ -925,21 +1039,47 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
     }
 
-    private func classifyDVVariant(_ record: AVDOVIDecoderConfigurationRecord?) -> DVVariant {
+    private func classifyDVVariant(
+        _ record: AVDOVIDecoderConfigurationRecord?,
+        codecID: AVCodecID
+    ) -> DVVariant {
         guard let r = record else { return .none }
         let profile = Int(r.dv_profile)
         let compat = Int(r.dv_bl_signal_compatibility_id)
 
-        if profile == 5 { return .profile5 }
-        if profile == 7 { return .profile7 }
-        if profile == 8 || profile == 9 || profile == 10 {
-            switch compat {
-            case 1: return .profile81
-            case 2: return .profile82
-            case 4: return .profile84
-            default: return .profile81  // P8.6 etc → treat as P8.1
+        // HEVC + DV: profiles 5, 7, 8 per Dolby's ETSI TS 103 572.
+        // Profile 9 is AVC+DV which AetherEngine doesn't support
+        // (AVPlayer accepts AVC but not AVC+DV per DrHurt's matrix).
+        if codecID == AV_CODEC_ID_HEVC {
+            if profile == 5 { return .profile5 }
+            if profile == 7 { return .profile7 }
+            if profile == 8 {
+                switch compat {
+                case 1: return .profile81
+                case 2: return .profile82
+                case 4: return .profile84
+                default: return .profile81  // P8.6 etc → treat as P8.1
+                }
             }
+            return .unknown
         }
+
+        // AV1 + DV: profile 10 per Dolby's spec. compat == 0 means
+        // P10.0 (no base layer); compat == 1 / 2 / 4 mirror P8's HDR10
+        // / SDR / HLG base-layer compatibility flags.
+        if codecID == AV_CODEC_ID_AV1 {
+            if profile == 10 {
+                switch compat {
+                case 0: return .av1Profile10
+                case 1: return .av1Profile101
+                case 2: return .av1Profile102
+                case 4: return .av1Profile104
+                default: return .av1Profile10
+                }
+            }
+            return .unknown
+        }
+
         return .unknown
     }
 
