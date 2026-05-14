@@ -383,6 +383,13 @@ final class SoftwarePlaybackHost {
         onError: @Sendable (String) -> Void,
         onEnd: @Sendable () -> Void
     ) {
+        // One-shot latch so the synchronizer clock is anchored exactly
+        // once per session, on the first decoded audio packet. seekClock
+        // is NOT idempotent (it always re-sets the synchronizer rate
+        // and time), so calling it on every packet would snap the clock
+        // back to `initialClockTime` 50× per second and freeze playback.
+        var clockArmed = false
+
         while !stopRequested() {
             if !isPlaying() {
                 condition.lock()
@@ -430,18 +437,14 @@ final class SoftwarePlaybackHost {
                 for buf in buffers {
                     aOut.enqueue(sampleBuffer: buf)
                 }
-                // Kick the synchronizer the first time we've actually
-                // enqueued audio. seekClock is idempotent against
-                // repeated calls (it sets _isStarted and start() then
-                // no-ops), and it sets the clock to `initialClockTime`
-                // which is the resume / audio-switch start position
-                // (.zero on cold-start). Without this alignment the
-                // synchronizer would tick from .zero while samples
-                // arrive PTS-stamped at the resume offset, freezing
-                // playback for `initialClockTime` seconds while the
-                // queue fills up and trips err=-12080.
-                if !buffers.isEmpty {
+                // Anchor the synchronizer clock to `initialClockTime`
+                // (.zero on cold-start, the resume offset on
+                // resume / audio-switch reload) the first time we've
+                // got real audio in the renderer. Latched so subsequent
+                // packets don't keep snapping the clock back.
+                if !clockArmed, !buffers.isEmpty {
                     aOut.seekClock(to: initialClockTime, rate: initialRate)
+                    clockArmed = true
                 }
             }
 
