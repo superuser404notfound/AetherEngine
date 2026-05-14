@@ -29,8 +29,22 @@ final class AudioOutput: @unchecked Sendable {
 
     /// Add the video display layer to the synchronizer so Apple handles
     /// A/V sync and frame pacing automatically.
+    ///
+    /// On iOS 18 / tvOS 18 / macOS 15 Apple split the queue rendering
+    /// surface off `AVSampleBufferDisplayLayer` onto a dedicated
+    /// `AVSampleBufferVideoRenderer` accessible via
+    /// `displayLayer.sampleBufferRenderer`. Direct `addRenderer(layer)`
+    /// still type-checks (the layer still conforms to
+    /// `AVQueuedSampleBufferRendering`), but on tvOS 26+ it's been
+    /// observed to fail with `FigVideoQueueRemote err=-12080` after
+    /// the first enqueue. Attaching the renderer instead of the layer
+    /// resolves it.
     func attachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
-        synchronizer.addRenderer(displayLayer)
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            synchronizer.addRenderer(displayLayer.sampleBufferRenderer)
+        } else {
+            synchronizer.addRenderer(displayLayer)
+        }
     }
 
     /// Remove the video display layer from the synchronizer and block
@@ -47,8 +61,14 @@ final class AudioOutput: @unchecked Sendable {
     /// in practice) and makes the handoff deterministic.
     func detachVideoLayer(_ displayLayer: AVSampleBufferDisplayLayer) {
         let semaphore = DispatchSemaphore(value: 0)
-        synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime()) { _ in
-            semaphore.signal()
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            synchronizer.removeRenderer(displayLayer.sampleBufferRenderer, at: synchronizer.currentTime()) { _ in
+                semaphore.signal()
+            }
+        } else {
+            synchronizer.removeRenderer(displayLayer, at: synchronizer.currentTime()) { _ in
+                semaphore.signal()
+            }
         }
         let result = semaphore.wait(timeout: .now() + .seconds(1))
         #if DEBUG

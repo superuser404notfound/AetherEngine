@@ -146,9 +146,14 @@ final class SoftwarePlaybackHost {
                 self.audioDecoder = aDec
                 self.audioStreamIndex = resolvedAudioIdx
 
-                let aOut = AudioOutput()
-                aOut.attachVideoLayer(renderer.displayLayer)
-                self.audioOutput = aOut
+                // AudioOutput is created here but the display layer is
+                // NOT yet attached to its synchronizer — that happens in
+                // play() after the engine has hung the layer in the
+                // bound view's CALayer hierarchy. Attaching a free-
+                // floating layer to the synchronizer has been observed
+                // to fail with `FigVideoQueueRemote err=-12080` after
+                // the first enqueue on tvOS 26+.
+                self.audioOutput = AudioOutput()
             } catch {
                 EngineLog.emit("[SWHost] audio open failed (\(error)); video-only", category: .engine)
                 self.audioStreamIndex = -1
@@ -159,14 +164,29 @@ final class SoftwarePlaybackHost {
             dem.seek(to: start)
         }
 
-        startDemuxLoop()
         startTimeUpdates()
         isReady = true
+        // Demux loop only spins up once play() actually fires; no point
+        // pulling packets while the synchronizer hasn't claimed the
+        // layer yet.
     }
 
     // MARK: - Transport
 
     func play() {
+        // First play() since load(): claim the display layer for the
+        // synchronizer (now that the engine has hung it in the bound
+        // view's CALayer hierarchy via presentCurrentLayer) and kick
+        // off the demux loop. Idempotent across repeated play() calls;
+        // the layer-attach + loop-spin-up only fire on the first one.
+        if !demuxLoopStarted, let aOut = audioOutput {
+            aOut.attachVideoLayer(renderer.displayLayer)
+        }
+        if !demuxLoopStarted {
+            demuxLoopStarted = true
+            startDemuxLoop()
+        }
+
         // Don't eager-start the audio synchronizer. The pre-collapse
         // pattern was: start(at:) fires only on the first decoded audio
         // sample, so the master clock's time-zero aligns with the
@@ -180,6 +200,11 @@ final class SoftwarePlaybackHost {
         rate = lastRate
         isPlaying = true
     }
+
+    /// Latched once the first `play()` has wired the audio synchronizer
+    /// to the display layer and spun up the demux loop. Subsequent
+    /// `play()` calls only flip `isPlaying` without re-attaching.
+    private var demuxLoopStarted: Bool = false
 
     func pause() {
         audioOutput?.pause()

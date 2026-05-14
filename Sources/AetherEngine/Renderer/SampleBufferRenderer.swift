@@ -85,6 +85,41 @@ final class SampleBufferRenderer: @unchecked Sendable {
         displayLayer = Self.makeDisplayLayer(isHDR: false)
     }
 
+    // MARK: - Queue rendering target
+
+    /// The queue-rendering target the display layer exposes. On
+    /// iOS 18 / tvOS 18 / macOS 15 Apple decoupled the queue ops onto a
+    /// dedicated `AVSampleBufferVideoRenderer` reachable via
+    /// `displayLayer.sampleBufferRenderer`; the layer's own `enqueue` /
+    /// `flush` / `isReadyForMoreMediaData` were deprecated and route to
+    /// the renderer internally. On tvOS 26+ at least, attaching the
+    /// layer directly to `AVSampleBufferRenderSynchronizer` and calling
+    /// the deprecated layer methods has been observed to fail with
+    /// `FigVideoQueueRemote err=-12080` after the first enqueue,
+    /// stopping rendering entirely. Going through the renderer instead
+    /// resolves it. Older OSes use the layer directly via the same
+    /// `AVQueuedSampleBufferRendering` protocol.
+    var queueTarget: any AVQueuedSampleBufferRendering {
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            return displayLayer.sampleBufferRenderer
+        }
+        return displayLayer
+    }
+
+    private var queueStatus: AVQueuedSampleBufferRenderingStatus {
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            return displayLayer.sampleBufferRenderer.status
+        }
+        return displayLayer.status
+    }
+
+    private var queueError: Error? {
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            return displayLayer.sampleBufferRenderer.error
+        }
+        return displayLayer.error
+    }
+
     private static func makeDisplayLayer(isHDR: Bool, gravity: AVLayerVideoGravity = .resizeAspect) -> AVSampleBufferDisplayLayer {
         let layer = AVSampleBufferDisplayLayer()
         layer.videoGravity = gravity
@@ -220,7 +255,11 @@ final class SampleBufferRenderer: @unchecked Sendable {
         _hasRenderedFirstFrame = false
         firstFrameLock.unlock()
 
-        displayLayer.flushAndRemoveImage()
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+            displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true) { }
+        } else {
+            displayLayer.flushAndRemoveImage()
+        }
     }
 
     /// Flush the reorder buffer and send all frames to the display layer
@@ -258,30 +297,23 @@ final class SampleBufferRenderer: @unchecked Sendable {
                 EngineLog.emit("[Renderer] HDR10+ attachment count: \(hdr10PlusAttachedCount) (last payload \(hdr10PlusData.count) bytes)")
             }
         }
-        // If the layer has entered the failed state (undefined-behavior
-        // races during Synchronizer↔controlTimebase handoffs push it
-        // here, and once it's failed it stays failed until flushed),
-        // attempt an in-place recovery: flush clears the internal
-        // pipeline state and resets status back to .unknown so the next
-        // enqueue can render.
-        if displayLayer.status == .failed {
+        // If the queue target has entered the failed state (undefined-
+        // behavior races during Synchronizer↔controlTimebase handoffs
+        // push it here, and once it's failed it stays failed until
+        // flushed), attempt an in-place recovery via flush.
+        let target = queueTarget
+        if queueStatus == .failed {
             if !loggedLayerFailed {
                 loggedLayerFailed = true
-                EngineLog.emit("[Renderer] display layer failed at enqueue #\(enqueueCount + 1): \(displayLayer.error?.localizedDescription ?? "nil"), attempting recovery via flush()")
+                EngineLog.emit("[Renderer] queue target failed at enqueue #\(enqueueCount + 1): \(queueError?.localizedDescription ?? "nil"), attempting recovery via flush()")
             }
-            displayLayer.flush()
+            target.flush()
         }
-        // One-shot signal that the layer pushed back. AVPlayer-rooted
-        // playback never reaches this code path, only the .aether
-        // pipeline does, and the symptom from ZeroQ-bit's 4K remote
-        // MKV stall (issue #2) was "renderer stops consuming after
-        // ~N frames". If isReadyForMoreMediaData latches false and
-        // never recovers, we'd want to know.
-        if !displayLayer.isReadyForMoreMediaData, !loggedNotReady {
+        if !target.isReadyForMoreMediaData, !loggedNotReady {
             loggedNotReady = true
             EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)")
         }
-        displayLayer.enqueue(sampleBuffer)
+        target.enqueue(sampleBuffer)
 
         // Mark first frame after the most recent reset. Lock-protected
         // because flushFrame runs on the decoder callback thread while
@@ -296,12 +328,12 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // logging at #30 but actually keep enqueueing". Logging cost
         // is bounded: at 60 fps for 1 hour we emit 4 lines total.
         if enqueueCount == 1 || enqueueCount == 30 || enqueueCount == 100 || enqueueCount == 1000 || enqueueCount == 5000 {
-            EngineLog.emit("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(displayLayer.isReadyForMoreMediaData) error=\(displayLayer.error?.localizedDescription ?? "nil")")
+            EngineLog.emit("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(queueTarget.isReadyForMoreMediaData) error=\(queueError?.localizedDescription ?? "nil")")
         }
     }
 
     private var statusName: String {
-        switch displayLayer.status {
+        switch queueStatus {
         case .unknown: "unknown"
         case .rendering: "rendering"
         case .failed: "failed"
@@ -318,12 +350,12 @@ final class SampleBufferRenderer: @unchecked Sendable {
         loggedNotReady = false
     }
 
-    /// Explicit flush of the underlying AVSampleBufferDisplayLayer
-    /// without clearing the currently displayed frame. Used by
-    /// AetherEngine before assigning a new controlTimebase to coax the
-    /// layer out of any leftover synchronizer state.
+    /// Explicit flush of the underlying queue target without clearing
+    /// the currently displayed frame. Used by AetherEngine before
+    /// assigning a new controlTimebase to coax the queue out of any
+    /// leftover synchronizer state.
     func flushDisplayLayer() {
-        displayLayer.flush()
+        queueTarget.flush()
     }
 
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
