@@ -379,12 +379,27 @@ public final class AetherEngine: ObservableObject {
             }
         }
 
-        // 3. Dispatch by codec. AVPlayer on tvOS can't decode AV1
-        //    (Apple's bundled dav1d ships on iOS / macOS only and no
-        //    Apple TV chip has HW AV1), so AV1 sources route through
-        //    the SW dav1d pipeline. Everything else uses the native
+        // 3. Dispatch by codec. AVPlayer's HLS-fMP4 path rejects
+        //    a handful of codecs even though VideoToolbox can decode
+        //    them, so these sources route through the SW pipeline:
+        //
+        //    - AV1: AVPlayer on tvOS has no AV1 decoder (Apple ships
+        //      dav1d on iOS / macOS only; no Apple TV chip has HW AV1).
+        //    - VP9: empirically rejected by AVPlayer's HLS manifest
+        //      parser. AVPlayer GETs master.m3u8 + media.m3u8, sees
+        //      `vp09` in the CODECS attribute, then silently stops
+        //      fetching — item.status never leaves `.unknown`. Verified
+        //      via aetherctl on macOS 26 against a libvpx-vp9 + libopus
+        //      WebM source. VideoToolbox HW-decodes VP9 fine (per
+        //      `VTCapabilityProbe.vp9Available`), but only outside the
+        //      HLS pipeline.
+        //
+        //    Everything else (HEVC / H.264) goes through the native
         //    AVPlayer path which carries Atmos / DV / HDR signaling.
-        let useSoftwarePath = (detectedCodecID == AV_CODEC_ID_AV1)
+        let useSoftwarePath = (
+            detectedCodecID == AV_CODEC_ID_AV1 ||
+            detectedCodecID == AV_CODEC_ID_VP9
+        )
         EngineLog.emit("[AetherEngine] dispatch: codec=\(detectedCodecID.rawValue) → \(useSoftwarePath ? "software" : "native")", category: .engine)
 
         do {

@@ -116,17 +116,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
             case .flac:   return "fLaC"
             case .alac:   return "alac"
             case .mp3:    return "mp4a.40.34"
-            case .opus:   return "opus"
-            case .truehd, .dts, .vorbis, .pcm, .mp2, .unsupported:
+            case .opus, .truehd, .dts, .vorbis, .pcm, .mp2, .unsupported:
                 return ""
             }
         }
 
         /// Codecs that aren't legal in fMP4 and always have to go
         /// through `AudioBridge` for FLAC transcoding.
+        ///
+        /// Opus is in this set despite being fMP4-spec-legal: AVPlayer
+        /// rejects `opus` inside HLS-fMP4 in practice (only the CAF
+        /// container path or WebM-with-VP9-video gets Opus direct-play
+        /// on Apple platforms; HLS-fMP4 segments with Opus audio fail
+        /// header validation downstream). Routing Opus pre-emptively
+        /// through the FLAC bridge avoids a "stream-copy header write
+        /// failed, retrying with FLAC bridge" round-trip on every
+        /// Opus source.
         var requiresBridge: Bool {
             switch self {
-            case .truehd, .dts, .vorbis, .pcm, .mp2: return true
+            case .opus, .truehd, .dts, .vorbis, .pcm, .mp2: return true
             default: return false
             }
         }
@@ -214,17 +222,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let codecpar = videoStream.pointee.codecpar!
         let isHEVC = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
         let isH264 = codecpar.pointee.codec_id == AV_CODEC_ID_H264
-        let isVP9 = codecpar.pointee.codec_id == AV_CODEC_ID_VP9
-        let isAV1 = codecpar.pointee.codec_id == AV_CODEC_ID_AV1
 
-        // VP9 / AV1 gate on a runtime VT capability probe so we don't
-        // mux a stream into fMP4 and hand AVPlayer a source it can't
-        // decode. Apple ships VP9 / AV1 as supplemental decoders that
-        // need explicit registration before the hardware check is
-        // valid; VTCapabilityProbe does that once and caches.
-        let vp9OK = isVP9 && VTCapabilityProbe.vp9Available
-        let av1OK = isAV1 && Self.av1ProfileIsAccepted(codecpar: codecpar) && VTCapabilityProbe.av1Available
-        guard isHEVC || isH264 || vp9OK || av1OK else {
+        // Accepted codecs are HEVC and H.264 only.
+        //
+        // AV1 and VP9 are explicitly NOT in this guard because
+        // `AetherEngine.load` dispatches them to `SoftwarePlaybackHost`
+        // (dav1d / libvpx via libavcodec + `AVSampleBufferDisplayLayer`)
+        // rather than this engine. AV1 because AVPlayer on tvOS has no
+        // AV1 decoder; VP9 because AVPlayer's HLS manifest parser
+        // empirically rejects the `vp09` CODECS attribute even though
+        // VideoToolbox can HW-decode the codec.
+        //
+        // If a future Apple platform ships HW AV1 + an AVPlayer-HLS
+        // path that accepts the codec (same for VP9), the dispatch in
+        // `AetherEngine.load` can route those sources here and the
+        // accept-list + codec-tag generation re-added.
+        guard isHEVC || isH264 else {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
         }
 
@@ -298,60 +311,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let supplementalCodecs: String?
         let dvVariant: DVVariant
 
-        if isVP9 {
-            codecTagOverride = "vp09"
-            let trc = codecpar.pointee.color_trc
-            if trc == AVCOL_TRC_ARIB_STD_B67 {
-                videoRange = .hlg
-            } else if trc == AVCOL_TRC_SMPTE2084 {
-                videoRange = .pq
-            } else {
-                videoRange = .sdr
-            }
-            // Apple HLS Authoring Spec CODECS form:
-            // vp09.<profile>.<level>.<bitDepth>.<chroma>.<colorPrimaries>.
-            //     <transfer>.<matrix>.<videoFullRangeFlag>
-            // Use conservative defaults pulled from codecpar; muxer
-            // will write the matching `vpcC` box.
-            let profile = Int(codecpar.pointee.profile)
-            let safeProfile = (profile >= 0 && profile <= 3) ? profile : 0
-            let level = Int(codecpar.pointee.level)
-            let safeLevel = level > 0 ? level : 41   // Level 4.1, 4K30 ceiling
-            let bitDepth = Int(codecpar.pointee.bits_per_raw_sample) > 0
-                ? Int(codecpar.pointee.bits_per_raw_sample)
-                : (videoRange == .sdr ? 8 : 10)
-            primaryCodecs = String(
-                format: "vp09.%02d.%02d.%02d.01.01.01.01.00",
-                safeProfile, safeLevel, bitDepth
-            )
-            supplementalCodecs = nil
-            dvVariant = .none
-        } else if isAV1 {
-            codecTagOverride = "av01"
-            let trc = codecpar.pointee.color_trc
-            if trc == AVCOL_TRC_ARIB_STD_B67 {
-                videoRange = .hlg
-            } else if trc == AVCOL_TRC_SMPTE2084 {
-                videoRange = .pq
-            } else {
-                videoRange = .sdr
-            }
-            // Apple HLS Authoring Spec CODECS form:
-            // av01.<profile>.<level><tier>.<bitDepth>.<...>
-            // Profile is 0 (Main), level expressed as `NN` from
-            // codecpar.level if available.
-            let level = Int(codecpar.pointee.level)
-            let safeLevel = (level >= 0 && level <= 31) ? level : 8 // 4.0
-            let bitDepth = Int(codecpar.pointee.bits_per_raw_sample) > 0
-                ? Int(codecpar.pointee.bits_per_raw_sample)
-                : (videoRange == .sdr ? 8 : 10)
-            primaryCodecs = String(
-                format: "av01.0.%02dM.%02d.0.111.01.01.01.0",
-                safeLevel, bitDepth
-            )
-            supplementalCodecs = nil
-            dvVariant = .none
-        } else if isH264 {
+        if isH264 {
             codecTagOverride = "avc1"
             videoRange = isHDRTransfer(codecpar) ? .pq : .sdr
             let profileIDC = Int(codecpar.pointee.profile)
@@ -952,31 +912,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func isHDRTransfer(_ codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
         let trc = codecpar.pointee.color_trc
         return trc == AVCOL_TRC_SMPTE2084 || trc == AVCOL_TRC_ARIB_STD_B67
-    }
-
-    /// AV1 Main / Profile 0 only, level cap at 5.3 (≤ 4K). Apple's HW
-    /// decoder doesn't handle Profile 1 (4:2:2), Profile 2 (4:4:4 / 12-bit),
-    /// or levels 6.0+ (8K). Rejecting non-Profile-0 / 8K up front keeps
-    /// the native path from handing AVPlayer a stream it'll throw away.
-    private static func av1ProfileIsAccepted(codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
-        let profile = codecpar.pointee.profile
-        // FFmpeg encodes "profile not set" as FF_PROFILE_UNKNOWN (-99).
-        // Treat unknown as 0 (Main) since that's the dominant case in
-        // the wild; if it's actually 1 / 2 the decoder will reject and
-        // engine.load falls back to aether.
-        if profile != -99 && profile != 0 {
-            EngineLog.emit("[HLSVideoEngine] AV1 profile=\(profile) rejected (Main/Profile 0 only)", category: .session)
-            return false
-        }
-        let level = codecpar.pointee.level
-        // AV1 level encoding: per AV1 spec, levels 0..23 map to 2.0..7.3.
-        // FFmpeg stores the seq_level_idx (0..23). Cap at level 13
-        // (5.3 → 4K @ 60fps); Apple HW tops out around there.
-        if level >= 0 && level > 13 {
-            EngineLog.emit("[HLSVideoEngine] AV1 level=\(level) rejected (cap at 5.3 / level 13)", category: .session)
-            return false
-        }
-        return true
     }
 
     /// Validate that `index` points at an audio stream in the demuxer's
