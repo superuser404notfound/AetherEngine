@@ -29,11 +29,11 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Area        | Details                                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV (demux side)                                                                         |
-| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox in AVPlayer's HLS-fMP4 path. AV1 / VP9 are HW-supported by VideoToolbox but AVPlayer's HLS pipeline rejects them, so both route through the SW pipeline instead (see below) |
-| SW decode   | AV1 (libavcodec/dav1d) and VP9 (libavcodec native VP9) decode through `SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`. Engine dispatches by codec at load time: AV1 / VP9 → SW pipeline, everything else → native AVPlayer path |
+| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox in AVPlayer's HLS-fMP4 path. AV1 on devices with HW AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips) also routes natively |
+| SW decode   | AV1 (libavcodec/dav1d) on devices without HW AV1 — currently all Apple TVs, M1/M2 Macs, pre-A17-Pro iPhones. VP9 (libavcodec native) unconditionally, since AVPlayer's HLS pipeline rejects the `vp09` CODECS attribute even where VT can HW-decode it. Both render through `SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`. Dispatch decision lives in `AetherEngine.load`, gated per source on `VTCapabilityProbe` |
 | HDR10       | BT.2020 + PQ signaled via the HLS-fMP4 wrapper; AVPlayer hands the bitstream to the system HDR pipeline                     |
 | HDR10+      | Per-frame ST 2094-40 dynamic metadata preserved through stream-copy into the HLS-fMP4 wrapper                               |
-| Dolby Vision| Profile 5 / 8.1 / 8.4. Stream-copied into HLS-fMP4 with `dvh1` / `dvhe` track type and the source's `dvcC` box intact, so tvOS triggers the HDMI DV handshake and DV-capable TVs switch into DV mode |
+| Dolby Vision| HEVC P5 / P8.1 / P8.4 with `dvh1` / `hvc1` track type + `dvcC` box. AV1 P10.0 / P10.1 / P10.4 with `dav1` / `av01` track type + `dvvC` box (per Apple HLS Authoring Spec + Dolby ETSI TS 103 572). Both engage the tvOS HDMI DV handshake on DV-capable displays |
 | HLG         | Transfer function detected and signaled                                                                                     |
 | HDR to SDR  | Handled by AVPlayer / system compositor based on the connected display; no host-side tonemap                                |
 | Audio       | AAC, AC3, EAC3, FLAC, MP3, Opus, Vorbis, TrueHD, DTS, DTS-HD MA, ALAC, PCM                                                  |
