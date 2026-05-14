@@ -47,6 +47,11 @@ final class NativeAVPlayerHost {
     // MARK: - Private state
 
     private var playerItem: AVPlayerItem?
+    /// Latest external-metadata array configured by the host. Applied to
+    /// the current `AVPlayerItem` immediately when set, and replayed
+    /// onto a fresh item across internal reloads (audio-track switch,
+    /// background reopen) so the tvOS system info overlay doesn't blank.
+    private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
@@ -118,6 +123,18 @@ final class NativeAVPlayerHost {
         // Philips TV stayed in HDR mode for DV sources; he flagged
         // the missing AVPlayerItem flag specifically.
         item.appliesPerFrameHDRDisplayMetadata = true
+        // Carry forward any externalMetadata the host configured before
+        // the previous session ended. Hosts typically call setExternalMetadata
+        // after load() returns, but for a reload (audio-track switch,
+        // background reopen) the pending metadata needs to survive the
+        // AVPlayerItem swap so the system info overlay doesn't blank.
+        // AVPlayerItem.externalMetadata exists on tvOS only; iOS / macOS
+        // surface that flow through AVPlayerViewController.metadata instead.
+        #if os(tvOS)
+        if !pendingExternalMetadata.isEmpty {
+            item.externalMetadata = pendingExternalMetadata
+        }
+        #endif
         playerItem = item
         accessLogCount = 0
         failureMessage = nil
@@ -381,6 +398,18 @@ final class NativeAVPlayerHost {
 
     func setRate(_ value: Float) {
         avPlayer.rate = value
+    }
+
+    /// Configure the metadata the system info overlay reads when the
+    /// user swipes down on the Siri Remote during playback (title,
+    /// artwork, description, etc.). Applied immediately to the current
+    /// `AVPlayerItem` and stashed so subsequent reloads inside the same
+    /// session don't drop it.
+    func setExternalMetadata(_ items: [AVMetadataItem]) {
+        pendingExternalMetadata = items
+        #if os(tvOS)
+        playerItem?.externalMetadata = items
+        #endif
     }
 
     // MARK: - Internal

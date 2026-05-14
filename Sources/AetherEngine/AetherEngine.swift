@@ -726,6 +726,18 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
+    /// Attach metadata to the current playback item so tvOS / iOS shows
+    /// real title / artwork / description in the system info overlay
+    /// (the swipe-down panel on the Siri Remote, the Now Playing widget
+    /// on iOS, etc.) instead of a bare URL + duration. No-op on the
+    /// software path since `AVSampleBufferDisplayLayer` doesn't surface
+    /// an info overlay. Safe to call before or after the engine has
+    /// loaded a URL; pre-load calls stash the metadata and apply it on
+    /// the next `load`.
+    public func setExternalMetadata(_ items: [AVMetadataItem]) {
+        nativeHost?.setExternalMetadata(items)
+    }
+
     /// Set playback speed (0.5-2.0). On the native AVPlayer path audio
     /// pitch adjusts via `audioTimePitchAlgorithm`; on the SW path the
     /// rate goes through the synchronizer and audio plays at the
