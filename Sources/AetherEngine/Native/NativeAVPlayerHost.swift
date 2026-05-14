@@ -47,6 +47,12 @@ final class NativeAVPlayerHost {
     // MARK: - Private state
 
     private var playerItem: AVPlayerItem?
+    /// Latest external-metadata array the host wants on the playing
+    /// item. Applied immediately to the current `AVPlayerItem` when set,
+    /// and replayed onto a fresh item across internal reloads
+    /// (audio-track switch, background reopen) so the system Now Playing
+    /// surface keeps its title / artwork after the seam.
+    private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
@@ -118,6 +124,17 @@ final class NativeAVPlayerHost {
         // Philips TV stayed in HDR mode for DV sources; he flagged
         // the missing AVPlayerItem flag specifically.
         item.appliesPerFrameHDRDisplayMetadata = true
+        // Apply any externalMetadata the host has pre-staged before this
+        // load (e.g. system Now Playing title + artwork). Setting it
+        // BEFORE AVPlayer.replaceCurrentItem-equivalent is the documented
+        // safe order; doing it after the asset has started loading races
+        // with AVPlayer's internal track-load. tvOS only; AVPlayerItem.externalMetadata
+        // is unavailable on iOS / macOS.
+        #if os(tvOS)
+        if !pendingExternalMetadata.isEmpty {
+            item.externalMetadata = pendingExternalMetadata
+        }
+        #endif
         playerItem = item
         accessLogCount = 0
         failureMessage = nil
@@ -381,6 +398,19 @@ final class NativeAVPlayerHost {
 
     func setRate(_ value: Float) {
         avPlayer.rate = value
+    }
+
+    /// Stage the metadata items the host wants on the current and any
+    /// future `AVPlayerItem` of this session. The system Now Playing
+    /// surface reads from `AVPlayerItem.externalMetadata` when an
+    /// `MPNowPlayingSession` is active with automatic publishing on.
+    /// Applied immediately if an item exists; otherwise replays onto the
+    /// next item created by `load(url:startPosition:)`.
+    func setExternalMetadata(_ items: [AVMetadataItem]) {
+        pendingExternalMetadata = items
+        #if os(tvOS)
+        playerItem?.externalMetadata = items
+        #endif
     }
 
     // MARK: - Internal

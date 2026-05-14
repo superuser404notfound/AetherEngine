@@ -727,6 +727,19 @@ public final class AetherEngine: ObservableObject {
         return nativeHost?.avPlayer
     }
 
+    /// Stage the metadata items for the system Now Playing surface
+    /// (title, artwork, description, etc.). Set this rather than writing
+    /// to `MPNowPlayingInfoCenter.nowPlayingInfo` when using
+    /// `MPNowPlayingSession` with automatic publishing: the session
+    /// reads metadata off `AVPlayerItem.externalMetadata`, and manual
+    /// `MPNowPlayingInfoCenter` writes alongside it race against
+    /// MediaPlayer's internal serial queue on tvOS 26 and trip an
+    /// assertion. No-op on the software path; tvOS-only at the AVPlayer
+    /// layer (iOS / macOS use AVPlayerViewController.metadata instead).
+    public func setExternalMetadata(_ items: [AVMetadataItem]) {
+        nativeHost?.setExternalMetadata(items)
+    }
+
     /// Set playback volume (0.0 = mute, 1.0 = full).
     public var volume: Float {
         get { softwareHost?.volume ?? nativeHost?.avPlayer.volume ?? 1.0 }
