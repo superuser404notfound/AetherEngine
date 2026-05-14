@@ -541,6 +541,9 @@ public final class AetherEngine: ObservableObject {
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
             audioSourceStreamIndexOverride: audioSourceStreamIndex
         )
+        session.onFirstHDR10PlusDetected = { [weak self] in
+            Task { @MainActor in self?.handleHDR10PlusDetected() }
+        }
         let playbackURL = try session.start()
         self.nativeVideoSession = session
 
@@ -595,6 +598,9 @@ public final class AetherEngine: ObservableObject {
         audioSourceStreamIndex: Int32?
     ) async throws {
         let host = SoftwarePlaybackHost()
+        host.onFirstHDR10PlusDetected = { [weak self] in
+            Task { @MainActor in self?.handleHDR10PlusDetected() }
+        }
         self.softwareHost = host
 
         softwareCancellables.removeAll()
@@ -1248,6 +1254,21 @@ public final class AetherEngine: ObservableObject {
             return caps.supportsHDR10 ? .hdr10 : .sdr
         }
         return .sdr
+    }
+
+    /// Called (once per session) when either backend's HDR10+ scan
+    /// catches a T.35 metadata payload. The host's badge tracks
+    /// `videoFormat`, so flipping `.hdr10 → .hdr10Plus` here is what
+    /// gets the badge to read "HDR10+". Guarded against upgrading
+    /// non-HDR10 states: a DV / HLG / SDR-clamped session that also
+    /// happens to carry HDR10+ metadata stays on its current format
+    /// because we have no evidence the panel is rendering an HDR10
+    /// base layer in those cases.
+    @MainActor
+    private func handleHDR10PlusDetected() {
+        guard videoFormat == .hdr10 else { return }
+        EngineLog.emit("[AetherEngine] HDR10+ T.35 detected, upgrading videoFormat .hdr10 → .hdr10Plus", category: .engine)
+        videoFormat = .hdr10Plus
     }
 
     private nonisolated static func streamHasDV(stream: UnsafeMutablePointer<AVStream>) -> Bool {

@@ -42,6 +42,11 @@ final class SoftwarePlaybackHost {
     @Published private(set) var failureMessage: String?
     @Published private(set) var didReachEnd: Bool = false
 
+    /// Fires (off-main) once per session the first time HDR10+ dynamic
+    /// metadata appears on a decoded frame. Hooked by `AetherEngine` to
+    /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
+    nonisolated(unsafe) var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+
     // MARK: - Output
 
     /// The display layer the engine attaches to the bound `AetherPlayerView`.
@@ -147,6 +152,9 @@ final class SoftwarePlaybackHost {
             // is internally locked + safe to call off-main; the engine's
             // public state stays untouched here, only the layer's frame queue.
             self?.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
+        }
+        videoDecoder.onFirstHDR10PlusDetected = { [weak self] in
+            self?.onFirstHDR10PlusDetected?()
         }
 
         let resolvedAudioIdx: Int32 = audioSourceStreamIndex ?? dem.audioStreamIndex

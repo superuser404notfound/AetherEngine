@@ -151,6 +151,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return didFinishFlag
     }
 
+    /// Fires (off the pump thread) once per producer instance the first
+    /// time the byte sequence `B5 00 3C 00 01 04` — the unique HDR10+
+    /// T.35 SEI / ITU-T-T.35 OBU prefix (country=US, provider=SMPTE,
+    /// oriented_code=HDR10+, application=4) — is seen in a video
+    /// packet's payload. HLSVideoEngine debounces across restarts and
+    /// forwards to AetherEngine for the `videoFormat` upgrade.
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+
+    /// Latched once the signature has been seen in this producer's
+    /// packet stream so the scan goes silent for the remainder of the
+    /// session. The byte scan is cheap (~µs per packet) but there's no
+    /// reason to keep paying for it after detection.
+    private var hdr10PlusDetected = false
+
     // MARK: - Init
 
     init(
@@ -409,6 +423,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
                 // Video path.
                 packet.pointee.stream_index = videoOutputStreamIndex
+
+                // HDR10+ detection. Scan packet payload for the T.35
+                // ITU country / provider / oriented-code / application
+                // signature that uniquely identifies an HDR10+ Samsung
+                // metadata payload. Works for both HEVC SEI NAL units
+                // (T.35 user_data_registered) and AV1 OBU_METADATA
+                // (METADATA_TYPE_ITUT_T35) because both wrap the same
+                // bytes. No `00 00` pair inside the signature, so HEVC
+                // emulation-prevention escaping does not perturb it.
+                // memmem is O(n*m) worst-case but with a 6-byte needle
+                // the cost is negligible vs. the muxer write that
+                // follows.
+                if !hdr10PlusDetected, let data = packet.pointee.data {
+                    let size = Int(packet.pointee.size)
+                    if size >= 6 {
+                        let needle: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
+                        let found = needle.withUnsafeBufferPointer { n -> Bool in
+                            memmem(data, size, n.baseAddress, n.count) != nil
+                        }
+                        if found {
+                            hdr10PlusDetected = true
+                            onFirstHDR10PlusDetected?()
+                        }
+                    }
+                }
 
                 // Rescale pts/dts/duration from source time_base to the
                 // muxer's chosen output time_base. The hls muxer

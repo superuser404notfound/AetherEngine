@@ -185,6 +185,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// parallel.
     private let restartLock = NSLock()
 
+    /// Fires once per session, the first time the producer sees an
+    /// HDR10+ T.35 signature in a packet. Hooked by `AetherEngine` to
+    /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
+    /// Debounced here so producer restarts on scrub don't re-fire.
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+    private var hasReportedHDR10Plus = false
+    private let hdr10PlusLock = NSLock()
+
     /// Approximate target segment duration in seconds. The hls muxer
     /// snaps cut points to keyframes at-or-after this threshold, so
     /// actual durations are this + GOP length variance. Apple's HLS
@@ -693,7 +701,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let dem = demuxer, let cache = cache, let cfg = savedVideoConfig else {
             throw HLSVideoEngineError.notStarted
         }
-        return try HLSSegmentProducer(
+        let prod = try HLSSegmentProducer(
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
             video: cfg,
@@ -702,6 +710,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
             baseIndex: baseIndex,
             targetSegmentDurationSeconds: Self.targetSegmentDuration
         )
+        prod.onFirstHDR10PlusDetected = { [weak self] in
+            self?.notifyHDR10PlusOnce()
+        }
+        return prod
+    }
+
+    /// Debounced relay. Producers each have their own once-per-instance
+    /// scan latch; this guards against re-firing after a scrub restart
+    /// (which builds a fresh producer that re-scans from packet zero).
+    private func notifyHDR10PlusOnce() {
+        hdr10PlusLock.lock()
+        let alreadyFired = hasReportedHDR10Plus
+        hasReportedHDR10Plus = true
+        hdr10PlusLock.unlock()
+        if !alreadyFired {
+            onFirstHDR10PlusDetected?()
+        }
     }
 
     /// Try the stream-copy → FLAC-bridge → video-only cascade for the
