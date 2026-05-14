@@ -29,8 +29,8 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Area        | Details                                                                                                                     |
 | ----------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Containers  | MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV (demux side)                                                                         |
-| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox; VP9 on A12+ (Apple TV 4K Gen 2+); AV1 on any chip with HW AV1 (none on Apple TV as of 2026), Apple's bundled dav1d on iOS 17+ / macOS 14+ |
-| SW decode   | AV1 via libavcodec/dav1d + `AVSampleBufferDisplayLayer` on platforms where AVPlayer has no AV1 path (primarily Apple TV). Engine dispatches by codec at load time: AV1 → SW pipeline, everything else → native AVPlayer path |
+| HW decode   | H.264, HEVC, HEVC Main10 via VideoToolbox in AVPlayer's HLS-fMP4 path. AV1 / VP9 are HW-supported by VideoToolbox but AVPlayer's HLS pipeline rejects them, so both route through the SW pipeline instead (see below) |
+| SW decode   | AV1 (libavcodec/dav1d) and VP9 (libavcodec native VP9) decode through `SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`. Engine dispatches by codec at load time: AV1 / VP9 → SW pipeline, everything else → native AVPlayer path |
 | HDR10       | BT.2020 + PQ signaled via the HLS-fMP4 wrapper; AVPlayer hands the bitstream to the system HDR pipeline                     |
 | HDR10+      | Per-frame ST 2094-40 dynamic metadata preserved through stream-copy into the HLS-fMP4 wrapper                               |
 | Dolby Vision| Profile 5 / 8.1 / 8.4. Stream-copied into HLS-fMP4 with `dvh1` / `dvhe` track type and the source's `dvcC` box intact, so tvOS triggers the HDMI DV handshake and DV-capable TVs switch into DV mode |
@@ -99,7 +99,7 @@ Install via Swift Package Manager:
 
 AetherEngine has two playback pipelines, picked once at `load(url:)` based on the source's video codec:
 
-**Native AVPlayer pipeline (default).** Demux the source with libavformat, re-mux the elementary streams on the fly into HLS-fMP4, serve them from a local HTTP server on `127.0.0.1:<port>`, point `AVPlayer` at the playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, all audio routing. This is the path for HEVC / H.264 / VP9 — every codec AVPlayer can decode natively. Atmos passthrough, DV HDMI handshake, HDR10 / HDR10+ system-side tone-mapping all live on this path.
+**Native AVPlayer pipeline (default).** Demux the source with libavformat, re-mux the elementary streams on the fly into HLS-fMP4, serve them from a local HTTP server on `127.0.0.1:<port>`, point `AVPlayer` at the playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, all audio routing. This is the path for HEVC and H.264, which is what AVPlayer's HLS-fMP4 pipeline reliably accepts. Atmos passthrough, DV HDMI handshake, HDR10 / HDR10+ system-side tone-mapping all live on this path.
 
 ```
 Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache ──► HLSLocalServer
@@ -111,7 +111,7 @@ Source URL ──► Demuxer ──► HLSSegmentProducer ──► SegmentCache
                                                                          └─► AVR / speakers (Atmos via MAT 2.0)
 ```
 
-**Software decoder pipeline (AV1 fallback).** Demux the source, run video packets through libavcodec/dav1d into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used when AVPlayer can't decode the source's video codec — today that means AV1 on Apple TV, where Apple ships dav1d on iOS and macOS but not on tvOS, and no Apple TV chip has HW AV1.
+**Software decoder pipeline (AV1 + VP9 fallback).** Demux the source, run video packets through libavcodec (dav1d for AV1, FFmpeg's native VP9 decoder for VP9) into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used for codecs AVPlayer's HLS-fMP4 pipeline doesn't accept: AV1 (no AV1 decoder on tvOS at all; Apple ships dav1d on iOS / macOS only, no Apple TV chip has HW AV1) and VP9 (AVPlayer parses the HLS manifest, sees `vp09` in the CODECS attribute, then silently stops fetching — `item.status` never leaves `.unknown`. VideoToolbox HW-decodes VP9 fine, but only outside the HLS pipeline).
 
 ```
 Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──► SampleBufferRenderer
