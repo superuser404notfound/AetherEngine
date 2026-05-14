@@ -3,9 +3,6 @@ import Libavformat
 import Libavcodec
 import Libavutil
 
-/// AVERROR_EOF, FFmpeg's end-of-file sentinel.
-private let AVERROR_EOF_VALUE: Int32 = -541478725
-
 enum SubtitleDecoderError: Error {
     case openFailed(code: Int32)
     case noSubtitleStream

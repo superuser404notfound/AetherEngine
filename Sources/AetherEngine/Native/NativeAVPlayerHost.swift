@@ -362,20 +362,6 @@ final class NativeAVPlayerHost {
         avPlayer.pause()
     }
 
-    /// Toggle between play and pause based on the current
-    /// `timeControlStatus`. The KVO-observed `rate` is also valid
-    /// here but reads as 0 during a buffer stall (which we don't
-    /// want to interpret as "paused"); `timeControlStatus`
-    /// distinguishes those.
-    func toggle() {
-        switch avPlayer.timeControlStatus {
-        case .playing:
-            pause()
-        default:
-            play()
-        }
-    }
-
     func seek(to seconds: Double) {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
         // Frame-accurate seek. Earlier experiment with

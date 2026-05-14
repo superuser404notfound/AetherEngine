@@ -67,10 +67,12 @@ public final class AetherEngine: ObservableObject {
     @Published public private(set) var activeAudioTrackIndex: Int?
     @Published public private(set) var videoFormat: VideoFormat = .sdr
 
-    /// Which internal backend rendered the current session.
-    /// Always `.native` after 1.0.0 (the legacy aether sample-buffer
-    /// path was removed). Kept on the public surface for diagnostic
-    /// overlays / TestFlight badges.
+    /// Which internal backend rendered the current session. Resolves
+    /// to `.native` for AVPlayer-decodable sources (HEVC, H.264, plus
+    /// AV1 on HW-AV1 devices) or `.software` when the source falls
+    /// through to `SoftwarePlaybackHost` (SW dav1d for AV1 without HW,
+    /// libavcodec for VP9). Kept on the public surface for diagnostic
+    /// overlays and TestFlight badges; hosts should not switch on it.
     @Published public private(set) var playbackBackend: PlaybackBackend = .none
 
     /// Decoded subtitle cues for the active subtitle source. Populated

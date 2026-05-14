@@ -353,15 +353,6 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
     }
 
-    /// Reset per-session diagnostic counters. Call on load() so the
-    /// progress / status logs fire for each new video, not only the
-    /// first one after app launch.
-    func resetDiagnostics() {
-        enqueueCount = 0
-        loggedLayerFailed = false
-        loggedNotReady = false
-    }
-
     private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Reuse the format description unless dimensions or pixel format
         // changed, rebuilding per frame wastes an allocation and Core
