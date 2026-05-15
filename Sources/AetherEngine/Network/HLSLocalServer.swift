@@ -427,39 +427,18 @@ final class HLSLocalServer: @unchecked Sendable {
 
         // HTTP/1.1 keep-alive loop. AVPlayer reuses connections
         // for several segment fetches before opening a new one.
-        //
-        // `carry` holds any bytes that landed in the recv buffer past
-        // the current request's `\r\n\r\n` terminator. AVPlayer is
-        // free to push the next GET into the same TCP segment as the
-        // tail of the previous one (back-to-back GETs are common on
-        // a hot keep-alive connection); without this carry, those
-        // bytes would be silently dropped between iterations and the
-        // peer would wait forever for a response that was never
-        // dispatched. Reproduces as CoreMediaErrorDomain -16046 on
-        // the AVPlayer side and was the regression the NWConnection
-        // → BSD-socket rewrite introduced.
-        var carry = Data()
         while true {
-            guard let request = readHTTPRequest(fd, carry: &carry) else { return }
+            guard let request = readHTTPRequest(fd) else { return }
             guard processRequest(request, on: fd) else { return }
         }
     }
 
     /// Read until end of HTTP headers (`\r\n\r\n`). Returns the raw
     /// request bytes (headers only — no body, since we only accept
-    /// GET). Any bytes recv'd past the terminator are written into
-    /// `carry` so the next call picks them up first. Returns nil on
-    /// EOF, error, or oversize.
-    private func readHTTPRequest(_ fd: Int32, carry: inout Data) -> Data? {
-        var buffer = carry
-        carry = Data()
+    /// GET). Returns nil on EOF, error, or oversize.
+    private func readHTTPRequest(_ fd: Int32) -> Data? {
+        var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
-
-        // Carry from previous iteration may already contain a full
-        // request; check before blocking on recv.
-        if let end = findHeadersTerminator(buffer) {
-            return splitRequest(from: &buffer, headerEnd: end + 4, carry: &carry)
-        }
 
         while true {
             let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
@@ -484,26 +463,15 @@ final class HLSLocalServer: @unchecked Sendable {
             }
             buffer.append(chunk, count: n)
 
+            // Look for the headers terminator.
             if let end = findHeadersTerminator(buffer) {
-                return splitRequest(from: &buffer, headerEnd: end + 4, carry: &carry)
+                return buffer.prefix(end + 4)
             }
             if buffer.count > 8192 {
                 EngineLog.emit("[HLSLocalServer] request too large fd=\(fd) bytes=\(buffer.count)", category: .hlsServer)
                 return nil
             }
         }
-    }
-
-    /// Split `buffer` at `headerEnd`: returns the request prefix as a
-    /// fresh contiguous Data, stashing the suffix into `carry` for
-    /// the next read. Both are forced through `Data(_:)` so neither
-    /// retains storage from the old buffer.
-    private func splitRequest(from buffer: inout Data, headerEnd: Int, carry: inout Data) -> Data {
-        let request = Data(buffer.prefix(headerEnd))
-        if buffer.count > headerEnd {
-            carry = Data(buffer.suffix(from: headerEnd))
-        }
-        return request
     }
 
     /// Returns the offset of `\r\n\r\n` in `buf`, or nil if not present.
