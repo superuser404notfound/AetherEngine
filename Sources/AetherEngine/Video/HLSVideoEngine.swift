@@ -805,43 +805,40 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.notStarted
         }
 
-        // Scan-forward targets in source TB. For initial-start
-        // sessions (baseIndex == 0) both stay at `Int64.min` and the
-        // producer's scan-forward gates start open. For restart
-        // sessions they're set to `plan[baseIndex].startPts` —
-        // `matroska_read_seek` may land at a Cue earlier than that
-        // value when the plan position is a non-Cue keyframe (the
-        // libavformat AVStream index includes both Cues and demux-
-        // discovered IRAPs, while the matroska seek only honours
-        // Cues). The producer drops the leading non-target packets
-        // so the resulting fragment's tfdt is at `plan[N].startPts -
-        // firstKeyframePts` in source TB, matching the playlist's
-        // cumulative-EXTINF position for seg-N.
+        // Scan-forward + dynamic-shift wiring.
         //
-        // Audio target uses the same source-video PTS rescaled into
-        // the audio stream's TB so both streams' first kept packet
-        // align in source-time.
+        // Video scan target (for restart sessions): plan[N].startPts
+        // in source video TB. The producer scans forward to the
+        // first real `AV_PKT_FLAG_KEY` packet with dts ≥ this value,
+        // which may land at a later IDR than the target when the
+        // planned position is a non-IDR keyframe in libavformat's
+        // wider index. Audio scan target is set DYNAMICALLY by the
+        // producer once video lands (so audio and video first
+        // samples come from the same source-time).
+        //
+        // Desired first tfdt (the value the muxer's fragment tfdt
+        // ends up at after the dynamic shift applies): for
+        // baseIndex == 0 this is 0 (playlist origin); for restart
+        // sessions it's plan[N].startSeconds in source TB =
+        // plan[N].startPts - firstKeyframePts. The producer computes
+        // shift = actualFirstDts - desiredFirstTfdt on the first
+        // kept packet per stream and applies it to all subsequent
+        // packets, giving aligned tfdts on both streams without
+        // relying on the demuxer hitting the plan exactly.
         let videoTarget: Int64
-        let audioTarget: Int64
+        let desiredVideoTfdt: Int64
+        let desiredAudioTfdt: Int64
         if baseIndex > 0, baseIndex < segmentPlan.count {
             videoTarget = segmentPlan[baseIndex].startPts
-            audioTarget = savedAudioConfig.map {
-                av_rescale_q(videoTarget, cfg.timeBase, $0.inputTimeBase)
-            } ?? Int64.min
+            desiredVideoTfdt = segmentPlan[baseIndex].startPts - firstKeyframePts
+            desiredAudioTfdt = savedAudioConfig.map {
+                av_rescale_q(desiredVideoTfdt, cfg.timeBase, $0.inputTimeBase)
+            } ?? 0
         } else {
             videoTarget = Int64.min
-            audioTarget = Int64.min
+            desiredVideoTfdt = 0
+            desiredAudioTfdt = 0
         }
-
-        // Audio shift in audio TB: subtract the audio stream's own
-        // start_time (already in audio TB) — see
-        // `HLSVideoEngine.AudioConfig.sourceStreamStartTime` use
-        // site for the rationale (uniform shift sends audio negative
-        // when video.start_time > audio.start_time, dropping the
-        // first audio frame and leaving the second audio fragment
-        // tfdt at a non-zero offset that AVPlayer can't reconcile).
-        // Stream-copy only; the FLAC bridge owns its encoder clock.
-        let audioShift: Int64 = 0
 
         let prod = try HLSSegmentProducer(
             demuxer: dem,
@@ -854,9 +851,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoFallbackDurationPts: videoFallbackDurationPts,
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoDts: videoTarget,
-            restartTargetAudioDts: audioTarget,
-            videoShiftPts: firstKeyframePts,
-            audioShiftPts: audioShift
+            desiredFirstVideoTfdtPts: desiredVideoTfdt,
+            desiredFirstAudioTfdtPts: desiredAudioTfdt
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()

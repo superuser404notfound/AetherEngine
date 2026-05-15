@@ -164,41 +164,56 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pendingAudioPkt: UnsafeMutablePointer<AVPacket>?
     private var loggedFirstVideoPktInfo = false
 
-    /// Target first dts (in source video / audio TB respectively) after
-    /// `avformat_seek_file` for restart sessions. `matroska_read_seek`
-    /// uses MKV `Cues` for seek, while `dem.indexedKeyframes` reports
-    /// libavformat's wider AVStream index which can include non-Cue
-    /// keyframes that the demuxer's own seek code can NOT land on
-    /// precisely. The seek therefore lands at the Cue ≤ target — which
-    /// can be 100+ ms before `plan[baseIndex].startPts`. The producer
-    /// then writes a fragment whose `tfdt` is well below the playlist's
-    /// cumulative-EXTINF position for that segment, AVPlayer's HLS-fMP4
-    /// engine sees a position mismatch, and the asset stalls at
-    /// `waitingToPlay` without surfacing an error.
+    /// Scan-forward + dynamic-shift state. The static `restart*Target`
+    /// fields are seeded from `plan[baseIndex]` for restart sessions
+    /// (Int64.min for initial-start). The dynamic `firstActual*Dts`
+    /// fields are filled in once the corresponding stream's gate
+    /// opens — they record where the producer actually landed and
+    /// determine the constant PTS shift applied to every subsequent
+    /// packet on that stream.
     ///
-    /// Scan-forward: per stream, drop incoming packets after the seek
-    /// until we see a packet whose dts ≥ the target (and, for video,
-    /// is a key frame). Once each stream's gate opens, all subsequent
-    /// packets pass through normally. Restart-only — for the
-    /// initial-start (baseIndex == 0) session both targets are
-    /// `AV_NOPTS_VALUE` and the gates start open.
+    /// The gate logic uses `AV_PKT_FLAG_KEY` for video because
+    /// libavformat's keyframe index can include non-IDR I-frames
+    /// that aren't flagged as keyframes in the matroska block
+    /// stream; starting a fragment on one of those would feed
+    /// AVPlayer a non-decodable seg-N first sample. Audio doesn't
+    /// have a keyframe concept (every audio frame is independently
+    /// decodable in our supported codecs).
+    ///
+    /// Audio scan-forward is GATED on video scan-forward: for restart
+    /// sessions audio waits until video's actual landing is known,
+    /// then targets the same source-time position so the audio and
+    /// video first samples come from the same scene in the source.
+    /// Without this gating, audio scans to the playlist target
+    /// independently of where video can actually land, and a
+    /// non-IDR-keyframe miss in video puts video ~10 seconds later
+    /// in source than audio — the symptom Vincent reported as
+    /// "video läuft aber Ton setzt erst später ein und ist asynchron".
     private let restartTargetVideoDts: Int64
-    private let restartTargetAudioDts: Int64
-    private var videoScanComplete: Bool
-    private var audioScanComplete: Bool
+    private var restartTargetAudioDts: Int64
+    private var audioWaitForVideo: Bool
+    private var firstActualVideoDts: Int64 = Int64.min
+    private var firstActualAudioDts: Int64 = Int64.min
 
-    /// PTS shift applied to all packets after the scan-forward gate
-    /// opens (in each stream's own source TB). Aligns the muxer's
-    /// fragment `tfdt` with the playlist's cumulative-EXTINF origin:
-    ///   - Video shift = `firstKeyframePts` so seg-0 tfdt=0 matches
-    ///     the playlist's seg-0 cumulative position of 0.
-    ///   - Audio shift = `audio.start_time` so the audio stream's
-    ///     first fragment tfdt=0 too. MKV from remuxers often parks
-    ///     audio.start_time at 0 even when video.start_time is non-
-    ///     zero, so a uniform shift would push audio negative — per
-    ///     stream is the correct alignment.
-    private let videoShiftPts: Int64
-    private let audioShiftPts: Int64
+    /// Desired first-sample dts (in source TB) for each stream — the
+    /// value the muxer's fragment `tfdt` will end up at after the
+    /// dynamic shift is applied. Set at init to align with the
+    /// playlist's cumulative-EXTINF origin for the segment we're
+    /// producing:
+    ///   - baseIndex == 0: desired = 0 (playlist origin).
+    ///   - baseIndex > 0: desired = plan[baseIndex].startPts -
+    ///     firstKeyframePts (= plan[baseIndex].startSeconds in source
+    ///     TB).
+    private let desiredFirstVideoTfdtPts: Int64
+    private var desiredFirstAudioTfdtPts: Int64
+
+    /// Dynamic PTS shift = `firstActualDts - desiredFirstTfdt`,
+    /// computed once each stream's first kept packet arrives, applied
+    /// to every subsequent packet on that stream so the fragment's
+    /// `tfdt` lands at the desired value. Int64.min == "not yet
+    /// computed".
+    private var videoShiftPts: Int64 = Int64.min
+    private var audioShiftPts: Int64 = Int64.min
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
@@ -260,9 +275,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         videoFallbackDurationPts: Int64,
         audioFallbackDurationPts: Int64 = 0,
         restartTargetVideoDts: Int64 = Int64.min,
-        restartTargetAudioDts: Int64 = Int64.min,
-        videoShiftPts: Int64 = 0,
-        audioShiftPts: Int64 = 0
+        desiredFirstVideoTfdtPts: Int64,
+        desiredFirstAudioTfdtPts: Int64 = 0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -273,14 +287,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.videoFallbackDurationPts = videoFallbackDurationPts
         self.audioFallbackDurationPts = audioFallbackDurationPts
         self.restartTargetVideoDts = restartTargetVideoDts
-        self.restartTargetAudioDts = restartTargetAudioDts
-        self.videoShiftPts = videoShiftPts
-        self.audioShiftPts = audioShiftPts
-        // Scan-forward gates start open for initial-start sessions
-        // (no restart target), closed for restart sessions until the
-        // first relevant packet arrives.
-        self.videoScanComplete = (restartTargetVideoDts == Int64.min)
-        self.audioScanComplete = (restartTargetAudioDts == Int64.min)
+        // Audio scan target is set DYNAMICALLY once video scan
+        // completes (= videoActualDts rescaled to audio TB), so the
+        // first kept audio sample is from the same source-time as
+        // the first video keyframe we land on.
+        self.restartTargetAudioDts = Int64.min
+        self.audioWaitForVideo = (restartTargetVideoDts != Int64.min)
+        self.desiredFirstVideoTfdtPts = desiredFirstVideoTfdtPts
+        self.desiredFirstAudioTfdtPts = desiredFirstAudioTfdtPts
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -537,66 +551,104 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     continue
                 }
 
-                // Scan-forward gate. After a restart-seek the
-                // matroska demuxer can land 100+ ms before the
-                // requested target (libavformat's keyframe index is
-                // wider than MKV's `Cues` table; non-Cue keyframes
-                // aren't seekable). Drop incoming packets per stream
-                // until the first one whose dts ≥ the recorded
-                // target — and, for video, is a real keyframe so the
-                // segment starts at a decodable boundary. Once each
-                // stream's gate opens it stays open for the rest of
-                // the producer session. Initial-start sessions
-                // (baseIndex == 0) have both gates pre-opened so
-                // this branch is a no-op for them.
-                if isVideoPkt && !videoScanComplete {
-                    let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
-                    if isKey && packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts {
-                        videoScanComplete = true
+                // Scan-forward + dynamic-shift gate.
+                //
+                // For restart sessions, the matroska demuxer's seek
+                // can land 100+ ms before our target (libavformat's
+                // keyframe index includes non-IDR keyframes that
+                // the demuxer's own seek can't precisely reach). On
+                // top of that, the keyframe at the planned position
+                // may not be flagged with `AV_PKT_FLAG_KEY` in the
+                // block stream — the libavformat index recorded it
+                // as a keyframe via MKV `Cues`, but matroskadec sets
+                // the packet flag from the SimpleBlock keyframe bit
+                // which can be off. Scanning to the next IDR is
+                // necessary to give AVPlayer a decodable start.
+                //
+                // Once the video gate opens at the next true IDR,
+                // the audio gate is opened against the SAME source-
+                // time so both streams' first kept packet comes from
+                // the same scene. Dynamic shift = actual - desired
+                // is then applied per-stream so the fragment's tfdt
+                // lands at the playlist's cumulative-EXTINF origin
+                // for this segment.
+                //
+                // Initial-start sessions (baseIndex == 0) start with
+                // both gates open: the demuxer is at file start, the
+                // first packet's dts already equals
+                // `desiredFirstVideoTfdtPts + firstKeyframePts`, the
+                // shift comes out to `firstKeyframePts` automatically.
+                if isVideoPkt {
+                    if restartTargetVideoDts != Int64.min && firstActualVideoDts == Int64.min {
+                        let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
+                        guard isKey, packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetVideoDts else {
+                            continue
+                        }
+                    }
+                    if firstActualVideoDts == Int64.min {
+                        firstActualVideoDts = packet.pointee.dts
+                        videoShiftPts = firstActualVideoDts - desiredFirstVideoTfdtPts
+                        // Open the audio gate now that we know where
+                        // video actually landed. Audio shift will be
+                        // computed against the same desired tfdt so
+                        // both streams' first sample lines up in
+                        // source-time AND in muxer-time.
+                        if audioWaitForVideo, let audio = audioConfig {
+                            restartTargetAudioDts = av_rescale_q(
+                                firstActualVideoDts,
+                                sourceVideoTimeBase,
+                                audio.inputTimeBase
+                            )
+                            audioWaitForVideo = false
+                        }
                         EngineLog.emit(
-                            "[HLSSegmentProducer] video scan-forward complete: target=\(restartTargetVideoDts) "
-                            + "landed=\(packet.pointee.dts) (off by \(packet.pointee.dts - restartTargetVideoDts))",
+                            "[HLSSegmentProducer] video gate open: "
+                            + "actual=\(firstActualVideoDts) "
+                            + "target=\(restartTargetVideoDts) "
+                            + "desired=\(desiredFirstVideoTfdtPts) "
+                            + "shift=\(videoShiftPts)",
                             category: .session
                         )
-                        // Fall through and write this packet.
-                    } else {
-                        continue
                     }
                 }
-                if isAudioPkt && !audioScanComplete {
-                    if packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetAudioDts {
-                        audioScanComplete = true
+                if isAudioPkt {
+                    if audioWaitForVideo {
+                        // Restart session, video scan hasn't completed
+                        // yet — drop audio so audio doesn't anchor
+                        // ahead of video.
+                        continue
+                    }
+                    if restartTargetAudioDts != Int64.min && firstActualAudioDts == Int64.min {
+                        guard packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetAudioDts else {
+                            continue
+                        }
+                    }
+                    if firstActualAudioDts == Int64.min {
+                        firstActualAudioDts = packet.pointee.dts
+                        audioShiftPts = firstActualAudioDts - desiredFirstAudioTfdtPts
                         EngineLog.emit(
-                            "[HLSSegmentProducer] audio scan-forward complete: target=\(restartTargetAudioDts) "
-                            + "landed=\(packet.pointee.dts) (off by \(packet.pointee.dts - restartTargetAudioDts))",
+                            "[HLSSegmentProducer] audio gate open: "
+                            + "actual=\(firstActualAudioDts) "
+                            + "target=\(restartTargetAudioDts) "
+                            + "desired=\(desiredFirstAudioTfdtPts) "
+                            + "shift=\(audioShiftPts)",
                             category: .session
                         )
-                        // Fall through and write this packet.
-                    } else {
-                        continue
                     }
                 }
 
-                // Apply per-stream PTS shift to align fragment tfdt
-                // with the playlist's cumulative-EXTINF origin.
-                // Video shift = firstKeyframePts (subtracted), audio
-                // shift = audio.start_time (subtracted). The shift
-                // is a constant for the whole producer session so it
-                // composes correctly with the scan-forward target.
-                if isVideoPkt && videoShiftPts != 0 {
+                // Apply the per-stream dynamic shift. After both
+                // gates have opened, every subsequent packet on each
+                // stream is shifted by its constant per-session
+                // value so the muxer sees a contiguous, playlist-
+                // aligned timeline.
+                let activeShift: Int64 = isVideoPkt ? videoShiftPts : audioShiftPts
+                if activeShift != Int64.min && activeShift != 0 {
                     if packet.pointee.dts != Int64.min {
-                        packet.pointee.dts -= videoShiftPts
+                        packet.pointee.dts -= activeShift
                     }
                     if packet.pointee.pts != Int64.min {
-                        packet.pointee.pts -= videoShiftPts
-                    }
-                }
-                if isAudioPkt && audioShiftPts != 0 {
-                    if packet.pointee.dts != Int64.min {
-                        packet.pointee.dts -= audioShiftPts
-                    }
-                    if packet.pointee.pts != Int64.min {
-                        packet.pointee.pts -= audioShiftPts
+                        packet.pointee.pts -= activeShift
                     }
                 }
 
