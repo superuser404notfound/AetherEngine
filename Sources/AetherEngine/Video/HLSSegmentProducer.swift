@@ -388,53 +388,50 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
                 let pktStreamIdx = packet.pointee.stream_index
 
-                // Repair unset dts. After a mid-cluster
-                // avformat_seek_file on MKV the matroska demuxer
-                // can emit packets with `AV_NOPTS_VALUE` for dts
-                // (its RelativeTimestamp-based reconstruction loses
-                // state at the seek boundary, especially across the
-                // first GOP after the seek target keyframe). FFmpeg's
-                // muxer in `compute_muxer_ts_fields` then fills the
-                // missing dts with the stream's `cur_dts` (last
-                // written), and the monotonic check immediately
-                // fails with `cur_dts >= cur_dts` — `av_write_frame`
-                // returns EINVAL and the segment is corrupt.
+                // Repair unset dts. The matroska demuxer can emit
+                // packets with `AV_NOPTS_VALUE` for dts on B-frames
+                // even from the start of a session — MKV doesn't
+                // store dts directly, FFmpeg reconstructs it from
+                // ReferenceBlock relations, and that reconstruction
+                // intermittently fails for non-leading B-frames.
                 //
-                // We can't drop the packet outright: B/P-frames near
-                // the seek boundary are needed to keep the GOP
-                // decode-coherent, and dropping the keyframe itself
-                // (if its dts is unset) leaves AVPlayer with a
-                // header-only segment that downloads cleanly but
-                // never advances past `waitingToPlay`. The repair
-                // policy here keeps the packet flowing:
-                //   1. If pts is valid, use it as dts. For
-                //      non-B-frames dts == pts always; for an
-                //      isolated seek-target keyframe with valid pts
-                //      this is exact.
-                //   2. Else if we have a previous valid dts on the
-                //      same stream, use `lastValidDts + 1`. The
-                //      display time is momentarily approximate (off
-                //      by one tick, ~1 ms at typical srcTb=1/1000);
-                //      the next packet with a real dts re-anchors
-                //      the stream.
-                //   3. Else drop. The very first packet after seek
-                //      should have at least pts set; reaching this
-                //      branch indicates a deeper demuxer issue.
+                // If we forward the NOPTS packet, FFmpeg's muxer
+                // fills the missing dts with the stream's `cur_dts`
+                // (last written) and the monotonic check fails with
+                // `cur_dts >= cur_dts`, returning EINVAL. The
+                // resulting segment is corrupt (a few KB instead of
+                // 1 MB+) and AVPlayer rejects it with
+                // CoreMediaErrorDomain -16046.
+                //
+                // The correct repair is `lastValidDts + 1` in the
+                // source time_base. Using `pts` as a fallback is
+                // tempting but WRONG for B-frames: pts is the
+                // display timestamp and is BEHIND the packet's
+                // decode-order position, so substituting pts as dts
+                // produces `new_dts < cur_dts` and re-trips the
+                // monotonic check (this was the regression that
+                // showed up as e.g. `3280 >= 80` failures from the
+                // very third packet of a fresh session, before any
+                // seek had happened). `lastValidDts + 1` keeps the
+                // packet flowing without violating monotonicity; the
+                // next packet with a real dts re-anchors.
                 let isVideoPkt = (pktStreamIdx == videoStreamIndex)
                 let isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
                 if packet.pointee.dts == Int64.min {
-                    if packet.pointee.pts != Int64.min {
-                        packet.pointee.dts = packet.pointee.pts
-                    } else {
-                        let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
-                                          : isAudioPkt ? lastAudioSourceDts
-                                          : Int64.min
-                        guard anchor != Int64.min else { continue }
-                        packet.pointee.dts = anchor + 1
+                    let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
+                                      : isAudioPkt ? lastAudioSourceDts
+                                      : Int64.min
+                    guard anchor != Int64.min else {
+                        // No anchor yet on this stream — drop. Only
+                        // possible for the very first packet of a
+                        // session. The next packet will set the
+                        // anchor for the rest of the run.
+                        continue
+                    }
+                    packet.pointee.dts = anchor + 1
+                    if packet.pointee.pts == Int64.min {
                         packet.pointee.pts = packet.pointee.dts
                     }
-                } else if packet.pointee.pts == Int64.min {
-                    packet.pointee.pts = packet.pointee.dts
                 }
                 if isVideoPkt {
                     lastVideoSourceDts = packet.pointee.dts
