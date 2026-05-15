@@ -379,6 +379,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
                 let pktStreamIdx = packet.pointee.stream_index
 
+                // Drop packets with unset dts. After a mid-cluster
+                // avformat_seek_file on MKV the demuxer can emit
+                // packets with `AV_NOPTS_VALUE` for dts (matroska's
+                // RelativeTimestamp-based dts reconstruction loses
+                // state at the seek boundary, especially across the
+                // first GOP boundary after the seek target keyframe).
+                // FFmpeg's muxer in `compute_muxer_ts_fields` fills
+                // the missing dts with the stream's last written dts
+                // (cur_dts), which immediately fails the monotonic
+                // check (cur_dts == cur_dts) and av_write_frame
+                // returns EINVAL. The corrupted partial segment that
+                // follows is ~3 KB instead of the expected ~1 MB+ and
+                // AVPlayer rejects it with CoreMediaErrorDomain
+                // -16046. Skipping NOPTS packets keeps the muxer's
+                // clock monotonic; the affected packets are pre-GOP
+                // B-frames that aren't decodable without state from
+                // before the seek anyway, so dropping them is the
+                // semantically correct move.
+                if packet.pointee.dts == Int64.min {
+                    continue
+                }
+
                 // Audio path. Either stream-copy the source packet
                 // straight into the muxer, or hand it to the FLAC
                 // bridge and mux whatever the encoder spits back out.

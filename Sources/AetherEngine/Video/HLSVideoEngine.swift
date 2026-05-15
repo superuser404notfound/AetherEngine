@@ -58,7 +58,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     fileprivate enum DVVariant {
         case none              // not DV
         case profile5          // HEVC P5  (IPT-PQ-c2, no base)     → dvh1 + PQ
-        case profile81         // HEVC P8.1 with HDR10-compat base  → dvh1 + PQ
+        case profile81         // HEVC P8.1 with HDR10-compat base  → hvc1 + PQ + SUPPLEMENTAL dvh1
         case profile84         // HEVC P8.4 with HLG-compat base    → hvc1 + HLG + SUPPLEMENTAL dvh1
         case profile7          // HEVC P7 dual-layer                → reject
         case profile82         // HEVC P8.2 with SDR-compat base    → reject
@@ -489,10 +489,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 primaryCodecs = "dvh1.05.\(dvLevelStr)"
                 supplementalCodecs = nil
             case .profile81:
-                codecTagOverride = "dvh1"
+                // P8.1: HDR10-compat base layer. Apple HLS Authoring
+                // Spec mandates cross-compat advertising: primary
+                // CODECS exposes the HEVC base (`hvc1.2.4.LXX.b0`),
+                // SUPPLEMENTAL-CODECS signals DV (`dvh1.08.LL/db1p`).
+                // Non-DV displays decode the HEVC base directly (which
+                // is HDR10, then tone-mapped to SDR when "Match Dynamic
+                // Range" is off); DV-capable displays engage DV via
+                // the RPU NALs in the bitstream + the per-frame HDR
+                // metadata bridge on AVPlayerItem. Same shape as P8.4,
+                // just db1p (HDR10-compat) vs db4h (HLG-compat). The
+                // earlier bare-dvh1 form fired AVFoundationErrorDomain
+                // -11868 on non-DV displays because AVPlayer's master-
+                // level codec filter couldn't fall back to anything.
+                codecTagOverride = "hvc1"
                 videoRange = .pq
-                primaryCodecs = "dvh1.08.\(dvLevelStr)"
-                supplementalCodecs = nil
+                primaryCodecs = "hvc1.2.4.L\(hevcLevel).b0"
+                supplementalCodecs = "dvh1.08.\(dvLevelStr)/db1p"
             case .profile84:
                 codecTagOverride = "hvc1"
                 videoRange = .hlg
