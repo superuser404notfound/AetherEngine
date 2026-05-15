@@ -183,7 +183,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audio: AudioConfig? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
-        targetSegmentDurationSeconds: Double = 6.0
+        targetSegmentDurationSeconds: Double = 6.0,
+        presentationTimeOffsetPts: Int64 = 0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -272,6 +273,36 @@ final class HLSSegmentProducer: @unchecked Sendable {
         guard ret >= 0 else {
             cleanup()
             throw ProducerError.writeHeaderFailed(code: ret)
+        }
+
+        // Shift all output timestamps so the first packet lands at
+        // dts=0 in muxer time, matching the playlist's cumulative
+        // EXTINF which starts at 0. MKV sources frequently have a
+        // non-zero `videoStream.start_time` (5 ms on Lila Giraffe,
+        // 88 ms on Bombige Magenverstimmung) which surfaces as a
+        // mismatch between the playlist's relative time and each
+        // segment's tfdt (= absolute source PTS). AVPlayer's HLS-
+        // fMP4 timeline insists tfdt aligns with cumulative EXTINF;
+        // when they diverge by even a few milliseconds the asset
+        // stays at `waitingToPlay` indefinitely without surfacing
+        // an error (verified across SDR + DV-fallback HEVC). Files
+        // with `firstKeyframePts == 0` (Cars, F1) play cleanly with
+        // no shift because their tfdt already aligns at 0.
+        //
+        // FFmpeg's `output_ts_offset` is in `AV_TIME_BASE_Q`
+        // (1/1000000); the muxer rescales it per-stream before
+        // adding to each packet's pts/dts, so the same value
+        // shifts video, audio, and any future tracks consistently.
+        if presentationTimeOffsetPts != 0 {
+            let avTimeBaseQ = AVRational(num: 1, den: Int32(AV_TIME_BASE))
+            let offsetUs = av_rescale_q(presentationTimeOffsetPts, sourceVideoTimeBase, avTimeBaseQ)
+            ctx.pointee.output_ts_offset = -offsetUs
+            EngineLog.emit(
+                "[HLSSegmentProducer] output_ts_offset=-\(offsetUs)us "
+                + "(presentationTimeOffsetPts=\(presentationTimeOffsetPts) "
+                + "in srcTb=\(sourceVideoTimeBase.num)/\(sourceVideoTimeBase.den))",
+                category: .session
+            )
         }
 
         // Latch the muxer stream's time_base after write_header. The

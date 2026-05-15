@@ -185,6 +185,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var videoStreamIndex: Int32 = -1
     private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
     private var savedAudioConfig: HLSSegmentProducer.AudioConfig?
+    /// PTS (in source video time_base) of the first keyframe used to
+    /// build the segment plan. Source-format quirks (MKV from many
+    /// remuxers) park the first usable IDR a few ms past PTS=0; the
+    /// playlist's cumulative EXTINF nonetheless starts at 0. Carried
+    /// here so `makeProducer` can hand it to the muxer as
+    /// `output_ts_offset` and segment tfdt stays aligned with the
+    /// playlist timeline across the initial start AND every restart.
+    private var firstKeyframePts: Int64 = 0
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -310,13 +318,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoTimeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
-            let firstKeyframePts = keyframes.sorted().first ?? 0
-            let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+            let detectedFirstKeyframePts = keyframes.sorted().first ?? 0
+            self.firstKeyframePts = detectedFirstKeyframePts
+            let firstKeyframeSeconds = Double(detectedFirstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
             let videoStreamStart = videoStream.pointee.start_time
             let formatStart = dem.formatStartTime
             EngineLog.emit(
                 "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments " +
-                "[firstKeyframePts=\(firstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
+                "[firstKeyframePts=\(detectedFirstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
                 "videoStream.start_time=\(videoStreamStart) format.start_time=\(formatStart)us " +
                 "plan[0].startSeconds=\(String(format: "%.3f", plan.first?.startSeconds ?? -1))]",
                 category: .session
@@ -736,7 +745,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audio: savedAudioConfig,
             cache: cache,
             baseIndex: baseIndex,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration
+            targetSegmentDurationSeconds: Self.targetSegmentDuration,
+            presentationTimeOffsetPts: firstKeyframePts
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
