@@ -552,6 +552,13 @@ public final class AetherEngine: ObservableObject {
 
         let host = NativeAVPlayerHost()
         host.playerLayer.videoGravity = _videoGravity
+        // Replay any pre-load externalMetadata onto the freshly-created
+        // host so its AVPlayerItem picks it up before AVPlayer assigns
+        // the item. Hosts that called `engine.setExternalMetadata`
+        // before `engine.load` rely on this transfer.
+        if !pendingExternalMetadata.isEmpty {
+            host.setExternalMetadata(pendingExternalMetadata)
+        }
         self.nativeHost = host
 
         nativeCancellables.removeAll()
@@ -727,16 +734,26 @@ public final class AetherEngine: ObservableObject {
         return nativeHost?.avPlayer
     }
 
+    /// Pending externalMetadata for the next native load. Set via
+    /// `setExternalMetadata(_:)` before `load(url:)`; consumed when
+    /// `loadNative` creates the `NativeAVPlayerHost` and applied to
+    /// the AVPlayerItem before AVPlayer.replaceCurrentItem. Survives
+    /// across native loads so internal reloads (audio-track switch,
+    /// background reopen) replay the metadata.
+    private var pendingExternalMetadata: [AVMetadataItem] = []
+
     /// Stage the metadata items for the system Now Playing surface
     /// (title, artwork, description, etc.). Set this rather than writing
-    /// to `MPNowPlayingInfoCenter.nowPlayingInfo` when using
-    /// `MPNowPlayingSession` with automatic publishing: the session
-    /// reads metadata off `AVPlayerItem.externalMetadata`, and manual
-    /// `MPNowPlayingInfoCenter` writes alongside it race against
-    /// MediaPlayer's internal serial queue on tvOS 26 and trip an
-    /// assertion. No-op on the software path; tvOS-only at the AVPlayer
-    /// layer (iOS / macOS use AVPlayerViewController.metadata instead).
+    /// to `MPNowPlayingInfoCenter.nowPlayingInfo` when using AVKit or
+    /// `MPNowPlayingSession` with automatic publishing: those read
+    /// metadata off `AVPlayerItem.externalMetadata`, while manual
+    /// `MPNowPlayingInfoCenter` writes race against MediaPlayer's
+    /// internal serial queue on tvOS 26 and trip an assertion.
+    /// Safe to call BEFORE `load(url:)`: the items are stashed on
+    /// the engine and replayed onto the AVPlayerItem the moment the
+    /// native host is created.
     public func setExternalMetadata(_ items: [AVMetadataItem]) {
+        pendingExternalMetadata = items
         nativeHost?.setExternalMetadata(items)
     }
 
