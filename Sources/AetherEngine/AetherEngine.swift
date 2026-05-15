@@ -560,6 +560,10 @@ public final class AetherEngine: ObservableObject {
             host.setExternalMetadata(pendingExternalMetadata)
         }
         self.nativeHost = host
+        // Publish before wiring up the @Published mirrors below so any
+        // host that subscribes via the same Combine sink sees the new
+        // AVPlayer instance before the first time / state update lands.
+        self.currentAVPlayer = host.avPlayer
 
         nativeCancellables.removeAll()
         host.$currentTime
@@ -725,14 +729,13 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// The active `AVPlayer` instance, when the native AVKit path is in
-    /// use. Returns `nil` when the software (AVSampleBufferDisplayLayer)
-    /// path is active or no session is loaded. Exposed so hosts can hand
-    /// the player to `MPNowPlayingSession(players:)` for automatic
-    /// publishing of elapsed-time / rate / state into the system Now
-    /// Playing surface (the supported path on tvOS 14+).
-    public var currentAVPlayer: AVPlayer? {
-        return nativeHost?.avPlayer
-    }
+    /// use. `nil` while the software (AVSampleBufferDisplayLayer) path
+    /// is active or no session is loaded. Published so hosts that drive
+    /// an `AVPlayerViewController` for system Now Playing can rebind
+    /// `.player` whenever the engine swaps the underlying instance
+    /// (every `selectAudioTrack` reload tears the previous host down
+    /// and brings up a fresh one, so a one-shot assignment goes stale).
+    @Published public private(set) var currentAVPlayer: AVPlayer?
 
     /// Pending externalMetadata for the next native load. Set via
     /// `setExternalMetadata(_:)` before `load(url:)`; consumed when
@@ -1226,6 +1229,7 @@ public final class AetherEngine: ObservableObject {
         nativeCancellables.removeAll()
         nativeHost?.tearDown()
         nativeHost = nil
+        currentAVPlayer = nil
         nativeVideoSession?.stop()
         nativeVideoSession = nil
 
