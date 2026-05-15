@@ -127,6 +127,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var lastVideoSourceDts: Int64 = Int64.min
     private var lastAudioSourceDts: Int64 = Int64.min
 
+    /// PTS shift (in source video time_base) applied to every packet
+    /// before rescale + write_frame so seg-0 lands at `tfdt = 0`,
+    /// matching the playlist's cumulative EXTINF origin. Set from
+    /// `init(presentationTimeOffsetPts:)`.
+    private let presentationTimeOffsetPts: Int64
+
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// How many segments the pump is allowed to race ahead of the
@@ -192,6 +198,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
+        self.presentationTimeOffsetPts = presentationTimeOffsetPts
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -275,32 +282,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
             throw ProducerError.writeHeaderFailed(code: ret)
         }
 
-        // Shift all output timestamps so the first packet lands at
-        // dts=0 in muxer time, matching the playlist's cumulative
-        // EXTINF which starts at 0. MKV sources frequently have a
-        // non-zero `videoStream.start_time` (5 ms on Lila Giraffe,
-        // 88 ms on Bombige Magenverstimmung) which surfaces as a
-        // mismatch between the playlist's relative time and each
-        // segment's tfdt (= absolute source PTS). AVPlayer's HLS-
-        // fMP4 timeline insists tfdt aligns with cumulative EXTINF;
-        // when they diverge by even a few milliseconds the asset
-        // stays at `waitingToPlay` indefinitely without surfacing
-        // an error (verified across SDR + DV-fallback HEVC). Files
-        // with `firstKeyframePts == 0` (Cars, F1) play cleanly with
-        // no shift because their tfdt already aligns at 0.
-        //
-        // FFmpeg's `output_ts_offset` is in `AV_TIME_BASE_Q`
-        // (1/1000000); the muxer rescales it per-stream before
-        // adding to each packet's pts/dts, so the same value
-        // shifts video, audio, and any future tracks consistently.
+        // The shift that aligns seg-0 tfdt with the playlist origin
+        // is applied manually in the pump (see `runPumpLoop`), NOT
+        // via the FFmpeg `output_ts_offset` knob. `output_ts_offset`
+        // shifts every output stream by the same amount, which lands
+        // audio fragments at a negative tfdt when the audio stream's
+        // first dts (typically 0) is earlier than the video stream's
+        // first dts (e.g. 5 ms on Lila Giraffe, 88 ms on Bombige);
+        // AVPlayer silently rejects fragments with negative tfdt
+        // and the asset stays at `waitingToPlay`. Doing the shift
+        // per-packet in the pump lets us drop pre-origin audio
+        // packets instead of writing them with a wrap-around tfdt.
         if presentationTimeOffsetPts != 0 {
-            let avTimeBaseQ = AVRational(num: 1, den: Int32(AV_TIME_BASE))
-            let offsetUs = av_rescale_q(presentationTimeOffsetPts, sourceVideoTimeBase, avTimeBaseQ)
-            ctx.pointee.output_ts_offset = -offsetUs
             EngineLog.emit(
-                "[HLSSegmentProducer] output_ts_offset=-\(offsetUs)us "
-                + "(presentationTimeOffsetPts=\(presentationTimeOffsetPts) "
-                + "in srcTb=\(sourceVideoTimeBase.num)/\(sourceVideoTimeBase.den))",
+                "[HLSSegmentProducer] presentationTimeOffsetPts=\(presentationTimeOffsetPts) "
+                + "in srcTb=\(sourceVideoTimeBase.num)/\(sourceVideoTimeBase.den) "
+                + "(applied per-packet in pump)",
                 category: .session
             )
         }
@@ -468,6 +465,49 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     lastVideoSourceDts = packet.pointee.dts
                 } else if isAudioPkt {
                     lastAudioSourceDts = packet.pointee.dts
+                }
+
+                // Shift output timestamps to align seg-0 with the
+                // playlist origin (tfdt = 0). The shift is the source
+                // video stream's first keyframe PTS (in source video
+                // time_base). For audio packets, we rescale the shift
+                // into the audio stream's time_base so video and audio
+                // both land at 0 in muxer time when they were
+                // originally aligned. Audio packets whose post-shift
+                // dts would go negative — typical MKV puts audio
+                // start_time at 0 ms while video starts a few ms in,
+                // so the leading 1-3 AC3 frames land before the
+                // playlist origin — are dropped. Negative tfdt
+                // fragments are silently rejected by AVPlayer and
+                // produce the `waitingToPlay` stall this fix removes.
+                if presentationTimeOffsetPts != 0 {
+                    let streamOffset: Int64
+                    if isVideoPkt {
+                        streamOffset = presentationTimeOffsetPts
+                    } else if isAudioPkt, let audio = audioConfig {
+                        streamOffset = av_rescale_q(
+                            presentationTimeOffsetPts,
+                            sourceVideoTimeBase,
+                            audio.inputTimeBase
+                        )
+                    } else {
+                        streamOffset = 0
+                    }
+                    if streamOffset != 0 {
+                        if packet.pointee.dts != Int64.min {
+                            let shifted = packet.pointee.dts - streamOffset
+                            if shifted < 0 {
+                                continue
+                            }
+                            packet.pointee.dts = shifted
+                        }
+                        if packet.pointee.pts != Int64.min {
+                            // Clamp pts to 0: B-frame display order
+                            // can put pts slightly below dts; allow
+                            // the muxer to recover rather than fail.
+                            packet.pointee.pts = max(0, packet.pointee.pts - streamOffset)
+                        }
+                    }
                 }
 
                 // Audio path. Either stream-copy the source packet
