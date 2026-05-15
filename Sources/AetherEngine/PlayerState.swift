@@ -83,20 +83,31 @@ public struct LoadOptions: Sendable, Equatable {
 
     /// Keep the source's `dvh1` codec tag on the HLS track even when the
     /// active display can't render Dolby Vision, instead of downgrading
-    /// to plain `hvc1`. AVPlayer ingests the DV asset and tone-maps
-    /// internally using the per-frame DV trim metadata (DV → HDR10 on
-    /// an HDR10 panel, DV → SDR on an SDR panel); strip the tag and
-    /// VideoToolbox drops the RPU side data, falling back to static
-    /// HDR10. Default on; verified across Dolby's reference P5 / P8.1 /
-    /// P8.4 samples on macOS AVPlayer. Set false only to reproduce the
-    /// legacy `hvc1` downgrade for debugging.
+    /// to plain `hvc1`. When set, the engine serves the master playlist
+    /// with DV-tagged variants and AVPlayer is expected to tone-map the
+    /// asset internally using the per-frame DV trim metadata.
+    ///
+    /// Default OFF: verified on macOS AVPlayer but reproducibly fails
+    /// on tvOS 26 AVPlayer with `AVFoundationErrorDomain -11868` /
+    /// `CoreMediaErrorDomain -17223` ("Open failed") for P8.1 cross-
+    /// compat content on non-DV panels with "Match Dynamic Range" off,
+    /// even after switching the master CODECS to spec-correct
+    /// `hvc1.2.4.LXX.b0` + `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"`. The
+    /// tvOS master-level codec filter rejects the asset before it ever
+    /// fetches a media playlist or init segment.
+    ///
+    /// When OFF (default), the engine routes non-DV-display sessions
+    /// through `mediaPlaylistURL` (no master variant) and AVPlayer's
+    /// HLS engine auto-tonemaps the underlying HEVC stream to whatever
+    /// the panel can render — the path documented at
+    /// `HLSLocalServer.mediaPlaylistURL`.
     public var keepDvh1TagWithoutDV: Bool
 
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
         httpHeaders: [String: String] = [:],
-        keepDvh1TagWithoutDV: Bool = true
+        keepDvh1TagWithoutDV: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria

@@ -118,6 +118,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// after avformat_write_header. Same dance as `muxerVideoTimeBase`.
     private var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
 
+    /// Last valid dts (in *source* time_base) seen on the video and
+    /// audio streams. Used to repair NOPTS dts emitted by the
+    /// matroska demuxer mid-cluster after `avformat_seek_file`: we
+    /// substitute `lastValidDts + 1` so the muxer's monotonic-dts
+    /// check still passes and the packet keeps flowing instead of
+    /// being dropped. Init to `AV_NOPTS_VALUE` (Int64.min).
+    private var lastVideoSourceDts: Int64 = Int64.min
+    private var lastAudioSourceDts: Int64 = Int64.min
+
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// How many segments the pump is allowed to race ahead of the
@@ -379,26 +388,58 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
                 let pktStreamIdx = packet.pointee.stream_index
 
-                // Drop packets with unset dts. After a mid-cluster
-                // avformat_seek_file on MKV the demuxer can emit
-                // packets with `AV_NOPTS_VALUE` for dts (matroska's
-                // RelativeTimestamp-based dts reconstruction loses
+                // Repair unset dts. After a mid-cluster
+                // avformat_seek_file on MKV the matroska demuxer
+                // can emit packets with `AV_NOPTS_VALUE` for dts
+                // (its RelativeTimestamp-based reconstruction loses
                 // state at the seek boundary, especially across the
-                // first GOP boundary after the seek target keyframe).
-                // FFmpeg's muxer in `compute_muxer_ts_fields` fills
-                // the missing dts with the stream's last written dts
-                // (cur_dts), which immediately fails the monotonic
-                // check (cur_dts == cur_dts) and av_write_frame
-                // returns EINVAL. The corrupted partial segment that
-                // follows is ~3 KB instead of the expected ~1 MB+ and
-                // AVPlayer rejects it with CoreMediaErrorDomain
-                // -16046. Skipping NOPTS packets keeps the muxer's
-                // clock monotonic; the affected packets are pre-GOP
-                // B-frames that aren't decodable without state from
-                // before the seek anyway, so dropping them is the
-                // semantically correct move.
+                // first GOP after the seek target keyframe). FFmpeg's
+                // muxer in `compute_muxer_ts_fields` then fills the
+                // missing dts with the stream's `cur_dts` (last
+                // written), and the monotonic check immediately
+                // fails with `cur_dts >= cur_dts` — `av_write_frame`
+                // returns EINVAL and the segment is corrupt.
+                //
+                // We can't drop the packet outright: B/P-frames near
+                // the seek boundary are needed to keep the GOP
+                // decode-coherent, and dropping the keyframe itself
+                // (if its dts is unset) leaves AVPlayer with a
+                // header-only segment that downloads cleanly but
+                // never advances past `waitingToPlay`. The repair
+                // policy here keeps the packet flowing:
+                //   1. If pts is valid, use it as dts. For
+                //      non-B-frames dts == pts always; for an
+                //      isolated seek-target keyframe with valid pts
+                //      this is exact.
+                //   2. Else if we have a previous valid dts on the
+                //      same stream, use `lastValidDts + 1`. The
+                //      display time is momentarily approximate (off
+                //      by one tick, ~1 ms at typical srcTb=1/1000);
+                //      the next packet with a real dts re-anchors
+                //      the stream.
+                //   3. Else drop. The very first packet after seek
+                //      should have at least pts set; reaching this
+                //      branch indicates a deeper demuxer issue.
+                let isVideoPkt = (pktStreamIdx == videoStreamIndex)
+                let isAudioPkt = (audioConfig.map { pktStreamIdx == $0.sourceStreamIndex }) ?? false
                 if packet.pointee.dts == Int64.min {
-                    continue
+                    if packet.pointee.pts != Int64.min {
+                        packet.pointee.dts = packet.pointee.pts
+                    } else {
+                        let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
+                                          : isAudioPkt ? lastAudioSourceDts
+                                          : Int64.min
+                        guard anchor != Int64.min else { continue }
+                        packet.pointee.dts = anchor + 1
+                        packet.pointee.pts = packet.pointee.dts
+                    }
+                } else if packet.pointee.pts == Int64.min {
+                    packet.pointee.pts = packet.pointee.dts
+                }
+                if isVideoPkt {
+                    lastVideoSourceDts = packet.pointee.dts
+                } else if isAudioPkt {
+                    lastAudioSourceDts = packet.pointee.dts
                 }
 
                 // Audio path. Either stream-copy the source packet
