@@ -617,12 +617,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             } else if compat != .unsupported {
+                let audioStart = max(0, audioStream.pointee.start_time == Int64.min ? 0 : audioStream.pointee.start_time)
                 streamCopyAudio = HLSSegmentProducer.AudioConfig(
                     codecpar: audioStream.pointee.codecpar,
                     timeBase: audioStream.pointee.time_base,
                     sourceStreamIndex: audioStreamIndex,
                     inputTimeBase: audioStream.pointee.time_base,
-                    bridge: nil
+                    bridge: nil,
+                    sourceStreamStartTime: audioStart
+                )
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: source start_time=\(audioStart) (in audio TB \(audioStream.pointee.time_base.num)/\(audioStream.pointee.time_base.den))",
+                    category: .session
                 )
                 audioHLSCodecs = compat.hlsCodecsString
                 EngineLog.emit(
@@ -853,7 +859,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         timeBase: bridge.encoderTimeBase,
                         sourceStreamIndex: sourceAudioStreamIndex,
                         inputTimeBase: bridge.encoderTimeBase,
-                        bridge: bridge
+                        bridge: bridge,
+                        // Bridge owns its encoder clock — packets it
+                        // emits start at PTS=0 already, no shift needed.
+                        sourceStreamStartTime: 0
                     )
                     self.savedAudioConfig = cfg
                     self.audioBridge = bridge
