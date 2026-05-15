@@ -83,18 +83,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// and muxes the returned FLAC packets; nil means the source
         /// packet is muxed directly (stream-copy).
         let bridge: AudioBridge?
-        /// `AVStream.start_time` of the source audio stream, in
-        /// `inputTimeBase` units. Used by the pump to shift stream-
-        /// copy audio packets so the first audio fragment's tfdt
-        /// lands at 0 in muxer time, matching the playlist origin.
-        /// MKV from many remuxers parks audio.start_time at 0 even
-        /// when video.start_time is non-zero; this lets us shift
-        /// each stream independently rather than imposing the video
-        /// stream's offset on audio (which sent audio fragments
-        /// negative and stalled AVPlayer at `waitingToPlay`).
-        /// For bridge audio this is ignored — the bridge owns its
-        /// encoder clock and emits packets starting at PTS=0.
-        let sourceStreamStartTime: Int64
     }
 
     // MARK: - State
@@ -138,12 +126,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// being dropped. Init to `AV_NOPTS_VALUE` (Int64.min).
     private var lastVideoSourceDts: Int64 = Int64.min
     private var lastAudioSourceDts: Int64 = Int64.min
-
-    /// PTS shift (in source video time_base) applied to every packet
-    /// before rescale + write_frame so seg-0 lands at `tfdt = 0`,
-    /// matching the playlist's cumulative EXTINF origin. Set from
-    /// `init(presentationTimeOffsetPts:)`.
-    private let presentationTimeOffsetPts: Int64
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
@@ -201,8 +183,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audio: AudioConfig? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
-        targetSegmentDurationSeconds: Double = 6.0,
-        presentationTimeOffsetPts: Int64 = 0
+        targetSegmentDurationSeconds: Double = 6.0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -210,7 +191,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
-        self.presentationTimeOffsetPts = presentationTimeOffsetPts
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -292,26 +272,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         guard ret >= 0 else {
             cleanup()
             throw ProducerError.writeHeaderFailed(code: ret)
-        }
-
-        // The shift that aligns seg-0 tfdt with the playlist origin
-        // is applied manually in the pump (see `runPumpLoop`), NOT
-        // via the FFmpeg `output_ts_offset` knob. `output_ts_offset`
-        // shifts every output stream by the same amount, which lands
-        // audio fragments at a negative tfdt when the audio stream's
-        // first dts (typically 0) is earlier than the video stream's
-        // first dts (e.g. 5 ms on Lila Giraffe, 88 ms on Bombige);
-        // AVPlayer silently rejects fragments with negative tfdt
-        // and the asset stays at `waitingToPlay`. Doing the shift
-        // per-packet in the pump lets us drop pre-origin audio
-        // packets instead of writing them with a wrap-around tfdt.
-        if presentationTimeOffsetPts != 0 {
-            EngineLog.emit(
-                "[HLSSegmentProducer] presentationTimeOffsetPts=\(presentationTimeOffsetPts) "
-                + "in srcTb=\(sourceVideoTimeBase.num)/\(sourceVideoTimeBase.den) "
-                + "(applied per-packet in pump)",
-                category: .session
-            )
         }
 
         // Latch the muxer stream's time_base after write_header. The
@@ -477,53 +437,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     lastVideoSourceDts = packet.pointee.dts
                 } else if isAudioPkt {
                     lastAudioSourceDts = packet.pointee.dts
-                }
-
-                // Shift output timestamps to align seg-0 with the
-                // playlist origin (tfdt = 0). Done per-stream against
-                // EACH stream's own `start_time`, not the video
-                // stream's offset rescaled into the audio TB. MKV
-                // remuxers frequently park `audio.start_time = 0`
-                // while `video.start_time` sits a few ms in, so a
-                // uniform shift either sends audio fragments to
-                // negative tfdt (which AVPlayer silently rejects and
-                // stalls at `waitingToPlay`) or drops the leading
-                // audio frames and lands audio's first fragment tfdt
-                // at +25 ms — also a mismatch.
-                //
-                // Video offset = `presentationTimeOffsetPts` (the
-                // first keyframe's source-PTS).
-                // Audio offset = `audio.sourceStreamStartTime` (the
-                // audio AVStream's `start_time`, latched on init).
-                //
-                // After this shift, each stream's first packet lands
-                // at dts=0 in source TB, so its first fragment's
-                // tfdt is 0 in muxer TB, matching the playlist's
-                // cumulative EXTINF origin. Bridge audio is excluded
-                // (the bridge's encoder clock already starts at 0).
-                let streamOffsetSourceTb: Int64 = {
-                    if isVideoPkt { return presentationTimeOffsetPts }
-                    if isAudioPkt, let audio = audioConfig, audio.bridge == nil {
-                        return audio.sourceStreamStartTime
-                    }
-                    return 0
-                }()
-                if streamOffsetSourceTb > 0 {
-                    if packet.pointee.dts != Int64.min {
-                        let shifted = packet.pointee.dts - streamOffsetSourceTb
-                        if shifted < 0 {
-                            // Pre-origin packet (rare — would be a
-                            // packet with a dts smaller than the
-                            // stream's own declared start_time).
-                            // Drop rather than write a wrap-around
-                            // tfdt.
-                            continue
-                        }
-                        packet.pointee.dts = shifted
-                    }
-                    if packet.pointee.pts != Int64.min {
-                        packet.pointee.pts = max(0, packet.pointee.pts - streamOffsetSourceTb)
-                    }
                 }
 
                 // Audio path. Either stream-copy the source packet

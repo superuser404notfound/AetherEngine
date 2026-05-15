@@ -185,14 +185,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var videoStreamIndex: Int32 = -1
     private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
     private var savedAudioConfig: HLSSegmentProducer.AudioConfig?
-    /// PTS (in source video time_base) of the first keyframe used to
-    /// build the segment plan. Source-format quirks (MKV from many
-    /// remuxers) park the first usable IDR a few ms past PTS=0; the
-    /// playlist's cumulative EXTINF nonetheless starts at 0. Carried
-    /// here so `makeProducer` can hand it to the muxer as
-    /// `output_ts_offset` and segment tfdt stays aligned with the
-    /// playlist timeline across the initial start AND every restart.
-    private var firstKeyframePts: Int64 = 0
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -318,14 +310,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoTimeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
-            let detectedFirstKeyframePts = keyframes.sorted().first ?? 0
-            self.firstKeyframePts = detectedFirstKeyframePts
-            let firstKeyframeSeconds = Double(detectedFirstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+            let firstKeyframePts = keyframes.sorted().first ?? 0
+            let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
             let videoStreamStart = videoStream.pointee.start_time
             let formatStart = dem.formatStartTime
             EngineLog.emit(
                 "[HLSVideoEngine] segment plan: keyframe-aligned, \(keyframes.count) IRAPs → \(plan.count) segments " +
-                "[firstKeyframePts=\(detectedFirstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
+                "[firstKeyframePts=\(firstKeyframePts) (\(String(format: "%.3f", firstKeyframeSeconds))s) " +
                 "videoStream.start_time=\(videoStreamStart) format.start_time=\(formatStart)us " +
                 "plan[0].startSeconds=\(String(format: "%.3f", plan.first?.startSeconds ?? -1))]",
                 category: .session
@@ -617,18 +608,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             } else if compat != .unsupported {
-                let audioStart = max(0, audioStream.pointee.start_time == Int64.min ? 0 : audioStream.pointee.start_time)
                 streamCopyAudio = HLSSegmentProducer.AudioConfig(
                     codecpar: audioStream.pointee.codecpar,
                     timeBase: audioStream.pointee.time_base,
                     sourceStreamIndex: audioStreamIndex,
                     inputTimeBase: audioStream.pointee.time_base,
-                    bridge: nil,
-                    sourceStreamStartTime: audioStart
-                )
-                EngineLog.emit(
-                    "[HLSVideoEngine] audio: source start_time=\(audioStart) (in audio TB \(audioStream.pointee.time_base.num)/\(audioStream.pointee.time_base.den))",
-                    category: .session
+                    bridge: nil
                 )
                 audioHLSCodecs = compat.hlsCodecsString
                 EngineLog.emit(
@@ -691,36 +676,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    requested index lands.
         prod.start()
 
-        // Pick the URL handed to AVPlayer:
-        //   - Plain HEVC / H.264 / AV1 (dvVariant == .none): master
-        //     playlist. It carries the `CODECS` attribute upfront
-        //     (e.g. `hvc1.2.4.L120,ac-3`) so AVPlayer's HLS-fMP4
-        //     engine doesn't have to discover the audio codec from
-        //     init.mp4 alone. Going through media.m3u8 directly
-        //     reliably stalls AC3-in-fMP4 sessions at
-        //     `waitingToPlay` even after the per-stream tfdt shift
-        //     fix — AVPlayer fetches seg-N once and never queues
-        //     seg-N+1, which strongly suggests it can't parse the
-        //     audio config without the codec hint. HEVC HDR10 +
-        //     EAC3 (Cars, F1) does work via media.m3u8 but its
-        //     `ec-3` config bytes self-describe, AC3's `dac3` does
-        //     not.
-        //   - Dolby Vision content: master only when the display
-        //     is DV-capable. On non-DV panels we still need
-        //     media.m3u8 so AVPlayer's auto-tonemap engages and
-        //     the asset isn't rejected by the master-level codec
-        //     filter that trips on bare `dvh1` (and on tvOS 26
-        //     also on the cross-compat `hvc1+SUPPLEMENTAL=dvh1`
-        //     form, per the most recent test pass).
-        let useMasterPlaylist = (dvVariant == .none) || dvModeAvailable
-        let resolvedURL: URL? = useMasterPlaylist
-            ? srv.playlistURL
-            : srv.mediaPlaylistURL
+        let resolvedURL: URL?
+        if effectiveDvMode {
+            resolvedURL = srv.playlistURL
+        } else {
+            resolvedURL = srv.mediaPlaylistURL
+        }
         guard let url = resolvedURL else {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) useMaster=\(useMasterPlaylist) dvVariant=\(dvVariant) keepDvh1=\(keepDvh1TagWithoutDV))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) keepDvh1=\(keepDvh1TagWithoutDV))")
         return url
     }
 
@@ -770,8 +736,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audio: savedAudioConfig,
             cache: cache,
             baseIndex: baseIndex,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration,
-            presentationTimeOffsetPts: firstKeyframePts
+            targetSegmentDurationSeconds: Self.targetSegmentDuration
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
@@ -878,10 +843,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         timeBase: bridge.encoderTimeBase,
                         sourceStreamIndex: sourceAudioStreamIndex,
                         inputTimeBase: bridge.encoderTimeBase,
-                        bridge: bridge,
-                        // Bridge owns its encoder clock — packets it
-                        // emits start at PTS=0 already, no shift needed.
-                        sourceStreamStartTime: 0
+                        bridge: bridge
                     )
                     self.savedAudioConfig = cfg
                     self.audioBridge = bridge
