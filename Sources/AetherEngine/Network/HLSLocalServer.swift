@@ -1,5 +1,5 @@
+import Darwin
 import Foundation
-import Network
 
 // MARK: - Segment Provider Protocol
 
@@ -104,9 +104,29 @@ enum HLSVideoRange: String {
 
 // MARK: - Local HLS Server
 
-/// Loopback HTTP server feeding HLS-fMP4 to AVPlayer. Originally the
-/// audio-only `HLSAudioServer`; generalised in phase 3 of the DV
-/// rollout so the same socket and request loop can serve video too.
+/// Loopback HTTP server feeding HLS-fMP4 to AVPlayer.
+///
+/// Phase-5 rewrite: uses POSIX BSD sockets + GCD instead of
+/// `Network.NWListener` / `NWConnection`. The earlier `Network`-
+/// framework implementation cooperated with `MPNowPlayingInfoCenter`
+/// writes in a way that reproducibly tripped
+/// `_dispatch_assert_queue_fail` deep inside MediaPlayer on tvOS 26
+/// (manual nowPlayingInfo writes from outside AVKit always crashed,
+/// regardless of timing or queue). Swiftfin uses manual writes
+/// successfully because their AVPlayer reads real HTTPS, never a
+/// loopback `NWConnection`. Dropping NWConnection from the loopback
+/// removes the queue-affinity collision; manual writes can then
+/// drive title / artwork / skip-command targets the same way
+/// Swiftfin does.
+///
+/// Threading: one accept loop on a dedicated serial queue, each
+/// accepted connection handled on a concurrent worker queue with
+/// blocking `recv` / `send` syscalls. Provider methods are
+/// thread-safe by contract (the buffered impl uses an NSLock, the
+/// video path's `HLSSegmentProducer` is `@unchecked Sendable` with
+/// internal locks). Server's own mutable state (`port`,
+/// `loggedMaster/MediaPlaylist`, `seg0FetchTime`, `clientFds`) is
+/// guarded by `stateLock`.
 ///
 /// Endpoints:
 ///   - `/master.m3u8` only when the provider has master-level
@@ -118,13 +138,12 @@ enum HLSVideoRange: String {
 ///   - `/init.mp4` the `ftyp`+`moov` init segment.
 ///   - `/seg{N}.mp4` the N-th `moof`+`mdat` media segment.
 ///
-/// Listens on `localhost` (not `127.0.0.1`) so tvOS App Transport
-/// Security treats it as exempt without per-domain plist entries
-/// (see TN3179, Apple Forum #663858).
+/// Listens on `127.0.0.1` so tvOS App Transport Security treats it
+/// as loopback-exempt (`NSAllowsLocalNetworking` in Sodalite's
+/// Info.plist) without per-domain plist entries.
 final class HLSLocalServer: @unchecked Sendable {
 
-    private var listener: NWListener?
-    private let queue = DispatchQueue(label: "com.aetherengine.hls")
+    // MARK: - Provider
 
     /// External provider, set via `init(provider:)`. Mutually
     /// exclusive with `bufferedProvider`.
@@ -138,18 +157,15 @@ final class HLSLocalServer: @unchecked Sendable {
         externalProvider ?? bufferedProvider
     }
 
+    // MARK: - Public state
+
     /// Wall-clock time when seg0 was first fetched by AVPlayer. Used
     /// by the audio engine to measure HLS pipeline latency from
     /// "first segment available" to "AVPlayer asked for it".
     private(set) var seg0FetchTime: Date?
 
-    /// One-shot flags so we log each playlist's full body once per
-    /// session instead of on every AVPlayer re-fetch. Lets us see
-    /// verbatim what got handed to AVPlayer without asking testers
-    /// to curl the loopback port.
-    private var loggedMasterPlaylist = false
-    private var loggedMediaPlaylist = false
-
+    /// Listening port, assigned by the kernel from the ephemeral
+    /// range. Zero until `start()` succeeds.
     private(set) var port: UInt16 = 0
 
     /// URL the host hands to AVPlayer to start playback. Points at
@@ -160,14 +176,8 @@ final class HLSLocalServer: @unchecked Sendable {
     /// `localhost`. The hostname form needs DNS / nsswitch /
     /// /etc/hosts to resolve, and AVPlayer on tvOS appears to hang
     /// in its pre-flight before opening any TCP socket when
-    /// resolution doesn't return immediately (build 122
-    /// `timeControlStatus=waitingToPlay` with zero NWListener
-    /// state-update events). The IP literal sidesteps the resolver
-    /// entirely. ATS is covered either way: Sodalite's Info.plist
-    /// already has `NSAllowsArbitraryLoads` plus
-    /// `NSAllowsLocalNetworking`, so the original argument for
-    /// keeping the hostname (per-domain ATS exception avoidance)
-    /// no longer applies.
+    /// resolution doesn't return immediately. The IP literal
+    /// sidesteps the resolver entirely.
     var playlistURL: URL? {
         guard port > 0 else { return nil }
         let path = (provider?.masterCodecs != nil) ? "master.m3u8" : "media.m3u8"
@@ -178,16 +188,48 @@ final class HLSLocalServer: @unchecked Sendable {
     /// variant-selection step. Per DrHurt's note on AetherEngine#2:
     /// when AVPlayer loads a media playlist directly rather than
     /// via a master, it automatically tone-maps HDR / Dolby Vision
-    /// content to whatever the display can render — including SDR
-    /// when the user has disabled "Match Dynamic Range" in tvOS
-    /// Settings. The host route picks this URL instead of
-    /// `playlistURL` whenever the DV / HDR display handshake isn't
-    /// available, so AVPlayer stops rejecting `dvh1` assets with
-    /// `-11868 'Cannot Open'` and just plays them as SDR.
+    /// content to whatever the display can render. The host route
+    /// picks this URL instead of `playlistURL` whenever the DV /
+    /// HDR display handshake isn't available.
     var mediaPlaylistURL: URL? {
         guard port > 0 else { return nil }
         return URL(string: "http://127.0.0.1:\(port)/media.m3u8")
     }
+
+    /// Number of segments currently published.
+    var segmentCount: Int {
+        provider?.segmentCount ?? 0
+    }
+
+    // MARK: - Private state
+
+    private var listenFd: Int32 = -1
+    private var shouldStop = false
+    /// Active client file descriptors so `stop()` can close them
+    /// and unblock their `recv` / `send` calls. Modify only while
+    /// holding `stateLock`.
+    private var clientFds = Set<Int32>()
+
+    /// One-shot flags so we log each playlist's full body once per
+    /// session instead of on every AVPlayer re-fetch.
+    private var loggedMasterPlaylist = false
+    private var loggedMediaPlaylist = false
+
+    /// Guards every mutable field above plus the listenFd. Reads
+    /// from the public-facing computed properties (`playlistURL`,
+    /// etc.) take the lock too. Lightweight; never held across
+    /// blocking syscalls.
+    private let stateLock = NSLock()
+
+    private let acceptQueue = DispatchQueue(
+        label: "com.aetherengine.hls.accept",
+        qos: .userInitiated
+    )
+    private let workQueue = DispatchQueue(
+        label: "com.aetherengine.hls.work",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
 
     // MARK: - Init
 
@@ -208,164 +250,371 @@ final class HLSLocalServer: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start() throws {
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-        let l = try NWListener(using: params, on: .any)
-
-        l.stateUpdateHandler = { [weak self] state in
-            if case .ready = state {
-                self?.port = l.port?.rawValue ?? 0
-                EngineLog.emit("[HLSLocalServer] Listening on port \(self?.port ?? 0)", category: .hlsServer)
-            }
+        // Create TCP socket on 127.0.0.1 with an ephemeral port.
+        // SOCK_STREAM = TCP, IPPROTO_TCP = 6.
+        let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        guard fd >= 0 else {
+            throw HLSLocalServerError.socketCreate(errno: errno)
         }
 
-        l.newConnectionHandler = { [weak self] conn in
-            // Log every TCP-level transition so we can tell whether
-            // AVPlayer is even getting as far as opening a connection,
-            // and whether the connection is reaching `.ready` before
-            // we attempt a receive. Without this we silently lose any
-            // connection that fails before delivering bytes.
-            conn.stateUpdateHandler = { state in
-                EngineLog.emit("[HLSLocalServer] conn state=\(state)", category: .hlsServer)
+        // SO_REUSEADDR avoids "Address already in use" when the
+        // previous server's TIME_WAIT entries haven't cleared yet.
+        var on: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
+        // SO_NOSIGPIPE prevents SIGPIPE when the client closes the
+        // socket mid-write. Without this a closed peer kills the
+        // process. send() will return EPIPE instead, which we
+        // handle gracefully.
+        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0 // kernel picks ephemeral
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
-            conn.start(queue: self?.queue ?? .main)
-            self?.readRequest(conn)
+        }
+        guard bindResult == 0 else {
+            let err = errno
+            close(fd)
+            throw HLSLocalServerError.bind(errno: err)
         }
 
-        l.start(queue: queue)
-        listener = l
+        // backlog=16 is plenty: AVPlayer typically opens 1-3 connections.
+        guard listen(fd, 16) == 0 else {
+            let err = errno
+            close(fd)
+            throw HLSLocalServerError.listen(errno: err)
+        }
 
-        for _ in 0..<50 {
-            if port > 0 { break }
-            Thread.sleep(forTimeInterval: 0.01)
+        // Read back the assigned port.
+        var actual = sockaddr_in()
+        var actualLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let getNameResult = withUnsafeMutablePointer(to: &actual) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &actualLen)
+            }
+        }
+        guard getNameResult == 0 else {
+            let err = errno
+            close(fd)
+            throw HLSLocalServerError.getsockname(errno: err)
+        }
+        let assignedPort = UInt16(bigEndian: actual.sin_port)
+
+        stateLock.lock()
+        listenFd = fd
+        port = assignedPort
+        shouldStop = false
+        loggedMasterPlaylist = false
+        loggedMediaPlaylist = false
+        stateLock.unlock()
+
+        EngineLog.emit("[HLSLocalServer] Listening on port \(assignedPort)", category: .hlsServer)
+
+        // Launch the accept loop. acceptQueue is serial and holds
+        // the blocking `accept()` call for the lifetime of the
+        // server; stop() closes listenFd to wake it.
+        acceptQueue.async { [weak self] in
+            self?.runAcceptLoop(listenFd: fd)
         }
     }
 
     func stop() {
-        listener?.cancel()
-        listener = nil
+        // 1. Flip the stop flag and snapshot live fds.
+        stateLock.lock()
+        shouldStop = true
+        let listenSnapshot = listenFd
+        let clients = clientFds
+        listenFd = -1
+        clientFds.removeAll()
         port = 0
         loggedMasterPlaylist = false
         loggedMediaPlaylist = false
-        bufferedProvider?.clear()
         seg0FetchTime = nil
+        stateLock.unlock()
+
+        bufferedProvider?.clear()
+
+        // 2. Close the listen socket — unblocks the accept loop's
+        // accept() call with EBADF / -1.
+        if listenSnapshot >= 0 {
+            close(listenSnapshot)
+        }
+        // 3. Close all client sockets — unblocks their handler
+        // threads' recv() / send() calls. Handlers exit via the
+        // EOF / EBADF return path.
+        for cfd in clients {
+            close(cfd)
+        }
     }
 
     // MARK: - Buffered-provider passthrough (legacy audio API)
 
-    /// Set the init segment bytes (legacy audio API). Routes into
-    /// the built-in buffered provider; throws nothing for the
-    /// external-provider mode but silently does nothing.
     func setInitSegment(_ data: Data) {
         bufferedProvider?.setInitSegment(data)
     }
 
-    /// Append a media segment (legacy audio API). Same caveat as
-    /// `setInitSegment`.
     func addMediaSegment(_ data: Data, duration: Double) {
         bufferedProvider?.addMediaSegment(data, duration: duration)
     }
 
-    /// Number of segments currently published.
-    var segmentCount: Int {
-        provider?.segmentCount ?? 0
-    }
+    // MARK: - Accept loop
 
-    // MARK: - HTTP Request Handling
+    private func runAcceptLoop(listenFd: Int32) {
+        while true {
+            // Check stop flag before accept(); cheap.
+            stateLock.lock()
+            let stopping = shouldStop
+            stateLock.unlock()
+            if stopping { return }
 
-    private func readRequest(_ connection: NWConnection) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, error in
-            guard let self = self else { return }
-            if let error = error {
-                EngineLog.emit("[HLSLocalServer] receive error: \(error)", category: .hlsServer)
-                connection.cancel()
-                return
+            var clientAddr = sockaddr_in()
+            var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let clientFd = withUnsafeMutablePointer(to: &clientAddr) { ptr -> Int32 in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                    accept(listenFd, sa, &clientLen)
+                }
             }
-            if isComplete && (content == nil || content?.isEmpty == true) {
-                EngineLog.emit("[HLSLocalServer] connection closed by peer (no data)", category: .hlsServer)
-                connection.cancel()
-                return
-            }
-            guard let data = content else {
-                // Spurious wake-up with no content and no error.
-                // Re-arm and wait for actual bytes.
-                self.readRequest(connection)
-                return
-            }
-            guard let request = String(data: data, encoding: .utf8) else {
-                EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(data.count)B), closing", category: .hlsServer)
-                connection.cancel()
+            if clientFd < 0 {
+                let err = errno
+                if err == EINTR { continue }
+                // EBADF / ECONNABORTED / etc. — listen socket likely
+                // closed via stop(). Exit loop cleanly.
+                EngineLog.emit("[HLSLocalServer] accept ended (errno=\(err))", category: .hlsServer)
                 return
             }
 
-            let firstLine = request.components(separatedBy: "\r\n").first ?? ""
-            let parts = firstLine.split(separator: " ")
-            let path = parts.count >= 2 ? String(parts[1]) : "/"
+            // Inherit SO_NOSIGPIPE from the listen socket on some
+            // BSDs is unreliable; set it explicitly on the client.
+            var on: Int32 = 1
+            _ = setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
 
-            // The audio path historically used /audio.m3u8 as the
-            // media playlist URL. Keep accepting it as an alias so
-            // HLSAudioEngine doesn't have to change.
-            let normalizedPath: String = {
-                if path == "/audio.m3u8" { return "/media.m3u8" }
-                return path
-            }()
+            // 60s idle timeout on recv. Without this an AVPlayer
+            // keep-alive connection that goes silent (because AVPlayer
+            // opened a new one elsewhere) would park this worker
+            // forever. AVPlayer's typical inter-request gap is
+            // single-digit seconds, so 60s is comfortable headroom.
+            var timeout = timeval(tv_sec: 60, tv_usec: 0)
+            _ = setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
 
-            EngineLog.emit("[HLSLocalServer] \(firstLine)", category: .hlsServer)
+            stateLock.lock()
+            clientFds.insert(clientFd)
+            stateLock.unlock()
 
-            switch normalizedPath {
-            case "/master.m3u8":
-                if self.provider?.masterCodecs != nil {
-                    let body = self.buildMasterPlaylist()
-                    if !self.loggedMasterPlaylist {
-                        self.loggedMasterPlaylist = true
-                        EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)", category: .hlsServer)
-                    }
-                    self.respondData(connection,
-                                     path: normalizedPath,
-                                     data: Data(body.utf8),
-                                     contentType: "application/vnd.apple.mpegurl")
-                } else {
-                    self.respond404(connection, path: normalizedPath, reason: "no masterCodecs")
-                }
-            case "/media.m3u8":
-                let body = self.buildMediaPlaylist()
-                if !self.loggedMediaPlaylist {
-                    self.loggedMediaPlaylist = true
-                    let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
-                    EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)", category: .hlsServer)
-                }
-                self.respondData(connection,
-                                 path: normalizedPath,
-                                 data: Data(body.utf8),
-                                 contentType: "application/vnd.apple.mpegurl")
-            case "/init.mp4":
-                let data = self.provider?.initSegment() ?? Data()
-                if data.isEmpty {
-                    self.respond404(connection, path: normalizedPath, reason: "init.mp4 empty (provider not ready?)")
-                } else {
-                    self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
-                }
-            default:
-                if normalizedPath.hasPrefix("/seg"), normalizedPath.hasSuffix(".mp4") {
-                    let indexStr = normalizedPath.dropFirst(4).dropLast(4)
-                    if let index = Int(indexStr), index >= 0 {
-                        if index == 0 && self.seg0FetchTime == nil {
-                            self.seg0FetchTime = Date()
-                        }
-                        if let data = self.provider?.mediaSegment(at: index), !data.isEmpty {
-                            self.respondData(connection, path: normalizedPath, data: data, contentType: "video/mp4")
-                        } else {
-                            let providerCount = self.provider?.segmentCount ?? -1
-                            self.respond404(connection, path: normalizedPath, reason: "segment[\(index)] empty (segmentCount=\(providerCount))")
-                        }
-                    } else {
-                        self.respond404(connection, path: normalizedPath, reason: "unparseable seg index '\(indexStr)'")
-                    }
-                } else {
-                    self.respond404(connection, path: normalizedPath, reason: "unknown path")
-                }
+            EngineLog.emit("[HLSLocalServer] conn opened fd=\(clientFd)", category: .hlsServer)
+
+            workQueue.async { [weak self] in
+                self?.handleConnection(clientFd)
             }
         }
+    }
+
+    // MARK: - Per-connection handler
+
+    private func handleConnection(_ fd: Int32) {
+        defer {
+            stateLock.lock()
+            clientFds.remove(fd)
+            stateLock.unlock()
+            close(fd)
+            EngineLog.emit("[HLSLocalServer] conn closed fd=\(fd)", category: .hlsServer)
+        }
+
+        // HTTP/1.1 keep-alive loop. AVPlayer reuses connections
+        // for several segment fetches before opening a new one.
+        while true {
+            guard let request = readHTTPRequest(fd) else { return }
+            guard processRequest(request, on: fd) else { return }
+        }
+    }
+
+    /// Read until end of HTTP headers (`\r\n\r\n`). Returns the raw
+    /// request bytes (headers only — no body, since we only accept
+    /// GET). Returns nil on EOF, error, or oversize.
+    private func readHTTPRequest(_ fd: Int32) -> Data? {
+        var buffer = Data()
+        var chunk = [UInt8](repeating: 0, count: 4096)
+
+        while true {
+            let n = chunk.withUnsafeMutableBufferPointer { ptr -> Int in
+                recv(fd, ptr.baseAddress, ptr.count, 0)
+            }
+            if n == 0 {
+                // Peer closed cleanly.
+                if buffer.isEmpty { return nil }
+                EngineLog.emit("[HLSLocalServer] peer EOF mid-request fd=\(fd)", category: .hlsServer)
+                return nil
+            }
+            if n < 0 {
+                let err = errno
+                if err == EINTR { continue }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    // SO_RCVTIMEO fired — connection idle too long.
+                    EngineLog.emit("[HLSLocalServer] recv timeout fd=\(fd)", category: .hlsServer)
+                    return nil
+                }
+                EngineLog.emit("[HLSLocalServer] recv error fd=\(fd) errno=\(err)", category: .hlsServer)
+                return nil
+            }
+            buffer.append(chunk, count: n)
+
+            // Look for the headers terminator.
+            if let end = findHeadersTerminator(buffer) {
+                return buffer.prefix(end + 4)
+            }
+            if buffer.count > 8192 {
+                EngineLog.emit("[HLSLocalServer] request too large fd=\(fd) bytes=\(buffer.count)", category: .hlsServer)
+                return nil
+            }
+        }
+    }
+
+    /// Returns the offset of `\r\n\r\n` in `buf`, or nil if not present.
+    private func findHeadersTerminator(_ buf: Data) -> Int? {
+        guard buf.count >= 4 else { return nil }
+        let needle: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+        return buf.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int? in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            for i in 0...(buf.count - 4) {
+                if base[i] == needle[0] && base[i + 1] == needle[1]
+                    && base[i + 2] == needle[2] && base[i + 3] == needle[3] {
+                    return i
+                }
+            }
+            return nil
+        }
+    }
+
+    /// Parse + dispatch one request. Returns false to close the
+    /// connection (e.g. send error), true to keep keep-alive going.
+    private func processRequest(_ request: Data, on fd: Int32) -> Bool {
+        guard let text = String(data: request, encoding: .utf8) else {
+            EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(request.count)B)", category: .hlsServer)
+            return false
+        }
+        let firstLine = text.components(separatedBy: "\r\n").first ?? ""
+        let parts = firstLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        guard parts.count >= 2 else {
+            EngineLog.emit("[HLSLocalServer] malformed request line: '\(firstLine)'", category: .hlsServer)
+            return false
+        }
+        let path = String(parts[1])
+        // The audio path historically used /audio.m3u8 as the media
+        // playlist URL. Keep accepting it as an alias.
+        let normalizedPath = (path == "/audio.m3u8") ? "/media.m3u8" : path
+
+        EngineLog.emit("[HLSLocalServer] \(firstLine)", category: .hlsServer)
+
+        switch normalizedPath {
+        case "/master.m3u8":
+            if provider?.masterCodecs != nil {
+                let body = buildMasterPlaylist()
+                stateLock.lock()
+                let firstTime = !loggedMasterPlaylist
+                if firstTime { loggedMasterPlaylist = true }
+                stateLock.unlock()
+                if firstTime {
+                    EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)", category: .hlsServer)
+                }
+                return send200(fd: fd, path: normalizedPath, data: Data(body.utf8), contentType: "application/vnd.apple.mpegurl")
+            }
+            return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
+
+        case "/media.m3u8":
+            let body = buildMediaPlaylist()
+            stateLock.lock()
+            let firstTime = !loggedMediaPlaylist
+            if firstTime { loggedMediaPlaylist = true }
+            stateLock.unlock()
+            if firstTime {
+                let head = body.split(separator: "\n").prefix(8).joined(separator: "\n")
+                EngineLog.emit("[HLSLocalServer] media.m3u8 head:\n\(head)", category: .hlsServer)
+            }
+            return send200(fd: fd, path: normalizedPath, data: Data(body.utf8), contentType: "application/vnd.apple.mpegurl")
+
+        case "/init.mp4":
+            let data = provider?.initSegment() ?? Data()
+            if data.isEmpty {
+                return send404(fd: fd, path: normalizedPath, reason: "init.mp4 empty (provider not ready?)")
+            }
+            return send200(fd: fd, path: normalizedPath, data: data, contentType: "video/mp4")
+
+        default:
+            if normalizedPath.hasPrefix("/seg"), normalizedPath.hasSuffix(".mp4") {
+                let indexStr = normalizedPath.dropFirst(4).dropLast(4)
+                if let index = Int(indexStr), index >= 0 {
+                    if index == 0 {
+                        stateLock.lock()
+                        if seg0FetchTime == nil { seg0FetchTime = Date() }
+                        stateLock.unlock()
+                    }
+                    if let data = provider?.mediaSegment(at: index), !data.isEmpty {
+                        return send200(fd: fd, path: normalizedPath, data: data, contentType: "video/mp4")
+                    }
+                    let providerCount = provider?.segmentCount ?? -1
+                    return send404(fd: fd, path: normalizedPath, reason: "segment[\(index)] empty (segmentCount=\(providerCount))")
+                }
+                return send404(fd: fd, path: normalizedPath, reason: "unparseable seg index '\(indexStr)'")
+            }
+            return send404(fd: fd, path: normalizedPath, reason: "unknown path")
+        }
+    }
+
+    // MARK: - HTTP framing
+
+    private func send200(fd: Int32, path: String, data: Data, contentType: String) -> Bool {
+        let header =
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: \(contentType)\r\n" +
+            "Content-Length: \(data.count)\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Cache-Control: no-cache\r\n" +
+            "Connection: keep-alive\r\n" +
+            "\r\n"
+        var payload = Data(header.utf8)
+        payload.append(data)
+
+        EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)", category: .hlsServer)
+
+        return writeAll(fd: fd, data: payload, path: path)
+    }
+
+    private func send404(fd: Int32, path: String, reason: String) -> Bool {
+        let response =
+            "HTTP/1.1 404 Not Found\r\n" +
+            "Content-Length: 0\r\n" +
+            "Connection: keep-alive\r\n" +
+            "\r\n"
+        EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)", category: .hlsServer)
+        return writeAll(fd: fd, data: Data(response.utf8), path: path)
+    }
+
+    /// Blocking send loop. Returns false on broken pipe / error.
+    private func writeAll(fd: Int32, data: Data, path: String) -> Bool {
+        var written = 0
+        while written < data.count {
+            let result = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int in
+                let base = raw.baseAddress!.advanced(by: written)
+                return send(fd, base, data.count - written, 0)
+            }
+            if result < 0 {
+                let err = errno
+                if err == EINTR { continue }
+                EngineLog.emit("[HLSLocalServer] send failed for \(path): errno=\(err)", category: .hlsServer)
+                return false
+            }
+            if result == 0 {
+                EngineLog.emit("[HLSLocalServer] send returned 0 for \(path)", category: .hlsServer)
+                return false
+            }
+            written += result
+        }
+        return true
     }
 
     // MARK: - Playlist construction
@@ -446,30 +695,23 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         return lines.joined(separator: "\n") + "\n"
     }
+}
 
-    // MARK: - HTTP framing
+// MARK: - Errors
 
-    private func respondData(_ connection: NWConnection, path: String, data: Data, contentType: String) {
-        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
-        var payload = Data(header.utf8)
-        payload.append(data)
+enum HLSLocalServerError: Error, CustomStringConvertible {
+    case socketCreate(errno: Int32)
+    case bind(errno: Int32)
+    case listen(errno: Int32)
+    case getsockname(errno: Int32)
 
-        EngineLog.emit("[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=\(contentType)", category: .hlsServer)
-
-        connection.send(content: payload, completion: .contentProcessed { [weak self] error in
-            if let error = error {
-                EngineLog.emit("[HLSLocalServer] send failed for \(path): \(error)", category: .hlsServer)
-            }
-            self?.readRequest(connection)
-        })
-    }
-
-    private func respond404(_ connection: NWConnection, path: String, reason: String) {
-        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
-        EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)", category: .hlsServer)
-        connection.send(content: Data(response.utf8), completion: .contentProcessed { [weak self] _ in
-            self?.readRequest(connection)
-        })
+    var description: String {
+        switch self {
+        case .socketCreate(let e): return "HLSLocalServer: socket() failed errno=\(e)"
+        case .bind(let e):         return "HLSLocalServer: bind() failed errno=\(e)"
+        case .listen(let e):       return "HLSLocalServer: listen() failed errno=\(e)"
+        case .getsockname(let e):  return "HLSLocalServer: getsockname() failed errno=\(e)"
+        }
     }
 }
 
