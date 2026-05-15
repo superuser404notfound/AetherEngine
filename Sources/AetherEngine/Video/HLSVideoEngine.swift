@@ -691,17 +691,36 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    requested index lands.
         prod.start()
 
-        let resolvedURL: URL?
-        if effectiveDvMode {
-            resolvedURL = srv.playlistURL
-        } else {
-            resolvedURL = srv.mediaPlaylistURL
-        }
+        // Pick the URL handed to AVPlayer:
+        //   - Plain HEVC / H.264 / AV1 (dvVariant == .none): master
+        //     playlist. It carries the `CODECS` attribute upfront
+        //     (e.g. `hvc1.2.4.L120,ac-3`) so AVPlayer's HLS-fMP4
+        //     engine doesn't have to discover the audio codec from
+        //     init.mp4 alone. Going through media.m3u8 directly
+        //     reliably stalls AC3-in-fMP4 sessions at
+        //     `waitingToPlay` even after the per-stream tfdt shift
+        //     fix — AVPlayer fetches seg-N once and never queues
+        //     seg-N+1, which strongly suggests it can't parse the
+        //     audio config without the codec hint. HEVC HDR10 +
+        //     EAC3 (Cars, F1) does work via media.m3u8 but its
+        //     `ec-3` config bytes self-describe, AC3's `dac3` does
+        //     not.
+        //   - Dolby Vision content: master only when the display
+        //     is DV-capable. On non-DV panels we still need
+        //     media.m3u8 so AVPlayer's auto-tonemap engages and
+        //     the asset isn't rejected by the master-level codec
+        //     filter that trips on bare `dvh1` (and on tvOS 26
+        //     also on the cross-compat `hvc1+SUPPLEMENTAL=dvh1`
+        //     form, per the most recent test pass).
+        let useMasterPlaylist = (dvVariant == .none) || dvModeAvailable
+        let resolvedURL: URL? = useMasterPlaylist
+            ? srv.playlistURL
+            : srv.mediaPlaylistURL
         guard let url = resolvedURL else {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) keepDvh1=\(keepDvh1TagWithoutDV))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) useMaster=\(useMasterPlaylist) dvVariant=\(dvVariant) keepDvh1=\(keepDvh1TagWithoutDV))")
         return url
     }
 
