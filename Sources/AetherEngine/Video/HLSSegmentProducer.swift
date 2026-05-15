@@ -127,6 +127,43 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var lastVideoSourceDts: Int64 = Int64.min
     private var lastAudioSourceDts: Int64 = Int64.min
 
+    /// Per-frame fallback duration (in source video time_base) used
+    /// to backfill the last packet of a fragment when the matroska
+    /// demuxer doesn't supply `pkt->duration`. Many MKV remuxers
+    /// (HandBrake / MakeMKV variants, web-rip pipelines) drop the
+    /// TrackEntry `DefaultDuration` element AND don't write per-
+    /// block `BlockDuration`, so every video packet arrives with
+    /// `duration == 0`. FFmpeg's mp4 sub-muxer reads `pkt->duration`
+    /// only for the LAST sample of each fragment (intermediate
+    /// sample durations come from `dts[i+1] - dts[i]`), so the last
+    /// `trun` entry ends up with `sample_duration = 0`, the fragment
+    /// stops one frame short of where the next fragment's `tfdt`
+    /// starts, and AVPlayer's HLS-fMP4 engine sees an unfillable
+    /// gap. AVPlayer parks on `WaitingToMinimizeStallsReason` and
+    /// never queues seg-N+1.
+    ///
+    /// Computed from `videoStream.avg_frame_rate` at engine setup
+    /// (see `HLSVideoEngine.makeProducer`); applied only when a
+    /// pending packet's duration is zero and no successor is
+    /// available to compute it from (the EOF case).
+    private let videoFallbackDurationPts: Int64
+
+    /// Same as `videoFallbackDurationPts` but for stream-copy
+    /// audio. AC3 / EAC3 emit one frame per packet at
+    /// `frame_size / sample_rate` seconds; AAC at `1024 / sample_rate`.
+    /// Computed from `audioStream.codecpar` at engine setup.
+    private let audioFallbackDurationPts: Int64
+
+    /// One-packet look-behind state. The pump holds the most recent
+    /// video / stream-copy-audio packet so the NEXT packet's dts can
+    /// be used to compute `pending.duration = next.dts - pending.dts`
+    /// (the only place to recover from demuxers that don't supply
+    /// `pkt->duration`). On EOF the pending packet is flushed using
+    /// `*FallbackDurationPts` as the duration.
+    private var pendingVideoPkt: UnsafeMutablePointer<AVPacket>?
+    private var pendingAudioPkt: UnsafeMutablePointer<AVPacket>?
+    private var loggedFirstVideoPktInfo = false
+
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// How many segments the pump is allowed to race ahead of the
@@ -183,7 +220,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audio: AudioConfig? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
-        targetSegmentDurationSeconds: Double = 6.0
+        targetSegmentDurationSeconds: Double = 6.0,
+        videoFallbackDurationPts: Int64,
+        audioFallbackDurationPts: Int64 = 0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -191,6 +230,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
+        self.videoFallbackDurationPts = videoFallbackDurationPts
+        self.audioFallbackDurationPts = audioFallbackDurationPts
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -369,7 +410,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let pumpStart = DispatchTime.now()
         var packetsRead = 0
         var packetsWritten = 0
-        var lastError: Int32 = 0
+        let lastError: Int32 = 0
 
         do {
             readLoop: while true {
@@ -439,15 +480,58 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     lastAudioSourceDts = packet.pointee.dts
                 }
 
-                // Audio path. Either stream-copy the source packet
-                // straight into the muxer, or hand it to the FLAC
-                // bridge and mux whatever the encoder spits back out.
+                // Subtitles, additional audio tracks, attachments,
+                // unknown streams — dropped silently. Embedded
+                // subtitles travel through a side Demuxer owned by
+                // AetherEngine, not through this pump.
+                if !isVideoPkt && !isAudioPkt {
+                    continue
+                }
+
+                // Look-behind: hold the most recent video / stream-
+                // copy-audio packet so the NEXT packet's dts can be
+                // used to compute `pending.duration = next.dts -
+                // pending.dts`. Many MKV remuxers (HandBrake / web-
+                // rip pipelines) drop `DefaultDuration` and don't
+                // write per-block `BlockDuration`, so the matroska
+                // demuxer emits packets with `duration == 0`. The
+                // mp4 sub-muxer in `mov_write_packet` reads
+                // `pkt->duration` only for the LAST sample of each
+                // fragment, which then writes `trun.last.duration =
+                // 0` — the fragment stops one frame short of the
+                // next fragment's `tfdt`, AVPlayer's HLS-fMP4
+                // engine sees an unfillable gap, and the asset
+                // parks on `WaitingToMinimizeStallsReason` and
+                // never queues seg-N+1. Backfilling `duration` from
+                // the successor's dts cleanly fixes this without
+                // touching the demuxer or muxer code.
+                if isVideoPkt {
+                    if !loggedFirstVideoPktInfo {
+                        loggedFirstVideoPktInfo = true
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] first video pkt: "
+                            + "dts=\(packet.pointee.dts) pts=\(packet.pointee.pts) "
+                            + "duration=\(packet.pointee.duration) "
+                            + "(fallback=\(videoFallbackDurationPts) in srcVideoTb)",
+                            category: .session
+                        )
+                    }
+                    if let prev = pendingVideoPkt {
+                        finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, ctx: ctx)
+                        packetsWritten += 1
+                    }
+                    pendingVideoPkt = packet
+                    pktPtr = nil  // hand ownership to pendingVideoPkt; suppress defer-free
+                    continue
+                }
+
+                // Audio path. Bridge audio (FLAC re-encode) emits
+                // packets with the encoder's own duration set
+                // correctly, so it bypasses the look-behind. Stream-
+                // copy audio gets the same look-behind treatment as
+                // video.
                 if let audio = audioConfig, pktStreamIdx == audio.sourceStreamIndex {
                     if let bridge = audio.bridge {
-                        // Decode + resample + FLAC-encode. Each call
-                        // returns 0..N encoded FLAC packets stamped in
-                        // `bridge.encoderTimeBase` — caller takes
-                        // ownership and frees after muxing.
                         let flacPackets: [UnsafeMutablePointer<AVPacket>]
                         do {
                             flacPackets = try bridge.feed(packet: packet)
@@ -465,75 +549,37 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&fpVar)
                         }
-                    } else {
-                        packet.pointee.stream_index = audioOutputStreamIndex
-                        av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
-                        _ = av_write_frame(ctx, packet)
+                        continue
                     }
+                    // Stream-copy audio look-behind.
+                    if let prev = pendingAudioPkt {
+                        finalizeAndWriteAudio(prev, nextDts: packet.pointee.dts, audio: audio, ctx: ctx)
+                    }
+                    pendingAudioPkt = packet
+                    pktPtr = nil
                     continue
                 }
-
-                if pktStreamIdx != videoStreamIndex {
-                    // Subtitles, additional audio tracks, attachments,
-                    // unknown streams — dropped silently. Embedded
-                    // subtitles travel through a side Demuxer owned by
-                    // AetherEngine, not through this pump.
-                    continue
-                }
-
-                // Video path.
-                packet.pointee.stream_index = videoOutputStreamIndex
-
-                // HDR10+ detection. Scan packet payload for the T.35
-                // ITU country / provider / oriented-code / application
-                // signature that uniquely identifies an HDR10+ Samsung
-                // metadata payload. Works for both HEVC SEI NAL units
-                // (T.35 user_data_registered) and AV1 OBU_METADATA
-                // (METADATA_TYPE_ITUT_T35) because both wrap the same
-                // bytes. No `00 00` pair inside the signature, so HEVC
-                // emulation-prevention escaping does not perturb it.
-                // memmem is O(n*m) worst-case but with a 6-byte needle
-                // the cost is negligible vs. the muxer write that
-                // follows.
-                if !hdr10PlusDetected, let data = packet.pointee.data {
-                    let size = Int(packet.pointee.size)
-                    if size >= 6 {
-                        let needle: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
-                        let found = needle.withUnsafeBufferPointer { n -> Bool in
-                            memmem(data, size, n.baseAddress, n.count) != nil
-                        }
-                        if found {
-                            hdr10PlusDetected = true
-                            onFirstHDR10PlusDetected?()
-                        }
-                    }
-                }
-
-                // Rescale pts/dts/duration from source time_base to the
-                // muxer's chosen output time_base. The hls muxer
-                // (auto-picked, e.g. 1/16000 for 30 fps) is rarely the
-                // same as the source (commonly 1/1000 for MKV); without
-                // this rescale, the muxer's cut threshold against
-                // `hls_time` interprets source-base values as fractional
-                // seconds and no segment cut ever triggers.
-                av_packet_rescale_ts(packet, sourceVideoTimeBase, muxerVideoTimeBase)
-
-                let ret = av_write_frame(ctx, packet)
-                if ret < 0 {
-                    lastError = ret
-                    EngineLog.emit(
-                        "[HLSSegmentProducer] av_write_frame failed at packet \(packetsRead): \(ret)",
-                        category: .session
-                    )
-                    break readLoop
-                }
-                packetsWritten += 1
             }
         } catch {
             EngineLog.emit(
                 "[HLSSegmentProducer] demuxer.readPacket threw: \(error)",
                 category: .session
             )
+        }
+
+        // Flush look-behind pending packets. No successor packet
+        // available so duration is set from the fallback (computed
+        // from `avg_frame_rate` / `frame_size / sample_rate`). This
+        // produces a tail-correct `trun` for the final fragment of
+        // the source.
+        if let prev = pendingVideoPkt {
+            finalizeAndWriteVideo(prev, nextDts: nil, ctx: ctx)
+            packetsWritten += 1
+            pendingVideoPkt = nil
+        }
+        if let prev = pendingAudioPkt, let audio = audioConfig {
+            finalizeAndWriteAudio(prev, nextDts: nil, audio: audio, ctx: ctx)
+            pendingAudioPkt = nil
         }
 
         // Trailer flushes the final segment and writes the playlist;
@@ -552,6 +598,78 @@ final class HLSSegmentProducer: @unchecked Sendable {
         didFinishFlag = true
         finishCondition.broadcast()
         finishCondition.unlock()
+    }
+
+    // MARK: - Look-behind finalize helpers
+
+    /// Backfill `packet.duration` from `nextDts` (or the fallback
+    /// computed from `avg_frame_rate` when there is no successor),
+    /// run HDR10+ detection, rescale into muxer time_base, write
+    /// via `av_write_frame`, then free the packet. Called from
+    /// `runPumpLoop` exactly once per video packet — either when
+    /// the next video packet arrives (`nextDts` set) or at EOF
+    /// (`nextDts == nil`).
+    private func finalizeAndWriteVideo(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        nextDts: Int64?,
+        ctx: UnsafeMutablePointer<AVFormatContext>
+    ) {
+        if packet.pointee.duration <= 0 {
+            if let next = nextDts {
+                let inferred = next - packet.pointee.dts
+                packet.pointee.duration = inferred > 0 ? inferred : videoFallbackDurationPts
+            } else {
+                packet.pointee.duration = videoFallbackDurationPts
+            }
+        }
+
+        packet.pointee.stream_index = videoOutputStreamIndex
+
+        if !hdr10PlusDetected, let data = packet.pointee.data {
+            let size = Int(packet.pointee.size)
+            if size >= 6 {
+                let needle: [UInt8] = [0xB5, 0x00, 0x3C, 0x00, 0x01, 0x04]
+                let found = needle.withUnsafeBufferPointer { n -> Bool in
+                    memmem(data, size, n.baseAddress, n.count) != nil
+                }
+                if found {
+                    hdr10PlusDetected = true
+                    onFirstHDR10PlusDetected?()
+                }
+            }
+        }
+
+        av_packet_rescale_ts(packet, sourceVideoTimeBase, muxerVideoTimeBase)
+        _ = av_write_frame(ctx, packet)
+
+        var pkt: UnsafeMutablePointer<AVPacket>? = packet
+        av_packet_free(&pkt)
+    }
+
+    /// Same shape as `finalizeAndWriteVideo` but for stream-copy
+    /// audio. Bridge audio doesn't pass through here — the FLAC
+    /// encoder sets durations correctly.
+    private func finalizeAndWriteAudio(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        nextDts: Int64?,
+        audio: AudioConfig,
+        ctx: UnsafeMutablePointer<AVFormatContext>
+    ) {
+        if packet.pointee.duration <= 0 {
+            if let next = nextDts {
+                let inferred = next - packet.pointee.dts
+                packet.pointee.duration = inferred > 0 ? inferred : audioFallbackDurationPts
+            } else {
+                packet.pointee.duration = audioFallbackDurationPts
+            }
+        }
+
+        packet.pointee.stream_index = audioOutputStreamIndex
+        av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
+        _ = av_write_frame(ctx, packet)
+
+        var pkt: UnsafeMutablePointer<AVPacket>? = packet
+        av_packet_free(&pkt)
     }
 
     // MARK: - IO trampoline plumbing (called from the C callbacks below)

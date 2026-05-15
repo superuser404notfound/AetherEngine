@@ -185,6 +185,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var videoStreamIndex: Int32 = -1
     private var savedVideoConfig: HLSSegmentProducer.StreamConfig?
     private var savedAudioConfig: HLSSegmentProducer.AudioConfig?
+
+    /// Per-frame fallback durations (in the respective source
+    /// time_base) so the producer can backfill `pkt->duration` when
+    /// the matroska demuxer doesn't supply per-block durations.
+    /// Computed once at `start()` from `videoStream.avg_frame_rate`
+    /// and `audioStream.codecpar` and carried across producer
+    /// restarts so the scrub path doesn't have to recompute them.
+    private var videoFallbackDurationPts: Int64 = 40
+    private var audioFallbackDurationPts: Int64 = 0
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -561,6 +570,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.savedVideoConfig = videoConfig
         self.segmentPlan = plan
 
+        // Per-frame fallback duration in the source video time_base,
+        // computed from `avg_frame_rate`. Handed to the producer so
+        // it can backfill `pkt->duration` when the source MKV
+        // doesn't supply per-block durations (HandBrake / web-rip
+        // pipelines drop the TrackEntry `DefaultDuration`, so every
+        // packet emerges with `duration == 0`). Without this the
+        // mp4 sub-muxer writes `trun.last.duration = 0` and the
+        // fragment ends one frame short of where the next fragment
+        // starts → AVPlayer's HLS-fMP4 engine sees an unfillable
+        // gap, parks on `WaitingToMinimizeStallsReason`, and never
+        // queues seg-N+1.
+        //
+        // 25 fps in a 1/1000 source TB → fallback = 40 ticks (40 ms).
+        // 23.976 fps (24000/1001) in 1/1000 → 41 ticks.
+        let videoFallbackDuration: Int64 = {
+            guard avgFR.num > 0 && avgFR.den > 0,
+                  videoTimeBase.num > 0, videoTimeBase.den > 0 else {
+                // Defensive default for the 25 fps / 1 ms case.
+                return 40
+            }
+            let num = Int64(avgFR.den) * Int64(videoTimeBase.den)
+            let den = Int64(avgFR.num) * Int64(videoTimeBase.num)
+            return max(1, num / den)
+        }()
+        self.videoFallbackDurationPts = videoFallbackDuration
+
         // 6a. Pick the audio routing: stream-copy for codecs legal in
         //     fMP4, FLAC bridge for those that aren't, drop for the
         //     unsupported tail. The fallback cascade tries stream-copy
@@ -615,9 +650,37 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     inputTimeBase: audioStream.pointee.time_base,
                     bridge: nil
                 )
+                // Compute the audio per-frame fallback duration in
+                // the source audio time_base. Same need as
+                // `videoFallbackDurationPts`: matroska demuxers that
+                // drop block durations make every audio packet
+                // arrive with `pkt->duration = 0`, and the mp4 sub-
+                // muxer's last-sample-in-fragment lookup then writes
+                // a zero-duration trailing entry. AC3 / EAC3 are
+                // exactly 1536 samples per frame; AAC is 1024.
+                let acp = audioStream.pointee.codecpar.pointee
+                let sampleRate = Int64(acp.sample_rate)
+                let frameSamples: Int64 = {
+                    if acp.frame_size > 0 { return Int64(acp.frame_size) }
+                    switch acp.codec_id {
+                    case AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3: return 1536
+                    case AV_CODEC_ID_AAC: return 1024
+                    case AV_CODEC_ID_MP3: return 1152
+                    case AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC: return 4096
+                    default: return 1024
+                    }
+                }()
+                let audioTb = audioStream.pointee.time_base
+                self.audioFallbackDurationPts = {
+                    guard sampleRate > 0, audioTb.num > 0, audioTb.den > 0 else { return 1 }
+                    let num = frameSamples * Int64(audioTb.den)
+                    let den = sampleRate * Int64(audioTb.num)
+                    return max(1, num / den)
+                }()
                 audioHLSCodecs = compat.hlsCodecsString
                 EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(compat.hlsCodecsString)`",
+                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(compat.hlsCodecsString)` "
+                    + "(fallback duration=\(audioFallbackDurationPts) in audioTb \(audioTb.num)/\(audioTb.den))",
                     category: .session
                 )
             } else {
@@ -736,7 +799,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audio: savedAudioConfig,
             cache: cache,
             baseIndex: baseIndex,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration
+            targetSegmentDurationSeconds: Self.targetSegmentDuration,
+            videoFallbackDurationPts: videoFallbackDurationPts,
+            audioFallbackDurationPts: audioFallbackDurationPts
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
