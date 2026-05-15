@@ -164,6 +164,42 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pendingAudioPkt: UnsafeMutablePointer<AVPacket>?
     private var loggedFirstVideoPktInfo = false
 
+    /// Target first dts (in source video / audio TB respectively) after
+    /// `avformat_seek_file` for restart sessions. `matroska_read_seek`
+    /// uses MKV `Cues` for seek, while `dem.indexedKeyframes` reports
+    /// libavformat's wider AVStream index which can include non-Cue
+    /// keyframes that the demuxer's own seek code can NOT land on
+    /// precisely. The seek therefore lands at the Cue ≤ target — which
+    /// can be 100+ ms before `plan[baseIndex].startPts`. The producer
+    /// then writes a fragment whose `tfdt` is well below the playlist's
+    /// cumulative-EXTINF position for that segment, AVPlayer's HLS-fMP4
+    /// engine sees a position mismatch, and the asset stalls at
+    /// `waitingToPlay` without surfacing an error.
+    ///
+    /// Scan-forward: per stream, drop incoming packets after the seek
+    /// until we see a packet whose dts ≥ the target (and, for video,
+    /// is a key frame). Once each stream's gate opens, all subsequent
+    /// packets pass through normally. Restart-only — for the
+    /// initial-start (baseIndex == 0) session both targets are
+    /// `AV_NOPTS_VALUE` and the gates start open.
+    private let restartTargetVideoDts: Int64
+    private let restartTargetAudioDts: Int64
+    private var videoScanComplete: Bool
+    private var audioScanComplete: Bool
+
+    /// PTS shift applied to all packets after the scan-forward gate
+    /// opens (in each stream's own source TB). Aligns the muxer's
+    /// fragment `tfdt` with the playlist's cumulative-EXTINF origin:
+    ///   - Video shift = `firstKeyframePts` so seg-0 tfdt=0 matches
+    ///     the playlist's seg-0 cumulative position of 0.
+    ///   - Audio shift = `audio.start_time` so the audio stream's
+    ///     first fragment tfdt=0 too. MKV from remuxers often parks
+    ///     audio.start_time at 0 even when video.start_time is non-
+    ///     zero, so a uniform shift would push audio negative — per
+    ///     stream is the correct alignment.
+    private let videoShiftPts: Int64
+    private let audioShiftPts: Int64
+
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
 
     /// How many segments the pump is allowed to race ahead of the
@@ -222,7 +258,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         baseIndex: Int = 0,
         targetSegmentDurationSeconds: Double = 6.0,
         videoFallbackDurationPts: Int64,
-        audioFallbackDurationPts: Int64 = 0
+        audioFallbackDurationPts: Int64 = 0,
+        restartTargetVideoDts: Int64 = Int64.min,
+        restartTargetAudioDts: Int64 = Int64.min,
+        videoShiftPts: Int64 = 0,
+        audioShiftPts: Int64 = 0
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
@@ -232,6 +272,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.sourceVideoTimeBase = video.timeBase
         self.videoFallbackDurationPts = videoFallbackDurationPts
         self.audioFallbackDurationPts = audioFallbackDurationPts
+        self.restartTargetVideoDts = restartTargetVideoDts
+        self.restartTargetAudioDts = restartTargetAudioDts
+        self.videoShiftPts = videoShiftPts
+        self.audioShiftPts = audioShiftPts
+        // Scan-forward gates start open for initial-start sessions
+        // (no restart target), closed for restart sessions until the
+        // first relevant packet arrives.
+        self.videoScanComplete = (restartTargetVideoDts == Int64.min)
+        self.audioScanComplete = (restartTargetAudioDts == Int64.min)
 
         // 1. Allocate hls output context. Output url "playlist.m3u8" is
         //    a placeholder: hlsenc derives segment filenames from it
@@ -486,6 +535,69 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // AetherEngine, not through this pump.
                 if !isVideoPkt && !isAudioPkt {
                     continue
+                }
+
+                // Scan-forward gate. After a restart-seek the
+                // matroska demuxer can land 100+ ms before the
+                // requested target (libavformat's keyframe index is
+                // wider than MKV's `Cues` table; non-Cue keyframes
+                // aren't seekable). Drop incoming packets per stream
+                // until the first one whose dts ≥ the recorded
+                // target — and, for video, is a real keyframe so the
+                // segment starts at a decodable boundary. Once each
+                // stream's gate opens it stays open for the rest of
+                // the producer session. Initial-start sessions
+                // (baseIndex == 0) have both gates pre-opened so
+                // this branch is a no-op for them.
+                if isVideoPkt && !videoScanComplete {
+                    let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
+                    if isKey && packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts {
+                        videoScanComplete = true
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] video scan-forward complete: target=\(restartTargetVideoDts) "
+                            + "landed=\(packet.pointee.dts) (off by \(packet.pointee.dts - restartTargetVideoDts))",
+                            category: .session
+                        )
+                        // Fall through and write this packet.
+                    } else {
+                        continue
+                    }
+                }
+                if isAudioPkt && !audioScanComplete {
+                    if packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetAudioDts {
+                        audioScanComplete = true
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] audio scan-forward complete: target=\(restartTargetAudioDts) "
+                            + "landed=\(packet.pointee.dts) (off by \(packet.pointee.dts - restartTargetAudioDts))",
+                            category: .session
+                        )
+                        // Fall through and write this packet.
+                    } else {
+                        continue
+                    }
+                }
+
+                // Apply per-stream PTS shift to align fragment tfdt
+                // with the playlist's cumulative-EXTINF origin.
+                // Video shift = firstKeyframePts (subtracted), audio
+                // shift = audio.start_time (subtracted). The shift
+                // is a constant for the whole producer session so it
+                // composes correctly with the scan-forward target.
+                if isVideoPkt && videoShiftPts != 0 {
+                    if packet.pointee.dts != Int64.min {
+                        packet.pointee.dts -= videoShiftPts
+                    }
+                    if packet.pointee.pts != Int64.min {
+                        packet.pointee.pts -= videoShiftPts
+                    }
+                }
+                if isAudioPkt && audioShiftPts != 0 {
+                    if packet.pointee.dts != Int64.min {
+                        packet.pointee.dts -= audioShiftPts
+                    }
+                    if packet.pointee.pts != Int64.min {
+                        packet.pointee.pts -= audioShiftPts
+                    }
                 }
 
                 // Look-behind: hold the most recent video / stream-

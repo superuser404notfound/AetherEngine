@@ -194,6 +194,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// restarts so the scrub path doesn't have to recompute them.
     private var videoFallbackDurationPts: Int64 = 40
     private var audioFallbackDurationPts: Int64 = 0
+
+    /// First video keyframe PTS (in source video TB), latched after
+    /// the segment plan is built. Source `videoStream.start_time`
+    /// is non-zero on MKV remuxes where the first usable IDR lives
+    /// past PTS=0 (e.g. 5 ms on Lila Giraffe, 88 ms on Bombige
+    /// Magenverstimmung). The producer subtracts this from every
+    /// video packet's pts/dts so seg-0's fragment tfdt aligns with
+    /// the playlist's cumulative-EXTINF origin of 0 — AVPlayer's
+    /// HLS-fMP4 engine stalls at `waitingToPlay` otherwise.
+    private var firstKeyframePts: Int64 = 0
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -319,7 +329,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoTimeBase: videoTimeBase,
                 sourceDurationSeconds: durationSeconds
             )
-            let firstKeyframePts = keyframes.sorted().first ?? 0
+            let detectedFirstKeyframePts = keyframes.sorted().first ?? 0
+            self.firstKeyframePts = detectedFirstKeyframePts
+            let firstKeyframePts = detectedFirstKeyframePts
             let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
             let videoStreamStart = videoStream.pointee.start_time
             let formatStart = dem.formatStartTime
@@ -792,6 +804,45 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let dem = demuxer, let cache = cache, let cfg = savedVideoConfig else {
             throw HLSVideoEngineError.notStarted
         }
+
+        // Scan-forward targets in source TB. For initial-start
+        // sessions (baseIndex == 0) both stay at `Int64.min` and the
+        // producer's scan-forward gates start open. For restart
+        // sessions they're set to `plan[baseIndex].startPts` —
+        // `matroska_read_seek` may land at a Cue earlier than that
+        // value when the plan position is a non-Cue keyframe (the
+        // libavformat AVStream index includes both Cues and demux-
+        // discovered IRAPs, while the matroska seek only honours
+        // Cues). The producer drops the leading non-target packets
+        // so the resulting fragment's tfdt is at `plan[N].startPts -
+        // firstKeyframePts` in source TB, matching the playlist's
+        // cumulative-EXTINF position for seg-N.
+        //
+        // Audio target uses the same source-video PTS rescaled into
+        // the audio stream's TB so both streams' first kept packet
+        // align in source-time.
+        let videoTarget: Int64
+        let audioTarget: Int64
+        if baseIndex > 0, baseIndex < segmentPlan.count {
+            videoTarget = segmentPlan[baseIndex].startPts
+            audioTarget = savedAudioConfig.map {
+                av_rescale_q(videoTarget, cfg.timeBase, $0.inputTimeBase)
+            } ?? Int64.min
+        } else {
+            videoTarget = Int64.min
+            audioTarget = Int64.min
+        }
+
+        // Audio shift in audio TB: subtract the audio stream's own
+        // start_time (already in audio TB) — see
+        // `HLSVideoEngine.AudioConfig.sourceStreamStartTime` use
+        // site for the rationale (uniform shift sends audio negative
+        // when video.start_time > audio.start_time, dropping the
+        // first audio frame and leaving the second audio fragment
+        // tfdt at a non-zero offset that AVPlayer can't reconcile).
+        // Stream-copy only; the FLAC bridge owns its encoder clock.
+        let audioShift: Int64 = 0
+
         let prod = try HLSSegmentProducer(
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
@@ -801,7 +852,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             baseIndex: baseIndex,
             targetSegmentDurationSeconds: Self.targetSegmentDuration,
             videoFallbackDurationPts: videoFallbackDurationPts,
-            audioFallbackDurationPts: audioFallbackDurationPts
+            audioFallbackDurationPts: audioFallbackDurationPts,
+            restartTargetVideoDts: videoTarget,
+            restartTargetAudioDts: audioTarget,
+            videoShiftPts: firstKeyframePts,
+            audioShiftPts: audioShift
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
