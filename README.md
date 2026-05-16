@@ -284,6 +284,10 @@ Things AetherEngine deliberately doesn't do, so you don't have to read the sourc
 
 - [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
 
+## Support
+
+If the engine is useful to you and you'd like to support its development, there's a [Ko-fi](https://ko-fi.com/superuser404).
+
 ## Built with
 
 AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
