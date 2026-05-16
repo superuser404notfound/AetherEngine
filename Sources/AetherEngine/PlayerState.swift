@@ -100,16 +100,39 @@ public struct LoadOptions: Sendable, Equatable {
     /// misreport their `availableHDRModes`.
     public var keepDvh1TagWithoutDV: Bool
 
+    /// Whether the user has tvOS Match Content (Dynamic Range and/or
+    /// Frame Rate) enabled. Mirrors `AVDisplayManager.
+    /// isDisplayCriteriaMatchingEnabled`; default `true` so non-tvOS
+    /// callers and hosts that don't query don't accidentally regress
+    /// HDR routing.
+    ///
+    /// Used by `HLSVideoEngine` to gate master-playlist routing for
+    /// HDR HEVC on non-DV displays. When `false`, the engine knows
+    /// tvOS will refuse panel-mode switches and falls back to media-
+    /// playlist routing (no `VIDEO-RANGE=PQ` in the playlist), which
+    /// lets AVPlayer open the asset as generic HEVC and tone-map on
+    /// the display. With `true`, master-playlist routing gives AVKit's
+    /// `appliesPreferredDisplayCriteriaAutomatically` an upfront HDR
+    /// hint so the panel switches to HDR mode before init.mp4 lands.
+    ///
+    /// Without this gate, master + `VIDEO-RANGE=PQ` on a panel locked
+    /// to SDR (user toggled Match Dynamic Range OFF) causes AVPlayer
+    /// to fail asset open with "Cannot Open" (-11848) since the asset
+    /// claims HDR and the panel mode contradicts.
+    public var matchContentEnabled: Bool
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
         httpHeaders: [String: String] = [:],
-        keepDvh1TagWithoutDV: Bool = false
+        keepDvh1TagWithoutDV: Bool = false,
+        matchContentEnabled: Bool = true
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
         self.httpHeaders = httpHeaders
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
+        self.matchContentEnabled = matchContentEnabled
     }
 }
 

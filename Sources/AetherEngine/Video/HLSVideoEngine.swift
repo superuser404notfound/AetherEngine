@@ -156,6 +156,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// only for misreporting DV panels.
     private let keepDvh1TagWithoutDV: Bool
 
+    /// Mirror of the user's tvOS Match Content master toggle at load
+    /// time (via `AVDisplayManager.isDisplayCriteriaMatchingEnabled`,
+    /// passed in from the host through `LoadOptions.matchContentEnabled`).
+    ///
+    /// Used by the master-vs-media-playlist routing decision in `start()`.
+    /// When `false`, HDR HEVC on non-DV displays falls back to media-
+    /// playlist routing so AVPlayer doesn't see `VIDEO-RANGE=PQ` in the
+    /// playlist body; otherwise AVKit's auto-criteria reads the HDR
+    /// hint, tries to switch the panel to HDR, tvOS refuses (Match
+    /// Dynamic Range is OFF), and AVPlayer fails asset open with
+    /// "Cannot Open" (-11848). Default `true` keeps the post-60b0994
+    /// behavior for callers that don't query.
+    private let matchContentEnabled: Bool
+
     /// `dvModeAvailable || keepDvh1TagWithoutDV`. The DV
     /// classification + codec-tag + master-playlist routing branches
     /// key off this single boolean.
@@ -239,12 +253,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceHTTPHeaders: [String: String] = [:],
         dvModeAvailable: Bool = true,
         keepDvh1TagWithoutDV: Bool = false,
+        matchContentEnabled: Bool = true,
         audioSourceStreamIndexOverride: Int32? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
         self.dvModeAvailable = dvModeAvailable
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
+        self.matchContentEnabled = matchContentEnabled
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
     }
 
@@ -782,6 +798,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //     HDR criteria and stick the panel back in SDR mode for
         //     the rest of the session ("Match Dynamic Range ON, TV
         //     blinks to HDR then drops back to SDR" symptom).
+        //     EXCEPTION: when `matchContentEnabled == false` the panel
+        //     is user-locked to its current mode (typically SDR). The
+        //     master playlist's `VIDEO-RANGE=PQ` then advertises HDR
+        //     to AVPlayer while the panel sits in SDR; AVPlayer fails
+        //     asset open with `Cannot Open` (-11848). Fall back to
+        //     media-playlist routing so AVPlayer sees no upfront HDR
+        //     declaration, opens as generic HEVC, and the panel tone-
+        //     maps the HDR bitstream to its locked mode. The fix
+        //     trades DrHurt's reported `HDR-flicker-back-to-SDR`
+        //     symptom (which only fires when the user actually wants
+        //     dynamic-range matching) against asset-open failure
+        //     (which fires whenever the user has Match Dynamic Range
+        //     off, regardless of intent).
         //   - non-DV display + DV source: still media-playlist for
         //     AVPlayer's auto-tonemap path. The master with bare
         //     `dvh1` would be rejected by tvOS 26's strict master-
@@ -791,7 +820,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let useMasterPlaylist: Bool
         if effectiveDvMode {
             useMasterPlaylist = true
-        } else if videoRange != .sdr && dvVariant == .none {
+        } else if videoRange != .sdr && dvVariant == .none && matchContentEnabled {
             useMasterPlaylist = true
         } else {
             useMasterPlaylist = false
@@ -803,7 +832,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) matchContent=\(matchContentEnabled) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
 

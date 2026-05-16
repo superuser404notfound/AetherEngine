@@ -506,7 +506,8 @@ public final class AetherEngine: ObservableObject {
                     sourceHTTPHeaders: options.httpHeaders,
                     startPosition: startPosition,
                     audioSourceStreamIndex: audioSourceStreamIndex,
-                    keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV
+                    keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
+                    matchContentEnabled: options.matchContentEnabled
                 )
                 playbackBackend = .native
                 presentCurrentLayer()
@@ -535,13 +536,15 @@ public final class AetherEngine: ObservableObject {
         sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
         audioSourceStreamIndex: Int32? = nil,
-        keepDvh1TagWithoutDV: Bool = false
+        keepDvh1TagWithoutDV: Bool = false,
+        matchContentEnabled: Bool = true
     ) async throws {
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
             dvModeAvailable: Self.displayCapabilities.supportsDolbyVision,
             keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
+            matchContentEnabled: matchContentEnabled,
             audioSourceStreamIndexOverride: audioSourceStreamIndex
         )
         session.onFirstHDR10PlusDetected = { [weak self] in
