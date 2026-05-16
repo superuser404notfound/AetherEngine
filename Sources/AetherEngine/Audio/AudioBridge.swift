@@ -350,6 +350,28 @@ final class AudioBridge: @unchecked Sendable {
 
         var results: [UnsafeMutablePointer<AVPacket>] = []
 
+        // Capture the packet's pts before we hand it to the decoder.
+        // The encoder-PTS rebase uses this rather than the decoded
+        // frame's pts.
+        //
+        // For codecs with decoder priming samples (Opus preskip ~312
+        // samples at 48 kHz, AAC encoder delay), libavcodec's generic
+        // discard-samples path trims the leading samples from the
+        // first decoded frame AND advances `frame.pts` by the same
+        // amount. Rebasing the encoder timeline off the advanced
+        // frame.pts would forward-shift FLAC output by preskip-count
+        // units, opening the audio gate ahead of the video gate and
+        // stalling AVPlayer in `waitingToPlay` waiting for an audio
+        // segment that never lines up. Issue #7.
+        //
+        // packet.pts represents the source timeline position of the
+        // *encoded* packet (preskip + content). Using it for rebase
+        // keeps the FLAC output aligned with source-PTS=packet.pts on
+        // the first encoded sample, matching how video segments are
+        // aligned, regardless of whether the codec auto-trims preskip
+        // off the decoded data.
+        let packetPts = packet.pointee.pts
+
         let sendRet = avcodec_send_packet(dec, packet)
         if sendRet < 0 && sendRet != AVERROR_EOF_VALUE {
             throw AudioBridgeError.sendPacketFailed(code: sendRet)
@@ -363,8 +385,10 @@ final class AudioBridge: @unchecked Sendable {
             // Rebase encoder PTS off the first decoded frame after a
             // segment boundary so the FLAC stream timestamps track
             // the source rather than drifting on the FIFO leftover.
-            if rebaseFromNextSourcePTS, sf.pointee.pts != Self.avNoPTS {
-                nextEncoderPTS = av_rescale_q(sf.pointee.pts, srcTimeBase, encoderTimeBase)
+            // See the packetPts capture above for why we use that
+            // rather than sf.pts here.
+            if rebaseFromNextSourcePTS, packetPts != Self.avNoPTS {
+                nextEncoderPTS = av_rescale_q(packetPts, srcTimeBase, encoderTimeBase)
                 rebaseFromNextSourcePTS = false
             }
             try resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)
