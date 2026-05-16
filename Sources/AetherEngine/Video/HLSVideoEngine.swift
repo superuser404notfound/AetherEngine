@@ -120,8 +120,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             case .eac3:   return "ec-3"
             case .flac:   return "fLaC"
             case .alac:   return "alac"
-            case .mp3:    return "mp4a.40.34"
-            case .opus, .truehd, .dts, .vorbis, .pcm, .mp2, .unsupported:
+            case .mp3, .opus, .truehd, .dts, .vorbis, .pcm, .mp2, .unsupported:
+                // mp3 is theoretically `mp4a.40.34`, but AVPlayer reads
+                // any mp4a sample entry as AAC, so we bridge it to FLAC
+                // instead, the engine then computes `fLaC` from the
+                // bridged stream rather than reading this enum.
                 return ""
             }
         }
@@ -137,9 +140,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         /// through the FLAC bridge avoids a "stream-copy header write
         /// failed, retrying with FLAC bridge" round-trip on every
         /// Opus source.
+        ///
+        /// MP3 is in the same bucket for the same reason: the muxer
+        /// happily writes `mp4a.40.34` (MP3-in-MP4 sample entry), but
+        /// AVPlayer reads any `mp4a` entry as AAC and fails to decode
+        /// the MP3 frames with -11829 / CoreMedia -12848. Bridge cost
+        /// on a lossy mono/stereo source is negligible.
         var requiresBridge: Bool {
             switch self {
-            case .opus, .truehd, .dts, .vorbis, .pcm, .mp2: return true
+            case .opus, .mp3, .truehd, .dts, .vorbis, .pcm, .mp2: return true
             default: return false
             }
         }
