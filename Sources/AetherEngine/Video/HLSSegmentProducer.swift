@@ -192,6 +192,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var firstActualVideoDts: Int64 = Int64.min
     private var firstActualAudioDts: Int64 = Int64.min
 
+    /// Source-TB pts of the first kept video packet (= the AV_PKT_FLAG_KEY
+    /// packet that opened the video gate). Used to detect and drop pre-
+    /// keyframe leading B-frames (HEVC RASL) that follow an open-GOP CRA:
+    /// they have display-order pts before the CRA and reference frames
+    /// from before it, so AVPlayer's HEVC decoder stalls on the first
+    /// display sample if we let them through.
+    private var firstActualVideoPts: Int64 = Int64.min
+    private var loggedFirstLeadingDrop: Bool = false
+
     /// Desired first-sample dts (in source TB) for each stream — the
     /// value the muxer's fragment `tfdt` will end up at after the
     /// dynamic shift is applied. Set at init to align with the
@@ -584,6 +593,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                     if firstActualVideoDts == Int64.min {
                         firstActualVideoDts = packet.pointee.dts
+                        firstActualVideoPts = packet.pointee.pts != Int64.min
+                            ? packet.pointee.pts
+                            : packet.pointee.dts
                         videoShiftPts = firstActualVideoDts - desiredFirstVideoTfdtPts
                         // Open the audio gate now that we know where
                         // video actually landed. Audio shift will be
@@ -601,11 +613,47 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         EngineLog.emit(
                             "[HLSSegmentProducer] video gate open: "
                             + "actual=\(firstActualVideoDts) "
+                            + "anchorPts=\(firstActualVideoPts) "
                             + "target=\(restartTargetVideoDts) "
                             + "desired=\(desiredFirstVideoTfdtPts) "
                             + "shift=\(videoShiftPts)",
                             category: .session
                         )
+                    } else {
+                        // Drop pre-keyframe leading B-frames (HEVC RASL).
+                        // An open-GOP source can emit B-frames whose
+                        // display-order pts is before the CRA that
+                        // opened our gate. They reference pre-CRA
+                        // frames not in our segment stream, so AVPlayer's
+                        // HEVC decoder fails on the first display sample
+                        // and the player stalls in waitingToPlay
+                        // forever. Repro: Bombige Magenverstimmung
+                        // (open-GOP HEVC, firstKeyframePts=88,
+                        // CRA pts=172 with two leading B-frames at
+                        // pts=88 and pts=131).
+                        //
+                        // Within a single GOP, only the leading region
+                        // before the CRA has pts < CRA.pts; once we
+                        // cross the next IDR/CRA, all subsequent
+                        // packets have pts >= firstActualVideoPts and
+                        // this check becomes a no-op for the rest of
+                        // the session.
+                        if firstActualVideoPts != Int64.min,
+                           packet.pointee.pts != Int64.min,
+                           packet.pointee.pts < firstActualVideoPts {
+                            if !loggedFirstLeadingDrop {
+                                loggedFirstLeadingDrop = true
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] drop pre-keyframe "
+                                    + "leading B-frame: pts=\(packet.pointee.pts) "
+                                    + "dts=\(packet.pointee.dts) "
+                                    + "anchor=\(firstActualVideoPts) "
+                                    + "(open-GOP RASL)",
+                                    category: .session
+                                )
+                            }
+                            continue
+                        }
                     }
                 }
                 if isAudioPkt {
