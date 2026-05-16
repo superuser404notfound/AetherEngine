@@ -38,8 +38,9 @@ final class DisplayCriteriaController {
     /// Apply display criteria for the next playback session.
     ///
     /// - Parameters:
-    ///   - format: The detected video dynamic range. `.sdr` returns
-    ///     `false` immediately (no handshake needed).
+    ///   - format: The detected video dynamic range. `.sdr` programs
+    ///     a rate-only criteria so Match Frame Rate can still engage
+    ///     (panel keeps SDR mode but switches refresh).
     ///   - frameRate: Real content frame rate, snapped via
     ///     `FrameRateSnap`. Pass `nil` to skip refresh-rate matching
     ///     (the panel keeps its current rate).
@@ -52,8 +53,10 @@ final class DisplayCriteriaController {
     ///     color metadata at session start. Engine-internal toggle for
     ///     diagnostic builds.
     /// - Returns: `true` if the display will switch to HDR mode.
-    ///     `false` means the caller should tone-map HDR content down
-    ///     to SDR (Match Content disabled, no window, SDR content).
+    ///     `false` means no dynamic-range switch happened — either
+    ///     SDR content (no switch needed; rate-only criteria may
+    ///     still have been programmed), Match Content disabled, no
+    ///     window, or tvOS < 17.
     @discardableResult
     func apply(format: VideoFormat, frameRate: Double?, codecTag: FourCharCode?, omitColorExtensions: Bool) -> Bool {
         #if os(tvOS)
@@ -61,7 +64,6 @@ final class DisplayCriteriaController {
             EngineLog.emit("[DisplayCriteria] skipped: tvOS < 17", category: .engine)
             return false
         }
-        guard format != .sdr else { return false }
 
         guard let window = resolveWindow() else {
             EngineLog.emit("[DisplayCriteria] skipped: no window", category: .engine)
@@ -70,33 +72,39 @@ final class DisplayCriteriaController {
 
         let displayManager = window.avDisplayManager
 
-        // Respect user's "Match Content → Match Dynamic Range" toggle
-        // (Apple TV → Settings → Video and Audio). When OFF, the
-        // system refuses to switch the panel; a preferredDisplayCriteria
-        // assignment would silently no-op and we'd ship HDR pixel data
-        // into an SDR-locked panel, which renders as black or massively
-        // over-saturated. The tone-map path is the safe fallback.
+        // Respect the user's Match Content master toggle. tvOS
+        // exposes one combined `isDisplayCriteriaMatchingEnabled`
+        // flag that is true when EITHER "Match Dynamic Range" OR
+        // "Match Frame Rate" is enabled in Settings → Video and
+        // Audio → Match Content. tvOS internally decides which
+        // dimension to honour based on the user's per-sub-toggle
+        // setting; we just have to hand it a criteria with both
+        // dimensions populated and let the system pick.
         guard displayManager.isDisplayCriteriaMatchingEnabled else {
-            EngineLog.emit("[DisplayCriteria] skipped: Match Dynamic Range disabled, falling back to tonemap", category: .engine)
+            EngineLog.emit("[DisplayCriteria] skipped: Match Content disabled (both Dynamic Range AND Frame Rate off)", category: .engine)
             return false
         }
 
+        // BT.2020 / transfer / YCbCr matrix extensions encode the
+        // dynamic-range claim. We only attach them for HDR / DV /
+        // HLG sources — for SDR sources the criteria carries the
+        // codec FourCC + refresh rate only, so when the user has
+        // Match Frame Rate ON but Match Dynamic Range OFF, the
+        // panel still switches to the content's native refresh
+        // rate (DrHurt #4 observation: previously Match Frame Rate
+        // only engaged when Match Dynamic Range was also active,
+        // because we early-returned for SDR and never programmed
+        // criteria at all).
+        let isHDR = (format != .sdr)
         let transferFunction: CFString = switch format {
         case .hlg: kCVImageBufferTransferFunction_ITU_R_2100_HLG
         default:   kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
         }
-
-        // BT.2020 / transfer / YCbCr matrix in the format description
-        // gives tvOS an explicit hint for the pre-playback handshake.
-        // The `omitColorExtensions` flag drops them so AVPlayer falls
-        // back to reading the actual bitstream's color metadata at
-        // session start instead. Off by default; engine-internal
-        // diagnostic lever.
-        let extensions: NSDictionary? = omitColorExtensions ? nil : [
+        let extensions: NSDictionary? = (isHDR && !omitColorExtensions) ? [
             kCMFormatDescriptionExtension_ColorPrimaries: kCVImageBufferColorPrimaries_ITU_R_2020,
             kCMFormatDescriptionExtension_TransferFunction: transferFunction,
             kCMFormatDescriptionExtension_YCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_2020,
-        ]
+        ] : nil
 
         // Codec FourCC encoded in the format description is what
         // tvOS reads to pick the HDMI display mode: `'hvc1'` →
@@ -137,8 +145,18 @@ final class DisplayCriteriaController {
         let criteria = AVDisplayCriteria(refreshRate: effectiveRate, formatDescription: desc)
         displayManager.preferredDisplayCriteria = criteria
 
-        EngineLog.emit("[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)")", category: .engine)
-        return true
+        EngineLog.emit(
+            "[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) "
+            + "rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)") "
+            + "extensions=\(extensions != nil ? "HDR" : "none")",
+            category: .engine
+        )
+        // Return true only when an actual dynamic-range switch is on
+        // the table — the caller uses this to decide whether to wait
+        // up to 5 s for the panel handshake to settle. SDR rate-only
+        // criteria don't need the wait (refresh-rate switches are
+        // sub-second on every panel we care about).
+        return isHDR
         #else
         return false
         #endif
