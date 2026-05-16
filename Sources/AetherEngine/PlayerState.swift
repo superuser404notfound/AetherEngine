@@ -81,26 +81,23 @@ public struct LoadOptions: Sendable, Equatable {
     /// Default is empty (no extra headers).
     public var httpHeaders: [String: String]
 
-    /// Keep the source's `dvh1` codec tag on the HLS track even when the
-    /// active display can't render Dolby Vision, instead of downgrading
-    /// to plain `hvc1`. When set, the engine serves the master playlist
-    /// with DV-tagged variants and AVPlayer is expected to tone-map the
-    /// asset internally using the per-frame DV trim metadata.
+    /// Force the engine into the DV codec-classification branch even
+    /// when the active display reports `dvModeAvailable == false`.
+    /// Diagnostic / opt-in lever, default OFF.
     ///
-    /// Default OFF: verified on macOS AVPlayer but reproducibly fails
-    /// on tvOS 26 AVPlayer with `AVFoundationErrorDomain -11868` /
-    /// `CoreMediaErrorDomain -17223` ("Open failed") for P8.1 cross-
-    /// compat content on non-DV panels with "Match Dynamic Range" off,
-    /// even after switching the master CODECS to spec-correct
-    /// `hvc1.2.4.LXX.b0` + `SUPPLEMENTAL-CODECS="dvh1.08.LL/db1p"`. The
-    /// tvOS master-level codec filter rejects the asset before it ever
-    /// fetches a media playlist or init segment.
+    /// When OFF (default), non-DV displays route DV sources through
+    /// `HLSLocalServer.mediaPlaylistURL` (no master variant) so
+    /// AVPlayer's auto-tonemap engages on the HEVC base layer. This
+    /// is the only path that works on tvOS 26 — the master-level
+    /// codec filter rejects bare `dvh1` AND cross-compat
+    /// `hvc1+SUPPLEMENTAL=dvh1` on non-DV panels with
+    /// `AVFoundationErrorDomain -11868`.
     ///
-    /// When OFF (default), the engine routes non-DV-display sessions
-    /// through `mediaPlaylistURL` (no master variant) and AVPlayer's
-    /// HLS engine auto-tonemaps the underlying HEVC stream to whatever
-    /// the panel can render — the path documented at
-    /// `HLSLocalServer.mediaPlaylistURL`.
+    /// When ON, the engine emits bare `dvh1` codec tags and serves
+    /// the master playlist regardless of display capability. Tested
+    /// working on macOS Tahoe AVPlayer against the Dolby reference
+    /// kit per AetherEngine#4. Use this for DV-capable panels that
+    /// misreport their `availableHDRModes`.
     public var keepDvh1TagWithoutDV: Bool
 
     public init(

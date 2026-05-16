@@ -129,22 +129,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Per-frame fallback duration (in source video time_base) used
     /// to backfill the last packet of a fragment when the matroska
-    /// demuxer doesn't supply `pkt->duration`. Many MKV remuxers
-    /// (HandBrake / MakeMKV variants, web-rip pipelines) drop the
-    /// TrackEntry `DefaultDuration` element AND don't write per-
-    /// block `BlockDuration`, so every video packet arrives with
-    /// `duration == 0`. FFmpeg's mp4 sub-muxer reads `pkt->duration`
-    /// only for the LAST sample of each fragment (intermediate
-    /// sample durations come from `dts[i+1] - dts[i]`), so the last
-    /// `trun` entry ends up with `sample_duration = 0`, the fragment
-    /// stops one frame short of where the next fragment's `tfdt`
-    /// starts, and AVPlayer's HLS-fMP4 engine sees an unfillable
-    /// gap. AVPlayer parks on `WaitingToMinimizeStallsReason` and
-    /// never queues seg-N+1.
+    /// demuxer doesn't supply `pkt->duration`. Defensive: most
+    /// MKVs in production carry intact per-block durations, but
+    /// some remuxer pipelines drop the TrackEntry `DefaultDuration`
+    /// element AND don't write per-block `BlockDuration`, so every
+    /// video packet arrives with `duration == 0`. FFmpeg's mp4
+    /// sub-muxer reads `pkt->duration` only for the LAST sample of
+    /// each fragment (intermediate sample durations come from
+    /// `dts[i+1] - dts[i]`), so a missing duration would write
+    /// `trun.last.sample_duration = 0` and the fragment would stop
+    /// one frame short of the next fragment's `tfdt`.
     ///
     /// Computed from `videoStream.avg_frame_rate` at engine setup
     /// (see `HLSVideoEngine.makeProducer`); applied only when a
-    /// pending packet's duration is zero and no successor is
+    /// pending packet's duration is zero AND no successor is
     /// available to compute it from (the EOF case).
     private let videoFallbackDurationPts: Int64
 
@@ -157,9 +155,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// One-packet look-behind state. The pump holds the most recent
     /// video / stream-copy-audio packet so the NEXT packet's dts can
     /// be used to compute `pending.duration = next.dts - pending.dts`
-    /// (the only place to recover from demuxers that don't supply
-    /// `pkt->duration`). On EOF the pending packet is flushed using
-    /// `*FallbackDurationPts` as the duration.
+    /// when the source's per-block duration was missing. On EOF the
+    /// pending packet is flushed using `*FallbackDurationPts`.
     private var pendingVideoPkt: UnsafeMutablePointer<AVPacket>?
     private var pendingAudioPkt: UnsafeMutablePointer<AVPacket>?
     private var loggedFirstVideoPktInfo = false
@@ -655,20 +652,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // Look-behind: hold the most recent video / stream-
                 // copy-audio packet so the NEXT packet's dts can be
                 // used to compute `pending.duration = next.dts -
-                // pending.dts`. Many MKV remuxers (HandBrake / web-
-                // rip pipelines) drop `DefaultDuration` and don't
-                // write per-block `BlockDuration`, so the matroska
-                // demuxer emits packets with `duration == 0`. The
-                // mp4 sub-muxer in `mov_write_packet` reads
-                // `pkt->duration` only for the LAST sample of each
-                // fragment, which then writes `trun.last.duration =
-                // 0` — the fragment stops one frame short of the
-                // next fragment's `tfdt`, AVPlayer's HLS-fMP4
-                // engine sees an unfillable gap, and the asset
-                // parks on `WaitingToMinimizeStallsReason` and
-                // never queues seg-N+1. Backfilling `duration` from
-                // the successor's dts cleanly fixes this without
-                // touching the demuxer or muxer code.
+                // pending.dts`. Defensive against MKVs without
+                // per-block durations (some remuxer pipelines drop
+                // `DefaultDuration` and `BlockDuration` both) — in
+                // that case the mp4 sub-muxer would write the
+                // fragment's last `trun` entry with
+                // `sample_duration = 0` and the fragment would
+                // stop one frame short of the next fragment's
+                // `tfdt`. Non-issue for sources with intact
+                // durations: the look-behind branch is taken but
+                // the backfill condition (`prev.duration == 0`)
+                // never fires.
                 if isVideoPkt {
                     if !loggedFirstVideoPktInfo {
                         loggedFirstVideoPktInfo = true

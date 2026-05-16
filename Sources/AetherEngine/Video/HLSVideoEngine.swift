@@ -151,17 +151,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let sourceHTTPHeaders: [String: String]
     private let dvModeAvailable: Bool
 
-    /// Experimental override: when true, keep the source's `dvh1`
-    /// codec tag (and the full DV classification path) even though
-    /// `dvModeAvailable=false`. AVPlayer is then asked to ingest a
-    /// DV-tagged HLS asset on a non-DV display and tone-map internally.
-    /// Driven from `LoadOptions.keepDvh1TagWithoutDV`; merged into the
-    /// computed `effectiveDvMode` below.
+    /// Opt-in override from `LoadOptions.keepDvh1TagWithoutDV`.
+    /// See LoadOptions for the full rationale — default OFF, set
+    /// only for misreporting DV panels.
     private let keepDvh1TagWithoutDV: Bool
 
-    /// `dvModeAvailable || keepDvh1TagWithoutDV`. The classification +
-    /// codec-tag + playlist-URL selection branches all key off this so
-    /// the override is one boolean OR away from the existing logic.
+    /// `dvModeAvailable || keepDvh1TagWithoutDV`. The DV
+    /// classification + codec-tag + master-playlist routing branches
+    /// key off this single boolean.
     private var effectiveDvMode: Bool { dvModeAvailable || keepDvh1TagWithoutDV }
 
     /// Optional caller-chosen audio source stream index. When `nil` the
