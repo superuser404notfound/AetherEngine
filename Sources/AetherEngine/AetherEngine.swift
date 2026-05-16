@@ -207,11 +207,17 @@ public final class AetherEngine: ObservableObject {
     /// background suspension.
     private var loadedURL: URL?
 
-    /// Extra HTTP headers the host passed via `LoadOptions.httpHeaders`
-    /// for the current session. Replayed on every internal reopen of
-    /// the source URL (selectAudioTrack reload, embedded subtitle side
-    /// demuxer) so auth survives mid-playback pipeline rebuilds.
-    private var loadedHTTPHeaders: [String: String] = [:]
+    /// The `LoadOptions` the host passed for the current session.
+    /// Replayed on every internal reopen of the source URL
+    /// (selectAudioTrack reload, embedded subtitle side demuxer,
+    /// background reload) so auth, Match Content state, and the
+    /// dvh1 tag override all survive mid-playback pipeline rebuilds
+    /// rather than silently reverting to defaults. The audio-switch
+    /// reload was hitting `matchContentEnabled = true` on a host that
+    /// had loaded with `false`, which then routed HDR HEVC through the
+    /// master playlist on a non-DV panel with Match Content off and
+    /// surfaced "Öffnen fehlgeschlagen".
+    private var loadedOptions: LoadOptions = .init()
 
     /// In-flight sidecar subtitle decode. Cancelled on subtitle
     /// clear / track switch so a stale decode can't overwrite fresh
@@ -375,7 +381,7 @@ public final class AetherEngine: ObservableObject {
     ) async throws {
         stopInternal()
         loadedURL = url
-        loadedHTTPHeaders = options.httpHeaders
+        loadedOptions = options
         state = .loading
         currentTime = 0
         duration = 0
@@ -695,7 +701,7 @@ public final class AetherEngine: ObservableObject {
     public func reloadAtCurrentPosition() async throws {
         guard let url = loadedURL else { return }
         let pos = currentTime
-        try await load(url: url, startPosition: pos > 1 ? pos : nil)
+        try await load(url: url, startPosition: pos > 1 ? pos : nil, options: loadedOptions)
     }
 
     public func seek(to seconds: Double) async {
@@ -874,7 +880,7 @@ public final class AetherEngine: ObservableObject {
             if wasOnSoftwarePath {
                 try await loadSoftware(
                     url: url,
-                    sourceHTTPHeaders: loadedHTTPHeaders,
+                    sourceHTTPHeaders: loadedOptions.httpHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
                     audioSourceStreamIndex: audioStreamIndex
                 )
@@ -885,9 +891,11 @@ public final class AetherEngine: ObservableObject {
             } else {
                 try await loadNative(
                     url: url,
-                    sourceHTTPHeaders: loadedHTTPHeaders,
+                    sourceHTTPHeaders: loadedOptions.httpHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
-                    audioSourceStreamIndex: audioStreamIndex
+                    audioSourceStreamIndex: audioStreamIndex,
+                    keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
+                    matchContentEnabled: loadedOptions.matchContentEnabled
                 )
                 playbackBackend = .native
                 activeAudioTrackIndex = Int(audioStreamIndex)
@@ -958,7 +966,7 @@ public final class AetherEngine: ObservableObject {
     private func startEmbeddedSubtitleTask(url: URL, streamIndex: Int32, startAt: Double) {
         let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
         let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
-        let headers = loadedHTTPHeaders
+        let headers = loadedOptions.httpHeaders
         embeddedSubtitleTask = Task.detached(priority: .userInitiated) { [weak self] in
             await self?.runEmbeddedSubtitleReader(
                 url: url, headers: headers, streamIndex: streamIndex, startAt: startAt,
