@@ -768,17 +768,42 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    requested index lands.
         prod.start()
 
-        let resolvedURL: URL?
+        // Pick the URL handed to AVPlayer.
+        //
+        //   - DV-capable display + DV source: master playlist with
+        //     full DV codec strings so AVKit's auto-criteria reads
+        //     `dvh1` from the sample entries and engages DV mode.
+        //   - non-DV display + HDR HEVC (HDR10 / HLG): master so
+        //     AVKit gets the `VIDEO-RANGE=PQ` (or HLG) + `hvc1` codec
+        //     hint upfront and programs HDR criteria immediately.
+        //     Routing through media here defaults AVKit's auto-
+        //     criteria to SDR until init.mp4 is fetched and parsed —
+        //     long enough for AVKit to override the engine's pre-load
+        //     HDR criteria and stick the panel back in SDR mode for
+        //     the rest of the session ("Match Dynamic Range ON, TV
+        //     blinks to HDR then drops back to SDR" symptom).
+        //   - non-DV display + DV source: still media-playlist for
+        //     AVPlayer's auto-tonemap path. The master with bare
+        //     `dvh1` would be rejected by tvOS 26's strict master-
+        //     level codec filter (-11868).
+        //   - SDR HEVC: media is fine, no auto-criteria override
+        //     to worry about.
+        let useMasterPlaylist: Bool
         if effectiveDvMode {
-            resolvedURL = srv.playlistURL
+            useMasterPlaylist = true
+        } else if videoRange != .sdr && dvVariant == .none {
+            useMasterPlaylist = true
         } else {
-            resolvedURL = srv.mediaPlaylistURL
+            useMasterPlaylist = false
         }
+        let resolvedURL: URL? = useMasterPlaylist
+            ? srv.playlistURL
+            : srv.mediaPlaylistURL
         guard let url = resolvedURL else {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) keepDvh1=\(keepDvh1TagWithoutDV))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
 
