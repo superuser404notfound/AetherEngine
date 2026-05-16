@@ -308,7 +308,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // first kept audio sample is from the same source-time as
         // the first video keyframe we land on.
         self.restartTargetAudioDts = Int64.min
-        self.audioWaitForVideo = (restartTargetVideoDts != Int64.min)
+        // Audio always waits for video, even on initial-start. The video
+        // gate may skip leading non-key packets while scanning for the
+        // first AV_PKT_FLAG_KEY (some MKV remuxes have a non-IDR first
+        // packet, e.g. Bluey BD remuxes); if audio anchored itself at
+        // its own first packet in the meantime, the two streams' first
+        // kept sample would come from different source-times and play
+        // back desynced by `firstVideoKeyDts - firstAudioDts` even
+        // though their tfdts after shift both equal 0.
+        self.audioWaitForVideo = true
         self.desiredFirstVideoTfdtPts = desiredFirstVideoTfdtPts
         self.desiredFirstAudioTfdtPts = desiredFirstAudioTfdtPts
 
