@@ -64,7 +64,14 @@ player.bind(view: surface)
 
 try await player.load(url: videoURL)                                        // or
 try await player.load(url: videoURL, startPosition: 347.5)                  // resume
-try await player.load(url: videoURL, options: .init(httpHeaders: headers))  // auth
+try await player.load(
+    url: videoURL,
+    options: .init(
+        httpHeaders: headers,             // attached to every demux + segment fetch
+        matchContentEnabled: matchContent // tvOS Match Content master toggle
+    )
+)
+try await player.reloadAtCurrentPosition()  // background reopen, preserves options
 
 player.play()
 player.pause()
@@ -74,12 +81,19 @@ player.stop()
 
 // Observe (Combine @Published)
 player.$state         // .idle, .loading, .playing, .paused, .seeking, .error
-player.$currentTime
+player.$currentTime   // AVPlayer's HLS clock (use for transport / scrub / resume)
+player.$sourceTime    // source PTS of the displayed frame (use for subtitle alignment)
 player.$duration
 player.$videoFormat   // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
+player.$currentAVPlayer  // active AVPlayer, re-emitted on every reload (MPNowPlayingSession)
 
 player.audioTracks    // [TrackInfo]
 player.selectAudioTrack(index: trackID)
+
+// tvOS info panel / Now Playing
+player.setExternalMetadata([
+    AVMetadataItem(/* title, artwork, etc. */)
+])
 
 // Subtitles, text and bitmap, one published list
 player.subtitleTracks                          // [TrackInfo] for the loaded source
@@ -90,6 +104,8 @@ player.$subtitleCues                           // [SubtitleCue], body is .text(S
 player.$isSubtitleActive                       // host mirror gate
 player.$isLoadingSubtitles                     // sidecar fetch + decode in progress
 ```
+
+Subtitle cues land in raw source PTS. On the native path, AVPlayer's HLS clock sits at `source_pts - producer.videoShiftPts` (the producer applies a per-session shift to align the first segment's tfdt with the playlist origin, and the shift can change on every restart). Render the overlay against `player.sourceTime` so cues match the spoken audio regardless of which producer session is active.
 
 Install via Swift Package Manager:
 
@@ -127,7 +143,7 @@ Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──
                                               AVR / speakers
 ```
 
-AV1 sources in the wild almost never carry Dolby Vision (DV is HEVC-profile-driven) or Atmos (mastering runs in HEVC overwhelmingly), so the SW pipeline's lack of those capabilities is a theoretical limitation rather than a real one. The dispatch happens once at load time; hosts see a unified `@Published` state surface either way.
+AV1+DV (Profile 10.0 / 10.1 / 10.4) routes through the native path on hardware-AV1 hosts via the `dav1` / `av01` track type plus the source's `dvvC` box. AV1+Atmos is genuinely rare in the wild (mastering still runs in HEVC overwhelmingly), so the SW pipeline's lack of Atmos passthrough is a theoretical limitation rather than a real one. The dispatch happens once at load time; hosts see a unified `@Published` state surface either way.
 
 Why HLS-fMP4 for the native path instead of feeding `AVPlayer` the source URL directly: AVPlayer's progressive-download path won't accept arbitrary MKV containers, and even for MP4 sources it's brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants. The HLS-fMP4 wrapper is the most permissive surface AVPlayer exposes; libavformat's `hls` muxer produces bytes byte-identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
 
@@ -154,11 +170,13 @@ HDR-to-SDR mapping is handled by AVPlayer and the system compositor according to
 
 ### Dolby Vision signaling
 
-For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord`. `HLSVideoEngine` writes the matching ISO BMFF `dvcC` box into the HLS-fMP4 sample description and promotes the track type from `hvc1` to `dvh1` (Profile 5, no HDR10 base) or `dvhe` (Profile 8.1 / 8.4 with HDR10 / HLG backward-compatible base layer). Profile 5 plays only on DV-capable displays; profiles 8.1 / 8.4 fall back to their base layer when the TV doesn't advertise DV.
+For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord`. On DV-capable displays, `HLSVideoEngine` writes the matching ISO BMFF `dvcC` box into the HLS-fMP4 sample description and emits a bare `dvh1.<profile>.<dvLevel>` codec tag for Profile 5, 8.1, and 8.4 so AVKit's auto-criteria reads `dvh1` from the sample entries and engages DV mode directly. On non-DV displays the engine downgrades to plain `hvc1`: Profile 5 is unplayable there (no HDR10 base), and Profiles 8.1 / 8.4 fall back to their HDR10 / HLG base layer with AVPlayer's tone-mapping path. AV1+DV (Profile 10.0 / 10.1 / 10.4) uses the parallel `dav1` / `av01` track type plus `dvvC` box on hardware-AV1 hosts.
 
 ### HDR10+ dynamic metadata
 
 ST 2094-40 metadata stays attached to the HEVC bitstream as user-data-registered ITU-T T.35 SEI NALs. The HLS-fMP4 stream-copy preserves the SEI through to `AVPlayer`, which forwards it to the system compositor. HDR10+-capable TVs apply the per-scene tone-mapping curves; HDR10-only TVs fall back to the static HDR10 base.
+
+The published `videoFormat` starts at `.hdr10` for any BT.2020 / PQ source and flips to `.hdr10Plus` the first time a packet's T.35 SEI signature is seen in the producer's scan. Debounced across producer restarts so a scrub doesn't re-fire. Hosts can drive an HDR10+ badge or analytics hook off the `$videoFormat` transition.
 
 ## Subtitles
 
@@ -215,7 +233,7 @@ Sources/AetherEngine/
 
 | Package                                                            | License   | Purpose                                                                  |
 | ------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------ |
-| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0  | Slim FFmpeg 7.1 (avcodec / avformat / avutil / swresample / swscale) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010 |
+| [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) | LGPL-3.0  | Slim FFmpeg 8.1 (avcodec / avformat / avutil / swresample / swscale) for demux + HLS-fMP4 mux + AudioBridge FLAC encode + SW-path dav1d decode + sws_scale YUV → NV12 / P010 |
 | VideoToolbox                                                       | System    | Native path video decode (HW where available, Apple's bundled SW dav1d on iOS / macOS) |
 | AVFoundation                                                       | System    | AVPlayer + AVDisplayManager (native path); AVSampleBufferDisplayLayer + AVSampleBufferRenderSynchronizer (SW path) |
 | CoreMedia                                                          | System    | Sample descriptions, format-description tagging, CMTimebase                |
