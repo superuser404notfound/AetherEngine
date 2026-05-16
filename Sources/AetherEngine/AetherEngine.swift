@@ -207,6 +207,20 @@ public final class AetherEngine: ObservableObject {
     /// background suspension.
     private var loadedURL: URL?
 
+    /// Seconds to subtract from every embedded or sidecar subtitle
+    /// cue's startTime / endTime so the cue's time range is in the
+    /// active player's clock frame rather than source-PTS-seconds.
+    ///
+    /// On the native HLS path AVPlayer's `currentTime` is
+    /// `source_pts - HLSVideoEngine.firstKeyframeSeconds` (the producer
+    /// subtracts the first keyframe's PTS so seg-0's tfdt lands at the
+    /// playlist's cumulative-EXTINF origin of 0). Subtitle decoders
+    /// produce cues in source-PTS-seconds, so on the native path they
+    /// land late by `firstKeyframeSeconds` (~500 ms for Cars on Apple
+    /// TV BD remuxes) unless we shift them here. SW path matches source
+    /// PTS directly, so the offset stays 0 there.
+    private var playlistOriginOffsetSeconds: Double = 0
+
     /// The `LoadOptions` the host passed for the current session.
     /// Replayed on every internal reopen of the source URL
     /// (selectAudioTrack reload, embedded subtitle side demuxer,
@@ -558,6 +572,7 @@ public final class AetherEngine: ObservableObject {
         }
         let playbackURL = try session.start()
         self.nativeVideoSession = session
+        self.playlistOriginOffsetSeconds = session.firstKeyframeSeconds
 
         let host = NativeAVPlayerHost()
         host.playerLayer.videoGravity = _videoGravity
@@ -625,6 +640,9 @@ public final class AetherEngine: ObservableObject {
             Task { @MainActor in self?.handleHDR10PlusDetected() }
         }
         self.softwareHost = host
+        // SW path's currentTime already tracks source PTS directly,
+        // so subtitle cues need no shift to land in the player clock.
+        self.playlistOriginOffsetSeconds = 0
 
         softwareCancellables.removeAll()
         host.$currentTime
@@ -1130,20 +1148,27 @@ public final class AetherEngine: ObservableObject {
             )
         }
 
+        // Shift source-PTS-seconds into the active player's clock frame.
+        // 0 on the SW path; firstKeyframeSeconds on the native path so
+        // cues match AVPlayer.currentTime instead of trailing it by the
+        // first-keyframe offset (~500 ms on most MKV BD remuxes).
+        let originOffset = playlistOriginOffsetSeconds
+
         // PGS clear-event trim: each PGS event implicitly terminates
         // whatever was on screen. Truncate any image cue whose
         // interval straddles the new event's start so it disappears
         // at the right moment instead of staying up for the
         // UINT32_MAX (~50-day) default the decoder hands us.
         if let trimAt = event.pgsTrimAt {
+            let shiftedTrim = trimAt - originOffset
             for i in 0..<subtitleCues.count {
                 guard case .image = subtitleCues[i].body else { continue }
                 let cue = subtitleCues[i]
-                if cue.startTime < trimAt && cue.endTime > trimAt {
+                if cue.startTime < shiftedTrim && cue.endTime > shiftedTrim {
                     subtitleCues[i] = SubtitleCue(
                         id: cue.id,
                         startTime: cue.startTime,
-                        endTime: trimAt,
+                        endTime: shiftedTrim,
                         body: cue.body
                     )
                 }
@@ -1155,16 +1180,22 @@ public final class AetherEngine: ObservableObject {
         // in sorted position so the overlay's lookup (binary search
         // then walk for overlapping cues) stays correct.
         for cue in event.cues {
+            let shifted = SubtitleCue(
+                id: cue.id,
+                startTime: cue.startTime - originOffset,
+                endTime: cue.endTime - originOffset,
+                body: cue.body
+            )
             var lo = 0, hi = subtitleCues.count
             while lo < hi {
                 let mid = (lo + hi) / 2
-                if subtitleCues[mid].startTime < cue.startTime {
+                if subtitleCues[mid].startTime < shifted.startTime {
                     lo = mid + 1
                 } else {
                     hi = mid
                 }
             }
-            subtitleCues.insert(cue, at: lo)
+            subtitleCues.insert(shifted, at: lo)
         }
     }
 
@@ -1205,7 +1236,23 @@ public final class AetherEngine: ObservableObject {
             await MainActor.run {
                 guard let self = self else { return }
                 guard self.isSubtitleActive else { return }
-                self.subtitleCues = cues
+                // Shift sidecar cues into the active player's clock frame.
+                // Sidecar SRT/ASS/VTT timestamps are source-PTS-seconds
+                // (Jellyfin's subtitle extraction preserves source PTS);
+                // on the native path AVPlayer.currentTime sits at
+                // source - firstKeyframeSeconds, so cues without the
+                // shift trail playback by that amount.
+                let offset = self.playlistOriginOffsetSeconds
+                self.subtitleCues = offset == 0
+                    ? cues
+                    : cues.map { cue in
+                        SubtitleCue(
+                            id: cue.id,
+                            startTime: cue.startTime - offset,
+                            endTime: cue.endTime - offset,
+                            body: cue.body
+                        )
+                    }
                 self.isLoadingSubtitles = false
             }
         }
@@ -1255,6 +1302,7 @@ public final class AetherEngine: ObservableObject {
 
         displayCriteria.reset()
         playbackBackend = .none
+        playlistOriginOffsetSeconds = 0
 
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()

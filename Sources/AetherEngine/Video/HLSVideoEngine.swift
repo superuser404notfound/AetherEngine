@@ -212,9 +212,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// past PTS=0 (e.g. 5 ms on Lila Giraffe, 88 ms on Bombige
     /// Magenverstimmung). The producer subtracts this from every
     /// video packet's pts/dts so seg-0's fragment tfdt aligns with
-    /// the playlist's cumulative-EXTINF origin of 0 — AVPlayer's
+    /// the playlist's cumulative-EXTINF origin of 0, AVPlayer's
     /// HLS-fMP4 engine stalls at `waitingToPlay` otherwise.
     private var firstKeyframePts: Int64 = 0
+
+    /// `firstKeyframePts` converted to seconds using the source video
+    /// time base. Exposed so the AetherEngine subtitle path can shift
+    /// embedded + sidecar cue timestamps into AVPlayer's clock frame,
+    /// which is `source_pts - firstKeyframeSeconds`. Without this
+    /// shift, sources whose first keyframe sits past PTS=0 (most MKV
+    /// remuxes, e.g. Cars at ~500 ms) render subtitles a constant
+    /// `firstKeyframeSeconds` late.
+    public private(set) var firstKeyframeSeconds: Double = 0
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -346,6 +355,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             self.firstKeyframePts = detectedFirstKeyframePts
             let firstKeyframePts = detectedFirstKeyframePts
             let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
+            self.firstKeyframeSeconds = firstKeyframeSeconds
             let videoStreamStart = videoStream.pointee.start_time
             let formatStart = dem.formatStartTime
             EngineLog.emit(
