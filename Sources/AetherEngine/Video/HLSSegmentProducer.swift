@@ -579,19 +579,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // lands at the playlist's cumulative-EXTINF origin
                 // for this segment.
                 //
-                // Initial-start sessions (baseIndex == 0) start with
-                // both gates open: the demuxer is at file start, the
-                // first packet's dts already equals
-                // `desiredFirstVideoTfdtPts + firstKeyframePts`, the
-                // shift comes out to `firstKeyframePts` automatically.
+                // Initial-start sessions (baseIndex == 0) still wait
+                // for a true IDR before opening the gate. Trusting the
+                // demuxer's first packet to be a sync sample broke on
+                // files whose decode-order leading packet is not (some
+                // Bluey MKV remuxes — first H.264 packet was dts=0
+                // pts=33 without AV_PKT_FLAG_KEY, seg-0 was emitted
+                // without a leading sync sample, AVPlayer rejected it
+                // with -12860 and an indefinite NoItemToPlay stall).
+                // The restart path's keyframe scan is the correct
+                // behaviour for initial-start too; only the target
+                // DTS check is restart-specific.
                 if isVideoPkt {
-                    if restartTargetVideoDts != Int64.min && firstActualVideoDts == Int64.min {
+                    if firstActualVideoDts == Int64.min {
+                        // Always wait for a keyframe to open the gate.
+                        //
+                        // Restart sessions also enforce that the keyframe
+                        // sits at or past `restartTargetVideoDts` so the
+                        // segment we're building covers its planned range.
+                        // Initial-start sessions used to trust the
+                        // demuxer's first packet, which broke on files
+                        // whose first decode-order video packet isn't a
+                        // sync sample (some Bluey MKV remuxes — the
+                        // gate opened on a non-key packet, seg-0 was
+                        // produced without a leading sync sample, and
+                        // AVPlayer rejected the asset with -12860 and
+                        // `AVPlayerWaitingWithNoItemToPlay` followed by
+                        // an indefinite stall).
                         let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
-                        guard isKey, packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetVideoDts else {
+                        let targetSatisfied = restartTargetVideoDts == Int64.min
+                            || (packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts)
+                        guard isKey, targetSatisfied else {
                             continue
                         }
-                    }
-                    if firstActualVideoDts == Int64.min {
                         firstActualVideoDts = packet.pointee.dts
                         firstActualVideoPts = packet.pointee.pts != Int64.min
                             ? packet.pointee.pts
