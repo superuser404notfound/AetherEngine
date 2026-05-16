@@ -580,8 +580,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // shift comes out to `firstKeyframePts` automatically.
                 if isVideoPkt {
                     if restartTargetVideoDts != Int64.min && firstActualVideoDts == Int64.min {
-                        let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
-                        guard isKey, packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetVideoDts else {
+                        // Exact-match scan: libavformat's keyframe
+                        // index entries come from MKV `Cues` (source
+                        // authoring's declared seek points) and from
+                        // demux-time keyframe discovery. Both are by
+                        // convention IRAPs — decodable from a cold
+                        // start regardless of whether the matroska
+                        // block stream happens to set its own
+                        // SimpleBlock keyframe bit. We trust the
+                        // index: when the packet's dts matches the
+                        // planned segment-start position exactly, we
+                        // accept it as the segment's first sample
+                        // even without `AV_PKT_FLAG_KEY`.
+                        //
+                        // Fallback for malformed sources: if the
+                        // demuxer overshoots the target (no packet
+                        // ever lands at exactly the planned dts —
+                        // broken Cue, off-by-one Cue timing), wait
+                        // for the next packet that genuinely is
+                        // flagged as a keyframe. That can put the
+                        // segment start a few seconds past the plan,
+                        // but only as a last resort for sources where
+                        // the index lies about the exact position.
+                        guard packet.pointee.dts != Int64.min else { continue }
+                        if packet.pointee.dts == restartTargetVideoDts {
+                            // Exact match — open the gate.
+                        } else if packet.pointee.dts > restartTargetVideoDts {
+                            let isKey = (packet.pointee.flags & 0x0001) != 0
+                            if !isKey { continue }
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] video gate FALLBACK to AV_PKT_FLAG_KEY "
+                                + "(no exact match for target=\(restartTargetVideoDts), landed=\(packet.pointee.dts))",
+                                category: .session
+                            )
+                        } else {
+                            // dts < target, keep scanning.
                             continue
                         }
                     }
