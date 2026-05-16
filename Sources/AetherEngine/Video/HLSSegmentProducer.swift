@@ -262,6 +262,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// forwards to AetherEngine for the `videoFormat` upgrade.
     var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
 
+    /// Fires once when the video gate opens, with the producer's
+    /// videoShiftPts in source video time base units. Lets the engine
+    /// translate AVPlayer's playlist clock back to source PTS for the
+    /// independent side-demuxer subtitle reader (subtitle cues land in
+    /// raw source PTS but AVPlayer.currentTime sits at
+    /// `source_pts - videoShiftPts`). Re-fires on every producer
+    /// restart since matroska seek imprecision can produce a different
+    /// shift for the same source.
+    var onVideoShiftKnown: (@Sendable (Int64) -> Void)?
+
     /// Latched once the signature has been seen in this producer's
     /// packet stream so the scan goes silent for the remainder of the
     /// session. The byte scan is cheap (~µs per packet) but there's no
@@ -639,6 +649,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + "shift=\(videoShiftPts)",
                             category: .session
                         )
+                        onVideoShiftKnown?(videoShiftPts)
                     } else {
                         // Drop pre-keyframe leading B-frames (HEVC RASL).
                         // An open-GOP source can emit B-frames whose

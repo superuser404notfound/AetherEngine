@@ -217,13 +217,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var firstKeyframePts: Int64 = 0
 
     /// `firstKeyframePts` converted to seconds using the source video
-    /// time base. Exposed so the AetherEngine subtitle path can shift
-    /// embedded + sidecar cue timestamps into AVPlayer's clock frame,
-    /// which is `source_pts - firstKeyframeSeconds`. Without this
-    /// shift, sources whose first keyframe sits past PTS=0 (most MKV
-    /// remuxes, e.g. Cars at ~500 ms) render subtitles a constant
-    /// `firstKeyframeSeconds` late.
+    /// time base. Retained for diagnostics; the actual AVPlayer-clock
+    /// to source-PTS translation lives in `playlistShiftSeconds` below,
+    /// which the producer updates dynamically on each gate open (the
+    /// shift can differ from `firstKeyframeSeconds` on restart sessions
+    /// when matroska seek imprecision lands past the planned target).
     public private(set) var firstKeyframeSeconds: Double = 0
+
+    /// `videoShiftPts` of the currently active producer, converted to
+    /// seconds via the source video time base. Updated by the producer's
+    /// `onVideoShiftKnown` callback on every gate open. AVPlayer's HLS
+    /// clock sits at `source_pts - playlistShiftSeconds`; the subtitle
+    /// path and side-demuxer seek read this to translate back to
+    /// source time.
+    public private(set) var playlistShiftSeconds: Double = 0
+
+    /// Source video time base, latched in `start()` so the
+    /// `onVideoShiftKnown` callback can convert producer PTS shift to
+    /// seconds without having to thread the TB through the callback
+    /// signature on every fire.
+    private var sourceVideoTbSeconds: Double = 1.0 / 1000.0
+
+    /// Fires when the active producer's `playlistShiftSeconds` changes
+    /// (initial gate open or restart). AetherEngine wires this to keep
+    /// its own published shift in step so the subtitle overlay's cue
+    /// lookup uses the right source-time conversion.
+    var onPlaylistShiftChanged: (@Sendable (Double) -> Void)?
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -318,6 +337,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
 
         let videoTimeBase = videoStream.pointee.time_base
+        if videoTimeBase.num > 0, videoTimeBase.den > 0 {
+            sourceVideoTbSeconds = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        }
         let durationSeconds = dem.duration
         guard durationSeconds > 0 else {
             throw HLSVideoEngineError.zeroDuration
@@ -938,7 +960,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
         }
+        prod.onVideoShiftKnown = { [weak self] shiftPts in
+            self?.handleVideoShiftKnown(shiftPts)
+        }
         return prod
+    }
+
+    /// Converts the producer's `videoShiftPts` (in source video TB)
+    /// to seconds and notifies the engine + AetherEngine that the
+    /// AVPlayer-clock-to-source-PTS translation may have changed.
+    /// Fires on initial start (shift ≈ firstKeyframeSeconds) and on
+    /// every restart (shift can be larger when matroska seek
+    /// imprecision lands past the planned target).
+    private func handleVideoShiftKnown(_ shiftPts: Int64) {
+        let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
+        playlistShiftSeconds = seconds
+        onPlaylistShiftChanged?(seconds)
     }
 
     /// Debounced relay. Producers each have their own once-per-instance
