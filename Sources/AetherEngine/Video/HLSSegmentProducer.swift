@@ -575,16 +575,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     let anchor: Int64 = isVideoPkt ? lastVideoSourceDts
                                       : isAudioPkt ? lastAudioSourceDts
                                       : Int64.min
-                    guard anchor != Int64.min else {
-                        // No anchor yet on this stream — drop. Only
-                        // possible for the very first packet of a
-                        // session. The next packet will set the
-                        // anchor for the rest of the run.
-                        continue
-                    }
-                    packet.pointee.dts = anchor + 1
-                    if packet.pointee.pts == Int64.min {
-                        packet.pointee.pts = packet.pointee.dts
+                    if anchor == Int64.min {
+                        // No anchor yet on this stream — this is the
+                        // very first packet. For keyframes (IDR / CRA)
+                        // we can safely use pts as dts because in
+                        // decode order pts == dts for sync samples; the
+                        // pts-fallback hazard only applies to B-frames
+                        // where pts is BEHIND decode-order position,
+                        // and B-frames can't be the first packet of a
+                        // GOP. Dropping the first IDR shifts seg-0
+                        // onto the next IDR, which lands seg-0 with a
+                        // different leading SEI sequence and (for
+                        // DV-tagged HEVC) prevents AVPlayer's DV
+                        // processor from initialising correctly:
+                        // playback renders the IPT-PQ-c2 chroma as
+                        // BT.709 YCbCr, producing the green/purple
+                        // cast DrHurt reported in AetherEngine#4 for
+                        // Build 154+. The Build 153 producer used
+                        // pts-as-dts unconditionally and DV5 worked.
+                        //
+                        // For a non-keyframe first packet with NOPTS
+                        // dts (no preceding anchor, no IDR to lean on),
+                        // we still drop. Decode order can't be
+                        // reconstructed from pts alone for B/P frames,
+                        // and a corrupt seg-0 is a worse failure mode
+                        // than a small drop at session start.
+                        let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+                        guard isKey, packet.pointee.pts != Int64.min else {
+                            continue
+                        }
+                        packet.pointee.dts = packet.pointee.pts
+                    } else {
+                        packet.pointee.dts = anchor + 1
+                        if packet.pointee.pts == Int64.min {
+                            packet.pointee.pts = packet.pointee.dts
+                        }
                     }
                 }
                 if isVideoPkt {
