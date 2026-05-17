@@ -166,18 +166,30 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let keepDvh1TagWithoutDV: Bool
 
     /// Mirror of the user's tvOS Match Content master toggle at load
-    /// time (via `AVDisplayManager.isDisplayCriteriaMatchingEnabled`,
-    /// passed in from the host through `LoadOptions.matchContentEnabled`).
-    ///
-    /// Used by the master-vs-media-playlist routing decision in `start()`.
-    /// When `false`, HDR HEVC on non-DV displays falls back to media-
-    /// playlist routing so AVPlayer doesn't see `VIDEO-RANGE=PQ` in the
-    /// playlist body; otherwise AVKit's auto-criteria reads the HDR
-    /// hint, tries to switch the panel to HDR, tvOS refuses (Match
-    /// Dynamic Range is OFF), and AVPlayer fails asset open with
-    /// "Cannot Open" (-11848). Default `true` keeps the post-60b0994
-    /// behavior for callers that don't query.
+    /// time. One of two inputs to the master-vs-media-playlist routing
+    /// decision (the other is `panelIsInHDRMode`). When `false`, the
+    /// panel is user-locked to its current mode regardless of what the
+    /// playlist advertises, so the engine treats it as "panel won't
+    /// switch into HDR" when the panel is in SDR.
     private let matchContentEnabled: Bool
+
+    /// Whether the connected display can present any HDR (HDR10, HLG,
+    /// HDR10+, or DV). Sourced from `AVPlayer.eligibleForHDRPlayback`
+    /// upstream. Used together with `matchContentEnabled` and
+    /// `panelIsInHDRMode` to decide whether master-playlist routing is
+    /// safe.
+    private let displaySupportsHDR: Bool
+
+    /// Whether the connected panel was already presenting in HDR at
+    /// load time (EDR active, `UIScreen.main.currentEDRHeadroom > 1`).
+    /// When `true`, master-playlist routing is safe regardless of
+    /// `matchContentEnabled`: the panel already accepts HDR signaling
+    /// and the master's `SUPPLEMENTAL-CODECS=dvh1` can upgrade an
+    /// HDR10-locked panel to DV mode per DrHurt's empirical test in
+    /// AetherEngine#4. When `false`, master is only safe if
+    /// `displaySupportsHDR && matchContentEnabled` so AVKit can drive
+    /// the panel-mode switch from SDR into HDR.
+    private let panelIsInHDRMode: Bool
 
     /// `dvModeAvailable || keepDvh1TagWithoutDV`. The DV
     /// classification + codec-tag + master-playlist routing branches
@@ -301,15 +313,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
         dvModeAvailable: Bool = true,
+        displaySupportsHDR: Bool = true,
         keepDvh1TagWithoutDV: Bool = false,
         matchContentEnabled: Bool = true,
+        panelIsInHDRMode: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil
     ) {
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
         self.dvModeAvailable = dvModeAvailable
+        self.displaySupportsHDR = displaySupportsHDR
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.matchContentEnabled = matchContentEnabled
+        self.panelIsInHDRMode = panelIsInHDRMode
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
     }
 
@@ -840,44 +856,48 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // Pick the URL handed to AVPlayer.
         //
-        //   - DV-capable display + DV source: master playlist with
-        //     full DV codec strings so AVKit's auto-criteria reads
-        //     `dvh1` from the sample entries and engages DV mode.
-        //   - non-DV display + HDR HEVC (HDR10 / HLG): master so
-        //     AVKit gets the `VIDEO-RANGE=PQ` (or HLG) + `hvc1` codec
-        //     hint upfront and programs HDR criteria immediately.
-        //     Routing through media here defaults AVKit's auto-
-        //     criteria to SDR until init.mp4 is fetched and parsed —
-        //     long enough for AVKit to override the engine's pre-load
-        //     HDR criteria and stick the panel back in SDR mode for
-        //     the rest of the session ("Match Dynamic Range ON, TV
-        //     blinks to HDR then drops back to SDR" symptom).
-        //     EXCEPTION: when `matchContentEnabled == false` the panel
-        //     is user-locked to its current mode (typically SDR). The
-        //     master playlist's `VIDEO-RANGE=PQ` then advertises HDR
-        //     to AVPlayer while the panel sits in SDR; AVPlayer fails
-        //     asset open with `Cannot Open` (-11848). Fall back to
-        //     media-playlist routing so AVPlayer sees no upfront HDR
-        //     declaration, opens as generic HEVC, and the panel tone-
-        //     maps the HDR bitstream to its locked mode. The fix
-        //     trades DrHurt's reported `HDR-flicker-back-to-SDR`
-        //     symptom (which only fires when the user actually wants
-        //     dynamic-range matching) against asset-open failure
-        //     (which fires whenever the user has Match Dynamic Range
-        //     off, regardless of intent).
-        //   - non-DV display + DV source: still media-playlist for
-        //     AVPlayer's auto-tonemap path. The master with bare
-        //     `dvh1` would be rejected by tvOS 26's strict master-
-        //     level codec filter (-11868).
-        //   - SDR HEVC: media is fine, no auto-criteria override
-        //     to worry about.
+        // The decision is driven by the active panel's dynamic-range
+        // state, not by the source's claim. Master-playlist routing
+        // advertises `VIDEO-RANGE=PQ` (or HLG) and optionally
+        // `SUPPLEMENTAL-CODECS=dvh1` upfront, which AVPlayer translates
+        // into a panel-mode request the moment AVKit sees the manifest.
+        // That request can succeed in three ways:
+        //
+        //   1. Panel is already in HDR (`panelIsInHDRMode == true`).
+        //      No transition needed; HDR10 / HLG signaling lands on a
+        //      panel that already accepts it. SUPPLEMENTAL-CODECS upgrades
+        //      an HDR10 panel into DV mode per DrHurt's manual remux
+        //      test in AetherEngine#4.
+        //   2. Panel is in SDR, can do HDR (`displaySupportsHDR`), and
+        //      `matchContentEnabled` is on. AVKit drives the panel
+        //      transition out of SDR using its own criteria pipeline.
+        //   3. Otherwise (SDR-only TV, or HDR-capable TV with Match
+        //      Dynamic Range off): the panel won't transition, and a
+        //      master playlist claiming HDR while the panel sits in SDR
+        //      fails asset open with `Cannot Open` (-11848). Route via
+        //      media playlist instead so AVPlayer sees no upfront HDR
+        //      hint, opens as generic HEVC, and the display tone-maps
+        //      the HDR bitstream to its locked mode.
+        //
+        // Source-side gate: only HDR or DV sources benefit from master
+        // routing in the first place. SDR HEVC has nothing to advertise
+        // and stays on the media playlist regardless of panel state.
+        //
+        // Non-DV display + DV source is the exception that always
+        // routes media: bare `dvh1` codec strings in the master are
+        // rejected by tvOS 26's strict master-level codec filter
+        // (`-11868`) on non-DV panels, so the auto-tonemap path on the
+        // base layer through the media playlist is the only one that
+        // works there.
+        let sourceIsHDR = videoRange != .sdr || effectiveDvMode
+        let panelReadyForHDR = panelIsInHDRMode
+            || (displaySupportsHDR && matchContentEnabled)
+        let nonDVPanelWithDVSource = dvVariant != .none && !effectiveDvMode
         let useMasterPlaylist: Bool
-        if effectiveDvMode {
-            useMasterPlaylist = true
-        } else if videoRange != .sdr && dvVariant == .none && matchContentEnabled {
-            useMasterPlaylist = true
-        } else {
+        if nonDVPanelWithDVSource {
             useMasterPlaylist = false
+        } else {
+            useMasterPlaylist = sourceIsHDR && panelReadyForHDR
         }
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
@@ -886,7 +906,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) matchContent=\(matchContentEnabled) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(sourceIsHDR) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
 

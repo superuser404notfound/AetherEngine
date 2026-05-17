@@ -106,33 +106,44 @@ public struct LoadOptions: Sendable, Equatable {
     /// callers and hosts that don't query don't accidentally regress
     /// HDR routing.
     ///
-    /// Used by `HLSVideoEngine` to gate master-playlist routing for
-    /// HDR HEVC on non-DV displays. When `false`, the engine knows
-    /// tvOS will refuse panel-mode switches and falls back to media-
-    /// playlist routing (no `VIDEO-RANGE=PQ` in the playlist), which
-    /// lets AVPlayer open the asset as generic HEVC and tone-map on
-    /// the display. With `true`, master-playlist routing gives AVKit's
-    /// `appliesPreferredDisplayCriteriaAutomatically` an upfront HDR
-    /// hint so the panel switches to HDR mode before init.mp4 lands.
-    ///
-    /// Without this gate, master + `VIDEO-RANGE=PQ` on a panel locked
-    /// to SDR (user toggled Match Dynamic Range OFF) causes AVPlayer
-    /// to fail asset open with "Cannot Open" (-11848) since the asset
-    /// claims HDR and the panel mode contradicts.
+    /// One of the two inputs to the master-vs-media-playlist routing
+    /// decision in `HLSVideoEngine` (see `panelIsInHDRMode` for the
+    /// other). When `false`, tvOS keeps the panel locked in its
+    /// current mode regardless of what the playlist advertises;
+    /// engine treats the panel as "won't switch into HDR" and routes
+    /// HDR sources through the media playlist for AVPlayer's
+    /// auto-tonemap path.
     public var matchContentEnabled: Bool
+
+    /// Whether the connected panel is currently presenting in HDR
+    /// (EDR active) at load time. Mirrors `UIScreen.main.currentEDRHeadroom > 1`
+    /// on tvOS / iOS; default `false` so callers that don't query
+    /// stay on the conservative "treat as SDR" branch.
+    ///
+    /// The other input to the master-vs-media-playlist routing
+    /// decision. When the panel is already in HDR, the master
+    /// playlist's `VIDEO-RANGE=PQ` and `SUPPLEMENTAL-CODECS=dvh1`
+    /// signals are accepted upfront (per DrHurt's empirical test:
+    /// HDR-mode panel honours master + supplemental for the
+    /// HDR10-to-DV upgrade). When in SDR, the master path only works
+    /// if `matchContentEnabled == true` so AVKit can drive the
+    /// panel-mode switch into HDR; otherwise routes via media.
+    public var panelIsInHDRMode: Bool
 
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,
         httpHeaders: [String: String] = [:],
         keepDvh1TagWithoutDV: Bool = false,
-        matchContentEnabled: Bool = true
+        matchContentEnabled: Bool = true,
+        panelIsInHDRMode: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
         self.httpHeaders = httpHeaders
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.matchContentEnabled = matchContentEnabled
+        self.panelIsInHDRMode = panelIsInHDRMode
     }
 }
 
