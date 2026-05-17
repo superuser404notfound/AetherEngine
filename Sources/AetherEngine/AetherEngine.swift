@@ -916,22 +916,29 @@ public final class AetherEngine: ObservableObject {
         // staring at a "playback stopped" error after picking a
         // different audio track.
         let wasOnSoftwarePath = (playbackBackend == .software)
+        let reloadStart = DispatchTime.now()
+        EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         stopInternal()
+        EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         loadedURL = url
 
         do {
+            let loadStart = DispatchTime.now()
             if wasOnSoftwarePath {
+                EngineLog.emit("[AetherEngine] reload: loadSoftware enter audio=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
                 try await loadSoftware(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
                     startPosition: resumeAt > 1 ? resumeAt : nil,
                     audioSourceStreamIndex: audioStreamIndex
                 )
+                EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
                 activeAudioTrackIndex = Int(audioStreamIndex)
                 presentCurrentLayer()
                 softwareHost?.play()
             } else {
+                EngineLog.emit("[AetherEngine] reload: loadNative enter audio=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
@@ -940,12 +947,14 @@ public final class AetherEngine: ObservableObject {
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
                     matchContentEnabled: loadedOptions.matchContentEnabled
                 )
+                EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
                 activeAudioTrackIndex = Int(audioStreamIndex)
                 presentCurrentLayer()
                 nativeHost?.play()
             }
             state = .playing
+            EngineLog.emit("[AetherEngine] reload: state=.playing total=\(elapsedMs(since: reloadStart))ms", category: .engine)
         } catch {
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",
@@ -1289,6 +1298,14 @@ public final class AetherEngine: ObservableObject {
     }
 
     // MARK: - Internal teardown
+
+    /// Milliseconds since a captured DispatchTime, rounded. Used by
+    /// the reload-path diagnostic markers so each step's duration is
+    /// visible without having to do mental arithmetic from absolute
+    /// timestamps.
+    private func elapsedMs(since start: DispatchTime) -> Int {
+        Int(Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000)
+    }
 
     private func stopInternal() {
         // Stop AVPlayer fetching before tearing down the loopback HLS

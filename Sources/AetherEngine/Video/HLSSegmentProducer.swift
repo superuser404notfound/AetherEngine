@@ -201,6 +201,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var firstActualVideoPts: Int64 = Int64.min
     private var loggedFirstLeadingDrop: Bool = false
 
+    /// Diagnostic counters for the pre-gate drop loop. If the video
+    /// gate never opens (no IDR found, or every IDR sits before the
+    /// restart target dts), the pump silently reads + drops packets
+    /// forever and AVPlayer sits in `waitingToPlay`. Counters surface
+    /// the silent failure mode in the log so the user-visible "lädt
+    /// unendlich" symptom maps to a concrete cause.
+    private var pregateVideoDropCount: Int = 0
+    private var pregateAudioDropCount: Int = 0
+    private var lastPregateVideoLog: Int = 0
+    private var lastPregateAudioLog: Int = 0
+    private static let pregateLogInterval = 200
+
     /// Desired first-sample dts (in source TB) for each stream — the
     /// value the muxer's fragment `tfdt` will end up at after the
     /// dynamic shift is applied. Set at init to align with the
@@ -628,6 +640,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         let targetSatisfied = restartTargetVideoDts == Int64.min
                             || (packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts)
                         guard isKey, targetSatisfied else {
+                            pregateVideoDropCount += 1
+                            if pregateVideoDropCount - lastPregateVideoLog >= Self.pregateLogInterval {
+                                lastPregateVideoLog = pregateVideoDropCount
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] still waiting for video keyframe: "
+                                    + "dropped=\(pregateVideoDropCount) "
+                                    + "lastDts=\(packet.pointee.dts) isKey=\(isKey) "
+                                    + "target=\(restartTargetVideoDts) "
+                                    + "baseIndex=\(baseIndex)",
+                                    category: .session
+                                )
+                            }
                             continue
                         }
                         firstActualVideoDts = packet.pointee.dts
@@ -700,10 +724,31 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // Restart session, video scan hasn't completed
                         // yet — drop audio so audio doesn't anchor
                         // ahead of video.
+                        pregateAudioDropCount += 1
+                        if pregateAudioDropCount - lastPregateAudioLog >= Self.pregateLogInterval {
+                            lastPregateAudioLog = pregateAudioDropCount
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] audio waiting for video gate: "
+                                + "dropped=\(pregateAudioDropCount) "
+                                + "lastDts=\(packet.pointee.dts) baseIndex=\(baseIndex)",
+                                category: .session
+                            )
+                        }
                         continue
                     }
                     if restartTargetAudioDts != Int64.min && firstActualAudioDts == Int64.min {
                         guard packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetAudioDts else {
+                            pregateAudioDropCount += 1
+                            if pregateAudioDropCount - lastPregateAudioLog >= Self.pregateLogInterval {
+                                lastPregateAudioLog = pregateAudioDropCount
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] audio waiting for target dts: "
+                                    + "dropped=\(pregateAudioDropCount) "
+                                    + "lastDts=\(packet.pointee.dts) "
+                                    + "target=\(restartTargetAudioDts) baseIndex=\(baseIndex)",
+                                    category: .session
+                                )
+                            }
                             continue
                         }
                     }
