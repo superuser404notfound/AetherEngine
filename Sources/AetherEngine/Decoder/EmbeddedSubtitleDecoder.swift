@@ -109,15 +109,20 @@ final class EmbeddedSubtitleDecoder {
     /// nothing usable; otherwise a `SubtitleEvent` with cues + PGS
     /// trim info.
     ///
-    /// `streamStartTime` is the AVStream's `start_time` (in stream
-    /// time_base units), subtracted from packet PTS so the resulting
-    /// cue startTime is in absolute source seconds matching AVPlayer's
-    /// clock. Pass `Int64.min` for streams without a defined
-    /// start_time.
+    /// Resulting `cue.startTime` / `cue.endTime` are in **absolute
+    /// source PTS seconds** (the same coordinate the host's overlay
+    /// compares against `engine.sourceTime`, which is `AVPlayer.
+    /// currentTime + playlistShiftSeconds`). No subtraction of the
+    /// stream's `start_time` happens here: for a typical MKV the
+    /// subtitle stream's `start_time` is the PTS of the first cue
+    /// (PGS has no continuous track), so subtracting it shifted
+    /// every cue back by that amount — Harry Potter's first PGS
+    /// cue at source PTS=19.186 s got mapped to startTime=0 and
+    /// fired immediately at session-start, dragging every subsequent
+    /// cue forward by the same 19 s offset.
     func decode(
         packet: UnsafeMutablePointer<AVPacket>,
-        streamTimeBase: AVRational,
-        streamStartTime: Int64
+        streamTimeBase: AVRational
     ) -> SubtitleEvent? {
         guard let ctx = codecContext else { return nil }
 
@@ -155,17 +160,14 @@ final class EmbeddedSubtitleDecoder {
         guard ret >= 0, gotSub != 0 else { return nil }
 
         let tbSec = Double(streamTimeBase.num) / Double(streamTimeBase.den)
-        // Subtract stream->start_time so the resulting playback time
-        // is in absolute source seconds. Some sources (especially
-        // those re-muxed from broadcast or edited from longer files)
-        // set a non-zero start_time on subtitle streams; without this
-        // subtraction the cue's startTime ends up offset from AVPlayer's
-        // clock by stream_start_time seconds. AV_NOPTS_VALUE (Int64.min)
-        // means "no defined start", treat as zero offset.
-        let startTimeOffset: Int64 = streamStartTime == Int64.min ? 0 : streamStartTime
+        // Convert the packet's raw PTS straight to source seconds; do
+        // not subtract any stream offset. The cue produced here goes
+        // into `subtitleCues`, which the host filters against
+        // `engine.sourceTime` (= AVPlayer.currentTime +
+        // playlistShiftSeconds). Both clocks are in absolute source
+        // PTS seconds, so the comparison aligns naturally.
         let rawPTS = packet.pointee.pts
-        let adjustedPTS = (rawPTS == Int64.min) ? 0 : (rawPTS - startTimeOffset)
-        let pktPTS = Double(adjustedPTS) * tbSec
+        let pktPTS = (rawPTS == Int64.min) ? 0 : Double(rawPTS) * tbSec
         let startOffset = Double(sub.start_display_time) / 1000.0
         let endOffset: Double
         if sub.end_display_time > 0 {

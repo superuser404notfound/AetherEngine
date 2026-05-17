@@ -1137,8 +1137,7 @@ public final class AetherEngine: ObservableObject {
             let pktPTS = pkt.pointee.pts
             let event = decoder.decode(
                 packet: pkt,
-                streamTimeBase: tb,
-                streamStartTime: streamStartTime
+                streamTimeBase: tb
             )
             var p: UnsafeMutablePointer<AVPacket>? = pkt
             av_packet_free(&p)
