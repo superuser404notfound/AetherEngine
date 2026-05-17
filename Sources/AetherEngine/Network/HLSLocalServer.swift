@@ -450,7 +450,16 @@ final class HLSLocalServer: @unchecked Sendable {
     // MARK: - HTTP framing
 
     private func respondData(_ connection: NWConnection, path: String, data: Data, contentType: String) {
-        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n"
+        // `no-store` tells AVPlayer's URLSession-backed fetcher not to
+        // park the response body in URLCache at all. `no-cache` (the
+        // previous setting) merely required revalidation before reuse,
+        // which still allowed caching. For loopback HLS the cache is
+        // pure overhead: the segment is already in our SegmentCache,
+        // and AVPlayer maintains its own forward / backward window
+        // separately. Saving the third copy was a likely contributor
+        // to the ~3.8 MB/sec RSS growth that survived the per-frame
+        // HDR fix on Sodalite Build 165's long DV 8.1 SDR session.
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(data.count)\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\n"
         var payload = Data(header.utf8)
         payload.append(data)
 
