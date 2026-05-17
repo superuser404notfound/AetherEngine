@@ -59,7 +59,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         case none              // not DV
         case profile5          // HEVC P5  (IPT-PQ-c2, no base)     → dvh1 + PQ
         case profile81         // HEVC P8.1 with HDR10-compat base  → dvh1 + PQ  (on DV display)
-        case profile84         // HEVC P8.4 with HLG-compat base    → dvh1 + HLG (on DV display)
+        case profile84         // HEVC P8.4 with HLG-compat base    → hvc1 + HLG + SUPPLEMENTAL dvh1/db4h
         case profile7          // HEVC P7 dual-layer                → reject
         case profile82         // HEVC P8.2 with SDR-compat base    → reject
         case av1Profile10      // AV1 P10.0 (no base)               → dav1 + PQ
@@ -587,53 +587,56 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
             switch dvVariant {
             case .profile5:
+                // P5 carries no base layer (IPT-PQ-c2 elementary
+                // stream only). Bare `dvh1` is the only legal
+                // sample-entry. AVPlayer can't tone-map P5 to SDR on
+                // a panel locked out of HDR/DV; renders the IPT
+                // chroma as YCbCr → green/purple cast (DrHurt #4
+                // Build 160). No engine-side mitigation exists short
+                // of refusing playback on locked-SDR panels; left as
+                // a known limitation pending a host-level error path.
                 codecTagOverride = "dvh1"
                 videoRange = .pq
                 primaryCodecs = "dvh1.05.\(dvLevelStr)"
                 supplementalCodecs = nil
-            case .profile81, .profile84:
-                // P8.1 (HDR10-compat base) and P8.4 (HLG-compat base).
-                // This branch only fires when `effectiveDvMode == true`,
-                // which under the current `keepDvh1TagWithoutDV=false`
-                // default means `dvModeAvailable == true` — i.e. the
-                // active display is DV-capable. Non-DV displays take
-                // the `!effectiveDvMode` branch above and never reach
-                // here.
-                //
-                // For a DV-capable display we emit bare `dvh1` rather
-                // than the spec's cross-compat `hvc1 + SUPPLEMENTAL=
-                // dvh1/db*` form. Rationale:
-                //
-                // - `AVPlayerViewController.appliesPreferredDisplayCriteria
-                //   Automatically = true` makes AVKit read the
-                //   init.mp4 sample-entry codec FourCC and program
-                //   `preferredDisplayCriteria` to match. With `hvc1`
-                //   in the sample entry, AVKit asks the panel for
-                //   HDR10 / HLG mode — overriding the engine's own
-                //   DV criteria assignment from
-                //   `DisplayCriteriaController.apply()`. DrHurt's
-                //   AetherEngine#4 report: "DV 8.4: TV switches to
-                //   HDR mode and Sodalite shows 'HLG'" is exactly
-                //   this override.
-                //
-                // - Cross-compat tags exist so that NON-DV-capable
-                //   AVPlayer instances can fall back to the HEVC
-                //   base layer. That's unreachable on this branch
-                //   (we already know the display is DV-capable), so
-                //   the cross-compat is pure overhead.
-                //
-                // - Bare `dvh1` puts the dvh1 FourCC directly in
-                //   both the master CODECS attribute and the
-                //   sample-entry, so AVKit's auto-criteria and the
-                //   engine's manual criteria converge on DV mode.
-                //
-                // P8.1 and P8.4 differ only in the base layer's
-                // transfer (PQ vs HLG); both negotiate DV mode on a
-                // DV-capable panel that does that profile.
+            case .profile81:
+                // P8.1 (HDR10-compat base layer). Bare `dvh1` works
+                // both in DV mode (AVKit reads sample-entry FourCC
+                // and asks the panel for DV) and falls back cleanly
+                // to HDR10 base rendering when the panel won't
+                // engage DV (locked SDR → HDR10 → tonemap to SDR
+                // gives correct colors per DrHurt #4).
                 codecTagOverride = "dvh1"
-                videoRange = (dvVariant == .profile84) ? .hlg : .pq
+                videoRange = .pq
                 primaryCodecs = "dvh1.08.\(dvLevelStr)"
                 supplementalCodecs = nil
+            case .profile84:
+                // P8.4 (HLG-compat base layer). Bare `dvh1` empirically
+                // does NOT play on either an HDR-mode or SDR-locked
+                // panel: HDR-mode fails AVPlayer asset open (DrHurt
+                // #4 Build 160: "does NOT play at all"), SDR-locked
+                // plays wrong colors. AVPlayer appears to reject the
+                // dvh1 sample entry when the underlying transfer
+                // characteristic is HLG.
+                //
+                // Workaround: emit `hvc1` sample-entry + `hvc1.2.4
+                // .LXX` primary CODECS so AVPlayer treats the asset
+                // as plain HEVC HLG (which it plays fine), then ride
+                // the `SUPPLEMENTAL-CODECS=dvh1.08.LL/db4h` hint to
+                // let DV-capable panels still upgrade to DV mode.
+                // The "/db4h" brand identifier marks the supplemental
+                // as DV with HLG base for the AVPlayer's profile
+                // matching logic, per the Dolby Vision HLS spec.
+                //
+                // Cost: AVKit's auto-criteria reads the `hvc1` sample
+                // entry and programs HLG criteria; the supplemental
+                // hint is what triggers the DV upgrade once the
+                // panel is in HDR. On a non-DV panel the supplemental
+                // is ignored and HLG base plays as expected.
+                codecTagOverride = "hvc1"
+                videoRange = .hlg
+                primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+                supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
             case .profile7:
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: 7, compatID: -1)
             case .profile82:
