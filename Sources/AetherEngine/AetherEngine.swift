@@ -234,6 +234,18 @@ public final class AetherEngine: ObservableObject {
     /// Cancelled on stopInternal alongside `nativeCancellables`.
     private var softwareCancellables: Set<AnyCancellable> = []
 
+    /// Periodic memory diagnostic. Emits the process's resident memory
+    /// footprint and engine-internal counters every 30 s so we can
+    /// see growth patterns instead of guessing about leaks. Started in
+    /// `load(url:)` once `state = .playing` lands; cancelled in
+    /// `stopInternal`. The log line shape is grep-friendly:
+    ///
+    ///   [AetherEngine] memprobe t=210s rss=412MB cache=27 subCues=0
+    ///
+    /// On macOS / aetherctl the line goes to stdout; on tvOS it goes to
+    /// `EngineLog.handler` so the host's diagnostic overlay sees it too.
+    private var memoryProbeTask: Task<Void, Never>?
+
     /// The URL of the current playback session. Used by
     /// `reloadAtCurrentPosition()` to rebuild the pipeline after
     /// background suspension.
@@ -592,6 +604,7 @@ public final class AetherEngine: ObservableObject {
                 presentCurrentLayer()
                 softwareHost?.play()
                 state = .playing
+                startMemoryProbe()
             } else {
                 try await loadNative(
                     url: url,
@@ -619,6 +632,7 @@ public final class AetherEngine: ObservableObject {
                 // starts playing once enough segments are in.
                 nativeHost?.play()
                 state = .playing
+                startMemoryProbe()
             }
         } catch {
             state = .error("Failed to load: \(error.localizedDescription)")
@@ -1402,6 +1416,8 @@ public final class AetherEngine: ObservableObject {
         // server shutdown and produce noisy errors in the log. Always
         // reset display criteria so a previous DV/HDR session doesn't
         // leak the panel mode into the next playback.
+        memoryProbeTask?.cancel()
+        memoryProbeTask = nil
         nativeCancellables.removeAll()
         nativeHost?.tearDown()
         nativeHost = nil
@@ -1439,6 +1455,52 @@ public final class AetherEngine: ObservableObject {
         // `selectAudioTrack` before the next `load(url:)` repopulates
         // `audioTracks`.
         activeAudioTrackIndex = nil
+    }
+
+    // MARK: - Memory diagnostic
+
+    /// Start the periodic memory probe. Cancels any prior probe so a
+    /// fresh `load(url:)` cycle starts a clean timeline. Drives one
+    /// `EngineLog.emit` line every 30 s under the `.engine` category;
+    /// the line shape is documented on `memoryProbeTask`.
+    private func startMemoryProbe() {
+        memoryProbeTask?.cancel()
+        let sessionStart = Date()
+        memoryProbeTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                if Task.isCancelled { return }
+                guard let self = self else { return }
+                let elapsed = Int(Date().timeIntervalSince(sessionStart))
+                let rssMB = Self.residentMemoryMB()
+                let cueCount = self.subtitleCues.count
+                EngineLog.emit(
+                    "[AetherEngine] memprobe t=\(elapsed)s "
+                    + "rss=\(rssMB)MB subCues=\(cueCount) "
+                    + "audioTracks=\(self.audioTracks.count) "
+                    + "subTracks=\(self.subtitleTracks.count) "
+                    + "subActive=\(self.isSubtitleActive)",
+                    category: .engine
+                )
+            }
+        }
+    }
+
+    /// Resident memory footprint of the current process in MB, read via
+    /// `mach_task_basic_info`. Returns 0 on error. Cheap to call (no
+    /// allocations) and safe from any thread.
+    private static func residentMemoryMB() -> Int {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        guard kr == KERN_SUCCESS else { return 0 }
+        return Int(info.resident_size / 1024 / 1024)
     }
 
     // MARK: - Decoder identity helpers
