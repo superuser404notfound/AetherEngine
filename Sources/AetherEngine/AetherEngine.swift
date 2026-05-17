@@ -1474,12 +1474,34 @@ public final class AetherEngine: ObservableObject {
                 let elapsed = Int(Date().timeIntervalSince(sessionStart))
                 let rssMB = Self.residentMemoryMB()
                 let cueCount = self.subtitleCues.count
+
+                // AVPlayer-side buffer probe: how much content has the
+                // native host's current AVPlayerItem actually loaded? If
+                // this number balloons past `preferredForwardBufferDuration`,
+                // AVPlayer is buffering more than we asked it to and is
+                // a candidate for the linear-growth memory leak.
+                var bufferAheadSec = 0.0
+                var bufferBehindSec = 0.0
+                if let avPlayer = self.currentAVPlayer,
+                   let item = avPlayer.currentItem {
+                    let now = item.currentTime().seconds
+                    for value in item.loadedTimeRanges {
+                        let range = value.timeRangeValue
+                        let start = range.start.seconds
+                        let end = (range.start + range.duration).seconds
+                        if end > now { bufferAheadSec += end - max(start, now) }
+                        if start < now { bufferBehindSec += min(end, now) - start }
+                    }
+                }
+
                 EngineLog.emit(
                     "[AetherEngine] memprobe t=\(elapsed)s "
                     + "rss=\(rssMB)MB subCues=\(cueCount) "
                     + "audioTracks=\(self.audioTracks.count) "
                     + "subTracks=\(self.subtitleTracks.count) "
-                    + "subActive=\(self.isSubtitleActive)",
+                    + "subActive=\(self.isSubtitleActive) "
+                    + "avBufAhead=\(String(format: "%.1f", bufferAheadSec))s "
+                    + "avBufBehind=\(String(format: "%.1f", bufferBehindSec))s",
                     category: .engine
                 )
             }
