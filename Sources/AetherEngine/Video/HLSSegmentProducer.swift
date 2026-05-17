@@ -78,6 +78,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// `AudioBridge.encoderTimeBase` (the bridge re-stamps the
         /// FLAC packets it emits into its encoder's time_base).
         let inputTimeBase: AVRational
+        /// Time base of *source* packets as they arrive from the
+        /// demuxer, BEFORE the bridge re-stamps them. Used by the
+        /// scan-forward gate to compare `packet.dts` (always in
+        /// source TB) against the gate target — that target gets
+        /// rescaled from videoSourceTB into this TB. For stream-copy
+        /// this equals `inputTimeBase`; for the FLAC bridge it does
+        /// NOT (inputTimeBase is the encoder TB 1/48000, while
+        /// sourceTimeBase is whatever the demuxer reported, typically
+        /// matroska's 1/1000). Pre-fix the gate rescaled into
+        /// `inputTimeBase`, so for bridged DTS sources the target
+        /// landed 48x further into the source than the video gate did
+        /// — symptom was "audio starts ~44 s after video and stays
+        /// drifted by exactly the same offset for the whole session".
+        let sourceTimeBase: AVRational
         /// Optional decode-then-FLAC-encode bridge. Non-nil means the
         /// pump routes each source audio packet through `bridge.feed`
         /// and muxes the returned FLAC packets; nil means the source
@@ -665,10 +679,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // both streams' first sample lines up in
                         // source-time AND in muxer-time.
                         if audioWaitForVideo, let audio = audioConfig {
+                            // Rescale into the *source* audio TB,
+                            // because `packet.dts` on incoming audio
+                            // packets is always in source TB — never
+                            // in the bridge's encoder TB. Stream-copy
+                            // happens to have sourceTimeBase ==
+                            // inputTimeBase so the bug was invisible
+                            // for AAC / EAC3 sources; the FLAC bridge
+                            // exposes the mismatch and the gate target
+                            // landed 48x too far into the source.
                             restartTargetAudioDts = av_rescale_q(
                                 firstActualVideoDts,
                                 sourceVideoTimeBase,
-                                audio.inputTimeBase
+                                audio.sourceTimeBase
                             )
                             audioWaitForVideo = false
                         }

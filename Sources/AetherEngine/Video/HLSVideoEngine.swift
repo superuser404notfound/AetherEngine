@@ -734,6 +734,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     timeBase: audioStream.pointee.time_base,
                     sourceStreamIndex: audioStreamIndex,
                     inputTimeBase: audioStream.pointee.time_base,
+                    sourceTimeBase: audioStream.pointee.time_base,
                     bridge: nil
                 )
                 // Compute the audio per-frame fallback duration in
@@ -1086,6 +1087,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         timeBase: bridge.encoderTimeBase,
                         sourceStreamIndex: sourceAudioStreamIndex,
                         inputTimeBase: bridge.encoderTimeBase,
+                        sourceTimeBase: audioStream.pointee.time_base,
                         bridge: bridge
                     )
                     self.savedAudioConfig = cfg
