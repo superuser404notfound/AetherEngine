@@ -727,7 +727,18 @@ public final class AetherEngine: ObservableObject {
             }
             .store(in: &nativeCancellables)
 
-        host.load(url: playbackURL, startPosition: startPosition)
+        // appliesPerFrameHDRDisplayMetadata is only useful when AVPlayer
+        // can actually engage the HDR pipeline, which means the master
+        // playlist routed through. On the media-playlist path (panel
+        // locked SDR + match off) AVPlayer falls back to plain HEVC
+        // playback with display-side tone-mapping, and the per-frame
+        // HDR metadata pipeline has been observed accumulating memory
+        // at ~3 MB/sec on long DV 8.1 sessions (OOM after ~8 min on
+        // Apple TV). Skipping it for media-playlist sessions removes
+        // the suspected leak without affecting the HDR / DV mode where
+        // the metadata is meaningful.
+        let perFrameHDR = session.servingMasterPlaylist
+        host.load(url: playbackURL, startPosition: startPosition, perFrameHDR: perFrameHDR)
     }
 
     /// Open a `SoftwarePlaybackHost` against the source and wire its

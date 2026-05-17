@@ -95,7 +95,7 @@ final class NativeAVPlayerHost {
     /// `DisplayCriteriaController.apply(...)` must have been invoked
     /// upstream so AVKit can configure the HDR pipeline against the
     /// right target mode before the first segment is fetched.
-    func load(url: URL, startPosition: Double?) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true) {
         unloadCurrentItem()
 
         Self.nextSessionID += 1
@@ -123,7 +123,16 @@ final class NativeAVPlayerHost {
         // that P8 MKVs and DV-tagged MP4s played end-to-end but the
         // Philips TV stayed in HDR mode for DV sources; he flagged
         // the missing AVPlayerItem flag specifically.
-        item.appliesPerFrameHDRDisplayMetadata = true
+        //
+        // Caller can disable when the routing decision routes through
+        // the media playlist (panel locked SDR + match off path), where
+        // AVPlayer can't engage HDR mode anyway and the per-frame
+        // metadata pipeline is suspected of slow memory growth on long
+        // DV 8.1 sessions (rss ~3 MB/sec linear, no visible bound).
+        // Engine sets this to `false` for SDR-fallback paths so the
+        // 4K HDR per-frame metadata path is bypassed and the leak
+        // suspect is removed from those sessions.
+        item.appliesPerFrameHDRDisplayMetadata = perFrameHDR
         // Apply any externalMetadata the host has pre-staged before this
         // load (e.g. system Now Playing title + artwork). Setting it
         // BEFORE AVPlayer.replaceCurrentItem-equivalent is the documented

@@ -909,9 +909,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
+        self.servingMasterPlaylist = useMasterPlaylist
         EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(sourceIsHDR) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
+
+    /// Resolved routing decision exposed for the host's AVPlayerItem
+    /// configuration. `true` when `start()` chose the master playlist
+    /// (HDR / DV signaling reaches AVPlayer); `false` for the media
+    /// playlist auto-tonemap path. Read after `start()` returns;
+    /// undefined before. Host wires this into AVPlayerItem flags that
+    /// only make sense when AVPlayer can engage an HDR pipeline.
+    public private(set) var servingMasterPlaylist: Bool = false
 
     public func stop() {
         restartLock.lock()
