@@ -120,7 +120,15 @@ public final class AetherEngine: ObservableObject {
         get { _videoGravity }
         set {
             _videoGravity = newValue
+            // Engine's native AVPlayerLayer (nativeHost.playerLayer) is
+            // allocated but typically not the surface on screen — most
+            // tvOS hosts wrap the AVPlayer in AVPlayerViewController,
+            // which mounts its own internal AVPlayerLayer. Writing here
+            // is still correct for hosts that use the engine's layer
+            // directly (`AetherPlayerView.attach(host.playerLayer)`)
+            // and for the SW path's displayLayer.
             nativeHost?.playerLayer.videoGravity = newValue
+            softwareHost?.displayLayer.videoGravity = newValue
         }
     }
     private var _videoGravity: AVLayerVideoGravity = .resizeAspect
@@ -478,12 +486,28 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
         }
 
-        // Publish the effective format (what the panel actually presents)
-        // not the source's claimed format. HLSVideoEngine already downgrades
-        // a DV asset to plain hvc1 when dvModeAvailable=false, so a DV file
-        // on a non-DV TV plays as HDR10 (PQ base) or HLG (P8.4 base); the
-        // badge needs to match.
-        videoFormat = effectiveFormat
+        // Publish the format the panel will actually present, not the
+        // source's claimed format. Three clamping passes feed into this:
+        //
+        //   1. `effectiveVideoFormat` collapses DV on a non-DV panel to
+        //      its base layer (HDR10 for P8.1, HLG for P8.4, SDR for
+        //      P8.2 even though the engine refuses to serve it).
+        //   2. The HDR-capability check below: if the connected panel
+        //      can't show HDR at all (`supportsHDR == false`), or if
+        //      the panel is currently in SDR with tvOS Match Content
+        //      OFF, the HLSVideoEngine routes through the media
+        //      playlist for AVPlayer's auto-tonemap path. The display
+        //      then renders SDR, so the badge / Stats overlay should
+        //      read SDR too.
+        //
+        // Mirrors the master-vs-media routing in HLSVideoEngine.start()
+        // so the published format and the actual on-screen rendering
+        // stay in step.
+        let panelWillPresentHDR = options.panelIsInHDRMode
+            || (Self.displayCapabilities.supportsHDR && options.matchContentEnabled)
+        videoFormat = (effectiveFormat != .sdr && panelWillPresentHDR)
+            ? effectiveFormat
+            : .sdr
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         // Mirror the audio stream HLSVideoEngine will actually pick.
