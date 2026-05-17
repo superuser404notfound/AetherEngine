@@ -38,11 +38,7 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    // 2 MB chunks (was 8 MB). Smaller chunks cut the peak memory held in
-    // URLSession's dispatch_data pool 4x. The pool retains response data
-    // beyond the completion handler return, so 75+ alive 8 MB blobs were
-    // accumulating on long playback sessions (~600 MB; Instruments 2026-05-17).
-    private static let chunkSize = 2 * 1024 * 1024
+    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
@@ -502,21 +498,7 @@ final class AVIOReader: @unchecked Sendable {
             if let e = e {
                 error = e
             } else if let d = d, let r = r {
-                // Force a contiguous copy so the returned Data no longer
-                // references URLSession's dispatch_data_t backing store.
-                // The pool retains its dispatch_data_t past completion;
-                // without this detach, 8 MB blobs accumulate (75+ alive on
-                // long sessions). Verified via Instruments 2026-05-17.
-                let detached: Data = d.withUnsafeBytes { buf -> Data in
-                    var copy = Data(count: buf.count)
-                    copy.withUnsafeMutableBytes { dest in
-                        if let src = buf.baseAddress {
-                            dest.copyMemory(from: UnsafeRawBufferPointer(start: src, count: buf.count))
-                        }
-                    }
-                    return copy
-                }
-                result = (detached, r)
+                result = (d, r)
             } else {
                 error = AVIOReaderError.noResponse
             }
