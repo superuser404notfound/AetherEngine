@@ -75,6 +75,30 @@ public final class AetherEngine: ObservableObject {
     /// overlays and TestFlight badges; hosts should not switch on it.
     @Published public private(set) var playbackBackend: PlaybackBackend = .none
 
+    /// Human-readable identity of the video decoder currently in use,
+    /// suitable for a "stats for nerds" UI. Examples:
+    /// - `"VideoToolbox HEVC (HW)"` for the native AVPlayer path on
+    ///   anything VideoToolbox can decode (HEVC, H.264, AV1 on HW-AV1
+    ///   capable devices).
+    /// - `"dav1d AV1 (SW)"` for AV1 falling through to the SW pipeline.
+    /// - `"libavcodec VP9 (SW)"` for VP9.
+    /// `nil` while no playback session is loaded. Cleared in
+    /// `stopInternal` so a new session never inherits the previous
+    /// label.
+    @Published public private(set) var activeVideoDecoder: String?
+
+    /// Human-readable identity of the audio pipeline currently in use.
+    /// For the native AVPlayer path this reflects what
+    /// `HLSVideoEngine`'s stream-copy / FLAC-bridge cascade chose:
+    /// - `"Stream-copy (EAC3+JOC Atmos)"` for preserved Atmos passthrough.
+    /// - `"Stream-copy (<CODEC>)"` for non-Atmos passthrough.
+    /// - `"FLAC bridge ← <CODEC>"` when the source codec isn't legal
+    ///   in fMP4 and got re-encoded as FLAC for AVPlayer.
+    /// For the SW path: `"libavcodec <codec> → CoreAudio"`.
+    /// `nil` when the source has no audio, when the cascade fell
+    /// through to video-only, or while no session is loaded.
+    @Published public private(set) var activeAudioDecoder: String?
+
     /// Decoded subtitle cues for the active subtitle source. Populated
     /// by `selectSidecarSubtitle(url:)` only — embedded subtitle
     /// streams in the source travel through HLSVideoEngine into the
@@ -269,6 +293,12 @@ public final class AetherEngine: ObservableObject {
     private var sourceVideoWidth: Int32 = 0
     private var sourceVideoHeight: Int32 = 0
 
+    /// Last-detected source video codec id. Latched in `load(url:)` and
+    /// reused by the audio-track-switch reload path so it can re-derive
+    /// the same `activeVideoDecoder` label without re-running the
+    /// demuxer probe. Reset to `AV_CODEC_ID_NONE` in `stopInternal`.
+    private var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
+
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
     /// session gets a fresh budget.
@@ -438,6 +468,7 @@ public final class AetherEngine: ObservableObject {
                 detectedCodecID = stream.pointee.codecpar.pointee.codec_id
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
+                lastDetectedVideoCodec = detectedCodecID
             }
             probedAudioTracks = probe.audioTrackInfos()
             probedSubtitleTracks = probe.subtitleTrackInfos()
@@ -527,6 +558,13 @@ public final class AetherEngine: ObservableObject {
                     audioSourceStreamIndex: audioSourceStreamIndex
                 )
                 playbackBackend = .software
+                activeVideoDecoder = Self.videoDecoderLabel(
+                    codecID: detectedCodecID, isSoftware: true
+                )
+                activeAudioDecoder = Self.softwareAudioDecoderLabel(
+                    audioTracks: probedAudioTracks,
+                    activeIndex: resolvedInitialAudio
+                )
                 presentCurrentLayer()
                 softwareHost?.play()
                 state = .playing
@@ -540,6 +578,14 @@ public final class AetherEngine: ObservableObject {
                     matchContentEnabled: options.matchContentEnabled
                 )
                 playbackBackend = .native
+                activeVideoDecoder = Self.videoDecoderLabel(
+                    codecID: detectedCodecID, isSoftware: false
+                )
+                // Native audio identity comes from HLSVideoEngine's
+                // cascade: stream-copy is preserved as a passthrough
+                // label, FLAC bridge re-labels with the source codec,
+                // video-only leaves the field nil.
+                activeAudioDecoder = nativeVideoSession?.audioPipelineDescription
                 presentCurrentLayer()
                 // Auto-play after load. AVPlayer's
                 // `automaticallyWaitsToMinimizeStalling = true` (default)
@@ -916,11 +962,16 @@ public final class AetherEngine: ObservableObject {
         // staring at a "playback stopped" error after picking a
         // different audio track.
         let wasOnSoftwarePath = (playbackBackend == .software)
+        // Snapshot the video codec before stopInternal wipes it. The
+        // reload re-uses the same source, so the decoder identity
+        // label can be reconstructed without re-probing the demuxer.
+        let preservedVideoCodec = lastDetectedVideoCodec
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         stopInternal()
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         loadedURL = url
+        lastDetectedVideoCodec = preservedVideoCodec
 
         do {
             let loadStart = DispatchTime.now()
@@ -935,6 +986,12 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit("[AetherEngine] reload: loadSoftware done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .software
                 activeAudioTrackIndex = Int(audioStreamIndex)
+                activeVideoDecoder = Self.videoDecoderLabel(
+                    codecID: preservedVideoCodec, isSoftware: true
+                )
+                activeAudioDecoder = Self.softwareAudioDecoderLabel(
+                    audioTracks: audioTracks, activeIndex: audioStreamIndex
+                )
                 presentCurrentLayer()
                 softwareHost?.play()
             } else {
@@ -950,6 +1007,10 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
                 activeAudioTrackIndex = Int(audioStreamIndex)
+                activeVideoDecoder = Self.videoDecoderLabel(
+                    codecID: preservedVideoCodec, isSoftware: false
+                )
+                activeAudioDecoder = nativeVideoSession?.audioPipelineDescription
                 presentCurrentLayer()
                 nativeHost?.play()
             }
@@ -1330,6 +1391,9 @@ public final class AetherEngine: ObservableObject {
 
         displayCriteria.reset()
         playbackBackend = .none
+        activeVideoDecoder = nil
+        activeAudioDecoder = nil
+        lastDetectedVideoCodec = AV_CODEC_ID_NONE
         playlistShiftSeconds = 0
         sourceTime = 0
 
@@ -1346,6 +1410,50 @@ public final class AetherEngine: ObservableObject {
         // `selectAudioTrack` before the next `load(url:)` repopulates
         // `audioTracks`.
         activeAudioTrackIndex = nil
+    }
+
+    // MARK: - Decoder identity helpers
+
+    /// Build a user-facing label for the active video decoder. Native
+    /// dispatch goes through VideoToolbox on every Apple platform we
+    /// ship to, so the "HW" tag holds even on HW-AV1 capable devices;
+    /// the SW branch covers the dav1d-on-tvOS AV1 case and the libavcodec
+    /// VP9 path. Returns `nil` when the source had no video track
+    /// (AV_CODEC_ID_NONE) so the caller can hide the row instead of
+    /// printing a placeholder.
+    private static func videoDecoderLabel(codecID: AVCodecID, isSoftware: Bool) -> String? {
+        guard codecID != AV_CODEC_ID_NONE else { return nil }
+        let name: String = {
+            guard let cstr = avcodec_get_name(codecID) else { return "video" }
+            return String(cString: cstr).uppercased()
+        }()
+        if isSoftware {
+            // Only two real paths through the SW host today: AV1 via
+            // dav1d, VP9 via libavcodec's vp9 decoder. Anything else
+            // routes through the native pipeline, so this branch can be
+            // exhaustive without a generic fallback.
+            switch codecID {
+            case AV_CODEC_ID_AV1: return "dav1d \(name) (SW)"
+            case AV_CODEC_ID_VP9: return "libavcodec \(name) (SW)"
+            default:              return "libavcodec \(name) (SW)"
+            }
+        }
+        return "VideoToolbox \(name) (HW)"
+    }
+
+    /// Build a user-facing label for the active audio decoder on the
+    /// software path. The SW host always uses libavcodec for audio
+    /// decode then hands PCM to CoreAudio, so the label is uniform.
+    /// Returns `nil` when the source has no audio.
+    private static func softwareAudioDecoderLabel(
+        audioTracks: [TrackInfo],
+        activeIndex: Int32
+    ) -> String? {
+        guard activeIndex >= 0,
+              let track = audioTracks.first(where: { $0.id == Int(activeIndex) }) else {
+            return nil
+        }
+        return "libavcodec \(track.codec.uppercased()) → CoreAudio"
     }
 
     // MARK: - Format / frame-rate probing

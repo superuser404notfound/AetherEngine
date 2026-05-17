@@ -233,6 +233,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// when matroska seek imprecision lands past the planned target).
     public private(set) var firstKeyframeSeconds: Double = 0
 
+    /// Human-readable description of the audio path that won the
+    /// stream-copy → FLAC-bridge → video-only cascade for this session.
+    /// Set inside `buildProducerWithAudioCascade` and read by the host
+    /// for diagnostic surfaces. `nil` while no audio pipeline is live
+    /// (source had no audio, or video-only fallback engaged).
+    ///
+    /// Possible values:
+    /// - `"Stream-copy (EAC3+JOC Atmos)"`
+    /// - `"Stream-copy (<CODEC>)"` for non-Atmos passthrough
+    /// - `"FLAC bridge ← <CODEC>"` for codecs re-encoded into the fMP4
+    public private(set) var audioPipelineDescription: String?
+
     /// `videoShiftPts` of the currently active producer, converted to
     /// seconds via the source video time base. Updated by the producer's
     /// `onVideoShiftKnown` callback on every gate open. AVPlayer's HLS
@@ -1034,6 +1046,19 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // If the source already needs the bridge (TrueHD / DTS / Vorbis
         // / PCM / MP2), skip the stream-copy attempt — we know the
         // muxer won't accept those codecs in fMP4 anyway.
+        // Source-codec label used for diagnostic strings if the cascade
+        // makes a decision worth surfacing. Falls back to "audio" so
+        // that a missing codec entry in libavcodec (extremely rare,
+        // mostly out-of-band-extension exotica) doesn't produce
+        // "Stream-copy (nil)" in the UI.
+        let sourceCodecLabel: String = {
+            if let stream = sourceAudioStream,
+               let cstr = avcodec_get_name(stream.pointee.codecpar.pointee.codec_id) {
+                return String(cString: cstr).uppercased()
+            }
+            return "audio"
+        }()
+
         if !preferBridge, let cfg = streamCopyAudio {
             self.savedAudioConfig = cfg
             do {
@@ -1044,6 +1069,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         category: .session
                     )
                 }
+                self.audioPipelineDescription = sourceIsAtmos
+                    ? "Stream-copy (EAC3+JOC Atmos)"
+                    : "Stream-copy (\(sourceCodecLabel))"
                 return prod
             } catch {
                 if sourceIsAtmos {
@@ -1095,6 +1123,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     do {
                         let prod = try makeProducer(baseIndex: 0)
                         audioHLSCodecs = "fLaC"
+                        self.audioPipelineDescription = "FLAC bridge ← \(sourceCodecLabel)"
                         return prod
                     } catch {
                         EngineLog.emit(
@@ -1118,6 +1147,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.savedAudioConfig = nil
         self.audioBridge = nil
         audioHLSCodecs = nil
+        self.audioPipelineDescription = nil
         return try makeProducer(baseIndex: 0)
     }
 
