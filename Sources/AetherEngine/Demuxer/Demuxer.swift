@@ -123,17 +123,27 @@ final class Demuxer: @unchecked Sendable {
     }
 
     /// Demuxer options passed to every `avformat_open_input` call.
-    /// Currently sets `fflags=+genpts` so libavformat regenerates
-    /// missing pts/dts values using its own (battle-tested) algorithm
-    /// rather than relying on our custom NOPTS-dts repair logic + the
-    /// monotonic-bump fallback. Per DrHurt's pointer on AetherEngine#4
-    /// this is the same option Jellyfin's server-side remux uses to
-    /// handle broken MKVs cleanly, and the goal is to stop producing
-    /// the subtle fragment artifacts that have been triggering the
-    /// pathological AVPlayer HLS-fMP4 buffer growth on long-form
-    /// 4K HDR HEVC playback.
+    ///
+    /// - `+genpts`: libavformat regenerates missing pts/dts values
+    ///   using its own (battle-tested) algorithm rather than relying
+    ///   on our custom NOPTS-dts repair logic. Per DrHurt's pointer
+    ///   on AetherEngine#4 this is the option Jellyfin's server-side
+    ///   remux uses. First-pass test on Sodalite cut the long-form
+    ///   4K HDR HEVC RSS growth roughly in half (3.24 → ~1.7 MB/sec).
+    ///
+    /// - `+sortdts`: instructs the demuxer to re-order output packets
+    ///   by dts before yielding them. The matroska demuxer's dts
+    ///   reconstruction for HEVC open-GOP leading B-frames emits a
+    ///   non-monotonic sequence (real dts=0 packet AFTER a packet our
+    ///   NOPTS-repair pushed to dts=1) — even with +genpts on. Sort
+    ///   lets libavformat fix the ordering itself instead of leaving
+    ///   the producer pump to bump dts after the fact.
+    ///
+    /// - `+discardcorrupt`: drops packets the demuxer flags as
+    ///   corrupted at the source. Cheap safety against matroska
+    ///   blocks with checksum mismatches or partial reads.
     private static func applyDemuxerOptions(_ opts: inout OpaquePointer?) {
-        av_dict_set(&opts, "fflags", "+genpts", 0)
+        av_dict_set(&opts, "fflags", "+genpts+sortdts+discardcorrupt", 0)
     }
 
     /// Common stream probing after open.
