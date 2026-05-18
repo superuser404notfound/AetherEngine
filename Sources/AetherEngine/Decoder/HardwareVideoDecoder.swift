@@ -120,10 +120,20 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         //    the whole point of routing HEVC through this path is
         //    HW decode under our explicit lifecycle. Software-decode
         //    HEVC is rejected by the user and would tank CPU at 4K
-        //    anyway.
-        let decoderSpec: NSDictionary = [
-            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true,
-        ]
+        //    anyway. Key is iOS 17 / tvOS 17 (`require`); pre-iOS 17
+        //    falls back to the `prefer` key which gives the same
+        //    behaviour on devices with HW decode but allows SW
+        //    fallback if unavailable.
+        let decoderSpec: NSDictionary
+        if #available(tvOS 17.0, iOS 17.0, *) {
+            decoderSpec = [
+                kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true,
+            ]
+        } else {
+            decoderSpec = [
+                kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder: true,
+            ]
+        }
 
         // 3. Destination pixel buffer attributes. We let VT pick a
         //    bit-depth-appropriate biplanar YCbCr format
