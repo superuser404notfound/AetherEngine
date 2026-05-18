@@ -985,7 +985,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         for fp in flacPackets {
                             fp.pointee.stream_index = audioOutputStreamIndex
                             av_packet_rescale_ts(fp, audio.inputTimeBase, muxerAudioTimeBase)
-                            _ = av_write_frame(ctx, fp)
+                            _ = av_interleaved_write_frame(ctx, fp)
                             var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&fpVar)
                         }
@@ -1095,7 +1095,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         }
         videoWriteCallCount += 1
-        _ = av_write_frame(ctx, packet)
+        _ = av_interleaved_write_frame(ctx, packet)
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         av_packet_free(&pkt)
@@ -1121,7 +1121,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         packet.pointee.stream_index = audioOutputStreamIndex
         av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
-        _ = av_write_frame(ctx, packet)
+        _ = av_interleaved_write_frame(ctx, packet)
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         av_packet_free(&pkt)
