@@ -1125,13 +1125,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// bytes that fed AVPlayer through stream-copy under the old
     /// architecture now fail header write here too — the fix on both
     /// sides is the same FLAC bridge fallback.
-    /// DIAGNOSTIC TOGGLE: when true, the audio-cascade short-circuits
-    /// to the video-only fallback without attempting stream-copy or
-    /// the FLAC bridge. Used to isolate audio's contribution to the
-    /// long-session RSS growth on 4K HDR HEVC. With this flag on the
-    /// muxer emits a video-only fragment and AVPlayer renders silently.
-    /// REVERT to `false` after the test session.
-    private static let DIAG_DISABLE_AUDIO_FOR_LEAK_TEST = true
+    /// DIAGNOSTIC TOGGLE (off after isolation test): when true, the
+    /// audio-cascade short-circuits to the video-only fallback. Test
+    /// run with `true` showed audio-disabled growth at 3.9 MB/sec
+    /// vs audio-active 2.63 MB/sec on the same source (Harry Potter
+    /// DV 8.1), so audio is NOT the leak — it's actually balancing
+    /// AVPlayer's video-decode-throttle. Kept here in case we need
+    /// the toggle again for another diagnostic; default off in prod.
+    private static let DIAG_DISABLE_AUDIO_FOR_LEAK_TEST = false
 
     private func buildProducerWithAudioCascade(
         preferBridge: Bool,
