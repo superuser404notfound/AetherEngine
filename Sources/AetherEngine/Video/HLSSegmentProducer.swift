@@ -182,6 +182,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// and we want to see exactly what the producer is handing the
     /// muxer when that fires.
     private var videoWriteCallCount: Int = 0
+    /// One-shot log latches for the monotonic-dts repair. Bumps and
+    /// drops both fire once per producer instance so the log shows
+    /// the first occurrence without going noisy.
+    private var loggedFirstDtsBump = false
+    private var loggedFirstDtsDrop = false
+    private var loggedFirstAudioDtsBump = false
 
     /// Scan-forward + dynamic-shift state. The static `restart*Target`
     /// fields are seeded from `plan[baseIndex]` for restart sessions
@@ -638,6 +644,76 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         }
                     }
                 }
+                // Monotonic-dts enforcement at source TB. The matroska
+                // demuxer's reconstructed dts can go non-monotonic
+                // across HEVC open-GOP leading B-frames: after a
+                // CRA, packet 2 arrives with NOPTS dts (we repair to
+                // lastValid+1) and packet 3 arrives with a real dts
+                // that's smaller than the repaired #2. FFmpeg's hls
+                // muxer rejects the resulting non-monotonic packet
+                // with "Application provided invalid, non monotonically
+                // increasing dts to muxer", and the rejected leading
+                // B-frame leaves a gap in the fmp4 fragment's sample
+                // table. AVPlayer's HLS-fMP4 demuxer appears to react
+                // to that gap with pathological internal buffer
+                // management, which is the long-form 4K HDR HEVC
+                // memory growth pattern we've been chasing.
+                //
+                // Bump to lastValid+1 when real dts goes backward,
+                // but only if the bump doesn't push dts past pts
+                // (dts <= pts is a hard invariant for the muxer).
+                // If both checks fail, drop the packet (loses one
+                // leading B-frame at most per CRA, acceptable).
+                if isVideoPkt, lastVideoSourceDts != Int64.min,
+                   packet.pointee.dts != Int64.min,
+                   packet.pointee.dts <= lastVideoSourceDts {
+                    let original = packet.pointee.dts
+                    let bumped = lastVideoSourceDts + 1
+                    let ptsValid = packet.pointee.pts != Int64.min
+                    if !ptsValid || bumped <= packet.pointee.pts {
+                        packet.pointee.dts = bumped
+                        if !loggedFirstDtsBump {
+                            loggedFirstDtsBump = true
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] video dts non-monotonic at source: "
+                                + "orig=\(original) lastValid=\(lastVideoSourceDts) "
+                                + "pts=\(packet.pointee.pts) → bumped to \(bumped)",
+                                category: .session
+                            )
+                        }
+                    } else {
+                        // Bump would violate dts<=pts. Drop the packet
+                        // rather than feed the muxer a bad combo.
+                        if !loggedFirstDtsDrop {
+                            loggedFirstDtsDrop = true
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] video dts unrecoverable, dropping: "
+                                + "orig=\(original) lastValid=\(lastVideoSourceDts) "
+                                + "pts=\(packet.pointee.pts)",
+                                category: .session
+                            )
+                        }
+                        continue
+                    }
+                }
+                if isAudioPkt, lastAudioSourceDts != Int64.min,
+                   packet.pointee.dts != Int64.min,
+                   packet.pointee.dts <= lastAudioSourceDts {
+                    // Same logic for audio. Audio doesn't have B-frame
+                    // pts/dts skew so dts <= pts isn't a useful gate;
+                    // just bump.
+                    let original = packet.pointee.dts
+                    packet.pointee.dts = lastAudioSourceDts + 1
+                    if !loggedFirstAudioDtsBump {
+                        loggedFirstAudioDtsBump = true
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] audio dts non-monotonic at source: "
+                            + "orig=\(original) lastValid=\(lastAudioSourceDts) → bumped to \(packet.pointee.dts)",
+                            category: .session
+                        )
+                    }
+                }
+
                 if isVideoPkt {
                     lastVideoSourceDts = packet.pointee.dts
                 } else if isAudioPkt {
