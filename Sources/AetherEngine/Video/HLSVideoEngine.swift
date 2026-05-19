@@ -1076,6 +1076,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
             desiredAudioTfdt = 0
         }
 
+        // Build the producer's segment-boundary slice. Each entry is
+        // the startPts of one segment in source video TB; the last
+        // entry is the endPts of the final segment so the producer
+        // has a known upper bound for its segmentIndex() lookup. The
+        // producer indexes this slice with `i = absoluteSegIdx - baseIndex`.
+        let plannedSegs = segmentPlan[baseIndex..<segmentPlan.count]
+        var segmentBoundaries: [Int64] = plannedSegs.map { $0.startPts }
+        if let last = plannedSegs.last {
+            segmentBoundaries.append(last.endPts)
+        }
+
         let prod = try HLSSegmentProducer(
             demuxer: dem,
             videoStreamIndex: videoStreamIndex,
@@ -1088,7 +1099,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoDts: videoTarget,
             desiredFirstVideoTfdtPts: desiredVideoTfdt,
-            desiredFirstAudioTfdtPts: desiredAudioTfdt
+            desiredFirstAudioTfdtPts: desiredAudioTfdt,
+            segmentBoundaries: segmentBoundaries
         )
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()

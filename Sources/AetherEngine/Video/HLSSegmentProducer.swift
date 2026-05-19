@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Libavformat
 import Libavcodec
@@ -118,20 +117,49 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// 30fps video, which would otherwise make pts=8333 read as 0.52s
     /// instead of 8.333s and suppress every segment cut).
     private let sourceVideoTimeBase: AVRational
-    /// Muxer's chosen time_base for the output video stream, latched
-    /// after avformat_write_header. Used as the destination time_base
-    /// for `av_packet_rescale_ts` on every video packet.
-    private var muxerVideoTimeBase: AVRational = AVRational(num: 1, den: 1)
+    /// Video stream configuration (codecpar + time base + codec_tag
+    /// override). Stored so each per-segment MP4SegmentMuxer can be
+    /// built with the same parameters.
+    private let videoConfig: StreamConfig
 
     /// Audio wiring info, nil for video-only sessions.
     private let audioConfig: AudioConfig?
-    /// Audio output stream index in the muxer (1 when audio is wired,
-    /// unused otherwise). Hardcoded since we add at most one audio
-    /// stream and it's always added after the video stream.
-    private let audioOutputStreamIndex: Int32 = 1
-    /// Muxer's chosen time_base for the output audio stream, latched
-    /// after avformat_write_header. Same dance as `muxerVideoTimeBase`.
-    private var muxerAudioTimeBase: AVRational = AVRational(num: 1, den: 1)
+
+    /// Boundaries (start PTS in source video TB) for every segment in
+    /// the producer's range. `segmentBoundaries[i]` is the startPts of
+    /// the segment at absolute index `baseIndex + i`. The pump uses
+    /// this to decide when the current video packet has crossed into
+    /// a new segment and the per-segment muxer needs to be cycled.
+    private let segmentBoundaries: [Int64]
+
+    /// Target segment duration in seconds. Passed to each per-segment
+    /// MP4SegmentMuxer as the `frag_duration` defensive backstop;
+    /// `+frag_keyframe` auto-cuts at keyframes so this rarely fires
+    /// for our keyframe-aligned segments, but we still set it so a
+    /// segment without a trailing IRAP doesn't sit unflushed.
+    private let targetSegmentDurationSeconds: Double
+
+    /// The mp4 muxer currently accumulating packets for one segment.
+    /// Replaced each time the video pump crosses a segment boundary
+    /// (per-segment teardown is the leak-free pattern that replaced
+    /// the long-lived libavformat `hls` wrapper; see
+    /// `MP4SegmentMuxer`'s class docstring).
+    private var currentMuxer: MP4SegmentMuxer?
+
+    /// Absolute index of the segment `currentMuxer` is writing.
+    /// `Int.min` before the first muxer is created. Compared against
+    /// each video packet's computed segment index to decide whether
+    /// to finalize the current muxer and open a new one.
+    private var currentMuxerSegmentIndex: Int = .min
+
+    /// Latched once the first MP4SegmentMuxer has emitted its
+    /// ftyp + moov bytes via FragmentSplitter. The captured bytes go
+    /// to `cache.setInit`; subsequent muxers' init bytes are
+    /// discarded because identical codec params + flags produce
+    /// byte-equivalent output (modulo the mvhd creation_time drift,
+    /// which AVPlayer ignores at fragment-level fetches once init.mp4
+    /// is cached on its side).
+    private var initCaptured: Bool = false
 
     /// Last valid dts (in *source* time_base) seen on the video and
     /// audio streams. Used to repair NOPTS dts emitted by the
@@ -254,8 +282,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var videoShiftPts: Int64 = Int64.min
     private var audioShiftPts: Int64 = Int64.min
 
-    private var formatContext: UnsafeMutablePointer<AVFormatContext>?
-
     /// How many segments the pump is allowed to race ahead of the
     /// highest segment AVPlayer has actually fetched. Matches the
     /// SegmentCache's forwardWindow so the muxer never writes past
@@ -344,14 +370,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioFallbackDurationPts: Int64 = 0,
         restartTargetVideoDts: Int64 = Int64.min,
         desiredFirstVideoTfdtPts: Int64,
-        desiredFirstAudioTfdtPts: Int64 = 0
+        desiredFirstAudioTfdtPts: Int64 = 0,
+        segmentBoundaries: [Int64]
     ) throws {
         self.demuxer = demuxer
         self.videoStreamIndex = videoStreamIndex
+        self.videoConfig = video
         self.audioConfig = audio
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
+        self.targetSegmentDurationSeconds = targetSegmentDurationSeconds
+        self.segmentBoundaries = segmentBoundaries
         self.videoFallbackDurationPts = videoFallbackDurationPts
         self.audioFallbackDurationPts = audioFallbackDurationPts
         self.restartTargetVideoDts = restartTargetVideoDts
@@ -372,137 +402,155 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.desiredFirstVideoTfdtPts = desiredFirstVideoTfdtPts
         self.desiredFirstAudioTfdtPts = desiredFirstAudioTfdtPts
 
-        // 1. Allocate hls output context. Output url "playlist.m3u8" is
-        //    a placeholder: hlsenc derives segment filenames from it
-        //    when `hls_segment_filename` isn't set; we override it
-        //    explicitly below.
-        var ctxOut: UnsafeMutablePointer<AVFormatContext>?
-        let allocRet = avformat_alloc_output_context2(&ctxOut, nil, "hls", "playlist.m3u8")
-        guard allocRet == 0, let ctx = ctxOut else {
-            throw ProducerError.muxerAllocFailed(code: allocRet)
-        }
-        formatContext = ctx
-
-        // 2. Allow non-standard extensions so the inner mp4 sub-muxer
-        //    writes `dvcC` / `dvvC` atoms (DV-spec, not ISOBMFF base).
-        ctx.pointee.strict_std_compliance = -2
-
-        // 3. Wire the IO trampolines. The opaque we stash here is also
-        //    propagated to the nested mp4 sub-muxer (hls_mux_init copies
-        //    `s->opaque` and the io callbacks onto `oc`), so the
-        //    trampolines below receive the same producer pointer
-        //    regardless of which AVFormatContext invoked them.
-        ctx.pointee.opaque = Unmanaged.passUnretained(self).toOpaque()
-        ctx.pointee.io_open = hlsProducerIOOpen
-        ctx.pointee.io_close2 = hlsProducerIOClose2
-
-        // 4. Add the video output stream. Time base is the source's;
-        //    the mp4 sub-muxer rescales to its track timescale (mvhd /
-        //    mdhd) automatically.
-        guard let videoStream = avformat_new_stream(ctx, nil) else {
-            cleanup()
-            throw ProducerError.streamCreationFailed
-        }
-        let vCopy = avcodec_parameters_copy(videoStream.pointee.codecpar, video.codecpar)
-        guard vCopy >= 0 else {
-            cleanup()
-            throw ProducerError.copyParametersFailed(code: vCopy)
-        }
-        videoStream.pointee.time_base = video.timeBase
-        if let override = video.codecTagOverride,
-           let tag = Self.mkTag(fromFourCC: override) {
-            videoStream.pointee.codecpar.pointee.codec_tag = tag
-        }
-
-        // 4b. Add the audio output stream (if any). Stream-copy and
-        //     FLAC-bridge cases use exactly the same wiring here —
-        //     the bridge's `encoderCodecpar` is structured identically
-        //     to a stream-copy codecpar from the caller's point of view.
-        if let audio = audio {
-            guard let audioStream = avformat_new_stream(ctx, nil) else {
-                cleanup()
-                throw ProducerError.streamCreationFailed
-            }
-            let aCopy = avcodec_parameters_copy(audioStream.pointee.codecpar, audio.codecpar)
-            guard aCopy >= 0 else {
-                cleanup()
-                throw ProducerError.copyParametersFailed(code: aCopy)
-            }
-            audioStream.pointee.time_base = audio.timeBase
-        }
-
-        // 4c. Discard every source stream the pump doesn't use. With
-        //     4K HDR HEVC the typical Blu-ray remux ships 1 video + 2
-        //     audio + 4 PGS subtitle streams. Without explicit discard
-        //     the matroska demuxer parses + queues a packet for every
-        //     PGS frame (4K bitmaps, several KB each, fire on every
-        //     subtitle change) and the secondary unused audio track.
-        //     Our pump drops them via `continue` at the consumer side,
-        //     but the demuxer has already paid the parse + queue cost
-        //     and the AVPacket alloc / free round trip churns the heap.
-        //     `AVDISCARD_ALL` short-circuits all of that at parse time.
-        //     The subtitle path runs through a separate side-demuxer
-        //     instance, so dropping subtitles here is safe — the side
-        //     demuxer keeps its own streams enabled.
+        // Tell the source demuxer to drop every stream we don't read.
+        // Without this the matroska demuxer parses + queues per-block
+        // packets for the secondary audio + every PGS subtitle bitmap
+        // (large per-frame payloads) that we then `continue` out of
+        // the pump anyway — pure heap churn.
         var keep: Set<Int32> = [videoStreamIndex]
         if let audio = audio {
             keep.insert(audio.sourceStreamIndex)
         }
         demuxer.discardAllStreamsExcept(keep)
 
-        // 5. Configure hls muxer options. The mp4 sub-muxer's movflags
-        //    are set inside hls_mux_init at libavformat/hlsenc.c:867
-        //    (`+frag_custom+dash+delay_moov`); we do not override them.
-        var opts: OpaquePointer? = nil
-        defer { av_dict_free(&opts) }
-        av_dict_set(&opts, "hls_segment_type", "fmp4", 0)
-        av_dict_set(&opts, "hls_fmp4_init_filename", "init.mp4", 0)
-        av_dict_set(&opts, "hls_segment_filename", "seg-%d.m4s", 0)
-        let hlsTimeStr = String(format: "%.3f", targetSegmentDurationSeconds)
-        av_dict_set(&opts, "hls_time", hlsTimeStr, 0)
-        av_dict_set(&opts, "hls_playlist_type", "vod", 0)
-        av_dict_set(&opts, "hls_list_size", "0", 0)
-        av_dict_set(&opts, "hls_flags", "independent_segments", 0)
-        if baseIndex > 0 {
-            av_dict_set(&opts, "start_number", String(baseIndex), 0)
-        }
-
-        let ret = avformat_write_header(ctx, &opts)
-        guard ret >= 0 else {
-            cleanup()
-            throw ProducerError.writeHeaderFailed(code: ret)
-        }
-
-        // Latch the muxer stream's time_base after write_header. The
-        // hls muxer (via its mov sub-muxer) rewrites the output stream
-        // time_base to its own auto-picked timescale (e.g. 1/16000 for
-        // a 30 fps video, 1/<sampleRate> for audio), but the source
-        // packets we feed still carry source-time-base pts/dts. Without
-        // rescaling, every pkt.pts looks scaled wrong and hlsenc's
-        // split threshold against `hls_time * vs->number` never fires
-        // — the entire source ends up as a single segment. We use these
-        // values as the destination time_base for `av_packet_rescale_ts`
-        // on every packet in the pump loop.
-        muxerVideoTimeBase = ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
-        if audio != nil {
-            muxerAudioTimeBase = ctx.pointee.streams.advanced(by: 1).pointee!.pointee.time_base
-        }
-
         let audioDesc = audio.map { a -> String in
             let mode = a.bridge != nil ? "bridge" : "stream-copy"
-            return " audio=\(mode) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den) muxerTb=\(muxerAudioTimeBase.num)/\(muxerAudioTimeBase.den)"
+            return " audio=\(mode) inTb=\(a.inputTimeBase.num)/\(a.inputTimeBase.den)"
         } ?? ""
         EngineLog.emit(
-            "[HLSSegmentProducer] muxer init OK (baseIndex=\(baseIndex), targetDur=\(hlsTimeStr)s, "
-            + "srcTb=\(video.timeBase.num)/\(video.timeBase.den) "
-            + "muxerTb=\(muxerVideoTimeBase.num)/\(muxerVideoTimeBase.den))"
+            "[HLSSegmentProducer] init OK (baseIndex=\(baseIndex), "
+            + "segments=\(max(0, segmentBoundaries.count - 1)), "
+            + "targetDur=\(String(format: "%.3f", targetSegmentDurationSeconds))s, "
+            + "srcVideoTb=\(video.timeBase.num)/\(video.timeBase.den))"
             + audioDesc,
             category: .session
         )
     }
 
+    /// Map an absolute video PTS (in source video TB) to the segment
+    /// index that contains it. Returns `baseIndex` for any pts before
+    /// the first boundary (defensive: shouldn't happen post-gate);
+    /// returns the last segment index for any pts past the last
+    /// boundary.
+    private func segmentIndex(forSourcePts pts: Int64) -> Int {
+        guard !segmentBoundaries.isEmpty else { return baseIndex }
+        // Linear scan is fine here — segmentBoundaries is at most
+        // ~2k entries and this is called once per video packet on a
+        // worker queue. Binary search would be premature.
+        for i in 0..<(segmentBoundaries.count - 1) {
+            if pts < segmentBoundaries[i + 1] {
+                return baseIndex + i
+            }
+        }
+        return baseIndex + max(0, segmentBoundaries.count - 2)
+    }
+
+    /// Make sure `currentMuxer` is the muxer for segment `targetIdx`.
+    /// If a different segment's muxer is currently active, finalize
+    /// it, adopt the resulting staging file into the cache, and
+    /// allocate a fresh MP4SegmentMuxer for `targetIdx`. Also applies
+    /// the producer's cache-window backpressure (the cache won't let
+    /// us race more than `bufferAheadSegments` past the player's
+    /// declared target).
+    ///
+    /// Returns the active muxer, or `nil` if a stop was requested
+    /// during the backpressure wait or a new muxer alloc failed.
+    private func ensureMuxer(forSegmentIndex targetIdx: Int) -> MP4SegmentMuxer? {
+        if currentMuxer?.segmentIndex == targetIdx, let m = currentMuxer { return m }
+
+        // Finalize the existing muxer first so its bytes land in the
+        // cache before the producer races into the next segment.
+        if let old = currentMuxer {
+            finalizeAndAdoptCurrentMuxer(old)
+            currentMuxer = nil
+            currentMuxerSegmentIndex = .min
+        }
+
+        // Producer backpressure: don't run more than `bufferAheadSegments`
+        // ahead of AVPlayer's declared target. The cache exposes a
+        // condvar-based highwater wait we poll in short chunks so
+        // `stop()` can shut us down promptly.
+        let backpressureTarget = targetIdx - Self.bufferAheadSegments
+        while !checkShouldStop() {
+            if cache.awaitFetchHighWater(reaching: backpressureTarget, timeout: 1.0) { break }
+        }
+        if checkShouldStop() { return nil }
+
+        // Build the muxer for the target segment.
+        let muxerVideo = MP4SegmentMuxer.VideoConfig(
+            codecpar: videoConfig.codecpar,
+            timeBase: videoConfig.timeBase,
+            codecTagOverride: videoConfig.codecTagOverride
+        )
+        let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
+            MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase)
+        }
+
+        let muxer: MP4SegmentMuxer
+        do {
+            muxer = try MP4SegmentMuxer(
+                segmentIndex: targetIdx,
+                sessionDir: cache.sessionDir,
+                video: muxerVideo,
+                audio: muxerAudio,
+                targetSegmentDurationSeconds: targetSegmentDurationSeconds,
+                onInitCaptured: { [weak self] initBytes in
+                    guard let self = self else { return }
+                    if !self.initCaptured {
+                        self.initCaptured = true
+                        self.cache.setInit(initBytes)
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] init.mp4 captured (\(initBytes.count) B)",
+                            category: .session
+                        )
+                    }
+                    // Subsequent muxers' init bytes are byte-equivalent
+                    // (same codecpar + flags); ignore.
+                }
+            )
+        } catch {
+            EngineLog.emit(
+                "[HLSSegmentProducer] muxer alloc for seg-\(targetIdx) failed: \(error)",
+                category: .session
+            )
+            return nil
+        }
+
+        currentMuxer = muxer
+        currentMuxerSegmentIndex = targetIdx
+        return muxer
+    }
+
+    /// Finalize the supplied muxer and adopt its staging file into
+    /// the cache. Logs the result. Always called via `ensureMuxer`
+    /// (boundary crossing) or pump exit (final segment).
+    private func finalizeAndAdoptCurrentMuxer(_ muxer: MP4SegmentMuxer) {
+        let idx = muxer.segmentIndex
+        if let result = muxer.finalize() {
+            EngineLog.emit(
+                "[HLSSegmentProducer] seg-\(idx).m4s captured (\(result.bytesWritten) B)",
+                category: .session
+            )
+            cache.adopt(index: idx, stagingPath: result.path,
+                        byteCount: result.bytesWritten)
+        } else {
+            EngineLog.emit(
+                "[HLSSegmentProducer] seg-\(idx).m4s finalize failed; not adopted",
+                category: .session
+            )
+        }
+    }
+
     deinit {
-        cleanup()
+        // Defensive: if the pump was killed without running the
+        // muxer-finalize path, drop the unfinished segment's staging
+        // file rather than leaking it. MP4SegmentMuxer's deinit also
+        // closes its fd; this guards against the muxer outliving the
+        // producer accidentally.
+        if let m = currentMuxer {
+            _ = m.finalize()
+            currentMuxer = nil
+        }
     }
 
     // MARK: - Public API
@@ -563,8 +611,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     // MARK: - Pump
 
     private func runPumpLoop() {
-        guard let ctx = formatContext else { return }
-
         let pumpStart = DispatchTime.now()
         var packetsRead = 0
         let lastError: Int32 = 0
@@ -969,8 +1015,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         )
                     }
                     if let prev = pendingVideoPkt {
-                        finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, ctx: ctx)
-                        bumpPacketsWritten()
+                        // Determine which segment `prev` belongs to
+                        // (by its source pts) and ensure the muxer for
+                        // that segment is active before writing.
+                        let prevSeg = segmentIndex(forSourcePts: prev.pointee.pts)
+                        if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
+                            finalizeAndWriteVideo(prev, nextDts: packet.pointee.dts, muxer: muxer)
+                            bumpPacketsWritten()
+                        } else {
+                            // Stop requested mid-pump; free the pending
+                            // packet ourselves since it wasn't transferred
+                            // to the muxer.
+                            var pkt: UnsafeMutablePointer<AVPacket>? = prev
+                            av_packet_free(&pkt)
+                            pendingVideoPkt = nil
+                            break readLoop
+                        }
                     }
                     pendingVideoPkt = packet
                     pktPtr = nil  // hand ownership to pendingVideoPkt; suppress defer-free
@@ -995,9 +1055,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             continue
                         }
                         for fp in flacPackets {
-                            fp.pointee.stream_index = audioOutputStreamIndex
-                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxerAudioTimeBase)
-                            _ = av_interleaved_write_frame(ctx, fp)
+                            // FLAC packet pts is in audio inputTimeBase.
+                            // Rescale to source video TB for the segment
+                            // lookup so audio and video share one segmentation.
+                            let fpPtsInVideoTb = av_rescale_q(
+                                fp.pointee.pts,
+                                audio.inputTimeBase,
+                                sourceVideoTimeBase
+                            )
+                            let fpSeg = segmentIndex(forSourcePts: fpPtsInVideoTb)
+                            guard let muxer = ensureMuxer(forSegmentIndex: fpSeg) else {
+                                var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+                                av_packet_free(&fpVar)
+                                continue
+                            }
+                            fp.pointee.stream_index = muxer.audioOutputStreamIndex
+                            av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+                            _ = muxer.writePacket(fp)
                             var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                             av_packet_free(&fpVar)
                         }
@@ -1005,7 +1079,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     }
                     // Stream-copy audio look-behind.
                     if let prev = pendingAudioPkt {
-                        finalizeAndWriteAudio(prev, nextDts: packet.pointee.dts, audio: audio, ctx: ctx)
+                        let prevPtsInVideoTb = av_rescale_q(
+                            prev.pointee.pts,
+                            audio.inputTimeBase,
+                            sourceVideoTimeBase
+                        )
+                        let prevSeg = segmentIndex(forSourcePts: prevPtsInVideoTb)
+                        if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
+                            finalizeAndWriteAudio(prev, nextDts: packet.pointee.dts, audio: audio, muxer: muxer)
+                        } else {
+                            var pkt: UnsafeMutablePointer<AVPacket>? = prev
+                            av_packet_free(&pkt)
+                            pendingAudioPkt = nil
+                            break readLoop
+                        }
                     }
                     pendingAudioPkt = packet
                     pktPtr = nil
@@ -1025,23 +1112,44 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // produces a tail-correct `trun` for the final fragment of
         // the source.
         if let prev = pendingVideoPkt {
-            finalizeAndWriteVideo(prev, nextDts: nil, ctx: ctx)
-            bumpPacketsWritten()
+            let prevSeg = segmentIndex(forSourcePts: prev.pointee.pts)
+            if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
+                finalizeAndWriteVideo(prev, nextDts: nil, muxer: muxer)
+                bumpPacketsWritten()
+            } else {
+                var pkt: UnsafeMutablePointer<AVPacket>? = prev
+                av_packet_free(&pkt)
+            }
             pendingVideoPkt = nil
         }
         if let prev = pendingAudioPkt, let audio = audioConfig {
-            finalizeAndWriteAudio(prev, nextDts: nil, audio: audio, ctx: ctx)
+            let prevPtsInVideoTb = av_rescale_q(
+                prev.pointee.pts,
+                audio.inputTimeBase,
+                sourceVideoTimeBase
+            )
+            let prevSeg = segmentIndex(forSourcePts: prevPtsInVideoTb)
+            if let muxer = ensureMuxer(forSegmentIndex: prevSeg) {
+                finalizeAndWriteAudio(prev, nextDts: nil, audio: audio, muxer: muxer)
+            } else {
+                var pkt: UnsafeMutablePointer<AVPacket>? = prev
+                av_packet_free(&pkt)
+            }
             pendingAudioPkt = nil
         }
 
-        // Trailer flushes the final segment and writes the playlist;
-        // our io_open trampoline still catches whatever bytes that
-        // produces. Safe to call on partial / error exit too.
-        let trailerRet = av_write_trailer(ctx)
+        // Finalize the last segment's muxer so its bytes land in the
+        // cache. Per-segment teardown owns the libavformat state
+        // cleanup, no global av_write_trailer needed.
+        if let muxer = currentMuxer {
+            finalizeAndAdoptCurrentMuxer(muxer)
+            currentMuxer = nil
+            currentMuxerSegmentIndex = .min
+        }
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - pumpStart.uptimeNanoseconds) / 1_000_000
         EngineLog.emit(
             "[HLSSegmentProducer] pump finished: packetsRead=\(packetsRead) "
-            + "packetsWritten=\(packetsWrittenCount) trailer=\(trailerRet) lastError=\(lastError) "
+            + "packetsWritten=\(packetsWrittenCount) lastError=\(lastError) "
             + "elapsed=\(String(format: "%.0f", elapsedMs))ms cacheCount=\(cache.count)",
             category: .session
         )
@@ -1056,15 +1164,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Backfill `packet.duration` from `nextDts` (or the fallback
     /// computed from `avg_frame_rate` when there is no successor),
-    /// run HDR10+ detection, rescale into muxer time_base, write
-    /// via `av_write_frame`, then free the packet. Called from
-    /// `runPumpLoop` exactly once per video packet — either when
-    /// the next video packet arrives (`nextDts` set) or at EOF
-    /// (`nextDts == nil`).
+    /// run HDR10+ detection, rescale into the muxer's video time_base,
+    /// write via `MP4SegmentMuxer.writePacket`, then free the packet.
+    /// Called from `runPumpLoop` exactly once per video packet —
+    /// either when the next video packet arrives (`nextDts` set) or
+    /// at EOF (`nextDts == nil`).
     private func finalizeAndWriteVideo(
         _ packet: UnsafeMutablePointer<AVPacket>,
         nextDts: Int64?,
-        ctx: UnsafeMutablePointer<AVFormatContext>
+        muxer: MP4SegmentMuxer
     ) {
         if packet.pointee.duration <= 0 {
             if let next = nextDts {
@@ -1075,7 +1183,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
 
-        packet.pointee.stream_index = videoOutputStreamIndex
+        packet.pointee.stream_index = muxer.videoOutputStreamIndex
 
         if !hdr10PlusDetected, let data = packet.pointee.data {
             let size = Int(packet.pointee.size)
@@ -1091,8 +1199,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
 
-        av_packet_rescale_ts(packet, sourceVideoTimeBase, muxerVideoTimeBase)
-        _ = av_interleaved_write_frame(ctx, packet)
+        av_packet_rescale_ts(packet, sourceVideoTimeBase, muxer.muxerVideoTimeBase)
+        _ = muxer.writePacket(packet)
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         av_packet_free(&pkt)
@@ -1105,7 +1213,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         _ packet: UnsafeMutablePointer<AVPacket>,
         nextDts: Int64?,
         audio: AudioConfig,
-        ctx: UnsafeMutablePointer<AVFormatContext>
+        muxer: MP4SegmentMuxer
     ) {
         if packet.pointee.duration <= 0 {
             if let next = nextDts {
@@ -1116,316 +1224,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
         }
 
-        packet.pointee.stream_index = audioOutputStreamIndex
-        av_packet_rescale_ts(packet, audio.inputTimeBase, muxerAudioTimeBase)
-        _ = av_interleaved_write_frame(ctx, packet)
+        packet.pointee.stream_index = muxer.audioOutputStreamIndex
+        av_packet_rescale_ts(packet, audio.inputTimeBase, muxer.muxerAudioTimeBase)
+        _ = muxer.writePacket(packet)
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         av_packet_free(&pkt)
     }
 
-    // MARK: - IO trampoline plumbing (called from the C callbacks below)
-
-    fileprivate func openSink(url: String) -> UnsafeMutablePointer<AVIOContext>? {
-        // Stage every segment as a real file under the cache's session
-        // directory so the cache's adopt step is a same-volume rename
-        // rather than a cross-volume copy. The filename includes a UUID
-        // suffix so concurrent producer restarts (rare but possible
-        // during fast scrub sequences) don't collide on the same path.
-        let staging = cache.sessionDir.appendingPathComponent(
-            "staging-\(url)-\(UUID().uuidString.prefix(8)).tmp"
-        )
-        let cPath = staging.withUnsafeFileSystemRepresentation { ptr -> [CChar] in
-            guard let p = ptr else { return [] }
-            var arr = [CChar]()
-            var i = 0
-            while p[i] != 0 { arr.append(p[i]); i += 1 }
-            arr.append(0)
-            return arr
-        }
-        guard !cPath.isEmpty else { return nil }
-        let fd = cPath.withUnsafeBufferPointer { buf -> Int32 in
-            // creat(path, mode) == open(path, O_WRONLY|O_CREAT|O_TRUNC,
-            // mode). Used instead of open() because Swift on Darwin
-            // marks the variadic 3-arg open form unavailable; creat
-            // is the non-variadic equivalent for the create-and-truncate
-            // path. Fail loud if it fails so the muxer surfaces
-            // -ENOMEM-style errors back to its caller, better than
-            // silently routing writes into a black-hole sink.
-            return creat(buf.baseAddress, 0o644)
-        }
-        guard fd >= 0 else { return nil }
-
-        let sink = SegmentSink(url: url, path: staging, fd: fd)
-        let opaque = Unmanaged.passRetained(sink).toOpaque()
-        let bufSize: Int32 = 65536
-        guard let raw = av_malloc(Int(bufSize)) else {
-            close(fd)
-            try? FileManager.default.removeItem(at: staging)
-            Unmanaged<SegmentSink>.fromOpaque(opaque).release()
-            return nil
-        }
-        let buf = raw.assumingMemoryBound(to: UInt8.self)
-        guard let pb = avio_alloc_context(
-            buf,
-            bufSize,
-            /* write_flag */ 1,
-            opaque,
-            nil,
-            hlsProducerSinkWrite,
-            nil
-        ) else {
-            av_free(raw)
-            close(fd)
-            try? FileManager.default.removeItem(at: staging)
-            Unmanaged<SegmentSink>.fromOpaque(opaque).release()
-            return nil
-        }
-        pb.pointee.seekable = 0
-        return pb
-    }
-
-    fileprivate func closeSink(pb: UnsafeMutablePointer<AVIOContext>) {
-        avio_flush(pb)
-        let opaqueRaw = pb.pointee.opaque
-        var url = ""
-        var path: URL? = nil
-        var byteCount = 0
-        var writeFailed = false
-        if let opaque = opaqueRaw {
-            let sink = Unmanaged<SegmentSink>.fromOpaque(opaque).takeRetainedValue()
-            // Close the fd before dispatch so the rename / mmap path
-            // doesn't race the kernel still flushing pending writes
-            // from the page cache. fsync would be overkill (we're
-            // about to read the file right back via mmap in the
-            // same process), so a plain close is fine.
-            close(sink.fd)
-            url = sink.url
-            path = sink.path
-            byteCount = sink.bytesWritten
-            writeFailed = sink.writeFailed
-        }
-        // Free the buffer libavformat currently has on the context. It
-        // may have been reallocated since openSink (avio grows it on
-        // demand when callers write more than `bufSize` between flushes).
-        if pb.pointee.buffer != nil {
-            withUnsafeMutablePointer(to: &pb.pointee.buffer) { bufRef in
-                bufRef.withMemoryRebound(to: Optional<UnsafeMutableRawPointer>.self, capacity: 1) { raw in
-                    av_freep(UnsafeMutableRawPointer(raw))
-                }
-            }
-        }
-        var pbVar: UnsafeMutablePointer<AVIOContext>? = pb
-        avio_context_free(&pbVar)
-
-        if let path = path {
-            dispatchSinkOutput(url: url, stagingPath: path,
-                               byteCount: byteCount, writeFailed: writeFailed)
-        }
-    }
-
-    private func dispatchSinkOutput(url: String, stagingPath: URL,
-                                    byteCount: Int, writeFailed: Bool) {
-        if writeFailed {
-            EngineLog.emit(
-                "[HLSSegmentProducer] sink write failed for \(url); discarding staging file",
-                category: .session
-            )
-            try? FileManager.default.removeItem(at: stagingPath)
-            return
-        }
-
-        if url == "init.mp4" {
-            // init.mp4 is small (~3.5 KB) and the cache wants it in
-            // RAM (it's pinned and served on every session). Read it
-            // back once via mmap-then-copy and hand to cache.setInit.
-            let initBytes = (try? Data(contentsOf: stagingPath)) ?? Data()
-            EngineLog.emit(
-                "[HLSSegmentProducer] init.mp4 captured (\(byteCount) B)",
-                category: .session
-            )
-            cache.setInit(initBytes)
-            try? FileManager.default.removeItem(at: stagingPath)
-            return
-        }
-        // "seg-N.m4s" — N is the hlsenc sequence number, which equals
-        // (baseIndex + local segment count) when we set `start_number`.
-        // Re-deriving from the filename keeps the cache key authoritative
-        // even if hlsenc renumbers internally.
-        if url.hasPrefix("seg-"), url.hasSuffix(".m4s") {
-            let inner = url.dropFirst("seg-".count).dropLast(".m4s".count)
-            if let absIdx = Int(inner) {
-                // Backpressure FIRST, adopt SECOND. Doing the adopt
-                // before the wait lets `pruneOutsideWindow` evict the
-                // just-staged segment whenever the cache window
-                // hasn't slid to include `absIdx` yet (race window:
-                // AVPlayer fetch latency greater than muxer cut
-                // interval, e.g. H.264 with ~2-3 MB segments on a
-                // local LAN where the muxer runs ahead of AVPlayer's
-                // network reads). Waiting first keeps the window
-                // centred such that every stored segment fits.
-                //
-                // Poll with short 1 s waits so `stop()` can shut us
-                // down promptly during a restart instead of stranding
-                // the pump in a 60 s sleep.
-                let target = absIdx - Self.bufferAheadSegments
-                while !checkShouldStop() {
-                    if cache.awaitFetchHighWater(reaching: target, timeout: 1.0) { break }
-                }
-                if checkShouldStop() {
-                    try? FileManager.default.removeItem(at: stagingPath)
-                    return
-                }
-
-                cache.adopt(index: absIdx, stagingPath: stagingPath,
-                            byteCount: byteCount)
-                return
-            }
-        }
-        // playlist.m3u8 (or any other path) — we generate our own
-        // playlist from the pre-planned keyframe segment list, so any
-        // bytes hlsenc writes here are discarded.
-        try? FileManager.default.removeItem(at: stagingPath)
-    }
-
-    // MARK: - Cleanup
-
-    private func cleanup() {
-        if let ctx = formatContext {
-            // Clear opaque first so any late io_open from the muxer's
-            // own teardown path doesn't dereference a self that's about
-            // to disappear. (avformat_free_context shouldn't trigger
-            // io_open at this point, but defensive.)
-            ctx.pointee.opaque = nil
-            avformat_free_context(ctx)
-            formatContext = nil
-        }
-    }
-
-    // MARK: - Helpers
-
-    /// Equivalent of FFmpeg's `MKTAG(a, b, c, d)`. Encodes a four-character
-    /// code as a little-endian `UInt32` (byte 0 = a, byte 3 = d).
-    private static func mkTag(fromFourCC fourCC: String) -> UInt32? {
-        let chars = Array(fourCC)
-        guard chars.count == 4 else { return nil }
-        var tag: UInt32 = 0
-        for (i, ch) in chars.enumerated() {
-            guard let ascii = ch.asciiValue else { return nil }
-            tag |= UInt32(ascii) << (i * 8)
-        }
-        return tag
-    }
-}
-
-// MARK: - Sink storage
-
-/// Per-segment sink that streams libavformat's muxer output straight
-/// to a disk file via a POSIX file descriptor. The previous
-/// implementation accumulated bytes into a `var buffer = Data()` and
-/// drained the whole Data into `cache.store(data:)` at close. That
-/// pattern fragmented the Swift heap badly on 4K HDR HEVC: each ~10
-/// MB segment hit ~150 `Data.append(buf, count:)` calls with libavformat's
-/// 64 KB writes, geometric-growth reallocation walked the buffer up
-/// through every power-of-two size, and even after release the malloc
-/// allocator held the freed pages in its arena. Across many in-flight
-/// segments the resident set climbed ~3 MB/sec proportional to source
-/// bitrate.
-///
-/// POSIX `write(2)` straight into a real file moves the bytes
-/// kernel-side with no Swift heap residency at all. The cache adopts
-/// the finished file via `rename(2)` instead of copying through a
-/// Data round trip.
-private final class SegmentSink {
-    /// libavformat-side URL ("init.mp4", "seg-0.m4s", ...) for the
-    /// dispatch path's branching.
-    let url: String
-    /// Disk path the file descriptor points at. Lives under the
-    /// cache's session dir so the cache's `rename` move stays on the
-    /// same volume.
-    let path: URL
-    /// Open file descriptor for the staging file. Closed in closeSink.
-    let fd: Int32
-    /// Total bytes successfully written so we can log the segment
-    /// size at close without `stat`ing the file.
-    var bytesWritten: Int = 0
-    /// Sticky once any `write(2)` call short-returns or errors. The
-    /// dispatch path checks this so partial files don't reach the
-    /// cache.
-    var writeFailed: Bool = false
-
-    init(url: String, path: URL, fd: Int32) {
-        self.url = url
-        self.path = path
-        self.fd = fd
-    }
-}
-
-// MARK: - C callback bridges
-
-/// `s->io_open` trampoline. Routed back into the `HLSSegmentProducer`
-/// via the `s->opaque` pointer set at construction. Returns a custom
-/// `AVIOContext` whose write callback streams bytes straight into a
-/// per-sink disk file; the closeSink path renames that file into the
-/// `SegmentCache`'s entries map.
-private func hlsProducerIOOpen(
-    s: UnsafeMutablePointer<AVFormatContext>?,
-    pb: UnsafeMutablePointer<UnsafeMutablePointer<AVIOContext>?>?,
-    url: UnsafePointer<CChar>?,
-    flags: Int32,
-    options: UnsafeMutablePointer<OpaquePointer?>?
-) -> Int32 {
-    guard let s = s, let pb = pb, let url = url, let opaque = s.pointee.opaque else {
-        return -1
-    }
-    let producer = Unmanaged<HLSSegmentProducer>.fromOpaque(opaque).takeUnretainedValue()
-    let urlStr = String(cString: url)
-    guard let ctx = producer.openSink(url: urlStr) else { return -1 }
-    pb.pointee = ctx
-    return 0
-}
-
-/// `s->io_close2` trampoline. Closes the sink's fd, renames the
-/// staging file into the cache, and frees the `AVIOContext`.
-private func hlsProducerIOClose2(
-    s: UnsafeMutablePointer<AVFormatContext>?,
-    pb: UnsafeMutablePointer<AVIOContext>?
-) -> Int32 {
-    guard let s = s, let pb = pb, let opaque = s.pointee.opaque else { return 0 }
-    let producer = Unmanaged<HLSSegmentProducer>.fromOpaque(opaque).takeUnretainedValue()
-    producer.closeSink(pb: pb)
-    return 0
-}
-
-/// `avio_alloc_context` write callback. `opaque` is the retained
-/// `SegmentSink` pointer set in `openSink`. Writes the buffer
-/// straight to the sink's fd via POSIX `write(2)`, looping on
-/// short writes and EINTR. Returns `size` on full success, the
-/// raw `write` return on error so libavformat surfaces the failure.
-private func hlsProducerSinkWrite(
-    opaque: UnsafeMutableRawPointer?,
-    buf: UnsafePointer<UInt8>?,
-    size: Int32
-) -> Int32 {
-    guard let opaque = opaque, let buf = buf, size > 0 else { return -1 }
-    let sink = Unmanaged<SegmentSink>.fromOpaque(opaque).takeUnretainedValue()
-    if sink.writeFailed { return -1 }
-    var written = 0
-    let total = Int(size)
-    while written < total {
-        let n = write(sink.fd, buf.advanced(by: written), total - written)
-        if n < 0 {
-            let err = errno
-            if err == EINTR { continue }
-            sink.writeFailed = true
-            return -1
-        }
-        if n == 0 {
-            sink.writeFailed = true
-            return -1
-        }
-        written += n
-    }
-    sink.bytesWritten += total
-    return size
 }
