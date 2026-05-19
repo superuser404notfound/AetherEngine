@@ -578,9 +578,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// to time out on its own.
     func stop() {
         stateLock.lock()
+        let wasAlreadyStopped = shouldStop
         shouldStop = true
         stateLock.unlock()
         cache.wakeWaiters()
+        if !wasAlreadyStopped {
+            EngineLog.emit("[HLSSegmentProducer] stop() called — caller stack:", category: .session)
+            for (i, sym) in Thread.callStackSymbols.prefix(10).enumerated() {
+                EngineLog.emit("[HLSSegmentProducer]   stop#\(i) \(sym)", category: .session)
+            }
+        }
     }
 
     /// Thread-safe read of `shouldStop`. Used by the dispatchSinkOutput
