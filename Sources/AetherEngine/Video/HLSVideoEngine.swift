@@ -988,6 +988,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return plan.count - 1
     }
 
+    /// Force-tear-down + recreate the producer at the segment that
+    /// contains `seconds` of source-time. Used by the memprobe's
+    /// libavformat-vs-AVPlayer leak-source discriminator: if RSS drops
+    /// significantly after this call, the leak was in libavformat's
+    /// internal state (hlsenc + mp4 sub-muxer accumulators). If RSS
+    /// stays flat, the leak is downstream in AVPlayer's HLS demuxer.
+    ///
+    /// Mirrors the production restart path used for seeks, just
+    /// triggered by a diagnostic timer instead of a cache miss. The
+    /// AVPlayer side continues fetching from cache uninterrupted as
+    /// long as the new producer's segments arrive within AVPlayer's
+    /// buffer tolerance (avBufBehind > 30 s is plenty).
+    ///
+    /// Returns the segment index restarted at, or nil if the engine
+    /// isn't in a state to restart.
+    public func diagnosticForceRestart(forCurrentSeconds seconds: Double) -> Int? {
+        guard !segmentPlan.isEmpty, demuxer != nil else { return nil }
+        let idx = Self.segmentIndex(forSeconds: seconds, plan: segmentPlan)
+        restartProducer(at: idx)
+        return idx
+    }
+
     public func stop() {
         restartLock.lock()
         producer?.stop()

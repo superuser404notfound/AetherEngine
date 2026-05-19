@@ -273,6 +273,34 @@ public final class AetherEngine: ObservableObject {
     /// to decide when to trigger the next reload.
     private var lastReloadAt: Date?
 
+    /// DIAGNOSTIC POC: how often the memprobe should force-restart the
+    /// HLSVideoEngine producer (libavformat hlsenc + mp4 sub-muxer
+    /// teardown + recreate at the current playback position) to
+    /// discriminate the long-form 4K HDR HEVC leak source. With
+    /// `vmIntDrop=0` confirming the bytes are genuinely referenced
+    /// (not malloc fragmentation) and `vmExt` / `vmIOS` flat, the
+    /// remaining candidates are libavformat's accumulating internal
+    /// state or AVPlayer's HLS demuxer parser state in our process.
+    ///
+    /// Periodic producer restart tears down the AVFormatContext for
+    /// hlsenc and its child mp4 sub-muxer. AVPlayer keeps fetching
+    /// from cache uninterrupted because the cache window covers
+    /// 30+ s of upcoming segments. If `vmInt` drops sharply after
+    /// the restart, libavformat was holding the bytes (which means
+    /// either workaround via periodic restart or rewrite the muxer).
+    /// If `vmInt` keeps climbing, AVPlayer is the source and we have
+    /// to pivot to the VTDecompressionSession + AVSampleBufferDisplayLayer
+    /// architecture instead of HLS-loopback.
+    ///
+    /// Set to 0 in production. Set to a positive value (e.g. 120 s)
+    /// when running the diagnostic test.
+    private static let DIAG_PRODUCER_RESTART_INTERVAL_SEC: TimeInterval = 120
+
+    /// Wall-clock timestamp of the last diagnostic producer restart.
+    /// Compared against the memprobe tick to decide when to trigger
+    /// the next restart.
+    private var lastProducerRestartAt: Date?
+
     /// The URL of the current playback session. Used by
     /// `reloadAtCurrentPosition()` to rebuild the pipeline after
     /// background suspension.
@@ -1474,6 +1502,7 @@ public final class AetherEngine: ObservableObject {
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
         lastReloadAt = nil
+        lastProducerRestartAt = nil
         nativeCancellables.removeAll()
         nativeHost?.tearDown()
         nativeHost = nil
@@ -1644,6 +1673,56 @@ public final class AetherEngine: ObservableObject {
                         EngineLog.emit(pocLine, category: .engine)
                         print(pocLine)
                         self.lastReloadAt = Date()
+                    }
+                }
+
+                // DIAGNOSTIC: trigger HLSVideoEngine producer restart
+                // (libavformat hlsenc + mp4 sub-muxer teardown +
+                // recreate at current playback time) if enough time
+                // has passed. Measures vmInt drop after restart to
+                // discriminate libavformat-side vs AVPlayer-side leak.
+                if Self.DIAG_PRODUCER_RESTART_INTERVAL_SEC > 0,
+                   let videoEngine = self.nativeVideoSession,
+                   let avPlayer = self.currentAVPlayer,
+                   let item = avPlayer.currentItem {
+                    let referenceTime = self.lastProducerRestartAt ?? sessionStart
+                    let sinceLastRestart = Date().timeIntervalSince(referenceTime)
+                    if sinceLastRestart >= Self.DIAG_PRODUCER_RESTART_INTERVAL_SEC {
+                        let nowSeconds = item.currentTime().seconds
+                            + self.playlistShiftSeconds
+                        let vmBefore = Self.vmBreakdownMB()
+                        let restartStart = DispatchTime.now()
+                        let restartedIdx = videoEngine.diagnosticForceRestart(
+                            forCurrentSeconds: nowSeconds
+                        )
+                        let elapsedMs = Double(
+                            DispatchTime.now().uptimeNanoseconds
+                            - restartStart.uptimeNanoseconds
+                        ) / 1_000_000
+                        // Wait 3 s so the old producer's AVFormatContext
+                        // teardown + libavformat free path actually run
+                        // before we sample. The pump's waitForFinish in
+                        // restartProducer is bounded at 5 s; 3 s after the
+                        // call returns is enough for the heap state to
+                        // settle.
+                        try? await Task.sleep(for: .seconds(3))
+                        let vmAfter = Self.vmBreakdownMB()
+                        if let vmBefore = vmBefore, let vmAfter = vmAfter {
+                            let intDelta = vmBefore.internalMB - vmAfter.internalMB
+                            let cmpDelta = vmBefore.compressedMB - vmAfter.compressedMB
+                            let fpDelta = vmBefore.physFootprintMB - vmAfter.physFootprintMB
+                            let pocLine = "[AetherEngine] DIAG producer-restart: "
+                                + "atSeg=\(restartedIdx.map(String.init) ?? "nil") "
+                                + "callDuration=\(String(format: "%.0f", elapsedMs))ms "
+                                + "vmIntBefore=\(vmBefore.internalMB)MB "
+                                + "vmIntAfter=\(vmAfter.internalMB)MB "
+                                + "vmIntDelta=\(intDelta)MB "
+                                + "vmCmpDelta=\(cmpDelta)MB "
+                                + "physFPDelta=\(fpDelta)MB"
+                            EngineLog.emit(pocLine, category: .engine)
+                            print(pocLine)
+                        }
+                        self.lastProducerRestartAt = Date()
                     }
                 }
             }
