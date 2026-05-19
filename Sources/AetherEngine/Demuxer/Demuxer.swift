@@ -317,9 +317,14 @@ final class Demuxer: @unchecked Sendable {
         for i in 0..<Int32(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[Int(i)] else { continue }
             // AVDISCARD_DEFAULT = 0 (= passthrough), AVDISCARD_ALL = 48.
-            stream.pointee.discard = keep.contains(i)
+            let target: AVDiscard = keep.contains(i)
                 ? AVDISCARD_DEFAULT
                 : AVDISCARD_ALL
+            stream.pointee.discard = target
+            EngineLog.emit(
+                "[Demuxer] stream[\(i)] discard set to \(target == AVDISCARD_ALL ? "ALL" : "DEFAULT") (rawValue=\(target.rawValue))",
+                category: .session
+            )
         }
     }
 

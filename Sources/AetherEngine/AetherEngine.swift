@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import QuartzCore
 import CoreMedia
@@ -1566,14 +1567,24 @@ public final class AetherEngine: ObservableObject {
                 // (mmap'd cache files, dyld) vs IOSurface (HEVC decoded
                 // frames) vs compressed (kernel-compressed pages still
                 // accounted to us).
+                //
+                // The probe also asks malloc to release back to the OS
+                // any free pages it's holding in its arenas, and reports
+                // the vmInt drop. If `vmIntDrop` is large, the leak is
+                // really malloc arena fragmentation; if it's near zero,
+                // the bytes are genuinely retained somewhere upstream.
+                let vmBefore = Self.vmBreakdownMB()
+                Self.releaseMallocFreePages()
                 let vm = Self.vmBreakdownMB()
                 let vmStr: String
-                if let vm = vm {
+                if let vm = vm, let vmBefore = vmBefore {
+                    let drop = max(0, vmBefore.internalMB - vm.internalMB)
                     vmStr = "vmInt=\(vm.internalMB)MB "
                         + "vmExt=\(vm.externalMB)MB "
                         + "vmCmp=\(vm.compressedMB)MB "
                         + "vmIOS=\(vm.iosurfaceMB)MB "
                         + "physFP=\(vm.physFootprintMB)MB "
+                        + "vmIntDrop=\(drop)MB "
                 } else {
                     vmStr = ""
                 }
@@ -1654,6 +1665,25 @@ public final class AetherEngine: ObservableObject {
         }
         guard kr == KERN_SUCCESS else { return 0 }
         return Int(info.resident_size / 1024 / 1024)
+    }
+
+    /// Ask every malloc zone to return free pages it's holding to the
+    /// kernel. The default zone holds freed allocations in per-zone
+    /// arenas for reuse — at high alloc + free throughput (the
+    /// libavformat AVPacket + AVBuffer churn under steady playback)
+    /// the arenas grow and rarely give pages back without explicit
+    /// pressure. Calling pressure_relief synchronously walks the zone
+    /// freelists and `madvise(MADV_FREE_REUSABLE)`s anything that's
+    /// fully free, telling the kernel the page can be reclaimed.
+    ///
+    /// Called from the 30-second memprobe BEFORE the post-relief
+    /// `task_vm_info` read so the probe's `vmIntDrop` field shows how
+    /// much malloc was holding. Large drop = malloc arena
+    /// fragmentation; near-zero drop = bytes genuinely retained.
+    static func releaseMallocFreePages() {
+        // 0 = all zones. The flags arg is unused by Darwin's
+        // implementation.
+        malloc_zone_pressure_relief(nil, 0)
     }
 
     /// Detailed VM breakdown via `task_vm_info`. The fields split
