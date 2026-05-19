@@ -211,6 +211,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var server: HLSLocalServer?
     private var provider: VideoSegmentProvider?
 
+    /// Background task that periodically tears down + recreates the
+    /// producer (matroska demuxer + mp4 muxer + AVIOReader + audio
+    /// bridge state) at a safe spot ahead of AVPlayer's current
+    /// position. The libavformat pipeline accumulates a few MB/s of
+    /// heap state per packet processed; teardown frees all of it.
+    /// AVPlayer never sees the restart because the cache holds enough
+    /// already-produced segments to cover the brief setup gap. Driven
+    /// by DrHurt's "remux 120s, terminate, repeat" pattern on
+    /// AetherEngine#4 once Apple's HLS demuxer + libavformat together
+    /// outgrew the tvOS jetsam budget on long-form 4K HDR HEVC.
+    private var periodicRestartTask: Task<Void, Never>?
+
     /// Captured at `start()` so the restart path can spin up a fresh
     /// producer at any segment index without re-running the full
     /// DV-classification / codec-pick logic.
@@ -871,6 +883,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         //    requested index lands.
         prod.start()
 
+        // 8b. Periodic producer recycle. Tears down + recreates the
+        //     producer-side libavformat pipeline every
+        //     `Self.producerRecycleIntervalSeconds` of wall time. The
+        //     restart fires at `cache.targetIndex + producerRecycleLookahead`
+        //     so AVPlayer continues to fetch from already-produced
+        //     segments while the new producer warms up. AVPlayer itself
+        //     is untouched, so no buffering UI / Now Playing glitch.
+        startPeriodicProducerRecycle(totalSegments: plan.count)
+
         // Pick the URL handed to AVPlayer.
         //
         // The decision is driven by the active panel's dynamic-range
@@ -989,6 +1010,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
 
     public func stop() {
+        periodicRestartTask?.cancel()
+        periodicRestartTask = nil
+
         restartLock.lock()
         producer?.stop()
         let p = producer
@@ -1272,6 +1296,66 @@ public final class HLSVideoEngine: @unchecked Sendable {
         audioHLSCodecs = nil
         self.audioPipelineDescription = nil
         return try makeProducer(baseIndex: 0)
+    }
+
+    /// Wall-clock cadence of the periodic producer recycle. 120 s lines
+    /// up with DrHurt's "remux 120s, terminate, repeat" suggestion on
+    /// AetherEngine#4 and is conservative enough that the producer's
+    /// accumulated libavformat / URLSession state hasn't grown into a
+    /// jetsam-relevant size yet. Adjust upward if the restart's HTTP
+    /// reconnect cost shows up in playback diagnostics; downward if
+    /// the post-fix memory growth still climbs faster than expected.
+    private static let producerRecycleIntervalSeconds: UInt64 = 120
+
+    /// How many segments ahead of AVPlayer's current target we restart
+    /// the producer at. The cache's `forwardWindow` is 10 segments, so
+    /// at most `forwardWindow - producerRecycleLookahead` segments
+    /// between AVPlayer's target and the restart point must remain in
+    /// the cache during the recycle. Picking 5 leaves 5 already-produced
+    /// segments downstream as runway for AVPlayer to fetch from while
+    /// the new producer initialises (typically ~100–500 ms of setup
+    /// against ~20 s of cache runway = ~40× safety margin).
+    private static let producerRecycleLookahead: Int = 5
+
+    /// Spawn the recycle Task. Detached + `[weak self]` because the
+    /// engine is owned by `AetherEngine`, not by the Task, and the
+    /// session can be torn down independently. The Task self-cancels
+    /// via `Task.isCancelled` checks at every loop boundary so
+    /// `stop()` reliably brings the loop down with one cancel call.
+    private func startPeriodicProducerRecycle(totalSegments: Int) {
+        periodicRestartTask?.cancel()
+        periodicRestartTask = Task.detached(priority: .utility) { [weak self] in
+            let interval = Self.producerRecycleIntervalSeconds
+            let lookahead = Self.producerRecycleLookahead
+            while !Task.isCancelled {
+                // Wait one interval. `Task.sleep` honours cancellation
+                // and throws if cancelled; the surrounding while/cancel
+                // check is the secondary safety.
+                do {
+                    try await Task.sleep(nanoseconds: interval * 1_000_000_000)
+                } catch {
+                    return
+                }
+                guard let self = self, !Task.isCancelled else { return }
+
+                guard let cache = self.cache else { return }
+                let target = cache.targetIndex
+                guard target >= 0 else { continue }
+
+                let restartIdx = target + lookahead
+                // Bail near end-of-file: no benefit to recycle if the
+                // producer would only emit a handful of segments before
+                // EOF anyway, and we'd risk the restart landing past
+                // the plan boundary.
+                guard restartIdx < totalSegments - 2 else { return }
+
+                EngineLog.emit(
+                    "[HLSVideoEngine] producer recycle: target=\(target) → restart at \(restartIdx)",
+                    category: .session
+                )
+                self.restartProducer(at: restartIdx)
+            }
+        }
     }
 
     /// Tear down the current producer, seek the demuxer to the start

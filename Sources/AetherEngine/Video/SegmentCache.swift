@@ -315,6 +315,17 @@ final class SegmentCache {
 
     // MARK: - Diagnostics
 
+    /// AVPlayer's current target segment index (highest fetched), or
+    /// -1 if no fetch has happened yet. Read by HLSVideoEngine's
+    /// periodic-restart watchdog to compute the safe restart index
+    /// (currentTarget + N where N is small enough that the cache still
+    /// covers the lookahead window during the restart's setup gap).
+    var targetIndex: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return currentTargetIndex
+    }
+
     /// (lowestIndex, highestIndex) currently held, or nil when empty.
     /// Used by the restart-decision logic in `VideoSegmentProvider`.
     func indexRange() -> (Int, Int)? {
