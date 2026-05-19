@@ -680,6 +680,23 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 var pktPtr: UnsafeMutablePointer<AVPacket>? = packet
                 defer { av_packet_free(&pktPtr) }
 
+                // Drop any AVPacket side data the demuxer attached
+                // (matroska's BlockAddition path allocates side data
+                // per packet for HDR10+ / DV RPU / generic
+                // BlockAdditional payloads — see matroskadec.c
+                // matroska_parse_block_additional, ~6 KB/HDR10+ entry
+                // plus the AVPacketSideData struct + AVDictionary
+                // overhead per allocation). For HEVC stream-copy the
+                // metadata already lives in the bitstream as SEI NAL
+                // units; the side data is redundant and the mp4 mux
+                // path doesn't need it. Dropping it before any
+                // downstream code touches the packet avoids the
+                // matroska→muxer side-data copy cycle entirely. If
+                // this knocks the residual leak rate down, matroska's
+                // per-packet side-data allocations were the missing
+                // piece beyond URLSession dispatch_data retention.
+                av_packet_free_side_data(packet)
+
                 let pktStreamIdx = packet.pointee.stream_index
 
                 // Repair unset dts. The matroska demuxer can emit
