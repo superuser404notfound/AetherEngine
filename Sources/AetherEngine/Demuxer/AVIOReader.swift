@@ -16,15 +16,34 @@ final class AVIOReader: @unchecked Sendable {
 
     private let url: URL
     private let extraHeaders: [String: String]
-    /// Long-lived ephemeral session, shared by all Range fetches for
-    /// the lifetime of this reader. The session has `urlCache = nil`
-    /// so that `dispatch_data_t` response bodies aren't retained in
-    /// an in-memory URLCache after each completion. With ephemeral +
-    /// reloadIgnoringLocalAndRemoteCacheData + nil cache, the only
-    /// remaining 8 MB Data alive per fetch is whatever our completion
-    /// handler returns to `fetchChunk`, and ARC releases it as soon
-    /// as `currentBuffer`/`prefetchBuffer` is reassigned.
-    private let session: URLSession
+    /// Configuration template for per-request sessions. We do NOT
+    /// share a long-lived URLSession across Range fetches: every
+    /// completed dataTask sits inside the session's internal task
+    /// list (Foundation's "completed-task pool") until the session
+    /// is invalidated, retaining its 8 MB `dispatch_data_t` response
+    /// body the whole time. With long-lived sessions playing a 4K
+    /// HDR HEVC source at ~25 Mbps that pool grows at ~5 MB/s of
+    /// heap, which is exactly the residual leak we chased after the
+    /// urlCache=nil fix.
+    ///
+    /// Per-request sessions used to be unsafe because each
+    /// configuration spun up its own URLCache (the "N URLCaches
+    /// racing async invalidation" reverted in fef8ef4). Setting
+    /// `config.urlCache = nil` removes the URLCache entirely, which
+    /// makes per-request sessions safe again: each fetch creates a
+    /// session with no URLCache, completes, and is dismantled via
+    /// finishTasksAndInvalidate so the task pool releases its
+    /// response data immediately.
+    private static func makeSessionConfig() -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForResource = 60
+        config.httpMaximumConnectionsPerHost = 2
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        // No URLCache instance — kills the in-memory cache that the
+        // long-lived-session fix from fef8ef4 was working around.
+        config.urlCache = nil
+        return config
+    }
     private var position: Int64 = 0
     private var fileSize: Int64 = -1
 
@@ -81,17 +100,6 @@ final class AVIOReader: @unchecked Sendable {
     init(url: URL, extraHeaders: [String: String] = [:]) {
         self.url = url
         self.extraHeaders = extraHeaders
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 60
-        config.httpMaximumConnectionsPerHost = 2
-        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        // Disable the in-memory URLCache entirely. Ephemeral only
-        // turns off the on-disk cache; without this line every fetch
-        // still leaves an 8 MB entry parked in an NSURLStorageURLCacheDB
-        // until the session is invalidated (Instruments traced the
-        // 4K HDR leak to this exact path).
-        config.urlCache = nil
-        self.session = URLSession(configuration: config)
     }
 
     /// Apply the caller-supplied extra headers to a request. Used by
@@ -178,11 +186,6 @@ final class AVIOReader: @unchecked Sendable {
         streamEnded = true
         streamLock.unlock()
         streamDataReady.signal()
-
-        // Tear down the long-lived Range-fetch session. Streaming
-        // mode owns its own URLSession lifecycle inside
-        // streamDownloadSync, so it's not touched here.
-        session.invalidateAndCancel()
     }
 
     // MARK: - Read (called by FFmpeg on demux thread)
@@ -357,7 +360,7 @@ final class AVIOReader: @unchecked Sendable {
         }
 
         let streamSession = URLSession(
-            configuration: .ephemeral,
+            configuration: Self.makeSessionConfig(),
             delegate: delegate,
             delegateQueue: nil
         )
@@ -507,6 +510,17 @@ final class AVIOReader: @unchecked Sendable {
     }
 
     private func syncRequest(_ request: URLRequest) throws -> (Data, URLResponse) {
+        // Per-request session: the session is created here, used for
+        // exactly one dataTask, then dismantled via finishTasksAndInvalidate
+        // in the defer block. This releases the completed task and its
+        // response Data immediately instead of parking it in a long-lived
+        // session's task pool. urlCache is nil so each per-request
+        // session has zero in-memory cache instance, sidestepping the
+        // multi-URLCache leak that reverted the previous per-request
+        // attempt (commit fef8ef4).
+        let session = URLSession(configuration: Self.makeSessionConfig())
+        defer { session.finishTasksAndInvalidate() }
+
         let semaphore = DispatchSemaphore(value: 0)
         nonisolated(unsafe) var result: (Data, URLResponse)?
         nonisolated(unsafe) var error: Error?
