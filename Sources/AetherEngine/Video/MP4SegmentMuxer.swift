@@ -327,29 +327,20 @@ final class MP4SegmentMuxer {
     @discardableResult
     func writePacket(_ packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let ctx = formatContext else { return -1 }
-        // av_write_frame instead of av_interleaved_write_frame: the
-        // interleaved path puts every packet into libavformat's
-        // packet_buffer linked list (one av_malloc per PacketListEntry +
-        // one av_packet_move_ref) and only drains it when ALL streams
-        // have at least one packet queued, or when a manual flush
-        // arrives. With +frag_custom that flush only happens at our
-        // ~4 s segment boundaries, so audio packets (~47/s FLAC) and
-        // video packets (~24/s HEVC) sit in the queue between cuts.
-        //
-        // The malloc diagnostic showed avg block size growing from
-        // 720 B to 10 KB while block count stays ~stable — the textbook
-        // signature of a long-lived linked list whose entries' attached
-        // packet buffers keep growing as we feed in bigger frames. The
-        // queue is bounded per fragment but its allocator footprint is
-        // not (libmalloc keeps the pages mapped after free for reuse).
-        //
-        // Matroska serves video+audio packets in source-file order
-        // which is already chronologically interleaved, so we don't
-        // need libavformat to re-sort. av_write_frame writes the packet
-        // straight through to mov_write_packet, which copies the bytes
-        // into trk->mdat_buf and unrefs the packet immediately. No
-        // intermediate queue.
-        return av_write_frame(ctx, packet)
+        // av_interleaved_write_frame instead of av_write_frame.
+        // Tested av_write_frame against av_interleaved as a leak
+        // hypothesis (the latter buffers packets in a PacketListEntry
+        // linked list until cross-stream interleave is possible);
+        // empirically had no impact on the 8 MB/s mallocMB growth
+        // before the URLSession force-copy landed. Reverted to the
+        // interleaved variant because (a) it's the safer default for
+        // cross-stream DTS monotonicity and (b) leaves audio + video
+        // re-ordering to libavformat's tested code path rather than
+        // relying on matroska always serving us perfect chronological
+        // order. The actual leak ended up being upstream of the muxer
+        // (Foundation Data(d) silently aliasing dispatch_data backing),
+        // confirmed by the force-copy fix in AVIOReader.
+        return av_interleaved_write_frame(ctx, packet)
     }
 
     /// Trigger a fragment cut, finalize the just-completed segment's
@@ -532,22 +523,6 @@ final class MP4SegmentMuxer {
         guard let raw = av_malloc(Int(bufSize)) else { return nil }
         let buf = raw.assumingMemoryBound(to: UInt8.self)
         let opaque = Unmanaged.passUnretained(muxer).toOpaque()
-        // Provide a stub seek callback that only answers AVSEEK_SIZE
-        // (returns 0 = unknown) and refuses every other whence. With
-        // a seek callback AND seekable = AVIO_SEEKABLE_NORMAL,
-        // libavformat's mov muxer skips the path it takes when it
-        // believes the output is non-seekable. The non-seekable path
-        // builds up sample-table state in memory in case the moov
-        // ever needs reconstruction; with +empty_moov+frag_custom
-        // that state should be unreachable but libavformat allocates
-        // it anyway. The diagnostic memprobe just confirmed mallocMB
-        // grows ~8 MB/s while block count is roughly flat, the
-        // signature of realloc-growing internal buffers — pointing at
-        // exactly this kind of state machine. seekable=1 lets the
-        // muxer drop that bookkeeping; if mov muxer ever actually
-        // tries to seek (it shouldn't with empty_moov+frag_custom),
-        // the stub returns -1 and the muxer reports a write error
-        // rather than crashing.
         guard let pb = avio_alloc_context(
             buf,
             bufSize,
@@ -555,12 +530,16 @@ final class MP4SegmentMuxer {
             opaque,
             nil,
             mp4SegmentMuxerSinkWrite,
-            mp4SegmentMuxerSinkSeek
+            nil
         ) else {
             av_free(raw)
             return nil
         }
-        pb.pointee.seekable = Int32(AVIO_SEEKABLE_NORMAL)
+        // seekable=0: the mov muxer with +empty_moov+frag_custom is
+        // pure-forward writing, never asks for size or seeks back.
+        // (Tried seekable=AVIO_SEEKABLE_NORMAL + stub seek as a leak
+        // hypothesis; had no impact on memory growth.)
+        pb.pointee.seekable = 0
         return pb
     }
 
@@ -617,19 +596,3 @@ private func mp4SegmentMuxerSinkWrite(
     return size
 }
 
-/// `avio_alloc_context` seek callback. We don't support actual seeking
-/// (writes are pure forward, fragment-style), but providing this stub
-/// alongside `seekable = AVIO_SEEKABLE_NORMAL` lets the mov muxer skip
-/// its non-seekable code path which buffers more state internally.
-/// AVSEEK_SIZE returns 0 ("unknown") which is harmless because
-/// +empty_moov+frag_custom never asks for size; every other whence
-/// returns -1 so any real seek attempt surfaces as a muxer write
-/// error rather than corrupted output.
-private func mp4SegmentMuxerSinkSeek(
-    opaque: UnsafeMutableRawPointer?,
-    offset: Int64,
-    whence: Int32
-) -> Int64 {
-    if whence == AVSEEK_SIZE { return 0 }
-    return -1
-}

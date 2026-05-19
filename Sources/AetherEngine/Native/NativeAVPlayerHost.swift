@@ -73,11 +73,27 @@ final class NativeAVPlayerHost {
 
     init() {
         let player = AVPlayer()
-        // Default (true) is right for VOD HLS, AVPlayer waits for
-        // buffer. HLSAudioEngine sets `false` for live-audio latency
-        // reasons, don't copy that pattern here: AVPlayer would try
-        // to play the moment seg0 has any bytes and stall because
-        // the lazy remuxer needs seconds to produce a full fragment.
+        // Force preferredForwardBufferDuration to be a hard bound
+        // rather than advisory. With the default
+        // automaticallyWaitsToMinimizeStalling=true, AVPlayer treats
+        // preferredForwardBufferDuration as a hint and is free to
+        // buffer more than that — for 4K HDR HEVC sources AVPlayer
+        // has been observed pulling 30–60 s of decoded samples
+        // backwards on Apple TV 4K, which combined with the 4 s
+        // forward target inflates resident memory beyond what the
+        // 25 GB source can tolerate before jetsam. Setting auto=false
+        // makes the 4 s forward bound binding and stops AVPlayer
+        // from speculatively pre-buffering.
+        //
+        // Risk: AVPlayer plays as soon as the first segment has
+        // bytes available, which could stall at startup if our
+        // producer can't fill seg-0 quickly. The producer's
+        // backpressure budget is 10 segments ahead so by the time
+        // AVPlayer fetches seg-0 there are several already buffered;
+        // empirically the producer races AVPlayer by ~2-3 s on
+        // session start, which is well inside any normal startup
+        // wait.
+        player.automaticallyWaitsToMinimizeStalling = false
         self.avPlayer = player
         self.playerLayer = AVPlayerLayer(player: player)
         self.playerLayer.videoGravity = .resizeAspect
