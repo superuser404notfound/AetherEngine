@@ -491,17 +491,22 @@ final class HLSLocalServer: @unchecked Sendable {
                            category: .hlsServer)
         }
 
-        // HTTP/1.1 keep-alive loop. AVPlayer reuses a single
-        // connection for several segment fetches before opening
-        // a new one.
-        while true {
-            stateLock.lock()
-            let stopping = shouldStop
-            stateLock.unlock()
-            if stopping { return }
-            guard let request = readHTTPRequest(fd) else { return }
-            guard processRequest(request, on: fd) else { return }
-        }
+        // Connection-per-request (HTTP/1.0-style). Previously we
+        // pipelined multiple requests on one keep-alive connection,
+        // but CFNetwork in AVPlayer retained per-connection I/O buffer
+        // pages indefinitely (Instruments showed
+        // `VM: libnetwork = 66 MiB` after ~5 min, 100% persistent
+        // ratio, ~one 545 KB chunk per segment served, never freed).
+        // Closing after each request forces the CFNetwork connection
+        // state to drain on the next AVPlayer request, bounding the
+        // loopback memory growth. Extra TCP handshake per request is
+        // ~ms on localhost (negligible vs. ~4 s segment cadence).
+        stateLock.lock()
+        let stopping = shouldStop
+        stateLock.unlock()
+        if stopping { return }
+        guard let request = readHTTPRequest(fd) else { return }
+        _ = processRequest(request, on: fd)
     }
 
     /// Read until end of HTTP headers (`\r\n\r\n`). Returns the raw
@@ -678,7 +683,7 @@ final class HLSLocalServer: @unchecked Sendable {
             "Content-Length: \(data.count)\r\n" +
             "Access-Control-Allow-Origin: *\r\n" +
             "Cache-Control: no-store\r\n" +
-            "Connection: keep-alive\r\n" +
+            "Connection: close\r\n" +
             "\r\n"
         let headerData = Data(header.utf8)
 
@@ -712,7 +717,7 @@ final class HLSLocalServer: @unchecked Sendable {
             "Content-Length: \(fileSize)\r\n" +
             "Access-Control-Allow-Origin: *\r\n" +
             "Cache-Control: no-store\r\n" +
-            "Connection: keep-alive\r\n" +
+            "Connection: close\r\n" +
             "\r\n"
         let headerData = Data(header.utf8)
 
@@ -729,7 +734,7 @@ final class HLSLocalServer: @unchecked Sendable {
         let response =
             "HTTP/1.1 404 Not Found\r\n" +
             "Content-Length: 0\r\n" +
-            "Connection: keep-alive\r\n" +
+            "Connection: close\r\n" +
             "\r\n"
         EngineLog.emit("[HLSLocalServer] -> 404 \(path) reason=\(reason)",
                        category: .hlsServer)
