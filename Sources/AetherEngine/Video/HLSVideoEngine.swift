@@ -838,9 +838,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     let den = sampleRate * Int64(audioTb.num)
                     return max(1, num / den)
                 }()
-                audioHLSCodecs = compat.hlsCodecsString
+                // Apple HLS Authoring Spec: EAC3 with JOC (Atmos via
+                // DD+) should be advertised as `ec+3`, plain EAC3 5.1
+                // / 7.1 as `ec-3`. Profile 30 is libavformat's JOC
+                // marker on the source codecpar. Advertising plain
+                // `ec-3` for a JOC track means the dec3 box says
+                // Atmos but the playlist says plain DD+, which makes
+                // AVPlayer's downstream routing logic inconsistent
+                // (the field experiment was JOC playing fine on Sonos
+                // even with `ec-3`, but matching the spec is the
+                // correct posture for the cases where it matters).
+                let isJOC = compat == .eac3 && acp.profile == 30
+                audioHLSCodecs = isJOC ? "ec+3" : compat.hlsCodecsString
                 EngineLog.emit(
-                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(compat.hlsCodecsString)` "
+                    "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(audioHLSCodecs ?? "?")` "
+                    + "\(isJOC ? "[JOC=Atmos] " : "")"
                     + "(fallback duration=\(audioFallbackDurationPts) in audioTb \(audioTb.num)/\(audioTb.den))",
                     category: .session
                 )

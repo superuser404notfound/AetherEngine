@@ -162,6 +162,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// which AVPlayer ignores at fragment-level fetches once init.mp4
     /// is cached on its side).
     private var initCaptured: Bool = false
+    /// Latched after the first audio packet's bytes are dumped to the
+    /// log. Used to diff bridge-EAC3 output between source-codec
+    /// variants (TrueHD-bridge vs DTS-bridge) and to compare against
+    /// stream-copy EAC3 bitstreams, when the dec3 box content alone is
+    /// identical but the perceived output on the sink differs.
+    private var firstAudioPacketLogged: Bool = false
 
     /// Last valid dts (in *source* time_base) seen on the video and
     /// audio streams. Used to repair NOPTS dts emitted by the
@@ -1160,6 +1166,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             continue
                         }
+                        if !firstAudioPacketLogged, let firstPkt = flacPackets.first {
+                            logFirstAudioPacket(firstPkt, label: "bridge")
+                            firstAudioPacketLogged = true
+                        }
                         for fp in flacPackets {
                             // FLAC packet pts is in audio inputTimeBase.
                             // Rescale to source video TB for the segment
@@ -1182,6 +1192,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             trackedPacketFree(&fpVar)
                         }
                         continue
+                    }
+                    if !firstAudioPacketLogged {
+                        logFirstAudioPacket(packet, label: "stream-copy")
+                        firstAudioPacketLogged = true
                     }
                     // Stream-copy audio look-behind.
                     if let prev = pendingAudioPkt {
@@ -1308,6 +1322,54 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         var pkt: UnsafeMutablePointer<AVPacket>? = packet
         trackedPacketFree(&pkt)
+    }
+
+    /// Dump the first audio packet's first 24 bytes plus a parsed
+    /// EAC3/AC3 frame header summary. Fires once per producer session,
+    /// for both bridge-encoded and stream-copy audio paths. Used to
+    /// compare the actual EAC3 bitstream content between source codecs
+    /// (TrueHD-bridge vs DTS-bridge produce byte-identical dec3 boxes
+    /// but Sonos plays one as surround and the other as stereo — the
+    /// only place the difference can hide is the encoded frames
+    /// themselves, so dump them).
+    private func logFirstAudioPacket(_ pkt: UnsafeMutablePointer<AVPacket>, label: String) {
+        let size = Int(pkt.pointee.size)
+        guard let data = pkt.pointee.data, size > 0 else {
+            EngineLog.emit(
+                "[HLSSegmentProducer] audio pkt#0 [\(label)]: empty packet",
+                category: .session
+            )
+            return
+        }
+        let dumpLen = min(size, 24)
+        let bytes = UnsafeBufferPointer(start: data, count: dumpLen)
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+
+        var parsed = ""
+        if size >= 6, data[0] == 0x0B, data[1] == 0x77 {
+            // EAC3/AC3 syncword 0x0B77. Bit layout differs between AC3 and EAC3.
+            // EAC3 BSI: streamtype(2) substreamid(3) framesize(11) sr_code(2) num_blks(2) acmod(3) lfeon(1) bsid(5)
+            // AC3 BSI:  fscod(2) frmsizecod(6) bsid(5) bsmod(3) acmod(3) ...
+            // bsid is at the same bit offset region — read bytes 4-5 for EAC3 layout.
+            let b2 = data[2]; let b3 = data[3]; let b4 = data[4]; let b5 = data[5]
+            // Try EAC3 path first: bsid at byte 5 bits 7..3
+            let eac3StreamType = (b2 >> 6) & 0x03
+            let eac3FramesizeHi = b2 & 0x07
+            let eac3Framesize = (UInt16(eac3FramesizeHi) << 8) | UInt16(b3)
+            let eac3SrCode = (b4 >> 6) & 0x03
+            let eac3NumBlks = (b4 >> 4) & 0x03
+            let eac3Acmod = (b4 >> 1) & 0x07
+            let eac3LfeOn = b4 & 0x01
+            let eac3Bsid = (b5 >> 3) & 0x1F
+            parsed = " parsed[sync=0x0b77 streamType=\(eac3StreamType) framesize=\(eac3Framesize) srCode=\(eac3SrCode) numBlks=\(eac3NumBlks) acmod=\(eac3Acmod) lfeOn=\(eac3LfeOn) bsid=\(eac3Bsid)]"
+        }
+
+        EngineLog.emit(
+            "[HLSSegmentProducer] audio pkt#0 [\(label)] size=\(size) "
+            + "pts=\(pkt.pointee.pts) dts=\(pkt.pointee.dts) duration=\(pkt.pointee.duration) "
+            + "flags=0x\(String(pkt.pointee.flags, radix: 16)) hex=\(hex)\(parsed)",
+            category: .session
+        )
     }
 
     /// Same shape as `finalizeAndWriteVideo` but for stream-copy
