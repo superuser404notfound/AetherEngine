@@ -149,7 +149,9 @@ Why HLS-fMP4 for the native path instead of feeding `AVPlayer` the source URL di
 
 ### Dolby Atmos
 
-EAC3+JOC packets are stream-copied through the muxer with the original `dec3` extradata preserved. AVPlayer reads the segment, recognises JOC from the `dec3` box (`numDepSub=1`, `depChanLoc=0x0100`), and hands the bitstream to the HDMI output as Dolby MAT 2.0. The AVR lights up the Atmos indicator. The engine emits an explicit `[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact` diagnostic on every Atmos session so the path is unambiguous in the log.
+EAC3+JOC packets are stream-copied through the muxer untouched. AVPlayer reads the segment, recognises JOC from the `dec3` box (`numDepSub=1`, `depChanLoc=0x0100`), and hands the bitstream to the HDMI output as Dolby MAT 2.0. The AVR lights up the Atmos indicator. The engine emits an explicit `[HLSVideoEngine] EAC3+JOC Atmos: stream-copy engaged, MAT 2.0 passthrough intact` diagnostic on every Atmos session so the path is unambiguous in the log.
+
+Matroska CodecPrivate doesn't usually carry the pre-parsed `dec3` / `dac3` box content the mov muxer needs at `avformat_write_header` time, so the muxer is configured with `+delay_moov` (alongside `+empty_moov+default_base_moof+frag_custom`). The moov atom is deferred until the first fragment-cut flush, by which point packets have flowed through `mov_write_packet` and libavformat's `handle_eac3` / `handle_ac3` have populated the sample-entry boxes from the actual packet bitstream. The first cut emits the deferred ftyp+moov (routed by `FragmentSplitter` to init.mp4); subsequent cuts emit normal moof+mdat for the segment files. Net effect: EAC3 / AC3 from matroska direct-play stream-copies cleanly with valid sample-entries, no manual bitstream parsing on the host side.
 
 For codecs that fMP4 doesn't accept directly (TrueHD, DTS, DTS-HD MA), `AudioBridge` decodes to PCM and re-encodes losslessly as FLAC. This preserves bit-exact channel data for 5.1 / 7.1 surround but, by definition, loses spatial Atmos / TrueHD-MA object metadata (it's a PCM derivative). The trade-off is per-source: keep the spatial mix when the wrapper can carry it, fall back to lossless 5.1 / 7.1 when it can't. If a JOC source ever falls through to the bridge for whatever reason the engine logs a loud `WARNING: Atmos downgrade — ...` so the silent quality regression doesn't go unnoticed.
 
@@ -202,14 +204,16 @@ Sources/AetherEngine/
 │   └── AudioOutput.swift                    SW path: AVSampleBufferAudioRenderer + Synchronizer (master clock)
 ├── Decoder/
 │   ├── EmbeddedSubtitleDecoder.swift        Inline subtitle decode from demuxed packets
+│   ├── HardwareVideoDecoder.swift           SW path: VideoToolbox HW HEVC / AV1 decoder for sources routed away from AVPlayer
 │   ├── SoftwareVideoDecoder.swift           SW path: libavcodec/dav1d → CVPixelBuffer (NV12 / P010), HDR10+ side data
 │   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only)
 │   └── VideoDecoderTypes.swift              DecodedFrameHandler typealias + VideoDecoderError
 ├── Demuxer/
-│   ├── AVIOReader.swift                     URLSession → avio_alloc_context
+│   ├── AVIOReader.swift                     URLSession-backed avio_alloc_context with 64 MB Range-fetch chunks
 │   └── Demuxer.swift                        libavformat wrapper
 ├── Diagnostics/
-│   └── EngineLog.swift                      Gated OSLog emission
+│   ├── EngineLog.swift                      Gated OSLog emission
+│   └── PacketBalanceTracker.swift           Process-wide AVPacket alloc/free balance counter for leak diagnostics
 ├── Display/
 │   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints (native path)
 │   └── FrameRateSnap.swift                  Snap to standard rates (23.976, 24, 25, 29.97, 30, 50, 59.94, 60)
@@ -221,8 +225,10 @@ Sources/AetherEngine/
 ├── Renderer/
 │   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments
 ├── Video/
-│   ├── HLSVideoEngine.swift                 Native path: session orchestrator (muxer wiring, DV signaling, scrub teardown)
-│   ├── HLSSegmentProducer.swift             Native path: drives libavformat's hls-fmp4 muxer; custom io_open hooks segment writes
+│   ├── HLSVideoEngine.swift                 Native path: session orchestrator (muxer wiring, audio cascade, DV signaling, scrub teardown)
+│   ├── HLSSegmentProducer.swift             Native path: pump loop reading from Demuxer, feeding MP4SegmentMuxer, cutting fragments at segment-plan boundaries
+│   ├── MP4SegmentMuxer.swift                Native path: session-long fragmented-MP4 muxer (+empty_moov+default_base_moof+frag_custom+delay_moov)
+│   ├── FragmentSplitter.swift               Native path: routes mp4 muxer's avio output stream into init.mp4 (ftyp+moov) vs per-segment moof+mdat files
 │   ├── SegmentCache.swift                   Native path: producer/consumer segment store with backpressure + scrub-aware eviction
 │   └── VTCapabilityProbe.swift              VP9 / AV1 system-decode probe (gates codec routing)
 └── View/
