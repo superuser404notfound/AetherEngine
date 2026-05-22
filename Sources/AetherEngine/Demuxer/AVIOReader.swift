@@ -74,24 +74,34 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    /// Settled chunk size: 8 MB (PROBE).
+    /// Settled chunk size: 8 MB.
     ///
-    /// Re-tried 2026-05-22 at 8 MB after the previous revert to 64 MB
-    /// (10dbf76) restored bounded memory. The 8 MB attempt this time
-    /// pairs with a delegate-based incremental fetch path (long-lived
-    /// `chunkSession` + per-task `ChunkFetchDelegate`) instead of the
-    /// per-request session + completion-handler pattern that the
-    /// previous 8 MB drop used. Theoretical fix: URLSession's task
-    /// pool retains monolithic response bodies past completion-handler
-    /// return (that was the 6 MB/sec leak source at high fetch
-    /// frequency), but delegate-based incremental delivery doesn't
-    /// accumulate — each chunk is force-copied into our own buffer
-    /// and the source dispatch_data is released per delivery.
+    /// Field-validated 2026-05-22: paired with the delegate-based
+    /// incremental fetch path (long-lived `chunkSession` + per-task
+    /// `ChunkFetchDelegate`), 8 MB chunks plateau mallocMB at
+    /// 103-139 MB through a 5-min Harry Potter 4K HDR run with a
+    /// mid-session scrub. Compared to the historic 64 MB config that
+    /// oscillated 211-291 MB, the new path is both bounded AND lower
+    /// steady-state, while delivering ~1 s cold-start instead of
+    /// ~10 s.
     ///
-    /// If field-validated bounded memory at 8 MB, the chunk-size
-    /// optimisation sticks. If still leaks, revert to 64 MB (path 1
-    /// from the planning) and ship asymmetric chunks (4 MB first,
-    /// 64 MB after) as the steady-state.
+    /// Why the previous 8 MB attempt (e327e5e) leaked at 6 MB/sec
+    /// where this one doesn't: the old path used per-request
+    /// URLSession + completion-handler, and URLSession's task object
+    /// holds the monolithic response body in its internal state past
+    /// the handler invocation until `finishTasksAndInvalidate`
+    /// finishes (async). At 6 fetches/sec the pool of pending
+    /// sessions piled up faster than invalidation could drain. The
+    /// new path skips invalidation entirely: a shared long-lived
+    /// session, incremental delivery to a delegate that force-copies
+    /// each chunk, source dispatch_data released per delivery. No
+    /// monolithic body, no accumulation.
+    ///
+    /// Trade-off captured: cold-start fetches 8 MB at source bitrate
+    /// (~1 s on 50 Mbps 4K HEVC, vs ~10 s at 64 MB). Steady-state
+    /// URLSession ops at ~0.8/sec for 50 Mbps source, handled by the
+    /// shared session's TCP connection pool without per-fetch
+    /// handshake cost.
     ///
     /// History of this knob:
     ///   - Long-form leak investigation A/B (with the periodic
@@ -142,7 +152,7 @@ final class AVIOReader: @unchecked Sendable {
     ///     would need re-validating that force-copy makes the pool
     ///     drop bytes promptly enough.
     ///   - Bounded pool of N reusable URLSessions, round-robin.
-    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk (probe)
+    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
