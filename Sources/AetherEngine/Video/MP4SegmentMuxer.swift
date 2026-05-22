@@ -24,7 +24,9 @@ import Libavutil
 /// configured as a plain `mp4` muxer (not `hls` wrapper) with these
 /// movflags:
 ///
-///   +empty_moov         — moov written eagerly at write_header
+///   +empty_moov         — combined with +delay_moov this means the
+///                          moov is written WITHOUT per-sample data
+///                          (which lives in fragments instead).
 ///   +default_base_moof  — relative offsets in tfhd (cleaner fmp4)
 ///   +frag_custom        — caller controls fragment cuts via
 ///                          `av_write_frame(ctx, nil)`. The mp4
@@ -32,12 +34,42 @@ import Libavutil
 ///                          packets until cut time, naturally
 ///                          aligning audio + video at fragment
 ///                          boundaries.
+///   +delay_moov         — defers writing the moov atom until the
+///                          first `av_write_frame(ctx, nil)` call,
+///                          AFTER packets have been queued via
+///                          `writePacket`. This lets `mov_write_packet`
+///                          run its codec-specific extradata
+///                          population (`handle_eac3` for EAC3,
+///                          equivalent for AC3) on actual packet
+///                          bitstream BEFORE the sample-entry boxes
+///                          (dec3 / dac3) are serialised into the
+///                          moov. The matroska CodecPrivate for
+///                          AC3 / EAC3 doesn't usually carry the
+///                          pre-parsed bitstream info the mov muxer
+///                          wants, so without delay_moov those
+///                          sources fail write_header with -22 /
+///                          "Cannot write moov atom before EAC3/AC3
+///                          packets parsed", and stream-copy falls
+///                          back to the FLAC bridge (losing Atmos
+///                          JOC and burning decode→encode CPU).
+///                          delay_moov plus libavformat's existing
+///                          parsing recovers stream-copy for the
+///                          full Atmos JOC chain.
 ///
-///   (notably NOT: +delay_moov, +dash, +frag_keyframe — these were
-///   the leak source. Without +delay_moov the moov is written upfront
-///   empty. Without +dash there's no sidx accumulator across
-///   fragments. mfra at trailer is tiny per-fragment metadata; the
-///   FragmentSplitter discards it.)
+///   (notably NOT: +dash, +frag_keyframe — +dash adds a session-long
+///   sidx accumulator across fragments; +frag_keyframe would interfere
+///   with our explicit fragment-cut control via av_write_frame(nil).)
+///
+/// First-cut semantics with delay_moov: the first call to
+/// `av_write_frame(ctx, nil)` after a fragment's worth of packets is
+/// queued writes the deferred ftyp+moov AND begins emitting moof+mdat
+/// in the same flush — but how FFmpeg splits the flush across calls
+/// depends on interleaver state at the time. To stay safe, the
+/// `cutFragmentForNextSegment` method calls `av_write_frame(nil)`
+/// twice on the first cut: the first call drains moov (via
+/// FragmentSplitter → onHeaderComplete → init.mp4), the second call
+/// emits the moof+mdat (via FragmentSplitter → onFragmentBytes →
+/// seg-0 file). Subsequent cuts are single-call.
 ///
 /// Output flow per session:
 ///
@@ -136,6 +168,17 @@ final class MP4SegmentMuxer {
     /// becomes safe to call. Guards against double-trailer if the
     /// caller invokes finalize() after a header-write failure.
     private var headerWritten: Bool = false
+
+    /// Latched after the first `av_write_frame(ctx, NULL)` call,
+    /// which is when the `+delay_moov` muxer writes the deferred
+    /// ftyp + moov atoms. With delay_moov, the first cut needs
+    /// TWO `av_write_frame(NULL)` calls in sequence: the first emits
+    /// ftyp+moov (with valid `dec3` / `dac3` sample-entry boxes that
+    /// `mov_write_packet` populated as packets were queued via
+    /// `writePacket`), the second emits the actual moof+mdat for
+    /// seg-0. Subsequent cuts are single-call. See
+    /// `cutFragmentForNextSegment` for the call site.
+    private var moovFlushed: Bool = false
 
     /// Muxer's chosen time_base for the video output stream, latched
     /// after avformat_write_header. The mp4 muxer rewrites the stream's
@@ -293,7 +336,7 @@ final class MP4SegmentMuxer {
         // fragment boundaries on its own.
         var opts: OpaquePointer? = nil
         defer { av_dict_free(&opts) }
-        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom", 0)
+        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov", 0)
         _ = targetSegmentDurationSeconds  // currently unused — frag_custom drives cuts
 
         let ret = avformat_write_header(ctx, &opts)
@@ -416,7 +459,7 @@ final class MP4SegmentMuxer {
 
         var opts: OpaquePointer? = nil
         defer { av_dict_free(&opts) }
-        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom", 0)
+        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov", 0)
 
         return avformat_write_header(ctx, &opts)
     }
@@ -471,6 +514,18 @@ final class MP4SegmentMuxer {
     /// before this call), or `nil` if any write failed or the new
     /// file couldn't be opened. On a nil return the muxer state may
     /// be inconsistent; the caller should bail.
+    ///
+    /// First-cut wrinkle with `+delay_moov`: the deferred ftyp+moov
+    /// atoms are emitted by the first `av_write_frame(nil)` call.
+    /// The FragmentSplitter routes those bytes to `onHeaderComplete`
+    /// (= init.mp4), so the segment file's byte counter sees nothing
+    /// from that call. A second call flushes the actual moof+mdat
+    /// for seg-0, which the splitter routes to `onFragmentBytes` and
+    /// the byte counter records normally. If FFmpeg's
+    /// `mov_flush_fragment` writes both moov AND moof+mdat in a
+    /// single call (which it does when packets are already queued in
+    /// the interleaver, the typical case), the second call is a
+    /// safe no-op against an empty queue.
     func cutFragmentForNextSegment(_ nextIdx: Int) -> (path: URL, bytesWritten: Int)? {
         guard let ctx = formatContext, headerWritten, fd >= 0 else { return nil }
 
@@ -478,6 +533,10 @@ final class MP4SegmentMuxer {
         //    path. Bytes for the just-completed segment are written
         //    to the current `fd` via the avio callback.
         _ = av_write_frame(ctx, nil)
+        if !moovFlushed {
+            moovFlushed = true
+            _ = av_write_frame(ctx, nil)
+        }
 
         // 2. Snapshot the completed segment + reset counters.
         let completedPath = currentStagingPath

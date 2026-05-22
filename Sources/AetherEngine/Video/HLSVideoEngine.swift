@@ -228,13 +228,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var videoFallbackDurationPts: Int64 = 40
     private var audioFallbackDurationPts: Int64 = 0
 
-    /// Engine-owned copy of the audio codecpar with reconstructed
-    /// `dec3` / `dac3` extradata. Set by the cascade when stream-copy
-    /// of an EAC3 / AC3 source from MKV requires the extradata that
-    /// the source's CodecPrivate omitted. The producer / muxer get a
-    /// pointer to this allocation; we free it in `stop()`.
-    private var patchedAudioCodecpar: UnsafeMutablePointer<AVCodecParameters>?
-
     /// First video keyframe PTS (in source video TB), latched after
     /// the segment plan is built. Source `videoStream.start_time`
     /// is non-zero on MKV remuxes where the first usable IDR lives
@@ -1065,13 +1058,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         segmentPlan = []
         demuxer?.close()
         demuxer = nil
-        // Free the patched audio codecpar (with reconstructed dec3 /
-        // dac3 extradata) if we built one. avcodec_parameters_free
-        // releases the AVCodecParameters struct and the extradata
-        // buffer in one call.
-        if patchedAudioCodecpar != nil {
-            avcodec_parameters_free(&patchedAudioCodecpar)
-        }
     }
 
     deinit {
@@ -1208,16 +1194,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// sides is the same FLAC bridge fallback.
     private func buildProducerWithAudioCascade(
         preferBridge: Bool,
-        streamCopyAudio streamCopyAudioParam: HLSSegmentProducer.AudioConfig?,
+        streamCopyAudio: HLSSegmentProducer.AudioConfig?,
         sourceAudioStreamIndex: Int32,
         sourceAudioStream: UnsafeMutablePointer<AVStream>?,
         audioHLSCodecs: inout String?
     ) throws -> HLSSegmentProducer {
-        // Local mutable shadow so the pre-cascade dec3 / dac3 patch
-        // can swap in a codecpar pointer with reconstructed extradata
-        // before the stream-copy probe runs.
-        var streamCopyAudio = streamCopyAudioParam
-
         // Detect if the source is EAC3+JOC Atmos so we can flag any
         // stream-copy → FLAC-bridge fallback as an Atmos downgrade.
         // EAC3 profile=30 is the JOC marker libavformat's demuxer sets
@@ -1247,57 +1228,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
             return "audio"
         }()
-
-        // Pre-cascade: for AC3 / EAC3 sources from matroska direct-play,
-        // unconditionally reconstruct the dec3 / dac3 box content + the
-        // frame_size from the first audio packet's syncframe. The mov
-        // muxer needs both at write_header time, matroska CodecPrivate
-        // typically supplies neither (or supplies extradata in some
-        // non-dec3 shape the muxer still rejects), and our parser is
-        // cheap + canonical. Don't gate on `extradata_size == 0`: empirical
-        // observation on Kapriolen showed matroska sometimes provides
-        // a few bytes of AC3 codecpar.extradata that aren't in the
-        // shape mov wants, and the missing frame_size alone causes
-        // the muxer to reject ("track 1: codec frame size is not set").
-        if !preferBridge,
-           let cfg = streamCopyAudio,
-           let dem = demuxer,
-           sourceAudioStreamIndex >= 0,
-           let stream = sourceAudioStream {
-            let codecID = stream.pointee.codecpar.pointee.codec_id
-            if codecID == AV_CODEC_ID_AC3 || codecID == AV_CODEC_ID_EAC3 {
-                if let patched = reconstructAC3Extradata(
-                       demuxer: dem,
-                       audioStreamIndex: sourceAudioStreamIndex,
-                       sourceCodecpar: cfg.codecpar,
-                       codecID: codecID,
-                       jocPresent: sourceIsAtmos
-                   ) {
-                    patchedAudioCodecpar = patched
-                    streamCopyAudio = HLSSegmentProducer.AudioConfig(
-                        codecpar: UnsafePointer(patched),
-                        timeBase: cfg.timeBase,
-                        sourceStreamIndex: cfg.sourceStreamIndex,
-                        inputTimeBase: cfg.inputTimeBase,
-                        sourceTimeBase: cfg.sourceTimeBase,
-                        bridge: cfg.bridge
-                    )
-                    EngineLog.emit(
-                        "[HLSVideoEngine] reconstructed \(codecID == AV_CODEC_ID_EAC3 ? "dec3" : "dac3") extradata "
-                        + "(\(patched.pointee.extradata_size) B, frame_size=\(patched.pointee.frame_size)) from first syncframe — "
-                        + "stream-copy probe will now succeed for \(sourceIsAtmos ? "EAC3+JOC Atmos" : sourceCodecLabel)",
-                        category: .session
-                    )
-                } else {
-                    EngineLog.emit(
-                        "[HLSVideoEngine] WARNING: \(codecID == AV_CODEC_ID_EAC3 ? "dec3" : "dac3") reconstruction returned nil "
-                        + "(no syncword in first audio packet within 100-packet scan, or allocation failed). "
-                        + "Cascade will probe with the source's original codecpar and fall back to FLAC bridge on failure.",
-                        category: .session
-                    )
-                }
-            }
-        }
 
         if !preferBridge, let cfg = streamCopyAudio, let vcfg = savedVideoConfig {
             // Pre-flight the mp4 muxer's write_header to detect cases
@@ -1695,124 +1625,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let durationSeconds: Double
     }
 
-    // MARK: - dec3 / dac3 extradata reconstruction
-
-    /// Peek the first audio packet on `audioStreamIndex`, parse its
-    /// AC3 / EAC3 syncframe, build the corresponding `dac3` / `dec3`
-    /// box content, and return an engine-owned AVCodecParameters
-    /// pointing at the patched values. The peeked packets are pushed
-    /// back onto the demuxer so the pump consumes them in the original
-    /// order on its first reads — no source content is dropped.
-    ///
-    /// Returns nil on any failure (no audio packet found within the
-    /// scan window, syncword absent, allocation failure). Caller falls
-    /// back to the FLAC bridge when nil.
-    private func reconstructAC3Extradata(
-        demuxer: Demuxer,
-        audioStreamIndex: Int32,
-        sourceCodecpar: UnsafePointer<AVCodecParameters>,
-        codecID: AVCodecID,
-        jocPresent: Bool
-    ) -> UnsafeMutablePointer<AVCodecParameters>? {
-        // Scan the demuxer for the first audio packet, pushing back
-        // any preceding non-audio packets so the pump's read sequence
-        // is unaffected. 100 packets is a generous bound for matroska
-        // BlockGroup layouts where the audio block typically appears
-        // within the first few clusters.
-        var scanned = 0
-        var audioPkt: UnsafeMutablePointer<AVPacket>? = nil
-        let maxScan = 100
-        while scanned < maxScan {
-            let pkt: UnsafeMutablePointer<AVPacket>?
-            do {
-                pkt = try demuxer.readPacket()
-            } catch {
-                return nil
-            }
-            guard let p = pkt else {
-                // EOF before any audio packet appeared. Source is
-                // probably video-only, which our caller already
-                // handled via the audioStreamIndex < 0 guard, but
-                // bail safely if we got here anyway.
-                return nil
-            }
-            scanned += 1
-            if p.pointee.stream_index == audioStreamIndex {
-                audioPkt = p
-                break
-            }
-            demuxer.pushBack(p)
-        }
-        guard let pkt = audioPkt else { return nil }
-
-        // Parse the syncframe + build the extradata blob in one shot.
-        // The packet's data is borrowed (we don't take ownership of
-        // any bytes); after the parse + push-back below, the packet
-        // continues its normal lifecycle through the producer.
-        let extradata: Data?
-        if let dataPtr = pkt.pointee.data {
-            let size = Int(pkt.pointee.size)
-            switch codecID {
-            case AV_CODEC_ID_AC3:
-                extradata = AC3ExtradataReconstructor.ac3ExtradataFromSyncframe(
-                    packetData: dataPtr, size: size
-                )
-            case AV_CODEC_ID_EAC3:
-                extradata = AC3ExtradataReconstructor.eac3ExtradataFromSyncframe(
-                    packetData: dataPtr, size: size, jocPresent: jocPresent
-                )
-            default:
-                extradata = nil
-            }
-        } else {
-            extradata = nil
-        }
-        // The audio packet replays into the pump's first read once we
-        // push it back, regardless of whether parsing succeeded.
-        demuxer.pushBack(pkt)
-
-        guard let extra = extradata, !extra.isEmpty else { return nil }
-
-        // Allocate an engine-owned AVCodecParameters and copy the
-        // source's fields into it.
-        guard let patched = avcodec_parameters_alloc() else { return nil }
-        let copyRet = avcodec_parameters_copy(patched, sourceCodecpar)
-        guard copyRet >= 0 else {
-            var p: UnsafeMutablePointer<AVCodecParameters>? = patched
-            avcodec_parameters_free(&p)
-            return nil
-        }
-
-        // Attach the reconstructed extradata. The mov muxer expects
-        // an `av_malloc`'d buffer because it eventually calls
-        // `av_free` on it via `avcodec_parameters_free` when the muxer
-        // teardown runs.
-        let extraSize = extra.count
-        guard let extraBuf = av_malloc(extraSize) else {
-            var p: UnsafeMutablePointer<AVCodecParameters>? = patched
-            avcodec_parameters_free(&p)
-            return nil
-        }
-        extra.withUnsafeBytes { src in
-            if let base = src.baseAddress {
-                memcpy(extraBuf, base, extraSize)
-            }
-        }
-        patched.pointee.extradata = extraBuf.assumingMemoryBound(to: UInt8.self)
-        patched.pointee.extradata_size = Int32(extraSize)
-
-        // Defensive: matroska often leaves frame_size = 0 on AC3 /
-        // EAC3 codecpars. The mov muxer's first error message on the
-        // missing-extradata case was "track 1: codec frame size is
-        // not set". Pin to the spec value so the muxer doesn't
-        // reject the moov for a frame_size reason after we've fixed
-        // the extradata reason.
-        if patched.pointee.frame_size == 0 {
-            patched.pointee.frame_size = 1536
-        }
-
-        return patched
-    }
 }
 
 // MARK: - Cache-backed provider

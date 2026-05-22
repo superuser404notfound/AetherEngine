@@ -371,19 +371,9 @@ final class Demuxer: @unchecked Sendable {
     /// Read the next packet from the container.
     /// Returns the packet on success, nil at EOF.
     /// Throws on read errors (network failure, corrupt data, etc).
-    ///
-    /// If packets have been pushed back via `pushBack(_:)`, those are
-    /// returned in FIFO order before the demuxer is consulted again.
-    /// The pushback queue lets the engine's audio cascade peek at the
-    /// first audio packet for codec-specific extradata reconstruction
-    /// (AC3 / EAC3 dec3 / dac3 box derivation) without losing the
-    /// peeked packets — they replay into the pump on its first read.
     func readPacket() throws -> UnsafeMutablePointer<AVPacket>? {
         accessLock.lock()
         defer { accessLock.unlock() }
-        if !pushbackQueue.isEmpty {
-            return pushbackQueue.removeFirst()
-        }
         guard let ctx = formatContext else { return nil }
         var packet: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc()
         guard packet != nil else { return nil }
@@ -397,29 +387,6 @@ final class Demuxer: @unchecked Sendable {
             throw DemuxerError.readFailed(code: ret)
         }
         return packet
-    }
-
-    /// Owned packets queued ahead of any live demuxer reads. FIFO so
-    /// the consumer sees packets in the order they were originally
-    /// produced by the demuxer. Cleared by `close()` along with the
-    /// rest of the demuxer state.
-    private var pushbackQueue: [UnsafeMutablePointer<AVPacket>] = []
-
-    /// Re-queue an already-read packet so the next `readPacket()` call
-    /// returns it instead of advancing the underlying demuxer. Caller
-    /// transfers ownership of the packet to the demuxer; the demuxer
-    /// frees it via `trackedPacketFree` in close() if it never gets
-    /// re-read.
-    ///
-    /// Multiple calls accumulate in FIFO order — push three packets,
-    /// the next three reads return them in push order. Used by the
-    /// audio cascade's syncframe peek where we read past zero or more
-    /// non-audio packets before finding the first audio packet on the
-    /// chosen stream.
-    func pushBack(_ packet: UnsafeMutablePointer<AVPacket>) {
-        accessLock.lock()
-        defer { accessLock.unlock() }
-        pushbackQueue.append(packet)
     }
 
     /// Seek to a position in seconds.
@@ -459,14 +426,6 @@ final class Demuxer: @unchecked Sendable {
             avformat_close_input(&formatContext)
         }
         formatContext = nil
-        // Drain any pushed-back packets that never got consumed. The
-        // pump normally drains them on its first reads, but a stop()
-        // before the pump starts (or a failed start that aborts before
-        // running the pump loop) can leave them here.
-        for var pkt: UnsafeMutablePointer<AVPacket>? in pushbackQueue {
-            trackedPacketFree(&pkt)
-        }
-        pushbackQueue.removeAll()
         accessLock.unlock()
 
         avioReader?.close()
