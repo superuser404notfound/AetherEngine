@@ -74,7 +74,23 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk
+    /// Diagnostic A/B: bumped from 8 MB to 64 MB to test the hypothesis
+    /// that the long-form leak is proportional to URLSession call count
+    /// rather than total fetched bytes. Test correlation across three
+    /// sources (Bluey 1080p AVC SDR, Kapriolen 1080p HEVC SDR, Harry
+    /// Potter 4K HDR HEVC) showed the leak rate tracking
+    /// `avioFetchedMB` rate ~1:1 — each fetched byte leaks ~one byte.
+    /// If the leak scales with the number of `URLSession` invocations
+    /// (per-request `finishTasksAndInvalidate` lag, completion-handler
+    /// closure retention, dispatch_data pinning), then 8x fewer fetches
+    /// at 64 MB should drop the leak rate by ~8x. If the rate stays the
+    /// same, the leak is byte-proportional and lives below the
+    /// `syncRequest` boundary (Foundation `Data` backing alias, libavformat
+    /// input context retention, etc.) and we need to bypass URLSession
+    /// entirely (NWConnection / dispatch_io). Memory cost during the test:
+    /// 128 MB peak (one current + one prefetch chunk), acceptable for a
+    /// diagnostic spike.
+    private static let chunkSize = 64 * 1024 * 1024  // 64 MB per chunk (was 8 MB; diagnostic A/B)
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
