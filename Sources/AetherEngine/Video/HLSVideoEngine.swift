@@ -1821,7 +1821,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
             return logServed(index: index, bytes: hit, totalStart: totalStart, restarted: false)
         }
 
-        // Decide whether to restart the producer or wait. Three cases:
+        // Decide whether to restart the producer or wait. Four cases:
         //   - range is empty → the producer hasn't produced (or hasn't
         //     produced anything in our current window after declareTarget
         //     pruned). If the requested index is beyond the producer's
@@ -1833,10 +1833,32 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         //   - index too far above the cache's high edge → forward
         //     seek past where the producer can reach via backpressure,
         //     restart.
+        //   - index nominally within the cache's [min..max] range but
+        //     peek failed → a HOLE in the cache. Happens after CC's
+        //     +10s skip: AVPlayer rebuffers from a position behind the
+        //     skip target, declareTarget slides the window back, the
+        //     prune evicts a segment AVPlayer will need ~10s later when
+        //     it plays through to it. Producer is by then past the
+        //     window's forward edge and produces into oblivion (every
+        //     store gets pruned immediately for being out of window).
+        //     Restart at `index` so the producer re-produces it.
         let range = cache.indexRange()
         let needsRestart: Bool
         if let r = range {
-            needsRestart = (index < r.0) || (index > r.1 + Self.forwardWaitWindow)
+            if index < r.0 {
+                needsRestart = true
+            } else if index > r.1 + Self.forwardWaitWindow {
+                needsRestart = true
+            } else if index >= r.0 && index <= r.1 {
+                // Hole: peek already returned nil at the top of this
+                // function, so the only way we land in [r.0..r.1] is
+                // if the slot was pruned out from under a fresh fetch.
+                needsRestart = true
+            } else {
+                // r.1 < index <= r.1 + forwardWaitWindow — producer is
+                // about to write this; backpressure-wait.
+                needsRestart = false
+            }
         } else {
             // Empty cache. Producer's plausible cold-start reach is
             // ~3 segments; anything past that and we know we want a
