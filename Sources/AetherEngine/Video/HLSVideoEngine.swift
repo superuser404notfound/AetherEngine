@@ -478,14 +478,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
             )
         }
 
-        // 4. Classify the DV variant and pick the master-playlist
-        //    CODECS string + codec_tag override. Same routing rules as
-        //    before: P5 / P8.1 use bare `dvh1.<profile>.<dvLevel>`
-        //    direct form; P8.4 keeps the cross-player-compat `hvc1.2.4
-        //    .LXX` + SUPPLEMENTAL `dvh1.08.LL/db4h` because its base
-        //    layer is HLG-HEVC. With dvModeAvailable=false the engine
-        //    downgrades any DV source to plain HEVC (hvc1) so AVPlayer
-        //    doesn't reject the asset on a non-DV-capable display.
+        // 4. Classify the DV variant and pick the sample-entry codec
+        //    tag + CODECS string. Per-profile policy:
+        //
+        //    - P5  → always `dvh1.05.<level>` + `dvcC` box, regardless
+        //            of panel capability. AVPlayer's system DV decoder
+        //            converts IPT-PQ-c2 to YCbCr and auto-tonemaps to
+        //            the panel's actual mode. On non-DV panels the
+        //            playlist routing below forces media (master with
+        //            bare `dvh1.05` is rejected by tvOS 26's strict
+        //            codec filter).
+        //    - P8.1 → `dvh1.08.<level>` on DV-capable display, `hvc1.2
+        //            .4.L<level>` downgrade on non-DV display (HDR10
+        //            base layer plays as plain HEVC HDR10).
+        //    - P8.4 → `hvc1.2.4.L<level>` + SUPPLEMENTAL `dvh1.08.<level>
+        //            /db4h` on every panel; the cross-player-compat
+        //            form because P8.4's base is HLG-HEVC.
         let codecTagOverride: String?
         let videoRange: HLSVideoRange
         let primaryCodecs: String
@@ -603,22 +611,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
             case .profile5, .profile81, .profile84, .profile7, .profile82:
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: -1, compatID: -1)
             }
-        } else if !effectiveDvMode {
-            codecTagOverride = "hvc1"
-            let hevcLevelRaw = Int(codecpar.pointee.level)
-            let hevcLevel = hevcLevelRaw > 0 ? hevcLevelRaw : 150
-            let trc = codecpar.pointee.color_trc
-            if trc == AVCOL_TRC_ARIB_STD_B67 {
-                videoRange = .hlg
-            } else if trc == AVCOL_TRC_SMPTE2084 {
-                videoRange = .pq
-            } else {
-                videoRange = .sdr
-            }
-            primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-            supplementalCodecs = nil
-            dvVariant = .none
         } else {
+            // HEVC path (DV or plain). Always classify the DV variant
+            // so DV5 can emit a `dvh1` sample entry + `dvcC` box even
+            // on a panel that won't engage DV mode at the HDMI
+            // handshake. AVPlayer has a system-level DV decoder on
+            // every tvOS 14+ device; it engages on the `dvh1` sample
+            // entry regardless of panel state, converts the IPT-PQ-c2
+            // elementary stream to a standard YCbCr colorspace, and
+            // auto-tonemaps to whatever the panel can accept (HDR10 on
+            // an HDR10-only TV, SDR on an SDR-locked panel). Without
+            // the `dvh1` sample entry, the HEVC bitstream's IPT chroma
+            // gets interpreted as YCbCr+BT.2020+PQ, producing the
+            // green/purple cast DrHurt reported on AetherEngine#4
+            // Build 160 + 163. Per DrHurt's #19 manual remux test,
+            // `dvh1` sample entry + media playlist routing plays DV5
+            // correctly on every panel mode. The routing branch below
+            // forces media playlist for the DV5-on-non-DV-panel case.
             let dvRecord = doviConfigRecord(from: codecpar)
             dvVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_HEVC)
 
@@ -630,28 +639,36 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
             switch dvVariant {
             case .profile5:
-                // P5 carries no base layer (IPT-PQ-c2 elementary
-                // stream only). Bare `dvh1` is the only legal
-                // sample-entry. AVPlayer can't tone-map P5 to SDR on
-                // a panel locked out of HDR/DV; renders the IPT
-                // chroma as YCbCr → green/purple cast (DrHurt #4
-                // Build 160). No engine-side mitigation exists short
-                // of refusing playback on locked-SDR panels; left as
-                // a known limitation pending a host-level error path.
+                // P5 has no HDR10 base layer (IPT-PQ-c2 elementary
+                // stream only). `dvh1` sample entry + `dvcC` box is
+                // the only legal packaging. Emitted regardless of
+                // `effectiveDvMode` because AVPlayer's DV decoder
+                // engages on the sample entry independent of panel
+                // state and tonemaps internally; without `dvh1` the
+                // IPT chroma is misinterpreted as YCbCr (green/purple
+                // cast). Master playlist with bare `dvh1.05` CODECS
+                // is rejected by tvOS 26's master-level codec filter
+                // on non-DV panels (-11868), so the routing logic
+                // forces media playlist when the panel can't engage
+                // DV/HDR mode.
                 codecTagOverride = "dvh1"
                 videoRange = .pq
                 primaryCodecs = "dvh1.05.\(dvLevelStr)"
                 supplementalCodecs = nil
             case .profile81:
-                // P8.1 (HDR10-compat base layer). Bare `dvh1` works
-                // both in DV mode (AVKit reads sample-entry FourCC
-                // and asks the panel for DV) and falls back cleanly
-                // to HDR10 base rendering when the panel won't
-                // engage DV (locked SDR → HDR10 → tonemap to SDR
-                // gives correct colors per DrHurt #4).
-                codecTagOverride = "dvh1"
+                // P8.1 (HDR10-compat base layer). `dvh1` on a DV-
+                // capable display so AVKit reads the sample-entry
+                // FourCC and asks the panel for DV; `hvc1` on a
+                // non-DV display so AVPlayer plays the HDR10 base
+                // layer as plain HEVC HDR10 (DrHurt #4 #7).
+                if effectiveDvMode {
+                    codecTagOverride = "dvh1"
+                    primaryCodecs = "dvh1.08.\(dvLevelStr)"
+                } else {
+                    codecTagOverride = "hvc1"
+                    primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
+                }
                 videoRange = .pq
-                primaryCodecs = "dvh1.08.\(dvLevelStr)"
                 supplementalCodecs = nil
             case .profile84:
                 // P8.4 (HLG-compat base layer). Bare `dvh1` empirically
@@ -946,18 +963,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // routing in the first place. SDR HEVC has nothing to advertise
         // and stays on the media playlist regardless of panel state.
         //
-        // Non-DV display + DV source is the exception that always
-        // routes media: bare `dvh1` codec strings in the master are
-        // rejected by tvOS 26's strict master-level codec filter
-        // (`-11868`) on non-DV panels, so the auto-tonemap path on the
-        // base layer through the media playlist is the only one that
-        // works there.
+        // Non-DV display + DV5 source is the exception that always
+        // routes media: bare `dvh1.05` CODECS in the master is rejected
+        // by tvOS 26's strict master-level codec filter (`-11868`) on
+        // non-DV panels. The media playlist path lets AVPlayer read
+        // the `dvh1` sample entry from the segment's init.mp4 directly,
+        // engage the system DV decoder for IPT→YCbCr conversion, and
+        // auto-tonemap to the panel's actual capability. DV8.1 and DV8.4
+        // on non-DV panels already downgrade their CODECS string to
+        // `hvc1.*` (see HEVC dispatch above), so the master-side codec
+        // filter accepts them; only DV5 needs this guard.
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
             || (displaySupportsHDR && matchContentEnabled)
-        let nonDVPanelWithDVSource = dvVariant != .none && !effectiveDvMode
+        let dv5OnNonDVPanel = dvVariant == .profile5 && !effectiveDvMode
         let useMasterPlaylist: Bool
-        if nonDVPanelWithDVSource {
+        if dv5OnNonDVPanel {
             useMasterPlaylist = false
         } else {
             useMasterPlaylist = sourceIsHDR && panelReadyForHDR
