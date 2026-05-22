@@ -549,6 +549,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             "[HLSSegmentProducer] init.mp4 captured (\(initBytes.count) B)",
                             category: .session
                         )
+                        let label = self.audioConfig?.bridge != nil
+                            ? "bridge-audio"
+                            : "stream-copy-audio"
+                        InitSegmentInspector.dumpAudioSampleEntry(
+                            initBytes: initBytes,
+                            sessionLabel: label
+                        )
                     }
                 }
             )
