@@ -74,23 +74,28 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    /// Diagnostic A/B: bumped from 8 MB to 64 MB to test the hypothesis
-    /// that the long-form leak is proportional to URLSession call count
-    /// rather than total fetched bytes. Test correlation across three
-    /// sources (Bluey 1080p AVC SDR, Kapriolen 1080p HEVC SDR, Harry
-    /// Potter 4K HDR HEVC) showed the leak rate tracking
-    /// `avioFetchedMB` rate ~1:1 — each fetched byte leaks ~one byte.
-    /// If the leak scales with the number of `URLSession` invocations
-    /// (per-request `finishTasksAndInvalidate` lag, completion-handler
-    /// closure retention, dispatch_data pinning), then 8x fewer fetches
-    /// at 64 MB should drop the leak rate by ~8x. If the rate stays the
-    /// same, the leak is byte-proportional and lives below the
-    /// `syncRequest` boundary (Foundation `Data` backing alias, libavformat
-    /// input context retention, etc.) and we need to bypass URLSession
-    /// entirely (NWConnection / dispatch_io). Memory cost during the test:
-    /// 128 MB peak (one current + one prefetch chunk), acceptable for a
-    /// diagnostic spike.
-    private static let chunkSize = 64 * 1024 * 1024  // 64 MB per chunk (was 8 MB; diagnostic A/B)
+    /// Diagnostic A/B round 2: bumped from 64 MB to 256 MB to test
+    /// whether the residual ~0.65 MB/s leak that survives the 64 MB
+    /// jump is still proportional to URLSession call count or has
+    /// shifted to a per-recycle teardown leak (the parallel hypothesis).
+    ///
+    /// 8 MB chunks  → 3.20 MB/s leak (URLSession-dominated)
+    /// 64 MB chunks → 0.64 MB/s leak (5x reduction; partial fix)
+    /// 256 MB chunks → ?
+    ///
+    /// If 256 MB drops the rate to ~0.16 MB/s (linear with call count
+    /// reduction) → URLSession is still the primary source. The
+    /// "remaining" leak is just the same per-call leak at lower rate.
+    /// If 256 MB stays at ~0.64 MB/s → URLSession is no longer the
+    /// dominant contributor; the remainder is in demuxer recycle
+    /// teardown (old AVIOReader / AVFormatContext retention) or
+    /// elsewhere.
+    ///
+    /// Memory cost during this spike: ~512 MB peak (one current + one
+    /// prefetch chunk). Acceptable on a 4 GB Apple TV 4K for a
+    /// diagnostic; not appropriate for production until we know which
+    /// chunk size to commit to.
+    private static let chunkSize = 256 * 1024 * 1024  // 256 MB per chunk (diagnostic A/B round 2)
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
@@ -171,6 +176,7 @@ final class AVIOReader: @unchecked Sendable {
     }
 
     private var isClosed = false
+    private var isFullyClosed = false
 
     /// Mark as closed without freeing resources. The AVIO read callback
     /// checks this flag and returns -1 immediately, which causes
@@ -184,8 +190,26 @@ final class AVIOReader: @unchecked Sendable {
         streamDataReady.signal()
     }
 
+    /// Fully release the AVIOContext, internal AVIO buffer, prefetch /
+    /// current data buffers, and signal stream-mode termination.
+    /// Idempotent against repeat invocation, but NOT idempotent against
+    /// `markClosed` — they're two separate state transitions:
+    ///
+    /// 1. `markClosed` (unblock demux thread) — fast, no allocations.
+    ///    `Demuxer.close()` calls it first so `av_read_frame` returns
+    ///    immediately and the demuxer's access lock can be acquired
+    ///    without waiting on a suspended read.
+    /// 2. `close` (free resources) — invoked once the demuxer's
+    ///    access lock is released. Must NOT short-circuit when
+    ///    `isClosed` is already true (the previous `guard !isClosed`
+    ///    did exactly that, which leaked the 64 MB current + 64 MB
+    ///    prefetch chunk Data buffers on every demuxer recycle —
+    ///    observed as the residual ~0.64 MB/s growth after the
+    ///    URLSession chunk-size A/B). `isFullyClosed` is a separate
+    ///    latch for actual idempotency.
     func close() {
-        guard !isClosed else { return }
+        guard !isFullyClosed else { return }
+        isFullyClosed = true
         isClosed = true
         if context != nil {
             avio_context_free(&context)
@@ -200,6 +224,7 @@ final class AVIOReader: @unchecked Sendable {
 
         streamLock.lock()
         streamEnded = true
+        streamBuffer = Data()
         streamLock.unlock()
         streamDataReady.signal()
     }
