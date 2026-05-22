@@ -74,7 +74,24 @@ final class AVIOReader: @unchecked Sendable {
 
     // MARK: - Seekable Mode (Range requests)
 
-    /// Settled chunk size: 64 MB.
+    /// Settled chunk size: 8 MB (PROBE).
+    ///
+    /// Re-tried 2026-05-22 at 8 MB after the previous revert to 64 MB
+    /// (10dbf76) restored bounded memory. The 8 MB attempt this time
+    /// pairs with a delegate-based incremental fetch path (long-lived
+    /// `chunkSession` + per-task `ChunkFetchDelegate`) instead of the
+    /// per-request session + completion-handler pattern that the
+    /// previous 8 MB drop used. Theoretical fix: URLSession's task
+    /// pool retains monolithic response bodies past completion-handler
+    /// return (that was the 6 MB/sec leak source at high fetch
+    /// frequency), but delegate-based incremental delivery doesn't
+    /// accumulate — each chunk is force-copied into our own buffer
+    /// and the source dispatch_data is released per delivery.
+    ///
+    /// If field-validated bounded memory at 8 MB, the chunk-size
+    /// optimisation sticks. If still leaks, revert to 64 MB (path 1
+    /// from the planning) and ship asymmetric chunks (4 MB first,
+    /// 64 MB after) as the steady-state.
     ///
     /// History of this knob:
     ///   - Long-form leak investigation A/B (with the periodic
@@ -125,7 +142,7 @@ final class AVIOReader: @unchecked Sendable {
     ///     would need re-validating that force-copy makes the pool
     ///     drop bytes promptly enough.
     ///   - Bounded pool of N reusable URLSessions, round-robin.
-    private static let chunkSize = 64 * 1024 * 1024  // 64 MB per chunk
+    private static let chunkSize = 8 * 1024 * 1024  // 8 MB per chunk (probe)
     private static let avioBufferSize: Int32 = 256 * 1024  // 256 KB
     private static let streamTrimThreshold = 1024 * 1024  // 1 MB, keep for small backward seeks
 
@@ -680,70 +697,40 @@ final class AVIOReader: @unchecked Sendable {
         return nil
     }
 
+    /// Long-lived URLSession dedicated to chunk fetches in the seekable
+    /// path. Paired with per-task `ChunkFetchDelegate` instances that
+    /// receive bytes incrementally and force-copy each delivery into
+    /// our own buffer.
+    ///
+    /// Why long-lived this time (the historic leak chase rejected
+    /// long-lived sessions): the original leak was driven by
+    /// completion-handler-style dataTasks where URLSession's task
+    /// pool accumulated monolithic response bodies past completion-
+    /// handler return. The delegate-based path doesn't accumulate —
+    /// URLSession delivers chunks as they arrive and releases its
+    /// internal references once the delegate ack returns. With
+    /// per-delivery force-copy, the source dispatch_data is released
+    /// per delivery, never accumulating. No invalidation overhead per
+    /// fetch either, so high-frequency small-chunk patterns don't
+    /// stack up un-invalidated sessions.
+    private static let chunkSession: URLSession = {
+        let config = makeSessionConfig()
+        return URLSession(configuration: config, delegate: nil, delegateQueue: nil)
+    }()
+
     private func syncRequest(_ request: URLRequest) throws -> (Data, URLResponse) {
-        // Per-request session AND completion-handler force-copy. Either
-        // one alone is insufficient: Instruments (commit 8e47344) traced
-        // the long-form 4K HDR leak to URLSession's dispatch_data_t
-        // task-pool keeping response bodies alive past the completion
-        // handler. Per-request session releases the pool entry only when
-        // finishTasksAndInvalidate completes — which is async and can
-        // lag the next fetch by enough to keep the previous chunk's
-        // dispatch_data pinned. The force-copy makes the returned Data
-        // a brand-new contiguous heap allocation that holds no reference
-        // to URLSession's backing buffer at all, so the pool can drop
-        // the dispatch_data immediately without keeping our chunk alive.
-        //
-        // The malloc diagnostic shipped this session showed mallocMB
-        // growing ~8 MB/s with block count roughly flat — consistent
-        // with a small fixed set of buffers being realloc'd-and-kept
-        // by libmalloc instead of returned to the kernel. dispatch_data
-        // is exactly that pattern: libmalloc tracks each pool slot, the
-        // contents change but the slot count stays small.
-        //
-        // At the 64 MB chunkSize, the per-chunk overhead is one
-        // 64 MB memcpy per fetch — negligible at 4K HEVC bitrates
-        // (~0.8 chunks/s = 50 MB/s copy bandwidth, far under any
-        // L1/L2 ceiling).
-        let session = URLSession(configuration: Self.makeSessionConfig())
-        defer { session.finishTasksAndInvalidate() }
+        // Delegate-based incremental fetch on a shared long-lived
+        // session. See `chunkSession` for the why; the rest of this
+        // function is just lifecycle: build a fresh delegate, attach
+        // it to a fresh task on the shared session, wait on a
+        // semaphore for completion, hand back our heap-allocated
+        // body Data.
+        let delegate = ChunkFetchDelegate()
+        let task = Self.chunkSession.dataTask(with: request)
+        task.delegate = delegate
 
         let semaphore = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var result: (Data, URLResponse)?
-        nonisolated(unsafe) var error: Error?
-
-        let task = session.dataTask(with: request) { d, r, e in
-            if let e = e {
-                error = e
-            } else if let d = d, let r = r {
-                // Force-copy: allocate a fresh contiguous Data on our
-                // heap and memcpy the bytes in. The returned Data has
-                // no reference to URLSession's dispatch_data_t, so the
-                // task pool can release the response body immediately
-                // when the completion handler returns.
-                //
-                // Foundation may short-circuit Data(other) into a
-                // structural share when both are dispatch_data-backed
-                // (= the previous test showed only a partial leak
-                // reduction). Force a real memcpy by allocating an
-                // empty Data of the right size and writing the source
-                // bytes into it under withUnsafeMutableBytes. Foundation
-                // cannot alias this with the source — it has to do the
-                // copy.
-                let count = d.count
-                var copied = Data(count: count)
-                copied.withUnsafeMutableBytes { dst in
-                    d.withUnsafeBytes { src in
-                        if let dstBase = dst.baseAddress, let srcBase = src.baseAddress {
-                            dstBase.copyMemory(from: srcBase, byteCount: count)
-                        }
-                    }
-                }
-                result = (copied, r)
-            } else {
-                error = AVIOReaderError.noResponse
-            }
-            semaphore.signal()
-        }
+        delegate.onCompletion = { semaphore.signal() }
         task.resume()
 
         if semaphore.wait(timeout: .now() + .seconds(35)) == .timedOut {
@@ -751,9 +738,78 @@ final class AVIOReader: @unchecked Sendable {
             throw AVIOReaderError.requestTimeout
         }
 
-        if let error = error { throw error }
-        guard let result = result else { throw AVIOReaderError.noResponse }
-        return result
+        if let err = delegate.error { throw err }
+        guard let response = delegate.response else { throw AVIOReaderError.noResponse }
+        return (delegate.body, response)
+    }
+}
+
+// MARK: - Chunk Fetch Delegate
+
+/// Per-task delegate for the seekable-mode range fetch. Receives
+/// response bytes incrementally and force-copies each delivery into
+/// its own `body` Data buffer, so the source dispatch_data references
+/// can be released per delivery instead of accumulating in URLSession's
+/// task pool past completion.
+///
+/// `@unchecked Sendable` because the delegate is single-use per fetch
+/// and ownership is enforced by the calling thread blocking on a
+/// semaphore: URLSession's delegate callbacks run on its own queue
+/// while the calling thread waits, so there's no concurrent access to
+/// the mutable fields. Body access from the caller happens only after
+/// `onCompletion` fires + the semaphore signals.
+private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    var body = Data()
+    var response: URLResponse?
+    var error: Error?
+    var onCompletion: (() -> Void)?
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        self.response = response
+        // Pre-reserve buffer space when Content-Length is known so
+        // body.append doesn't repeatedly realloc as chunks stream in.
+        if let http = response as? HTTPURLResponse {
+            let len = Int(http.expectedContentLength)
+            if len > 0 { body.reserveCapacity(len) }
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        // Explicit force-copy: append a fresh contiguous range to our
+        // heap-backed `body` and memcpy the source bytes in. Foundation's
+        // own `body.append(data)` may keep a reference to the source
+        // dispatch_data via copy-on-write semantics, defeating the
+        // whole point. Manual memcpy through withUnsafeMutableBytes
+        // guarantees the source can be dropped once this method returns.
+        let count = data.count
+        let baseCount = body.count
+        body.count = baseCount + count
+        body.withUnsafeMutableBytes { dst in
+            data.withUnsafeBytes { src in
+                if let dstBase = dst.baseAddress, let srcBase = src.baseAddress {
+                    (dstBase + baseCount).copyMemory(from: srcBase, byteCount: count)
+                }
+            }
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        self.error = error
+        onCompletion?()
     }
 }
 
