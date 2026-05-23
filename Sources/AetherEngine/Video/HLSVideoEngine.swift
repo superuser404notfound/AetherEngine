@@ -1812,17 +1812,31 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
 
     /// Forward-distance threshold beyond which a fetch triggers a
     /// restart instead of waiting for the producer to catch up.
-    /// Tightened from 8 to 3 after a Vincent repro on Sodalite where
-    /// AVPlayer requested seg-13 while cache.max was at seg-5 (gap=8,
-    /// inside the old window) and the request waited 26 s for the
-    /// producer to sequentially write seg-6..13. With the smaller
-    /// window, gaps that big trigger a restart at the requested
-    /// index instead, which writes the target segment in ~1 s rather
-    /// than blocking AVPlayer in waitingToPlay for tens of seconds.
-    /// Normal forward playback (request within 1-2 ahead of cache
-    /// max) stays in the wait branch so a transient producer
-    /// slowdown doesn't cause a spurious restart.
-    private static let forwardWaitWindow = 3
+    /// 8 is the value that survives both failure modes:
+    ///
+    ///   - Tightened to 3 briefly to fix a Vincent repro where a
+    ///     seg-13 request waited 26 s for the existing producer to
+    ///     sequentially write 11 segments. The smaller window did
+    ///     trigger restart at the target index for that case, but
+    ///     also restarted on every AVPlayer prefetch above the cache
+    ///     edge. AVPlayer's HLS engine speculatively prefetches 5-7
+    ///     segments ahead of the playhead during normal playback, so
+    ///     with window 3 every prefetch above cache.max+3 triggered
+    ///     a restart that killed the in-flight producer mid-write,
+    ///     leaving cache holes that AVPlayer hit on its next sequential
+    ///     request, restarting again, and so on. Vincent's "video
+    ///     hängt nach Scrub nach vorn" was the cascade outcome.
+    ///   - 8 is wide enough to absorb AVPlayer's prefetch (any request
+    ///     within ~32 s of source content above cache.max waits) and
+    ///     narrow enough that user-initiated scrubs of 30+ seconds
+    ///     still trigger a restart at the target. The 26 s wait
+    ///     in the original repro is the worst-case for "wait within
+    ///     window"; it's annoying but not a hang, and stays bounded
+    ///     by segment-write-rate × window. Tightening below 8
+    ///     requires distinguishing user scrubs from AVPlayer's
+    ///     speculative prefetch, which we currently cannot do from
+    ///     the segment-server side.
+    private static let forwardWaitWindow = 8
 
     // MARK: - Sliding-window EVENT playlist state
 
