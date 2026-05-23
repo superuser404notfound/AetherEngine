@@ -53,6 +53,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// force `dvh1` / `hvc1` / `avc1` instead of FFmpeg's defaults
         /// of `hev1` / `h264`, which AVPlayer rejects.
         let codecTagOverride: String?
+        /// Strip the source's Dolby Vision configuration record before
+        /// `avformat_write_header`. Forwarded to the muxer for paths
+        /// where the engine has chosen to play a DV source as plain
+        /// HEVC HDR10 (P7 today). See
+        /// `MP4SegmentMuxer.VideoConfig.stripDolbyVisionMetadata`.
+        let stripDolbyVisionMetadata: Bool
+
+        init(
+            codecpar: UnsafePointer<AVCodecParameters>,
+            timeBase: AVRational,
+            codecTagOverride: String?,
+            stripDolbyVisionMetadata: Bool = false
+        ) {
+            self.codecpar = codecpar
+            self.timeBase = timeBase
+            self.codecTagOverride = codecTagOverride
+            self.stripDolbyVisionMetadata = stripDolbyVisionMetadata
+        }
     }
 
     /// Audio output wiring. The producer is agnostic about whether
@@ -527,7 +545,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let muxerVideo = MP4SegmentMuxer.VideoConfig(
             codecpar: videoConfig.codecpar,
             timeBase: videoConfig.timeBase,
-            codecTagOverride: videoConfig.codecTagOverride
+            codecTagOverride: videoConfig.codecTagOverride,
+            stripDolbyVisionMetadata: videoConfig.stripDolbyVisionMetadata
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
             MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase)

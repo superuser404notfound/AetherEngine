@@ -104,6 +104,28 @@ final class MP4SegmentMuxer {
         /// Used to force `hvc1` on HEVC (default is `hev1` which
         /// AVPlayer doesn't accept).
         let codecTagOverride: String?
+        /// Drop `AV_PKT_DATA_DOVI_CONF` from the output stream's
+        /// codecpar before `avformat_write_header`. Set when the
+        /// engine is intentionally routing a Dolby Vision source as
+        /// plain HEVC HDR10 (currently P7 only) so the mp4 muxer
+        /// doesn't emit a `dvcC` box inside an `hvc1` sample entry.
+        /// VideoToolbox's HEVC decoder selection rejects that combo
+        /// with `kVTVideoDecoderUnsupportedDataFormatErr` (-12906)
+        /// because the dvcC advertises a DV profile the dvh1-less
+        /// sample entry contradicts.
+        let stripDolbyVisionMetadata: Bool
+
+        init(
+            codecpar: UnsafePointer<AVCodecParameters>,
+            timeBase: AVRational,
+            codecTagOverride: String?,
+            stripDolbyVisionMetadata: Bool = false
+        ) {
+            self.codecpar = codecpar
+            self.timeBase = timeBase
+            self.codecTagOverride = codecTagOverride
+            self.stripDolbyVisionMetadata = stripDolbyVisionMetadata
+        }
     }
 
     struct AudioConfig {
@@ -314,6 +336,9 @@ final class MP4SegmentMuxer {
            let tag = Self.mkTag(fromFourCC: override) {
             videoStream.pointee.codecpar.pointee.codec_tag = tag
         }
+        if video.stripDolbyVisionMetadata {
+            Self.stripDolbyVisionSideData(videoStream.pointee.codecpar)
+        }
 
         // Audio stream (optional).
         if let audio = audio {
@@ -445,6 +470,9 @@ final class MP4SegmentMuxer {
         if let override = video.codecTagOverride,
            let tag = Self.mkTag(fromFourCC: override) {
             videoStream.pointee.codecpar.pointee.codec_tag = tag
+        }
+        if video.stripDolbyVisionMetadata {
+            Self.stripDolbyVisionSideData(videoStream.pointee.codecpar)
         }
 
         // Audio stream (optional).
@@ -731,6 +759,26 @@ final class MP4SegmentMuxer {
             tag |= UInt32(ascii) << (i * 8)
         }
         return tag
+    }
+
+    /// Remove the Dolby Vision configuration record from a codecpar's
+    /// `coded_side_data` array so `avformat_write_header` doesn't emit
+    /// a `dvcC` box on the sample entry. Used when the engine has
+    /// chosen to route a DV source as plain HEVC HDR10: an `hvc1`
+    /// sample entry + a P7 `dvcC` box is exactly the combination
+    /// VideoToolbox's HEVC decoder selection rejects with
+    /// `kVTVideoDecoderUnsupportedDataFormatErr` (-12906), since the
+    /// dvcC promises a DV profile the sample entry doesn't honour.
+    private static func stripDolbyVisionSideData(
+        _ codecpar: UnsafeMutablePointer<AVCodecParameters>
+    ) {
+        guard codecpar.pointee.nb_coded_side_data > 0,
+              codecpar.pointee.coded_side_data != nil else { return }
+        av_packet_side_data_remove(
+            codecpar.pointee.coded_side_data,
+            &codecpar.pointee.nb_coded_side_data,
+            AV_PKT_DATA_DOVI_CONF
+        )
     }
 }
 

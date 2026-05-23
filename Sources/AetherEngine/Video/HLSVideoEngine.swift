@@ -499,6 +499,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let primaryCodecs: String
         let supplementalCodecs: String?
         let dvVariant: DVVariant
+        // Default false; set true in the P7 branch below so the mp4
+        // muxer drops the source's `dvcC` configuration record before
+        // `avformat_write_header` writes the sample entry. Necessary
+        // because P7's BL is routed as plain HEVC HDR10 (`hvc1`) and
+        // VT's HEVC selection rejects `hvc1` + a P7 `dvcC` with
+        // `kVTVideoDecoderUnsupportedDataFormatErr` (-12906).
+        var stripDolbyVisionMetadata = false
 
         if isH264 {
             codecTagOverride = "avc1"
@@ -743,6 +750,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 videoRange = .pq
                 primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
                 supplementalCodecs = nil
+                stripDolbyVisionMetadata = true
             case .profile82:
                 throw HLSVideoEngineError.unsupportedDVProfile(profile: 8, compatID: 2)
             case .unknown:
@@ -785,7 +793,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let videoConfig = HLSSegmentProducer.StreamConfig(
             codecpar: codecpar,
             timeBase: videoTimeBase,
-            codecTagOverride: codecTagOverride
+            codecTagOverride: codecTagOverride,
+            stripDolbyVisionMetadata: stripDolbyVisionMetadata
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
@@ -1401,7 +1410,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             let probeVideo = MP4SegmentMuxer.VideoConfig(
                 codecpar: vcfg.codecpar,
                 timeBase: vcfg.timeBase,
-                codecTagOverride: vcfg.codecTagOverride
+                codecTagOverride: vcfg.codecTagOverride,
+                stripDolbyVisionMetadata: vcfg.stripDolbyVisionMetadata
             )
             let probeAudio = MP4SegmentMuxer.AudioConfig(
                 codecpar: cfg.codecpar,
