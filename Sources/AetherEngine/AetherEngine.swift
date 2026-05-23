@@ -1680,14 +1680,6 @@ public final class AetherEngine: ObservableObject {
                     + "avBufBehind=\(String(format: "%.1f", bufferBehindSec))s"
 
                 EngineLog.emit(line, category: .engine)
-                // Also write to stdout so the line shows up in Xcode's
-                // debug console even on devices where the OSLog stream
-                // isn't being captured. EngineLog's own stdout fallback
-                // is suppressed once Sodalite installs its LogTap
-                // handler, so we duplicate the memprobe line here only.
-                // One line per 30 s is cheap; the rest of EngineLog stays
-                // single-sink to avoid console spam.
-                print(line)
             }
         }
     }

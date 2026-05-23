@@ -238,7 +238,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             "[HardwareVideoDecoder] opened HEVC \(width)x\(height) "
             + "\(use10Bit ? "10-bit" : "8-bit") "
             + "transfer=\(codecpar.pointee.color_trc.rawValue)",
-            category: .engine
+            category: .swPlayback
         )
     }
 
@@ -358,7 +358,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if decodeStatus != noErr {
             EngineLog.emit(
                 "[HardwareVideoDecoder] decode error \(decodeStatus) at pts=\(ptsRaw)",
-                category: .engine
+                category: .swPlayback
             )
         }
     }

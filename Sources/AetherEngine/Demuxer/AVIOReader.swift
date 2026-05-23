@@ -90,7 +90,7 @@ final class AVIOReader: @unchecked Sendable {
         if resolved != url && resolved != _resolvedURL {
             _resolvedURL = resolved
             #if DEBUG
-            print("[AVIOReader] Cached resolved URL host=\(resolved.host ?? "?")")
+            EngineLog.emit("[AVIOReader] Cached resolved URL host=\(resolved.host ?? "?")", category: .demux)
             #endif
         }
     }
@@ -104,7 +104,7 @@ final class AVIOReader: @unchecked Sendable {
         if _resolvedURL != nil {
             _resolvedURL = nil
             #if DEBUG
-            print("[AVIOReader] Dropped resolved URL cache (expiry status)")
+            EngineLog.emit("[AVIOReader] Dropped resolved URL cache (expiry status)", category: .demux)
             #endif
         }
     }
@@ -548,14 +548,14 @@ final class AVIOReader: @unchecked Sendable {
         task.resume()
 
         #if DEBUG
-        print("[AVIOReader] Streaming started: \(url.lastPathComponent)")
+        EngineLog.emit("[AVIOReader] Streaming started: \(url.lastPathComponent)", category: .demux)
         #endif
 
         // Wait until stream ends or reader is closed
         semaphore.wait()
 
         #if DEBUG
-        print("[AVIOReader] Streaming ended")
+        EngineLog.emit("[AVIOReader] Streaming ended", category: .demux)
         #endif
         streamSession.invalidateAndCancel()
     }
@@ -683,7 +683,7 @@ final class AVIOReader: @unchecked Sendable {
         // that don't accept Range early in the session).
         if let size = rangeProbeFileSize(), size > 0 {
             #if DEBUG
-            print("[AVIOReader] File size: \(size) bytes (Range probe)")
+            EngineLog.emit("[AVIOReader] File size: \(size) bytes (Range probe)", category: .demux)
             #endif
             return size
         }
@@ -716,14 +716,14 @@ final class AVIOReader: @unchecked Sendable {
         if semaphore.wait(timeout: .now() + .seconds(25)) == .timedOut {
             task.cancel()
             #if DEBUG
-            print("[AVIOReader] Range probe timed out → trying HEAD")
+            EngineLog.emit("[AVIOReader] Range probe timed out → trying HEAD", category: .demux)
             #endif
             return nil
         }
 
         if delegate.totalSize == nil {
             #if DEBUG
-            print("[AVIOReader] Range probe didn't yield a size → trying HEAD")
+            EngineLog.emit("[AVIOReader] Range probe didn't yield a size → trying HEAD", category: .demux)
             #endif
         }
         return delegate.totalSize
@@ -742,13 +742,13 @@ final class AVIOReader: @unchecked Sendable {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
                 #if DEBUG
-                print("[AVIOReader] HEAD failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)) → streaming mode")
+                EngineLog.emit("[AVIOReader] HEAD failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)) → streaming mode", category: .demux)
                 #endif
                 return -1
             }
             let length = http.expectedContentLength
             #if DEBUG
-            print("[AVIOReader] File size: \(length) bytes (HEAD fallback)\(length <= 0 ? " streaming mode" : "")")
+            EngineLog.emit("[AVIOReader] File size: \(length) bytes (HEAD fallback)\(length <= 0 ? " streaming mode" : "")", category: .demux)
             #endif
             return length
         } catch {
@@ -756,7 +756,7 @@ final class AVIOReader: @unchecked Sendable {
             // This is expected for live transcode URLs where the server
             // needs to start transcoding before responding.
             #if DEBUG
-            print("[AVIOReader] HEAD probe failed: \(error.localizedDescription) → streaming mode")
+            EngineLog.emit("[AVIOReader] HEAD probe failed: \(error.localizedDescription) → streaming mode", category: .demux)
             #endif
             return -1
         }
@@ -816,7 +816,7 @@ final class AVIOReader: @unchecked Sendable {
         }
 
         #if DEBUG
-        print("[AVIOReader] Fetch failed after \(Self.maxRetries) retries at offset \(offset): \(lastError?.localizedDescription ?? "?")")
+        EngineLog.emit("[AVIOReader] Fetch failed after \(Self.maxRetries) retries at offset \(offset): \(lastError?.localizedDescription ?? "?")", category: .demux)
         #endif
         return nil
     }
@@ -997,7 +997,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         #if DEBUG
         if let error {
-            print("[AVIOReader] Stream error: \(error.localizedDescription)")
+            EngineLog.emit("[AVIOReader] Stream error: \(error.localizedDescription)", category: .demux)
         }
         #endif
         onComplete()

@@ -85,7 +85,7 @@ final class AudioDecoder: @unchecked Sendable {
         // fully resolved layout/rate/format; initialise from it.
 
         #if DEBUG
-        print("[AudioDecoder] Opened: \(sampleRate)Hz, \(channels)ch, codec=\(String(cString: codec.pointee.name))")
+        EngineLog.emit("[AudioDecoder] Opened: \(sampleRate)Hz, \(channels)ch, codec=\(String(cString: codec.pointee.name))", category: .swPlayback)
         #endif
     }
 
@@ -170,7 +170,7 @@ final class AudioDecoder: @unchecked Sendable {
         }
 
         #if DEBUG
-        print("[AudioDecoder] Resampler ready: \(sampleRate)Hz, \(channels)ch, inFmt=\(inFmt.rawValue)")
+        EngineLog.emit("[AudioDecoder] Resampler ready: \(sampleRate)Hz, \(channels)ch, inFmt=\(inFmt.rawValue)", category: .swPlayback)
         #endif
         return true
     }
@@ -312,7 +312,7 @@ final class AudioDecoder: @unchecked Sendable {
         #if DEBUG
         if convertedSamples <= 0 && !_loggedZeroConvert {
             _loggedZeroConvert = true
-            print("[AudioDecoder] swr_convert returned \(convertedSamples), pipeline silent from here")
+            EngineLog.emit("[AudioDecoder] swr_convert returned \(convertedSamples), pipeline silent from here", category: .swPlayback)
         }
         #endif
         guard convertedSamples > 0 else { return }

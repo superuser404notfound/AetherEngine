@@ -170,7 +170,7 @@ public final class Demuxer: @unchecked Sendable {
         }
 
         #if DEBUG
-        print("[Demuxer] Opened: \(ctx.pointee.nb_streams) streams, duration=\(ctx.pointee.duration) us")
+        EngineLog.emit("[Demuxer] Opened: \(ctx.pointee.nb_streams) streams, duration=\(ctx.pointee.duration) us", category: .demux)
         for i in 0..<Int(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[i],
                   let codecpar = stream.pointee.codecpar else { continue }
@@ -182,7 +182,7 @@ public final class Demuxer: @unchecked Sendable {
             case AVMEDIA_TYPE_SUBTITLE: typeName = "subtitle"
             default: typeName = "other"
             }
-            print("[Demuxer]   stream[\(i)] type=\(typeName) \(codecpar.pointee.width)x\(codecpar.pointee.height)")
+            EngineLog.emit("[Demuxer]   stream[\(i)] type=\(typeName) \(codecpar.pointee.width)x\(codecpar.pointee.height)", category: .demux)
         }
         #endif
     }
@@ -418,7 +418,7 @@ public final class Demuxer: @unchecked Sendable {
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
         if ret < 0 {
             #if DEBUG
-            print("[Demuxer] Seek to \(seconds)s failed: \(ret)")
+            EngineLog.emit("[Demuxer] Seek to \(seconds)s failed: \(ret)", category: .demux)
             #endif
         }
         // Flush internal parser state after seek, prevents assertion

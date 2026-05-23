@@ -202,7 +202,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         #if DEBUG
         enqueueCount = 0
         loggedLayerFailed = false
-        print("[Renderer] display layer recreated")
+        EngineLog.emit("[Renderer] display layer recreated", category: .swPlayback)
         #endif
     }
 
@@ -306,7 +306,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
             )
             hdr10PlusAttachedCount += 1
             if hdr10PlusAttachedCount == 1 || hdr10PlusAttachedCount == 30 || hdr10PlusAttachedCount % 600 == 0 {
-                EngineLog.emit("[Renderer] HDR10+ attachment count: \(hdr10PlusAttachedCount) (last payload \(hdr10PlusData.count) bytes)")
+                EngineLog.emit("[Renderer] HDR10+ attachment count: \(hdr10PlusAttachedCount) (last payload \(hdr10PlusData.count) bytes)", category: .swPlayback)
             }
         }
         // If the queue target has entered the failed state (undefined-
@@ -317,13 +317,13 @@ final class SampleBufferRenderer: @unchecked Sendable {
         if queueStatus == .failed {
             if !loggedLayerFailed {
                 loggedLayerFailed = true
-                EngineLog.emit("[Renderer] queue target failed at enqueue #\(enqueueCount + 1): \(queueError?.localizedDescription ?? "nil"), attempting recovery via flush()")
+                EngineLog.emit("[Renderer] queue target failed at enqueue #\(enqueueCount + 1): \(queueError?.localizedDescription ?? "nil"), attempting recovery via flush()", category: .swPlayback)
             }
             target.flush()
         }
         if !target.isReadyForMoreMediaData, !loggedNotReady {
             loggedNotReady = true
-            EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)")
+            EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)", category: .swPlayback)
         }
         target.enqueue(sampleBuffer)
 
@@ -340,7 +340,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // logging at #30 but actually keep enqueueing". Logging cost
         // is bounded: at 60 fps for 1 hour we emit 4 lines total.
         if enqueueCount == 1 || enqueueCount == 30 || enqueueCount == 100 || enqueueCount == 1000 || enqueueCount == 5000 {
-            EngineLog.emit("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(queueTarget.isReadyForMoreMediaData) error=\(queueError?.localizedDescription ?? "nil")")
+            EngineLog.emit("[Renderer] enqueue #\(enqueueCount): status=\(statusName) ready=\(queueTarget.isReadyForMoreMediaData) error=\(queueError?.localizedDescription ?? "nil")", category: .swPlayback)
         }
     }
 

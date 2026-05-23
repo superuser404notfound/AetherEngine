@@ -89,6 +89,7 @@ private func parseSourceURL(_ raw: String) -> URL {
 // MARK: - probe
 
 private func runProbe(url: URL) -> Int32 {
+    EngineLog.handler = { print($0) }
     print("aetherctl probe: \(url.absoluteString)")
     print("")
     let probe: SourceProbe

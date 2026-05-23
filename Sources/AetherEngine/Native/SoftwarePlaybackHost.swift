@@ -165,7 +165,7 @@ final class SoftwarePlaybackHost {
             videoDecoder = HardwareVideoDecoder()
             EngineLog.emit(
                 "[SWHost] selected HardwareVideoDecoder (VT HEVC) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
-                category: .engine
+                category: .swPlayback
             )
         } else if !(videoDecoder is SoftwareVideoDecoder) {
             // Restoring the software default if a previous load left
@@ -187,7 +187,7 @@ final class SoftwarePlaybackHost {
                 renderer.setHDROutput(true)
                 EngineLog.emit(
                     "[SWHost] HDR mode ON on display layer (transfer=\(trc.rawValue))",
-                    category: .engine
+                    category: .swPlayback
                 )
             }
         }
@@ -219,7 +219,7 @@ final class SoftwarePlaybackHost {
                 // the first enqueue on tvOS 26+.
                 self.audioOutput = AudioOutput()
             } catch {
-                EngineLog.emit("[SWHost] audio open failed (\(error)); video-only", category: .engine)
+                EngineLog.emit("[SWHost] audio open failed (\(error)); video-only", category: .swPlayback)
                 self.audioStreamIndex = -1
             }
         }
@@ -458,7 +458,7 @@ final class SoftwarePlaybackHost {
             do {
                 packet = try demuxer.readPacket()
             } catch {
-                EngineLog.emit("[SWHost] demux read failed: \(error)", category: .engine)
+                EngineLog.emit("[SWHost] demux read failed: \(error)", category: .swPlayback)
                 onError("Playback error: \(error.localizedDescription)")
                 break
             }

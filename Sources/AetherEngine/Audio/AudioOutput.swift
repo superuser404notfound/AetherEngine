@@ -73,7 +73,7 @@ final class AudioOutput: @unchecked Sendable {
         let result = semaphore.wait(timeout: .now() + .seconds(1))
         #if DEBUG
         if result == .timedOut {
-            print("[AudioOutput] detachVideoLayer: timed out waiting for synchronizer removal")
+            EngineLog.emit("[AudioOutput] detachVideoLayer: timed out waiting for synchronizer removal", category: .swPlayback)
         }
         #endif
     }
@@ -132,10 +132,10 @@ final class AudioOutput: @unchecked Sendable {
             let sr = fmt.map { "\($0.mSampleRate)Hz" } ?? "?"
             let ch = fmt.map { "\($0.mChannelsPerFrame)ch" } ?? "?"
             let count = CMSampleBufferGetNumSamples(sampleBuffer)
-            print("[AudioOutput] first enqueue: \(sr) \(ch), \(count) samples, renderer.error=\(String(describing: renderer.error))")
+            EngineLog.emit("[AudioOutput] first enqueue: \(sr) \(ch), \(count) samples, renderer.error=\(String(describing: renderer.error))", category: .swPlayback)
         } else if let err = renderer.error, !_loggedRendererError {
             _loggedRendererError = true
-            print("[AudioOutput] renderer error: \(err)")
+            EngineLog.emit("[AudioOutput] renderer error: \(err)", category: .swPlayback)
         }
         #endif
     }

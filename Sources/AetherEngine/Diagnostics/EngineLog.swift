@@ -2,18 +2,20 @@ import Foundation
 import os
 
 /// Single point where the engine emits human-readable diagnostic
-/// lines. Sinks (always OSLog, then either host handler or stdout):
+/// lines. Two sinks:
 ///
-///   1. **OSLog** (`os.Logger`): structured per-category logging that
-///      shows up in Console.app and `log stream` and survives Release
-///      builds without a debugger. Filterable per subsystem/category,
-///      e.g. `log stream --predicate 'subsystem == "de.superuser404.AetherEngine" AND category == "muxer"'`.
-///   2. **Host handler OR stdout** (mutually exclusive): if a host has
-///      installed `handler` (e.g. Sodalite mirroring into an in-app
-///      ring buffer), the line goes there. Otherwise it falls back to
-///      `print(line)` so the macOS `aetherctl` CLI keeps live stdout
-///      output. Gating these against each other avoids the duplicate
-///      lines that Xcode console shows when OSLog and stdout both fire.
+///   1. **OSLog** (`os.Logger`, always on): structured per-category
+///      logging that shows up in Console.app, `log stream`, and
+///      Xcode's debug console, and survives Release builds without
+///      a debugger. Filterable per subsystem/category, e.g.
+///      `log stream --predicate 'subsystem == "de.superuser404.AetherEngine" AND category == "muxer"'`.
+///   2. **Host handler** (optional): if a host sets
+///      `EngineLog.handler`, every line is mirrored there. Used by
+///      apps mirroring into an in-app overlay/ring buffer, and by
+///      `aetherctl serve`/`validate`/`probe` to add a timestamp
+///      prefix and route to stdout. No stdio fallback inside
+///      `EngineLog`; any context that wants live stdout must
+///      install a handler explicitly.
 ///
 /// Centralising on `EngineLog.emit(...)` means the call site never
 /// has to gate on build config or thread-safety; the dispatch happens
@@ -46,6 +48,11 @@ public enum EngineLog {
         /// `AudioBridge` transcoding path: source decode → S16 PCM →
         /// FLAC encode, per-segment PTS rebase, encoder lifecycle.
         case audioBridge = "audio.bridge"
+        /// `SoftwarePlaybackHost` and its decode/render pipeline:
+        /// `SoftwareVideoDecoder`, `HardwareVideoDecoder`,
+        /// `SampleBufferRenderer`, `AudioDecoder`, `AudioOutput`.
+        /// Covers the custom playback route AVPlayer doesn't drive.
+        case swPlayback = "sw.playback"
         /// Scrub / seek diagnostics: backward-seek detection, reset
         /// reasons, A/V watermarks.
         case scrub
@@ -82,10 +89,12 @@ public enum EngineLog {
     }
 
     /// Emit one diagnostic line under a specific category. Always
-    /// writes to OSLog. If the host installed a handler the line goes
-    /// to the handler, otherwise it falls back to stdout via `print`.
-    /// Picking one of the two avoids Xcode console duplicates where
-    /// OSLog and stdout would otherwise both render the same line.
+    /// writes to OSLog so Console.app, `log stream`, and Xcode's
+    /// debug console see everything. If a host has installed a
+    /// `handler`, the line is mirrored there too (in-app overlay,
+    /// or aetherctl's own timestamp-prefixed stdout). No stdio
+    /// fallback: any context that wants live stdout must install
+    /// a handler.
     ///
     /// The OSLog `\(..., privacy: .public)` interpolation marks the
     /// payload as non-sensitive (engine logs never contain user data,
@@ -93,10 +102,6 @@ public enum EngineLog {
     /// full string instead of `<private>`.
     public static func emit(_ line: String, category: Category) {
         loggers[category]?.log("\(line, privacy: .public)")
-        if let handler {
-            handler(line)
-        } else {
-            print(line)
-        }
+        handler?(line)
     }
 }
