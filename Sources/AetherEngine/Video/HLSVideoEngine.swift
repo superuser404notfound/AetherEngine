@@ -918,8 +918,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // (the field experiment was JOC playing fine on Sonos
                 // even with `ec-3`, but matching the spec is the
                 // correct posture for the cases where it matters).
+                //
+                // iOS exception: iOS AVPlayer strictly enforces
+                // RFC 6381 codec strings and silently drops the
+                // variant when the audio codec is anything other
+                // than `ec-3` — `ec+3` makes `asset.load(tracks)`
+                // return 0 and the item fails with `Cannot Open`
+                // (`AVFoundationErrorDomain -11848` / underlying
+                // `CoreMediaErrorDomain -15517`). JOC stays intact
+                // because the dec3 box still carries the marker;
+                // only the playlist string changes.
                 let isJOC = compat == .eac3 && acp.profile == 30
+                #if os(iOS)
+                audioHLSCodecs = compat.hlsCodecsString
+                #else
                 audioHLSCodecs = isJOC ? "ec+3" : compat.hlsCodecsString
+                #endif
                 EngineLog.emit(
                     "[HLSVideoEngine] audio: codec=\(compat) → stream-copy as `\(audioHLSCodecs ?? "?")` "
                     + "\(isJOC ? "[JOC=Atmos] " : "")"
