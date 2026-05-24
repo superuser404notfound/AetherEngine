@@ -261,6 +261,12 @@ final class HLSLocalServer: @unchecked Sendable {
         defer { byteCounterLock.unlock() }
         return _lifetimeBytesSent
     }
+    private var _requestCount: Int = 0
+    var requestCount: Int {
+        byteCounterLock.lock()
+        defer { byteCounterLock.unlock() }
+        return _requestCount
+    }
     private func bumpBytesSent(_ n: Int) {
         guard n > 0 else { return }
         byteCounterLock.lock()
@@ -576,6 +582,9 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     private func processRequest(_ request: Data, on fd: Int32) -> Bool {
+        byteCounterLock.lock()
+        _requestCount &+= 1
+        byteCounterLock.unlock()
         guard let text = String(data: request, encoding: .utf8) else {
             EngineLog.emit("[HLSLocalServer] non-UTF8 request bytes (\(request.count)B)",
                            category: .hlsServer)

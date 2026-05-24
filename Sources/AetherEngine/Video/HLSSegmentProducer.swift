@@ -262,6 +262,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var firstActualVideoDts: Int64 = Int64.min
     private var firstActualAudioDts: Int64 = Int64.min
 
+    /// Counter for forward-only producer restarts triggered by
+    /// HLSVideoEngine. Surfaced via the engine's live telemetry so the
+    /// stats overlay can show how aggressively AVPlayer is re-priming
+    /// segment requests after scrubs. Reset to 0 on every new session
+    /// (each producer instance is per-session).
+    private(set) var restartCount: Int = 0
+
+    /// Most recently measured open-audio-gate vs. open-video-gate gap,
+    /// in source-clock milliseconds. Already computed inline for the
+    /// existing log line at the gap-detection site; stored here so the
+    /// engine memprobe and the live telemetry sampler can read it
+    /// without re-deriving it.
+    private(set) var lastAVGapMs: Double = 0
+
     /// Source-TB pts of the first kept video packet (= the AV_PKT_FLAG_KEY
     /// packet that opened the video gate). Used to detect and drop pre-
     /// keyframe leading B-frames (HEVC RASL) that follow an open-GOP CRA:
@@ -705,6 +719,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     // MARK: - Pump
 
     private func runPumpLoop() {
+        if restartTargetVideoDts > Int64.min {
+            restartCount &+= 1
+        }
         let pumpStart = DispatchTime.now()
         var packetsRead = 0
         let lastError: Int32 = 0
@@ -1093,6 +1110,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         let gapMs = audioTb.den > 0
                             ? Double(gapInAudioTb) * Double(audioTb.num) * 1000.0 / Double(audioTb.den)
                             : 0
+                        self.lastAVGapMs = gapMs
                         EngineLog.emit(
                             "[HLSSegmentProducer] audio gate open: "
                             + "actual=\(firstActualAudioDts) "

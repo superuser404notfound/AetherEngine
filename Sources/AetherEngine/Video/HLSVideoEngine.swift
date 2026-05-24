@@ -1133,6 +1133,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         /// growth = a packet leak in one of our paths.
         public let packetsAlive: Int
         public let packetsTotalAllocs: Int
+        /// Number of times the producer's `runPumpLoop` was entered for
+        /// a restart session (restartTargetVideoDts != Int64.min). Each
+        /// scrub or seek that triggers a producer restart increments this
+        /// by one. Zero for non-restart (phase-A) sessions.
+        public let producerRestartCount: Int
+        /// Most recently measured open-audio-gate vs. open-video-gate
+        /// gap in source-clock milliseconds. Matches the value logged
+        /// at the gap-detection site. Zero until the first audio gate
+        /// opens in a session.
+        public let lastAVGapMs: Double
+        /// Lifetime count of HTTP requests served by the loopback HLS
+        /// server (one per `processRequest` call). Includes playlist,
+        /// init-segment, and media-segment fetches.
+        public let serverRequestCount: Int
     }
 
     /// Read the current pipeline counters. Returns zeros for any
@@ -1154,7 +1168,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             serverLifetimeBytesSent: server?.lifetimeBytesSent ?? 0,
             serverSendfileBytesSent: server?.lifetimeSendfileBytes ?? 0,
             packetsAlive: PacketBalanceTracker.alive,
-            packetsTotalAllocs: PacketBalanceTracker.totalAllocs
+            packetsTotalAllocs: PacketBalanceTracker.totalAllocs,
+            producerRestartCount: producer?.restartCount ?? 0,
+            lastAVGapMs: producer?.lastAVGapMs ?? 0,
+            serverRequestCount: server?.requestCount ?? 0
         )
     }
 
