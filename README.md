@@ -90,7 +90,7 @@ player.$currentAVPlayer  // active AVPlayer, re-emitted on every reload (MPNowPl
 player.audioTracks    // [TrackInfo]
 player.selectAudioTrack(index: trackID)
 
-// tvOS info panel / Now Playing
+// Info panel / Now Playing (iOS / tvOS)
 player.setExternalMetadata([
     AVMetadataItem(/* title, artwork, etc. */)
 ])

@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AVKit
 import Combine
 
 /// `AVPlayer` + `AVPlayerLayer` wrapper owned by AetherEngine. Drives
@@ -143,9 +144,10 @@ final class NativeAVPlayerHost {
         // load (e.g. system Now Playing title + artwork). Setting it
         // BEFORE AVPlayer.replaceCurrentItem-equivalent is the documented
         // safe order; doing it after the asset has started loading races
-        // with AVPlayer's internal track-load. tvOS only; AVPlayerItem.externalMetadata
-        // is unavailable on iOS / macOS.
-        #if os(tvOS)
+        // with AVPlayer's internal track-load. `AVPlayerItem.externalMetadata`
+        // is unavailable on macOS — macOS hosts must write
+        // `MPNowPlayingInfoCenter` directly.
+        #if !os(macOS)
         if !pendingExternalMetadata.isEmpty {
             item.externalMetadata = pendingExternalMetadata
         }
@@ -452,7 +454,7 @@ final class NativeAVPlayerHost {
     /// next item created by `load(url:startPosition:)`.
     func setExternalMetadata(_ items: [AVMetadataItem]) {
         pendingExternalMetadata = items
-        #if os(tvOS)
+        #if !os(macOS)
         playerItem?.externalMetadata = items
         #endif
     }
