@@ -213,6 +213,8 @@ Sources/AetherEngine/
 │   └── Demuxer.swift                        libavformat wrapper
 ├── Diagnostics/
 │   ├── EngineLog.swift                      Gated OSLog emission
+│   ├── LiveTelemetry.swift                  Value type emitted at 1 Hz: instant / avg bitrate, buffer, network, dropped frames, observed FPS, A/V sync gap, plus subsystem byte counters
+│   ├── LiveTelemetrySampler.swift           @MainActor 1 Hz sampler that reads existing subsystem counters and assembles LiveTelemetry snapshots
 │   └── PacketBalanceTracker.swift           Process-wide AVPacket alloc/free balance counter for leak diagnostics
 ├── Display/
 │   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints (native path)
@@ -289,7 +291,7 @@ go in `./Fixtures/user/` (gitignored).
 Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
 
 - No built-in UI. No controls, no transport bar, no pretty HUD.
-- No analytics, telemetry, or session reporting. Wire your own to the `@Published` state.
+- No external analytics or session reporting. A 1 Hz `@Published liveTelemetry: LiveTelemetry?` surface is provided for host UIs that want to render runtime stats locally; nothing leaves the device.
 - No playlist / queue management. Call `load(url:)` when you want the next one.
 - No subtitle overlay. The engine decodes packets and emits `SubtitleCue` (text or `CGImage` with normalised position); your UI paints them with whatever style and animation you want.
 - No Metal shaders. Everything renders through Apple's native display stack.
