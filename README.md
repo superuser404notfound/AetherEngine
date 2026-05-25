@@ -319,6 +319,10 @@ If the engine is useful to you and you'd like to support its development, there'
 
 AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
 
+## Testing and feedback
+
+Big thanks to [@DrHurt](https://github.com/DrHurt) for the relentless on-device DV / HDR matrix testing in [#4](https://github.com/superuser404notfound/AetherEngine/issues/4). The empirical builds 159-172 sweeps across panel modes (SDR / HDR10 / DV) cross-matched with Match Content states exposed the timing race in `DisplayCriteriaController.waitForSwitch` that the 1.4.0 two-stage poll now fixes.
+
 ## License
 
 [LGPL-3.0 with Apple Store / DRM Exception](LICENSE). The exception clause grants explicit permission to distribute through application stores (Apple App Store, TestFlight, etc.) whose terms otherwise conflict with LGPL §4–6. Modifications to the engine itself still have to be released under LGPL.
