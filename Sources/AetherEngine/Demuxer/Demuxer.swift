@@ -194,6 +194,20 @@ public final class Demuxer: @unchecked Sendable {
         return dur > 0 ? Double(dur) / Double(AV_TIME_BASE) : 0
     }
 
+    /// AVFormatContext.bit_rate in bits-per-second, or 0 if unknown.
+    /// libavformat computes this from the container's reported size +
+    /// duration; for sources where the container doesn't expose either
+    /// (some live streams, malformed files) it falls back to 0. Callers
+    /// should fall back to a safe over-declared estimate when 0 is
+    /// returned. Used by `HLSVideoEngine.masterBandwidth /
+    /// masterAverageBandwidth` to populate the HLS master playlist's
+    /// BANDWIDTH and AVERAGE-BANDWIDTH attributes from real source
+    /// data instead of a hardcoded 5 Mbps default.
+    var bitRate: Int64 {
+        guard let ctx = formatContext else { return 0 }
+        return ctx.pointee.bit_rate
+    }
+
     /// AVFormatContext.start_time in microseconds (AV_TIME_BASE units),
     /// or 0 / AV_NOPTS_VALUE if unknown. Many MKV / TS sources have a
     /// non-zero format start_time when re-muxed from broadcast or

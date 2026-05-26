@@ -272,6 +272,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// signature on every fire.
     private var sourceVideoTbSeconds: Double = 1.0 / 1000.0
 
+    /// Source container's reported total bitrate in bits-per-second,
+    /// captured at `start()`. Populates the HLS master playlist's
+    /// BANDWIDTH / AVERAGE-BANDWIDTH attributes from real source data
+    /// instead of a hardcoded 5 Mbps default. `0` when libavformat
+    /// can't compute it from the container metadata; callers fall back
+    /// to a safe over-declared estimate to avoid AVPlayer's
+    /// `CoreMediaErrorDomain -12318 'Segment exceeds specified
+    /// bandwidth for variant'` log entries on high-bitrate sources.
+    private var sourceBitrate: Int64 = 0
+
     /// Fires when the active producer's `playlistShiftSeconds` changes
     /// (initial gate open or restart). AetherEngine wires this to keep
     /// its own published shift in step so the subtitle overlay's cue
@@ -424,6 +434,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard durationSeconds > 0 else {
             throw HLSVideoEngineError.zeroDuration
         }
+        sourceBitrate = dem.bitRate
 
         // 2. Prewarm the MKV cue table so libavformat's keyframe index
         //    is populated. avformat_seek_file's first invocation on an
@@ -2269,8 +2280,28 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
         return (resolution.0, resolution.1)
     }
     var masterVideoRange: HLSVideoRange? { videoRange }
-    var masterBandwidth: Int? { 5_000_000 }
-    var masterAverageBandwidth: Int? { 5_000_000 }
+    /// AVERAGE-BANDWIDTH reflects the source container's reported
+    /// bitrate. Falls back to a high default (25 Mbps) when libavformat
+    /// can't compute it, since under-declaring causes AVPlayer to log
+    /// `CoreMediaErrorDomain -12318 'Segment exceeds specified
+    /// bandwidth for variant'` for every above-average segment.
+    /// Over-declaring is harmless to AVPlayer's variant-selection on a
+    /// single-variant master.
+    var masterAverageBandwidth: Int? {
+        sourceBitrate > 0 ? Int(sourceBitrate) : 25_000_000
+    }
+
+    /// BANDWIDTH represents the peak segment bitrate. Per HLS spec it
+    /// MUST NOT be smaller than any individual segment's bitrate.
+    /// 4K HDR HEVC sources have heavily variable per-second bitrates
+    /// (action-heavy scenes burst to ~2x average) so we publish 2x
+    /// the source's average as a safety margin. 5 Mbps floor keeps
+    /// us above AVPlayer's internal sanity thresholds even when the
+    /// source reports a tiny / corrupt bitrate.
+    var masterBandwidth: Int? {
+        let avg = masterAverageBandwidth ?? 25_000_000
+        return max(avg * 2, 5_000_000)
+    }
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
