@@ -14,15 +14,18 @@ import SwiftUI
 ///
 /// The host embeds one instance (UIKit on iOS/tvOS, AppKit on macOS) and
 /// hands it to `engine.bind(view:)`. The engine then attaches whichever
-/// `CALayer` is active for the current source (an `AVPlayerLayer` for
-/// AVPlayer-backed sessions, an `AVSampleBufferDisplayLayer` while the
-/// legacy aether path still exists). The view swaps internally on layer
-/// changes so the host never needs to know which backend is rendering.
+/// `CALayer` is active for the current source:
 ///
-/// During phases 1–3 of the engine refactor, both backends can be active
-/// across sessions and the view may briefly host either kind of layer.
-/// After the native-only collapse (1.0.0) the hosted layer is always an
-/// `AVPlayerLayer`.
+/// - `AVPlayerLayer` for the native AVPlayer path (HEVC, H.264, plus AV1
+///   on devices with hardware AV1 decode).
+/// - `AVSampleBufferDisplayLayer` for the software path driven by
+///   `SoftwarePlaybackHost` (AV1 without hardware decode, VP9, MPEG-4
+///   Part 2, MPEG-2, VC-1).
+///
+/// The view swaps the hosted layer internally on dispatch changes, so the
+/// host never needs to know which backend is rendering. The active layer
+/// can also change across sessions when consecutive sources dispatch to
+/// different paths.
 @MainActor
 public final class AetherPlayerView: PlatformBaseView {
 
