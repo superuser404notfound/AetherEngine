@@ -197,6 +197,37 @@ final class NativeAVPlayerHost {
                     EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.error.underlying=\(underlying.domain)/\(underlying.code) '\(underlying.localizedDescription)'", category: .engine)
                 }
                 Self.dumpAssetTracks(item.asset, sid: sid, reason: "item.failed")
+                // Dump every error-log event accumulated since item
+                // creation. AVPlayer's internal HLS pipeline writes
+                // granular diagnostics here (variant filter rejections,
+                // CODECS mismatches, init.mp4 parse failures, ATS
+                // blocks, manifest errors) that the wrapped
+                // AVFoundation/CoreMedia error codes hide. The
+                // `newErrorLogEntryNotification` observer only catches
+                // entries logged AFTER it registers, which races
+                // synchronous entries logged during replaceCurrentItem;
+                // polling the full log on .failed catches every entry
+                // regardless of timing.
+                if let log = item.errorLog() {
+                    EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog dump: \(log.events.count) events", category: .engine)
+                    for (idx, event) in log.events.enumerated() {
+                        let comment = event.errorComment ?? "no comment"
+                        let uri = event.uri ?? "-"
+                        let server = event.serverAddress ?? "-"
+                        EngineLog.emit("[NativeAVPlayerHost] #\(sid)   errorLog[\(idx)] code=\(event.errorStatusCode) domain=\(event.errorDomain) uri=\(uri) server=\(server) '\(comment)'", category: .engine)
+                    }
+                } else {
+                    EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog dump: <nil>", category: .engine)
+                }
+                if let log = item.accessLog() {
+                    EngineLog.emit("[NativeAVPlayerHost] #\(sid) accessLog dump: \(log.events.count) events", category: .engine)
+                    for (idx, event) in log.events.enumerated() {
+                        let uri = event.uri ?? "-"
+                        EngineLog.emit("[NativeAVPlayerHost] #\(sid)   accessLog[\(idx)] uri=\(uri) bytes=\(event.numberOfBytesTransferred) reqs=\(event.numberOfMediaRequests) downloadOverdue=\(event.numberOfStalls) dlSegments=\(event.numberOfDroppedVideoFrames)", category: .engine)
+                    }
+                } else {
+                    EngineLog.emit("[NativeAVPlayerHost] #\(sid) accessLog dump: <nil>", category: .engine)
+                }
             } else if item.status == .readyToPlay {
                 // For HLS sources `asset.tracks` returns empty
                 // synchronously — the tracks live on AVPlayerItem
