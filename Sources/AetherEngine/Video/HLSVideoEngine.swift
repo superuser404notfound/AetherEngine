@@ -732,32 +732,40 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     stripDolbyVisionMetadata = true
                 }
             case .profile84:
-                // P8.4 (HLG-compat base layer). Bare `dvh1` empirically
-                // does NOT play on either an HDR-mode or SDR-locked
-                // panel: HDR-mode fails AVPlayer asset open (DrHurt
-                // #4 Build 160: "does NOT play at all"), SDR-locked
-                // plays wrong colors. AVPlayer appears to reject the
-                // dvh1 sample entry when the underlying transfer
-                // characteristic is HLG.
+                // P8.4 (HLG-compat base layer). Two branches mirror P8.1:
                 //
-                // Workaround: emit `hvc1` sample-entry + `hvc1.2.4
-                // .LXX` primary CODECS so AVPlayer treats the asset
-                // as plain HEVC HLG (which it plays fine), then ride
-                // the `SUPPLEMENTAL-CODECS=dvh1.08.LL/db4h` hint to
-                // let DV-capable panels still upgrade to DV mode.
-                // The "/db4h" brand identifier marks the supplemental
-                // as DV with HLG base for the AVPlayer's profile
-                // matching logic, per the Dolby Vision HLS spec.
+                // DV-capable panel (`effectiveDvMode == true`): emit
+                // `hvc1` sample entry + `hvcC` + `dvvC` boxes (mp4
+                // muxer writes dvvC automatically when DV side data
+                // is preserved on the codecpar), primary CODECS
+                // `hvc1.2.4.LXX`, SUPPLEMENTAL-CODECS `dvh1.08.XX/db4h`.
+                // The `/db4h` brand identifier marks the supplemental
+                // as DV with HLG base for AVPlayer's profile matching;
+                // AVKit's auto-criteria reads dvvC from the live
+                // formatDescription and drives DV mode on the panel.
                 //
-                // Cost: AVKit's auto-criteria reads the `hvc1` sample
-                // entry and programs HLG criteria; the supplemental
-                // hint is what triggers the DV upgrade once the
-                // panel is in HDR. On a non-DV panel the supplemental
-                // is ignored and HLG base plays as expected.
+                // Non-DV panel (HDR10 / HLG-capable / SDR): emit plain
+                // HEVC HLG and STRIP DV side data so init.mp4 has a
+                // clean `hvc1` + `hvcC` sample entry with NO dvvC.
+                // Mirrors P8.1's strip path (Vincent test 2026-05-26
+                // on HDR10 panel: dvvC in init.mp4 trips tvOS 26's
+                // master-level codec filter even when master CODECS
+                // is plain hvc1.2.4 with no SUPPLEMENTAL). The plain
+                // HLG variant plays on HLG-capable panels and gets
+                // tonemapped on HDR10 / SDR panels by AVPlayer's
+                // auto-tonemap path. Bare `dvh1` sample entry was
+                // never an option for HLG-base regardless of panel
+                // (DrHurt #4 Build 160: AVPlayer rejects dvh1 +
+                // HLG transfer outright).
                 codecTagOverride = "hvc1"
                 videoRange = .hlg
                 primaryCodecs = "hvc1.2.4.L\(hevcLevel)"
-                supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
+                if effectiveDvMode {
+                    supplementalCodecs = "dvh1.08.\(dvLevelStr)/db4h"
+                } else {
+                    supplementalCodecs = nil
+                    stripDolbyVisionMetadata = true
+                }
             case .profile7:
                 // P7 dual-layer (UHD-BD remux territory). The bitstream
                 // carries an HEVC Main10 base layer + an enhancement
@@ -806,7 +814,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
             ? Double(avgFR.num) / Double(avgFR.den)
             : nil
-        let hdcpLevel: String? = (dvVariant != .none) ? "TYPE-1" : nil
+        // HDCP-LEVEL intentionally omitted. Apple Tech Talk 501 recommends
+        // `TYPE-1` (HDCP 2.2) for 4K HDR / DV variants in CDN distribution
+        // for DRM enforcement, but our local loopback HLS server doesn't
+        // carry that requirement (no content protection scope, the source
+        // file is already in the user's possession). Vincent test 2026-05-26
+        // on HDR10 panel: emitting `HDCP-LEVEL=TYPE-1` caused AVPlayer to
+        // filter out the only variant with `item.status=failed` /
+        // `AVFoundationErrorDomain -11868` / `tracks count=0` when the
+        // Apple TV's HDMI link's HDCP 2.2 negotiation state didn't match
+        // the assertion (occurs intermittently in Xcode debug builds and
+        // on edge-case HDMI hardware chains). Plain HDR10 sources never
+        // had this attribute and play fine on the same setup; matching
+        // that behavior for DV-routed-as-HDR10 is the right default.
+        let hdcpLevel: String? = nil
 
         // 5. Position the demuxer at the file's first packet so the
         //    producer's pump starts from byte zero. The cue prewarm
