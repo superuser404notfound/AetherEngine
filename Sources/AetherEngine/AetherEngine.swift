@@ -793,6 +793,9 @@ public final class AetherEngine: ObservableObject {
         //      aetherctl on macOS 26 against a libvpx-vp9 source
         //      (AVPlayer GETs master.m3u8 + media.m3u8 then silently
         //      stops fetching, `item.status` never leaves `.unknown`).
+        //    - VP8: always SW. Same HLS-manifest-parser rejection as
+        //      VP9; VP8 was never part of the HLS Authoring Spec CODECS
+        //      list. Useful for legacy WebM rips.
         //    - MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video,
         //      VC-1: always SW. AVPlayer's HLS-fMP4 pipeline does not
         //      accept these codecs (`mp4v.20.X`, `mp2v`, `vc-1` are
@@ -807,6 +810,7 @@ public final class AetherEngine: ObservableObject {
         case AV_CODEC_ID_AV1:
             useSoftwarePath = !VTCapabilityProbe.av1Available
         case AV_CODEC_ID_VP9,
+             AV_CODEC_ID_VP8,
              AV_CODEC_ID_MPEG4,
              AV_CODEC_ID_MPEG2VIDEO,
              AV_CODEC_ID_VC1:
