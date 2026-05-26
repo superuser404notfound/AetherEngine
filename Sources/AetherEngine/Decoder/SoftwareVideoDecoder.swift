@@ -105,9 +105,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             || codecpar.pointee.color_trc == AVCOL_TRC_ARIB_STD_B67
         use10Bit = bitsPerSample > 8 || isHDRTransfer
 
-        #if DEBUG
+        // Release-visible: this is the only line that tells a
+        // diagnostic-overlay reader whether the SW decoder opened at
+        // all. Removing the #if DEBUG gate so TestFlight users (and
+        // DrHurt #4 MPEG-4 black-screen reports) can see decoder
+        // init outcome from the in-app log buffer.
         EngineLog.emit("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")", category: .swPlayback)
-        #endif
     }
 
     func decode(packet: UnsafeMutablePointer<AVPacket>) {

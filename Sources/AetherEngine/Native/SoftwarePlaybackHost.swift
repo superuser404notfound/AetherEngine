@@ -163,6 +163,22 @@ final class SoftwarePlaybackHost {
         }
         self.videoStreamIndex = dem.videoStreamIndex
 
+        // Release-visible session-start log so the diagnostic overlay
+        // shows the SW path was entered at all. Without this, a SW-path
+        // session that black-screens looks identical in logs to a session
+        // that never dispatched here (DrHurt #4 MPEG-4 "not much on log").
+        let vCodecID = vStream.pointee.codecpar?.pointee.codec_id.rawValue ?? 0
+        let aIdx = audioSourceStreamIndex ?? dem.audioStreamIndex
+        let aCodecID: UInt32 = aIdx >= 0
+            ? (dem.stream(at: aIdx)?.pointee.codecpar?.pointee.codec_id.rawValue ?? 0)
+            : 0
+        EngineLog.emit(
+            "[SWHost] session start: videoCodecID=\(vCodecID) "
+            + "audioCodecID=\(aCodecID == 0 ? "none" : String(aCodecID)) "
+            + "duration=\(String(format: "%.1f", dem.duration))s",
+            category: .swPlayback
+        )
+
         // Pick the right decoder for the source codec. HEVC routes
         // to VTDecompressionSession (HW); AV1 / VP9 / anything else
         // stays on libavcodec via SoftwareVideoDecoder. The current
@@ -206,6 +222,22 @@ final class SoftwarePlaybackHost {
             // is internally locked + safe to call off-main; the engine's
             // public state stays untouched here, only the layer's frame queue.
             self?.renderer.enqueue(pixelBuffer: pixelBuffer, pts: pts, hdr10PlusData: hdr10PlusData)
+            // Release-visible first-frame-enqueued log. After [SWDecoder]
+            // Opened and [SWHost] session start, this is the next milestone:
+            // proves the demux loop reached a video packet, the decoder
+            // produced a pixel buffer, and the renderer accepted the
+            // enqueue. If this never fires after several seconds, the
+            // failure is between decoder-open and first-frame.
+            if self?.framesEnqueued == 0 {
+                let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                EngineLog.emit(
+                    "[SWHost] first video frame enqueued: "
+                    + "pixfmt=0x\(String(pfType, radix: 16)) "
+                    + "size=\(CVPixelBufferGetWidth(pixelBuffer))x\(CVPixelBufferGetHeight(pixelBuffer)) "
+                    + "pts=\(String(format: "%.3f", pts.seconds))s",
+                    category: .swPlayback
+                )
+            }
             self?.framesEnqueued &+= 1
         }
         videoDecoder.onFirstHDR10PlusDetected = { [weak self] in

@@ -283,6 +283,58 @@ public struct SourceProbe: Sendable {
     }
 }
 
+/// Result of `AetherEngine.swDecodeProbe(url:)`. SW-decoder repro
+/// shape for `aetherctl swdecode` and host-side SW-pipeline diagnostics
+/// (MPEG-4 Part 2, MPEG-2, VC-1, AV1 on platforms without HW AV1).
+/// Distinguishes "decoder couldn't open" from "decoder opened but
+/// produced no frames" from "decode works end-to-end" so failures
+/// can be localised without spinning up a render layer.
+public struct SoftwareDecodeProbeResult: Sendable {
+    public let codecName: String
+    public let codecID: Int32
+    public let width: Int32
+    public let height: Int32
+    public let openSucceeded: Bool
+    public let openError: String?
+    public let packetsRead: Int
+    public let packetsFedToDecoder: Int
+    public let framesDecoded: Int
+    public let firstFramePixelFormat: String?
+    public let firstFrameWidth: Int
+    public let firstFrameHeight: Int
+    public let firstError: String?
+
+    public init(
+        codecName: String,
+        codecID: Int32,
+        width: Int32,
+        height: Int32,
+        openSucceeded: Bool,
+        openError: String?,
+        packetsRead: Int,
+        packetsFedToDecoder: Int,
+        framesDecoded: Int,
+        firstFramePixelFormat: String?,
+        firstFrameWidth: Int,
+        firstFrameHeight: Int,
+        firstError: String?
+    ) {
+        self.codecName = codecName
+        self.codecID = codecID
+        self.width = width
+        self.height = height
+        self.openSucceeded = openSucceeded
+        self.openError = openError
+        self.packetsRead = packetsRead
+        self.packetsFedToDecoder = packetsFedToDecoder
+        self.framesDecoded = framesDecoded
+        self.firstFramePixelFormat = firstFramePixelFormat
+        self.firstFrameWidth = firstFrameWidth
+        self.firstFrameHeight = firstFrameHeight
+        self.firstError = firstError
+    }
+}
+
 /// Metadata about an audio or subtitle track in the loaded media.
 public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// Track index as reported by FFmpeg's AVStream.

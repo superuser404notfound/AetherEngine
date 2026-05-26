@@ -42,6 +42,7 @@ private func printUsage() {
       aetherctl probe <url>
       aetherctl serve [--no-dv] <url>
       aetherctl validate [--no-dv] <url>
+      aetherctl swdecode [--frames N] <url>
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -50,6 +51,10 @@ private func printUsage() {
                      Mirrors what AetherEngine.loadNative passes on a
                      non-DV TV / on macOS (where displayCapabilities
                      reports supportsDolbyVision=false anyway).
+
+    Flags (swdecode only):
+      --frames N     Max packets to read / frames to wait for.
+                     Default 100.
 
     Subcommands:
       probe     Open the demuxer, dump format + streams + duration, exit.
@@ -74,6 +79,12 @@ private func printUsage() {
       validate  Spin up the engine, run Apple's `mediastreamvalidator`
                 against the loopback manifest, print the report, tear
                 down. Requires Xcode (xcrun) on the PATH.
+
+      swdecode  Open SoftwareVideoDecoder for the source's video
+                stream, feed packets, report counters + first-frame
+                metadata. Tests the SW-pipeline path without needing
+                a display layer. Use for AV1, VP9, MPEG-4 Part 2,
+                MPEG-2, VC-1 sources.
     """)
 }
 
@@ -260,6 +271,66 @@ private func runValidate(url: URL, dvModeAvailable: Bool) -> Int32 {
     return process.terminationStatus
 }
 
+// MARK: - swdecode
+
+private func runSWDecode(url: URL, maxPackets: Int) -> Int32 {
+    EngineLog.handler = { print($0) }
+    print("aetherctl swdecode: \(url.absoluteString) (maxPackets=\(maxPackets))")
+    print("")
+
+    let result: SoftwareDecodeProbeResult
+    do {
+        result = try AetherEngine.swDecodeProbe(url: url, maxPackets: maxPackets)
+    } catch {
+        print("ERROR: \(error)")
+        return 1
+    }
+
+    print("")
+    print("=== SW DECODER RESULT ===")
+    print("Codec:                \(result.codecName) (id=\(result.codecID))")
+    print("Source resolution:    \(result.width)x\(result.height)")
+    print("Decoder open:         \(result.openSucceeded ? "OK" : "FAILED")")
+    if let err = result.openError {
+        print("Open error:           \(err)")
+    }
+    print("Packets read:         \(result.packetsRead)")
+    print("Packets fed (video):  \(result.packetsFedToDecoder)")
+    print("Frames decoded:       \(result.framesDecoded)")
+    if let fmt = result.firstFramePixelFormat {
+        print("First frame pixfmt:   \(fmt)")
+        print("First frame size:     \(result.firstFrameWidth)x\(result.firstFrameHeight)")
+    } else {
+        print("First frame:          (none decoded)")
+    }
+    if let err = result.firstError {
+        print("First demux error:    \(err)")
+    }
+    print("=========================")
+    print("")
+
+    // Verdict
+    if !result.openSucceeded {
+        print("VERDICT: decoder open failed (libavcodec rejected the stream).")
+        print("         Check FFmpegBuild --enable-decoder=\(result.codecName) +")
+        print("         codec-private extradata in the source.")
+        return 2
+    }
+    if result.framesDecoded == 0 {
+        print("VERDICT: decoder opened but produced no frames from \(result.packetsFedToDecoder) packets.")
+        print("         Suggests pixel-format conversion failure or no key-frame")
+        print("         in the first \(result.packetsFedToDecoder) packets. Bump --frames")
+        print("         if the source has a long GOP.")
+        return 3
+    }
+    print("VERDICT: SW decode end-to-end healthy. \(result.framesDecoded) frames")
+    print("         produced into \(result.firstFramePixelFormat ?? "?") pixel buffers.")
+    print("         If real playback still hangs, the failure is downstream")
+    print("         (SoftwarePlaybackHost frame-enqueue, AVSampleBufferDisplayLayer")
+    print("         attach, audio-clock sync).")
+    return 0
+}
+
 // MARK: - Dispatch
 
 let args = CommandLine.arguments
@@ -284,10 +355,21 @@ private func takeFlag(_ name: String, from rest: inout [String]) -> Bool {
     return true
 }
 
+/// Pluck a `--key value` pair out of the rest-args list, returning
+/// the value as Int. Returns nil if absent or unparseable.
+private func takeIntFlag(_ name: String, from rest: inout [String]) -> Int? {
+    guard let idx = rest.firstIndex(of: name),
+          idx + 1 < rest.count,
+          let value = Int(rest[idx + 1]) else { return nil }
+    rest.removeSubrange(idx...(idx + 1))
+    return value
+}
+
 // Subcommand path: explicit subcommand + flags + url.
-if ["probe", "serve", "validate"].contains(first) {
+if ["probe", "serve", "validate", "swdecode"].contains(first) {
     var rest = Array(args.dropFirst(2))
     let noDV = takeFlag("--no-dv", from: &rest)
+    let framesOverride = takeIntFlag("--frames", from: &rest)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
         print("")
@@ -303,6 +385,8 @@ if ["probe", "serve", "validate"].contains(first) {
         runServe(url: url, dvModeAvailable: dvModeAvailable)
     case "validate":
         exit(runValidate(url: url, dvModeAvailable: dvModeAvailable))
+    case "swdecode":
+        exit(runSWDecode(url: url, maxPackets: framesOverride ?? 100))
     default:
         printUsage()
         exit(64)

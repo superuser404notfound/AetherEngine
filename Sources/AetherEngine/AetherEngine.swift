@@ -469,6 +469,144 @@ public final class AetherEngine: ObservableObject {
         )
     }
 
+    // MARK: - SW-decoder repro probe
+
+    /// One-shot SW-decoder repro for `aetherctl swdecode` and any
+    /// future host-side diagnostic that wants to localise SW-pipeline
+    /// failures (MPEG-4 Part 2, MPEG-2, VC-1, AV1 on platforms without
+    /// HW AV1) without spinning up a render target.
+    ///
+    /// Opens the demuxer, opens `SoftwareVideoDecoder` for the video
+    /// stream, reads up to `maxPackets` packets and feeds the video
+    /// ones to the decoder, returns counters + first-frame metadata.
+    /// Useful failure modes the result discriminates:
+    ///
+    /// - `openSucceeded == false`: decoder couldn't open (FFmpegBuild
+    ///   missing the libavcodec decoder, codec-private extradata
+    ///   malformed). `openError` carries the reason.
+    /// - `openSucceeded == true && framesDecoded == 0`: decoder
+    ///   opened but never produced a frame from the packets fed.
+    ///   Suggests pixel-format conversion failure or all-skipped
+    ///   non-IDR packets.
+    /// - `framesDecoded > 0` with a populated `firstFramePixelFormat`:
+    ///   SW decode path is functionally healthy end-to-end; if real
+    ///   playback still hangs, the failure is downstream
+    ///   (`SoftwarePlaybackHost` frame-enqueue, `AVSampleBufferDisplayLayer`
+    ///   attach, audio-clock sync).
+    public nonisolated static func swDecodeProbe(
+        url: URL,
+        maxPackets: Int = 100,
+        options: LoadOptions = .init()
+    ) throws -> SoftwareDecodeProbeResult {
+        let demuxer = Demuxer()
+        try demuxer.open(url: url, extraHeaders: options.httpHeaders)
+        defer { demuxer.close() }
+
+        let videoIdx = demuxer.videoStreamIndex
+        guard videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) else {
+            throw AetherEngineError.noVideoStream
+        }
+
+        let codecID = stream.pointee.codecpar.pointee.codec_id
+        let codecName: String = {
+            guard let cstr = avcodec_get_name(codecID) else { return "unknown" }
+            return String(cString: cstr)
+        }()
+        let width = stream.pointee.codecpar.pointee.width
+        let height = stream.pointee.codecpar.pointee.height
+
+        let decoder = SoftwareVideoDecoder()
+        // Captured-by-reference accumulators via a class so the onFrame
+        // closure can mutate them safely without inout / @escaping
+        // capture gymnastics. Closure fires synchronously from inside
+        // avcodec_send_packet / receive_frame, all on this thread.
+        final class Accum {
+            var framesDecoded = 0
+            var firstFramePixelFormat: String?
+            var firstFrameWidth: Int = 0
+            var firstFrameHeight: Int = 0
+        }
+        let accum = Accum()
+
+        do {
+            try decoder.open(stream: stream) { pixelBuffer, _, _ in
+                accum.framesDecoded += 1
+                if accum.firstFramePixelFormat == nil {
+                    let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
+                    let bytes: [UInt8] = [
+                        UInt8((pfType >> 24) & 0xff),
+                        UInt8((pfType >> 16) & 0xff),
+                        UInt8((pfType >> 8) & 0xff),
+                        UInt8(pfType & 0xff),
+                    ]
+                    let printable = bytes.map { ($0 >= 0x20 && $0 < 0x7f) ? $0 : 0x2e }
+                    let fourCC = String(bytes: printable, encoding: .ascii) ?? "????"
+                    accum.firstFramePixelFormat = "\(fourCC) (0x\(String(pfType, radix: 16)))"
+                    accum.firstFrameWidth = CVPixelBufferGetWidth(pixelBuffer)
+                    accum.firstFrameHeight = CVPixelBufferGetHeight(pixelBuffer)
+                }
+            }
+        } catch {
+            return SoftwareDecodeProbeResult(
+                codecName: codecName,
+                codecID: Int32(bitPattern: codecID.rawValue),
+                width: width,
+                height: height,
+                openSucceeded: false,
+                openError: "\(error)",
+                packetsRead: 0,
+                packetsFedToDecoder: 0,
+                framesDecoded: 0,
+                firstFramePixelFormat: nil,
+                firstFrameWidth: 0,
+                firstFrameHeight: 0,
+                firstError: "decoder open failed: \(error)"
+            )
+        }
+        defer { decoder.close() }
+
+        var packetsRead = 0
+        var packetsFedToDecoder = 0
+        var firstError: String?
+
+        while packetsRead < maxPackets, accum.framesDecoded < maxPackets {
+            do {
+                guard let packet = try demuxer.readPacket() else {
+                    break  // EOF
+                }
+                packetsRead += 1
+                if packet.pointee.stream_index == videoIdx {
+                    packetsFedToDecoder += 1
+                    decoder.decode(packet: packet)
+                }
+                av_packet_unref(packet)
+                av_packet_free_safe(packet)
+            } catch {
+                if firstError == nil {
+                    firstError = "\(error)"
+                }
+                break
+            }
+        }
+        decoder.flush()
+
+        return SoftwareDecodeProbeResult(
+            codecName: codecName,
+            codecID: Int32(bitPattern: codecID.rawValue),
+            width: width,
+            height: height,
+            openSucceeded: true,
+            openError: nil,
+            packetsRead: packetsRead,
+            packetsFedToDecoder: packetsFedToDecoder,
+            framesDecoded: accum.framesDecoded,
+            firstFramePixelFormat: accum.firstFramePixelFormat,
+            firstFrameWidth: accum.firstFrameWidth,
+            firstFrameHeight: accum.firstFrameHeight,
+            firstError: firstError
+        )
+    }
+
     // MARK: - Public load
 
     /// Load a media file or stream URL. Replaces any current playback.
