@@ -1093,31 +1093,50 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // routing in the first place. SDR HEVC has nothing to advertise
         // and stays on the media playlist regardless of panel state.
         //
-        // DV5 routing on non-DV panels: narrowed to SDR-locked only.
+        // DV5 routing on non-DV panels: ALWAYS media playlist.
         //
-        // The earlier "always media" guard was a defensive workaround
-        // for a DV5 master playlist + match-on failure with
-        // `CODECS="dvh1.05.06,ec+3"` + `VIDEO-RANGE=PQ` on a true
-        // non-DV HDR10 Samsung. Subsequent investigation traced the
-        // actual root cause to the non-standard `ec+3` audio CODECS
-        // token (b5462d7 fix): tvOS 26.5's HLS variant validator
-        // strictly enforces RFC 6381 and rejects any variant whose
-        // CODECS contains tokens not in the IANA registry. With the
-        // canonical `ec-3` emitted instead, P5 master playlist
-        // routing on HDR-ready non-DV panels is worth retrying;
-        // DrHurt #4 #63's hypothesis ("AVPlayer tone-maps DV→HDR10
-        // via the master `dvh1.05` CODECS hint") may yet hold true
-        // for the corrected master signaling.
+        // Two tests on Vincent's HDR10-only Samsung (2026-05-26)
+        // empirically disproved the "AVPlayer tone-maps DV→HDR10
+        // via the master `dvh1.05` CODECS hint" hypothesis (DrHurt
+        // #4 #63):
         //
-        // The narrower SDR-locked guard remains because the existing
-        // comment at line 690-694 documents tvOS 26's master-level
-        // codec filter rejecting bare `dvh1.05` CODECS with -11868
-        // when the panel can't engage HDR/DV mode at all — that's
-        // an independent failure from the audio-codec parser issue,
-        // and the empirically-validated workaround (route via media,
-        // let AVPlayer tonemap from the dvh1 sample entry) still
-        // applies to truly SDR-locked panels with no HDR mode
-        // reachable.
+        //   1. With `CODECS="dvh1.05.06,ec+3"` + `VIDEO-RANGE=PQ`:
+        //      AVPlayer rejected with `AVFoundationErrorDomain
+        //      -11848 / CoreMediaErrorDomain -15517` — CODECS-string
+        //      mismatch caused by the non-standard `ec+3` audio
+        //      token (fixed in b5462d7).
+        //   2. With `CODECS="dvh1.05.06,ec-3"` + `VIDEO-RANGE=PQ`
+        //      (canonical RFC 6381 audio token, otherwise identical
+        //      master): AVPlayer still rejected with
+        //      `AVFoundationErrorDomain -11868 /
+        //      AVErrorNoCompatibleAlternatesForExternalDisplay /
+        //      CoreMediaErrorDomain -17223`. Same `errorLog dump: 0
+        //      events`, same `tracks count=0`, same `item.duration`
+        //      parsed from EXTINFs but no playback.
+        //
+        // The -11868 vs the earlier -11848 is the actual variant-
+        // filter rejection: tvOS 26.5 sees a `dvh1.05` master
+        // variant, the panel has no DV capability and no fallback
+        // variant exists (P5 has no SUPPLEMENTAL-CODECS brand for
+        // backward-compat — `/db1p` and `/db4h` only work for P8.1
+        // / P8.4), so "no compatible alternates" is the literal
+        // truth. Matches the published Apple HLS Authoring Spec
+        // contract: real streaming services (Apple TV+, Netflix,
+        // Disney+) ship P5 alongside a sibling HDR10 variant for
+        // non-DV clients; single-variant P5 master is not a
+        // supported pattern on AVPlayer.
+        //
+        // DrHurt's positive #63 result was on a DV-capable system
+        // with HDR10 panel mode active — there the variant filter
+        // is lenient because the system reports DV decoder
+        // availability. On a true non-DV system the filter is
+        // strict and rejects unconditionally.
+        //
+        // So: P5 on any non-DV panel always routes via media. Plain
+        // HEVC base never exists for P5 (IPT-PQ-c2 elementary stream
+        // is the only thing the source carries), and AVPlayer's
+        // media-playlist tonemap path via the dvh1 sample entry in
+        // init.mp4 handles the DV-to-display downgrade internally.
         //
         // DV8.1 and DV8.4 on non-DV panels already downgrade their
         // CODECS string to `hvc1.*` in the HEVC dispatch above + strip
@@ -1127,11 +1146,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
             || (displaySupportsHDR && matchContentEnabled)
-        let dv5OnSdrLockedNonDVPanel = dvVariant == .profile5
-            && !effectiveDvMode
-            && !panelReadyForHDR
+        let dv5OnNonDVPanel = dvVariant == .profile5 && !effectiveDvMode
         let useMasterPlaylist: Bool
-        if dv5OnSdrLockedNonDVPanel {
+        if dv5OnNonDVPanel {
             useMasterPlaylist = false
         } else {
             useMasterPlaylist = sourceIsHDR && panelReadyForHDR
