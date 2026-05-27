@@ -2366,22 +2366,23 @@ private final class VideoSegmentProvider: HLSSegmentProvider {
                 category: .session
             )
             lastRestartIndex = index
-            // Reset the cache's high-water before the new producer
-            // takes over so `producerPassedAndPruned` only reflects
-            // what the *new* producer has written. Without this, the
-            // previous producer's high-water stays hot and every
-            // subsequent peek-miss above `index` re-triggers
-            // `producerPassedAndPruned` → restart cascade. Seen in
-            // the wild: a back-scrub at ~80s evicted seg-11..seg-19,
-            // the first seg-11 fetch correctly restarted at 11, but
-            // then seg-12..seg-19 each restarted again (highWater
-            // still 21 from the killed producer) instead of waiting
-            // 2 s for the now-forward-writing new producer to reach
-            // them. Each restart cost 100-200 ms, drained AVPlayer's
-            // buffer, and produced the user-visible "stalls for 10 s
-            // then fast-forwards to catch up" symptom.
-            cache.resetHighWaterForRestart()
             restart(index)
+            // Reset cache's high-water AFTER `restart(index)` returns.
+            // restart() is synchronous: it calls `old.stop()` then
+            // `waitForFinish` so the old producer has fully exited
+            // (or been abandoned after 5 s) before returning. The
+            // new producer was just `start()`-ed but its pump loop
+            // is async and hasn't stored anything yet. Resetting
+            // here closes the race where the old producer's final
+            // segment write (e.g. seg-21 captured immediately after
+            // we triggered the restart at 11) re-bumps `highWater`
+            // *after* a pre-restart reset would have cleared it,
+            // re-arming the producerPassedAndPruned gate and
+            // cascading into a per-segment restart storm. With the
+            // reset positioned post-restart, only the new producer's
+            // forward writes feed the high-water and the gate stays
+            // inert for forward-march fetches.
+            cache.resetHighWaterForRestart()
         }
 
         let bytes = cache.fetch(index: index, timeout: 30.0)
