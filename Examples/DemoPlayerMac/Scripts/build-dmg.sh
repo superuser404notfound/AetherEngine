@@ -23,7 +23,7 @@
 #   NOTARY_PROFILE="NOTARY_PROFILE" \
 #   ./Scripts/build-dmg.sh
 #
-# Optional env overrides: VERSION (default: 2.0.1), APP_NAME, BUNDLE_ID.
+# Optional env overrides: VERSION (default: 2.0.2), APP_NAME, BUNDLE_ID.
 #
 # If NOTARY_PROFILE is unset the script still builds + signs the .app
 # and .dmg but skips notarization. The output won't pass Gatekeeper
@@ -31,7 +31,7 @@
 
 set -euo pipefail
 
-VERSION="${VERSION:-2.0.1}"
+VERSION="${VERSION:-2.0.2}"
 APP_NAME="${APP_NAME:-AetherEngine Demo}"
 BUNDLE_ID="${BUNDLE_ID:-de.superuser404.AetherEngine.DemoPlayer}"
 DEVELOPER_ID="${DEVELOPER_ID:-}"

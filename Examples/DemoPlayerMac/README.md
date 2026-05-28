@@ -61,7 +61,7 @@ NOTARY_PROFILE="NOTARY_PROFILE" \
 
 The output lands in `build/AetherEngine-Demo-<version>.dmg`. Six phases run in sequence: universal release build, `.app` wrap with Info.plist + entitlements, code-sign with Hardened Runtime, notarize + staple the `.app`, package into `.dmg`, sign + notarize the `.dmg`. Takes 1–3 minutes mostly waiting on Apple's notary service.
 
-Optional env overrides: `VERSION` (default `2.0.1`), `APP_NAME`, `BUNDLE_ID`. If `NOTARY_PROFILE` is unset the script still builds + signs but skips notarization — useful for local smoke tests; the output won't pass Gatekeeper on other machines.
+Optional env overrides: `VERSION` (default `2.0.2`), `APP_NAME`, `BUNDLE_ID`. If `NOTARY_PROFILE` is unset the script still builds + signs but skips notarization — useful for local smoke tests; the output won't pass Gatekeeper on other machines.
 
 ## Why a separate `Package.swift`
 
