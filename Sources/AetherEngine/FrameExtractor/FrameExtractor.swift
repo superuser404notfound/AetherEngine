@@ -134,9 +134,12 @@ public actor FrameExtractor {
     private func scheduleIdleClose() {
         idleTask?.cancel()
         idleTask = Task { [weak self, idleInterval] in
-            try? await Task.sleep(for: idleInterval)
-            guard !Task.isCancelled else { return }
-            await self?.idleClose()
+            do {
+                try await Task.sleep(for: idleInterval)
+                await self?.idleClose()
+            } catch {
+                // Cancelled before the interval elapsed: nothing to do.
+            }
         }
     }
 
@@ -146,6 +149,9 @@ public actor FrameExtractor {
     private func idleClose() {
         cache.clear()
         let context = self.context
+        // Fire-and-forget: idle teardown is best-effort and no caller
+        // awaits it. Using runOnQueue here (as shutdown does) would
+        // block the actor for no benefit.
         decodeQueue.async { context.close() }
     }
 }
