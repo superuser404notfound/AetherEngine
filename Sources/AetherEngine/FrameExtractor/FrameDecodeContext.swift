@@ -163,9 +163,12 @@ final class FrameDecodeContext: @unchecked Sendable {
 
         avcodec_flush_buffers(ctx)
 
-        // thumbnail wants only the seeked-to keyframe; snapshot must decode
-        // forward through non-key frames to reach the exact PTS.
-        ctx.pointee.skip_frame = (mode == .thumbnail) ? AVDISCARD_NONKEY : AVDISCARD_DEFAULT
+        // AVDISCARD_DEFAULT for both modes. Thumbnail returns the first frame
+        // after the seek and stops, so discarding non-key frames buys nothing,
+        // and AVDISCARD_NONKEY actively breaks streams whose seek lands mid-GOP
+        // past a sparse keyframe (decoder discards every packet -> EAGAIN, nil
+        // frame). Snapshot must keep all frames to decode forward to the exact PTS.
+        ctx.pointee.skip_frame = AVDISCARD_DEFAULT
 
         demuxer.seek(to: seconds)
 
