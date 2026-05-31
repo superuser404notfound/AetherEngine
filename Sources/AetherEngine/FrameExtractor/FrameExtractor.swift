@@ -35,6 +35,9 @@ public actor FrameExtractor {
     /// work instead of lazily reopening a closed context.
     private var isShutDown = false
 
+    private let idleInterval: Duration = .seconds(10)
+    private var idleTask: Task<Void, Never>?
+
     public init(url: URL, httpHeaders: [String: String] = [:]) {
         self.context = FrameDecodeContext(url: url, httpHeaders: httpHeaders)
         self.cache = FrameCache(
@@ -62,6 +65,7 @@ public actor FrameExtractor {
         guard !isShutDown else { return }
         let context = self.context
         await runOnQueue { try? context.ensureOpen() }
+        scheduleIdleClose()
     }
 
     /// Permanently tear down the decode context and clear the cache.
@@ -71,6 +75,7 @@ public actor FrameExtractor {
     /// `snapshot` / `prewarm` calls return nil / no-op and do NOT reopen
     /// the context. Create a new `FrameExtractor` to extract again.
     public func shutdown() async {
+        idleTask?.cancel()
         isShutDown = true
         currentToken?.cancel()
         cache.clear()
@@ -83,6 +88,7 @@ public actor FrameExtractor {
     private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
         guard !isShutDown else { return nil }
         if let hit = cache.get(mode: mode, seconds: seconds) {
+            scheduleIdleClose()
             return hit
         }
         currentToken?.cancel()
@@ -108,6 +114,7 @@ public actor FrameExtractor {
         if let image = result.image, !token.isCancelled {
             cache.set(image, mode: mode, seconds: seconds)
         }
+        scheduleIdleClose()
         return result.image
     }
 
@@ -119,6 +126,27 @@ public actor FrameExtractor {
                 continuation.resume(returning: work())
             }
         }
+    }
+
+    /// Restart the idle countdown. Called at the end of every request.
+    /// After `idleInterval` with no further request, the decode context
+    /// is closed and the cache cleared; the next request reopens lazily.
+    private func scheduleIdleClose() {
+        idleTask?.cancel()
+        idleTask = Task { [weak self, idleInterval] in
+            try? await Task.sleep(for: idleInterval)
+            guard !Task.isCancelled else { return }
+            await self?.idleClose()
+        }
+    }
+
+    /// Transient teardown after idle: closes the decode context and
+    /// drops the cache. Distinct from `shutdown()`, this does NOT set
+    /// `isShutDown`, so the next request lazily reopens.
+    private func idleClose() {
+        cache.clear()
+        let context = self.context
+        decodeQueue.async { context.close() }
     }
 }
 
