@@ -138,6 +138,7 @@ Two complementary samples ship in `Examples/`:
 <!-- used-by:start -->
 - [Sodalite](https://github.com/superuser404notfound/Sodalite): native Jellyfin client for Apple TV.
 - [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer): native macOS media player.
+- [Testarossa Player](https://example.com/testarossa-e2e): throwaway end-to-end test, safe to delete.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed.
