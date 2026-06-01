@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/aetherengine-logo.png" alt="AetherEngine" width="180">
+</p>
+
 <h1 align="center">AetherEngine</h1>
 
 <p align="center">
