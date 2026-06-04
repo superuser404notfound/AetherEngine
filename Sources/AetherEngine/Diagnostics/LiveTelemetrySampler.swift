@@ -168,7 +168,7 @@ final class LiveTelemetrySampler {
             avSyncGapMs = nil  // see .native arm — the producer that measures the gap doesn't run on this path
             forwardBufferSeconds = nil  // software host has no comparable surface yet
 
-        case .aether, .none:
+        case .aether, .none, .audio:
             observedFps = nil
             droppedFrameCount = nil
             networkThroughputMbps = nil

@@ -33,6 +33,10 @@ public enum PlaybackBackend: String, Sendable, Equatable {
     /// platform — primarily AV1 on tvOS where Apple ships no SW decoder
     /// and no Apple TV chip has HW AV1.
     case software
+    /// FFmpeg audio decode → AVSampleBufferAudioRenderer. The audio-only
+    /// path: no video pipeline, no display layer, no loopback. Used for
+    /// music and other audio-only sources.
+    case audio
 }
 
 /// Static snapshot of what the current display can present.
