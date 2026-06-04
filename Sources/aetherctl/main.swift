@@ -398,7 +398,7 @@ private func audioSmokeTest(url: URL, seconds playSeconds: Double) async -> Int3
         return 1
     }
     let backend = engine.playbackBackend
-    print("backend=\(backend.rawValue) duration=\(String(format: "%.1f", engine.duration))s")
+    print("backend=\(backend.rawValue) decoder=\(engine.activeAudioDecoder ?? "?") duration=\(String(format: "%.1f", engine.duration))s")
     guard backend == .audio else {
         print("FAIL: expected backend .audio, got \(backend.rawValue)")
         return 1
@@ -411,6 +411,8 @@ private func audioSmokeTest(url: URL, seconds playSeconds: Double) async -> Int3
     }
     let finalTime = engine.currentTime
     let endState = engine.state
+    let finalDuration = engine.duration
+    print("  final duration=\(String(format: "%.1f", finalDuration))s")
     engine.stop()
     if finalTime <= 0.5 {
         print("FAIL: clock did not advance (t=\(finalTime)); decode or render path is silent")
