@@ -403,18 +403,31 @@ private func audioSmokeTest(url: URL, seconds playSeconds: Double) async -> Int3
         print("FAIL: expected backend .audio, got \(backend.rawValue)")
         return 1
     }
+    let duration = engine.duration
     let ticks = max(1, Int(playSeconds))
     for _ in 0..<ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         print(String(format: "  t=%.2fs", engine.currentTime))
     }
     let finalTime = engine.currentTime
+    let endState = engine.state
     engine.stop()
     if finalTime <= 0.5 {
         print("FAIL: clock did not advance (t=\(finalTime)); decode or render path is silent")
         return 1
     }
-    print("OK: audio path advanced the clock to \(String(format: "%.2f", finalTime))s")
+    // If we stopped sampling well before the file's end, the engine MUST
+    // still be playing. If it already reached .idle, the demuxer raced to
+    // EOF and ended the track early (the missing-back-pressure regression).
+    if duration > 0, playSeconds < duration - 1.0 {
+        if case .playing = endState {
+            // expected
+        } else {
+            print("FAIL: engine left .playing early (state=\(endState)) at t=\(String(format: "%.2f", finalTime))s of \(String(format: "%.1f", duration))s; demuxer raced to EOF")
+            return 1
+        }
+    }
+    print("OK: audio path advanced the clock to \(String(format: "%.2f", finalTime))s (state=\(endState), duration=\(String(format: "%.1f", duration))s)")
     return 0
 }
 

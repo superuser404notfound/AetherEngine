@@ -279,6 +279,24 @@ final class AudioPlaybackHost {
         // back ~47x/sec and freeze playback.
         var clockArmed = false
 
+        // Bound how far the demuxer may run ahead of the playback clock.
+        // Without this the loop reads the ENTIRE file's packets in a tight
+        // burst, enqueues them all into the renderer, hits readPacket()==nil
+        // (demuxer EOF) within a second or two, and fires onEnd() while the
+        // audio is still playing out of the renderer's buffer. The host then
+        // mistakes demuxer-EOF for end-of-track and advances early. Pacing
+        // the loop to keep at most `maxBufferAhead` seconds queued ahead of
+        // the synchronizer clock makes demuxer-EOF land near actual playback
+        // end and bounds the decoded-PCM memory held in the renderer.
+        let maxBufferAhead: Double = 8.0
+        // Source-time (seconds) of the end of the last sample handed to the
+        // renderer. Drives both the back-pressure gate and the end-of-track
+        // drain below. lastEnqueuedEnd and currentTimeSeconds share the same
+        // source-PTS timeline (samples carry source PTS; the clock is
+        // anchored to initialClockTime), so their difference is the seconds
+        // of audio queued ahead of the playhead.
+        var lastEnqueuedEnd: Double = 0
+
         while !stopRequested() {
             if !isPlaying() {
                 condition.lock()
@@ -287,6 +305,17 @@ final class AudioPlaybackHost {
                 }
                 condition.unlock()
                 continue
+            }
+
+            // Back-pressure: once the clock is running, don't outrun it by
+            // more than `maxBufferAhead` seconds. Skipped until the clock is
+            // armed so the initial buffer can prime.
+            if clockArmed, let aOut = audioOutput {
+                while !stopRequested() && isPlaying()
+                    && (lastEnqueuedEnd - aOut.currentTimeSeconds) > maxBufferAhead {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if stopRequested() { break }
             }
 
             let packet: UnsafeMutablePointer<AVPacket>?
@@ -300,6 +329,14 @@ final class AudioPlaybackHost {
 
             guard let packet else {
                 audioDecoder?.flush()
+                // Demuxer EOF is NOT end-of-track: the renderer still has up
+                // to `maxBufferAhead` seconds queued. Wait for the clock to
+                // play through everything enqueued before signaling the end,
+                // otherwise the host advances to the next track seconds early.
+                while !stopRequested()
+                    && (audioOutput?.currentTimeSeconds ?? lastEnqueuedEnd) < lastEnqueuedEnd - 0.25 {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
                 onEnd()
                 break
             }
@@ -309,6 +346,11 @@ final class AudioPlaybackHost {
                 let buffers = aDec.decode(packet: packet)
                 for buf in buffers {
                     aOut.enqueue(sampleBuffer: buf)
+                }
+                if let last = buffers.last {
+                    let end = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(last))
+                        + CMTimeGetSeconds(CMSampleBufferGetDuration(last))
+                    if end.isFinite, end > lastEnqueuedEnd { lastEnqueuedEnd = end }
                 }
                 if !clockArmed, !buffers.isEmpty {
                     aOut.seekClock(to: initialClockTime, rate: initialRate)
