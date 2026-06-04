@@ -18,6 +18,12 @@ final class AudioAVPlayerHost {
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var rate: Float = 0
+    /// Mirrors `avPlayer.timeControlStatus` so the engine can reconcile its
+    /// transport state when the system (Control Center, Siri Remote, AirPods)
+    /// plays/pauses the AVPlayer directly rather than through our play()/
+    /// pause(). Without this our `state` goes stale and the play/pause toggle
+    /// is swallowed (looks like "only pause works").
+    @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
     @Published private(set) var failureMessage: String?
     @Published private(set) var didReachEnd: Bool = false
 
@@ -33,6 +39,7 @@ final class AudioAVPlayerHost {
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
 
@@ -127,6 +134,15 @@ final class AudioAVPlayerHost {
             let r = player.rate
             Task { @MainActor [weak self] in
                 self?.rate = r
+            }
+        }
+
+        // Mirror timeControlStatus so the engine reconciles transport state
+        // on system-driven play/pause (Control Center / remote / AirPods).
+        timeControlObservation = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            let status = player.timeControlStatus
+            Task { @MainActor [weak self] in
+                self?.timeControlStatus = status
             }
         }
 
@@ -232,6 +248,8 @@ final class AudioAVPlayerHost {
         statusObservation = nil
         rateObservation?.invalidate()
         rateObservation = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
             self.endObserver = nil

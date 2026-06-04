@@ -1331,6 +1331,29 @@ public final class AetherEngine: ObservableObject {
                 self?.state = .idle
             }
             .store(in: &audioNativeCancellables)
+        host.$timeControlStatus
+            .sink { [weak self] status in
+                guard let self = self else { return }
+                // Reconcile `state` when something other than the engine's
+                // own play()/pause() drives the AVPlayer: Control Center,
+                // the Siri Remote play/pause, or AirPods. Without this our
+                // state goes stale, the now-playing rate stops reflecting
+                // reality, and togglePlayPause() resolves to a no-op
+                // (the "only pause works" symptom). Only reconcile between
+                // the two steady transport states; never clobber loading /
+                // seeking / error / idle. `.waitingToPlayAtSpecifiedRate`
+                // is a buffer stall while the user still intends to play.
+                guard self.state == .playing || self.state == .paused else { return }
+                switch status {
+                case .paused:
+                    if self.state != .paused { self.state = .paused }
+                case .playing, .waitingToPlayAtSpecifiedRate:
+                    if self.state != .playing { self.state = .playing }
+                @unknown default:
+                    break
+                }
+            }
+            .store(in: &audioNativeCancellables)
 
         try await Task.detached(priority: .userInitiated) { [host] in
             try await host.load(url: url, startPosition: startPosition, httpHeaders: httpHeaders)
