@@ -698,7 +698,13 @@ public final class AetherEngine: ObservableObject {
         options: LoadOptions = .init(),
         audioSourceStreamIndex: Int32? = nil
     ) async throws {
-        stopInternal()
+        // Preserve the native AVPlayer host across a native->native reload
+        // so AVKit's system Now-Playing registration survives the seam
+        // (issue #15). Captured before stopInternal resets playbackBackend.
+        // If this source instead routes to the software path, the SW branch
+        // in the dispatch below releases the preserved host.
+        let priorBackendWasNative = (playbackBackend == .native)
+        stopInternal(keepNativeHost: priorBackendWasNative)
         loadedURL = url
         loadedOptions = options
         isLive = options.isLive
@@ -954,6 +960,16 @@ public final class AetherEngine: ObservableObject {
                 // AVFormatContext + AVIOReader for the entire SW
                 // playback session.
                 if probeOpened { probe.close() }
+                // A native->native reload may have preserved the previous
+                // AVPlayer host (issue #15), but this source routes to the
+                // software path. Release it now: the SW pipeline renders
+                // into its own layer and the host's currentAVPlayer sink
+                // relies on a nil publish to drop AVKit's now-stale player.
+                if nativeHost != nil {
+                    nativeHost?.tearDown()
+                    nativeHost = nil
+                    currentAVPlayer = nil
+                }
                 try await loadSoftware(
                     url: url,
                     sourceHTTPHeaders: options.httpHeaders,
@@ -1083,20 +1099,40 @@ public final class AetherEngine: ObservableObject {
         }.value
         self.nativeVideoSession = session
 
-        let host = NativeAVPlayerHost()
+        // Reuse the existing native host across a native->native reload
+        // (episode change, audio-track switch) so the AVPlayer instance,
+        // and AVKit's MediaRemote system Now-Playing registration bound to
+        // it, survives the seam. Building a fresh AVPlayer here makes AVKit
+        // fail to re-register ("Code=14 client callback") and the iPhone
+        // Control Center widget goes blank (issue #15). stopInternal kept
+        // the host alive (keepNativeHost) and unloaded its old item; a
+        // brand-new host is built only on a cold load or after a
+        // native->SW transition released the previous one.
+        let host: NativeAVPlayerHost
+        if let existing = nativeHost {
+            host = existing
+        } else {
+            host = NativeAVPlayerHost()
+        }
         host.playerLayer.videoGravity = _videoGravity
-        // Replay any pre-load externalMetadata onto the freshly-created
-        // host so its AVPlayerItem picks it up before AVPlayer assigns
-        // the item. Hosts that called `engine.setExternalMetadata`
-        // before `engine.load` rely on this transfer.
+        // Replay any pre-load externalMetadata onto the host so its
+        // AVPlayerItem picks it up before AVPlayer assigns the item. Hosts
+        // that called `engine.setExternalMetadata` before `engine.load`
+        // rely on this transfer.
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
         }
         self.nativeHost = host
-        // Publish before wiring up the @Published mirrors below so any
-        // host that subscribes via the same Combine sink sees the new
-        // AVPlayer instance before the first time / state update lands.
-        self.currentAVPlayer = host.avPlayer
+        // Publish before wiring up the @Published mirrors below so any host
+        // that subscribes via the same Combine sink sees the AVPlayer
+        // instance before the first time / state update lands. Only emit
+        // when the instance actually changed: re-publishing the same player
+        // would drive the host's currentAVPlayer sink to reassign
+        // AVPlayerViewController.player to the same instance, re-triggering
+        // the exact AVKit re-registration this reuse path exists to avoid.
+        if currentAVPlayer !== host.avPlayer {
+            self.currentAVPlayer = host.avPlayer
+        }
 
         nativeCancellables.removeAll()
         host.$currentTime
@@ -1704,7 +1740,10 @@ public final class AetherEngine: ObservableObject {
         // window, the new AVPlayer asset's PQ variant failed item open
         // with `AVFoundationErrorDomain -11868 / CoreMediaErrorDomain
         // -17223` at variant selection.
-        stopInternal(resetDisplayCriteria: false)
+        // Keep the native AVPlayer host alive across the audio-track switch
+        // (issue #15) unless playback is on the software path, where there
+        // is no native host to preserve.
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: !wasOnSoftwarePath)
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         loadedURL = url
         lastDetectedVideoCodec = preservedVideoCodec
@@ -2198,12 +2237,26 @@ public final class AetherEngine: ObservableObject {
     ///   panels (notably when paired with a Bluetooth A2DP audio route)
     ///   never settles and times out at 5 s, adding ~12 s of black-
     ///   screen latency per audio switch.
-    private func stopInternal(resetDisplayCriteria: Bool = true) {
+    private func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false) {
         // Stop AVPlayer fetching before tearing down the loopback HLS
         // server, otherwise AVPlayer's segment requests race the
         // server shutdown and produce noisy errors in the log. Display
         // criteria reset is gated by the parameter so audio-only reloads
         // preserve the panel mode (see method doc).
+        //
+        // `keepNativeHost` preserves the NativeAVPlayerHost and its
+        // AVPlayer instance across a native->native reload (episode
+        // change, audio-track switch). `tearDown()` still unloads the
+        // current item (so AVPlayer stops fetching from the old loopback
+        // server before that server is torn down), but the host and the
+        // published `currentAVPlayer` survive. AVKit binds its MediaRemote
+        // system Now-Playing registration to the AVPlayer instance once,
+        // at first presentation, and never re-registers against a swapped
+        // player ("Code=14 client callback"), so reusing the instance is
+        // what keeps the iPhone Control Center widget populated across the
+        // seam (issue #15). Callers that cross into the software path must
+        // release the preserved host themselves (the SW pipeline needs the
+        // currentAVPlayer sink to see a nil publish).
         memoryProbeTask?.cancel()
         memoryProbeTask = nil
         liveTelemetrySampler?.stop()
@@ -2211,8 +2264,10 @@ public final class AetherEngine: ObservableObject {
         liveTelemetry = nil
         nativeCancellables.removeAll()
         nativeHost?.tearDown()
-        nativeHost = nil
-        currentAVPlayer = nil
+        if !keepNativeHost {
+            nativeHost = nil
+            currentAVPlayer = nil
+        }
         nativeVideoSession?.stop()
         nativeVideoSession = nil
 
