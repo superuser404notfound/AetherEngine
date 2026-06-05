@@ -65,6 +65,12 @@ final class NativeAVPlayerHost {
     private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
     private var statusObservation: NSKeyValueObservation?
+    /// One-shot guard so the settled audio-route capability check (route
+    /// dump + downmix warnings) runs once, after the first transition to
+    /// `.playing` when AVKit has finished negotiating the HDMI output
+    /// format. Sampling at readyToPlay was premature and false-positived
+    /// the downmix warning on stereo-idle sinks (issue #24).
+    private var didSampleSettledRoute = false
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var notificationObservers: [NSObjectProtocol] = []
@@ -280,9 +286,16 @@ final class NativeAVPlayerHost {
                 // count after the route renegotiates against the
                 // loaded asset.
                 Self.dumpPlayerItemTracks(item, sid: sid)
-                Self.dumpAudioRoute(sid: sid)
-                Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
-                Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                // Dump the route here for reference, but do NOT warn yet:
+                // at readyToPlay the player is still paused and AVKit has
+                // not finished negotiating the HDMI output format. On a
+                // sink that idles at stereo (Continuous Audio off) the
+                // route still reads ch=2 at this instant and only lifts to
+                // the source channel count once playback actually starts.
+                // Warning here produced false "downmix" reports (issue
+                // #24). The capability check runs from the settled re-dump
+                // on the first .playing transition instead.
+                Self.dumpAudioRoute(sid: sid, phase: "readyToPlay, route may still be negotiating")
             }
 
             Task { @MainActor in
@@ -324,7 +337,24 @@ final class NativeAVPlayerHost {
             let reason = player.reasonForWaitingToPlay?.rawValue ?? "-"
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) timeControlStatus=\(statusStr) reason=\(reason)", category: .engine)
             Task { @MainActor in
-                self?.timeControlStatus = status
+                guard let self = self else { return }
+                self.timeControlStatus = status
+                // On the first real .playing transition, re-sample the
+                // audio route after a short settle delay: AVKit negotiates
+                // the HDMI output format (stereo -> source channel count /
+                // Dolby) only once playback actually starts, so this is the
+                // first point the route reflects the true steady state. The
+                // downmix warnings run here, not at readyToPlay (issue #24).
+                if status == .playing, !self.didSampleSettledRoute {
+                    self.didSampleSettledRoute = true
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        guard let self = self, let item = self.playerItem else { return }
+                        Self.dumpAudioRoute(sid: sid, phase: "settled")
+                        Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
+                        Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                    }
+                }
             }
         }
 
@@ -808,7 +838,7 @@ final class NativeAVPlayerHost {
     /// AVPlayer's PCM decoder downmixes upstream. EAC3 / Atmos avoids
     /// this because the bitstream tunnels through as encoded data
     /// without an LPCM intermediate.
-    private static func dumpAudioRoute(sid: Int) {
+    private static func dumpAudioRoute(sid: Int, phase: String) {
         #if os(iOS) || os(tvOS)
         let session = AVAudioSession.sharedInstance()
         let out = session.outputNumberOfChannels
@@ -823,7 +853,7 @@ final class NativeAVPlayerHost {
         }.joined(separator: ", ")
         EngineLog.emit(
             "[NativeAVPlayerHost] #\(sid) audioRoute output=\(out) preferred=\(pref) max=\(maxCh) "
-            + "ports=[\(outputDescs)] (readyToPlay)",
+            + "ports=[\(outputDescs)] (\(phase))",
             category: .engine
         )
         #endif
