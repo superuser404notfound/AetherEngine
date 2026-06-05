@@ -88,7 +88,9 @@ final class AudioAVPlayerHost {
         // metadata + accurate elapsed/rate to nowPlayingSession.nowPlayingInfo-
         // Center itself (it owns the queue + artwork), and auto-publish was
         // part of the earlier mixed setup that only half-worked.
-        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        nowPlayingSession.becomeActiveIfPossible(completion: { success in
+            EngineLog.emit("[AudioAVPlayerHost] nowPlayingSession becomeActiveIfPossible (init) success=\(success)", category: .swPlayback)
+        })
         #endif
     }
 
@@ -98,7 +100,10 @@ final class AudioAVPlayerHost {
     /// across a background pause).
     func becomeActiveNowPlaying() {
         #if os(tvOS) || os(iOS)
-        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        let active = nowPlayingSession.isActive
+        nowPlayingSession.becomeActiveIfPossible(completion: { success in
+            EngineLog.emit("[AudioAVPlayerHost] nowPlayingSession becomeActiveIfPossible (track start, wasActive=\(active)) success=\(success)", category: .swPlayback)
+        })
         #endif
     }
 
