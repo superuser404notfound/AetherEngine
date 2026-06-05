@@ -819,17 +819,26 @@ final class NativeAVPlayerHost {
     ///
     /// Direct-play AVPlayer apps avoid this because they activate their
     /// session per playback, so the route negotiates against the live
-    /// multichannel asset. We replicate that here: at readyToPlay the
-    /// asset's `dec3` / `dac3` is parsed and AVPlayer knows the track
-    /// is 5.1 / 7.1, so a deactivate / reactivate cycle forces the
-    /// route to renegotiate off the stereo idle state and the fresh
-    /// `maximumOutputNumberOfChannels` lets the multichannel hint land.
+    /// multichannel asset. We replicate that here by re-applying the
+    /// same knobs the init path uses — `setSupportsMultichannelContent`,
+    /// `setActive(true)`, and the `setPreferredOutputNumberOfChannels`
+    /// hint — but now against the live route, once AVPlayer has parsed
+    /// the asset's `dec3` / `dac3` and the route can carry the source's
+    /// channel count.
+    ///
+    /// A `setActive(false, .notifyOthersOnDeactivation)` deactivate /
+    /// reactivate cycle was tried first to force the idle stereo link to
+    /// wake, but on the AVPlayer-bound shared session mid-load it returns
+    /// NSOSStatusErrorDomain -50 (paramErr) and is a no-op, so it is not
+    /// used. Each call is isolated so a single failure is logged without
+    /// aborting the rest.
     ///
     /// Gated on a > 2-channel audio track so the stereo path and the
     /// Atmos path (EAC3 + JOC reports 2 channels over its MAT carrier,
     /// `ch=2` is the correct passthrough state) are left untouched. The
-    /// before / after channel counts are logged so a device run can
-    /// confirm the route actually woke from 2 to the source count.
+    /// before / after channel counts are logged so a device run on a
+    /// sink that idles at `ch=2` (continuous-audio off) can confirm
+    /// whether the route woke from 2 to the source count.
     private static func reassertMultichannelAudioSession(_ item: AVPlayerItem, sid: Int) {
         #if os(iOS) || os(tvOS)
         var trackChannels: Int = 0
@@ -850,23 +859,26 @@ final class NativeAVPlayerHost {
             + "max=\(session.maximumOutputNumberOfChannels) out=\(session.outputNumberOfChannels) "
             + "pref=\(session.preferredOutputNumberOfChannels)",
             category: .engine)
-        do {
-            try session.setSupportsMultichannelContent(true)
-            // Deactivate / reactivate so the HDMI route renegotiates
-            // against the loaded multichannel asset rather than the
-            // stereo idle route latched at process launch. The player is
-            // ready but not yet playing at this point, so the cycle is
-            // inaudible.
-            try session.setActive(false, options: .notifyOthersOnDeactivation)
-            try session.setActive(true)
-            let maxCh = session.maximumOutputNumberOfChannels
-            if maxCh > 2 {
-                try session.setPreferredOutputNumberOfChannels(maxCh)
-            }
-        } catch {
+        do { try session.setSupportsMultichannelContent(true) }
+        catch {
             EngineLog.emit(
-                "[NativeAVPlayerHost] #\(sid) audioReassert error: \(error)",
+                "[NativeAVPlayerHost] #\(sid) audioReassert setSupportsMultichannelContent err=\(error)",
                 category: .engine)
+        }
+        do { try session.setActive(true) }
+        catch {
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) audioReassert setActive err=\(error)",
+                category: .engine)
+        }
+        let maxCh = session.maximumOutputNumberOfChannels
+        if maxCh > 2 {
+            do { try session.setPreferredOutputNumberOfChannels(maxCh) }
+            catch {
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) audioReassert setPreferredOutputNumberOfChannels(\(maxCh)) err=\(error)",
+                    category: .engine)
+            }
         }
         EngineLog.emit(
             "[NativeAVPlayerHost] #\(sid) audioReassert AFTER "
