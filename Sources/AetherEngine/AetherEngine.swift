@@ -2632,17 +2632,26 @@ public final class AetherEngine: ObservableObject {
         #if os(iOS) || os(tvOS)
         let nc = NotificationCenter.default
 
-        // Pause AVPlayer when the app backgrounds so audio doesn't
-        // keep streaming in the background. The host calls
-        // `reloadAtCurrentPosition()` from its own foreground hook to
-        // recover from any AVIO invalidation tvOS may do during
-        // suspension.
+        // Pause VIDEO when the app backgrounds so it doesn't keep streaming
+        // in the background. The host calls `reloadAtCurrentPosition()` from
+        // its own foreground hook to recover from any AVIO invalidation tvOS
+        // may do during suspension.
+        //
+        // AUDIO (music) is the opposite: it is MEANT to keep playing in the
+        // background (UIBackgroundModes audio). Pausing it here, or even just
+        // flipping `state` to .paused while the audio AVPlayer keeps playing,
+        // desyncs the system Now-Playing rate (the system reads
+        // MPNowPlayingInfoPropertyPlaybackRate to know play-vs-pause), making
+        // tvOS believe we are paused-while-playing and breaking the Now-Playing
+        // badge + Siri Remote routing. So skip this entirely for the audio
+        // backends and let them stream on.
         let bgObserver = nc.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self = self else { return }
+                if self.audioAVPlayerActive || self.audioHost != nil { return }
                 guard self.state == .playing || self.state == .paused else { return }
                 self.nativeHost?.pause()
                 self.state = .paused
