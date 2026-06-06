@@ -318,28 +318,32 @@ public final class AetherEngine: ObservableObject {
     // AetherEngine+FrameExtractor extension to vend a FrameExtractor.
     private(set) var loadedURL: URL?
 
-    /// Seconds to ADD to AVPlayer's HLS clock to recover the source
-    /// PTS of the currently displayed frame on the native path.
-    ///
-    /// The producer subtracts `videoShiftPts` from every packet's
-    /// pts/dts so seg-0's fragment tfdt aligns with the playlist's
-    /// cumulative-EXTINF origin. AVPlayer's clock therefore sits at
-    /// `source_pts - playlistShiftSeconds`. Subtitles come from an
-    /// independent side-demuxer (or pre-decoded sidecar) and land in
-    /// raw source PTS, so the cue lookup and the side-demuxer's seek
-    /// have to add this shift back to map between the two clocks.
+    /// Seconds the producer shifted AVPlayer's HLS clock away from
+    /// source PTS on the native path: it subtracts `videoShiftPts` from
+    /// every packet's pts/dts so seg-0's fragment tfdt aligns with the
+    /// playlist's cumulative-EXTINF origin, leaving AVPlayer's raw clock
+    /// at `source_pts - playlistShiftSeconds`. The engine folds this back
+    /// in before publishing, so `currentTime` (and `sourceTime`) already
+    /// carry source PTS on every path; see `nativeClockSeconds` for the
+    /// pre-fold raw value. Retained public for diagnostics.
     ///
     /// Updated by `HLSVideoEngine.onPlaylistShiftChanged` on every
     /// producer init / restart (matroska seek imprecision means the
     /// shift can differ session-to-session for the same source).
-    /// 0 on the SW path; the SW renderer's clock already tracks
-    /// source PTS directly.
+    /// 0 on the SW / audio paths, whose clocks track source PTS directly.
     @Published public private(set) var playlistShiftSeconds: Double = 0
 
-    /// Source PTS of the currently displayed frame, derived on every
-    /// `currentTime` or `playlistShiftSeconds` update. Hosts that
-    /// schedule against the source timeline (subtitle overlay, side-
-    /// demuxer seek) should read this instead of `currentTime`.
+    /// Raw AVPlayer HLS clock (`source_pts - playlistShiftSeconds`) on the
+    /// native path, before the shift is folded back into `currentTime`.
+    /// Held so `onPlaylistShiftChanged` can re-derive `currentTime` the
+    /// instant the shift changes mid-session, instead of waiting for the
+    /// next periodic time tick. Unused on the SW / audio paths (shift 0).
+    private var nativeClockSeconds: Double = 0
+
+    /// Source PTS of the currently displayed frame. Equal to `currentTime`
+    /// on every path now that the native clock is unified onto source time;
+    /// kept as a stable alias for callers that want to express source-
+    /// timeline intent explicitly (subtitle overlay, side-demuxer seek).
     @Published public private(set) var sourceTime: Double = 0
 
     /// The `LoadOptions` the host passed for the current session.
@@ -710,6 +714,7 @@ public final class AetherEngine: ObservableObject {
         isLive = options.isLive
         state = .loading
         currentTime = 0
+        nativeClockSeconds = 0
         duration = 0
         progress = 0
         audioTracks = []
@@ -1086,7 +1091,12 @@ public final class AetherEngine: ObservableObject {
             Task { @MainActor in
                 guard let self = self else { return }
                 self.playlistShiftSeconds = seconds
-                self.sourceTime = self.currentTime + seconds
+                // Re-fold against the raw clock so the published source-PTS
+                // currentTime tracks the new shift immediately (e.g. after a
+                // restart that landed past the planned keyframe), rather than
+                // lagging until the next periodic time tick.
+                self.currentTime = self.nativeClockSeconds + seconds
+                self.sourceTime = self.currentTime
             }
         }
         // AVPlayer HLS playback over the loopback HTTP server. Detach
@@ -1138,8 +1148,13 @@ public final class AetherEngine: ObservableObject {
         host.$currentTime
             .sink { [weak self] value in
                 guard let self = self else { return }
-                self.currentTime = value
-                self.sourceTime = value + self.playlistShiftSeconds
+                // Fold the producer's shift into the published clock so
+                // currentTime carries source PTS, unifying it with the
+                // SW / audio paths. nativeClockSeconds keeps the raw value
+                // for onPlaylistShiftChanged to re-derive against.
+                self.nativeClockSeconds = value
+                self.currentTime = value + self.playlistShiftSeconds
+                self.sourceTime = self.currentTime
             }
             .store(in: &nativeCancellables)
         host.$duration
@@ -1521,13 +1536,18 @@ public final class AetherEngine: ObservableObject {
             return
         }
         let target = max(0, min(seconds, duration))
+        // seek(to:) speaks source PTS (the unified engine clock). On the
+        // native path AVPlayer's HLS clock sits at source - playlistShiftSeconds,
+        // so convert before driving the host. The SW / audio hosts already
+        // run on source time (shift 0), making this a no-op there.
+        let clockTarget = target - playlistShiftSeconds
         state = .seeking
         if audioAVPlayerActive, let host = audioAVPlayerHost {
-            await host.seek(to: target)
+            await host.seek(to: clockTarget)
         } else if let host = audioHost {
-            await host.seek(to: target)
+            await host.seek(to: clockTarget)
         } else if let host = softwareHost {
-            await host.seek(to: target)
+            await host.seek(to: clockTarget)
         } else {
             // Sliding-window EVENT playlist: ensure the seek target's
             // segment is visible in the playlist before AVPlayer fetches
@@ -1535,10 +1555,12 @@ public final class AetherEngine: ObservableObject {
             // on a segment that the playlist hasn't grown to expose
             // yet — AVPlayer either fails the seek or stalls until the
             // playlist's periodic refresh catches up.
-            nativeVideoSession?.extendVisibleWindow(toCoverSeconds: target)
-            nativeHost?.seek(to: target)
+            nativeVideoSession?.extendVisibleWindow(toCoverSeconds: clockTarget)
+            nativeHost?.seek(to: clockTarget)
         }
+        nativeClockSeconds = clockTarget
         currentTime = target
+        sourceTime = target
 
         // Re-arm the side subtitle demuxer at the new playhead so cues
         // for the post-scrub content surface immediately. Skip when
@@ -1547,8 +1569,8 @@ public final class AetherEngine: ObservableObject {
             let streamIdx = activeEmbeddedSubtitleStreamIndex
             embeddedSubtitleTask?.cancel()
             subtitleCues = []
-            // Side-demuxer seeks in source PTS, not AVPlayer clock.
-            startEmbeddedSubtitleTask(url: url, streamIndex: streamIdx, startAt: target + playlistShiftSeconds)
+            // Side-demuxer seeks in source PTS, which is the seek target.
+            startEmbeddedSubtitleTask(url: url, streamIndex: streamIdx, startAt: target)
         }
 
         // AVPlayer surfaces post-seek readiness via its own KVO; the
@@ -1557,16 +1579,12 @@ public final class AetherEngine: ObservableObject {
         state = .playing
     }
 
-    /// Seek to an absolute source-PTS position (seconds), the timeline
-    /// that Jellyfin media-segment markers and embedded subtitle cues
-    /// live on. On the native HLS path the AVPlayer clock sits at
-    /// `source_pts - playlistShiftSeconds`, so callers scheduling against
-    /// source time (skip-intro / skip-outro to a marker boundary) must
-    /// route through here. `seek(to:)` is AVPlayer-clock based and is for
-    /// scrubber-driven seeks that already speak that clock. `playlistShiftSeconds`
-    /// is 0 on the SW path, so this collapses to a plain seek there.
+    /// Deprecated alias for `seek(to:)`, which is now itself source-PTS
+    /// based (the engine clock is unified onto source time). Retained so
+    /// existing callers keep building; prefer `seek(to:)` in new code.
+    @available(*, deprecated, renamed: "seek(to:)")
     public func seek(toSourceTime seconds: Double) async {
-        await seek(to: seconds - playlistShiftSeconds)
+        await seek(to: seconds)
     }
 
     public func stop() {
@@ -1872,15 +1890,13 @@ public final class AetherEngine: ObservableObject {
         isLoadingSubtitles = true
         activeEmbeddedSubtitleStreamIndex = Int32(index)
 
-        // Side-demuxer seeks in source PTS, not AVPlayer clock. On the
-        // native HLS path AVPlayer's currentTime sits at
-        // `source_pts - playlistShiftSeconds`, so we add the shift back
-        // before handing it to the side demuxer. Without this, the
-        // demuxer seek lands `playlistShiftSeconds` before the actual
-        // source playhead and the first emitted cue (typically a long-
-        // tail past cue) is followed by a gap that reads as "subs are
-        // 3-5 s late" — repro on Cars at a restart-driven shift of
-        // ~3.92 s.
+        // Side-demuxer seeks in source PTS. sourceTime is the unified
+        // source-PTS playhead (equal to currentTime now that the native
+        // clock folds in playlistShiftSeconds), so it hands the demuxer
+        // the true source position directly. Reading the pre-fold AVPlayer
+        // clock here would land `playlistShiftSeconds` early and the first
+        // emitted cue would read as "subs are 3-5 s late" — repro on Cars
+        // at a restart-driven shift of ~3.92 s.
         startEmbeddedSubtitleTask(url: url, streamIndex: Int32(index), startAt: sourceTime)
     }
 
@@ -2113,13 +2129,12 @@ public final class AetherEngine: ObservableObject {
     /// the current source-PTS position than the retention window.
     /// Called from `applySubtitleEvent` so the prune happens at the
     /// cue-emit cadence (~1-2 / second on a typical PGS track) rather
-    /// than on a separate timer. Compares against `sourceTime` rather
-    /// than `currentTime` because cue start / end timestamps are in
+    /// than on a separate timer. Compares against `sourceTime` because
+    /// cue start / end timestamps are in
     /// absolute source PTS seconds (see EmbeddedSubtitleDecoder.decode
-    /// docstring); `currentTime` is `sourceTime - playlistShiftSeconds`
-    /// and the shift can be non-zero per producer session, so using
-    /// the AVPlayer clock here would prune cues out of sync with what
-    /// the host is currently displaying.
+    /// docstring). sourceTime now equals currentTime (the clock is unified
+    /// onto source PTS), so either is correct; sourceTime keeps the intent
+    /// explicit.
     private func pruneOldSubtitleCues() {
         guard !subtitleCues.isEmpty else { return }
         let cutoff = sourceTime - subtitleCueRetentionSeconds
@@ -2319,6 +2334,7 @@ public final class AetherEngine: ObservableObject {
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
         playlistShiftSeconds = 0
+        nativeClockSeconds = 0
         sourceTime = 0
 
         cancelSidecarTask()
