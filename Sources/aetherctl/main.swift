@@ -176,6 +176,14 @@ private func runProbe(url: URL) -> Int32 {
             print("       title=\(track.name)")
         }
     }
+    print("")
+
+    let meta = probe.metadata
+    print("Metadata:")
+    print("  title:    \(meta.title ?? "(nil)")")
+    print("  artist:   \(meta.artist ?? "(nil)")")
+    print("  album:    \(meta.album ?? "(nil)")")
+    print("  artwork:  \(meta.artworkData.map { "\($0.count) bytes" } ?? "0 bytes (none)")")
     return 0
 }
 
