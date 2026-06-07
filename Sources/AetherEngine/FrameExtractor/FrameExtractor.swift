@@ -48,6 +48,18 @@ public actor FrameExtractor {
         self.decodeQueue = DispatchQueue(label: "com.aetherengine.frameextractor", qos: .userInitiated)
     }
 
+    /// Construct an extractor over a custom `IOReader` source (a clone with its
+    /// own cursor). The extractor owns the reader and closes it on teardown.
+    public init(reader: IOReader, formatHint: String? = nil) {
+        self.context = FrameDecodeContext(reader: reader, formatHint: formatHint)
+        self.cache = FrameCache(
+            thumbnailLimit: 24,
+            snapshotLimit: 2,
+            thumbnailBucketSeconds: 1.0
+        )
+        self.decodeQueue = DispatchQueue(label: "com.aetherengine.frameextractor", qos: .userInitiated)
+    }
+
     // MARK: - Public API
 
     public func thumbnail(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {

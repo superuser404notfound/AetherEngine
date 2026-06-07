@@ -1,8 +1,10 @@
 import Foundation
 
 extension AetherEngine {
-    /// Vends a `FrameExtractor` for the currently loaded URL and its
-    /// HTTP headers, or nil if nothing is loaded.
+    /// Vends a `FrameExtractor` for the currently loaded source, or nil if
+    /// nothing is loaded. URL sources use the URL and its HTTP headers; custom
+    /// `IOReader` sources use an independent reader clone (nil when the reader
+    /// cannot provide a second cursor, e.g. forward-only).
     ///
     /// The engine does NOT retain the returned extractor; the caller
     /// owns its lifecycle. Call `await shutdown()` for prompt teardown
@@ -12,9 +14,13 @@ extension AetherEngine {
     /// Recents-style callers that need frames from arbitrary items
     /// should construct `FrameExtractor(url:httpHeaders:)` directly.
     public func makeFrameExtractor() -> FrameExtractor? {
-        // A custom IOReader source has no URL to construct an extractor from
-        // (loadedURL is a synthetic placeholder); scrub preview is unavailable.
-        guard !isCustomSource else { return nil }
+        if isCustomSource {
+            // Scrub preview runs a second demuxer concurrently with playback,
+            // so it needs an independent reader. nil when the source cannot
+            // clone (forward-only / one-shot), then scrub preview is skipped.
+            guard let clone = customReader?.makeIndependentReader() else { return nil }
+            return FrameExtractor(reader: clone, formatHint: customFormatHint)
+        }
         guard let url = loadedURL else { return nil }
         return FrameExtractor(url: url, httpHeaders: loadedOptions.httpHeaders)
     }

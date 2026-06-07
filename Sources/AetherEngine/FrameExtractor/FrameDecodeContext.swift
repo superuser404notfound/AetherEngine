@@ -21,6 +21,12 @@ private let AVERROR_FRAMEDECODE_EOF_VALUE: Int32 = -541478725
 final class FrameDecodeContext: @unchecked Sendable {
     private let url: URL
     private let httpHeaders: [String: String]
+    /// When non-nil, the context opens from this independent reader (a custom
+    /// source clone) instead of the URL. The context owns it and closes it at
+    /// deinit (NOT in close(), which only tears down the demuxer/decoder so the
+    /// idle-reopen path can rebuild over the still-alive reader).
+    private let reader: IOReader?
+    private let formatHint: String?
 
     private var demuxer: Demuxer?
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -39,10 +45,21 @@ final class FrameDecodeContext: @unchecked Sendable {
     init(url: URL, httpHeaders: [String: String]) {
         self.url = url
         self.httpHeaders = httpHeaders
+        self.reader = nil
+        self.formatHint = nil
+    }
+
+    init(reader: IOReader, formatHint: String?) {
+        // Placeholder; unused when reader != nil (openInternal opens the reader).
+        self.url = URL(string: "aether-custom://frame-extractor")!
+        self.httpHeaders = [:]
+        self.reader = reader
+        self.formatHint = formatHint
     }
 
     deinit {
         close()
+        reader?.close()
     }
 
     /// Open demuxer + decoder if not already open. Throws on failure
@@ -76,7 +93,11 @@ final class FrameDecodeContext: @unchecked Sendable {
 
     private func openInternal() throws {
         let demuxer = Demuxer()
-        try demuxer.open(url: url, extraHeaders: httpHeaders, profile: .stillExtraction)
+        if let reader = reader {
+            try demuxer.open(reader: reader, formatHint: formatHint, profile: .stillExtraction)
+        } else {
+            try demuxer.open(url: url, extraHeaders: httpHeaders, profile: .stillExtraction)
+        }
         self.demuxer = demuxer
 
         let videoIdx = demuxer.videoStreamIndex
