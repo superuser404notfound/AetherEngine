@@ -337,12 +337,17 @@ final class SegmentCache {
         return currentTargetIndex >= target
     }
 
-    /// Evict all on-disk segments with index < `cutoff`. Called by the
-    /// sliding-window prototype path in `VideoSegmentProvider` when the
-    /// playlist's first-visible index advances. Crude: ignores the
-    /// backwardWindow guard to let the playlist and disk stay in sync.
-    /// This is throwaway spike code; the productized sliding playlist
-    /// will integrate eviction into `pruneOutsideWindow`.
+    /// Evict all on-disk segments with index strictly `< cutoff`. Called
+    /// by `VideoSegmentProvider.notePlaylistBuild` when the live playlist's
+    /// firstVisible index advances; `cutoff` is that firstVisible. Because
+    /// firstVisible is always `<= currentTargetIndex` (the playlist never
+    /// drops a segment at or after the live edge AVPlayer is reading), this
+    /// only removes segments the playlist has already dropped from the
+    /// MEDIA-SEQUENCE window, so it cannot evict a not-yet-played forward
+    /// segment. This keeps the on-disk footprint bounded to the DVR window
+    /// in lockstep with the playlist (`pruneOutsideWindow` continues to
+    /// bound the band around the target independently; for a live session
+    /// the firstVisible cutoff is the tighter of the two on the back side).
     func evictBelow(_ cutoff: Int) {
         condition.lock()
         defer { condition.unlock() }
@@ -351,6 +356,24 @@ final class SegmentCache {
             entries.removeValue(forKey: k)
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// Sum of the actual on-disk sizes of all resident segment files
+    /// (excluding the pinned init segment), freshly stat-ed rather than
+    /// read from the running `_totalBytes` accumulator. The accumulator
+    /// is the cheap steady-state path; this method gives an authoritative
+    /// disk-footprint number for the harness / diagnostics where a stat
+    /// per segment is acceptable. Bounded by the live window so it stays
+    /// O(windowSegmentCount).
+    func diskBytes() -> Int64 {
+        condition.lock()
+        let urls = Array(entries.values)
+        condition.unlock()
+        var total: Int64 = 0
+        for url in urls {
+            total += Int64(byteSize(of: url))
+        }
+        return total
     }
 
     /// Broadcast on the cache's condition variable without changing

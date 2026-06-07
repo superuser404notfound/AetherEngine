@@ -361,7 +361,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// larger playlist footprint is negligible.
     private static let targetSegmentDuration: Double = 4.0
 
-    // MARK: - Measurement spike: sliding-window prototype flag
+    // MARK: - Measurement spike: sliding-window prototype (superseded)
+    //
+    // PRODUCTIZED (Task B3): the throwaway `_liveSlidingPrototype` flag and
+    // `slidingWindowSize = 12` constant this block originally documented are
+    // GONE. A live session now ALWAYS serves a sliding `.live` playlist
+    // (no PLAYLIST-TYPE, no ENDLIST, advancing MEDIA-SEQUENCE) sized from
+    // `LoadOptions.dvrWindowSeconds` (with a live-only floor) via the shared
+    // `LiveWindowSizing` helper, and the cache evicts strictly below the
+    // playlist's firstVisible. The stall the spike observed (AVPlayer paused
+    // at 81 s) traced to the EVENT-vs-removal contradiction plus an
+    // uncoordinated MEDIA-SEQUENCE slide; the `.live` type plus a
+    // minSafeSegments floor that keeps AVPlayer's live-edge buffer inside
+    // the window removes it. The off-device measurement below is retained
+    // as documentation; on-device tvOS RSS verification is pending with the
+    // maintainer and is NOT this task's success bar (sustained no-stall
+    // playback + advancing MEDIA-SEQUENCE + bounded on-disk bytes is).
     //
     // SPIKE RESULT (2026-06-07, aetherctl on macOS, h264-ts-sample.ts,
     // 300 s each run):
@@ -431,21 +446,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     //   effective; device-level tvOS measurement is needed for a definitive
     //   answer.
     //
-    // Leave this flag off by default. The productized sliding-playlist
-    // implementation (a later task) will supersede this throwaway.
-
-    /// Throwaway spike flag: when true, the live playlist uses a sliding
-    /// MEDIA-SEQUENCE window (segments drop off the back) instead of the
-    /// default append-only EVENT playlist. Defaults to false. Set to true
-    /// via `aetherctl live --sliding` for the measurement run only.
-    /// See measurement results in the comment block above.
-    nonisolated(unsafe) public static var _liveSlidingPrototype = false
-
-    /// Number of segments to keep visible in the sliding window when
-    /// `_liveSlidingPrototype` is true. 12 segments at 4 s each = 48 s
-    /// of visible runway: enough for AVPlayer's prefetch without
-    /// holding consumed history.
-    fileprivate static let slidingWindowSize = 12
+    // End of spike documentation. Sliding is now unconditional for a live
+    // session (see `LiveWindowSizing`).
 
     public init(
         url: URL,
@@ -459,6 +461,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         initialPositionSeconds: Double? = nil,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLiveSession: Bool = false,
+        dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer? = nil
     ) {
         self.sourceURL = url
@@ -472,6 +475,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.initialPositionSeconds = initialPositionSeconds
         self.audioBridgeMode = audioBridgeMode
         self.isLiveSession = isLiveSession
+        self.dvrWindowSeconds = dvrWindowSeconds
         self.preopenedDemuxer = preopenedDemuxer
     }
 
@@ -484,6 +488,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// appends it to the provider's growing segment list). VOD paths
     /// leave this false and are unaffected.
     private let isLiveSession: Bool
+
+    /// DVR window in seconds for a live session (from `LoadOptions`).
+    /// `nil` means live-only: no DVR seek, but the live window is still
+    /// bounded to `LiveWindowSizing.liveOnlyFloorSeconds`. Threaded into
+    /// the provider so the sliding playlist window and the cache eviction
+    /// share one size. Ignored for VOD.
+    private let dvrWindowSeconds: Double?
 
     /// Encoder choice for the audio bridge (used for source codecs that
     /// can't stream-copy into fMP4: TrueHD, DTS, DTS-HD MA, MP3, Opus,
@@ -982,6 +993,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceBitrate: sourceBitrate,
             initialIndex: initialIndex,
             isLive: isLiveSession,
+            liveWindowSizing: LiveWindowSizing(
+                targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                dvrWindowSeconds: dvrWindowSeconds
+            ),
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.restartProducer(at: idx)
             }
@@ -1217,6 +1232,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// Resident bytes in the loopback HLS segment cache.
     var segmentCacheTotalBytes: Int { cache?.totalBytes ?? 0 }
+
+    /// Authoritative on-disk byte footprint of the resident segment files
+    /// (freshly stat-ed). 0 when no native session is active. Used by the
+    /// `aetherctl live --report-cache-bytes` harness to verify the live
+    /// window keeps disk bounded.
+    var segmentCacheDiskBytes: Int64 { cache?.diskBytes() ?? 0 }
 
     /// Producer restart sessions in the current session.
     var producerRestartCount: Int { producer?.restartCount ?? 0 }
@@ -2449,6 +2470,47 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
 }
 
+// MARK: - Live window sizing
+
+/// Single source of truth for how large the sliding live window is, in
+/// segments. Both the playlist's visible window (`firstVisible = highWater -
+/// windowSegmentCount`) and the on-disk cache eviction (`evictBelow(
+/// firstVisible)`) read this so the two can never drift apart (a drift is
+/// exactly what stalls AVPlayer: the playlist keeps listing a segment the
+/// cache already deleted, or the cache keeps a segment the playlist dropped).
+///
+/// `effectiveWindowSeconds = dvrWindowSeconds ?? liveOnlyFloorSeconds`.
+/// Live-only (no DVR seek) still gets a bounded floor so disk and the
+/// playlist stay finite. `windowSegmentCount = max(minSafeSegments,
+/// ceil(effectiveWindowSeconds / targetSegmentDurationSeconds))`.
+struct LiveWindowSizing {
+    /// Bound applied to a live-only session (no `dvrWindowSeconds`). No DVR
+    /// seek is offered, but the window is still capped so memory and disk
+    /// do not grow without bound. 60 s at 4 s segments is 15 segments.
+    static let liveOnlyFloorSeconds: Double = 60
+
+    /// Floor on the segment count regardless of how small the requested
+    /// window is. AVPlayer keeps several target-durations of media buffered
+    /// near the live edge (it prefetches ~5-7 segments ahead during normal
+    /// playback, see `forwardWaitWindow`). If the window were smaller than
+    /// that buffer, AVPlayer's forward/backward live-edge reads would
+    /// routinely fall below MEDIA-SEQUENCE and it would lose its position
+    /// (the spike's 81 s stall). 8 keeps the window comfortably wider than
+    /// AVPlayer's live-edge buffer at 4 s segments (32 s of runway).
+    static let minSafeSegments = 8
+
+    let targetSegmentDurationSeconds: Double
+    let dvrWindowSeconds: Double?
+
+    /// Number of segments the playlist keeps visible (and the cache keeps
+    /// resident). Clamped up to `minSafeSegments`.
+    var windowSegmentCount: Int {
+        let effective = dvrWindowSeconds ?? Self.liveOnlyFloorSeconds
+        let raw = Int(ceil(effective / max(0.5, targetSegmentDurationSeconds)))
+        return max(Self.minSafeSegments, raw)
+    }
+}
+
 // MARK: - Cache-backed provider
 
 /// Thin `HLSSegmentProvider` over a `SegmentCache`. The cache is
@@ -2484,6 +2546,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// ENDLIST so AVPlayer re-polls), and the locked reads. VOD leaves
     /// this false and behaves byte-for-byte as before.
     private let isLive: Bool
+
+    /// Sliding live window sizing. Drives both the playlist's visible
+    /// window (`firstVisible = highWater - windowSegmentCount`) and the
+    /// cache eviction cutoff, so the two never drift. Dormant for VOD.
+    private let liveWindowSizing: LiveWindowSizing
 
     private let codecsString: String
     private let supplementalCodecsString: String?
@@ -2561,8 +2628,10 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     private var visibleHighWater: Int
     private var refreshCounter: Int = 0
     private var endlistAdded: Bool = false
-    /// First segment index visible in the sliding-window prototype playlist.
-    /// Monotonically increasing. 0 for the append-only baseline path.
+    /// First segment index visible in the live sliding-window playlist
+    /// (`#EXT-X-MEDIA-SEQUENCE`). Monotonically increasing; advanced by
+    /// `notePlaylistBuild` to `max(0, highWater - windowSegmentCount)`.
+    /// Stays 0 for VOD and the append-only EVENT audio path.
     private var _liveFirstVisible: Int = 0
 
     /// How many segments past the resume position the initial playlist
@@ -2591,11 +2660,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
         sourceBitrate: Int64,
         initialIndex: Int = 0,
         isLive: Bool = false,
+        liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         restartHandler: ((Int) -> Void)? = nil
     ) {
         self.cache = cache
         self.segments = segments
         self.isLive = isLive
+        self.liveWindowSizing = liveWindowSizing
         self.codecsString = codecsString
         self.supplementalCodecsString = supplementalCodecs
         self.resolution = resolution
@@ -2667,38 +2738,46 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
         }
     }
 
-    /// Atomic snapshot the playlist build reads from. Now that we're
-    /// back on .vod playlistType the sliding-window state is dormant
-    /// (visibleHighWater is still tracked for future EVENT revival,
-    /// but the snapshot reports the full segment count so AVPlayer
-    /// sees the complete playlist with a correct asset.duration).
-    /// Without this fix the snapshot was returning visibleHighWater+1
-    /// (=31 at session start), causing AVPlayer to think the asset
-    /// was 2:13 long and stop playback at that point.
+    /// Atomic snapshot the playlist build reads from. For VOD this
+    /// reports the full segment count so AVPlayer sees a complete asset
+    /// with a correct duration (the historical EVENT experiment that
+    /// reported visibleHighWater+1 made AVPlayer think the asset was
+    /// 2:13 and stop there).
     ///
-    /// SPIKE: when `_liveSlidingPrototype` is true and this is a live
-    /// session, advance `_liveFirstVisible` so the playlist window
-    /// slides forward, then evict the dropped segments from the cache.
+    /// For a live session this advances `_liveFirstVisible` to
+    /// `max(0, highWater - windowSegmentCount)` so the playlist window
+    /// slides forward, then evicts everything strictly below the new
+    /// firstVisible from the cache. The same `windowSegmentCount` drives
+    /// both, so the playlist and the cache stay byte-for-byte aligned.
+    /// firstVisible only advances once enough segments exist to seed
+    /// AVPlayer's live edge (the window stays anchored at 0 until then),
+    /// which is the anti-stall guarantee.
     func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool) {
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
-        if isLive && HLSVideoEngine._liveSlidingPrototype {
+        if isLive {
             let total = segments.count
-            let window = HLSVideoEngine.slidingWindowSize
+            let window = liveWindowSizing.windowSegmentCount
+            // highWater is the last produced index (total - 1). Keep the
+            // last `window` segments visible: firstVisible = highWater -
+            // window + 1 = total - window. Until at least `window`
+            // segments exist, do not advance past 0 so AVPlayer's first
+            // read sees all produced segments and can establish a live
+            // edge without losing a not-yet-buffered position.
             let newFirst = max(0, total - window)
             if newFirst > _liveFirstVisible {
-                let oldFirst = _liveFirstVisible
                 _liveFirstVisible = newFirst
-                // Evict segments that dropped off the back of the window.
-                // Off-lock to avoid holding stateLock while doing file I/O;
-                // safe because evictBelow acquires its own lock.
+                // Evict everything below the new firstVisible. Off-lock to
+                // avoid holding stateLock during file I/O; evictBelow takes
+                // its own lock. Strictly below firstVisible, so no segment
+                // the playlist still lists (or AVPlayer's live-edge buffer
+                // still references) is ever removed.
                 let cutoff = newFirst
                 let cacheRef = cache
                 DispatchQueue.global(qos: .utility).async {
                     cacheRef.evictBelow(cutoff)
                 }
-                _ = oldFirst // suppress unused-var warning
             }
             return (total, refreshCounter, false)
         }
@@ -2706,11 +2785,11 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     }
 
     /// First segment index visible in the current playlist window.
-    /// For append-only EVENT and VOD playlists this is always 0.
-    /// For the sliding-window prototype this advances as old segments
-    /// fall off the back.
+    /// For VOD (and the append-only EVENT audio path) this is always 0.
+    /// For a live session this is `_liveFirstVisible`, which advances as
+    /// old segments fall off the back of the sliding window.
     var firstVisibleSegmentIndex: Int {
-        guard isLive && HLSVideoEngine._liveSlidingPrototype else { return 0 }
+        guard isLive else { return 0 }
         stateLock.lock()
         defer { stateLock.unlock() }
         return _liveFirstVisible
@@ -3003,12 +3082,17 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// live-edge default overrode EXT-X-START even with the
     /// explicit seek-to-0). The leak is fundamental to the
     /// AVPlayer + HLS-loopback pipeline for 4K HDR HEVC content.
-    /// Live sessions serve an EVENT playlist: append-only, no ENDLIST,
-    /// so AVPlayer re-polls as the producer cuts more segments and never
-    /// treats the stream as a finite VOD asset (which would stop playback
-    /// at the few segments present on the first read). VOD stays `.vod`
-    /// (the reverted-EVENT rationale below applies only to finite files).
-    var playlistType: HLSPlaylistType { isLive ? .event : .vod }
+    /// Live sessions serve a `.live` playlist: no `#EXT-X-PLAYLIST-TYPE`
+    /// and no `#EXT-X-ENDLIST`, with an advancing `#EXT-X-MEDIA-SEQUENCE`
+    /// as the sliding window drops consumed segments. EVENT was tried
+    /// first but forbids segment removal (the spec), which contradicts a
+    /// sliding window and was the likely cause of the spike's 81 s stall;
+    /// VOD implies a finished asset and stops playback at the first read.
+    /// `.live` is the only spec-correct shape for a window that grows at
+    /// the edge AND drops the back. VOD stays `.vod` (the reverted-EVENT
+    /// rationale below applies only to finite files); the audio-append
+    /// path keeps `.event` available.
+    var playlistType: HLSPlaylistType { isLive ? .live : .vod }
     var masterCodecs: String? { codecsString }
     var masterSupplementalCodecs: String? { supplementalCodecsString }
     var masterResolution: (width: Int, height: Int)? {

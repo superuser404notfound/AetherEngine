@@ -127,9 +127,24 @@ extension HLSSegmentProvider {
     }
 }
 
-enum HLSPlaylistType {
+enum HLSPlaylistType: Equatable {
+    /// Append-only playlist (`#EXT-X-PLAYLIST-TYPE:EVENT`, no ENDLIST).
+    /// Segments are never removed and MEDIA-SEQUENCE stays 0. Used by the
+    /// audio-append path. NOT used for the productized sliding live video
+    /// path (EVENT forbids segment removal, which is exactly what a
+    /// sliding live window must do).
     case event
+    /// Complete asset (`#EXT-X-PLAYLIST-TYPE:VOD`, ENDLIST present). Used
+    /// by finite-duration video files.
     case vod
+    /// Sliding live playlist: no `#EXT-X-PLAYLIST-TYPE` tag at all and no
+    /// `#EXT-X-ENDLIST`, with a `#EXT-X-MEDIA-SEQUENCE` that advances as
+    /// old segments fall off the back of the window. This is the only
+    /// spec-correct shape for a window that both grows at the live edge
+    /// and drops consumed segments: EVENT forbids removal and VOD implies
+    /// a finished asset, so a live sliding playlist must omit the tag
+    /// (RFC 8216 §4.3.3.5). Used by the live video session.
+    case live
 }
 
 enum HLSVideoRange: String {
@@ -295,6 +310,10 @@ final class HLSLocalServer: @unchecked Sendable {
     private var loggedMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
+    /// Count of /media.m3u8 builds. Used to periodically re-log the
+    /// head/tail of a live sliding playlist so the advancing
+    /// #EXT-X-MEDIA-SEQUENCE is observable over a run.
+    private var mediaPlaylistBuildCount = 0
 
     /// Guards every mutable field above plus the listenFd. Reads
     /// from the public-facing computed properties take the lock too.
@@ -409,6 +428,7 @@ final class HLSLocalServer: @unchecked Sendable {
         port = 0
         loggedMasterPlaylist = false
         loggedMediaPlaylist = false
+        mediaPlaylistBuildCount = 0
         let clients = clientFds
         clientFds.removeAll()
         seg0FetchTime = nil
@@ -624,8 +644,15 @@ final class HLSLocalServer: @unchecked Sendable {
             stateLock.lock()
             let firstTime = !loggedMediaPlaylist
             if firstTime { loggedMediaPlaylist = true }
+            mediaPlaylistBuildCount += 1
+            // For a live (sliding) playlist, re-log the head/tail every 30
+            // rebuilds so the advancing #EXT-X-MEDIA-SEQUENCE is observable
+            // over a run (the firstTime-only log can't show advancement).
+            // VOD logs once and never re-logs (no advancement to show).
+            let isLivePlaylist = (provider?.playlistType == .live)
+            let periodic = isLivePlaylist && (mediaPlaylistBuildCount % 10 == 0)
             stateLock.unlock()
-            if firstTime {
+            if firstTime || periodic {
                 let lines = body.split(separator: "\n", omittingEmptySubsequences: false)
                 let head = lines.prefix(8).joined(separator: "\n")
                 let tail = lines.suffix(6).joined(separator: "\n")
@@ -943,6 +970,11 @@ final class HLSLocalServer: @unchecked Sendable {
         let count = snapshot.visibleCount
         let firstVisible = provider.firstVisibleSegmentIndex
         let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
+        // A sliding live playlist: MEDIA-SEQUENCE advances, segments below
+        // firstVisible are gone, and the playlist is neither EVENT (which
+        // forbids removal) nor VOD (which implies a finished asset). It
+        // carries no PLAYLIST-TYPE tag and no ENDLIST.
+        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded)
 
         // Compute target duration as ceil of the longest segment.
         // Spec requires this be >= every EXTINF in the playlist.
@@ -957,7 +989,14 @@ final class HLSLocalServer: @unchecked Sendable {
         lines.append("#EXT-X-VERSION:7")
         lines.append("#EXT-X-TARGETDURATION:\(targetDuration)")
         lines.append("#EXT-X-MEDIA-SEQUENCE:\(firstVisible)")
-        if typeIsEvent {
+        if typeIsLive {
+            // No #EXT-X-PLAYLIST-TYPE and no #EXT-X-ENDLIST: the sliding
+            // window grows at the live edge and drops segments below
+            // MEDIA-SEQUENCE. A refresh counter keeps two consecutive
+            // polls distinct so AVPlayer never trips its "Playlist File
+            // unchanged" (-12888) check during a quiet window.
+            lines.append("#EXT-X-SODALITE-REFRESH:\(snapshot.refreshCounter)")
+        } else if typeIsEvent {
             lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
             lines.append("#EXT-X-SODALITE-REFRESH:\(snapshot.refreshCounter)")
         } else {
@@ -995,7 +1034,12 @@ final class HLSLocalServer: @unchecked Sendable {
             lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
             lines.append(segURI(i))
         }
-        if snapshot.endlistAdded || !typeIsEvent {
+        // ENDLIST marks a complete playlist. Emit it for VOD and for any
+        // append path that has reached its end (endlistAdded), but NEVER
+        // for a sliding live playlist (it must stay open so AVPlayer keeps
+        // re-polling the advancing window) and not while an EVENT playlist
+        // is still growing.
+        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent) {
             lines.append("#EXT-X-ENDLIST")
         }
         return lines.joined(separator: "\n") + "\n"

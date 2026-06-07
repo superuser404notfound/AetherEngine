@@ -1133,6 +1133,7 @@ public final class AetherEngine: ObservableObject {
                     panelIsInHDRMode: panelHDRAfterHandshake,
                     audioBridgeMode: options.audioBridgeMode,
                     isLive: options.isLive,
+                    dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil
                 )
                 playbackBackend = .native
@@ -1190,6 +1191,7 @@ public final class AetherEngine: ObservableObject {
         panelIsInHDRMode: Bool = false,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLive: Bool = false,
+        dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer? = nil
     ) async throws {
         let session = HLSVideoEngine(
@@ -1204,6 +1206,7 @@ public final class AetherEngine: ObservableObject {
             initialPositionSeconds: startPosition,
             audioBridgeMode: audioBridgeMode,
             isLiveSession: isLive,
+            dvrWindowSeconds: dvrWindowSeconds,
             preopenedDemuxer: preopenedDemuxer
         )
         session.onFirstHDR10PlusDetected = { [weak self] in
@@ -2795,6 +2798,14 @@ public final class AetherEngine: ObservableObject {
     var cachedBytes: Int64? {
         guard let bytes = nativeVideoSession?.segmentCacheTotalBytes else { return nil }
         return Int64(bytes)
+    }
+
+    /// Authoritative on-disk byte footprint of the loopback HLS segment
+    /// cache (freshly stat-ed resident files), or `nil` when no native
+    /// session is active. Public so the `aetherctl live --report-cache-
+    /// bytes` harness can verify the live window keeps disk bounded.
+    public var segmentCacheDiskBytes: Int64? {
+        nativeVideoSession?.segmentCacheDiskBytes
     }
 
     /// Lifetime count of frames the SW host has enqueued into its

@@ -84,7 +84,7 @@ private func printUsage() {
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio <url>
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--measure-rss] [--sliding]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--measure-rss] [--report-cache-bytes]
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -157,13 +157,15 @@ private func printUsage() {
                 20), and report whether isLive is true, state is
                 .playing, and currentTime advanced past ~15s. --seed
                 overrides the seed .ts (default
-                Fixtures/user/h264-ts-sample.ts). --dvr-window is parsed
-                but unused in this build (a later task wires it up).
+                Fixtures/user/h264-ts-sample.ts). --dvr-window N sets
+                LoadOptions.dvrWindowSeconds (the sliding-live window size);
+                omit it for a live-only run bounded by the 60 s floor.
                 --measure-rss prints phys_footprint + resident_size every
                 30 s (spike measurement harness, kept for regression
-                tracking). --sliding enables the throwaway
-                sliding-window prototype behind
-                HLSVideoEngine._liveSlidingPrototype.
+                tracking). --report-cache-bytes prints the segment cache's
+                on-disk footprint every 60 s to verify the live window keeps
+                disk bounded. --sliding is accepted but ignored (sliding is
+                now the unconditional behaviour for a live session).
     """)
 }
 
@@ -751,30 +753,25 @@ private func audioSmokeTest(url: URL, seconds playSeconds: Double) async -> Int3
 /// fresh engine with `LoadOptions(isLive: true)`, play for `playSeconds`,
 /// and verdict on whether the live path advanced the clock.
 ///
-/// `dvrWindow` is parsed from `--dvr-window` but unused in this task:
-/// `LoadOptions` does not yet have a `dvrWindowSeconds` property (a later
-/// task adds it). Accepted now so the flag is stable.
+/// `dvrWindow` (from `--dvr-window`) is threaded into
+/// `LoadOptions.dvrWindowSeconds`. `nil` means live-only: the live window is
+/// still bounded by `LiveWindowSizing.liveOnlyFloorSeconds`.
 private func runLive(
     seconds playSeconds: Double,
     seed seedPath: String?,
     dvrWindow: Double?,
     serveOnly: Bool,
     measureRSS: Bool,
-    sliding: Bool
+    reportCacheBytes: Bool
 ) -> Int32 {
     EngineLog.handler = { print($0) }
-
-    // Flip the throwaway prototype flag before building the engine.
-    if sliding {
-        HLSVideoEngine._liveSlidingPrototype = true
-        print("aetherctl live: sliding-window prototype ENABLED")
-    }
 
     // Resolve the seed relative to the repo root (CWD under `swift run`).
     let resolvedSeed = seedPath ?? "Fixtures/user/h264-ts-sample.ts"
     print("aetherctl live: seed=\(resolvedSeed) seconds=\(playSeconds)" +
-          (dvrWindow.map { " dvr-window=\($0) (parsed, unused this task)" } ?? "") +
-          (measureRSS ? " measure-rss=true" : ""))
+          (dvrWindow.map { " dvr-window=\($0)" } ?? " dvr-window=none (live-only floor)") +
+          (measureRSS ? " measure-rss=true" : "") +
+          (reportCacheBytes ? " report-cache-bytes=true" : ""))
 
     let fixture: LiveFixture
     do {
@@ -816,7 +813,9 @@ private func runLive(
 
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds, measureRSS: measureRSS)
+        box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds,
+                                        dvrWindow: dvrWindow, measureRSS: measureRSS,
+                                        reportCacheBytes: reportCacheBytes)
         fixture.stop()
         CFRunLoopStop(CFRunLoopGetMain())
     }
@@ -825,7 +824,10 @@ private func runLive(
 }
 
 @MainActor
-private func liveSmokeTest(url: URL, seconds playSeconds: Double, measureRSS: Bool = false) async -> Int32 {
+private func liveSmokeTest(url: URL, seconds playSeconds: Double,
+                           dvrWindow: Double? = nil,
+                           measureRSS: Bool = false,
+                           reportCacheBytes: Bool = false) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -836,6 +838,7 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double, measureRSS: Bo
 
     var options = LoadOptions(isLive: true)
     options.suppressDisplayCriteria = true
+    options.dvrWindowSeconds = dvrWindow
 
     do {
         try await engine.load(url: url, options: options)
@@ -858,9 +861,17 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double, measureRSS: Bo
     if measureRSS {
         print("RSS_HEADER: elapsed_s  phys_footprint_mb  resident_mb")
     }
+    if reportCacheBytes {
+        print("CACHE_HEADER: elapsed_s  disk_bytes  disk_mb")
+        // Emit an initial sample at t=0 so the plateau has a baseline.
+        let b0 = engine.segmentCacheDiskBytes ?? 0
+        print(String(format: "CACHE_BYTES: elapsed=0s  disk=%lld B  disk=%.2f MB",
+                     b0, Double(b0) / 1_048_576.0))
+    }
 
     let startTime = Date()
     var lastRSSTick: Double = 0
+    var lastCacheTick: Double = 0
 
     let ticks = max(1, Int(playSeconds))
     for tick in 0..<ticks {
@@ -877,6 +888,15 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double, measureRSS: Bo
             print(String(format: "RSS_SAMPLE: elapsed=%.0fs  phys=%.1fMB  resident=%.1fMB",
                          elapsed, physMB, resMB))
             lastRSSTick = elapsed
+        }
+        // Print the cache disk footprint every 60 s when
+        // --report-cache-bytes is set (plus a final sample at the end of
+        // the run so a short run still shows the plateau).
+        if reportCacheBytes && (elapsed - lastCacheTick >= 60.0 || tick == ticks - 1) {
+            let bytes = engine.segmentCacheDiskBytes ?? 0
+            print(String(format: "CACHE_BYTES: elapsed=%.0fs  disk=%lld B  disk=%.2f MB",
+                         elapsed, bytes, Double(bytes) / 1_048_576.0))
+            lastCacheTick = elapsed
         }
         _ = tick // suppress unused-var warning
     }
@@ -1046,9 +1066,13 @@ if first == "live" {
     let seed = takeStringFlag("--seed", from: &rest)
     let serveOnly = takeFlag("--serve-only", from: &rest)
     let measureRSS = takeFlag("--measure-rss", from: &rest)
-    let sliding = takeFlag("--sliding", from: &rest)
+    let reportCacheBytes = takeFlag("--report-cache-bytes", from: &rest)
+    // --sliding is accepted-and-ignored for backward compat: sliding is now
+    // the unconditional behaviour for a live session, so the flag is a no-op.
+    _ = takeFlag("--sliding", from: &rest)
     exit(runLive(seconds: seconds, seed: seed, dvrWindow: dvrWindow,
-                 serveOnly: serveOnly, measureRSS: measureRSS, sliding: sliding))
+                 serveOnly: serveOnly, measureRSS: measureRSS,
+                 reportCacheBytes: reportCacheBytes))
 }
 
 // Subcommand path: explicit subcommand + flags + url.
