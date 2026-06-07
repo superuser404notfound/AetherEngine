@@ -33,13 +33,30 @@ public protocol IOReader: AnyObject, Sendable {
 
     /// Release the underlying resource. Called exactly once at teardown.
     func close()
+
+    /// Unblock a `read` that is currently blocked, so engine teardown does
+    /// not hang. Default no-op (provided by an extension). Network-backed
+    /// readers override this to cancel the in-flight request; memory/file
+    /// readers can ignore it. For a reader the engine may reuse across an
+    /// internal reload, `cancel()` must only unblock a pending read, not
+    /// invalidate the reader.
+    func cancel()
+
+    /// Vend an independent reader over the same underlying source, with its
+    /// own cursor, for concurrent access (embedded-subtitle side demuxer,
+    /// scrub previews) while playback reads the primary reader. Return nil if
+    /// the source cannot provide a second independent cursor (for example a
+    /// one-shot stream); the engine then skips that concurrent feature. The
+    /// returned reader is owned and closed by the engine. May be called
+    /// off-main; the returned reader follows the same threading contract as
+    /// the primary reader (its `read`/`seek` run on a demux thread). Default
+    /// returns nil.
+    func makeIndependentReader() -> IOReader?
 }
 
 public extension IOReader {
-    /// Unblock a `read` that is currently blocked, so engine teardown does
-    /// not hang. Default no-op. Network-backed readers should override this
-    /// to cancel the in-flight request; memory/file readers can ignore it.
     func cancel() {}
+    func makeIndependentReader() -> IOReader? { nil }
 }
 
 /// The source AetherEngine loads media from.
