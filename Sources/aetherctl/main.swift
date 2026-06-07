@@ -48,7 +48,7 @@ private func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio <url>
-      aetherctl customio [--memory] [--forward-only] [--audio-only] <file>
+      aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
       aetherctl <url>             (alias for `serve`)
 
     Flags (serve / validate only):
@@ -375,6 +375,7 @@ private func runSWDecode(url: URL, maxPackets: Int) -> Int32 {
 /// `inMemory` loads the whole file into a Data buffer instead of streaming
 /// from the FileHandle.
 final class FileHandleIOReader: IOReader, @unchecked Sendable {
+    private let path: String
     private let data: Data?
     private let handle: FileHandle?
     private let totalSize: Int64
@@ -382,7 +383,12 @@ final class FileHandleIOReader: IOReader, @unchecked Sendable {
     private let forwardOnly: Bool
     private let lock = NSLock()
 
+    /// Counts cancel() invocations to verify the override is dynamically
+    /// dispatched (cancel() is now a protocol requirement, not extension-only).
+    nonisolated(unsafe) static var cancelCount = 0
+
     init(path: String, inMemory: Bool, forwardOnly: Bool) throws {
+        self.path = path
         self.forwardOnly = forwardOnly
         let attrs = try FileManager.default.attributesOfItem(atPath: path)
         self.totalSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0
@@ -397,6 +403,18 @@ final class FileHandleIOReader: IOReader, @unchecked Sendable {
             self.data = nil
             self.handle = h
         }
+    }
+
+    func cancel() {
+        FileHandleIOReader.cancelCount += 1
+    }
+
+    func makeIndependentReader() -> IOReader? {
+        // A file source supports independent cursors: a fresh handle over the
+        // same path. forwardOnly is preserved so a forward-only clone still
+        // refuses seeks. (In-memory clones also fall back to a file-backed
+        // reader here, which is fine since the test files exist on disk.)
+        return try? FileHandleIOReader(path: path, inMemory: false, forwardOnly: forwardOnly)
     }
 
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
@@ -448,7 +466,7 @@ final class FileHandleIOReader: IOReader, @unchecked Sendable {
 /// it, printing the engine state once a second. Confirms load(source:)
 /// end-to-end on both the native path (seekable reader) and the software
 /// path (seekable or forward-only).
-private func runCustomIO(path: String, inMemory: Bool, forwardOnly: Bool, audioOnly: Bool) -> Int32 {
+private func runCustomIO(path: String, inMemory: Bool, forwardOnly: Bool, audioOnly: Bool, reload: Bool, switchAudio: Bool, selectSubs: Bool, extract: Bool) -> Int32 {
     EngineLog.handler = { print($0) }
     var modeDesc: String
     switch (inMemory, forwardOnly) {
@@ -461,7 +479,7 @@ private func runCustomIO(path: String, inMemory: Bool, forwardOnly: Bool, audioO
     print("aetherctl customio: \(path) (\(modeDesc))")
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await customIOSmokeTest(path: path, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnly)
+        box.value = await customIOSmokeTest(path: path, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnly, reload: reload, switchAudio: switchAudio, selectSubs: selectSubs, extract: extract)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -469,7 +487,7 @@ private func runCustomIO(path: String, inMemory: Bool, forwardOnly: Bool, audioO
 }
 
 @MainActor
-private func customIOSmokeTest(path: String, inMemory: Bool, forwardOnly: Bool, audioOnly: Bool) async -> Int32 {
+private func customIOSmokeTest(path: String, inMemory: Bool, forwardOnly: Bool, audioOnly: Bool, reload: Bool, switchAudio: Bool, selectSubs: Bool, extract: Bool) async -> Int32 {
     let reader: FileHandleIOReader
     do {
         reader = try FileHandleIOReader(path: path, inMemory: inMemory, forwardOnly: forwardOnly)
@@ -508,40 +526,96 @@ private func customIOSmokeTest(path: String, inMemory: Bool, forwardOnly: Bool, 
     if case .playing = postLoadState {
         let verdict = String(format: "VERDICT: custom source playing. currentTime=%.2fs", postLoadTime)
         print(verdict)
-        engine.stop()
-        return 0
-    }
-    if case .error(let msg) = postLoadState {
+    } else if case .error(let msg) = postLoadState {
         print("VERDICT: custom source failed: \(msg)")
         engine.stop()
         return 1
-    }
-    // State was .idle or .loading at load return; poll for up to 8s.
-    let maxTicks = 8
-    for _ in 0..<maxTicks {
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        let t = engine.currentTime
-        let st = engine.state
-        print(String(format: "  state=%@ t=%.2fs", "\(st)", t))
-        switch st {
-        case .playing:
-            let verdict = String(format: "VERDICT: custom source playing. currentTime=%.2fs", t)
-            print(verdict)
-            engine.stop()
-            return 0
-        case .error(let msg):
-            print("VERDICT: custom source failed: \(msg)")
+    } else {
+        // State was .idle or .loading at load return; poll for up to 8s.
+        let maxTicks = 8
+        var reached = false
+        for _ in 0..<maxTicks {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let t = engine.currentTime
+            let st = engine.state
+            print(String(format: "  state=%@ t=%.2fs", "\(st)", t))
+            switch st {
+            case .playing:
+                let verdict = String(format: "VERDICT: custom source playing. currentTime=%.2fs", t)
+                print(verdict)
+                reached = true
+            case .error(let msg):
+                print("VERDICT: custom source failed: \(msg)")
+                engine.stop()
+                return 1
+            default:
+                break
+            }
+            if reached { break }
+        }
+        if !reached {
+            let finalTime = engine.currentTime
+            let finalState = engine.state
+            print("VERDICT: custom source timed out after \(maxTicks)s (state=\(finalState), t=\(String(format: "%.2f", finalTime))s)")
             engine.stop()
             return 1
-        default:
-            break
         }
     }
-    let finalTime = engine.currentTime
-    let finalState = engine.state
-    print("VERDICT: custom source timed out after \(maxTicks)s (state=\(finalState), t=\(String(format: "%.2f", finalTime))s)")
+
+    // Feature checks follow. Engine is in .playing state here.
+    if reload {
+        do { try await engine.reloadAtCurrentPosition() } catch {
+            print("VERDICT: reload threw: \(error.localizedDescription)"); engine.stop(); return 5
+        }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        if case .playing = engine.state {
+            print("VERDICT: reload OK, still playing")
+        } else {
+            print("VERDICT: reload left state \(engine.state)"); engine.stop(); return 5
+        }
+    }
+    if switchAudio {
+        let current = engine.activeAudioTrackIndex
+        guard let target = engine.audioTracks.map({ $0.id }).first(where: { $0 != current }) else {
+            print("VERDICT: switch-audio: no second audio track to switch to (tracks=\(engine.audioTracks.map { $0.id }), active=\(String(describing: current)))")
+            return 6
+        }
+        engine.selectAudioTrack(index: target)
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        if case .playing = engine.state {
+            print("VERDICT: audio switch OK to id=\(target), still playing (was \(String(describing: current)))")
+        } else {
+            print("VERDICT: audio switch left state \(engine.state)"); return 6
+        }
+    }
+    if selectSubs {
+        guard let subID = engine.subtitleTracks.first?.id else {
+            print("VERDICT: select-subs: no subtitle tracks in source"); return 7
+        }
+        engine.selectSubtitleTrack(index: subID)
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        let cueCount = engine.subtitleCues.count
+        print("VERDICT: subtitle select id=\(subID), cues=\(cueCount) active=\(engine.isSubtitleActive)")
+        if cueCount == 0 { print("VERDICT: select-subs FAILED: no cues produced"); return 7 }
+    }
+    if extract {
+        guard let fx = engine.makeFrameExtractor() else {
+            print("VERDICT: makeFrameExtractor returned nil"); engine.stop(); return 8
+        }
+        if let image = await fx.thumbnail(at: 1.0, maxWidth: 320) {
+            print("VERDICT: extract OK, image \(image.width)x\(image.height)")
+        } else {
+            print("VERDICT: extract returned nil image"); await fx.shutdown(); engine.stop(); return 8
+        }
+        await fx.shutdown()
+    }
     engine.stop()
-    return 1
+    // Give the engine's demux teardown path (runs in a detached Task on the
+    // native path) time to call Demuxer.close() -> markClosed() ->
+    // reader.cancel() before we sample the counter.
+    try? await Task.sleep(nanoseconds: 3_500_000_000)
+    print("cancel() override invocations: \(FileHandleIOReader.cancelCount)")
+    return 0
 }
 
 // MARK: - audio
@@ -755,6 +829,10 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)
     let audioOnlyFlag = takeFlag("--audio-only", from: &rest)
+    let reloadFlag = takeFlag("--reload", from: &rest)
+    let switchAudioFlag = takeFlag("--switch-audio", from: &rest)
+    let selectSubsFlag = takeFlag("--select-subs", from: &rest)
+    let extractFlag = takeFlag("--extract", from: &rest)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
         print("")
@@ -784,7 +862,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
         exit(runAudio(url: url, seconds: 10))
     case "customio":
         // urlArg is a filesystem path, not a URL; use rest.first directly.
-        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag))
+        exit(runCustomIO(path: urlArg, inMemory: inMemory, forwardOnly: forwardOnly, audioOnly: audioOnlyFlag, reload: reloadFlag, switchAudio: switchAudioFlag, selectSubs: selectSubsFlag, extract: extractFlag))
     default:
         printUsage()
         exit(64)
