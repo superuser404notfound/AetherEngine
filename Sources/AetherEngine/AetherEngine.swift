@@ -895,11 +895,13 @@ public final class AetherEngine: ObservableObject {
             let audioCodecID: AVCodecID = (probeOpened && resolvedInitialAudio >= 0)
                 ? (probe.stream(at: resolvedInitialAudio)?.pointee.codecpar.pointee.codec_id ?? AV_CODEC_ID_NONE)
                 : AV_CODEC_ID_NONE
-            if probeOpened { probe.close() }
-            let useNativeAudio = Self.avPlayerCanDecodeAudio(audioCodecID)
+            // Custom sources have no URL; AVPlayer (loadAudioNative) cannot consume a
+            // custom FFmpeg demuxer, so force the FFmpeg audio path for them.
+            let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID)
             EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")", category: .engine)
             do {
                 if useNativeAudio {
+                    if probeOpened { probe.close() }
                     try await loadAudioNative(url: url, startPosition: startPosition, httpHeaders: options.httpHeaders)
                     playbackBackend = .audio
                     activeVideoDecoder = nil
@@ -913,7 +915,8 @@ public final class AetherEngine: ObservableObject {
                         url: url,
                         sourceHTTPHeaders: options.httpHeaders,
                         startPosition: startPosition,
-                        audioSourceStreamIndex: resolvedInitialAudio >= 0 ? resolvedInitialAudio : nil
+                        audioSourceStreamIndex: resolvedInitialAudio >= 0 ? resolvedInitialAudio : nil,
+                        preopenedDemuxer: probeOpened ? probe : nil
                     )
                     playbackBackend = .audio
                     activeVideoDecoder = nil
@@ -1401,7 +1404,8 @@ public final class AetherEngine: ObservableObject {
         url: URL,
         sourceHTTPHeaders: [String: String] = [:],
         startPosition: Double?,
-        audioSourceStreamIndex: Int32?
+        audioSourceStreamIndex: Int32?,
+        preopenedDemuxer: Demuxer?
     ) async throws {
         activateRendererAudioSession()
         let host = AudioPlaybackHost()
@@ -1441,12 +1445,22 @@ public final class AetherEngine: ObservableObject {
             }
             .store(in: &audioCancellables)
 
-        // Detach the host's load (its body is synchronous despite the
-        // async signature) so the @MainActor runloop keeps ticking.
-        try await Task.detached(priority: .userInitiated) { [host] in
+        // Reuse the probe demuxer when present (custom sources require it,
+        // since they have no URL to reopen; URL sources just skip a redundant
+        // open). Fall back to a fresh open only when the probe failed.
+        // The (possibly blocking) open stays detached so the @MainActor
+        // runloop keeps ticking.
+        try await Task.detached(priority: .userInitiated) {
+            [host, preopenedDemuxer, url, sourceHTTPHeaders] in
+            let dem: Demuxer
+            if let pre = preopenedDemuxer {
+                dem = pre
+            } else {
+                dem = Demuxer()
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders)
+            }
             try await host.load(
-                url: url,
-                sourceHTTPHeaders: sourceHTTPHeaders,
+                demuxer: dem,
                 startPosition: startPosition,
                 audioSourceStreamIndex: audioSourceStreamIndex
             )
