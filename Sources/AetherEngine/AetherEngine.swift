@@ -1701,9 +1701,18 @@ public final class AetherEngine: ObservableObject {
         if activeEmbeddedSubtitleStreamIndex >= 0, let url = loadedURL {
             let streamIdx = activeEmbeddedSubtitleStreamIndex
             embeddedSubtitleTask?.cancel()
+            embeddedSubtitleTask = nil
             subtitleCues = []
             // Side-demuxer seeks in source PTS, which is the seek target.
-            startEmbeddedSubtitleTask(url: url, streamIndex: streamIdx, startAt: target)
+            // For custom sources, request a fresh clone; skip re-arm if the
+            // reader cannot produce one (forward-only source mid-seek).
+            if isCustomSource {
+                if let clone = customReader?.makeIndependentReader() {
+                    startEmbeddedSubtitleTask(url: url, reader: clone, formatHint: customFormatHint, streamIndex: streamIdx, startAt: target)
+                }
+            } else {
+                startEmbeddedSubtitleTask(url: url, reader: nil, formatHint: nil, streamIndex: streamIdx, startAt: target)
+            }
         }
 
         // AVPlayer surfaces post-seek readiness via its own KVO; the
@@ -2044,9 +2053,14 @@ public final class AetherEngine: ObservableObject {
     /// re-seeks on `engine.seek` so scrubs surface cues at the new
     /// position immediately.
     public func selectSubtitleTrack(index: Int) {
-        // Embedded-subtitle selection opens a second side demuxer against the
-        // source URL; a single-cursor custom reader cannot serve it. No-op.
-        guard !isCustomSource else { return }
+        // Embedded-subtitle selection runs a side demuxer concurrently with
+        // playback. For custom sources the side demuxer needs an independent
+        // second cursor; if the reader cannot clone, no-op.
+        var customClone: IOReader? = nil
+        if isCustomSource {
+            guard let clone = customReader?.makeIndependentReader() else { return }
+            customClone = clone
+        }
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
@@ -2065,20 +2079,21 @@ public final class AetherEngine: ObservableObject {
         // clock here would land `playlistShiftSeconds` early and the first
         // emitted cue would read as "subs are 3-5 s late" — repro on Cars
         // at a restart-driven shift of ~3.92 s.
-        startEmbeddedSubtitleTask(url: url, streamIndex: Int32(index), startAt: sourceTime)
+        startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: sourceTime)
     }
 
     /// Spin up the side-demuxer Task that streams cues into the
     /// engine. Captured-on-init: the URL, the stream index, the
     /// start position, and the source video dimensions. The Task's
     /// run loop is cancellable; `cancel()` triggers a clean exit.
-    private func startEmbeddedSubtitleTask(url: URL, streamIndex: Int32, startAt: Double) {
+    private func startEmbeddedSubtitleTask(url: URL, reader: IOReader?, formatHint: String?, streamIndex: Int32, startAt: Double) {
         let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
         let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
         let headers = loadedOptions.httpHeaders
         embeddedSubtitleTask = Task.detached(priority: .userInitiated) { [weak self] in
             await self?.runEmbeddedSubtitleReader(
-                url: url, headers: headers, streamIndex: streamIndex, startAt: startAt,
+                url: url, reader: reader, formatHint: formatHint,
+                headers: headers, streamIndex: streamIndex, startAt: startAt,
                 videoWidth: w, videoHeight: h
             )
         }
@@ -2091,20 +2106,31 @@ public final class AetherEngine: ObservableObject {
     /// subtitle packets through an `EmbeddedSubtitleDecoder`, emitting
     /// cues back into the engine on the main actor.
     nonisolated private func runEmbeddedSubtitleReader(
-        url: URL, headers: [String: String], streamIndex: Int32, startAt: Double,
+        url: URL, reader: IOReader?, formatHint: String?,
+        headers: [String: String], streamIndex: Int32, startAt: Double,
         videoWidth: Int32, videoHeight: Int32
     ) async {
         let demuxer = Demuxer()
         do {
-            try demuxer.open(url: url, extraHeaders: headers)
+            if let reader = reader {
+                try demuxer.open(reader: reader, formatHint: formatHint)
+            } else {
+                try demuxer.open(url: url, extraHeaders: headers)
+            }
         } catch {
             EngineLog.emit("[AetherEngine] embedded subtitle open failed: \(error)", category: .engine)
+            reader?.close()
             await MainActor.run { [weak self] in
                 self?.isLoadingSubtitles = false
             }
             return
         }
-        defer { demuxer.close() }
+        // The side demuxer owns the clone reader (the bridge does not close
+        // it); close it after the demuxer is torn down.
+        defer {
+            demuxer.close()
+            reader?.close()
+        }
 
         // Prewarm the cue table by seeking mid-file before the actual
         // playhead seek. MKV cues live at the end of the file; a fresh
