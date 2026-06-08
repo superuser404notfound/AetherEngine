@@ -547,6 +547,16 @@ public final class Demuxer: @unchecked Sendable {
         avformat_flush(ctx)
     }
 
+    /// Fast, lock-free unblock: mark the AVIO reader closed so its read
+    /// callback returns -1 immediately and a suspended `av_read_frame`
+    /// (including one parked in the live reconnect loop) returns at once.
+    /// Frees no resources. Call this synchronously when cancelling a pump so
+    /// the pump can unwind without waiting on the (potentially slow) `close()`
+    /// teardown. Idempotent; `close()` calls it again before freeing.
+    func markClosed() {
+        avioProvider?.markClosed()
+    }
+
     /// Close the format context and release resources.
     /// Thread-safe: waits for any in-progress readPacket() to finish
     /// before freeing the format context. The AVIO reader is marked

@@ -1350,6 +1350,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // resource teardown move to a detached task.
         p?.stop()
 
+        // Unblock the pump's read synchronously. A live producer can be parked
+        // inside av_read_frame in the AVIO reconnect loop, which only exits on
+        // the reader's closed flag (not the producer's cancel flag). Without
+        // this, the detached waitForFinish below blocks for up to 3s while the
+        // old live source storms reconnects (e.g. Jellyfin 400s a superseded
+        // transcode) until the reconnect cap is hit, polluting the next
+        // session on the shared engine. markClosed is lock-free and
+        // idempotent; the detached close() still frees the resources.
+        d?.markClosed()
+        preopened?.markClosed()
+
         // Detached cleanup. The closure captures the local resource
         // strong refs (not self), so they live as long as the cleanup
         // needs them. The producer waitForFinish has to come before
