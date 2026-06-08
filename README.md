@@ -7,7 +7,7 @@
 <p align="center">
   <b>A media player engine for Apple platforms.</b><br>
   FFmpeg demuxes. VideoToolbox decodes. AVPlayer handles Dolby Atmos.<br>
-  Video, or a lean audio-only path with system Now-Playing. You ship the UI.
+  Video, live TV with DVR timeshift, or a lean audio-only path with system Now-Playing. You ship the UI.
 </p>
 
 <p align="center">
