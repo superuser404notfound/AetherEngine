@@ -106,8 +106,14 @@ protocol HLSSegmentProvider: AnyObject {
     /// counter (for the byte-level "playlist changed" signal), and
     /// whether the playlist should declare itself complete with
     /// `#EXT-X-ENDLIST`. Used by the video provider to advance a
-    /// sliding-window live playlist.
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool)
+    /// sliding-window live playlist. `discontinuitySequence` is the
+    /// number of `#EXT-X-DISCONTINUITY`-tagged segments that have slid
+    /// OUT of the visible window, emitted as
+    /// `#EXT-X-DISCONTINUITY-SEQUENCE` (RFC 8216 §6.2.2 REQUIRES the
+    /// server to increment it when a discontinuity-tagged segment is
+    /// removed; without it AVPlayer's discontinuity tracking slips one
+    /// window-length after every program boundary).
+    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
 
     /// First segment index visible in the current playlist window.
     /// For append-only and VOD playlists this is always 0.
@@ -183,8 +189,8 @@ extension HLSSegmentProvider {
     /// a zero refresh counter (the byte-level change line is a
     /// video-side concern), and trusts the static playlistType to
     /// drive ENDLIST inclusion.
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool) {
-        return (visibleCount: segmentCount, refreshCounter: 0, endlistAdded: false)
+    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
+        return (visibleCount: segmentCount, refreshCounter: 0, endlistAdded: false, discontinuitySequence: 0)
     }
 }
 
@@ -1176,6 +1182,14 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         lines.append("#EXT-X-TARGETDURATION:\(targetDuration)")
         lines.append("#EXT-X-MEDIA-SEQUENCE:\(firstVisible)")
+        if typeIsLive {
+            // RFC 8216 §6.2.2: must track discontinuity-tagged segments
+            // that slid out of the window, or AVPlayer's discontinuity
+            // numbering shifts one window-length after every program
+            // boundary. Emitted unconditionally for live (0 is the spec
+            // default and harmless).
+            lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(snapshot.discontinuitySequence)")
+        }
         if typeIsLive {
             // No #EXT-X-PLAYLIST-TYPE and no #EXT-X-ENDLIST: the sliding
             // window grows at the live edge and drops segments below

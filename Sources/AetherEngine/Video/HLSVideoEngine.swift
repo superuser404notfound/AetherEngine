@@ -287,6 +287,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// its own published shift in step so the subtitle overlay's cue
     /// lookup uses the right source-time conversion.
     var onPlaylistShiftChanged: (@Sendable (Double) -> Void)?
+    /// Fires when a live program-boundary rebase changes the shift.
+    /// Carries (newShiftSeconds, seamOutputSeconds): AetherEngine queues
+    /// the new shift and applies it to its published clock only when
+    /// playback crosses `seamOutputSeconds` on the raw AVPlayer timeline,
+    /// so currentTime/sourceTime don't jump while the old program is
+    /// still on screen.
+    var onPlaylistShiftRebased: (@Sendable (Double, Double) -> Void)?
     /// Session-long FLAC bridge for codecs that aren't legal in fMP4.
     /// Owned by the engine (not the producer) so that producer
     /// restarts on scrub don't lose the bridge's encoder state. The
@@ -1495,6 +1502,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         prod.onVideoShiftKnown = { [weak self] shiftPts in
             self?.handleVideoShiftKnown(shiftPts)
         }
+        prod.onLiveTimelineRebase = { [weak self] shiftPts, seamOutputSeconds in
+            self?.handleLiveTimelineRebase(shiftPts, seamOutputSeconds: seamOutputSeconds)
+        }
         return prod
     }
 
@@ -1508,6 +1518,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         playlistShiftSeconds = seconds
         onPlaylistShiftChanged?(seconds)
+    }
+
+    /// Live program-boundary rebase. Unlike `handleVideoShiftKnown` this
+    /// does NOT push the new shift through `onPlaylistShiftChanged`: the
+    /// shift describes packets at the producer edge, which AVPlayer
+    /// renders ~buffer + holdback later, so the host clock must keep the
+    /// OLD shift until playback crosses the seam. The engine-side
+    /// `playlistShiftSeconds` tracks the producer edge immediately
+    /// (internal bookkeeping); the deferred host-facing activation goes
+    /// through `onPlaylistShiftRebased`.
+    private func handleLiveTimelineRebase(_ shiftPts: Int64, seamOutputSeconds: Double) {
+        let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
+        playlistShiftSeconds = seconds
+        onPlaylistShiftRebased?(seconds, seamOutputSeconds)
     }
 
     /// Debounced relay. Producers each have their own once-per-instance
@@ -2730,6 +2754,10 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// `notePlaylistBuild` to `max(0, highWater - windowSegmentCount)`.
     /// Stays 0 for VOD and the append-only EVENT audio path.
     private var _liveFirstVisible: Int = 0
+    /// Running count of discontinuity-tagged segments that have slid out
+    /// of the visible live window; the playlist's
+    /// `#EXT-X-DISCONTINUITY-SEQUENCE` value. Guarded by `stateLock`.
+    private var _discontinuitySequence: Int = 0
 
     /// How many segments past the resume position the initial playlist
     /// exposes. 30 × 4 s = 120 s of forward runway: enough to absorb
@@ -2858,7 +2886,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// firstVisible only advances once enough segments exist to seed
     /// AVPlayer's live edge (the window stays anchored at 0 until then),
     /// which is the anti-stall guarantee.
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool) {
+    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
@@ -2873,6 +2901,13 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
             // edge without losing a not-yet-buffered position.
             let newFirst = max(0, total - window)
             if newFirst > _liveFirstVisible {
+                // RFC 8216 §6.2.2: EXT-X-DISCONTINUITY-SEQUENCE MUST be
+                // incremented for every discontinuity-tagged segment that
+                // falls out of the window. The live `segments` array is
+                // never pruned, so the slid-out range is still readable.
+                for i in _liveFirstVisible..<newFirst where segments[i].discontinuous {
+                    _discontinuitySequence += 1
+                }
                 _liveFirstVisible = newFirst
                 // Evict everything below the new firstVisible. Off-lock to
                 // avoid holding stateLock during file I/O; evictBelow takes
@@ -2885,9 +2920,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
                     cacheRef.evictBelow(cutoff)
                 }
             }
-            return (total, refreshCounter, false)
+            return (total, refreshCounter, false, _discontinuitySequence)
         }
-        return (segments.count, refreshCounter, false)
+        return (segments.count, refreshCounter, false, 0)
     }
 
     /// First segment index visible in the current playlist window.
