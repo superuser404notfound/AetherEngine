@@ -2999,6 +2999,31 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
 
     func mediaSegment(at index: Int) -> Data? {
         guard index >= 0, index < currentSegmentCount else { return nil }
+
+        // Live fast-404: a request below the sliding window can never be
+        // satisfied. The producer is forward-only (restartHandler is nil
+        // for live) and the cache evicted the file when the window slid,
+        // so falling through would park the connection in the 30 s
+        // cache.fetch below for a segment that will never reappear.
+        // Concrete trigger: pause live TV past the window, resume;
+        // AVPlayer drains its buffer and fetches an evicted segment, and
+        // playback freezes for 30 s instead of AVPlayer resyncing from
+        // the playlist edge. An immediate nil turns into a fast 404 and
+        // lets AVPlayer recover (the engine's resume clamp jumps the
+        // playhead back inside the window in parallel).
+        if isLive {
+            stateLock.lock()
+            let firstVisible = _liveFirstVisible
+            stateLock.unlock()
+            if index < firstVisible {
+                EngineLog.emit(
+                    "[HLSVideoEngine] seg\(index): below live window (firstVisible=\(firstVisible)), fast 404",
+                    category: .session
+                )
+                return nil
+            }
+        }
+
         let totalStart = DispatchTime.now()
 
         // Defensive: if AVPlayer fetches a segment beyond the current

@@ -413,6 +413,33 @@ public final class AetherEngine: ObservableObject {
     /// `$currentTime` sink; cleared on every load/stop.
     private var pendingLiveShiftRebases: [(activateAt: Double, shift: Double)] = []
 
+    /// 1 Hz live-window publisher, independent of playback ticks. The
+    /// `$currentTime` sink only fires while AVPlayer's periodic time
+    /// observer runs, i.e. NOT while paused, so without this timer
+    /// `liveEdgeTime` / `behindLiveSeconds` / `isAtLiveEdge` /
+    /// `seekableLiveRange` all freeze for the entire pause: the UI shows
+    /// "at live edge" while drifting arbitrarily far behind, and a DVR
+    /// scrub issued while paused seeks against a stale edge. The edge is
+    /// reachable while paused via `host.seekableEnd` (AVPlayer keeps
+    /// reloading the live playlist during a pause).
+    private var liveWindowTimerTask: Task<Void, Never>?
+
+    /// Drive the live surfaces at 1 Hz for the lifetime of a native live
+    /// session. Replaces nothing: the `$currentTime` sink still publishes
+    /// on every playback tick; this covers the paused case.
+    private func startLiveWindowTimer(host: NativeAVPlayerHost) {
+        liveWindowTimerTask?.cancel()
+        guard isLive else { return }
+        liveWindowTimerTask = Task { [weak self, weak host] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, let host else { return }
+                guard self.isLive else { continue }
+                self.publishLiveWindow(edgeSessionTime: host.seekableEnd + self.playlistShiftSeconds)
+            }
+        }
+    }
+
     /// Source PTS of the currently displayed frame. Equal to `currentTime`
     /// on every path now that the native clock is unified onto source time;
     /// kept as a stable alias for callers that want to express source-
@@ -1289,6 +1316,7 @@ public final class AetherEngine: ObservableObject {
                 }
             }
             .store(in: &nativeCancellables)
+        startLiveWindowTimer(host: host)
         host.$duration
             .sink { [weak self] value in
                 if value > 0 { self?.duration = value }
@@ -1510,6 +1538,7 @@ public final class AetherEngine: ObservableObject {
                 }
             }
             .store(in: &nativeCancellables)
+        startLiveWindowTimer(host: host)
         host.$duration
             .sink { [weak self] value in
                 if value > 0 { self?.duration = value }
@@ -1861,6 +1890,37 @@ public final class AetherEngine: ObservableObject {
         if state == .paused || state == .loading {
             state = .playing
         }
+        clampLiveResumeIfBehindWindow()
+    }
+
+    /// Live resume clamp. While paused the live edge keeps advancing (the
+    /// 1 Hz window timer keeps `liveWindow` fresh), and a pause longer
+    /// than the retention window leaves the playhead on content the
+    /// sliding window has already evicted. AVPlayer would then fetch
+    /// evicted segments (fast-404'd by the provider) instead of cleanly
+    /// resuming, so jump the playhead back inside the window: to just
+    /// above the DVR window's lower bound when a DVR window exists, or to
+    /// the live edge for live-only sessions (their server-side retention
+    /// floor is 60 s; clamping at 45 s leaves headroom before eviction).
+    private func clampLiveResumeIfBehindWindow() {
+        guard isLive, let w = liveWindow else { return }
+        let margin: Double = 5
+        let target: Double?
+        if let win = w.windowSeconds {
+            target = w.behindLiveSeconds > (win - margin)
+                ? (w.seekableRange?.lowerBound ?? w.edgeTime) + margin
+                : nil
+        } else {
+            target = w.behindLiveSeconds > 45 ? w.edgeTime : nil
+        }
+        guard let t = target else { return }
+        EngineLog.emit(
+            "[AetherEngine] live resume clamp: behind=\(String(format: "%.1f", w.behindLiveSeconds))s "
+            + "window=\(w.windowSeconds.map { String(format: "%.0f", $0) } ?? "live-only") "
+            + "-> seek \(String(format: "%.1f", t))",
+            category: .session
+        )
+        Task { await self.seek(to: t) }
     }
 
     public func pause() {
@@ -2884,6 +2944,9 @@ public final class AetherEngine: ObservableObject {
         pendingLiveShiftRebases.removeAll()
         nativeClockSeconds = 0
         sourceTime = 0
+
+        liveWindowTimerTask?.cancel()
+        liveWindowTimerTask = nil
 
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
