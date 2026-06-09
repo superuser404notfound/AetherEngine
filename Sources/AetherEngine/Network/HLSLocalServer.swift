@@ -1047,23 +1047,38 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         var targetDuration = Int(ceil(max(1.0, maxDuration)))
 
-        // For live playlists, apply a stable floor equal to the producer's
-        // configured cut target. Before segment 0 is finalized, maxDuration
-        // is 0 and the plain computation yields 1, giving AVPlayer only
-        // 1.5 s to receive the first segment (1.5 * TARGETDURATION per spec).
-        // High-bitrate sources (20+ Mbps, 5+ s segments, many MB) cannot be
-        // demuxed, remuxed, and published over the loopback path in that
-        // window, so AVPlayer fires CoreMediaErrorDomain -12888
-        // "Playlist File unchanged for longer than 1.5 * target duration".
-        // Using ceil(producerTarget) as the minimum makes TARGETDURATION
-        // stable and generous from the very first (empty) manifest, giving
-        // AVPlayer ~6-9 s to receive segment 0. Per HLS spec TARGETDURATION
-        // must be >= every EXTINF; since the producer cuts at targetSeconds,
-        // ceil(target) satisfies that for normal segments. If a produced
-        // segment ever exceeds it, max() keeps us compliant. VOD and EVENT
-        // paths are unchanged.
+        // For live playlists, apply a stable floor of 1.5x the producer's
+        // configured cut target. Two distinct problems share this floor:
+        //
+        // 1. Empty first manifest. Before segment 0 is finalized, maxDuration
+        //    is 0 and the plain computation yields 1, giving AVPlayer only
+        //    1.5 s to receive the first segment (1.5 * TARGETDURATION per
+        //    spec). High-bitrate sources (20+ Mbps, 5+ s segments, many MB)
+        //    cannot be demuxed, remuxed, and published over the loopback path
+        //    in that window, so AVPlayer fires CoreMediaErrorDomain -12888
+        //    "Playlist File unchanged for longer than 1.5 * target duration".
+        //
+        // 2. Transcode warm-up jitter. Even with the startup cushion, the
+        //    server's real-time transcode takes a moment to reach steady
+        //    throughput. During that warm-up the producer can stall ~8 s
+        //    cutting the next segment (the pump blocks in the persistent
+        //    reader), and AVPlayer, started one segment behind the edge,
+        //    catches the gap and trips -12888 once at startup before
+        //    recovering. The fix is patience, not a bigger cushion: a bigger
+        //    cushion would add startup latency, whereas advertising a more
+        //    generous TARGETDURATION widens the -12888 window at no startup
+        //    cost. The segments are still CUT at the producer's target, so
+        //    EXTINF stays ~targetSeconds and the playlist-reload cadence is
+        //    unaffected; only AVPlayer's unchanged-playlist patience grows.
+        //
+        // ceil(1.5 * target) = 6 for a 4 s cut gives a 9 s patience window,
+        // which clears the observed ~8 s warm-up gap with margin. Per HLS
+        // spec TARGETDURATION must be >= every EXTINF; since the producer
+        // cuts at targetSeconds, 1.5x comfortably satisfies that for normal
+        // segments, and if a produced segment ever exceeds the floor, max()
+        // keeps us compliant. VOD and EVENT paths are unchanged.
         if typeIsLive, let liveTarget = provider.liveTargetSegmentDuration {
-            let liveFloor = Int(ceil(liveTarget))
+            let liveFloor = Int(ceil(liveTarget * 1.5))
             targetDuration = max(targetDuration, liveFloor)
         }
 
