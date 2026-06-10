@@ -420,6 +420,20 @@ final class MP4SegmentMuxer {
         var opts: OpaquePointer? = nil
         defer { av_dict_free(&opts) }
         av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov", 0)
+        // No edit lists in the moov. With delay_moov the mov muxer
+        // derives an empty-edit from the FIRST packet's timestamp,
+        // which on a producer restart is the restart anchor (field
+        // evidence: elst.segment_duration == 280280 after a seek to
+        // segment 28). That makes init.mp4 position-DEPENDENT, but
+        // AVPlayer fetches EXT-X-MAP exactly once per session, so
+        // every post-restart fragment then plays against a stale edit
+        // list: post-scrub lipsync drift and timeline jumps. Position
+        // belongs exclusively in the fragments' tfdt (absolute output
+        // timeline, both tracks), which also preserves the relative
+        // head-of-stream A/V offset. With edit lists off, the moov is
+        // restart-invariant, matching the SegmentCache's pinned-init
+        // assumption.
+        av_dict_set(&opts, "use_editlist", "0", 0)
 
         let ret = avformat_write_header(ctx, &opts)
         guard ret >= 0 else {
@@ -554,6 +568,8 @@ final class MP4SegmentMuxer {
         var opts: OpaquePointer? = nil
         defer { av_dict_free(&opts) }
         av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov", 0)
+        // Mirror the session muxer: no edit lists (see openSession).
+        av_dict_set(&opts, "use_editlist", "0", 0)
 
         return avformat_write_header(ctx, &opts)
     }
