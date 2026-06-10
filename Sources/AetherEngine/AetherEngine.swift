@@ -433,13 +433,19 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// Queued live program-boundary shift changes, in output-timeline
-    /// order. The producer rebases its timeline the moment it READS a
-    /// boundary, but AVPlayer renders that seam ~buffer + holdback later;
-    /// each entry holds the new shift and the raw-clock position at which
-    /// it becomes true for the on-screen content. Drained by the
-    /// `$currentTime` sink; cleared on every load/stop.
-    private var pendingLiveShiftRebases: [(activateAt: Double, shift: Double)] = []
+    /// Session history of live program-boundary shift seams, in
+    /// output-timeline order. The producer rebases its timeline the
+    /// moment it READS a boundary, but AVPlayer renders that seam
+    /// ~buffer + holdback later; each entry holds the new shift and the
+    /// raw-clock position from which it is true for on-screen content.
+    /// The `$currentTime` sink RESOLVES the active shift by looking up
+    /// the newest seam at or before the raw clock (a history, not a
+    /// destructive queue: a backward DVR seek across an already-crossed
+    /// seam must fold pre-seam content with the pre-seam shift again).
+    /// The baseline entry (activateAt -infinity) is seeded by the
+    /// gate-open / restart shift. Cleared on every load/stop; capped in
+    /// the append handler.
+    private var liveShiftSeams: [(activateAt: Double, shift: Double)] = []
 
     /// 1 Hz live-window publisher, independent of playback ticks. The
     /// `$currentTime` sink only fires while AVPlayer's periodic time
@@ -1394,7 +1400,7 @@ public final class AetherEngine: ObservableObject {
         // No producer on this path, so the playhead carries the AVPlayer
         // clock directly (no source-PTS fold). Keep the shift at 0.
         self.playlistShiftSeconds = 0
-        self.pendingLiveShiftRebases.removeAll()
+        self.liveShiftSeams.removeAll()
         if currentAVPlayer !== host.avPlayer {
             self.currentAVPlayer = host.avPlayer
         }
@@ -1535,6 +1541,10 @@ public final class AetherEngine: ObservableObject {
             Task { @MainActor in
                 guard let self = self else { return }
                 self.playlistShiftSeconds = seconds
+                // Gate-open / restart shift = the session baseline of the
+                // seam history (valid from the beginning of the output
+                // timeline). Boundary seams append after it.
+                self.liveShiftSeams = [(activateAt: -.infinity, shift: seconds)]
                 // Re-fold against the raw clock so the published source-PTS
                 // currentTime tracks the new shift immediately (e.g. after a
                 // restart that landed past the planned keyframe), rather than
@@ -1548,15 +1558,23 @@ public final class AetherEngine: ObservableObject {
                 guard let self = self else { return }
                 // Live program boundary: the producer rebased its timeline,
                 // but AVPlayer is still rendering ~buffer + holdback of OLD
-                // program. Queue the shift and let the $currentTime sink
-                // apply it when the raw clock crosses the seam, so the
+                // program. Record the seam and let the $currentTime sink
+                // resolve the active shift from the history, so the
                 // published currentTime/sourceTime never jump ahead of what
-                // is actually on screen. Seams are appended in output-
-                // timeline order by construction (the continuation dts is
-                // monotonic even for backward source jumps).
-                self.pendingLiveShiftRebases.append(
+                // is actually on screen, and a backward DVR seek across a
+                // crossed seam folds with the pre-seam shift again. Seams
+                // append in output-timeline order by construction (the
+                // continuation dts is monotonic even for backward source
+                // jumps).
+                self.liveShiftSeams.append(
                     (activateAt: seamOutputSeconds, shift: seconds)
                 )
+                if self.liveShiftSeams.count > 64 {
+                    // Bound the history; dropping the oldest only loses
+                    // shift fidelity for DVR positions older than 60+
+                    // program boundaries, far outside any real window.
+                    self.liveShiftSeams.removeFirst(self.liveShiftSeams.count - 64)
+                }
             }
         }
         // AVPlayer HLS playback over the loopback HTTP server. Detach
@@ -1620,12 +1638,13 @@ public final class AetherEngine: ObservableObject {
                 // SW / audio paths. nativeClockSeconds keeps the raw value
                 // for onPlaylistShiftChanged to re-derive against.
                 self.nativeClockSeconds = value
-                // Activate any queued program-boundary shift whose seam the
-                // playhead has crossed (see onPlaylistShiftRebased above).
-                while let next = self.pendingLiveShiftRebases.first,
-                      value >= next.activateAt {
-                    self.playlistShiftSeconds = next.shift
-                    self.pendingLiveShiftRebases.removeFirst()
+                // Resolve the shift for the playhead's position from the
+                // seam history (see onPlaylistShiftRebased above): newest
+                // seam at or before the raw clock wins, so forward
+                // playback activates seams as they're crossed AND a
+                // backward DVR seek re-applies the pre-seam shift.
+                if let active = self.liveShiftSeams.last(where: { value >= $0.activateAt }) {
+                    self.playlistShiftSeconds = active.shift
                 }
                 self.currentTime = value + self.playlistShiftSeconds
                 self.sourceTime = self.currentTime
@@ -1775,7 +1794,7 @@ public final class AetherEngine: ObservableObject {
         // SW path's currentTime tracks source PTS directly, so the
         // AVPlayer-clock shift is 0 and sourceTime mirrors currentTime.
         self.playlistShiftSeconds = 0
-        self.pendingLiveShiftRebases.removeAll()
+        self.liveShiftSeams.removeAll()
 
         softwareCancellables.removeAll()
         host.$currentTime
@@ -1858,7 +1877,7 @@ public final class AetherEngine: ObservableObject {
         self.audioHost = host
         // Audio path tracks source PTS directly: no AVPlayer-clock shift.
         self.playlistShiftSeconds = 0
-        self.pendingLiveShiftRebases.removeAll()
+        self.liveShiftSeams.removeAll()
 
         audioCancellables.removeAll()
         host.$currentTime
@@ -1939,7 +1958,7 @@ public final class AetherEngine: ObservableObject {
         self.audioAVPlayerHost = host
         self.audioAVPlayerActive = true
         self.playlistShiftSeconds = 0
-        self.pendingLiveShiftRebases.removeAll()
+        self.liveShiftSeams.removeAll()
         // Reclaim Now-Playing ownership for this session on each track start,
         // so the Home badge + remote commands stay bound across a pause.
         host.becomeActiveNowPlaying()
@@ -3115,7 +3134,7 @@ public final class AetherEngine: ObservableObject {
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
         playlistShiftSeconds = 0
-        pendingLiveShiftRebases.removeAll()
+        liveShiftSeams.removeAll()
         nativeClockSeconds = 0
         sourceTime = 0
 

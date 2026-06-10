@@ -505,6 +505,29 @@ final class AudioBridge: @unchecked Sendable {
         rebaseFromNextSourcePTS = true
     }
 
+    /// Live program-boundary correction. The bridge stamps its output
+    /// from the free-running `nextEncoderPTS` sample counter, which
+    /// collapses any audio splice gap sample-continuously, while the
+    /// video timeline keeps the relative gap the rebase preserved. The
+    /// producer calls this with the residual (audio gap minus video
+    /// gap, in seconds) so the bridged audio timeline reproduces the
+    /// same relationship: positive deltas advance the encoder PTS
+    /// (AVPlayer renders the gap as silence), negative ones (an audio
+    /// overlap at the splice) are clamped, the counter cannot rewind.
+    /// Called on the pump thread, same thread as `feed`. Samples still
+    /// sitting in the FIFO (< one encoder frame) are stamped post-jump;
+    /// that error is bounded by one frame (~32 ms) and one-shot.
+    func noteTimelineJump(deltaSeconds: Double) {
+        guard deltaSeconds > 0, encoderTimeBase.den > 0 else { return }
+        let samples = Int64((deltaSeconds * Double(encoderTimeBase.den)).rounded())
+        nextEncoderPTS += samples
+        EngineLog.emit(
+            "[AudioBridge] live timeline jump: +\(String(format: "%.3f", deltaSeconds))s "
+            + "(\(samples) samples) at encoder pts \(nextEncoderPTS)",
+            category: .session
+        )
+    }
+
     private func cleanup() {
         if decoderCtx != nil {
             avcodec_free_context(&decoderCtx)

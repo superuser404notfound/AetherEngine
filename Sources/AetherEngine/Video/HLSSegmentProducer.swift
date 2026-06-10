@@ -288,7 +288,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// poison a later, unrelated one.
     private var pendingAudioInheritDelta: (ticksAudioTb: Int64, at: Date)? = nil
     private var lastIndependentAudioRebase: (preShift: Int64, at: Date)? = nil
-    private var pendingAudioShiftOverride: Int64? = nil
+    private var pendingAudioShiftOverride: (shift: Int64, at: Date)? = nil
     private static let rebasePairingWindowSeconds: TimeInterval = 5.0
 
     /// Last in-band video extradata observed via
@@ -460,6 +460,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// `liveKeyframeGateTimeoutSeconds`; see the gate for rationale.
     private var pregateWaitStart: Date?
     private static let liveKeyframeGateTimeoutSeconds: TimeInterval = 15
+
+    /// Wall-clock start of the audio target-gate wait (first dropped
+    /// pre-gate audio packet). Live sessions bound the wait with
+    /// `liveAudioGateTimeoutSeconds`: a backward source-clock reset
+    /// between video gate-open and the first kept audio packet strands
+    /// the target in the old clock domain (permanent silence otherwise).
+    /// 5 s is generous; the gap the gate bridges is normally < 100 ms of
+    /// interleave.
+    private var audioGateWaitStart: Date?
+    private static let liveAudioGateTimeoutSeconds: TimeInterval = 5
     private var pregateAudioDropCount: Int = 0
     private var lastPregateVideoLog: Int = 0
     private var lastPregateAudioLog: Int = 0
@@ -1276,7 +1286,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 // and measured independently; replace its
                                 // measured shift with the video-derived one at
                                 // the next audio packet.
-                                pendingAudioShiftOverride = prior.preShift + deltaAudioTb
+                                pendingAudioShiftOverride = (prior.preShift + deltaAudioTb, Date())
                                 lastIndependentAudioRebase = nil
                             } else {
                                 // Accumulate instead of overwrite: a transient
@@ -1311,6 +1321,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         ? Int64(Self.discontinuityThresholdSeconds * Double(tb.den) / Double(tb.num))
                         : Int64.max
                     if abs(jumpTicks) >= thresholdTicks {
+                        // A fresh jump supersedes any pending correction from
+                        // the PREVIOUS boundary; applying it later would shift
+                        // audio by a stale delta.
+                        if pendingAudioShiftOverride != nil {
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] audio rebase: discarding stale shift override (new boundary)",
+                                category: .session
+                            )
+                            pendingAudioShiftOverride = nil
+                        }
                         let lastOutputDts = lastAudioSourceDts - audioShiftPts
                         // Independent measurement: continue one audio frame
                         // past the last output dts. Used directly only when
@@ -1323,24 +1343,42 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         var inherited = false
                         if let p = pendingAudioInheritDelta,
                            Date().timeIntervalSince(p.at) < Self.rebasePairingWindowSeconds {
-                            // Inherit the video rebase delta so the A/V
-                            // relationship survives the boundary. Clamp so the
-                            // first rebased output dts never lands at or below
-                            // the last emitted one (an audio splice overlap
-                            // would otherwise trip the muxer's monotonic
-                            // check); the clamp ceiling equals the independent
-                            // measurement's continuation point.
                             let candidate = audioShiftPts + p.ticksAudioTb
-                            let maxShift = packet.pointee.dts - lastOutputDts - 1
-                            newShift = min(candidate, maxShift)
-                            inherited = true
-                            if newShift != candidate {
-                                EngineLog.emit(
-                                    "[HLSSegmentProducer] audio rebase inherit clamped: "
-                                    + "candidate=\(candidate) maxShift=\(maxShift) "
-                                    + "(splice overlap collapsed)",
-                                    category: .session
+                            if let bridge = audio.bridge {
+                                // Bridge path: shifts never reach the encoder
+                                // timeline (the bridge re-stamps from its
+                                // free-running sample counter, collapsing the
+                                // audio splice gap sample-continuously while
+                                // the video timeline keeps its relative gap).
+                                // Reproduce the A/V relationship by jumping
+                                // the encoder timeline by the residual gap.
+                                let driftTicks = measuredShift - candidate
+                                let tbSec = tb.den > 0
+                                    ? Double(tb.num) / Double(tb.den) : 0
+                                bridge.noteTimelineJump(
+                                    deltaSeconds: Double(driftTicks) * tbSec
                                 )
+                                inherited = true
+                            } else {
+                                // Stream-copy: inherit the video rebase delta
+                                // so the A/V relationship survives the
+                                // boundary. Clamp so the first rebased output
+                                // dts never lands at or below the last emitted
+                                // one (an audio splice overlap would otherwise
+                                // trip the muxer's monotonic check); the clamp
+                                // ceiling equals the independent measurement's
+                                // continuation point.
+                                let maxShift = packet.pointee.dts - lastOutputDts - 1
+                                newShift = min(candidate, maxShift)
+                                inherited = true
+                                if newShift != candidate {
+                                    EngineLog.emit(
+                                        "[HLSSegmentProducer] audio rebase inherit clamped: "
+                                        + "candidate=\(candidate) maxShift=\(maxShift) "
+                                        + "(splice overlap collapsed)",
+                                        category: .session
+                                    )
+                                }
                             }
                         } else {
                             // Audio crossed first; remember the pre-boundary
@@ -1362,22 +1400,48 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     } else if let override_ = pendingAudioShiftOverride {
                         // The video rebase arrived AFTER this stream already
                         // rebased independently (interleave delivered audio's
-                        // boundary packet first). Correct the shift to the
-                        // video-derived value, clamped to output monotonicity;
-                        // only the few packets between the two boundary
-                        // packets carried the uncorrected shift.
-                        let lastOutputDts = lastAudioSourceDts - audioShiftPts
-                        let maxShift = packet.pointee.dts - lastOutputDts - 1
-                        let applied = min(override_, maxShift)
-                        EngineLog.emit(
-                            "[HLSSegmentProducer] audio rebase corrected to video-derived shift: "
-                            + "old=\(audioShiftPts) new=\(applied)"
-                            + (applied != override_ ? " (clamped from \(override_))" : ""),
-                            category: .session
-                        )
-                        audioShiftPts = applied
-                        lastAudioSourceDts = packet.pointee.dts - 1
+                        // boundary packet first). Correct toward the
+                        // video-derived value; only the few packets between
+                        // the two boundary packets carried the uncorrected
+                        // shift. Expired overrides (no quiet audio packet
+                        // within the pairing window) are dropped: applying a
+                        // boundary-old delta later shifts audio wrongly.
                         pendingAudioShiftOverride = nil
+                        if Date().timeIntervalSince(override_.at) < Self.rebasePairingWindowSeconds {
+                            if let bridge = audio.bridge {
+                                // Bridge path: see the inherit branch; the
+                                // residual between the applied (measured)
+                                // shift and the video-derived one becomes an
+                                // encoder-timeline jump.
+                                let driftTicks = audioShiftPts - override_.shift
+                                let tbSec = tb.den > 0
+                                    ? Double(tb.num) / Double(tb.den) : 0
+                                bridge.noteTimelineJump(
+                                    deltaSeconds: Double(driftTicks) * tbSec
+                                )
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] audio rebase corrected via bridge jump (drift=\(driftTicks) ticks)",
+                                    category: .session
+                                )
+                            } else {
+                                let lastOutputDts = lastAudioSourceDts - audioShiftPts
+                                let maxShift = packet.pointee.dts - lastOutputDts - 1
+                                let applied = min(override_.shift, maxShift)
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] audio rebase corrected to video-derived shift: "
+                                    + "old=\(audioShiftPts) new=\(applied)"
+                                    + (applied != override_.shift ? " (clamped from \(override_.shift))" : ""),
+                                    category: .session
+                                )
+                                audioShiftPts = applied
+                                lastAudioSourceDts = packet.pointee.dts - 1
+                            }
+                        } else {
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] audio rebase: shift override expired unapplied",
+                                category: .session
+                            )
+                        }
                     }
                 }
                 // Monotonic-dts enforcement at source TB. The matroska
@@ -1645,7 +1709,35 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         continue
                     }
                     if restartTargetAudioDts != Int64.min && firstActualAudioDts == Int64.min {
-                        guard packet.pointee.dts != Int64.min, packet.pointee.dts >= restartTargetAudioDts else {
+                        let meetsTarget = packet.pointee.dts != Int64.min
+                            && packet.pointee.dts >= restartTargetAudioDts
+                        // Live escape: the target was derived from the video
+                        // gate's landing dts; a backward source-clock reset
+                        // (program boundary, PCR wrap) in the gap between
+                        // video gate-open and the first kept audio packet
+                        // strands the target in the OLD clock domain and no
+                        // audio packet ever reaches it: the session plays
+                        // permanently silent. Bound the wait; on timeout,
+                        // accept the current packet (the head-of-stream-style
+                        // inherit below still aligns it to the video shift).
+                        // VOD keeps the unbounded wait (its targets come from
+                        // a fixed plan, the clock cannot reset).
+                        var escape = false
+                        if isLive, !meetsTarget {
+                            if audioGateWaitStart == nil { audioGateWaitStart = Date() }
+                            if let started = audioGateWaitStart,
+                               Date().timeIntervalSince(started) > Self.liveAudioGateTimeoutSeconds {
+                                EngineLog.emit(
+                                    "[HLSSegmentProducer] live audio gate timed out after "
+                                    + "\(Int(Self.liveAudioGateTimeoutSeconds))s "
+                                    + "(dropped=\(pregateAudioDropCount) dts=\(packet.pointee.dts) "
+                                    + "target=\(restartTargetAudioDts)); accepting current packet",
+                                    category: .session
+                                )
+                                escape = packet.pointee.dts != Int64.min
+                            }
+                        }
+                        guard meetsTarget || escape else {
                             pregateAudioDropCount += 1
                             if pregateAudioDropCount - lastPregateAudioLog >= Self.pregateLogInterval {
                                 lastPregateAudioLog = pregateAudioDropCount
