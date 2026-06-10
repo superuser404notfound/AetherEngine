@@ -173,6 +173,41 @@ public final class AetherEngine: ObservableObject {
     /// replay): subscribe per session.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
 
+    // MARK: - Live scrub thumbnails
+
+    /// Decode contexts for the live scrub preview, keyed by segment
+    /// index. Tiny LRU (capacity 2) so scrubbing within one segment
+    /// reuses the open demux/decode context; torn down in stopInternal
+    /// with the rest of the session state.
+    private var liveThumbnailExtractors: [(segmentIndex: Int, extractor: FrameExtractor)] = []
+
+    /// A frame from the live DVR window at `atSessionSeconds` (the
+    /// `seekableLiveRange` timeline), decoded locally from the engine's
+    /// own segment cache: no network, no server round-trip. The composed
+    /// segment carries the output timeline in its tfdt, so the session
+    /// time IS the seek time (no shift arithmetic). Returns nil when no
+    /// native live session is active, the time is outside the resident
+    /// window, or decoding fails. Never throws.
+    public func liveScrubThumbnail(atSessionSeconds seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+        guard isLive, let session = nativeVideoSession else { return nil }
+        let source = await Task.detached(priority: .userInitiated) { [session] in
+            session.liveScrubThumbnailSource(atSeconds: seconds)
+        }.value
+        guard let source else { return nil }
+        let extractor: FrameExtractor
+        if let hit = liveThumbnailExtractors.first(where: { $0.segmentIndex == source.segmentIndex }) {
+            extractor = hit.extractor
+        } else {
+            extractor = FrameExtractor(reader: DataIOReader(data: source.data), formatHint: "mp4")
+            liveThumbnailExtractors.append((source.segmentIndex, extractor))
+            while liveThumbnailExtractors.count > 2 {
+                let evicted = liveThumbnailExtractors.removeFirst()
+                Task { await evicted.extractor.shutdown() }
+            }
+        }
+        return await extractor.thumbnail(at: seconds, maxWidth: maxWidth)
+    }
+
     // MARK: - Output
 
     /// How the AVPlayer surface fills its container layer. Mirrors
@@ -3186,6 +3221,13 @@ public final class AetherEngine: ObservableObject {
         }
         nativeVideoSession?.stop()
         nativeVideoSession = nil
+
+        // Live scrub-thumbnail contexts die with the session.
+        let liveThumbs = liveThumbnailExtractors
+        liveThumbnailExtractors.removeAll()
+        for entry in liveThumbs {
+            Task { await entry.extractor.shutdown() }
+        }
 
         // Mirror teardown for the SW path. stop() halts the demux loop,
         // releases the decoders / synchronizer / display layer, and
