@@ -73,6 +73,17 @@ final class NativeAVPlayerHost {
     private var didSampleSettledRoute = false
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
+    /// Observes `playerLayer.isReadyForDisplay`, the only signal for
+    /// "the first video frame is actually on screen". Diagnostic for the
+    /// audio-leads-black-video startup reports: timeControlStatus can
+    /// sit at .playing (audio audible) seconds before the layer flips
+    /// ready; the t+ stamps localize where those seconds go.
+    private var layerReadyObservation: NSKeyValueObservation?
+    /// Stamp of the current load() entry; the t+ reference for the
+    /// startup-sequence diagnostics (layer readiness, timeControl
+    /// transitions). Written on MainActor in load(), read from KVO
+    /// closures off-main; diagnostic-only, a torn read is harmless.
+    nonisolated(unsafe) private var loadStartTime = DispatchTime.now()
     private var notificationObservers: [NSObjectProtocol] = []
     private var accessLogCount = 0
 
@@ -123,8 +134,21 @@ final class NativeAVPlayerHost {
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
+        let loadStart = DispatchTime.now()
+        loadStartTime = loadStart
 
         EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil")", category: .engine)
+
+        // First-frame-visible diagnostic (see `layerReadyObservation`).
+        layerReadyObservation = playerLayer.observe(
+            \.isReadyForDisplay, options: [.new, .initial]
+        ) { layer, change in
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - loadStart.uptimeNanoseconds) / 1_000_000_000
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) layer.isReadyForDisplay=\(change.newValue ?? layer.isReadyForDisplay) t+\(String(format: "%.2f", elapsed))s",
+                category: .engine
+            )
+        }
 
         let asset = AVURLAsset(url: url)
         let item = AVPlayerItem(asset: asset)
@@ -349,7 +373,8 @@ final class NativeAVPlayerHost {
             @unknown default:                      statusStr = "@unknown"
             }
             let reason = player.reasonForWaitingToPlay?.rawValue ?? "-"
-            EngineLog.emit("[NativeAVPlayerHost] #\(sid) timeControlStatus=\(statusStr) reason=\(reason)", category: .engine)
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - (self?.loadStartTime ?? DispatchTime.now()).uptimeNanoseconds) / 1_000_000_000
+            EngineLog.emit("[NativeAVPlayerHost] #\(sid) timeControlStatus=\(statusStr) reason=\(reason) t+\(String(format: "%.2f", elapsed))s", category: .engine)
             Task { @MainActor in
                 guard let self = self else { return }
                 self.timeControlStatus = status
@@ -615,6 +640,8 @@ final class NativeAVPlayerHost {
         rateObservation = nil
         timeControlObservation?.invalidate()
         timeControlObservation = nil
+        layerReadyObservation?.invalidate()
+        layerReadyObservation = nil
         for obs in notificationObservers {
             NotificationCenter.default.removeObserver(obs)
         }
