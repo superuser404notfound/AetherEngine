@@ -44,6 +44,14 @@ final class SegmentCache {
     /// Values are URLs to files inside `sessionDir`. Reads use mmap
     /// so the bytes don't sit in our heap.
     private var entries: [Int: URL] = [:]
+    /// Per-index byte counts backing `_totalBytes`. Subtracting via a
+    /// fresh stat of the entry's PATH was wrong whenever the same index
+    /// was overwritten (store/adopt replace the file BEFORE the
+    /// accounting runs, so the stat returned the NEW size and the old
+    /// segment's bytes stayed counted forever). Diagnostics-only impact
+    /// (memprobe cacheMB drifted upward), but the ledger makes the
+    /// number trustworthy again.
+    private var entryBytes: [Int: Int] = [:]
 
     /// Pinned init segment. Stays in RAM because it's tiny
     /// (~3.5 KB) and AVPlayer fetches it exactly once per session.
@@ -175,10 +183,11 @@ final class SegmentCache {
             // written twice across a producer restart) the new write
             // overwrote it on disk via .atomic; just update the byte
             // accounting.
-            if let old = entries[index] {
-                _totalBytes -= byteSize(of: old)
+            if let oldBytes = entryBytes[index] {
+                _totalBytes -= oldBytes
             }
             entries[index] = fileURL
+            entryBytes[index] = data.count
             _totalBytes += data.count
             if index > _highestStoredIndex { _highestStoredIndex = index }
         }
@@ -218,10 +227,11 @@ final class SegmentCache {
         condition.lock()
         defer { condition.unlock() }
         if renameOK {
-            if let old = entries[index] {
-                _totalBytes -= byteSize(of: old)
+            if let oldBytes = entryBytes[index] {
+                _totalBytes -= oldBytes
             }
             entries[index] = fileURL
+            entryBytes[index] = byteCount
             _totalBytes += byteCount
             if index > _highestStoredIndex { _highestStoredIndex = index }
         }
@@ -234,6 +244,7 @@ final class SegmentCache {
         closed = true
         let dir = sessionDir
         entries.removeAll(keepingCapacity: false)
+        entryBytes.removeAll(keepingCapacity: false)
         initSegment = nil
         _totalBytes = 0
         _highestStoredIndex = -1
@@ -352,7 +363,8 @@ final class SegmentCache {
         condition.lock()
         defer { condition.unlock() }
         for (k, url) in entries where k < cutoff {
-            _totalBytes -= byteSize(of: url)
+            _totalBytes -= entryBytes[k] ?? byteSize(of: url)
+            entryBytes.removeValue(forKey: k)
             entries.removeValue(forKey: k)
             try? FileManager.default.removeItem(at: url)
         }
@@ -482,7 +494,8 @@ final class SegmentCache {
         let hi = max(currentTargetIndex + forwardWindow, _highestStoredIndex)
         for (k, url) in entries {
             if k < lo || k > hi {
-                _totalBytes -= byteSize(of: url)
+                _totalBytes -= entryBytes[k] ?? byteSize(of: url)
+                entryBytes.removeValue(forKey: k)
                 entries.removeValue(forKey: k)
                 try? FileManager.default.removeItem(at: url)
             }

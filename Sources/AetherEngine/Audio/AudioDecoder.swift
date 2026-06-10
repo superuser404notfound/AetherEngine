@@ -21,6 +21,14 @@ import Libswresample
 final class AudioDecoder: @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
+
+    /// Serializes decode (demux/feeder thread) against flush/close
+    /// (main actor: seek, track switch, teardown). Without it a
+    /// MainActor flush could run avcodec_flush_buffers concurrently
+    /// with an in-flight avcodec_send_packet on the same context (UB:
+    /// crash or corruption), since nothing waited for the demux loop
+    /// to park first. Mirrors SoftwareVideoDecoder's lock discipline.
+    private let stateLock = NSLock()
     private var swrContext: OpaquePointer?
     private var audioFormatDescription: CMAudioFormatDescription?
 
@@ -91,6 +99,8 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// Decode an audio packet. Returns an array of CMSampleBuffers.
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard let ctx = codecContext else { return [] }
         var results: [CMSampleBuffer] = []
 
@@ -177,6 +187,8 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// Flush the decoder (call at EOF or seek).
     func flush() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         guard let ctx = codecContext else { return }
         avcodec_flush_buffers(ctx)
         // Drop whatever we were coalescing, after a seek the old
@@ -189,6 +201,8 @@ final class AudioDecoder: @unchecked Sendable {
 
     /// Close the decoder and release resources.
     func close() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         if codecContext != nil {
             avcodec_free_context(&codecContext)
         }

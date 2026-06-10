@@ -166,9 +166,12 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 // fall through and render the frame as-is (combing,
                 // but playing).
             }
-            lock.unlock()
-
+            // emit() under the lock on the direct path too: it reads AND
+            // reassigns swsContext / pixelBufferPool, which close() frees
+            // under the same lock from another thread; emitting unlocked
+            // raced a stop() into a use-after-free of the sws context.
             emit(f)
+            lock.unlock()
         }
 
         av_frame_free(&frame)

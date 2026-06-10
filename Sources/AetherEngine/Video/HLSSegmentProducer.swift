@@ -1810,6 +1810,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 sourceVideoTimeBase,
                                 audioTb
                             )
+                            // The inherited shift is the CURRENT (possibly
+                            // already-rebased) video shift; a boundary delta
+                            // still armed from before gate-open is thereby
+                            // consumed and must not apply again at the next
+                            // audio jump.
+                            pendingAudioInheritDelta = nil
                         } else {
                             // Restart session: keep the gate-on-video snap.
                             // The first audio packet is aligned to the video

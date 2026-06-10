@@ -533,6 +533,13 @@ public final class AetherEngine: ObservableObject {
     /// instead of letting it reconnect into the next session.
     private var inFlightProbeDemuxer: Demuxer?
 
+    /// The embedded-subtitle side demuxer currently reading, registered
+    /// by `runEmbeddedSubtitleReader` so the cancel sites can
+    /// `markClosed()` it: Task cancellation alone is only observed
+    /// between `readPacket` calls and a read blocked in the AVIO
+    /// reconnect loop otherwise survives stop()/track switches.
+    private var activeSubtitleSideDemuxer: Demuxer?
+
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
     /// session gets a fresh budget.
@@ -2143,6 +2150,16 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func seek(to seconds: Double) async {
+        // No active session: a host scrub racing stop() must not flip an
+        // idle/error engine to .seeking -> .playing with no pipeline
+        // behind it.
+        switch state {
+        case .idle, .error:
+            EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: no active session (state=\(state))", category: .engine)
+            return
+        default:
+            break
+        }
         // Live-only sources (no DVR window) have no rewind range; AVPlayer
         // would either stall indefinitely or land on a segment the playlist
         // hasn't materialised. DVR sources expose a bounded seekable range
@@ -2227,6 +2244,8 @@ public final class AetherEngine: ObservableObject {
             let streamIdx = activeEmbeddedSubtitleStreamIndex
             embeddedSubtitleTask?.cancel()
             embeddedSubtitleTask = nil
+            activeSubtitleSideDemuxer?.markClosed()
+            activeSubtitleSideDemuxer = nil
             subtitleCues = []
             // Side-demuxer seeks in source PTS, which is the seek target.
             // For custom sources, request a fresh clone; skip re-arm if the
@@ -2303,6 +2322,18 @@ public final class AetherEngine: ObservableObject {
         state = .idle
         currentTime = 0
         progress = 0
+        // Published-surface hygiene: without these, the PREVIOUS
+        // session's metadata/track lists/duration/format survive until
+        // the next load() and hosts reading between stop and load see
+        // stale values. pendingExternalMetadata would even replay the
+        // old title/artwork onto an unrelated next session.
+        duration = 0
+        metadata = nil
+        audioTracks = []
+        subtitleTracks = []
+        videoFormat = .sdr
+        sourceVideoFormat = .sdr
+        pendingExternalMetadata = []
     }
 
     /// The active `AVPlayer` instance, when the native AVKit path is in
@@ -2655,6 +2686,10 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
+        // Unblock a side demuxer parked in a network read; cancel alone
+        // is only observed between reads (see runEmbeddedSubtitleReader).
+        activeSubtitleSideDemuxer?.markClosed()
+        activeSubtitleSideDemuxer = nil
 
         isSubtitleActive = true
         subtitleCues = []
@@ -2700,6 +2735,23 @@ public final class AetherEngine: ObservableObject {
         videoWidth: Int32, videoHeight: Int32
     ) async {
         let demuxer = Demuxer()
+        // Register for abort: Task.cancel() is only observed BETWEEN
+        // readPacket calls, but a side demuxer blocked inside the AVIO
+        // reconnect loop against a stalled source survived stop()/track
+        // switches and kept its connection reconnecting into the next
+        // session, the same orphan class the probe-abort hook fixed for
+        // load(). markClosed (from the cancel sites) makes the blocked
+        // read return promptly.
+        await MainActor.run { [weak self] in
+            self?.activeSubtitleSideDemuxer = demuxer
+        }
+        defer {
+            Task { @MainActor [weak self, weak demuxer] in
+                if let self, let demuxer, self.activeSubtitleSideDemuxer === demuxer {
+                    self.activeSubtitleSideDemuxer = nil
+                }
+            }
+        }
         do {
             if let reader = reader {
                 try demuxer.open(reader: reader, formatHint: formatHint)
@@ -2710,6 +2762,9 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] embedded subtitle open failed: \(error)", category: .engine)
             reader?.close()
             await MainActor.run { [weak self] in
+                // Stale-task guard: a cancelled reader (track switch in
+                // flight) must not clear the SUCCESSOR's loading spinner.
+                guard !Task.isCancelled else { return }
                 self?.isLoadingSubtitles = false
             }
             return
@@ -2748,6 +2803,9 @@ public final class AetherEngine: ObservableObject {
         else {
             EngineLog.emit("[AetherEngine] embedded subtitle decoder open failed for stream=\(streamIndex)", category: .engine)
             await MainActor.run { [weak self] in
+                // Stale-task guard: a cancelled reader (track switch in
+                // flight) must not clear the SUCCESSOR's loading spinner.
+                guard !Task.isCancelled else { return }
                 self?.isLoadingSubtitles = false
             }
             return
@@ -2777,6 +2835,7 @@ public final class AetherEngine: ObservableObject {
         )
 
         await MainActor.run { [weak self] in
+            guard !Task.isCancelled else { return }
             self?.isLoadingSubtitles = false
         }
 
@@ -2816,6 +2875,7 @@ public final class AetherEngine: ObservableObject {
                     firstCueLogged = true
                 }
                 await MainActor.run { [weak self] in
+                    guard !Task.isCancelled else { return }
                     self?.applySubtitleEvent(event)
                 }
             }
@@ -2937,6 +2997,10 @@ public final class AetherEngine: ObservableObject {
         // Sidecar replaces any active embedded stream.
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
+        // Unblock a side demuxer parked in a network read; cancel alone
+        // is only observed between reads (see runEmbeddedSubtitleReader).
+        activeSubtitleSideDemuxer?.markClosed()
+        activeSubtitleSideDemuxer = nil
         activeEmbeddedSubtitleStreamIndex = -1
 
         loadedSidecarURL = url
@@ -2977,6 +3041,10 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
+        // Unblock a side demuxer parked in a network read; cancel alone
+        // is only observed between reads (see runEmbeddedSubtitleReader).
+        activeSubtitleSideDemuxer?.markClosed()
+        activeSubtitleSideDemuxer = nil
         activeEmbeddedSubtitleStreamIndex = -1
         loadedSidecarURL = nil
         isSubtitleActive = false
@@ -3144,6 +3212,10 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         embeddedSubtitleTask?.cancel()
         embeddedSubtitleTask = nil
+        // Unblock a side demuxer parked in a network read; cancel alone
+        // is only observed between reads (see runEmbeddedSubtitleReader).
+        activeSubtitleSideDemuxer?.markClosed()
+        activeSubtitleSideDemuxer = nil
         activeEmbeddedSubtitleStreamIndex = -1
         loadedSidecarURL = nil
         isSubtitleActive = false
@@ -3595,6 +3667,11 @@ public final class AetherEngine: ObservableObject {
                 if self.audioAVPlayerActive || self.audioHost != nil { return }
                 guard self.state == .playing || self.state == .paused else { return }
                 self.nativeHost?.pause()
+                // The SW path must pause too: without this a SW session
+                // kept demuxing/decoding/streaming until tvOS suspended
+                // the process, while the published state already said
+                // .paused.
+                self.softwareHost?.pause()
                 self.state = .paused
             }
         }

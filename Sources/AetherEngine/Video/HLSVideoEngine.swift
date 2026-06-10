@@ -1670,6 +1670,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `liveReopenOutputEndSeconds` in `makeProducer`).
     private static let liveReopenMaxAttempts = 6
 
+    /// Cross-cycle backstop: each lost source gets a fresh reopen budget,
+    /// so an open-then-starve source (connects, never delivers a usable
+    /// segment, pump times out) would otherwise cycle open/reopen forever
+    /// without ever surfacing an error. Consecutive reopen cycles that
+    /// produced NO new segment count as barren; after 3 the engine stops
+    /// reviving the session.
+    private var barrenReopenCycles = 0
+    private var lastReopenSegmentCount = -1
+    private static let maxBarrenReopenCycles = 3
+
     private func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
         guard isLiveSession else { return }
@@ -1679,6 +1689,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
         case .eof, .readError, .keyframeStarvation:
             // A healthy live source never EOFs; treat it like a loss.
             break
+        }
+        restartLock.lock()
+        let segmentsNow = provider?.liveContinuationPoint().nextIndex ?? 0
+        restartLock.unlock()
+        if segmentsNow == lastReopenSegmentCount {
+            barrenReopenCycles += 1
+        } else {
+            barrenReopenCycles = 0
+        }
+        lastReopenSegmentCount = segmentsNow
+        if barrenReopenCycles >= Self.maxBarrenReopenCycles {
+            EngineLog.emit(
+                "[HLSVideoEngine] live source produced no segments across "
+                + "\(barrenReopenCycles) reopen cycles; giving up (source considered dead)",
+                category: .session
+            )
+            return
         }
         EngineLog.emit(
             "[HLSVideoEngine] live pump exited (reason=\(reason)); starting reopen",

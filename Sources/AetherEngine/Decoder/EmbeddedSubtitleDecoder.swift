@@ -157,7 +157,13 @@ final class EmbeddedSubtitleDecoder {
             }
         }
 
-        guard ret >= 0, gotSub != 0 else { return nil }
+        guard ret >= 0, gotSub != 0 else {
+            // The synthetic PGS END flush can set gotSub even when the
+            // real decode returned ret < 0; the AVSubtitle then owns
+            // allocations that must be freed or they leak.
+            if gotSub != 0 { avsubtitle_free(&sub) }
+            return nil
+        }
 
         let tbSec = Double(streamTimeBase.num) / Double(streamTimeBase.den)
         // Convert the packet's raw PTS straight to source seconds; do

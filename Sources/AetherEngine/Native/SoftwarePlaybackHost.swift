@@ -503,7 +503,13 @@ final class SoftwarePlaybackHost {
         // first samples as "in the past".
         if pausedByHost {
             pausedByHost = false
-            audioOutput?.setRate(lastRate)
+            // Only when the loop already ran: a pause() before the first
+            // play() must not eager-start the un-anchored synchronizer
+            // (the lazy first-sample arming would be defeated and early
+            // samples dropped).
+            if demuxLoopStarted {
+                audioOutput?.setRate(lastRate)
+            }
         }
         rate = lastRate
         isPlaying = true
@@ -1073,6 +1079,17 @@ final class SoftwarePlaybackHost {
                 continue
             }
             guard let pkt = ring.packet(atSeq: cursor) else {
+                // Resident entry whose file read failed (disk hiccup,
+                // pruned mid-read): skip it, or the feeder would spin on
+                // the same sequence number forever in a silent freeze.
+                if cursor < bounds.end {
+                    EngineLog.emit(
+                        "[SWHost] feeder: packet seq=\(cursor) unreadable; skipping",
+                        category: .swPlayback
+                    )
+                    advanceCursor(cursor)
+                    continue
+                }
                 // At the live edge (cursor == end): wait for the reader's
                 // next append, or finish when the source is gone and the
                 // ring is fully drained.

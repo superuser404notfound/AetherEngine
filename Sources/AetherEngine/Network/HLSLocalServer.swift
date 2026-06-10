@@ -501,8 +501,15 @@ final class HLSLocalServer: @unchecked Sendable {
         seg0FetchTime = nil
         stateLock.unlock()
 
-        // Close the listen fd to unblock accept().
+        // shutdown() the listen fd BEFORE close(): close alone releases
+        // the fd number while the accept loop may already have captured
+        // it for its next accept() call; a new session can recycle the
+        // number in that window and the dying loop would accept on the
+        // NEW session's listen socket, stealing one connection. shutdown
+        // wakes the blocked accept without releasing the number; the
+        // close after it then proceeds with the loop already unwinding.
         if fdToClose >= 0 {
+            shutdown(fdToClose, SHUT_RDWR)
             close(fdToClose)
         }
         // shutdown() (NOT close) the active client fds to unblock
@@ -543,8 +550,11 @@ final class HLSLocalServer: @unchecked Sendable {
                 if err == EBADF || err == EINVAL {
                     return
                 }
-                // EINTR / EAGAIN: spurious wakeup, retry.
-                if err == EINTR || err == EAGAIN {
+                // EINTR / EAGAIN: spurious wakeup, retry. ECONNABORTED:
+                // a backlogged connection was torn down before accept
+                // picked it up (normal during stop()); retry quietly, the
+                // loop-top stop check exits if we're shutting down.
+                if err == EINTR || err == EAGAIN || err == ECONNABORTED {
                     continue
                 }
                 EngineLog.emit("[HLSLocalServer] accept failed errno=\(err)",

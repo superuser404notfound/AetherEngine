@@ -796,6 +796,11 @@ final class MP4SegmentMuxer {
         if fd >= 0 {
             close(fd)
         }
+        // Free the AVFormatContext / AVIOContext / avio buffer too. The
+        // producer always finalize()s before dropping the reference, so
+        // this is a safety net for any future early-release path; without
+        // it those allocations (incl. the 64 KB avio buffer) would leak.
+        cleanup()
     }
 
     // MARK: - AVIO

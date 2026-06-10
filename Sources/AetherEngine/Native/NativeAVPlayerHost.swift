@@ -630,6 +630,10 @@ final class NativeAVPlayerHost {
         // spurious end-of-item edge.
         failureMessage = nil
         didReachEnd = false
+        // Re-arm the settled-route diagnostic for the next session on
+        // this reused host (episode 2+ of a binge otherwise silently
+        // lost the issue-24 downmix warnings).
+        didSampleSettledRoute = false
         // Force the player rate to 0 before swapping the item. On a
         // native->native reload the host (and its AVPlayer) is reused to
         // keep AVKit's system Now-Playing registration alive (issue #15),
