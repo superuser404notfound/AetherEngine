@@ -47,9 +47,22 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// session with no URLCache, completes, and is dismantled via
     /// finishTasksAndInvalidate so the task pool releases its
     /// response data immediately.
-    private static func makeSessionConfig() -> URLSessionConfiguration {
+    /// `longLived: true` is for the persistent / streaming connections
+    /// that intentionally stay open for the whole playback session.
+    /// `timeoutIntervalForResource` is a TOTAL-task-lifetime ceiling
+    /// (it fires even while data is flowing), so the 60 s value that is
+    /// right for probes and chunk fetches silently killed every stream
+    /// connection at exactly t+60 s with NSURLError -1001. For VOD the
+    /// frontier reconnect papered over it (Range resume, invisible);
+    /// for live it made Jellyfin re-serve the transcode from byte 0
+    /// every minute (the source-replay retune churn on device). Idle
+    /// detection for long-lived connections is the reader's own
+    /// `connStallTimeout` machinery, not URLSession's.
+    private static func makeSessionConfig(longLived: Bool = false) -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForResource = 60
+        if !longLived {
+            config.timeoutIntervalForResource = 60
+        }
         config.httpMaximumConnectionsPerHost = 2
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         // No URLCache instance — kills the in-memory cache that the
@@ -952,7 +965,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             extraHeaders: extraHeaders
         )
         let session = URLSession(
-            configuration: Self.makeSessionConfig(),
+            configuration: Self.makeSessionConfig(longLived: true),
             delegate: delegate,
             delegateQueue: nil
         )
@@ -1135,7 +1148,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
 
         let streamSession = URLSession(
-            configuration: Self.makeSessionConfig(),
+            configuration: Self.makeSessionConfig(longLived: true),
             delegate: delegate,
             delegateQueue: nil
         )
