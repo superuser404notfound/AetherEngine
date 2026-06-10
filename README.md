@@ -130,6 +130,10 @@ player.$isLoadingSubtitles                     // sidecar fetch + decode in prog
 // raw event lines via LoadOptions(preserveASSMarkup: true) and read
 // the track's script header ([Script Info] + [V4+ Styles]) from
 // TrackInfo.assHeader to resolve style references.
+// ASSScriptBuilder reassembles those raw event lines + assHeader into a
+// complete script for whole-file renderers (e.g. swift-ass-renderer's
+// loadTrack(content:)), deduped by ReadOrder; engine.fontAttachments
+// carries the container's embedded fonts for the renderer's font dir.
 
 // Still frames, off-playback (scrub preview, snapshot, Recents thumbnail)
 let frames = player.makeFrameExtractor()           // for the currently loaded URL, or nil
