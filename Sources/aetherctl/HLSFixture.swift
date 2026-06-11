@@ -15,7 +15,7 @@
 // The file is divided into fixed-size chunks of approximately 1 MB, each
 // rounded DOWN to a multiple of 188 (the MPEG-TS packet size). If the
 // resulting chunk would be zero bytes (pathologically small file), we fall
-// back to exactly one chunk per 188 bytes. Segments cycle (wrap) so the
+// back to the whole file as a single chunk. Segments cycle (wrap) so the
 // fixture can serve a sliding live window forever without EOF.
 //
 // Playlist
