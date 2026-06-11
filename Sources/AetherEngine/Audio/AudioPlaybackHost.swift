@@ -76,6 +76,35 @@ final class AudioPlaybackHost {
     /// Latched once the first `play()` has spun up the demux loop.
     private var demuxLoopStarted: Bool = false
 
+    /// True between a pause() and the next play(), so play() knows it must
+    /// resume the synchronizer rate the pause froze (mirrors
+    /// `SoftwarePlaybackHost.pausedByHost`).
+    private var pausedByHost: Bool = false
+
+    /// Shared clock-armed latch (mirrors `SoftwarePlaybackHost._clockArmed`).
+    /// The demux loop arms the clock once on the first decoded packet;
+    /// `seek()` anchors the clock directly and sets this so the loop does
+    /// not snap the clock back to the stale initial anchor afterwards.
+    nonisolated(unsafe) private var _clockArmed = false
+    nonisolated private var clockArmed: Bool {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _clockArmed }
+        set { flagsLock.lock(); _clockArmed = newValue; flagsLock.unlock() }
+    }
+
+    /// Bumped by every `seek()`. The demux loop resets its enqueue
+    /// high-water mark when it observes a change, so the back-pressure
+    /// gate can't park against a pre-seek mark after a backward seek.
+    nonisolated(unsafe) private var _seekGeneration: UInt64 = 0
+    nonisolated private var seekGeneration: UInt64 {
+        flagsLock.lock(); defer { flagsLock.unlock() }; return _seekGeneration
+    }
+
+    /// Sync hop for `seek(to:)`: NSLock is unavailable directly from async
+    /// contexts.
+    nonisolated private func bumpSeekGeneration() {
+        flagsLock.lock(); _seekGeneration &+= 1; flagsLock.unlock()
+    }
+
     nonisolated var isPlaying: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _isPlaying }
         set {
@@ -144,6 +173,17 @@ final class AudioPlaybackHost {
     // MARK: - Transport
 
     func play() {
+        // Resume the synchronizer a pause() froze (rate 0). Guarded on
+        // demuxLoopStarted so a pause() before the first play() doesn't
+        // eager-start the un-anchored synchronizer: the clock is armed off
+        // the first decoded sample, and an unguarded setRate would tick
+        // the clock through the spin-up and drop the first samples.
+        if pausedByHost {
+            pausedByHost = false
+            if demuxLoopStarted {
+                audioOutput?.setRate(lastRate)
+            }
+        }
         if !demuxLoopStarted {
             demuxLoopStarted = true
             startDemuxLoop()
@@ -159,6 +199,7 @@ final class AudioPlaybackHost {
 
     func pause() {
         audioOutput?.pause()
+        pausedByHost = true
         rate = 0
         isPlaying = false
     }
@@ -180,17 +221,34 @@ final class AudioPlaybackHost {
         dem.seek(to: seconds)
         currentTime = seconds
 
+        // Tell the demux loop to drop its enqueue high-water mark; after a
+        // backward seek the stale mark would otherwise park the
+        // back-pressure gate until the clock walked back up to the
+        // pre-seek position (minutes of silence).
+        bumpSeekGeneration()
+
+        let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+        guard demuxLoopStarted else {
+            // Cold seek (no play() yet): stash the target so the loop's
+            // first decoded packet anchors the clock there, not at .zero.
+            initialClockTime = targetTime
+            return
+        }
         if wasPlaying {
             // Jump the master clock to the seek target so PTS-stamped
             // samples decoded after the seek align with the clock.
-            let targetTime = CMTime(seconds: seconds, preferredTimescale: 90000)
             audioOutput?.seekClock(to: targetTime, rate: lastRate)
             isPlaying = true
         } else {
-            // Paused seek: stash the target so the next play()'s first
-            // decoded packet anchors the clock there, not at .zero.
-            initialClockTime = CMTime(seconds: seconds, preferredTimescale: 90000)
+            // Paused seek: anchor the clock at the target with rate 0 so
+            // play() resumes from the SEEK position instead of the stale
+            // pre-seek clock (mirrors SoftwarePlaybackHost's VOD path).
+            audioOutput?.seekClock(to: targetTime, rate: 0)
+            pausedByHost = true
         }
+        // Either way the clock is now positioned; the demux loop must not
+        // re-arm it at the stale initial anchor.
+        clockArmed = true
     }
 
     func stop() {
@@ -226,6 +284,9 @@ final class AudioPlaybackHost {
         let initialRate = lastRate
         let getIsPlaying: @Sendable () -> Bool = { [weak self] in self?.isPlaying ?? false }
         let getStopRequested: @Sendable () -> Bool = { [weak self] in self?.stopRequested ?? true }
+        let getClockArmed: @Sendable () -> Bool = { [weak self] in self?.clockArmed ?? true }
+        let setClockArmed: @Sendable () -> Void = { [weak self] in self?.clockArmed = true }
+        let getSeekGeneration: @Sendable () -> UInt64 = { [weak self] in self?.seekGeneration ?? 0 }
         let onError: @Sendable (String) -> Void = { [weak self] msg in
             Task { @MainActor [weak self] in self?.failureMessage = msg }
         }
@@ -247,6 +308,9 @@ final class AudioPlaybackHost {
                 initialRate: initialRate,
                 isPlaying: getIsPlaying,
                 stopRequested: getStopRequested,
+                clockArmed: getClockArmed,
+                armClock: setClockArmed,
+                seekGeneration: getSeekGeneration,
                 onError: onError,
                 onEnd: onEnd
             )
@@ -267,14 +331,18 @@ final class AudioPlaybackHost {
         initialRate: Float,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
+        clockArmed: @Sendable () -> Bool,
+        armClock: @Sendable () -> Void,
+        seekGeneration: @Sendable () -> UInt64,
         onError: @Sendable (String) -> Void,
         onEnd: @Sendable () -> Void
     ) {
-        // One-shot latch: anchor the clock exactly once, on the first
-        // decoded audio packet. seekClock is NOT idempotent (it re-sets
-        // rate + time), so calling it per packet would snap the clock
-        // back ~47x/sec and freeze playback.
-        var clockArmed = false
+        // The clock-armed latch is SHARED with the host (not loop-local):
+        // anchor the clock exactly once, on the first decoded audio packet.
+        // seekClock is NOT idempotent (it re-sets rate + time), so calling
+        // it per packet would snap the clock back ~47x/sec and freeze
+        // playback. seek() arms the clock itself and sets the latch so the
+        // loop doesn't override the seek anchor with the stale initial one.
 
         // Bound how far the demuxer may run ahead of the playback clock.
         // Without this the loop reads the ENTIRE file's packets in a tight
@@ -293,6 +361,7 @@ final class AudioPlaybackHost {
         // anchored to initialClockTime), so their difference is the seconds
         // of audio queued ahead of the playhead.
         var lastEnqueuedEnd: Double = 0
+        var seenSeekGeneration = seekGeneration()
 
         while !stopRequested() {
             if !isPlaying() {
@@ -304,10 +373,19 @@ final class AudioPlaybackHost {
                 continue
             }
 
+            // A seek invalidates the enqueue high-water mark: keeping the
+            // pre-seek value after a backward seek would park the gate
+            // below until the clock walked back up to the old position.
+            let gen = seekGeneration()
+            if gen != seenSeekGeneration {
+                seenSeekGeneration = gen
+                lastEnqueuedEnd = 0
+            }
+
             // Back-pressure: once the clock is running, don't outrun it by
             // more than `maxBufferAhead` seconds. Skipped until the clock is
             // armed so the initial buffer can prime.
-            if clockArmed, let aOut = audioOutput {
+            if clockArmed(), let aOut = audioOutput {
                 while !stopRequested() && isPlaying()
                     && (lastEnqueuedEnd - aOut.currentTimeSeconds) > maxBufferAhead {
                     Thread.sleep(forTimeInterval: 0.05)
@@ -349,9 +427,9 @@ final class AudioPlaybackHost {
                         + CMTimeGetSeconds(CMSampleBufferGetDuration(last))
                     if end.isFinite, end > lastEnqueuedEnd { lastEnqueuedEnd = end }
                 }
-                if !clockArmed, !buffers.isEmpty {
+                if !clockArmed(), !buffers.isEmpty {
                     aOut.seekClock(to: initialClockTime, rate: initialRate)
-                    clockArmed = true
+                    armClock()
                 }
             }
 

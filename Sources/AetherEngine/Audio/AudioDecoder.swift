@@ -387,8 +387,13 @@ final class AudioDecoder: @unchecked Sendable {
             return nil
         }
 
+        // Single timing entry: CoreMedia treats `duration` as the duration
+        // of EACH sample, so for LPCM it must be 1/sampleRate. Stamping the
+        // buffer total here made CMSampleBufferGetDuration report
+        // totalSamples^2/sampleRate (~22 s for a 1024-sample buffer), which
+        // wedged AudioPlaybackHost's buffer-ahead gate after one packet.
         var timing = CMSampleTimingInfo(
-            duration: CMTimeMake(value: Int64(totalSamples), timescale: sampleRate),
+            duration: CMTime(value: 1, timescale: sampleRate),
             presentationTimeStamp: startPTS,
             decodeTimeStamp: .invalid
         )
