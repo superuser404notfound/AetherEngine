@@ -1113,6 +1113,16 @@ public final class AetherEngine: ObservableObject {
         metadata = nil
         fontAttachments = []
         subtitleCueDiagnosticCount = 0
+        // Reset format/dimension state from the previous session. Paths
+        // that return before the probe (nativeRemoteHLS) or that find no
+        // video track would otherwise keep publishing the predecessor's
+        // values: Live TV after an HDR10 film kept reporting .hdr10 for
+        // the whole live session, and the doc on sourceVideoWidth/Height
+        // promises 0 when the source has no video track.
+        videoFormat = .sdr
+        sourceVideoFormat = .sdr
+        sourceVideoWidth = 0
+        sourceVideoHeight = 0
 
         // Native remote-HLS live path: skip the probe + loopback pipeline
         // entirely and play the URL directly with AVPlayer. The source
@@ -1304,6 +1314,17 @@ public final class AetherEngine: ObservableObject {
             // custom FFmpeg demuxer, so force the FFmpeg audio path for them.
             let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID)
             EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")", category: .engine)
+            // A native->native reload may have preserved the previous
+            // AVPlayer host (issue #15), but this source routes to an
+            // audio path: release the video host now (mirrors the SW
+            // branch below). Without this the old VIDEO AVPlayer stayed
+            // alive and published via currentAVPlayer for the whole
+            // audio session, and the volume setter kept writing into it.
+            if nativeHost != nil {
+                nativeHost?.tearDown()
+                nativeHost = nil
+                currentAVPlayer = nil
+            }
             do {
                 if useNativeAudio {
                     if probeOpened { probe.close() }
@@ -2561,7 +2582,19 @@ public final class AetherEngine: ObservableObject {
         fontAttachments = []
         videoFormat = .sdr
         sourceVideoFormat = .sdr
+        sourceVideoWidth = 0
+        sourceVideoHeight = 0
         pendingExternalMetadata = []
+        // Source identity is load-scoped, but the public stop() ends the
+        // session for good: clearing it here keeps reloadAtCurrentPosition
+        // from resurrecting the old URL (e.g. a background-return hook
+        // firing after the player was dismissed) and keeps
+        // selectSubtitleTrack from spawning a side demuxer against a
+        // stopped session. load() re-sets all of these immediately, so the
+        // internal stopInternal()-then-reload paths are unaffected.
+        loadedURL = nil
+        isCustomSource = false
+        customSourceIsSeekable = false
     }
 
     /// The active `AVPlayer` instance, when the native AVKit path is in
@@ -2988,8 +3021,19 @@ public final class AetherEngine: ObservableObject {
         // session, the same orphan class the probe-abort hook fixed for
         // load(). markClosed (from the cancel sites) makes the blocked
         // read return promptly.
-        await MainActor.run { [weak self] in
-            self?.activeSubtitleSideDemuxer = demuxer
+        let registered = await MainActor.run { [weak self] () -> Bool in
+            // Stale-task guard: if this task was already cancelled (track
+            // switch A->B where B's registration landed first), overwriting
+            // would hijack B's abort handle. The cancel sites would then
+            // markClosed the wrong demuxer and A's identity-guarded defer
+            // would nil B's registration, leaving B's reader unabortable.
+            guard !Task.isCancelled, let self else { return false }
+            self.activeSubtitleSideDemuxer = demuxer
+            return true
+        }
+        guard registered else {
+            reader?.close()
+            return
         }
         defer {
             Task { @MainActor [weak self, weak demuxer] in
@@ -3331,7 +3375,11 @@ public final class AetherEngine: ObservableObject {
             } catch {
                 EngineLog.emit("[AetherEngine] sidecar decode failed: \(error)", category: .engine)
                 await MainActor.run {
-                    guard let self = self else { return }
+                    // Stale-task guard: a superseded sidecar load (A->B
+                    // switch) must not clear the SUCCESSOR's loading
+                    // spinner. isSubtitleActive alone doesn't cover this:
+                    // it is true again for B by the time A's error lands.
+                    guard !Task.isCancelled, let self = self else { return }
                     if self.isSubtitleActive {
                         self.isLoadingSubtitles = false
                     }
@@ -3340,7 +3388,11 @@ public final class AetherEngine: ObservableObject {
             }
 
             await MainActor.run {
-                guard let self = self else { return }
+                // Stale-task guard, mirroring the embedded path: without
+                // it a superseded load A whose decode outlives the A->B
+                // switch overwrites B's cues (isSubtitleActive is true
+                // again for B, so that check alone can't catch it).
+                guard !Task.isCancelled, let self = self else { return }
                 guard self.isSubtitleActive else { return }
                 // Sidecar cues stay in source PTS; host renders
                 // against `engine.sourceTime`, which already adds the
