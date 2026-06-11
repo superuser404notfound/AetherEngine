@@ -219,13 +219,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// removed once reported to keep the map bounded over a long session.
     private var liveSegmentStartByIndex: [Int: Double] = [:]
 
-    /// Fires once per finalized live segment (cut or EOF), off the pump
-    /// thread, with the segment's absolute index, measured duration in
+    /// Fires once per finalized live segment (cut or EOF), SYNCHRONOUSLY
+    /// ON the pump thread (via advanceMuxer -> reportLiveSegmentFinalized),
+    /// with the segment's absolute index, measured duration in
     /// seconds, start-PTS in seconds, and a `discontinuous` flag (true when
     /// the segment opened at a detected program-boundary PTS jump). The
     /// engine wires this to the provider's `appendLiveSegment` so the
     /// growing playlist exposes the segment, with `#EXT-X-DISCONTINUITY`
     /// prefixed on the boundary segment. Live-only; nil for VOD.
+    /// The callee must therefore be lock-safe and must not block
+    /// (appendLiveSegment is; a blocking callee would stall the pump).
     var onLiveSegmentFinalized: (@Sendable (Int, Double, Double, Bool) -> Void)?
 
     /// Live PTS-discontinuity detection. A real broadcast / IPTV feed can
@@ -451,14 +454,38 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// stats overlay can show how aggressively AVPlayer is re-priming
     /// segment requests after scrubs. Reset to 0 on every new session
     /// (each producer instance is per-session).
-    private(set) var restartCount: Int = 0
+    ///
+    /// Written on the pump thread, read by the telemetry sampler:
+    /// guarded by `packetCounterLock` like the packet counters.
+    var restartCount: Int {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _restartCount
+    }
+    private var _restartCount: Int = 0
+    func bumpRestartCount() {
+        packetCounterLock.lock()
+        _restartCount &+= 1
+        packetCounterLock.unlock()
+    }
 
     /// Most recently measured open-audio-gate vs. open-video-gate gap,
     /// in source-clock milliseconds. Already computed inline for the
     /// existing log line at the gap-detection site; stored here so the
     /// engine memprobe and the live telemetry sampler can read it
-    /// without re-deriving it.
-    private(set) var lastAVGapMs: Double = 0
+    /// without re-deriving it. Same cross-thread shape as
+    /// `restartCount`, same lock.
+    var lastAVGapMs: Double {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _lastAVGapMs
+    }
+    private var _lastAVGapMs: Double = 0
+    private func setLastAVGapMs(_ value: Double) {
+        packetCounterLock.lock()
+        _lastAVGapMs = value
+        packetCounterLock.unlock()
+    }
 
     /// Source-TB pts of the first kept video packet (= the AV_PKT_FLAG_KEY
     /// packet that opened the video gate). Used to detect and drop pre-
@@ -781,12 +808,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         )
     }
 
-    /// Map an absolute video PTS (in source video TB) to the segment
-    /// index that contains it. Returns `baseIndex` for any pts before
-    /// the first boundary (defensive: shouldn't happen post-gate);
-    /// returns the last segment index for any pts past the last
-    /// boundary.
-
     /// Live-mode segment index for a VIDEO packet. Forward-only keyframe
     /// cutter: the first keyframe opens segment `baseIndex`; a later
     /// keyframe whose source-pts is at least `targetSegmentDurationSeconds`
@@ -845,6 +866,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return Double(sourceVideoTimeBase.num) / Double(sourceVideoTimeBase.den)
     }
 
+    /// Map an absolute video PTS (in source video TB) to the segment
+    /// index that contains it. Returns `baseIndex` for any pts before
+    /// the first boundary (defensive: shouldn't happen post-gate);
+    /// returns the last segment index for any pts past the last
+    /// boundary.
     private func segmentIndex(forSourcePts pts: Int64) -> Int {
         guard !segmentBoundaries.isEmpty else { return baseIndex }
         // Callers pass POST-shift (output-timeline) values: the
@@ -1173,7 +1199,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func runPumpLoop() {
         if restartTargetVideoDts > Int64.min {
-            restartCount &+= 1
+            bumpRestartCount()
         }
         let pumpStart = DispatchTime.now()
         var packetsRead = 0
@@ -1707,7 +1733,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // AVPlayer rejected the asset with -12860 and
                         // `AVPlayerWaitingWithNoItemToPlay` followed by
                         // an indefinite stall).
-                        let isKey = (packet.pointee.flags & 0x0001) != 0   // AV_PKT_FLAG_KEY
+                        let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                         let targetSatisfied = restartTargetVideoDts == Int64.min
                             || (packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts)
                         guard isKey, targetSatisfied else {
@@ -1954,7 +1980,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         let gapMs = audioTb.den > 0
                             ? Double(gapInAudioTb) * Double(audioTb.num) * 1000.0 / Double(audioTb.den)
                             : 0
-                        self.lastAVGapMs = gapMs
+                        self.setLastAVGapMs(gapMs)
                         EngineLog.emit(
                             "[HLSSegmentProducer] audio gate open: "
                             + "actual=\(firstActualAudioDts) "
@@ -2112,7 +2138,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             continue
                         }
+                        // Symmetric with the video path: a nil muxer
+                        // (stop requested or alloc failure) ends the
+                        // pump. The old per-packet `continue` kept the
+                        // pump reading and silently dropping every
+                        // bridged frame until the next VIDEO packet
+                        // tripped the same nil. The flag drains the
+                        // remaining bridged packets (each must still be
+                        // freed) before exiting the read loop.
+                        var bridgedMuxerGone = false
                         for fp in flacPackets {
+                            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
+                            if bridgedMuxerGone {
+                                trackedPacketFree(&fpVar)
+                                continue
+                            }
                             // FLAC packet pts is in audio inputTimeBase.
                             // Rescale to source video TB for the segment
                             // lookup so audio and video share one segmentation.
@@ -2131,15 +2171,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 fpSeg = segmentIndex(forSourcePts: fpPtsInVideoTb)
                             }
                             guard let muxer = ensureMuxer(forSegmentIndex: fpSeg) else {
-                                var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                                 trackedPacketFree(&fpVar)
+                                bridgedMuxerGone = true
                                 continue
                             }
                             fp.pointee.stream_index = muxer.audioOutputStreamIndex
                             av_packet_rescale_ts(fp, audio.inputTimeBase, muxer.muxerAudioTimeBase)
                             _ = muxer.writePacket(fp)
-                            var fpVar: UnsafeMutablePointer<AVPacket>? = fp
                             trackedPacketFree(&fpVar)
+                        }
+                        if bridgedMuxerGone {
+                            exitReason = .muxerFailed
+                            break readLoop
                         }
                         continue
                     }

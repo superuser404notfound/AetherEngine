@@ -376,6 +376,9 @@ final class AudioBridge: @unchecked Sendable {
         } else {
             av_channel_layout_default(&inLayout, nChannels)
         }
+        // copy() allocates a channel map for custom-order layouts; the
+        // stack struct must be uninit'd or that map leaks per session.
+        defer { av_channel_layout_uninit(&inLayout) }
 
         let swrRet = swr_alloc_set_opts2(
             &swrCtx,
@@ -518,18 +521,6 @@ final class AudioBridge: @unchecked Sendable {
         rebaseFromNextSourcePTS = true
     }
 
-    /// Live program-boundary correction. The bridge stamps its output
-    /// from the free-running `nextEncoderPTS` sample counter, which
-    /// collapses any audio splice gap sample-continuously, while the
-    /// video timeline keeps the relative gap the rebase preserved. The
-    /// producer calls this with the residual (audio gap minus video
-    /// gap, in seconds) so the bridged audio timeline reproduces the
-    /// same relationship: positive deltas advance the encoder PTS
-    /// (AVPlayer renders the gap as silence), negative ones (an audio
-    /// overlap at the splice) are clamped, the counter cannot rewind.
-    /// Called on the pump thread, same thread as `feed`. Samples still
-    /// sitting in the FIFO (< one encoder frame) are stamped post-jump;
-    /// that error is bounded by one frame (~32 ms) and one-shot.
     /// Drain everything still buffered in the bridge at source EOF:
     /// remaining decoder frames, the FIFO leftover (< one encoder
     /// frame), and the encoder's internal delay. Without this the
@@ -579,6 +570,18 @@ final class AudioBridge: @unchecked Sendable {
         return results
     }
 
+    /// Live program-boundary correction. The bridge stamps its output
+    /// from the free-running `nextEncoderPTS` sample counter, which
+    /// collapses any audio splice gap sample-continuously, while the
+    /// video timeline keeps the relative gap the rebase preserved. The
+    /// producer calls this with the residual (audio gap minus video
+    /// gap, in seconds) so the bridged audio timeline reproduces the
+    /// same relationship: positive deltas advance the encoder PTS
+    /// (AVPlayer renders the gap as silence), negative ones (an audio
+    /// overlap at the splice) are clamped, the counter cannot rewind.
+    /// Called on the pump thread, same thread as `feed`. Samples still
+    /// sitting in the FIFO (< one encoder frame) are stamped post-jump;
+    /// that error is bounded by one frame (~32 ms) and one-shot.
     func noteTimelineJump(deltaSeconds: Double) {
         guard deltaSeconds > 0, encoderTimeBase.den > 0 else { return }
         let samples = Int64((deltaSeconds * Double(encoderTimeBase.den)).rounded())
@@ -652,7 +655,35 @@ final class AudioBridge: @unchecked Sendable {
         // off the decoded data.
         let packetPts = packet.pointee.pts
 
-        let sendRet = avcodec_send_packet(dec, packet)
+        var srcFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        defer { av_frame_free(&srcFrame) }
+        guard let sf = srcFrame else { return results }
+
+        // Drain every currently-decodable frame into the FIFO. The PTS
+        // rebase fires on the first decoded frame after a segment
+        // boundary so the FLAC stream timestamps track the source rather
+        // than drifting on the FIFO leftover. See the packetPts capture
+        // above for why we use that rather than sf.pts.
+        func receiveDecodedFrames() throws {
+            while avcodec_receive_frame(dec, sf) >= 0 {
+                if rebaseFromNextSourcePTS, packetPts != Self.avNoPTS {
+                    nextEncoderPTS = av_rescale_q(packetPts, srcTimeBase, encoderTimeBase)
+                    rebaseFromNextSourcePTS = false
+                }
+                try resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)
+            }
+        }
+
+        var sendRet = avcodec_send_packet(dec, packet)
+        if sendRet == AVERROR_EAGAIN_VALUE {
+            // Standard FFmpeg contract: EAGAIN from send_packet means the
+            // decoder's output queue is full (possible on multi-frame
+            // packets, e.g. TrueHD bursts) and frames must be received
+            // first, then the send retried. The old code lumped EAGAIN in
+            // with real errors and threw, dropping the packet.
+            try receiveDecodedFrames()
+            sendRet = avcodec_send_packet(dec, packet)
+        }
         if sendRet == AVERROR_INVALIDDATA_VALUE {
             // Corrupt source packet (glitchy live MPEG-TS, broken mp2
             // header). The decoder stays usable for the next valid packet,
@@ -665,22 +696,7 @@ final class AudioBridge: @unchecked Sendable {
             throw AudioBridgeError.sendPacketFailed(code: sendRet)
         }
 
-        var srcFrame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
-        defer { av_frame_free(&srcFrame) }
-        guard let sf = srcFrame else { return results }
-
-        while avcodec_receive_frame(dec, sf) >= 0 {
-            // Rebase encoder PTS off the first decoded frame after a
-            // segment boundary so the FLAC stream timestamps track
-            // the source rather than drifting on the FIFO leftover.
-            // See the packetPts capture above for why we use that
-            // rather than sf.pts here.
-            if rebaseFromNextSourcePTS, packetPts != Self.avNoPTS {
-                nextEncoderPTS = av_rescale_q(packetPts, srcTimeBase, encoderTimeBase)
-                rebaseFromNextSourcePTS = false
-            }
-            try resampleAndPushIntoFIFO(srcFrame: sf, enc: enc, swr: swr, fifo: fifoPtr)
-        }
+        try receiveDecodedFrames()
 
         // Drain the FIFO into encoder-frame-size chunks. Each chunk
         // becomes one AVFrame fed to the encoder.

@@ -146,14 +146,21 @@ final class PacketRingBuffer {
     }
 
     /// All packets with `pts >= pts`, in order, with bytes read from
-    /// disk.
+    /// disk. Entries whose backing file was evicted between the index
+    /// snapshot and the off-lock read are skipped instead of failing the
+    /// whole reseed (`packet(atSeq:)` handles the identical race the
+    /// same way). Eviction only removes from the FRONT of the window, so
+    /// skipping evicted leading entries preserves the keyframe-alignment
+    /// guarantee of what remains.
     func packets(fromPts startPts: Double) throws -> [Packet] {
         lock.lock()
         let slice = entries.filter { $0.pts >= startPts }
         lock.unlock()
 
-        return try slice.map { entry in
-            let data = try Data(contentsOf: entry.fileURL, options: [.alwaysMapped, .uncached])
+        return slice.compactMap { entry in
+            guard let data = try? Data(contentsOf: entry.fileURL, options: [.alwaysMapped, .uncached]) else {
+                return nil
+            }
             return Packet(pts: entry.pts, isKeyframe: entry.isKeyframe, isVideo: entry.isVideo, bytes: data)
         }
     }

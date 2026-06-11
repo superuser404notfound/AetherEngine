@@ -70,7 +70,17 @@ public enum EngineLog {
     /// diagnostic line. Called on whatever thread emitted the line,
     /// so handlers must be thread-safe and should not block. Typical
     /// shape: append to a ring buffer that an in-app overlay reads.
-    nonisolated(unsafe) public static var handler: ((String) -> Void)?
+    ///
+    /// Lock-guarded: emit() reads this from arbitrary threads while a
+    /// host may (re)assign it; an unsynchronized closure swap against
+    /// those reads is a data race (multi-word write + release of the
+    /// old closure).
+    public static var handler: ((String) -> Void)? {
+        get { handlerLock.lock(); defer { handlerLock.unlock() }; return _handler }
+        set { handlerLock.lock(); _handler = newValue; handlerLock.unlock() }
+    }
+    private static let handlerLock = NSLock()
+    nonisolated(unsafe) private static var _handler: ((String) -> Void)?
 
     /// Subsystem used for OSLog. Kept here as a public constant so
     /// hosts can match it in `log stream` filters or pull it into UI

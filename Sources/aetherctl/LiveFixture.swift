@@ -310,6 +310,11 @@ final class LiveFixture: @unchecked Sendable {
                 let err = errno
                 if err == EBADF || err == EINVAL { return }
                 if err == EINTR || err == EAGAIN { continue }
+                // Unexpected errno (e.g. EMFILE under fd exhaustion):
+                // say so. A silent exit leaves the fixture parked but
+                // not accepting, which looks exactly like an
+                // engine-side connect failure during debugging.
+                print("[LiveFixture] accept failed: errno=\(err); accept loop exiting")
                 return
             }
 

@@ -67,7 +67,13 @@ struct HDRToneMapper {
             return nil
         }
 
-        let addRet = av_buffersrc_add_frame_flags(srcCtx, frame, 0)
+        // KEEP_REF: without it, buffersrc TAKES the frame's references and
+        // resets the input frame (w/h = 0). The caller's documented sws
+        // fallback after a failed tone-map then operated on an emptied
+        // frame and silently produced nil, exactly when it was needed.
+        let addRet = av_buffersrc_add_frame_flags(
+            srcCtx, frame, Int32(AV_BUFFERSRC_FLAG_KEEP_REF)
+        )
         guard addRet >= 0 else {
             EngineLog.emit("[HDRToneMap] add_frame failed ret=\(addRet)", category: .swPlayback)
             return nil

@@ -273,7 +273,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// clock sits at `source_pts - playlistShiftSeconds`; the subtitle
     /// path and side-demuxer seek read this to translate back to
     /// source time.
-    public private(set) var playlistShiftSeconds: Double = 0
+    ///
+    /// Lock-guarded: written from producer callbacks on the pump thread,
+    /// read by the host/engine on other threads.
+    public var playlistShiftSeconds: Double {
+        shiftLock.lock(); defer { shiftLock.unlock() }; return _playlistShiftSeconds
+    }
+    private func setPlaylistShiftSeconds(_ value: Double) {
+        shiftLock.lock(); _playlistShiftSeconds = value; shiftLock.unlock()
+    }
+    private let shiftLock = NSLock()
+    private var _playlistShiftSeconds: Double = 0
 
     /// Source video time base, latched in `start()` so the
     /// `onVideoShiftKnown` callback can convert producer PTS shift to
@@ -2022,7 +2032,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// imprecision lands past the planned target).
     private func handleVideoShiftKnown(_ shiftPts: Int64) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
-        playlistShiftSeconds = seconds
+        setPlaylistShiftSeconds(seconds)
         onPlaylistShiftChanged?(seconds)
     }
 
@@ -2036,7 +2046,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// through `onPlaylistShiftRebased`.
     private func handleLiveTimelineRebase(_ shiftPts: Int64, seamOutputSeconds: Double) {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
-        playlistShiftSeconds = seconds
+        setPlaylistShiftSeconds(seconds)
         onPlaylistShiftRebased?(seconds, seamOutputSeconds)
     }
 
@@ -2322,7 +2332,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             let ok = old.waitForFinish(timeout: 5.0)
             if !ok {
                 EngineLog.emit(
-                    "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it",
+                    "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it "
+                    + "(its in-flight read shares the demuxer and may consume the first post-seek packet; "
+                    + "if the new session starts a GOP late, this is why)",
                     category: .session
                 )
             }
@@ -2478,7 +2490,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 segEndSeconds = Double(segEndPts - startPts0) * tb
             } else {
                 segEndSeconds = sourceDurationSeconds
-                segEndPts = Int64(sourceDurationSeconds / tb)
+                // startPts0-anchored like every startPts: a bare
+                // duration/tb sat on the from-zero axis while the rest of
+                // the plan is absolute source PTS. Harmless today only
+                // because segmentIndex() clamps past-the-end PTS into the
+                // last segment; any new consumer of endPts would inherit
+                // an off-by-one-GOP skew.
+                segEndPts = startPts0 + Int64(sourceDurationSeconds / tb)
             }
 
             plan.append(Segment(
@@ -2578,9 +2596,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
             guard let pkt = readResult else { break }
             defer {
-                av_packet_unref(pkt)
+                // trackedPacketFree, not raw av_packet_free: readPacket
+                // allocs via trackedPacketAlloc, and a raw free here left
+                // the PacketBalanceTracker's pktAlive permanently high
+                // (+N per DV5/empty-hvcC session), defeating the very
+                // leak diagnostic the counter exists for. free() unrefs
+                // internally, so no separate av_packet_unref needed.
                 var maybePkt: UnsafeMutablePointer<AVPacket>? = pkt
-                av_packet_free(&maybePkt)
+                trackedPacketFree(&maybePkt)
             }
             packetsScanned += 1
             if pkt.pointee.stream_index != videoStreamIndex { continue }
@@ -3451,7 +3474,7 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
     /// firstVisible only advances once enough segments exist to seed
     /// AVPlayer's live edge (the window stays anchored at 0 until then),
     /// which is the anti-stall guarantee.
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
+    func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
@@ -3485,9 +3508,9 @@ private final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendabl
                     cacheRef.evictBelow(cutoff)
                 }
             }
-            return (total, refreshCounter, false, _discontinuitySequence)
+            return (total, _liveFirstVisible, refreshCounter, false, _discontinuitySequence)
         }
-        return (segments.count, refreshCounter, false, 0)
+        return (segments.count, 0, refreshCounter, false, 0)
     }
 
     /// First segment index visible in the current playlist window.

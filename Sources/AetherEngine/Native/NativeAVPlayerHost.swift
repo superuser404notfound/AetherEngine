@@ -678,7 +678,7 @@ final class NativeAVPlayerHost {
         avPlayer.replaceCurrentItem(with: nil)
         playerItem = nil
         isReady = false
-        didReachEnd = false
+        // (didReachEnd already cleared above, with the terminal flags.)
         currentTime = 0
         duration = 0
         rate = 0

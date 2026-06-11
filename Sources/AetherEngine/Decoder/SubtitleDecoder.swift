@@ -172,6 +172,9 @@ enum SubtitleDecoder {
 
         var cues: [SubtitleCue] = []
         var nextID = 0
+        // PTS anchor for events surfaced by the post-loop flush, which
+        // have no packet of their own.
+        var lastPktPTS: Double = 0
 
         while !cancel.isCancelled {
             var pktPtr: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc()
@@ -196,6 +199,7 @@ enum SubtitleDecoder {
                 let pktPTS = pkt.pointee.pts == Int64.min
                     ? 0.0
                     : Double(pkt.pointee.pts) * tbSec
+                lastPktPTS = pktPTS
                 let startOffset = Double(sub.start_display_time) / 1000.0
                 let endOffset: Double
                 if sub.end_display_time > 0 {
@@ -237,14 +241,51 @@ enum SubtitleDecoder {
             trackedPacketFree(&pktPtr)
         }
 
-        // Flush, ASS/SSA decoders sometimes buffer events.
-        var flushPkt = AVPacket()
-        flushPkt.data = nil
-        flushPkt.size = 0
-        var flushSub = AVSubtitle()
-        var gotSub: Int32 = 0
-        if avcodec_decode_subtitle2(codecCtx, &flushSub, &gotSub, &flushPkt) >= 0 && gotSub != 0 {
+        // Flush: ASS/SSA decoders can buffer events. Loop until the
+        // decoder reports nothing more and run the SAME cue extraction
+        // as the main loop. The old code decoded exactly one buffered
+        // event and threw it away unextracted, so whenever the decoder
+        // really did buffer, the file's last cue silently vanished.
+        // Timing anchor: a flushed event has no packet of its own, the
+        // last packet's PTS is the only plausible base.
+        while !cancel.isCancelled {
+            var flushPkt = AVPacket()
+            flushPkt.data = nil
+            flushPkt.size = 0
+            var flushSub = AVSubtitle()
+            var gotFlush: Int32 = 0
+            let flushRet = avcodec_decode_subtitle2(codecCtx, &flushSub, &gotFlush, &flushPkt)
+            guard flushRet >= 0, gotFlush != 0 else { break }
+
+            let startOffset = Double(flushSub.start_display_time) / 1000.0
+            let endOffset = flushSub.end_display_time > 0
+                ? Double(flushSub.end_display_time) / 1000.0
+                : startOffset + 5.0
+            var lines: [String] = []
+            if flushSub.num_rects > 0, let rects = flushSub.rects {
+                for i in 0..<Int(flushSub.num_rects) {
+                    guard let rect = rects[i] else { continue }
+                    if let text = textForRect(rect) {
+                        lines.append(text)
+                    }
+                }
+            }
             avsubtitle_free(&flushSub)
+
+            let merged = lines
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let startTime = lastPktPTS + startOffset
+            let endTime = lastPktPTS + endOffset
+            if !merged.isEmpty && endTime > startTime {
+                cues.append(SubtitleCue(
+                    id: nextID,
+                    startTime: startTime,
+                    endTime: endTime,
+                    body: .text(merged)
+                ))
+                nextID += 1
+            }
         }
 
         return cues.sorted { $0.startTime < $1.startTime }

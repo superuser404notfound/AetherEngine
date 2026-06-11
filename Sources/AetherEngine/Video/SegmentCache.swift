@@ -178,6 +178,13 @@ final class SegmentCache {
 
         condition.lock()
         defer { condition.unlock() }
+        // Close contract: a store racing close() from a still-unwinding
+        // pump must not resurrect bookkeeping on a closed cache (the
+        // entry would point into the deleted session dir).
+        guard !closed else {
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
         if writeOK {
             // If an old file existed at this index (rare: same index
             // written twice across a producer restart) the new write
@@ -226,6 +233,12 @@ final class SegmentCache {
 
         condition.lock()
         defer { condition.unlock() }
+        // Same close contract as store(): drop the adopted file instead
+        // of resurrecting bookkeeping on a closed cache.
+        guard !closed else {
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
         if renameOK {
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes

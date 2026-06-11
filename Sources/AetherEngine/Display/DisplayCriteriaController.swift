@@ -238,7 +238,7 @@ final class DisplayCriteriaController {
         }
 
         if !sawSwitchStart {
-            // 200ms elapsed and the handshake never started. Either
+            // 1000ms (100 x 10ms) elapsed and the handshake never started. Either
             // the panel can't satisfy the criteria (non-HDR display,
             // unsupported codec) or the setter was a no-op (criteria
             // already matched). Don't block playback further; AVPlayer

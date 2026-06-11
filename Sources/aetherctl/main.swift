@@ -639,25 +639,25 @@ private func customIOSmokeTest(path: String, inMemory: Bool, forwardOnly: Bool, 
         let current = engine.activeAudioTrackIndex
         guard let target = engine.audioTracks.map({ $0.id }).first(where: { $0 != current }) else {
             print("VERDICT: switch-audio: no second audio track to switch to (tracks=\(engine.audioTracks.map { $0.id }), active=\(String(describing: current)))")
-            return 6
+            engine.stop(); return 6
         }
         engine.selectAudioTrack(index: target)
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         if case .playing = engine.state {
             print("VERDICT: audio switch OK to id=\(target), still playing (was \(String(describing: current)))")
         } else {
-            print("VERDICT: audio switch left state \(engine.state)"); return 6
+            print("VERDICT: audio switch left state \(engine.state)"); engine.stop(); return 6
         }
     }
     if selectSubs {
         guard let subID = engine.subtitleTracks.first?.id else {
-            print("VERDICT: select-subs: no subtitle tracks in source"); return 7
+            print("VERDICT: select-subs: no subtitle tracks in source"); engine.stop(); return 7
         }
         engine.selectSubtitleTrack(index: subID)
         try? await Task.sleep(nanoseconds: 2_000_000_000)
         let cueCount = engine.subtitleCues.count
         print("VERDICT: subtitle select id=\(subID), cues=\(cueCount) active=\(engine.isSubtitleActive)")
-        if cueCount == 0 { print("VERDICT: select-subs FAILED: no cues produced"); return 7 }
+        if cueCount == 0 { print("VERDICT: select-subs FAILED: no cues produced"); engine.stop(); return 7 }
     }
     if extract {
         guard let fx = engine.makeFrameExtractor() else {

@@ -36,13 +36,27 @@ final class SoftwarePlaybackHost {
     // MARK: - Published state (mirrors NativeAVPlayerHost surface)
 
     /// Frames successfully enqueued into the AVSampleBufferDisplayLayer.
-    /// Incremented each time `renderer.enqueue` is invoked. Read by the
+    /// Incremented from the decoder callback (demux thread), read by the
     /// engine's LiveTelemetrySampler at 1 Hz to compute observed FPS on
-    /// the software path. Atomic read via the existing class-internal
-    /// serialisation; the counter is single-writer (the decode pump) and
-    /// any reader sees a torn `Int` only on 32-bit platforms (tvOS is
-    /// 64-bit, so reads are atomic by ABI).
-    private(set) var framesEnqueued: Int = 0
+    /// the software path. Lock-guarded: the previous bare property was a
+    /// MainActor-isolated var mutated off-main (the compiler only let it
+    /// through because the callback isn't @Sendable-typed).
+    nonisolated var framesEnqueued: Int {
+        framesEnqueuedLock.lock()
+        defer { framesEnqueuedLock.unlock() }
+        return _framesEnqueued
+    }
+    /// Increments and returns the PREVIOUS value (the first-frame log
+    /// site needs to know whether this was frame zero).
+    nonisolated private func bumpFramesEnqueued() -> Int {
+        framesEnqueuedLock.lock()
+        defer { framesEnqueuedLock.unlock() }
+        let previous = _framesEnqueued
+        _framesEnqueued &+= 1
+        return previous
+    }
+    private let framesEnqueuedLock = NSLock()
+    nonisolated(unsafe) private var _framesEnqueued: Int = 0
 
     @Published private(set) var isReady: Bool = false
     @Published private(set) var currentTime: Double = 0
@@ -415,7 +429,7 @@ final class SoftwarePlaybackHost {
             // produced a pixel buffer, and the renderer accepted the
             // enqueue. If this never fires after several seconds, the
             // failure is between decoder-open and first-frame.
-            if self?.framesEnqueued == 0 {
+            if self?.bumpFramesEnqueued() == 0 {
                 let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                 EngineLog.emit(
                     "[SWHost] first video frame enqueued: "
@@ -425,7 +439,6 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
             }
-            self?.framesEnqueued &+= 1
         }
         videoDecoder.onFirstHDR10PlusDetected = { [weak self] in
             self?.onFirstHDR10PlusDetected?()
@@ -877,6 +890,7 @@ final class SoftwarePlaybackHost {
                     readCursor: readCursor,
                     advanceCursor: advanceCursor,
                     clampCursor: clampCursor,
+                    initialRate: initialRate,
                     isPlaying: getIsPlaying,
                     stopRequested: getStopRequested,
                     sourceEnded: getSourceEnded,
@@ -1093,6 +1107,7 @@ final class SoftwarePlaybackHost {
         readCursor: @Sendable () -> Int,
         advanceCursor: @Sendable (Int) -> Void,
         clampCursor: @Sendable (Int, Int) -> Void,
+        initialRate: Float,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
         sourceEnded: @Sendable () -> Bool,
@@ -1184,7 +1199,11 @@ final class SoftwarePlaybackHost {
                 let shouldArm = (audioDecoder == nil) ? pkt.isVideo : producedAudio
                 if shouldArm {
                     let armTime = CMTime(seconds: pkt.pts, preferredTimescale: 90000)
-                    aOut.seekClock(to: armTime, rate: 1.0)
+                    // initialRate, not a hard 1.0: a rate set before the
+                    // arming would otherwise be silently reset to 1x
+                    // until the next setRate (the combined loop already
+                    // arms with initialRate).
+                    aOut.seekClock(to: armTime, rate: initialRate)
                     markClockArmed()
                 }
             }

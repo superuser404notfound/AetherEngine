@@ -70,7 +70,12 @@ final class LiveTelemetrySampler {
         stop()
         byteWindow.reset()
         frameWindow.reset()
-        lastDemuxerBytes = 0
+        // Seed from the CURRENT counters, not zero: the demuxer has
+        // already prefetched by the time the sampler starts, and a
+        // zero seed pushed the whole accumulated byte count into the
+        // first tick's window, inflating the instant bitrate for the
+        // first ~10 s of every session.
+        lastDemuxerBytes = engine?.demuxerBytesFetched ?? 0
         lastFramesEnqueued = 0
         sessionStartTime = Date()
         sessionStartBytes = 0

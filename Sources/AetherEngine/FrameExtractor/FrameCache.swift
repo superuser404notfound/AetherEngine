@@ -6,6 +6,12 @@ import CoreGraphics
 /// leak guard: the cache can never hold more than
 /// `thumbnailLimit + snapshotLimit` CGImages.
 ///
+/// The key deliberately omits the TARGET SIZE: one FrameExtractor
+/// instance serves one consumer surface with a fixed target size per
+/// mode. Asking the same extractor for the same position at different
+/// `maxWidth`/`maxSize` values returns the first-rendered image;
+/// consumers needing different sizes use separate extractors.
+///
 /// Bucketing rounds the requested position down to a grid so that
 /// neighbouring scrub requests resolve to the same entry. Thumbnails
 /// bucket coarsely (default 1 s); snapshots bucket finely (0.1 s) since

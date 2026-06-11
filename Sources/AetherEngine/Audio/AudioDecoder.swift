@@ -151,6 +151,12 @@ final class AudioDecoder: @unchecked Sendable {
         } else {
             av_channel_layout_default(&inLayout, channels)
         }
+        // copy() allocates a channel map for custom-order layouts; the
+        // stack structs must be uninit'd or that map leaks per init.
+        defer {
+            av_channel_layout_uninit(&inLayout)
+            av_channel_layout_uninit(&outLayout)
+        }
 
         let inFmt = AVSampleFormat(rawValue: frame.pointee.format)
         let inRate = frame.pointee.sample_rate > 0 ? frame.pointee.sample_rate : sampleRate

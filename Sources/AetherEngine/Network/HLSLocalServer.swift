@@ -129,13 +129,18 @@ protocol HLSSegmentProvider: AnyObject {
     /// server to increment it when a discontinuity-tagged segment is
     /// removed; without it AVPlayer's discontinuity tracking slips one
     /// window-length after every program boundary).
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
+    /// `firstVisible` is part of the SAME atomic snapshot: reading it
+    /// via a separate lock acquisition let a concurrent window slide
+    /// land in between, producing a MEDIA-SEQUENCE newer than the
+    /// count it was paired with.
+    func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
 
     /// First segment index visible in the current playlist window.
     /// For append-only and VOD playlists this is always 0.
     /// For a live session this advances as old segments
-    /// fall off the back. Used by `buildMediaPlaylistText` to emit
-    /// `#EXT-X-MEDIA-SEQUENCE` and to list only [firstVisible, visibleCount).
+    /// fall off the back. Prefer the atomic snapshot from
+    /// `notePlaylistBuild` for playlist construction; this getter
+    /// serves point-in-time diagnostics.
     var firstVisibleSegmentIndex: Int { get }
 
     /// Blocks the calling thread until this provider has at least one
@@ -212,8 +217,8 @@ extension HLSSegmentProvider {
     /// a zero refresh counter (the byte-level change line is a
     /// video-side concern), and trusts the static playlistType to
     /// drive ENDLIST inclusion.
-    func notePlaylistBuild() -> (visibleCount: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
-        return (visibleCount: segmentCount, refreshCounter: 0, endlistAdded: false, discontinuitySequence: 0)
+    func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
+        return (visibleCount: segmentCount, firstVisible: 0, refreshCounter: 0, endlistAdded: false, discontinuitySequence: 0)
     }
 }
 
@@ -942,7 +947,8 @@ final class HLSLocalServer: @unchecked Sendable {
         guard writeAll(fd: fd, data: headerData, path: "\(path) [header]") else {
             return false
         }
-        return sendfileAll(fileURL: fileURL, socketFd: fd, path: path)
+        return sendfileAll(fileURL: fileURL, socketFd: fd, path: path,
+                           expectedLength: fileSize)
     }
 
     private func send404(fd: Int32, path: String, reason: String) -> Bool {
@@ -1005,7 +1011,18 @@ final class HLSLocalServer: @unchecked Sendable {
     /// Returns false on broken pipe / file open failure / partial
     /// send the kernel won't drain. The caller treats failure the
     /// same as a `writeAll` failure: close the connection.
-    private func sendfileAll(fileURL: URL, socketFd: Int32, path: String) -> Bool {
+    ///
+    /// `expectedLength` is the Content-Length already sent in the
+    /// response header. The body must match it EXACTLY on a keep-alive
+    /// connection: the file can grow or shrink between the caller's
+    /// stat and our reads (still-finalizing segment, concurrent cache
+    /// eviction), and a mismatched body shifts the HTTP framing so
+    /// AVPlayer's next response starts mid-segment. Excess file bytes
+    /// are not sent; a short file fails the response (connection
+    /// closes) instead of leaving the client waiting on a byte count
+    /// that never completes.
+    private func sendfileAll(fileURL: URL, socketFd: Int32, path: String,
+                             expectedLength: Int) -> Bool {
         let handle: FileHandle
         do {
             handle = try FileHandle(forReadingFrom: fileURL)
@@ -1023,12 +1040,24 @@ final class HLSLocalServer: @unchecked Sendable {
 
         var totalSent: Int = 0
         while true {
-            let nRead = read(fileFd, buffer, chunkSize)
-            if nRead == 0 {
-                // EOF. Full file transferred.
+            if totalSent >= expectedLength {
+                // Declared length fully sent; any further file bytes
+                // (file grew after stat) must NOT go on the wire.
                 bumpBytesSent(totalSent)
                 bumpSendfileBytes(totalSent)
                 return true
+            }
+            let want = min(chunkSize, expectedLength - totalSent)
+            let nRead = read(fileFd, buffer, want)
+            if nRead == 0 {
+                // EOF before the declared length: the file shrank after
+                // stat. Fail the response so the connection closes;
+                // padding or under-sending would desync the framing.
+                EngineLog.emit(
+                    "[HLSLocalServer] short file \(path): sent=\(totalSent) expected=\(expectedLength)",
+                    category: .hlsServer
+                )
+                return false
             }
             if nRead < 0 {
                 let err = errno
@@ -1151,7 +1180,11 @@ final class HLSLocalServer: @unchecked Sendable {
         // build.
         let snapshot = provider.notePlaylistBuild()
         let count = snapshot.visibleCount
-        let firstVisible = provider.firstVisibleSegmentIndex
+        // From the SAME snapshot as count: a separate lock acquisition
+        // let a concurrent window slide advance firstVisible past the
+        // count it was paired with (worst case a trapping range below).
+        // Clamp defensively anyway.
+        let firstVisible = min(snapshot.firstVisible, count)
         let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
         // A sliding live playlist: MEDIA-SEQUENCE advances, segments below
         // firstVisible are gone, and the playlist is neither EVENT (which

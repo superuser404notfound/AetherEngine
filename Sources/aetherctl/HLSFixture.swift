@@ -382,6 +382,8 @@ final class HLSFixtureServer: @unchecked Sendable {
                 let e = errno
                 if e == EBADF || e == EINVAL { return }
                 if e == EINTR || e == EAGAIN { continue }
+                // Unexpected errno: say so (see LiveFixture.acceptLoop).
+                print("[HLSFixture] accept failed: errno=\(e); accept loop exiting")
                 return
             }
 

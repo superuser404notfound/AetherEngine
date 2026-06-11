@@ -185,7 +185,9 @@ final class FragmentSplitter {
         let headerBytes = pendingHeaderBytes
         pendingHeaderBytes.removeAll(keepingCapacity: true)
 
-        let bodySize = max(0, Int(largesize) - 16)
+        // clamping: a corrupt 64-bit box size above Int.max would trap in
+        // the plain Int() initializer and take down the whole byte path.
+        let bodySize = max(0, Int(clamping: largesize) - 16)
         startBox(type: boxType, headerBytes: headerBytes, bodySize: bodySize)
         return offset
     }

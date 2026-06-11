@@ -68,9 +68,10 @@ func trackedPacketAlloc() -> UnsafeMutablePointer<AVPacket>? {
 }
 
 /// Wrapper around `av_packet_free(_:)` that increments the
-/// PacketBalanceTracker before delegating. A nil input still records
-/// a free for symmetry with `trackedPacketAlloc` patterns that may
-/// pass a nil pointer through the defer chain.
+/// PacketBalanceTracker before delegating. A nil input records
+/// NOTHING: defer chains routinely pass an already-nil'd pointer
+/// through here, and counting those as frees would drift `pktAlive`
+/// negative.
 @inline(__always)
 func trackedPacketFree(_ pkt: inout UnsafeMutablePointer<AVPacket>?) {
     if pkt != nil {

@@ -695,8 +695,26 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Init
 
-    /// Lifecycle notification observers, stored for cleanup.
-    private var lifecycleObservers: [Any] = []
+    /// Lifecycle notification observers. Block-based observers are NOT
+    /// auto-removed on dealloc (unlike selector-based ones), so the bag
+    /// removes them in its own deinit (a MainActor deinit can't touch
+    /// non-Sendable stored state under Swift 6, hence the helper class).
+    /// In practice the engine is a process-wide singleton and never
+    /// deallocates; this keeps the cleanup contract honest anyway.
+    private let lifecycleObservers = LifecycleObserverBag()
+
+    private final class LifecycleObserverBag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tokens: [Any] = []
+        func append(_ token: Any) {
+            lock.lock(); tokens.append(token); lock.unlock()
+        }
+        deinit {
+            for token in tokens {
+                NotificationCenter.default.removeObserver(token)
+            }
+        }
+    }
 
     public init() throws {
         // Route FFmpeg's av_log output into EngineLog before any
@@ -1131,7 +1149,18 @@ public final class AetherEngine: ObservableObject {
         // because we never demux the m3u8 ourselves (unlike the audioOnly
         // divert below, which needs probe info first).
         if options.nativeRemoteHLS {
-            try await loadRemoteHLS(url: url, options: options)
+            do {
+                try await loadRemoteHLS(url: url, options: options)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Without this catch a throwing loadRemoteHLS stranded
+                // state at .loading forever (the bypass sits outside the
+                // do/catch all other load paths run under). The body
+                // can't throw today, but the signature says it can.
+                state = .error("Failed to load: \(error.localizedDescription)")
+                throw error
+            }
             // No probe ran on this bypass; there is nothing to report.
             return nil
         }
@@ -1734,6 +1763,11 @@ public final class AetherEngine: ObservableObject {
         // the transcode spin-up instead of showing a premature black screen.
         host.play()
         startMemoryProbe()
+        // No startLiveTelemetrySampler() here, deliberately: the sampler's
+        // counters all read the loopback pipeline (demuxer / producer /
+        // cache / server), none of which exists on this AVPlayer-direct
+        // bypass. Its fields are nil-safe, but a sampler emitting all-zero
+        // rows would only mislead.
     }
 
     private func loadNative(
@@ -2401,6 +2435,13 @@ public final class AetherEngine: ObservableObject {
         case .idle, .error:
             EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: no active session (state=\(state))", category: .engine)
             return
+        case .loading:
+            // Mid-load there are no hosts yet: the body below would be
+            // all no-ops but still flip state to .playing, dropping the
+            // host's spinner early and breaking the $isReady -> .paused
+            // waypoint that load() is still driving.
+            EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: load in progress", category: .engine)
+            return
         default:
             break
         }
@@ -2746,7 +2787,7 @@ public final class AetherEngine: ObservableObject {
             ? loadedSidecarURL
             : nil
         EngineLog.emit(
-            "[AetherEngine] reload begin: audioStream=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s embeddedSub=\(embeddedStreamToResume) sidecar=\(sidecarToResume?.lastPathComponent ?? "nil")",
+            "[AetherEngine] reload begin: audioStream=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s embeddedSub=\(embeddedStreamToResume) sidecar=\(sidecarToResume?.lastPathComponent ?? "nil")",
             category: .engine
         )
 
@@ -2828,7 +2869,7 @@ public final class AetherEngine: ObservableObject {
         do {
             let loadStart = DispatchTime.now()
             if wasOnSoftwarePath {
-                EngineLog.emit("[AetherEngine] reload: loadSoftware enter audio=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
+                EngineLog.emit("[AetherEngine] reload: loadSoftware enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
                 try await loadSoftware(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
@@ -2854,7 +2895,7 @@ public final class AetherEngine: ObservableObject {
                 presentCurrentLayer()
                 softwareHost?.play()
             } else {
-                EngineLog.emit("[AetherEngine] reload: loadNative enter audio=\(audioStreamIndex) resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
+                EngineLog.emit("[AetherEngine] reload: loadNative enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
                 try await loadNative(
                     url: url,
                     sourceHTTPHeaders: loadedOptions.httpHeaders,
