@@ -144,7 +144,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     media = seeded
                     pendingPlaylist = nil
                 } else {
-                    let (playlist, _) = try await fetchPlaylist(mediaURL)
+                    let (playlist, _) = try await fetchPlaylistWithRetry(mediaURL)
                     guard case .media(let fetched) = playlist else {
                         throw HLSIngestError.playlistInvalid(reason: "expected media playlist on refresh")
                     }
@@ -240,6 +240,61 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             EngineLog.emit("[HLSIngest] master playlist: picked variant bandwidth=\(best.bandwidth)", category: .engine)
             return (url, nil)
         }
+    }
+
+    /// Wall-clock budget for mid-session playlist-refresh retries. The
+    /// FIFO plus the producer's already-cut segments give the player
+    /// roughly 10-20 s of slack, so a refresh hiccup bridged inside this
+    /// window stays invisible; past it, going terminal (and letting the
+    /// host retune) beats stretching a stall the buffer can no longer
+    /// hide.
+    private static let refreshRetryBudget: TimeInterval = 12
+
+    /// Mid-session playlist refresh with bounded retry + backoff.
+    ///
+    /// One transient failure on a chunks.m3u8 poll used to go terminal
+    /// immediately and force a visible ~10 s host retune (device repro:
+    /// a single -1001 timeout from the provider's CDN while segments
+    /// were still buffered). Transport errors and retryable statuses
+    /// (5xx / 429) now back off 1 s, 2 s, 4 s, ... inside
+    /// `refreshRetryBudget`; parse failures and other 4xx are real
+    /// verdicts and still throw straight through. The INITIAL join
+    /// deliberately stays single-shot (`fetchPlaylist` in
+    /// `resolveMediaPlaylistURL`): there the user is staring at a
+    /// spinner and a fast host fallback beats a slow retry.
+    private func fetchPlaylistWithRetry(_ url: URL) async throws -> (HLSPlaylist, URL) {
+        let deadline = Date().addingTimeInterval(Self.refreshRetryBudget)
+        var attempt = 0
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await fetchPlaylist(url)
+            } catch let error as HLSIngestError {
+                guard case .playlistUnreachable(let status) = error,
+                      status >= 500 || status == 429 else {
+                    throw error
+                }
+                try await backoffOrRethrow(error, attempt: &attempt, deadline: deadline)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if (error as? URLError)?.code == .cancelled { throw error }
+                try await backoffOrRethrow(error, attempt: &attempt, deadline: deadline)
+            }
+        }
+    }
+
+    /// Sleep out the next backoff step, or rethrow `error` when the next
+    /// attempt could not finish inside the deadline anyway.
+    private func backoffOrRethrow(_ error: Error, attempt: inout Int, deadline: Date) async throws {
+        attempt += 1
+        let delay = min(4.0, pow(2.0, Double(attempt - 1)))
+        guard Date().addingTimeInterval(delay) < deadline else { throw error }
+        EngineLog.emit(
+            "[HLSIngest] playlist refresh failed (attempt \(attempt): \(error.localizedDescription)); retrying in \(Int(delay))s",
+            category: .engine
+        )
+        try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
     /// Fetch + parse a playlist. Returns the parsed playlist and the FINAL
