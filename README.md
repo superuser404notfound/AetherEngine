@@ -51,7 +51,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 | Metadata    | `MediaMetadata` parsed from the container on `load`: normalised title / artist / album / albumArtist tags plus embedded cover art. Published on the engine and carried in `SourceProbe`, so a host gets track info without its own tag parser. `aetherctl probe` prints it |
 | Seek        | Producer teardown + restart for backward / far-forward scrubs; short-range forward scrubs ride the cached segment window    |
 | Streaming   | Playback reads the source over one long-lived forward-streaming `URLSession` connection (VLC-style): bytes stream into a sliding window, a new request is issued only on a seek outside that window. Still extraction uses discrete Range chunks for random access; live sources ride the same persistent connection (reconnect-capable even without a Content-Length); only non-live sources without a known length fall back to a single sequential GET |
-| Live / DVR  | Unbounded live playback with optional in-session timeshift (DVR). `LoadOptions.isLive` opts the session in; `dvrWindowSeconds` (e.g. `1800`) enables rewind. Native path (H.264 / HEVC / AV1-with-HW): a forward-only live producer cuts segments into a sliding HLS playlist served to AVPlayer; timeshift uses AVPlayer's native seekable range. Software path (AV1-without-HW / VP9 / MPEG-2 / VC-1): unbounded live with a disk-spooled `PacketRingBuffer` for rewind. Both paths share a session-relative timeline (seconds since first frame) so a host draws one scrubber regardless of backend. Engine publishes `liveEdgeTime`, `seekableLiveRange`, `isAtLiveEdge`, and `behindLiveSeconds`; `seekToLiveEdge()` snaps to the edge. The live playlist advertises LL-HLS blocking reload (`CAN-BLOCK-RELOAD`) so AVPlayer receives each segment the instant it is cut; broadcast program boundaries (PTS resets, PCR wraps) are rebased onto a continuous output timeline with `#EXT-X-DISCONTINUITY` / `#EXT-X-DISCONTINUITY-SEQUENCE` bookkeeping and A/V-paired shifts; a lost live source (dead tuner, killed transcode) auto-reopens with capped backoff and resumes on the same timeline. Live HLS upstreams can be ingested directly via `HLSLiveIngestReader` (public forward-only `IOReader`): master-playlist variant selection (highest bandwidth), duration-capped live-edge join, sequential segment fetch flattened into one TS stream, and typed `HLSIngestError`s (encrypted / fMP4 / unreachable / stalled) so hosts can fall back to a server-mediated path; the local playlist adapts `TARGETDURATION` and LL-HLS blocking-reload eligibility to the upstream's real segment cadence, and a terminal ingest loss fires the host retune surface instead of a doomed URL reopen |
+| Live / DVR  | Unbounded live playback with optional in-session timeshift (DVR). `LoadOptions.isLive` opts the session in; `dvrWindowSeconds` (e.g. `1800`) enables rewind. Native path (H.264 / HEVC / AV1-with-HW): a forward-only live producer cuts segments into a sliding HLS playlist served to AVPlayer; timeshift uses AVPlayer's native seekable range. Software path (AV1-without-HW / VP9 / MPEG-2 / VC-1): unbounded live with a disk-spooled `PacketRingBuffer` for rewind. Both paths share a session-relative timeline (seconds since first frame) so a host draws one scrubber regardless of backend. Engine publishes `liveEdgeTime`, `seekableLiveRange`, `isAtLiveEdge`, and `behindLiveSeconds`; `seekToLiveEdge()` snaps to the edge. The live playlist advertises LL-HLS blocking reload (`CAN-BLOCK-RELOAD`) so AVPlayer receives each segment the instant it is cut; broadcast program boundaries (PTS resets, PCR wraps) are rebased onto a continuous output timeline with `#EXT-X-DISCONTINUITY` / `#EXT-X-DISCONTINUITY-SEQUENCE` bookkeeping and A/V-paired shifts; a lost live source (dead tuner, killed transcode) auto-reopens with capped backoff and resumes on the same timeline. Live HLS upstreams can be ingested directly via `HLSLiveIngestReader` (public forward-only `IOReader`): master-playlist variant selection (highest bandwidth), duration-capped live-edge join, sequential segment fetch flattened into one TS stream, and typed `HLSIngestError`s (encrypted / fMP4 / unreachable / stalled) so hosts can fall back to a server-mediated path. Demuxed-audio variants (`EXT-X-MEDIA` audio groups) play via a companion rendition reader whose packets merge with the video by DTS, and packed-audio renditions (raw ADTS framed by ID3 timestamps) are wrapped on the fly, so broadcasters like ARD direct-play with sound instead of failing fast; transient playlist-refresh failures retry inside a bounded budget before going terminal. Live reloads (audio-track switch, background return) rejoin at the live edge rather than resuming a stale clock, guarded by a readiness watchdog that fails a wedged rejoin into the host's retune surface; the local playlist adapts `TARGETDURATION` and LL-HLS blocking-reload eligibility to the upstream's real segment cadence, and a terminal ingest loss fires the host retune surface instead of a doomed URL reopen |
 | Resilience  | Direct-URL playback survives CDN stutters: a dropped connection, socket stall, or early close reconnects at the last byte delivered instead of ending playback (only the real end of file reports EOF). `429` / `503` honour `Retry-After`, expired signed URLs re-resolve against the source, and a progress-aware cap stops a dead or flapping origin from hammering the CDN. Plus background pause and a display-link aware lifecycle |
 | Custom input | Play from any byte source via the `IOReader` protocol, passed as `MediaSource.custom` to `load(source:)`: memory buffers, encrypted-at-rest archives, proprietary containers. Seekable readers work on both the native and software playback paths (forward-only readers: software path for VOD, native loopback for live sessions), with audio-track switching, background reload, embedded subtitles, and scrub preview for readers that vend a second cursor |
 
@@ -234,9 +234,12 @@ try await player.load(
 )
 ```
 
-Phase-1 ingest contract: unencrypted MPEG-TS segments. Encrypted playlists
-(`EXT-X-KEY`) and fMP4 playlists (`EXT-X-MAP`) terminate with a typed
-`HLSIngestError` so the host can fall back to a server-mediated URL.
+Ingest contract: unencrypted MPEG-TS segments, including demuxed-audio
+variants (`EXT-X-MEDIA` audio groups, fetched by a companion reader and
+merged by DTS) and packed-audio renditions (raw ADTS framed by ID3
+timestamps). Encrypted playlists (`EXT-X-KEY`) and fMP4 playlists
+(`EXT-X-MAP`) terminate with a typed `HLSIngestError` so the host can
+fall back to a server-mediated URL.
 
 
 Format coverage follows the engine's native-first / software-fallback split. H.264 / HEVC / AV1-with-HW route through the native AVPlayer pipeline; AV1-without-HW / VP9 / MPEG-2 / VC-1 route through the software pipeline with a disk-spooled `PacketRingBuffer` backing the rewind. Both paths present the same session-relative timeline to the host.
@@ -244,7 +247,7 @@ Format coverage follows the engine's native-first / software-fallback split. H.2
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.3.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.4.0")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -473,6 +476,7 @@ Sources/AetherEngine/
 ├── AetherEngine+Diagnostics.swift           Memory probe + live-telemetry bridge
 ├── PlaybackClock.swift                      engine.clock: the ~10 Hz ticking values (currentTime, sourceTime, progress, live-edge fields) as a separate ObservableObject
 ├── PlayerState.swift                        PlaybackState, VideoFormat, PlaybackBackend, LoadOptions, SourceProbe, TrackInfo, FontAttachment, MediaMetadata, SubtitleCue, SubtitleImage
+├── LiveReloadPolicy.swift                   Pure decision functions for live reloads: rejoin at the live edge (no stale resume position), skip the pre-readiness zero seek
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)
 ├── FFmpegErrorConstants.swift               AVERROR sentinels Swift can't import from the C macros
 ├── Audio/
@@ -518,6 +522,7 @@ Sources/AetherEngine/
 │       ├── HLSLiveIngestReader.swift        Public forward-only IOReader ingesting a live HLS upstream (resolver, playlist poller, segment fetcher)
 │       ├── HLSPlaylist.swift                Line-oriented RFC 8216 subset parser (master / media playlists)
 │       ├── HLSPlaylistTracker.swift         Pure segment cursor: duration-capped edge join, window-slide rejoin, stall budget
+│       ├── PackedAudioSegments.swift        Packed-audio rendition support: LiveSegmentFormat classification + ID3 PRIV timestamp parser (raw ADTS segments)
 │       ├── ByteFIFO.swift                   Bounded blocking byte queue between the fetch loop and the demux thread
 │       ├── HLSIngestError.swift             Typed terminal errors (encrypted, fMP4, unreachable, invalid, stalled)
 │       └── LiveIngestSourceInfo.swift       Internal seam: the reader reports the upstream segment cadence so the loopback playlist can shape TARGETDURATION + blocking-reload eligibility
@@ -703,13 +708,13 @@ AetherEngine uses [Semantic Versioning](https://semver.org). The public API surf
 
 `internal` types and properties are not part of the contract and may change in any release. `@testable import AetherEngine` reaches them for the package's own tests, not for production use.
 
-Pin `from: "3.3.1"` in your `Package.swift` to allow patch + minor updates while excluding breaking changes:
+Pin `from: "3.4.0"` in your `Package.swift` to allow patch + minor updates while excluding breaking changes:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.3.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.4.0")
 ```
 
-Pin to `.upToNextMinor(from: "3.3.1")` for stricter teams that prefer to opt into minor bumps explicitly. See [CHANGELOG.md](CHANGELOG.md) for the per-release index.
+Pin to `.upToNextMinor(from: "3.4.0")` for stricter teams that prefer to opt into minor bumps explicitly. See [CHANGELOG.md](CHANGELOG.md) for the per-release index.
 
 ## Requirements
 
