@@ -299,4 +299,30 @@ extension HLSVideoEngine {
         codecpar.pointee.codec_tag = 0
         return true
     }
+
+    /// Whether an AAC source must take the `AudioBridge` (decode → re-encode)
+    /// instead of fMP4 stream-copy because it is HE-AAC (SBR) / HE-AACv2 (PS)
+    /// AND carries no AudioSpecificConfig in `extradata`.
+    ///
+    /// HE-AAC stream-copies cleanly whenever the source already ships an ASC
+    /// (any movie container: MP4 `esds`, MKV `CodecPrivate`). The ASC encodes
+    /// the true core sample rate plus the SBR/PS signaling; AVPlayer reads it
+    /// from the fMP4 init segment and decodes HE-AAC/HE-AACv2 natively
+    /// (AetherEngine#33), exactly as a manual or Jellyfin server-side remux
+    /// does. Bridging those was an unnecessary EAC3/FLAC re-encode.
+    ///
+    /// It only has to bridge when the ASC is ABSENT — live ADTS / MPEG-TS,
+    /// where `prepareAACForFMP4` synthesizes a 2-byte ASC from the codecpar.
+    /// That synthesized ASC declares plain LC at the SBR OUTPUT rate (e.g.
+    /// mp4a.40.2 @ 48 kHz for a 24 kHz core), which AudioToolbox decodes as
+    /// garbage (AVFoundationErrorDomain -11821, device repro: NBC HE-AAC).
+    /// `find_stream_info` decodes a frame before this runs, so `profile`
+    /// (4 = HE, 28 = HE-AACv2) and `frameSize` (SBR doubles the LC frame to
+    /// 2048 samples) are both populated; either one flags HE-AAC.
+    static func aacRequiresBridge(profile: Int32, frameSize: Int32, hasASC: Bool) -> Bool {
+        guard !hasASC else { return false }
+        return profile == 4        // FF_PROFILE_AAC_HE
+            || profile == 28       // FF_PROFILE_AAC_HE_V2
+            || frameSize == 2048   // SBR doubles the LC frame to 2048 samples
+    }
 }
