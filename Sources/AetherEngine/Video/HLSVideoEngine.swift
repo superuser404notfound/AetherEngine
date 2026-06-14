@@ -1079,23 +1079,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 )
             }
             let compat = AudioCodecCompat.from(codecID)
-            // HE-AAC (SBR, profile 4) / HE-AACv2 (PS, profile 28) cannot take
-            // the ADTS stream-copy path: ADTS signals only the LC core (SBR
-            // is implicit), and the synthesized ASC below would declare plain
-            // LC at the SBR OUTPUT rate (mp4a.40.2 @ 48 kHz for a 24 kHz
-            // core), which AudioToolbox decodes as garbage; on device this
-            // surfaced as AVFoundationErrorDomain -11821 right after
-            // readyToPlay with the item's tracks unreadable (NBC 1,
-            // aac(HE-AAC)). The frame_size check is the belt-and-suspenders
-            // discriminator: SBR outputs 2048 samples per frame where plain
-            // LC outputs 1024 (find_stream_info decodes a frame, so both
-            // profile and frame_size are populated). Route through the FLAC
-            // bridge, which decodes + re-encodes correctly.
+            // HE-AAC (SBR) / HE-AACv2 (PS) only has to bridge when the source
+            // carries NO AudioSpecificConfig (live ADTS/MPEG-TS): there the
+            // ASC is synthesized below and would declare plain LC at the SBR
+            // OUTPUT rate, which AudioToolbox decodes as garbage (-11821, NBC
+            // HE-AAC). A movie-container HE-AAC track already ships a correct
+            // ASC in extradata, so fMP4 stream-copy preserves SBR/PS and
+            // AVPlayer decodes it natively — bridging it was an unnecessary
+            // EAC3/FLAC re-encode (AetherEngine#33). See aacRequiresBridge.
             let acpForHE = audioStream.pointee.codecpar.pointee
+            let hasASC = acpForHE.extradata != nil && acpForHE.extradata_size > 0
             let isHEAAC = acpForHE.codec_id == AV_CODEC_ID_AAC
-                && (acpForHE.profile == 4        // FF_PROFILE_AAC_HE
-                    || acpForHE.profile == 28    // FF_PROFILE_AAC_HE_V2
-                    || acpForHE.frame_size == 2048)
+                && Self.aacRequiresBridge(
+                    profile: acpForHE.profile,
+                    frameSize: acpForHE.frame_size,
+                    hasASC: hasASC
+                )
             if compat.requiresBridge || isHEAAC {
                 bridgePreferred = true
                 EngineLog.emit(
