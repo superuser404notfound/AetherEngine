@@ -216,6 +216,21 @@ if first == "dvr" {
     exit(runDVR(path: path, seconds: seconds, dvrWindow: dvrWin))
 }
 
+// Rapid-seek burst repro (issue #35).
+if first == "seektest" {
+    var rest = Array(args.dropFirst(2))
+    let seeks   = takeIntFlag("--seeks", from: &rest) ?? 40
+    let gapMs   = takeIntFlag("--gap-ms", from: &rest) ?? 60
+    let settle  = takeDoubleFlag("--settle", from: &rest) ?? 5.0
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("ERROR: seektest requires a <url> argument")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    rejectStrayFlags(rest, subcommand: "seektest")
+    exit(runSeekTest(url: parseSourceURL(urlArg), seeks: seeks, gapMs: gapMs, settleSeconds: settle))
+}
+
 // HLS live fixture subcommand.
 if first == "hlsfixture" {
     let rest = Array(args.dropFirst(2))
