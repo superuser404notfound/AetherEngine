@@ -31,4 +31,15 @@ final class ISO9660ReaderTests: XCTestCase {
             guard case DiscError.directoryNotFound = err else { return XCTFail("wrong error: \(err)") }
         }
     }
+
+    func test_truncatedImageThrowsMalformedOrNotISO() throws {
+        // A valid-looking ISO whose backing data is cut off before the PVD's
+        // referenced root extent must throw, not trap.
+        let full = ISO9660Fixture.make(files: [.init(name: "VTS_01_1.VOB", length: 100)])
+        let truncated = full.prefix(17 * ISO9660Fixture.sectorSize) // PVD present, root extent cut
+        XCTAssertThrowsError(try {
+            let iso = try ISO9660Reader(reader: DataIOReader(data: Data(truncated)))
+            _ = try iso.list(directory: "VIDEO_TS")
+        }())
+    }
 }
