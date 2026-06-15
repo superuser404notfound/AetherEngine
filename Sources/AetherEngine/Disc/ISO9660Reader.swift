@@ -9,6 +9,7 @@ public struct DiscFile: Equatable, Sendable {
 
 public enum DiscError: Error, Equatable {
     case notISO9660
+    case notUDF
     case directoryNotFound(String)
     case malformed(String)
 }
