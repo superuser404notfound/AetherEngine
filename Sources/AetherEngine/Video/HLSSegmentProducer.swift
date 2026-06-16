@@ -333,6 +333,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// backward jumps at 1.5 s rebases those short elements cleanly.
     static let discontinuityBackwardThresholdSeconds: Double = 1.5
 
+    /// The audio stream's per-session shift across an SSAI program boundary,
+    /// derived so the audio boundary packet lands exactly on the video seam
+    /// output. Output dts = srcDts - shift, so a shift of
+    /// `audioBoundarySrcDts - seamOutAudioTb` makes the boundary packet's
+    /// output equal `seamOutAudioTb` (the video seam, in audio TB) for ANY
+    /// audio source base. This is the fix for amux ad creatives, which mux
+    /// audio on a different source clock than video (Pluto: video from 0,
+    /// audio near 2^33): copying the video's shift verbatim would offset
+    /// audio by that base difference and hang it ~2^33 ticks in the future.
+    static func seamDerivedAudioShift(
+        audioBoundarySrcDts: Int64,
+        seamOutAudioTb: Int64
+    ) -> Int64 {
+        audioBoundarySrcDts - seamOutAudioTb
+    }
+
     /// Previous video packet's RAW source PTS (source video TB), before the
     /// dynamic shift is applied. `Int64.min` until the first post-gate video
     /// packet. Used only in live mode to detect the program-boundary leap.
@@ -386,20 +402,33 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// video, and OutputTimestampSanitizer absorbs the lone sub-frame
     /// output overlap at the seam.
     ///
-    /// `pendingAudioInheritShift` is the video-derived absolute audio
-    /// shift waiting for the audio stream's own boundary packet (video
-    /// usually crosses first; a transient double-rebase just overwrites
-    /// it, latest video shift wins). `lastIndependentAudioRebase` records
-    /// an audio rebase that fired BEFORE the video one (packet interleave
-    /// can deliver the first new-program audio packet early); the
-    /// subsequent video rebase then replaces the audio's measured shift
-    /// with the video-derived absolute one via `pendingAudioShiftOverride`,
+    /// The handoff carries the seam's OUTPUT dts (the position on the
+    /// unified output timeline where the new program begins), NOT the
+    /// video shift. An SSAI ad creative can mux its audio on a DIFFERENT
+    /// source clock than its video (Pluto's amux ads start the video at
+    /// source dts 0 but the amux audio near 2^33), so the two streams do
+    /// not share a source base across the boundary. Handing audio the
+    /// video's shift verbatim would then offset audio by the base
+    /// difference (audio launched ~2^33 ticks into the future, the audio
+    /// hangs). Instead audio derives its own shift from its OWN boundary
+    /// srcDts and the shared seam output position
+    /// (`audioShift = audioBoundarySrcDts - seamOutAudioTb`), which snaps
+    /// audio onto the video timeline regardless of source base.
+    ///
+    /// `pendingAudioInheritSeamOut` is the seam output dts (audio TB)
+    /// waiting for the audio stream's own boundary packet (video usually
+    /// crosses first; a transient double-rebase just overwrites it, latest
+    /// seam wins). `lastIndependentAudioRebase` records an audio rebase
+    /// that fired BEFORE the video one (packet interleave can deliver the
+    /// first new-program audio packet early), keeping that boundary
+    /// packet's srcDts; the subsequent video rebase then re-derives the
+    /// audio shift from it and the seam via `pendingAudioShiftOverride`,
     /// applied at the next audio packet. All pairing state expires after
     /// `rebasePairingWindowSeconds` so a stale half-boundary can never
     /// poison a later, unrelated one.
-    private var pendingAudioInheritShift: (shift: Int64, at: Date)? = nil
-    private var lastIndependentAudioRebase: (preShift: Int64, at: Date)? = nil
-    private var pendingAudioShiftOverride: (shift: Int64, at: Date)? = nil
+    private var pendingAudioInheritSeamOut: (seamOutAudioTb: Int64, at: Date)? = nil
+    private var lastIndependentAudioRebase: (boundarySrcDts: Int64, at: Date)? = nil
+    private var pendingAudioShiftOverride: (seamOutAudioTb: Int64, boundarySrcDts: Int64, at: Date)? = nil
     private static let rebasePairingWindowSeconds: TimeInterval = 5.0
 
     /// Last in-band video extradata observed via
@@ -1938,32 +1967,35 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         lastRawVideoPts = Int64.min
                         pendingDiscontinuityFlag = true
                         pendingForceCutFlag = true
-                        // Hand the video's ABSOLUTE shift to the audio stream
-                        // (rescaled), so both streams carry the identical
-                        // timeline transform and the output A/V offset is the
-                        // intrinsic source skew, re-anchored fresh at every
-                        // boundary (no cross-pod accumulation). See the
-                        // pairing-state docs.
+                        // Hand the seam's OUTPUT dts to the audio stream
+                        // (rescaled), NOT the video shift. Audio then derives
+                        // its own shift from its OWN boundary srcDts against
+                        // this shared seam position, so a creative that muxes
+                        // audio on a different source base than video (Pluto
+                        // amux ads: video from 0, audio near 2^33) still snaps
+                        // audio cleanly onto the video timeline. The output A/V
+                        // offset is re-anchored fresh at every boundary (no
+                        // cross-pod accumulation). See the pairing-state docs.
                         if let audio = audioConfig {
-                            let videoDerivedAudioShift = av_rescale_q(
-                                videoShiftPts,
+                            let seamOutAudioTb = av_rescale_q(
+                                continuationDts,
                                 sourceVideoTimeBase,
                                 audio.sourceTimeBase
                             )
                             if let prior = lastIndependentAudioRebase,
                                Date().timeIntervalSince(prior.at) < Self.rebasePairingWindowSeconds {
                                 // Audio crossed the boundary first (interleave)
-                                // and measured independently; replace its
-                                // measured shift with the video-derived absolute
-                                // one at the next audio packet.
-                                pendingAudioShiftOverride = (videoDerivedAudioShift, Date())
+                                // and measured independently; re-derive its shift
+                                // from its recorded boundary srcDts and the seam
+                                // at the next audio packet.
+                                pendingAudioShiftOverride = (seamOutAudioTb, prior.boundarySrcDts, Date())
                                 lastIndependentAudioRebase = nil
                             } else {
                                 // Audio crosses after video (the common case):
-                                // stash the absolute target. A transient double-
-                                // rebase just overwrites it; the latest video
-                                // shift is the correct one to inherit.
-                                pendingAudioInheritShift = (videoDerivedAudioShift, Date())
+                                // stash the seam output. A transient double-
+                                // rebase just overwrites it; the latest seam is
+                                // the correct one to snap onto.
+                                pendingAudioInheritSeamOut = (seamOutAudioTb, Date())
                             }
                         }
                         // Deferred host-clock handoff: the shift describes
@@ -2020,12 +2052,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             - (lastOutputDts + max(audioFallbackDurationPts, 1))
                         var newShift = measuredShift
                         var inherited = false
-                        if let p = pendingAudioInheritShift,
+                        if let p = pendingAudioInheritSeamOut,
                            Date().timeIntervalSince(p.at) < Self.rebasePairingWindowSeconds {
-                            // Absolute video-derived shift: snap audio onto
-                            // video, discarding any prior audio offset (that is
-                            // what stops the cross-pod accumulation).
-                            let candidate = p.shift
+                            // Snap audio onto the video timeline: derive the
+                            // shift from THIS audio boundary packet's srcDts and
+                            // the shared seam output position, so a differing
+                            // audio source base (amux ads) is absorbed and the
+                            // first audio packet lands exactly on the seam. This
+                            // discards any prior audio offset (what stops the
+                            // cross-pod accumulation).
+                            let candidate = Self.seamDerivedAudioShift(
+                                audioBoundarySrcDts: packet.pointee.dts,
+                                seamOutAudioTb: p.seamOutAudioTb
+                            )
                             if let bridge = audio.bridge {
                                 // Bridge path: shifts never reach the encoder
                                 // timeline (the bridge re-stamps from its
@@ -2042,12 +2081,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 )
                                 inherited = true
                             } else {
-                                // Stream-copy: snap audio onto the video's
-                                // ABSOLUTE shift (candidate). Both streams are
-                                // 90 kHz, so an equal shift makes the output A/V
-                                // offset the intrinsic source skew, re-anchored
-                                // fresh at this boundary. Apply it verbatim; do
-                                // NOT clamp it to the last output dts. A genuine
+                                // Stream-copy: snap audio onto the seam output
+                                // (candidate lands this packet exactly at the
+                                // video seam, base-correct for amux ads). Both
+                                // streams are 90 kHz, so the output A/V offset is
+                                // the intrinsic source skew, re-anchored fresh at
+                                // this boundary. Apply it verbatim; do NOT clamp
+                                // it to the last output dts. A genuine
                                 // SSAI splice changes the audio-vs-video start
                                 // skew by a sub-frame amount (Pluto content leads
                                 // by ~51 ms, the spliced ad by ~67 ms) and the
@@ -2086,12 +2126,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 inherited = true
                             }
                         } else {
-                            // Audio crossed first; remember the pre-boundary
-                            // shift so the upcoming video rebase can replace
-                            // this measurement with the video-derived delta.
-                            lastIndependentAudioRebase = (audioShiftPts, Date())
+                            // Audio crossed first; remember THIS boundary
+                            // packet's srcDts so the upcoming video rebase can
+                            // re-derive the audio shift from it and the seam.
+                            lastIndependentAudioRebase = (packet.pointee.dts, Date())
                         }
-                        pendingAudioInheritShift = nil
+                        pendingAudioInheritSeamOut = nil
                         EngineLog.emit(
                             "[HLSSegmentProducer] live audio timeline rebase: "
                             + "jumpTicks=\(jumpTicks) srcDts=\(packet.pointee.dts) "
@@ -2112,13 +2152,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         // within the pairing window) are dropped: applying a
                         // boundary-old delta later shifts audio wrongly.
                         pendingAudioShiftOverride = nil
+                        // Re-derive the base-correct absolute shift from the
+                        // recorded audio boundary srcDts and the seam, so a
+                        // differing audio source base (amux ads) is absorbed
+                        // instead of copying the video shift into a wrong base.
+                        let derivedShift = Self.seamDerivedAudioShift(
+                            audioBoundarySrcDts: override_.boundarySrcDts,
+                            seamOutAudioTb: override_.seamOutAudioTb
+                        )
                         if Date().timeIntervalSince(override_.at) < Self.rebasePairingWindowSeconds {
                             if let bridge = audio.bridge {
                                 // Bridge path: see the inherit branch; the
                                 // residual between the applied (measured)
                                 // shift and the video-derived one becomes an
                                 // encoder-timeline jump.
-                                let driftTicks = audioShiftPts - override_.shift
+                                let driftTicks = audioShiftPts - derivedShift
                                 let tbSec = tb.den > 0
                                     ? Double(tb.num) / Double(tb.den) : 0
                                 bridge.noteTimelineJump(
@@ -2129,27 +2177,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                     category: .session
                                 )
                             } else {
-                                // Apply the video-derived shift verbatim (both
-                                // streams 90 kHz, so it is sample-exact). Same
-                                // reasoning as the inherit branch above: do not
-                                // clamp the shift to the last output dts, which
-                                // dragged audio permanently late and accumulated
-                                // across creatives. Leave the sub-frame splice
-                                // overlap to OutputTimestampSanitizer; only an
+                                // Apply the seam-derived shift (both streams
+                                // 90 kHz, so it is sample-exact). Same reasoning
+                                // as the inherit branch above: do not clamp the
+                                // shift to the last output dts, which dragged
+                                // audio permanently late and accumulated across
+                                // creatives. Leave the sub-frame splice overlap
+                                // to OutputTimestampSanitizer; only an
                                 // implausibly large overlap (> 0.5 s) re-anchors.
                                 let lastOutputDts = lastAudioSourceDts - audioShiftPts
-                                let firstOutputDts = packet.pointee.dts - override_.shift
+                                let firstOutputDts = override_.boundarySrcDts - derivedShift
                                 let overlapTicks = lastOutputDts - firstOutputDts
                                 let maxOverlapTicks = tb.num > 0
                                     ? Int64(0.5 * Double(tb.den) / Double(tb.num))
                                     : Int64.max
                                 let applied = overlapTicks > maxOverlapTicks
                                     ? packet.pointee.dts - lastOutputDts - 1
-                                    : override_.shift
+                                    : derivedShift
                                 EngineLog.emit(
                                     "[HLSSegmentProducer] audio rebase corrected to video-derived shift: "
                                     + "old=\(audioShiftPts) new=\(applied)"
-                                    + (applied != override_.shift ? " (re-anchored, overlap \(overlapTicks) ticks)" : ""),
+                                    + (applied != derivedShift ? " (re-anchored, overlap \(overlapTicks) ticks)" : ""),
                                     category: .session
                                 )
                                 audioShiftPts = applied
@@ -2539,11 +2587,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 audioTb
                             )
                             // The inherited shift is the CURRENT (possibly
-                            // already-rebased) video shift; a boundary delta
+                            // already-rebased) video shift; a seam handoff
                             // still armed from before gate-open is thereby
                             // consumed and must not apply again at the next
                             // audio jump.
-                            pendingAudioInheritShift = nil
+                            pendingAudioInheritSeamOut = nil
                         } else {
                             // Restart session: keep the gate-on-video snap.
                             // The first audio packet is aligned to the video
