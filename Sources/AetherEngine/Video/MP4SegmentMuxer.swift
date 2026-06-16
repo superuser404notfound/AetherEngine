@@ -236,6 +236,11 @@ final class MP4SegmentMuxer {
     /// caller invokes finalize() after a header-write failure.
     private var headerWritten: Bool = false
 
+    /// Per-output-stream final timestamp guard (strictly increasing dts,
+    /// pts >= dts). A no-op for healthy content; rescues SSAI ad-boundary
+    /// segments whose pts < dts would otherwise be dropped wholesale.
+    private var timestampSanitizer = OutputTimestampSanitizer()
+
     /// Latched after the first `av_write_frame(ctx, NULL)` call,
     /// which is when the `+delay_moov` muxer writes the deferred
     /// ftyp + moov atoms. With delay_moov, the first cut may need a
@@ -575,6 +580,19 @@ final class MP4SegmentMuxer {
     @discardableResult
     func writePacket(_ packet: UnsafeMutablePointer<AVPacket>) -> Int32 {
         guard let ctx = formatContext else { return -1 }
+        // Final-stage guard: enforce strictly-increasing dts and pts >= dts
+        // per output stream. Healthy content is unchanged; this only fires
+        // for server-side-ad-insertion boundaries (Pluto/FAST) whose
+        // creatives restart the source clock and trail pts behind dts,
+        // which otherwise makes the muxer drop every audio packet of the
+        // ad and stalls AVPlayer. See OutputTimestampSanitizer.
+        let clean = timestampSanitizer.sanitize(
+            streamIndex: packet.pointee.stream_index,
+            pts: packet.pointee.pts,
+            dts: packet.pointee.dts
+        )
+        packet.pointee.pts = clean.pts
+        packet.pointee.dts = clean.dts
         // av_interleaved_write_frame instead of av_write_frame.
         // Tested av_write_frame against av_interleaved as a leak
         // hypothesis (the latter buffers packets in a PacketListEntry
