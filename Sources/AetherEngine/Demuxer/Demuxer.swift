@@ -359,34 +359,6 @@ public final class Demuxer: @unchecked Sendable {
         return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO
     }
 
-    /// Live pointer to `index`'s codecpar, for re-allocating the fMP4
-    /// muxer at an SSAI program switch (the muxer copies it synchronously
-    /// via `avcodec_parameters_copy`, so the pointer need only outlive the
-    /// call). nil if the stream is gone. Mirrors how the producer's
-    /// session VideoConfig already holds a live demuxer codecpar pointer.
-    func videoCodecparPointer(forStream index: Int32) -> UnsafePointer<AVCodecParameters>? {
-        accessLock.lock(); defer { accessLock.unlock() }
-        guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams,
-              let stream = ctx.pointee.streams[Int(index)] else { return nil }
-        return UnsafePointer(stream.pointee.codecpar)
-    }
-
-    /// True once `index`'s video codecpar is fully parsed and muxable:
-    /// dimensions AND extradata (SPS/PPS) are set. A new video PID from an
-    /// SSAI ad creative appears mid-stream with an empty codecpar that
-    /// libavformat fills only after parsing the first keyframe's parameter
-    /// sets; re-allocating the muxer before then fails with
-    /// `avformat_write_header (-22) "dimensions not set"`. The producer
-    /// waits for this before switching/rotating.
-    func isVideoCodecparReady(_ index: Int32) -> Bool {
-        accessLock.lock(); defer { accessLock.unlock() }
-        guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams,
-              let stream = ctx.pointee.streams[Int(index)] else { return false }
-        let par = stream.pointee.codecpar.pointee
-        return par.codec_type == AVMEDIA_TYPE_VIDEO
-            && par.width > 0 && par.height > 0
-            && par.extradata != nil && par.extradata_size > 0
-    }
 
     /// Index of the best audio stream, or -1 if none. Same
     /// `AVERROR_STREAM_NOT_FOUND` clamp as `videoStreamIndex`.

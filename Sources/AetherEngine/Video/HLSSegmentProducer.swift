@@ -343,6 +343,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// (versioned-init path). Consumed when that segment opens.
     private var pendingVideoProgramSwitch: Bool = false
 
+    /// The ad creative's video config parsed from its keyframe's in-band
+    /// SPS/PPS at the program switch (the mid-stream demuxer codecpar is
+    /// unparsed, width/height == 0). Used to build the rotation muxer:
+    /// explicit dimensions + Annex-B extradata the mov muxer packs into
+    /// avcC. Set with `pendingVideoProgramSwitch`, consumed at the rotation.
+    private var pendingAdVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])?
+
     /// Cross-stream rebase pairing. A program boundary jumps the shared
     /// MPEG-TS source clock on BOTH streams, but the content gap at the
     /// splice is rarely symmetric (audio lead-out / silence / dropped
@@ -1085,38 +1092,55 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// SSAI versioned-init rotation: finalize the program's last segment
     /// on the old muxer, then allocate a fresh muxer (new init version)
-    /// for the ad creative at `newIdx`. The ad's video codecpar comes
-    /// live from the demuxer's (already re-pointed) videoStreamIndex.
+    /// for the ad creative at `newIdx`, built from the ad config parsed
+    /// out of its keyframe's SPS at the program switch.
     private func rotateMuxerForProgramSwitch(to newIdx: Int) -> MP4SegmentMuxer? {
         let finishedIdx = currentMuxerSegmentIndex
         finalizeSessionMuxerAndAdopt() // adopts finishedIdx, nils currentMuxer
         pendingVideoProgramSwitch = false
-        guard let newCodecpar = demuxer.videoCodecparPointer(forStream: videoStreamIndex) else {
+        guard let adConfig = pendingAdVideoConfig else {
             EngineLog.emit(
-                "[HLSSegmentProducer] program switch: no codecpar for new video stream "
-                + "\(videoStreamIndex); cannot re-init muxer",
+                "[HLSSegmentProducer] program switch: no parsed ad video config; "
+                + "cannot re-init muxer",
                 category: .session
             )
             return nil
         }
+        pendingAdVideoConfig = nil
         EngineLog.emit(
             "[HLSSegmentProducer] muxer rotation at SSAI program switch: "
-            + "seg-\(finishedIdx) finalized on old init, fresh init for seg-\(newIdx)",
+            + "seg-\(finishedIdx) finalized on old init, fresh init for seg-\(newIdx) "
+            + "(\(adConfig.width)x\(adConfig.height))",
             category: .session
         )
-        return allocateMuxer(initialSegmentIndex: newIdx, videoCodecparOverride: newCodecpar)
+        return allocateMuxer(initialSegmentIndex: newIdx, adVideoConfig: adConfig)
+    }
+
+    /// Parse the ad creative's video config from a keyframe packet's
+    /// in-band Annex-B SPS/PPS: explicit dimensions (from the SPS) plus
+    /// Annex-B extradata the mov muxer packs into avcC. nil when the
+    /// packet carries no parameter sets (mid-GOP join). H.264 only; other
+    /// codecs fall back (the switch won't fire and the watchdog catches it).
+    private func extractAdVideoConfig(_ packet: UnsafeMutablePointer<AVPacket>) -> (width: Int32, height: Int32, extradata: [UInt8])? {
+        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
+        let buf = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+        guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
+              let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
+        return (Int32(dim.width), Int32(dim.height),
+                H264SPS.annexBExtradata(sps: sps, pps: pps))
     }
 
     /// First-time allocation of the session's single mp4 muxer. Wires
     /// the init.mp4 callback so the cache gets seeded once.
     ///
-    /// `videoCodecparOverride` re-allocates the muxer at an SSAI program
-    /// switch with the AD creative's video codecpar (different
-    /// SPS/resolution). The captured init then becomes a NEW version in
-    /// the cache (so the playlist emits a per-discontinuity EXT-X-MAP)
-    /// rather than overwriting the session init.
+    /// `adVideoConfig` re-allocates the muxer at an SSAI program switch
+    /// with the AD creative's parsed dimensions + Annex-B SPS/PPS
+    /// extradata (the mid-stream demuxer codecpar is unparsed). The
+    /// captured init becomes a NEW version in the cache (so the playlist
+    /// emits a per-discontinuity EXT-X-MAP) rather than overwriting the
+    /// session init.
     private func allocateMuxer(initialSegmentIndex: Int,
-                               videoCodecparOverride: UnsafePointer<AVCodecParameters>? = nil) -> MP4SegmentMuxer? {
+                               adVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])? = nil) -> MP4SegmentMuxer? {
         // Backpressure even on the first segment so the producer
         // doesn't try to allocate ahead of AVPlayer's declared target.
         let backpressureTarget = initialSegmentIndex - Self.bufferAheadSegments
@@ -1125,15 +1149,43 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         if checkShouldStop() { return nil }
 
-        let isReinit = videoCodecparOverride != nil
+        let isReinit = adVideoConfig != nil
+
+        // Build a fresh codecpar from the parsed ad SPS for a re-init:
+        // explicit dimensions + Annex-B extradata. avcodec_parameters_copy
+        // (inside the muxer) copies it; we free our temporary right after.
+        var adPar: UnsafeMutablePointer<AVCodecParameters>?
+        defer { if adPar != nil { avcodec_parameters_free(&adPar) } }
+        let videoCodecpar: UnsafePointer<AVCodecParameters>
+        if let adVideoConfig {
+            guard let par = avcodec_parameters_alloc() else { return nil }
+            par.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+            par.pointee.codec_id = AV_CODEC_ID_H264
+            par.pointee.width = adVideoConfig.width
+            par.pointee.height = adVideoConfig.height
+            let ed = adVideoConfig.extradata
+            let pad = Int(AV_INPUT_BUFFER_PADDING_SIZE)
+            if let raw = av_malloc(ed.count + pad) {
+                let bytes = raw.assumingMemoryBound(to: UInt8.self)
+                ed.withUnsafeBytes { _ = memcpy(bytes, $0.baseAddress, ed.count) }
+                memset(bytes + ed.count, 0, pad)
+                par.pointee.extradata = bytes
+                par.pointee.extradata_size = Int32(ed.count)
+            }
+            adPar = par
+            videoCodecpar = UnsafePointer(par)
+        } else {
+            videoCodecpar = videoConfig.codecpar
+        }
+
         let muxerVideo = MP4SegmentMuxer.VideoConfig(
-            codecpar: videoCodecparOverride ?? videoConfig.codecpar,
+            codecpar: videoCodecpar,
             timeBase: videoConfig.timeBase,
             codecTagOverride: videoConfig.codecTagOverride,
             // The session's DV-strip / color / extradata overrides were
             // derived from the program's codecpar; on a re-init the ad's
-            // own (copied) codecpar carries its signaling, so don't force
-            // the program's values onto it.
+            // own codecpar carries its signaling, so don't force the
+            // program's values onto it.
             stripDolbyVisionMetadata: isReinit ? false : videoConfig.stripDolbyVisionMetadata,
             colorOverride: isReinit ? nil : videoConfig.colorOverride,
             extradataOverride: isReinit ? nil : videoConfig.extradataOverride
@@ -1617,15 +1669,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                    pktStreamIdx != videoStreamIndex,
                    pktStreamIdx != (audioConfig?.sourceStreamIndex ?? -1),
                    demuxer.isVideoStream(pktStreamIdx),
-                   // Wait until the new PID's codecpar is muxable (dimensions
-                   // + SPS/PPS parsed); until then drop its packets as a
-                   // foreign stream. libavformat fills this within the first
-                   // keyframe, so the ad starts at most a frame or two late.
-                   demuxer.isVideoCodecparReady(pktStreamIdx) {
+                   // The mid-stream demuxer codecpar is unparsed (width 0),
+                   // so build the ad's config from its keyframe's in-band
+                   // SPS/PPS. Only switch on a packet that carries them; a
+                   // mid-GOP join without parameter sets is dropped as a
+                   // foreign stream until the next keyframe.
+                   let adConfig = extractAdVideoConfig(packet) {
                     EngineLog.emit(
                         "[HLSSegmentProducer] SSAI video program switch: "
                         + "videoStreamIndex \(videoStreamIndex) → \(pktStreamIdx) "
-                        + "(ad/program on a new video PID)",
+                        + "(ad/program \(adConfig.width)x\(adConfig.height) on a new video PID)",
                         category: .session
                     )
                     videoStreamIndex = pktStreamIdx
@@ -1636,6 +1689,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // ad's video isn't dropped by the leading-B-frame gate.
                     lastSeenVideoExtradata = nil
                     pendingVideoProgramSwitch = true
+                    pendingAdVideoConfig = adConfig
                     // (pendingDiscontinuityFlag / pendingForceCutFlag are
                     // set by the rebase that follows.)
                 }
