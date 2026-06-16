@@ -582,6 +582,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var audioGateWaitStart: Date?
     private static let liveAudioGateTimeoutSeconds: TimeInterval = 5
     private var pregateAudioDropCount: Int = 0
+
+    /// Wall-clock of the last finalized live segment. Drives the
+    /// no-cut stall watchdog: while the pump keeps reading packets but
+    /// finalizes no segment for `liveSegmentStallTimeoutSeconds`, the
+    /// cutter is wedged (hostile SSAI ad pod) and the pump exits with
+    /// `.segmentStall` so the host can retune to the server route.
+    /// nil until the first segment is finalized (startup has its own
+    /// gates); set on every `reportLiveSegmentFinalized`.
+    private var lastLiveSegmentFinalizeAt: Date?
+    /// No-cut watchdog window. Comfortably above the ~5 s segment
+    /// cadence (so normal jitter never trips it) and the 12 s playlist
+    /// refresh budget, but well under the buffer the player holds, so a
+    /// wedged cutter fails over before AVPlayer drains. Live-only.
+    private static let liveSegmentStallTimeoutSeconds: TimeInterval = 10
     private var lastPregateVideoLog: Int = 0
     private var lastPregateAudioLog: Int = 0
     private static let pregateLogInterval = 200
@@ -735,6 +749,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// exits terminally and the engine asks the host to re-negotiate
         /// a fresh playback session at the live edge.
         case sourceReplay
+        /// Live: the pump kept reading packets but finalized no new
+        /// segment for the stall window. Hostile server-side ad
+        /// insertion (Pluto/FAST ad pods restarting source timestamps
+        /// per creative) can wedge the segment cutter even when bytes
+        /// keep flowing; rather than let AVPlayer hang on the missing
+        /// next segment, exit so the engine asks the host to retune
+        /// (which falls back to the server-muxed route that tolerates
+        /// the ad pod). Defense-in-depth behind the discontinuity
+        /// rebase: if rebasing ever fails to keep cutting, this fires.
+        case segmentStall
 
         var description: String {
             switch self {
@@ -744,6 +768,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             case .muxerFailed: return "muxerFailed"
             case .keyframeStarvation: return "keyframeStarvation"
             case .sourceReplay: return "sourceReplay"
+            case .segmentStall: return "segmentStall"
             }
         }
     }
@@ -1187,6 +1212,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let discontinuous = liveSegmentDiscontinuousByIndex[index] ?? false
         liveSegmentStartByIndex.removeValue(forKey: index)
         liveSegmentDiscontinuousByIndex.removeValue(forKey: index)
+        // Feed the no-cut stall watchdog: a finalized segment means the
+        // cutter is alive, so reset its clock.
+        lastLiveSegmentFinalizeAt = Date()
         EngineLog.emit(
             "[HLSSegmentProducer] live seg-\(index) finalized: start=\(String(format: "%.3f", startSeconds))s "
             + "dur=\(String(format: "%.3f", duration))s"
@@ -1427,6 +1455,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 stateLock.unlock()
                 if stopRequested {
                     exitReason = .stopRequested
+                    break readLoop
+                }
+
+                // No-cut stall watchdog (live, defense-in-depth behind
+                // the discontinuity rebase). The loop only reaches here
+                // when packets are flowing (readNextSourcePacket returns);
+                // if they keep flowing yet no segment finalizes for the
+                // window, the cutter is wedged on a hostile SSAI ad pod.
+                // Exit so the host retunes to the server route instead of
+                // letting AVPlayer hang on the missing next segment.
+                if isLive, let lastFinalize = lastLiveSegmentFinalizeAt,
+                   Date().timeIntervalSince(lastFinalize) > Self.liveSegmentStallTimeoutSeconds {
+                    EngineLog.emit(
+                        "[HLSSegmentProducer] no-cut stall: pump reading but no segment "
+                        + "finalized for \(Int(Self.liveSegmentStallTimeoutSeconds))s "
+                        + "(packetsRead=\(packetsRead)); exiting for host retune",
+                        category: .session
+                    )
+                    exitReason = .segmentStall
                     break readLoop
                 }
 

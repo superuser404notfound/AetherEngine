@@ -23,6 +23,19 @@ extension HLSVideoEngine {
             )
             onLiveSourceReset?()
             return
+        case .segmentStall:
+            // The cutter wedged (hostile SSAI ad pod the direct re-mux
+            // can't keep cutting through). An in-engine URL reopen would
+            // re-enter the same ad pod, so hand it to the host: the
+            // direct-path fallback latch sends it to the server-muxed
+            // route, which tolerates the ad pod's timestamp resets.
+            EngineLog.emit(
+                "[HLSVideoEngine] live segment cutter stalled (likely SSAI ad pod); "
+                + "requesting host retune to the server route",
+                category: .session
+            )
+            onLiveSourceReset?()
+            return
         case .eof, .readError, .keyframeStarvation:
             // A healthy live source never EOFs; treat it like a loss.
             // A source that cannot be reopened by URL (custom reader, e.g.
