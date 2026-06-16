@@ -282,8 +282,24 @@ extension AetherEngine {
             Task { @MainActor in
                 // A stale session (superseded by a zap) must not trigger a
                 // retune of whatever is playing now.
-                guard let self, let session,
-                      self.nativeVideoSession === session else { return }
+                guard let self, let session else {
+                    EngineLog.emit(
+                        "[AetherEngine] onLiveSourceReset dropped: self/session deallocated",
+                        category: .session
+                    )
+                    return
+                }
+                guard self.nativeVideoSession === session else {
+                    EngineLog.emit(
+                        "[AetherEngine] onLiveSourceReset dropped: session superseded (not current)",
+                        category: .session
+                    )
+                    return
+                }
+                EngineLog.emit(
+                    "[AetherEngine] onLiveSourceReset → publishing liveSourceReset to host",
+                    category: .session
+                )
                 self.liveSourceReset.send()
             }
         }

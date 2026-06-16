@@ -620,11 +620,30 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// nil until the first segment is finalized (startup has its own
     /// gates); set on every `reportLiveSegmentFinalized`.
     private var lastLiveSegmentFinalizeAt: Date?
-    /// No-cut watchdog window. Comfortably above the ~5 s segment
-    /// cadence (so normal jitter never trips it) and the 12 s playlist
-    /// refresh budget, but well under the buffer the player holds, so a
-    /// wedged cutter fails over before AVPlayer drains. Live-only.
+    /// No-cut watchdog window for a genuine CUTTER WEDGE: the pump is
+    /// reading packets at a healthy rate but finalizes no segment (hostile
+    /// SSAI ad pod the re-mux can't cut through). Comfortably above the
+    /// ~5 s segment cadence and the 12 s playlist refresh budget, but well
+    /// under the buffer the player holds, so a wedged cutter fails over
+    /// before AVPlayer drains. Live-only.
     private static let liveSegmentStallTimeoutSeconds: TimeInterval = 10
+    /// No-cut watchdog window for SOURCE STARVATION: the pump is barely
+    /// reading (a slow / flaky CDN segment trickling in or timing out), so
+    /// the cutter is fine, the upstream is the problem. The HLS ingest
+    /// reader owns this: it retries each segment up to 3x (~31 s budget)
+    /// and then goes terminal, which exits the pump cleanly via readError.
+    /// Escalating at the tight wedge timeout instead would turn a single
+    /// transient slow segment into a full host retune (device repro:
+    /// playback hung ~17 s after start on a -1001 segment timeout). This
+    /// longer backstop only fires if the ingest neither recovers nor
+    /// terminates (e.g. a sustained 404-window slide), well past the
+    /// ingest's own retry budget. Live-only.
+    private static let liveSourceStarvationTimeoutSeconds: TimeInterval = 35
+    /// Packets read in the watchdog window above which the stall counts as
+    /// a cutter wedge (healthy read, no cut) rather than source starvation
+    /// (a trickle). ~1 s of a 30 fps program plus its audio; a wedged
+    /// SSAI pod reads hundreds in the window, a starved source a handful.
+    private static let liveWedgeProgressPacketThreshold = 60
     private var lastPregateVideoLog: Int = 0
     private var lastPregateAudioLog: Int = 0
     private static let pregateLogInterval = 200
@@ -1573,6 +1592,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
         var packetsRead = 0
         var lastError: Int32 = 0
         var exitReason: PumpExitReason = .eof
+        // No-cut watchdog progress tracking: snapshot packetsRead each time
+        // a segment finalizes, so the watchdog can tell a cutter wedge
+        // (many packets read since, no cut) from source starvation (a
+        // trickle). Updated when lastLiveSegmentFinalizeAt advances.
+        var packetsReadAtLastFinalize = 0
+        var lastFinalizeSeen: Date? = lastLiveSegmentFinalizeAt
 
         do {
             readLoop: while true {
@@ -1584,23 +1609,42 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     break readLoop
                 }
 
-                // No-cut stall watchdog (live, defense-in-depth behind
-                // the discontinuity rebase). The loop only reaches here
-                // when packets are flowing (readNextSourcePacket returns);
-                // if they keep flowing yet no segment finalizes for the
-                // window, the cutter is wedged on a hostile SSAI ad pod.
-                // Exit so the host retunes to the server route instead of
-                // letting AVPlayer hang on the missing next segment.
-                if isLive, let lastFinalize = lastLiveSegmentFinalizeAt,
-                   Date().timeIntervalSince(lastFinalize) > Self.liveSegmentStallTimeoutSeconds {
-                    EngineLog.emit(
-                        "[HLSSegmentProducer] no-cut stall: pump reading but no segment "
-                        + "finalized for \(Int(Self.liveSegmentStallTimeoutSeconds))s "
-                        + "(packetsRead=\(packetsRead)); exiting for host retune",
-                        category: .session
-                    )
-                    exitReason = .segmentStall
-                    break readLoop
+                // Pick up a finalize that happened since the last iteration
+                // so the watchdog's progress baseline tracks the cut cadence.
+                if lastLiveSegmentFinalizeAt != lastFinalizeSeen {
+                    lastFinalizeSeen = lastLiveSegmentFinalizeAt
+                    packetsReadAtLastFinalize = packetsRead
+                }
+                // No-cut stall watchdog (live, defense-in-depth behind the
+                // discontinuity rebase). The loop only reaches here when
+                // readNextSourcePacket returns, so distinguish the two ways
+                // a cut can stall: a WEDGE reads packets at a healthy rate
+                // but can't finalize (hostile SSAI ad pod) and must fail
+                // over fast; SOURCE STARVATION barely reads (a slow / flaky
+                // CDN segment) and belongs to the ingest reader's own retry
+                // + terminal budget, so escalating it at the tight wedge
+                // timeout would turn one transient slow segment into a full
+                // host retune. Use the longer starvation backstop unless the
+                // pump made real read progress without cutting.
+                if isLive, let lastFinalize = lastLiveSegmentFinalizeAt {
+                    let stalledFor = Date().timeIntervalSince(lastFinalize)
+                    let progress = packetsRead - packetsReadAtLastFinalize
+                    let isWedge = progress >= Self.liveWedgeProgressPacketThreshold
+                    let timeout = isWedge
+                        ? Self.liveSegmentStallTimeoutSeconds
+                        : Self.liveSourceStarvationTimeoutSeconds
+                    if stalledFor > timeout {
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] no-cut stall: no segment finalized for "
+                            + "\(Int(stalledFor))s (packetsRead=\(packetsRead), "
+                            + "sinceFinalize=\(progress), "
+                            + "\(isWedge ? "cutter wedge" : "source starvation")); "
+                            + "exiting for host retune",
+                            category: .session
+                        )
+                        exitReason = .segmentStall
+                        break readLoop
+                    }
                 }
 
                 guard let (packet, origin) = try readNextSourcePacket() else {
