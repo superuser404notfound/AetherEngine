@@ -99,6 +99,22 @@ public enum EngineLog {
         return map
     }()
 
+    /// Severity of a diagnostic line, controlling which sinks see it.
+    public enum Level: Sendable {
+        /// Decision points, lifecycle, and errors. Written to OSLog at
+        /// the default level (visible in Console.app / `log stream`) and
+        /// mirrored to the host handler (in-app Support screen,
+        /// aetherctl stdout). This is the default.
+        case info
+        /// High-frequency, per-segment / per-request trace (local-server
+        /// GETs, each captured segment). Written to OSLog at `.debug`
+        /// level only — suppressed in the default Console stream and NOT
+        /// mirrored to the host handler, so it stays out of the in-app
+        /// log buffer. Retrieve on demand with
+        /// `log stream --level debug --predicate 'subsystem == "de.superuser404.AetherEngine"'`.
+        case verbose
+    }
+
     /// Emit one diagnostic line under the generic `.engine` category.
     /// Kept for source compatibility with the original call sites;
     /// new code should prefer the typed-category overload.
@@ -121,5 +137,20 @@ public enum EngineLog {
     public static func emit(_ line: String, category: Category) {
         loggers[category]?.log("\(line, privacy: .public)")
         handler?(line)
+    }
+
+    /// Emit at a chosen severity. `.info` behaves exactly like
+    /// `emit(_:category:)`; `.verbose` routes to OSLog `.debug` only and
+    /// skips the host handler, keeping per-segment / per-request trace
+    /// out of the default Console stream and the in-app log buffer while
+    /// remaining retrievable via `log stream --level debug`.
+    public static func emit(_ line: String, category: Category, level: Level) {
+        switch level {
+        case .info:
+            loggers[category]?.log("\(line, privacy: .public)")
+            handler?(line)
+        case .verbose:
+            loggers[category]?.debug("\(line, privacy: .public)")
+        }
     }
 }

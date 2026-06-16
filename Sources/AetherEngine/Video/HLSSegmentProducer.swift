@@ -1320,7 +1320,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if let result = muxer.cutFragmentForNextSegment(newIdx) {
             EngineLog.emit(
                 "[HLSSegmentProducer] seg-\(currentMuxerSegmentIndex).m4s captured (\(result.bytesWritten) B)",
-                category: .session
+                category: .session, level: .verbose
             )
             cache.adopt(index: currentMuxerSegmentIndex,
                         stagingPath: result.path,
@@ -1422,7 +1422,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if let result = muxer.finalize() {
             EngineLog.emit(
                 "[HLSSegmentProducer] seg-\(idx).m4s captured (\(result.bytesWritten) B)",
-                category: .session
+                category: .session, level: .verbose
             )
             cache.adopt(index: idx, stagingPath: result.path,
                         byteCount: result.bytesWritten)
