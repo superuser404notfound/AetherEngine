@@ -42,6 +42,24 @@ final class NativeAVPlayerHost {
     /// play/pause press" symptom).
     @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
 
+    // MARK: - Seek landing state
+
+    /// Monotonic seek counter. A scrub that supersedes an in-flight seek
+    /// bumps this so AVPlayer's `finished == false` completion for the
+    /// abandoned seek can be told apart from the latest seek's real
+    /// landing: only the newest generation clears the in-flight state
+    /// and publishes the landed time. See `seek(to:)`.
+    private var seekGeneration: UInt64 = 0
+
+    /// True between a `seek(to:)` call and the AVPlayer completion handler
+    /// firing for the latest seek. While set, the periodic time observer
+    /// suppresses `currentTime` publishing: the loopback HLS-fMP4 source
+    /// lands a seek seconds after the call, so the observer would read the
+    /// stale pre-seek clock and bounce the engine clock back through the
+    /// old position (issue #37). The completion handler publishes the
+    /// landed time once and clears this.
+    private(set) var seekInFlight: Bool = false
+
     // MARK: - Output
 
     /// The AVPlayerLayer the engine attaches to the bound
@@ -503,7 +521,14 @@ final class NativeAVPlayerHost {
         ) { [weak self] time in
             let value = time.seconds.isFinite ? time.seconds : 0
             Task { @MainActor in
-                self?.currentTime = value
+                guard let self else { return }
+                // While a seek is in flight AVPlayer still reports the
+                // pre-seek clock until the seek physically lands on the
+                // loopback HLS-fMP4 source; publishing it bounces the
+                // engine clock back through the old position (issue #37).
+                // The seek completion handler publishes the landed time.
+                guard !self.seekInFlight else { return }
+                self.currentTime = value
             }
         }
 
@@ -583,7 +608,12 @@ final class NativeAVPlayerHost {
         // device repro). See LiveReloadPolicy.skipInitialSeek. VOD /
         // initial loopback joins (default) seek to startPosition.
         if !skipInitialSeek {
-            seek(to: startPosition ?? 0)
+            // Load-time positioning, not a user seek: no in-flight signal or
+            // landing await needed (the item is not yet serving a clock the
+            // host observes). Drive AVPlayer directly; the async public
+            // seek(to:) carries the #37/#38 landing semantics for scrubs.
+            avPlayer.seek(to: CMTime(seconds: startPosition ?? 0, preferredTimescale: 600),
+                          toleranceBefore: .zero, toleranceAfter: .zero)
         }
     }
 
@@ -635,21 +665,55 @@ final class NativeAVPlayerHost {
         avPlayer.pause()
     }
 
-    func seek(to seconds: Double) {
+    /// Seek the underlying AVPlayer and resolve only when the seek
+    /// **physically lands** (AVPlayer's completion handler), not when the
+    /// call returns. The loopback HLS-fMP4 source lands a seek seconds
+    /// after the call; resolving early let the engine flip back to
+    /// `.playing` and let the 100 ms periodic observer overwrite the
+    /// target with the stale pre-seek clock (issue #37). `seekInFlight`
+    /// spans the real landing so the observer is suppressed across it.
+    ///
+    /// A superseding seek (the user scrubs again before this lands) bumps
+    /// `seekGeneration`; AVPlayer reports the abandoned seek's completion
+    /// with `finished == false`. Only the latest generation clears the
+    /// in-flight state and publishes the landed time, so a stale
+    /// completion can't drop the in-flight flag while a newer seek is
+    /// still in flight.
+    func seek(to seconds: Double) async {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
-        // Frame-accurate seek. Earlier experiment with
-        // `.positiveInfinity` tolerances to skip the IDR-to-target
-        // decode pre-roll caused AVPlayer to land on apparently-
-        // arbitrary sync samples far from the requested time — the
-        // user's TestFlight session showed the image "hanging" on
-        // wrong-position content during forward scrubs. AVPlayer's
-        // "most efficient seek" interpretation of unbounded tolerance
-        // appears to be undefined for HLS-fMP4 served over loopback,
-        // matching the long-standing openradar 44904505 bug report.
-        // Keep tolerances at zero until we have a different lever
-        // (predictive engine prefetch on scrub commit) that doesn't
-        // depend on tolerance semantics.
-        avPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        seekGeneration &+= 1
+        let gen = seekGeneration
+        seekInFlight = true
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            // Frame-accurate seek. Earlier experiment with
+            // `.positiveInfinity` tolerances to skip the IDR-to-target
+            // decode pre-roll caused AVPlayer to land on apparently-
+            // arbitrary sync samples far from the requested time — the
+            // user's TestFlight session showed the image "hanging" on
+            // wrong-position content during forward scrubs. AVPlayer's
+            // "most efficient seek" interpretation of unbounded tolerance
+            // appears to be undefined for HLS-fMP4 served over loopback,
+            // matching the long-standing openradar 44904505 bug report.
+            // Keep tolerances at zero until we have a different lever
+            // (predictive engine prefetch on scrub commit) that doesn't
+            // depend on tolerance semantics.
+            avPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { cont.resume(); return }
+                    // A newer seek already owns the in-flight state; just
+                    // unblock this awaiter and leave its flags intact.
+                    if gen == self.seekGeneration {
+                        self.seekInFlight = false
+                        // Publish the exact landed position so the clock
+                        // settles on the target immediately instead of
+                        // waiting a tick for the periodic observer.
+                        let landed = self.avPlayer.currentTime().seconds
+                        if landed.isFinite { self.currentTime = landed }
+                    }
+                    cont.resume()
+                }
+            }
+        }
     }
 
     func setRate(_ value: Float) {

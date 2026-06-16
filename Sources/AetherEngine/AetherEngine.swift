@@ -66,6 +66,68 @@ public final class AetherEngine: ObservableObject {
     /// Always false on the initial load spin-up (that is `state == .loading`).
     @Published public internal(set) var isBuffering: Bool = false
 
+    /// True from the moment a seek begins until it **physically lands**,
+    /// uniform across programmatic `seek(to:)` and native AVKit
+    /// transport-bar scrubs. Unlike `state == .seeking` (which the engine
+    /// optimistically flips back to `.playing` so a host UI does not stick
+    /// on the spinner), this spans the real landing on the loopback-HLS
+    /// native path, where the seek resolves seconds after the call. A host
+    /// coordinating playback across devices can gate on this to tell a
+    /// deliberate seek from a rebuffer or an underflow skip without
+    /// inferring it from `currentTime` jumps (AetherEngine#38). Paired with
+    /// `seekTarget`.
+    @Published public internal(set) var isSeeking: Bool = false
+
+    /// The source-PTS destination of the in-flight seek (the same axis as
+    /// `currentTime`), or `nil` when no seek is in flight. Set at seek
+    /// entry, cleared on the real landing. For native scrubs it is the
+    /// time of the segment AVPlayer requested out of range (AetherEngine#38).
+    @Published public internal(set) var seekTarget: Double? = nil
+
+    /// Monotonic counter bumped at the entry of every programmatic
+    /// `seek(to:)`. A seek finalizes its clock/state and clears the
+    /// `isSeeking` signal only if its captured generation still matches,
+    /// so a superseded seek's late landing cannot clobber the newer seek's
+    /// in-flight state (the engine-side mirror of the host's guard).
+    private var seekGeneration: UInt64 = 0
+
+    /// The two independent in-flight sources `isSeeking` unions over. A
+    /// programmatic `seek(to:)` and a native AVKit scrub are NOT mutually
+    /// exclusive: a programmatic seek to a far target drives AVPlayer,
+    /// which requests an out-of-range segment and triggers the same
+    /// producer-restart path a transport-bar scrub does. Tracking them
+    /// separately and OR-ing keeps `isSeeking` true until BOTH settle, so
+    /// the native restart finishing (producer rebuilt) cannot drop the
+    /// signal before a programmatic seek's AVPlayer landing, and vice
+    /// versa. Routed through `setProgrammaticSeek`/`setNativeScrubSeek`.
+    private var programmaticSeekInFlight = false
+    private var nativeScrubSeekInFlight = false
+
+    /// Publish `isSeeking`/`seekTarget` from the two in-flight sources.
+    /// `target` updates `seekTarget` only while seeking; cleared to nil
+    /// once both sources settle. Idempotent on `isSeeking` to avoid
+    /// redundant Combine emissions.
+    private func recomputeSeekSignal(target: Double?) {
+        let seeking = programmaticSeekInFlight || nativeScrubSeekInFlight
+        if isSeeking != seeking { isSeeking = seeking }
+        if seeking {
+            if let target { seekTarget = target }
+        } else {
+            seekTarget = nil
+        }
+    }
+
+    private func setProgrammaticSeek(inFlight: Bool, target: Double?) {
+        programmaticSeekInFlight = inFlight
+        recomputeSeekSignal(target: target)
+    }
+
+    /// Wired to `HLSVideoEngine.onSeekStateChanged`; see `requestRestart`.
+    func setNativeScrubSeek(inFlight: Bool, target: Double?) {
+        nativeScrubSeekInFlight = inFlight
+        recomputeSeekSignal(target: target)
+    }
+
     /// High-frequency playback clock (`currentTime`, `sourceTime`,
     /// live-edge fields). Deliberately a SEPARATE ObservableObject:
     /// its ~10 Hz ticks must not fire `objectWillChange` on the
@@ -1513,6 +1575,13 @@ public final class AetherEngine: ObservableObject {
         // window's session-relative seekable range.
         let target: Double = isLive ? (liveWindow?.clamp(seconds) ?? seconds) : max(0, min(seconds, duration))
         state = .seeking
+        // Span the real landing (not the optimistic .playing flip below) so a
+        // host gets an accurate in-flight seek signal (#38). The generation
+        // guard at each finalize point ensures a superseded seek's late
+        // landing cannot clear this while a newer seek is still in flight.
+        seekGeneration &+= 1
+        let seekGen = seekGeneration
+        setProgrammaticSeek(inFlight: true, target: target)
         if isLive {
             // Live/DVR native path: translate the session-time target into the
             // AVPlayer live clock. Measure how far behind the live edge the
@@ -1531,21 +1600,31 @@ public final class AetherEngine: ObservableObject {
             if softwareHost != nil, nativeHost == nil {
                 EngineLog.emit("[AetherEngine] SW live seek target=\(target)", category: .engine)
                 await softwareHost?.seek(to: target)
+                guard seekGeneration == seekGen else { return }
                 clock.currentTime = target
                 clock.sourceTime = target
                 state = .playing
+                setProgrammaticSeek(inFlight: false, target: nil)
                 return
             }
             let behind = (liveWindow?.edgeTime ?? target) - target   // >= 0; 0 == "to the edge"
             let clockTarget = max(0, (nativeHost?.seekableEnd ?? 0) - behind)
             EngineLog.emit("[AetherEngine] live seek target=\(target) behind=\(behind) seekableEnd=\(nativeHost?.seekableEnd ?? 0) clockTarget=\(clockTarget)", category: .engine)
-            nativeHost?.seek(to: clockTarget)
+            // Publish the target up front so the playhead holds it while the
+            // host suppresses the periodic observer's stale pre-seek reads,
+            // then await the real landing before flipping back to .playing.
+            nativeClockSeconds = clockTarget
+            clock.currentTime = target
+            clock.sourceTime = target
+            await nativeHost?.seek(to: clockTarget)
+            guard seekGeneration == seekGen else { return }
             nativeClockSeconds = clockTarget
             clock.currentTime = target
             clock.sourceTime = target
             // publishLiveWindow on the next tick recomputes behindLiveSeconds
             // against the new playhead.
             state = .playing
+            setProgrammaticSeek(inFlight: false, target: nil)
             return
         }
         // seek(to:) speaks source PTS (the unified engine clock). On the
@@ -1554,6 +1633,19 @@ public final class AetherEngine: ObservableObject {
         // run on source time (shift 0), making this a no-op there.
         let clockTarget = target - playlistShiftSeconds
         let gen = loadGeneration
+        // Native loopback-HLS lands a seek seconds late. Publish the target
+        // up front so the playhead snaps to the drop point; the host
+        // suppresses the periodic observer's stale pre-seek reads until the
+        // seek lands, so the clock holds the target instead of bouncing back
+        // through the old position (#37). Audio/SW hosts run on source time
+        // and resolve their seek synchronously to the await, so they write
+        // the clock only at finalize below, as before.
+        let nativeOnly = !audioAVPlayerActive && audioHost == nil && softwareHost == nil && nativeHost != nil
+        if nativeOnly {
+            nativeClockSeconds = clockTarget
+            clock.currentTime = target
+            clock.sourceTime = target
+        }
         if audioAVPlayerActive, let host = audioAVPlayerHost {
             await host.seek(to: clockTarget)
         } else if let host = audioHost {
@@ -1561,12 +1653,15 @@ public final class AetherEngine: ObservableObject {
         } else if let host = softwareHost {
             await host.seek(to: clockTarget)
         } else {
-            nativeHost?.seek(to: clockTarget)
+            // Await the real AVPlayer landing before flipping back to
+            // .playing so isSeeking spans it (#37/#38).
+            await nativeHost?.seek(to: clockTarget)
         }
         // A stop()/load() landing during the await above already tore
         // the session down; writing clock state + .playing into the
-        // singleton afterwards would publish a phantom session.
-        guard loadGeneration == gen else { return }
+        // singleton afterwards would publish a phantom session. A
+        // superseding seek bumped seekGeneration and owns the final state.
+        guard loadGeneration == gen, seekGeneration == seekGen else { return }
         nativeClockSeconds = clockTarget
         clock.currentTime = target
         clock.sourceTime = target
@@ -1590,10 +1685,10 @@ public final class AetherEngine: ObservableObject {
             }
         }
 
-        // AVPlayer surfaces post-seek readiness via its own KVO; the
-        // engine optimistically flips back to .playing so the host UI
-        // doesn't stick on .seeking when the seek lands fast.
+        // The host seek has physically landed (we awaited it). Flip back to
+        // .playing and clear the in-flight seek signal.
         state = .playing
+        setProgrammaticSeek(inFlight: false, target: nil)
     }
 
     /// Deprecated alias for `seek(to:)`, which is now itself source-PTS
@@ -1898,6 +1993,13 @@ public final class AetherEngine: ObservableObject {
         nativeClockSeconds = 0
         clock.sourceTime = 0
         isBuffering = false
+        // A stop landing mid-seek must not strand the in-flight signal: a
+        // late host completion or restart-drain callback is dropped by the
+        // generation/session guards, so clear hard here (#38).
+        programmaticSeekInFlight = false
+        nativeScrubSeekInFlight = false
+        isSeeking = false
+        seekTarget = nil
 
         liveWindowTimerTask?.cancel()
         liveWindowTimerTask = nil

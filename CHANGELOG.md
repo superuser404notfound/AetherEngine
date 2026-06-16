@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Seek on the native loopback-HLS path no longer bounces back through the pre-seek position.** A seek wrote the target clock optimistically and flipped state back to `.playing` without waiting for AVPlayer's seek to physically land, so the 100 ms periodic time observer kept publishing the stale pre-seek clock until the (seconds-late) loopback seek completed — the reported time read the target, snapped back to the old position, then re-settled. `seek(to:)` now awaits the real AVPlayer completion, and the native host suppresses the periodic observer's stale reads while a seek is in flight, so the clock holds the target across the landing (AetherEngine#37).
+
+### Added
+
+- **`isSeeking` / `seekTarget` published seek signal.** `AetherEngine.isSeeking` is true from seek entry until the seek physically lands (not the optimistic `.playing` flip), uniform across programmatic `seek(to:)` and native AVKit transport-bar scrubs (which drive a producer restart out of the served window). `seekTarget` carries the in-flight destination on the source-PTS axis. A host coordinating playback across devices can gate on these to tell a deliberate seek from a rebuffer or underflow skip without inferring it from `currentTime` jumps (AetherEngine#38).
+
 ## [3.6.1] — 2026-06-16
 
 ### Fixed

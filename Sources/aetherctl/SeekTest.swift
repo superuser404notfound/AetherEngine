@@ -75,6 +75,48 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     // Let playback settle for a moment before the burst.
     try? await Task.sleep(nanoseconds: 1_500_000_000)
 
+    // ---- #37/#38 probe: single backward seek with a concurrent sampler ----
+    // A 20 ms sampler records (currentTime, isSeeking) across one backward
+    // seek. Pre-fix the engine clock bounces back through the pre-seek
+    // position before AVPlayer's seek physically lands (the 100 ms time
+    // observer overwrites the optimistic target with the stale clock);
+    // post-fix the host suppresses that stale publish so the clock holds the
+    // target, and isSeeking spans the real landing. Runs the sampler for a
+    // fixed window so it catches both the in-flight hold (post-fix, inside
+    // the await) and the post-return bounce (pre-fix, after the await).
+    let probeHi = duration * 0.85
+    let probeLo = duration * 0.10
+    await engine.seek(to: probeHi)
+    try? await Task.sleep(nanoseconds: 800_000_000)
+    let preSeekCt = engine.currentTime
+    struct Probe { let ct: Double; let seeking: Bool }
+    let probeBox = UncheckedBox<[Probe]>([])
+    let sampler = Task { @MainActor in
+        for _ in 0..<200 {   // ~4 s at 20 ms
+            probeBox.value.append(Probe(ct: engine.currentTime, seeking: engine.isSeeking))
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+    await engine.seek(to: probeLo)
+    _ = await sampler.value
+    let probes = probeBox.value
+    let tol = max(2.0, duration * 0.02)
+    var firstTargetIdx: Int?
+    var bounceAfterTarget = false
+    for (i, p) in probes.enumerated() {
+        if firstTargetIdx == nil, abs(p.ct - probeLo) <= tol { firstTargetIdx = i }
+        if let ft = firstTargetIdx, i > ft, abs(p.ct - preSeekCt) <= tol { bounceAfterTarget = true }
+    }
+    let sawSeeking = probes.contains { $0.seeking }
+    let endedCleared = !(probes.last?.seeking ?? true)
+    print("")
+    print("=== #37/#38 PROBE (single backward seek, concurrent sampler) ===")
+    print(String(format: "  preSeek=%.1f target=%.1f tol=%.1f samples=%d", preSeekCt, probeLo, tol, probes.count))
+    print("  #37 clock bounce back through pre-seek after reaching target: "
+          + (bounceAfterTarget ? "YES  <-- FAIL" : "no  <-- PASS"))
+    print("  #38 isSeeking observed in-flight=\(sawSeeking ? "yes" : "NO") ended-cleared=\(endedCleared ? "yes" : "NO")  "
+          + ((sawSeeking && endedCleared) ? "<-- PASS" : "<-- FAIL"))
+
     struct Sample { let wall: Double; let ct: Double; let playing: Bool }
     var samples: [Sample] = []
     let t0 = Date()

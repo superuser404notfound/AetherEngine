@@ -136,7 +136,7 @@ extension AetherEngine {
                     "[AetherEngine] live-only edge snap: clockTarget=\(String(format: "%.1f", clockTarget))",
                     category: .engine
                 )
-                host.seek(to: clockTarget)
+                await host.seek(to: clockTarget)
                 nativeClockSeconds = clockTarget
                 clock.currentTime = clockTarget + playlistShiftSeconds
                 clock.sourceTime = currentTime

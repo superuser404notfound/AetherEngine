@@ -254,6 +254,18 @@ extension AetherEngine {
                 self.clock.sourceTime = self.currentTime
             }
         }
+        session.onSeekStateChanged = { [weak self] inFlight, playlistTime in
+            Task { @MainActor in
+                guard let self = self else { return }
+                // Fold the playlist-axis segment time onto the source-PTS
+                // axis the published seekTarget/currentTime use (#38), the
+                // same fold as the $currentTime sink. nil target while
+                // clearing leaves the last value untouched until both seek
+                // sources settle.
+                let target = playlistTime.map { $0 + self.playlistShiftSeconds }
+                self.setNativeScrubSeek(inFlight: inFlight, target: target)
+            }
+        }
         session.onPlaylistShiftRebased = { [weak self] seconds, seamOutputSeconds in
             Task { @MainActor in
                 guard let self = self else { return }

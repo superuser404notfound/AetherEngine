@@ -239,6 +239,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// lookup uses the right source-time conversion.
     var onPlaylistShiftChanged: (@Sendable (Double) -> Void)?
 
+    /// Fires when a native AVKit transport-bar scrub (or any AVPlayer seek
+    /// that lands out of the currently-served LRU window) drives a producer
+    /// restart, so AetherEngine can publish an accurate in-flight seek
+    /// signal for scrubs that bypass `engine.seek()` (AetherEngine#38).
+    /// `(true, playlistTime)` at the start of a coalesced restart run,
+    /// `(false, nil)` once the run drains. `playlistTime` is the requested
+    /// segment's start on the AVPlayer/playlist axis; the host folds it
+    /// with `playlistShiftSeconds` onto its source-PTS `seekTarget`.
+    var onSeekStateChanged: (@Sendable (Bool, Double?) -> Void)?
+
     /// Engine-owned deep copy of an AVCodecParameters. The saved
     /// video/audio configs previously held raw pointers INTO the
     /// session demuxer's AVStreams; a live reopen closes that demuxer
@@ -1895,6 +1905,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     func requestRestart(at idx: Int) {
         restartLock.lock()
         let shouldRun = restartCoalescer.begin(idx)
+        // Map the requested segment to its playlist-axis start time while we
+        // hold the lock that guards segmentPlan (issue #38 seek signal).
+        let seekTime = segmentStartSecondsLocked(idx)
         restartLock.unlock()
         guard shouldRun else {
             EngineLog.emit(
@@ -1903,19 +1916,38 @@ public final class HLSVideoEngine: @unchecked Sendable {
             )
             return
         }
+        // A native AVKit scrub (or any AVPlayer seek that landed out of the
+        // served LRU window) is now in flight; publish it until the coalesced
+        // restart run drains (#38). Purely additive to the #35 coalescer.
+        onSeekStateChanged?(true, seekTime)
         var target = idx
         while true {
             performRestart(at: target)
             restartLock.lock()
             let nextTarget = restartCoalescer.next(justRan: target)
+            let nextSeekTime = nextTarget.map { segmentStartSecondsLocked($0) } ?? nil
             restartLock.unlock()
             guard let nextTarget else { break }
             EngineLog.emit(
                 "[HLSVideoEngine] coalesced restart advancing to settled target idx=\(nextTarget)",
                 category: .session
             )
+            // Burst scrub coalesced to a new settled target: keep the signal
+            // in flight, update the published target.
+            onSeekStateChanged?(true, nextSeekTime)
             target = nextTarget
         }
+        // The restart run settled at the final target and the producer is
+        // rebuilt and serving; clear the in-flight seek signal.
+        onSeekStateChanged?(false, nil)
+    }
+
+    /// `segmentPlan[idx].startSeconds` on the AVPlayer/playlist axis, or nil
+    /// if out of range. Caller must hold `restartLock` (segmentPlan is
+    /// guarded by it).
+    private func segmentStartSecondsLocked(_ idx: Int) -> Double? {
+        guard idx >= 0, idx < segmentPlan.count else { return nil }
+        return segmentPlan[idx].startSeconds
     }
 
     // Renamed from restartProducer(at:). Now driven exclusively through
