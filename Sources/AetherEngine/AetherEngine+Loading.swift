@@ -233,7 +233,13 @@ extension AetherEngine {
             liveSourceCadenceHint: liveSourceCadenceHint,
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
-            companionAudioReader: companionAudioReader
+            companionAudioReader: companionAudioReader,
+            // Decoy subtitle renditions for AVKit's native picker. Mapped
+            // from the published list the load probe populated (empty
+            // unless the active load set advertiseSubtitleRenditions).
+            subtitleRenditions: subtitleRenditions.map {
+                (renditionID: $0.renditionID, name: $0.name, language: $0.language)
+            }
         )
         session.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }

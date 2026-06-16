@@ -101,6 +101,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let hdcpLevel: String?
     private let sourceBitrate: Int64
 
+    /// Decoy subtitle renditions to advertise in the master playlist
+    /// (native-picker path). Set by the engine at load time before the
+    /// server is started; empty means the feature is off and the master
+    /// emits no subtitle lines. Plain stored value: written once on the
+    /// load thread before `HLSLocalServer.start()`, then read-only for
+    /// the session, so it needs no lock.
+    var subtitleRenditionList: [(renditionID: String, name: String, language: String)] = []
+
+    /// Total source duration in seconds (0 for live / unknown), used to
+    /// size the decoy WebVTT rendition playlist's single EXTINF.
+    private let durationSeconds: Double
+
     /// Closure into the engine that tears down the current producer
     /// and brings up a fresh one rooted at the given absolute segment
     /// index. Synchronous: returns after the new producer's pump has
@@ -205,6 +217,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         frameRate: Double?,
         hdcpLevel: String?,
         sourceBitrate: Int64,
+        durationSeconds: Double = 0,
         isLive: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         blockingReloadEnabled: Bool = true,
@@ -224,6 +237,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.frameRate = frameRate
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
+        self.durationSeconds = durationSeconds
         self.restartHandler = restartHandler
 
     }
@@ -872,4 +886,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
+
+    /// Decoy subtitle renditions the engine installed at load time.
+    var subtitleRenditions: [(renditionID: String, name: String, language: String)] {
+        subtitleRenditionList
+    }
+
+    /// Source duration for the decoy WebVTT playlist sizing; nil when
+    /// unknown (0).
+    var mediaDurationSeconds: Double? {
+        durationSeconds > 0 ? durationSeconds : nil
+    }
 }

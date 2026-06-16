@@ -64,6 +64,94 @@ extension AetherEngine {
         return makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
     }
 
+    /// Build the decoy subtitle rendition list (native-picker path) from
+    /// the probed subtitle tracks. Each rendition's `renditionID` embeds
+    /// the engine subtitle AVStream index (`TrackInfo.id`) so the host can
+    /// correlate AVKit's selected legible option back to the track; the
+    /// `name` is a human label (the track's localized language name, then
+    /// its declared name, then "Subtitle N"); `language` is the ISO code
+    /// (fallback "und").
+    nonisolated static func makeSubtitleRenditions(
+        from tracks: [TrackInfo]
+    ) -> [SubtitleRendition] {
+        // The native picker lists each rendition by its NAME, and AVKit
+        // collapses entries sharing NAME + LANGUAGE. Build a consistent,
+        // self-describing label from the reliable signals (localized language +
+        // format derived from the codec), then append the container title only
+        // when it carries a real distinguisher (SDH / Forced / Commentary /
+        // Simplified), dropping bare echoes and remux auto-titles like
+        // "ENG (srt)". Number any labels that still collide so every track stays
+        // selectable. Result e.g. "English (SRT)", "English SDH (SRT)",
+        // "Chinese Simplified (SRT)", "English (VOBSUB)".
+        var renditions: [SubtitleRendition] = []
+        var usedNameCounts: [String: Int] = [:]
+        for (offset, track) in tracks.enumerated() {
+            let language = track.language?.trimmingCharacters(in: .whitespaces)
+            let langCode = (language?.isEmpty == false) ? language! : "und"
+            let localizedLang = (langCode != "und")
+                ? Locale.current.localizedString(forLanguageCode: langCode)
+                : nil
+            let format = subtitleFormatLabel(track.codec)
+            let title = track.name.trimmingCharacters(in: .whitespaces)
+
+            // Keep the container title only when it adds information beyond the
+            // language / format. Drop bare echoes ("English", "eng", "SRT") and
+            // remux auto-titles of the form "<langcode> (<codec>)" (e.g.
+            // "ENG (srt)", "FRE (dvdsub)") -- the auto-pattern is matched against
+            // THIS track's language code so real labels like "SDH" survive.
+            let lowerTitle = title.lowercased()
+            let lowerLang = langCode.lowercased()
+            let echoesLanguageName = localizedLang.map { lowerTitle == $0.lowercased() } ?? false
+            let isEcho = title.isEmpty
+                || lowerTitle == lowerLang
+                || echoesLanguageName
+                || lowerTitle == format.lowercased()
+                || (lowerTitle.hasPrefix(lowerLang + " (") && lowerTitle.hasSuffix(")"))
+            let distinguisher = isEcho ? nil : title
+
+            // Compose "Language Distinguisher (FORMAT)".
+            let languageLabel: String? = localizedLang ?? (langCode != "und" ? langCode : nil)
+            let base: String
+            switch (languageLabel, distinguisher) {
+            case let (lang?, dist?):
+                base = "\(lang) \(dist) (\(format))"
+            case let (lang?, nil):
+                base = "\(lang) (\(format))"
+            case let (nil, dist?):
+                base = "\(dist) (\(format))"
+            case (nil, nil):
+                base = "Subtitle \(offset + 1) (\(format))"
+            }
+
+            let priorCount = usedNameCounts[base, default: 0]
+            usedNameCounts[base] = priorCount + 1
+            let displayName = (priorCount == 0) ? base : "\(base) \(priorCount + 1)"
+
+            renditions.append(SubtitleRendition(
+                renditionID: "sub\(track.id)",
+                name: displayName,
+                language: langCode,
+                trackIndex: track.id
+            ))
+        }
+        return renditions
+    }
+
+    /// Map an FFmpeg subtitle codec name to a short, user-facing format label.
+    nonisolated private static func subtitleFormatLabel(_ codec: String) -> String {
+        switch codec.lowercased() {
+        case "subrip", "srt": return "SRT"
+        case "ass", "ssa": return "ASS"
+        case "mov_text", "text", "tx3g": return "Text"
+        case "webvtt", "vtt": return "VTT"
+        case "dvd_subtitle", "dvdsub", "vobsub": return "VOBSUB"
+        case "hdmv_pgs_subtitle", "pgssub", "pgs": return "PGS"
+        case "dvb_subtitle", "dvbsub": return "DVB"
+        case "dvb_teletext": return "Teletext"
+        default: return codec.uppercased()
+        }
+    }
+
     /// Assemble a `SourceProbe` from an open demuxer. Shared by the
     /// static probe entry points and `load(source:)`'s internal probe
     /// stage, so all of them report identical metadata for the same

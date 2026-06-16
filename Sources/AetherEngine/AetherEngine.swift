@@ -91,6 +91,15 @@ public final class AetherEngine: ObservableObject {
     // list with the side demuxer's tracks for demuxed-audio live sources.
     @Published public internal(set) var audioTracks: [TrackInfo] = []
     @Published public private(set) var subtitleTracks: [TrackInfo] = []
+
+    /// Maps an advertised decoy subtitle rendition (HLS master playlist,
+    /// native-picker path) back to the engine subtitle track it stands
+    /// for. Non-empty only when the active load set
+    /// `LoadOptions.advertiseSubtitleRenditions == true`; empty otherwise
+    /// and whenever no session is loaded. The host uses `renditionID` /
+    /// `trackIndex` to correlate AVKit's selected legible option with the
+    /// `TrackInfo` whose cues it should then decode + paint.
+    @Published public private(set) var subtitleRenditions: [SubtitleRendition] = []
     /// Container metadata (tags + embedded cover) for the loaded source.
     /// nil while idle or when the source carries no metadata. Populated
     /// during `load(url:)` from the probe demuxer, before backend dispatch,
@@ -837,6 +846,7 @@ public final class AetherEngine: ObservableObject {
         clock.progress = 0
         audioTracks = []
         subtitleTracks = []
+        subtitleRenditions = []
         metadata = nil
         fontAttachments = []
         subtitleCueDiagnosticCount = 0
@@ -1008,6 +1018,14 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = detectedFormat
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
+        // Decoy subtitle renditions for AVKit's native picker. Populated
+        // only when the active load opted in; otherwise stays empty and
+        // the generated playlists carry no subtitle lines (no behavioral
+        // change). Mapping is published so the host can correlate the
+        // picked legible option back to the engine subtitle track.
+        subtitleRenditions = options.advertiseSubtitleRenditions
+            ? Self.makeSubtitleRenditions(from: probedSubtitleTracks)
+            : []
         metadata = probeOpened ? probe.mediaMetadata() : nil
         fontAttachments = probeOpened ? probe.fontAttachmentInfos() : []
         // Assemble the caller-facing SourceProbe now, while the probe
@@ -1618,6 +1636,7 @@ public final class AetherEngine: ObservableObject {
         metadata = nil
         audioTracks = []
         subtitleTracks = []
+        subtitleRenditions = []
         // Session-scoped like the track lists; must survive stopInternal,
         // which also runs under the audio-track-switch reload (that path
         // skips the probe, so clearing here would strand the session with

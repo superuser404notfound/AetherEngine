@@ -218,6 +218,19 @@ public struct LoadOptions: Sendable, Equatable {
     /// bitmap tracks are untouched. Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
+    /// When `true`, advertise each of the source's subtitle tracks as a
+    /// decoy (empty, cue-less) WebVTT rendition in the generated HLS
+    /// master playlist, so AVKit's native subtitle picker lists them.
+    /// The engine does NOT decode or paint cues for these renditions;
+    /// the host renders the actual subtitle cues itself (via
+    /// `subtitleCues`). This is purely a picker-population hook.
+    /// Default `false`: when off, the master/media playlists are
+    /// byte-identical to a build without this feature and no subtitle
+    /// lines are emitted. The mapping the host needs to correlate a
+    /// picked rendition back to an engine subtitle track is published on
+    /// `AetherEngine.subtitleRenditions`.
+    public var advertiseSubtitleRenditions: Bool
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (a reload of
     /// an already-running live session: background-return reopen via
     /// `reloadAtCurrentPosition`). Not part of the public API and not
@@ -247,7 +260,8 @@ public struct LoadOptions: Sendable, Equatable {
         audioOnly: Bool = false,
         dvrWindowSeconds: Double? = nil,
         nativeRemoteHLS: Bool = false,
-        preserveASSMarkup: Bool = false
+        preserveASSMarkup: Bool = false,
+        advertiseSubtitleRenditions: Bool = false
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -261,6 +275,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.dvrWindowSeconds = dvrWindowSeconds
         self.nativeRemoteHLS = nativeRemoteHLS
         self.preserveASSMarkup = preserveASSMarkup
+        self.advertiseSubtitleRenditions = advertiseSubtitleRenditions
     }
 }
 
@@ -448,6 +463,33 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
         self.isDefault = isDefault
         self.isAtmos = isAtmos
         self.assHeader = assHeader
+    }
+}
+
+/// A decoy subtitle rendition advertised in the generated HLS master
+/// playlist so AVKit's native subtitle picker lists it (see
+/// `LoadOptions.advertiseSubtitleRenditions`). Published on
+/// `AetherEngine.subtitleRenditions`; the engine paints no cues for it,
+/// it exists only to populate the picker and to let the host correlate
+/// the picked legible option back to an engine subtitle `TrackInfo`.
+public struct SubtitleRendition: Sendable, Equatable {
+    /// Path-safe identifier the master playlist uses (`"sub<trackIndex>"`).
+    /// The loopback server serves `/subs_<renditionID>.m3u8` + `.vtt`.
+    public let renditionID: String
+    /// Display name shown in the picker (the language label).
+    public let name: String
+    /// ISO language code emitted as `LANGUAGE=` (fallback `"und"`).
+    public let language: String
+    /// The engine subtitle AVStream index (`TrackInfo.id`) this rendition
+    /// stands for; the host decodes + paints this track's cues when the
+    /// rendition is selected.
+    public let trackIndex: Int
+
+    public init(renditionID: String, name: String, language: String, trackIndex: Int) {
+        self.renditionID = renditionID
+        self.name = name
+        self.language = language
+        self.trackIndex = trackIndex
     }
 }
 

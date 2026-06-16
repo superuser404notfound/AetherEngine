@@ -109,6 +109,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?
 
+    /// Decoy subtitle renditions to advertise in the master playlist
+    /// (native-picker path). Supplied by the engine at construction;
+    /// forwarded to the `VideoSegmentProvider` when it is built in
+    /// `start()`. Empty means the feature is off.
+    private let subtitleRenditions: [(renditionID: String, name: String, language: String)]
+
     /// Side demuxer over a demuxed-audio companion reader (live HLS
     /// ingest whose variant is video-only with a separate audio
     /// rendition playlist). Opened in `start()` when the main demuxer
@@ -449,8 +455,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         liveSourceCadenceHint: Double? = nil,
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
-        companionAudioReader: IOReader? = nil
+        companionAudioReader: IOReader? = nil,
+        subtitleRenditions: [(renditionID: String, name: String, language: String)] = []
     ) {
+        self.subtitleRenditions = subtitleRenditions
         self.sourceURL = url
         self.sourceHTTPHeaders = sourceHTTPHeaders
         self.dvModeAvailable = dvModeAvailable
@@ -1231,6 +1239,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             frameRate: frameRate,
             hdcpLevel: hdcpLevel,
             sourceBitrate: sourceBitrate,
+            durationSeconds: durationSeconds,
             isLive: isLiveSession,
             liveWindowSizing: LiveWindowSizing(
                 targetSegmentDurationSeconds: Self.targetSegmentDuration,
@@ -1243,6 +1252,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         )
         self.provider = prov
+        // Hand the decoy subtitle renditions to the provider before the
+        // server starts, so the very first master.m3u8 fetch already
+        // carries the #EXT-X-MEDIA subtitle lines (native-picker path).
+        // Empty when the feature is off; provider then emits no subtitle
+        // lines and the master is byte-identical to before.
+        prov.subtitleRenditionList = subtitleRenditions
         // Live producer appends each finalized segment to the provider's
         // growing list so the live playlist exposes it on the next poll.
         if isLiveSession {
@@ -1370,21 +1385,32 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // #4 2026-05-27).
         let panelReadyForHDR = panelIsInHDRMode
         let dv5OnNonDVPanel = dvVariant == .profile5 && !effectiveDvMode
-        let useMasterPlaylist: Bool
+        // HDR / DV master routing. This drives `servingMasterPlaylist`, which
+        // the host wires into HDR-only AVPlayerItem flags, so it must remain
+        // strictly the HDR decision (unchanged behavior).
+        let hdrMaster: Bool
         if dv5OnNonDVPanel {
-            useMasterPlaylist = false
+            hdrMaster = false
         } else {
-            useMasterPlaylist = sourceIsHDR && panelReadyForHDR
+            hdrMaster = sourceIsHDR && panelReadyForHDR
         }
-        let resolvedURL: URL? = useMasterPlaylist
+        // Serve a MASTER playlist when the HDR path needs it OR when we are
+        // advertising subtitle renditions (EXT-X-MEDIA:TYPE=SUBTITLES can only
+        // live in a master). The subtitle case deliberately does NOT flip
+        // `servingMasterPlaylist`: an SDR title with subtitles serves a master
+        // (single SDR variant + subtitle group) but stays SDR for the host's
+        // HDR-pipeline flags. HDR/DV routing and SDR-without-subtitles are
+        // byte-for-byte unchanged.
+        let serveMaster = hdrMaster || !subtitleRenditions.isEmpty
+        let resolvedURL: URL? = serveMaster
             ? srv.playlistURL
             : srv.mediaPlaylistURL
         guard let url = resolvedURL else {
             stop()
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
-        self.servingMasterPlaylist = useMasterPlaylist
-        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(sourceIsHDR) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
+        self.servingMasterPlaylist = hdrMaster
+        EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(sourceIsHDR) hdrMaster=\(hdrMaster) serveMaster=\(serveMaster) subRenditions=\(subtitleRenditions.count) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }
 

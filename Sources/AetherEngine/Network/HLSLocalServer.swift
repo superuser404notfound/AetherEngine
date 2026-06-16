@@ -129,6 +129,22 @@ protocol HLSSegmentProvider: AnyObject {
     /// this to `NONE` when there's no in-band CC track.
     var masterClosedCaptions: String? { get }
 
+    /// Decoy subtitle renditions to advertise in the master playlist so
+    /// AVKit's native subtitle picker lists them. Each entry produces an
+    /// `#EXT-X-MEDIA:TYPE=SUBTITLES` line in a "subs" group and a
+    /// `SUBTITLES="subs"` attribute on the variant. The server serves a
+    /// fixed empty (cue-less) WebVTT rendition for each: the host paints
+    /// the actual cues itself. Empty (default) means no subtitle lines
+    /// and no behavioral change. `renditionID` is a path-safe token (the
+    /// server matches `/subs_<renditionID>.m3u8` and `.vtt`).
+    var subtitleRenditions: [(renditionID: String, name: String, language: String)] { get }
+
+    /// Media duration in seconds, used to size the decoy WebVTT
+    /// rendition's single `#EXTINF`. nil when the provider does not know
+    /// the duration (live), in which case the server uses a large
+    /// constant so the empty cue list spans the whole asset.
+    var mediaDurationSeconds: Double? { get }
+
     /// Hook called by `HLSLocalServer.buildMediaPlaylist` at the top
     /// of each playlist build. Returns the snapshot the playlist
     /// should be built against: visible segment count, refresh
@@ -204,6 +220,14 @@ extension HLSSegmentProvider {
     var masterAverageBandwidth: Int? { nil }
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
+
+    /// Default: no decoy subtitle renditions (feature off / providers
+    /// that never carry subtitles).
+    var subtitleRenditions: [(renditionID: String, name: String, language: String)] { [] }
+
+    /// Default: duration unknown.
+    var mediaDurationSeconds: Double? { nil }
+
     /// Default: not a live provider; playlist builder uses the
     /// computed-from-segments path.
     var liveTargetSegmentDuration: Double? { nil }
@@ -339,7 +363,13 @@ final class HLSLocalServer: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard port > 0 else { return nil }
-        let path = (provider?.masterCodecs != nil) ? "master.m3u8" : "media.m3u8"
+        // Serve the master playlist when it carries either video variant
+        // metadata (masterCodecs) OR decoy subtitle renditions (the
+        // native-picker path needs the #EXT-X-MEDIA lines, which only
+        // live in the master).
+        let hasMaster = (provider?.masterCodecs != nil)
+            || !(provider?.subtitleRenditions.isEmpty ?? true)
+        let path = hasMaster ? "master.m3u8" : "media.m3u8"
         return URL(string: "http://127.0.0.1:\(port)/\(path)")
     }
 
@@ -771,7 +801,11 @@ final class HLSLocalServer: @unchecked Sendable {
 
         switch normalizedPath {
         case "/master.m3u8":
-            if provider?.masterCodecs != nil {
+            // Build + serve the master when it has video variant metadata
+            // OR decoy subtitle renditions (the picker path). Only 404
+            // when both are absent.
+            let hasSubRenditions = !(provider?.subtitleRenditions.isEmpty ?? true)
+            if provider?.masterCodecs != nil || hasSubRenditions {
                 let body = buildMasterPlaylist()
                 stateLock.lock()
                 let firstTime = !loggedMasterPlaylist
@@ -879,6 +913,42 @@ final class HLSLocalServer: @unchecked Sendable {
                     return send200(fd: fd, path: normalizedPath, data: data,
                                    contentType: "video/mp4")
                 }
+            }
+            // Decoy subtitle rendition playlist: a fixed VOD WebVTT media
+            // playlist pointing at a single empty .vtt. AVKit fetches this
+            // when the user selects the rendition in the native picker; the
+            // host paints the real cues, so the bytes here are intentionally
+            // cue-less.
+            if normalizedPath.hasPrefix("/subs_"),
+               normalizedPath.hasSuffix(".m3u8") {
+                let id = String(normalizedPath.dropFirst("/subs_".count).dropLast(".m3u8".count))
+                guard !id.isEmpty else {
+                    return send404(fd: fd, path: normalizedPath, reason: "empty subs id")
+                }
+                let dur = provider?.mediaDurationSeconds
+                let d = (dur != nil && dur! > 0) ? dur! : 86400.0
+                let body = """
+                #EXTM3U
+                #EXT-X-VERSION:7
+                #EXT-X-TARGETDURATION:\(Int(ceil(d)))
+                #EXT-X-PLAYLIST-TYPE:VOD
+                #EXT-X-MEDIA-SEQUENCE:0
+                #EXTINF:\(String(format: "%.1f", d)),
+                subs_\(id).vtt
+                #EXT-X-ENDLIST
+
+                """
+                return send200(fd: fd, path: normalizedPath,
+                               data: Data(body.utf8),
+                               contentType: "application/vnd.apple.mpegurl")
+            }
+            // Decoy subtitle WebVTT body: a valid but cue-less WebVTT file.
+            if normalizedPath.hasPrefix("/subs_"),
+               normalizedPath.hasSuffix(".vtt") {
+                let body = "WEBVTT\n\n"
+                return send200(fd: fd, path: normalizedPath,
+                               data: Data(body.utf8),
+                               contentType: "text/vtt")
             }
             if normalizedPath.hasPrefix("/seg"),
                normalizedPath.hasSuffix(".mp4") {
@@ -1160,13 +1230,30 @@ final class HLSLocalServer: @unchecked Sendable {
     /// against the playlist URL.
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
                                          subResourceBaseURL: URL? = nil) -> String {
-        guard let codecs = provider.masterCodecs else {
+        let renditions = provider.subtitleRenditions
+        // Build a master when there's video variant metadata OR decoy
+        // subtitle renditions to advertise. Both absent → bare playlist,
+        // byte-identical to the pre-feature behavior.
+        guard provider.masterCodecs != nil || !renditions.isEmpty else {
             return "#EXTM3U\n"
         }
         var lines: [String] = []
         lines.append("#EXTM3U")
         lines.append("#EXT-X-VERSION:7")
         lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
+
+        // Decoy SUBTITLES renditions. Emitted BEFORE the STREAM-INF per
+        // Apple's convention (media renditions precede the variants that
+        // reference their GROUP-ID). Each points at a fixed empty WebVTT
+        // playlist the server serves at /subs_<id>.m3u8.
+        for r in renditions {
+            lines.append(
+                "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\","
+                + "NAME=\"\(r.name)\",LANGUAGE=\"\(r.language)\","
+                + "DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,"
+                + "URI=\"subs_\(r.renditionID).m3u8\""
+            )
+        }
 
         // EXT-X-STREAM-INF attribute order follows Apple's HLS
         // Authoring Spec Appendixes example: BANDWIDTH first,
@@ -1179,7 +1266,13 @@ final class HLSLocalServer: @unchecked Sendable {
         if let avg = provider.masterAverageBandwidth {
             streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
         }
-        streamInfAttrs.append("CODECS=\"\(codecs)\"")
+        // CODECS: present when the provider has video variant metadata.
+        // When masterCodecs is nil (SDR-only, no variant metadata) but
+        // renditions exist, omit CODECS rather than skip the variant —
+        // the SUBTITLES group still needs a STREAM-INF to attach to.
+        if let codecs = provider.masterCodecs {
+            streamInfAttrs.append("CODECS=\"\(codecs)\"")
+        }
         if let supplemental = provider.masterSupplementalCodecs {
             streamInfAttrs.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"")
         }
@@ -1197,6 +1290,11 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
+        }
+        // Bind the variant to the SUBTITLES group so AVKit lists the
+        // renditions for this stream.
+        if !renditions.isEmpty {
+            streamInfAttrs.append("SUBTITLES=\"subs\"")
         }
         lines.append("#EXT-X-STREAM-INF:\(streamInfAttrs.joined(separator: ","))")
         lines.append("media.m3u8")
