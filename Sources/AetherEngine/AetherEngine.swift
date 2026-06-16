@@ -1804,12 +1804,33 @@ public final class AetherEngine: ObservableObject {
         if let v = desiredVolume { host.volume = v }
     }
 
-    /// Set playback speed (0.5-2.0). On the native AVPlayer path audio
-    /// pitch adjusts via `audioTimePitchAlgorithm`; on the SW path the
-    /// rate goes through the synchronizer and audio plays at the
-    /// changed rate without pitch correction.
+    /// The highest forward playback rate the active path plays reliably.
+    /// AVPlayer caps fast-forward at 2x for video; an audio-only session
+    /// (no video stream) plays cleanly up to 3x. Above this the AVPlayer
+    /// fast-forward becomes unstable (audio and video go abnormal, the
+    /// symptom in AetherEngine#39), so hosts should size their speed
+    /// picker against this value, and `setRate(_:)` clamps to it as a
+    /// backstop. Reflects the currently loaded session; query it after
+    /// load (it is 2.0 while idle).
+    public var maxSupportedRate: Float {
+        (audioAVPlayerActive || audioHost != nil) ? 3.0 : 2.0
+    }
+
+    /// Set playback speed. Forward rates are clamped to `maxSupportedRate`
+    /// (2x for video, 3x for an audio-only session): AVPlayer's HLS
+    /// fast-forward is undefined above that and drives both audio and
+    /// video abnormal (AetherEngine#39). 0 pauses; values at or below the
+    /// cap pass through unchanged. On the native AVPlayer path audio pitch
+    /// adjusts via `audioTimePitchAlgorithm`; on the SW path the rate goes
+    /// through the synchronizer and audio plays at the changed rate
+    /// without pitch correction.
     public func setRate(_ rate: Float) {
-        activeTransportHost?.setRate(rate)
+        let cap = maxSupportedRate
+        let clamped = min(rate, cap)
+        if clamped != rate {
+            EngineLog.emit("[AetherEngine] setRate(\(rate)) clamped to \(clamped) (max supported on this path)", category: .engine)
+        }
+        activeTransportHost?.setRate(clamped)
     }
 
     // MARK: - Audio / subtitle track selection
