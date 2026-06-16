@@ -684,11 +684,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// terminates (e.g. a sustained 404-window slide), well past the
     /// ingest's own retry budget. Live-only.
     private static let liveSourceStarvationTimeoutSeconds: TimeInterval = 35
-    /// Packets read in the watchdog window above which the stall counts as
-    /// a cutter wedge (healthy read, no cut) rather than source starvation
-    /// (a trickle). ~1 s of a 30 fps program plus its audio; a wedged
-    /// SSAI pod reads hundreds in the window, a starved source a handful.
-    private static let liveWedgeProgressPacketThreshold = 60
+    /// Packets-per-second in the no-cut window above which the stall is a
+    /// genuine CUTTER WEDGE (source streaming at full rate, the cutter just
+    /// can't find a keyframe to cut on) rather than SOURCE STARVATION (the
+    /// feed itself slowed to a trickle, e.g. a Wowza SMIL `bounce`
+    /// re-buffering at an SSAI ad splice). A healthy 1080p25 program
+    /// delivers ~60 pkt/s (video + audio); a trickle delivers a handful.
+    /// Measured as a RATE over the elapsed-since-last-finalize window, not
+    /// a cumulative count: a slow feed that accumulates a high packet count
+    /// over a long stall used to be misread as a wedge and forced a
+    /// premature host retune (device repro: Alex Berlin read 137 packets in
+    /// 13 s = 10.5 pkt/s, an obvious trickle, but 137 > the old count
+    /// threshold of 60 tripped the tight wedge timeout instead of waiting
+    /// the source out on the starvation backstop).
+    private static let liveWedgeProgressRateThreshold: Double = 40
     private var lastPregateVideoLog: Int = 0
     private var lastPregateAudioLog: Int = 0
     private static let pregateLogInterval = 200
@@ -1643,6 +1652,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // trickle). Updated when lastLiveSegmentFinalizeAt advances.
         var packetsReadAtLastFinalize = 0
         var lastFinalizeSeen: Date? = lastLiveSegmentFinalizeAt
+        // Per-window breakdown for the no-cut wedge trace: what actually
+        // arrived since the last finalize. Reset alongside
+        // packetsReadAtLastFinalize so the numbers describe the stall, not
+        // the whole session. A wedge with video=N key=0 means "frames
+        // flowing, no keyframe to cut on"; foreign>0 means "the ad came on
+        // a stream we're dropping"; all-low means a genuine trickle.
+        var videoPktsSinceFinalize = 0
+        var audioPktsSinceFinalize = 0
+        var videoKeyframesSinceFinalize = 0
+        var foreignPktsSinceFinalize = 0
+        var lastForeignStreamIndexSinceFinalize: Int32 = -1
+        var firstVideoPtsSinceFinalize: Int64 = Int64.min
+        var lastVideoPtsSinceFinalize: Int64 = Int64.min
 
         do {
             readLoop: while true {
@@ -1659,6 +1681,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if lastLiveSegmentFinalizeAt != lastFinalizeSeen {
                     lastFinalizeSeen = lastLiveSegmentFinalizeAt
                     packetsReadAtLastFinalize = packetsRead
+                    videoPktsSinceFinalize = 0
+                    audioPktsSinceFinalize = 0
+                    videoKeyframesSinceFinalize = 0
+                    foreignPktsSinceFinalize = 0
+                    lastForeignStreamIndexSinceFinalize = -1
+                    firstVideoPtsSinceFinalize = Int64.min
+                    lastVideoPtsSinceFinalize = Int64.min
                 }
                 // No-cut stall watchdog (live, defense-in-depth behind the
                 // discontinuity rebase). The loop only reaches here when
@@ -1674,17 +1703,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if isLive, let lastFinalize = lastLiveSegmentFinalizeAt {
                     let stalledFor = Date().timeIntervalSince(lastFinalize)
                     let progress = packetsRead - packetsReadAtLastFinalize
-                    let isWedge = progress >= Self.liveWedgeProgressPacketThreshold
+                    // Classify by READ RATE, not cumulative count: a real
+                    // wedge streams at full rate but can't cut, a starved
+                    // source trickles. A long stall can accumulate a high
+                    // cumulative count from a trickle, which the old
+                    // count-only test misread as a wedge and failed over at
+                    // the tight 10 s timeout instead of waiting the source
+                    // out on the 35 s starvation backstop.
+                    let readRate = stalledFor > 0 ? Double(progress) / stalledFor : 0
+                    let isWedge = readRate >= Self.liveWedgeProgressRateThreshold
                     let timeout = isWedge
                         ? Self.liveSegmentStallTimeoutSeconds
                         : Self.liveSourceStarvationTimeoutSeconds
                     if stalledFor > timeout {
+                        // Window breakdown turns the next stall into a
+                        // root-causable trace instead of a guess: key=0
+                        // means no keyframe to cut on, foreign>0 means the
+                        // ad arrived on a dropped stream, all-low means a
+                        // genuine source trickle.
+                        let ptsAdvance = (lastVideoPtsSinceFinalize != Int64.min
+                            && firstVideoPtsSinceFinalize != Int64.min && sourceVideoTbSeconds > 0)
+                            ? Double(lastVideoPtsSinceFinalize - firstVideoPtsSinceFinalize) * sourceVideoTbSeconds
+                            : -1
                         EngineLog.emit(
                             "[HLSSegmentProducer] no-cut stall: no segment finalized for "
                             + "\(Int(stalledFor))s (packetsRead=\(packetsRead), "
                             + "sinceFinalize=\(progress), "
+                            + "rate=\(String(format: "%.1f", readRate))pkt/s, "
                             + "\(isWedge ? "cutter wedge" : "source starvation")); "
-                            + "exiting for host retune",
+                            + "window video=\(videoPktsSinceFinalize) key=\(videoKeyframesSinceFinalize) "
+                            + "audio=\(audioPktsSinceFinalize) foreign=\(foreignPktsSinceFinalize)"
+                            + (lastForeignStreamIndexSinceFinalize >= 0
+                                ? " lastForeignIdx=\(lastForeignStreamIndexSinceFinalize)" : "")
+                            + (ptsAdvance >= 0
+                                ? " videoPtsAdvance=\(String(format: "%.1f", ptsAdvance))s" : "")
+                            + "; exiting for host retune",
                             category: .session
                         )
                         exitReason = .segmentStall
@@ -2301,11 +2354,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 }
 
                 if isVideoPkt {
+                    videoPktsSinceFinalize += 1
+                    if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
+                        videoKeyframesSinceFinalize += 1
+                    }
+                    if packet.pointee.pts != Int64.min {
+                        if firstVideoPtsSinceFinalize == Int64.min {
+                            firstVideoPtsSinceFinalize = packet.pointee.pts
+                        }
+                        lastVideoPtsSinceFinalize = packet.pointee.pts
+                    }
                     if firstSeenVideoSourceDts == Int64.min {
                         firstSeenVideoSourceDts = packet.pointee.dts
                     }
                     lastVideoSourceDts = packet.pointee.dts
                 } else if isAudioPkt {
+                    audioPktsSinceFinalize += 1
                     if firstSeenAudioSourceDts == Int64.min {
                         firstSeenAudioSourceDts = packet.pointee.dts
                     }
@@ -2317,6 +2381,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // subtitles travel through a side Demuxer owned by
                 // AetherEngine, not through this pump.
                 if !isVideoPkt && !isAudioPkt {
+                    foreignPktsSinceFinalize += 1
+                    lastForeignStreamIndexSinceFinalize = pktStreamIdx
                     continue
                 }
 

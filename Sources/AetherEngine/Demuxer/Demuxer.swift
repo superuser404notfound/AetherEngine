@@ -300,7 +300,8 @@ public final class Demuxer: @unchecked Sendable {
             case AVMEDIA_TYPE_SUBTITLE: typeName = "subtitle"
             default: typeName = "other"
             }
-            EngineLog.emit("[Demuxer]   stream[\(i)] type=\(typeName) \(codecpar.pointee.width)x\(codecpar.pointee.height)", category: .demux)
+            let codecName = String(cString: avcodec_get_name(codecpar.pointee.codec_id))
+            EngineLog.emit("[Demuxer]   stream[\(i)] type=\(typeName) codec=\(codecName) \(codecpar.pointee.width)x\(codecpar.pointee.height)", category: .demux)
         }
         #endif
     }
