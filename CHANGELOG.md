@@ -13,6 +13,7 @@ the public-API contract.
 ### Fixed
 
 - **Seek on the native loopback-HLS path no longer bounces back through the pre-seek position.** A seek wrote the target clock optimistically and flipped state back to `.playing` without waiting for AVPlayer's seek to physically land, so the 100 ms periodic time observer kept publishing the stale pre-seek clock until the (seconds-late) loopback seek completed — the reported time read the target, snapped back to the old position, then re-settled. `seek(to:)` now awaits the real AVPlayer completion, and the native host suppresses the periodic observer's stale reads while a seek is in flight, so the clock holds the target across the landing (AetherEngine#37).
+- **Hang on MKV sources with a missing or out-of-bounds Cues index.** When a file's Cues seek index is absent or points past EOF (truncated / mis-muxed remux), libavformat's matroska seek degrades the VOD cue-prewarm into a multi-GB linear forward scan — tens of minutes (a de-facto hang) on a large remote source, even though every byte range of the stream serves fine. The prewarm seek is now bounded by a deadline (`HLSVideoEngine.cuePrewarmTimeout`); on timeout it falls back to the existing keyframe / uniform-stride segment plan so playback starts promptly. Healthy files (Cues resolve in well under a second) are unaffected.
 
 ### Added
 

@@ -690,6 +690,37 @@ public final class Demuxer: @unchecked Sendable {
         avformat_flush(ctx)
     }
 
+    /// Like `seek(to:)`, but aborts the underlying AVIO reads after `timeout`
+    /// seconds. Returns `true` if the seek completed, `false` if it was
+    /// aborted by the deadline (or otherwise failed).
+    ///
+    /// Needed for the VOD cue prewarm: on a source whose MKV Cues index is
+    /// missing or points past the end of the file (truncated / mis-muxed
+    /// remux), libavformat's matroska seek degrades from the expected "one or
+    /// two byte-range reads" into a sequential linear scan of roughly half the
+    /// file. On a 70+ GB remote source that is tens of minutes — a de-facto
+    /// hang. Bounding it lets the seek fail fast so the caller falls back to a
+    /// uniform-stride segment plan and playback can start immediately. Only
+    /// `AVIOReader` (URL-backed) honours the deadline; other providers run the
+    /// plain seek (local / custom sources don't exhibit this pathology).
+    @discardableResult
+    func seekBounded(to seconds: Double, timeout: TimeInterval) -> Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext else { return false }
+        let reader = avioProvider as? AVIOReader
+        reader?.beginReadDeadline(secondsFromNow: timeout)
+        defer { reader?.endReadDeadline() }
+        let timestamp = Int64(seconds * Double(AV_TIME_BASE))
+        let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
+        avformat_flush(ctx)
+        // matroska can return success with a partial index even after the
+        // read was aborted mid-scan, so the deadline flag — not `ret` — is the
+        // authoritative signal of whether the seek was capped.
+        let capped = reader?.readDeadlineFired ?? false
+        return ret >= 0 && !capped
+    }
+
     /// Fast, lock-free unblock: mark the AVIO reader closed so its read
     /// callback returns -1 immediately and a suspended `av_read_frame`
     /// (including one parked in the live reconnect loop) returns at once.

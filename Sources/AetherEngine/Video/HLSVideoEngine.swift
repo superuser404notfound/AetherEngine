@@ -356,6 +356,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// larger playlist footprint is negligible.
     static let targetSegmentDuration: Double = 4.0
 
+    /// Upper bound on the VOD cue-prewarm seek. A healthy MKV resolves its
+    /// Cues index in well under a second (one or two byte-range reads); a
+    /// source with a missing/out-of-bounds index instead triggers a multi-GB
+    /// linear scan. Past this many seconds we abort the seek and fall back to
+    /// the uniform-stride segment plan so playback starts promptly. Generous
+    /// enough not to false-trip on a slow link doing legitimate tail reads.
+    static let cuePrewarmTimeout: TimeInterval = 10.0
+
     // MARK: - Measurement spike: sliding-window prototype (superseded)
     //
     // PRODUCTIZED (Task B3): the throwaway `_liveSlidingPrototype` flag and
@@ -678,10 +686,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
             //    tail, which fans out into one or two HTTP byte-range
             //    reads. Mid-duration target so the prewarm doesn't strand
             //    the demuxer cursor far from where playback starts.
+            //
+            //    Bounded: when the Cues index is missing or points past EOF
+            //    (truncated / mis-muxed remux) the matroska seek degrades into
+            //    a multi-GB linear scan (tens of minutes on a remote source).
+            //    The deadline aborts it so we fall through to the uniform-stride
+            //    plan below and start playback immediately instead of hanging.
             let prewarmStart = DispatchTime.now()
-            dem.seek(to: durationSeconds * 0.5)
+            let prewarmOK = dem.seekBounded(to: durationSeconds * 0.5, timeout: Self.cuePrewarmTimeout)
             let prewarmMs = Double(DispatchTime.now().uptimeNanoseconds - prewarmStart.uptimeNanoseconds) / 1_000_000
-            EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
+            if prewarmOK {
+                EngineLog.emit("[HLSVideoEngine] cue prewarm: seek to \(String(format: "%.1f", durationSeconds * 0.5))s took \(String(format: "%.1f", prewarmMs))ms")
+            } else {
+                EngineLog.emit("[HLSVideoEngine] cue prewarm: capped at \(String(format: "%.1f", prewarmMs))ms (no usable Cues index — index points past EOF or is absent); building plan from whatever keyframes were scanned")
+            }
 
             // 3. Build the segment plan from real keyframes in the index,
             //    using the SAME cut algorithm libavformat's hls muxer uses

@@ -509,6 +509,43 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var isClosed = false
     private var isFullyClosed = false
 
+    /// Optional wall-clock deadline for read operations. `.distantFuture`
+    /// means "no deadline" (normal playback). When armed via
+    /// `beginReadDeadline`, the read callback returns -1 once the deadline
+    /// passes, which makes an in-flight `avformat_seek_file` abort instead
+    /// of grinding through a multi-GB linear forward scan. This happens when
+    /// a source's MKV Cues index is missing or points past EOF: libavformat's
+    /// matroska seek then degrades from "one or two byte-range reads" into a
+    /// sequential read of (typically) half the file — tens of minutes on a
+    /// remote source, indistinguishable from a hang. Used only to bound the
+    /// VOD cue prewarm (see `Demuxer.seekBounded`); read relaxed from the
+    /// demux thread, exactly like `isClosed`.
+    private var readDeadline = Date.distantFuture
+    private var isPastReadDeadline: Bool { Date() >= readDeadline }
+    /// Set when a read actually returned early because the deadline passed.
+    /// Lets `Demuxer.seekBounded` report whether the seek was capped even
+    /// though `avformat_seek_file` may still return success (matroska keeps a
+    /// partial keyframe index from the bytes it scanned before the abort).
+    /// Written and read on the same thread that drives the synchronous seek.
+    private(set) var readDeadlineFired = false
+
+    /// Arm the read deadline `seconds` from now. Call immediately before a
+    /// bounded seek; always pair with `endReadDeadline()`.
+    func beginReadDeadline(secondsFromNow seconds: TimeInterval) {
+        readDeadlineFired = false
+        readDeadline = Date(timeIntervalSinceNow: seconds)
+        // Wake a read already parked in the forward-wait so it re-evaluates
+        // against the new deadline instead of sleeping the full stall window.
+        winCond.lock()
+        winCond.broadcast()
+        winCond.unlock()
+    }
+
+    /// Disarm the read deadline. Call right after the bounded seek returns.
+    func endReadDeadline() {
+        readDeadline = .distantFuture
+    }
+
     /// Streaming-mode session/task, held as fields so `markClosed()` /
     /// `close()` can cancel the in-flight download. Without this the GET
     /// kept streaming after teardown (endless for chunked responses with
@@ -626,6 +663,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     fileprivate func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         guard !isClosed else { return -1 }
+        if isPastReadDeadline { readDeadlineFired = true; return -1 }
         // For a live source, persistent reader is preferred even without a
         // known fileSize. Check usePersistentReader before isStreaming so a
         // live feed with no Content-Length is routed through the reconnect-
@@ -816,6 +854,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         while totalRead < requestSize {
             if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
+            if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
 
             // Evaluate the whole decision under one lock acquisition so the
             // window can't shift between snapshot and use, and so the
@@ -886,8 +925,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // blocked and re-acquires before returning; a false return
                 // means the connStallTimeout elapsed with no state change,
                 // i.e. a socket stall — treat it as a drop and reconnect.
-                let signaled = winCond.wait(until: Date(timeIntervalSinceNow: Self.connStallTimeout))
+                let signaled = winCond.wait(until: min(Date(timeIntervalSinceNow: Self.connStallTimeout), readDeadline))
                 winCond.unlock()
+                // Woken by the read deadline (bounded seek): bail at the loop
+                // top, which returns -1 and aborts the seek. Do this before the
+                // stall handling so a deadline wake isn't misread as a socket
+                // stall (which would reconnect instead of aborting).
+                if isPastReadDeadline { continue }
                 if !signaled {
                     if recordReconnectAndShouldGiveUp() {
                         EngineLog.emit("[AVIOReader] Persistent stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
