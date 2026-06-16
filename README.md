@@ -248,7 +248,7 @@ Format coverage follows the engine's native-first / software-fallback split. H.2
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.6.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.6.1")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -711,13 +711,13 @@ AetherEngine uses [Semantic Versioning](https://semver.org). The public API surf
 
 `internal` types and properties are not part of the contract and may change in any release. `@testable import AetherEngine` reaches them for the package's own tests, not for production use.
 
-Pin `from: "3.6.0"` in your `Package.swift` to allow patch + minor updates while excluding breaking changes:
+Pin `from: "3.6.1"` in your `Package.swift` to allow patch + minor updates while excluding breaking changes:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.6.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.6.1")
 ```
 
-Pin to `.upToNextMinor(from: "3.6.0")` for stricter teams that prefer to opt into minor bumps explicitly. See [CHANGELOG.md](CHANGELOG.md) for the per-release index.
+Pin to `.upToNextMinor(from: "3.6.1")` for stricter teams that prefer to opt into minor bumps explicitly. See [CHANGELOG.md](CHANGELOG.md) for the per-release index.
 
 ## Requirements
 

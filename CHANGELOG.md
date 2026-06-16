@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.6.1] — 2026-06-16
+
+### Fixed
+
+- **Live no-cut stall classified by read rate, not packet count.** A slow live source that trickles packets (a Wowza SMIL `bounce` re-buffering at an SSAI ad splice) could accumulate enough packets over a long stall to be misread as a cutter wedge, tripping the tight wedge timeout and forcing a premature host retune to the server transcode route mid-program. The watchdog now classifies wedge vs. source starvation by the packet read RATE over the stall window: a genuine wedge streams at full rate but cannot cut, a trickle stays well under the threshold and takes the longer starvation backstop, giving the source time to resume.
+
+### Changed
+
+- The no-cut stall trace now reports a per-window breakdown (video / keyframe / audio / foreign-stream packet counts, last foreign stream index, and the video PTS advance across the stall) so an undetected live boundary is diagnosable from one log line. Non-audio/video streams are also named by codec in the demuxer open log.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.6.1))
+
 ## [3.6.0] — 2026-06-16
 
 ### Added
