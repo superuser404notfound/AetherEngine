@@ -317,6 +317,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// always catches a program boundary.
     static let discontinuityThresholdSeconds: Double = 10.0
 
+    /// Tighter rebase threshold for BACKWARD source-clock jumps. A live
+    /// source's clock only advances within a program, so any backward leap
+    /// past the small-glitch ceiling (matroska B-frame reconstruction,
+    /// <= 0.5 s, handled by the monotonic gate) is a program discontinuity,
+    /// not jitter. The forward threshold stays at 10 s (a forward gap can be
+    /// benign buffering). The 10 s symmetric threshold left a dead zone:
+    /// SHORT SSAI elements (e.g. a 5 s ad bumper between the ad pod and the
+    /// returning program) reset the clock by only ~5 s, so neither the
+    /// monotonic gate (> 0.5 s) nor the rebase (< 10 s) fired. The stream
+    /// then kept the old shift across the reset, overlapping the new element
+    /// against the last one by seconds: video froze on the bumper's last
+    /// frame and the audio splice flooded OutputTimestampSanitizer with
+    /// hundreds of 1-tick-collapsed packets (audible stutter). Catching
+    /// backward jumps at 1.5 s rebases those short elements cleanly.
+    static let discontinuityBackwardThresholdSeconds: Double = 1.5
+
     /// Previous video packet's RAW source PTS (source video TB), before the
     /// dynamic shift is applied. `Int64.min` until the first post-gate video
     /// packet. Used only in live mode to detect the program-boundary leap.
@@ -1864,8 +1880,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if isLive, isVideoPkt, lastVideoSourceDts != Int64.min,
                    videoShiftPts != Int64.min, packet.pointee.dts != Int64.min {
                     let jumpTicks = packet.pointee.dts - lastVideoSourceDts
+                    let thresholdSeconds = jumpTicks < 0
+                        ? Self.discontinuityBackwardThresholdSeconds
+                        : Self.discontinuityThresholdSeconds
                     let thresholdTicks = sourceVideoTbSeconds > 0
-                        ? Int64(Self.discontinuityThresholdSeconds / sourceVideoTbSeconds)
+                        ? Int64(thresholdSeconds / sourceVideoTbSeconds)
                         : Int64.max
                     if abs(jumpTicks) >= thresholdTicks {
                         if isSourceReplay(newDts: packet.pointee.dts,
@@ -1965,8 +1984,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                    let audio = audioConfig {
                     let jumpTicks = packet.pointee.dts - lastAudioSourceDts
                     let tb = audio.sourceTimeBase
+                    let thresholdSeconds = jumpTicks < 0
+                        ? Self.discontinuityBackwardThresholdSeconds
+                        : Self.discontinuityThresholdSeconds
                     let thresholdTicks = tb.num > 0
-                        ? Int64(Self.discontinuityThresholdSeconds * Double(tb.den) / Double(tb.num))
+                        ? Int64(thresholdSeconds * Double(tb.den) / Double(tb.num))
                         : Int64.max
                     if abs(jumpTicks) >= thresholdTicks {
                         if isSourceReplay(newDts: packet.pointee.dts,
