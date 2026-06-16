@@ -46,6 +46,15 @@ final class DisplayCriteriaController {
     /// panel's locked DV value to 1.0).
     private var didApply: Bool = false
 
+    /// Whether the most recent `apply()` attached HDR color extensions
+    /// (i.e. asked the panel for an actual dynamic-range switch). Read by
+    /// `waitForSwitch` to classify the settle outcome: a panel that ends
+    /// at EDR headroom 1.0 is a FAILURE only when HDR was requested; for
+    /// an SDR rate-only criteria (Match Frame Rate engaging on a 50/60 fps
+    /// stream) headroom 1.0 is the correct, expected result and must not
+    /// log an HDR-failure warning. Defaults to false (no HDR asked).
+    private var lastCriteriaWasHDR: Bool = false
+
     init() {}
 
     /// Apply display criteria for the next playback session.
@@ -73,6 +82,9 @@ final class DisplayCriteriaController {
     @discardableResult
     func apply(format: VideoFormat, frameRate: Double?, codecTag: FourCharCode?, omitColorExtensions: Bool) -> Bool {
         #if os(tvOS)
+        // Reset up front so a skipped apply (Match Content off, no window)
+        // can't leave a prior HDR session's flag for waitForSwitch to read.
+        lastCriteriaWasHDR = false
         guard #available(tvOS 17.0, *) else {
             EngineLog.emit("[DisplayCriteria] skipped: tvOS < 17", category: .engine)
             return false
@@ -158,6 +170,7 @@ final class DisplayCriteriaController {
         let criteria = AVDisplayCriteria(refreshRate: effectiveRate, formatDescription: desc)
         displayManager.preferredDisplayCriteria = criteria
         didApply = true
+        lastCriteriaWasHDR = isHDR
 
         EngineLog.emit(
             "[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) "
@@ -254,7 +267,17 @@ final class DisplayCriteriaController {
                 let totalMs = (tick + 1) * 100 + 1000  // include stage 1 budget
                 if screen.currentEDRHeadroom > 1.001 {
                     EngineLog.emit("[DisplayCriteria] switch settled after ~\(totalMs)ms (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+                } else if didApply && !lastCriteriaWasHDR {
+                    // We explicitly programmed an SDR rate-only criteria (Match
+                    // Frame Rate): a refresh-rate switch settled and the panel
+                    // correctly stayed SDR. EDR headroom 1.0 is the expected
+                    // result, not a failure.
+                    EngineLog.emit("[DisplayCriteria] rate-only switch settled after ~\(totalMs)ms (SDR, EDR headroom 1.0 as expected)", category: .engine)
                 } else {
+                    // HDR was requested (or AVKit drives criteria on a
+                    // suppressed host and we can't prove it asked for SDR) yet
+                    // the panel ended back in SDR: a real dynamic-range
+                    // handshake failure worth flagging.
                     EngineLog.emit("[DisplayCriteria] WARN switch ended after ~\(totalMs)ms but EDR headroom still 1.0 (panel stayed SDR despite HDR criteria)", category: .engine)
                 }
                 return
