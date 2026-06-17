@@ -463,14 +463,10 @@ final class EmbeddedSubtitleDecoder {
     // MARK: - Rect → text / image
 
     /// Raw ASS event line for the rect, exactly as libavcodec hands
-    /// it over (the `ReadOrder,Layer,Style,...,Text` payload with all
-    /// override tags and escapes intact). Used by the
-    /// `preserveASSMarkup` opt-in path; nil when the rect carries no
-    /// ASS payload (bitmap rects, plain-text-only rects).
+    /// it over. Delegates to `SubtitleRectText` so the embedded and
+    /// sidecar `preserveASSMarkup` paths share one source of truth.
     private static func rawASSLine(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
-        guard let assPtr = rect.pointee.ass else { return nil }
-        let line = String(cString: assPtr)
-        return line.isEmpty ? nil : line
+        SubtitleRectText.rawASSLine(for: rect)
     }
 
     private static func textForSubtitleRect(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {

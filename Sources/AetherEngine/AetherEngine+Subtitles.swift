@@ -513,13 +513,23 @@ extension AetherEngine {
         loadedSidecarURL = url
         isSubtitleActive = true
         subtitleCues = []
+        sidecarASSHeader = nil
         isLoadingSubtitles = true
 
         let effectiveHeaders = httpHeaders ?? loadedOptions.httpHeaders
+        // Mirror the embedded primary path (startEmbeddedSubtitleTask):
+        // an ASS/SSA sidecar honours the session's preserveASSMarkup so
+        // the host can drive a styled whole-script renderer. SRT / VTT
+        // carry no ASS payload, so the decoder falls back to plain text
+        // there regardless.
+        let preserveASS = loadedOptions.preserveASSMarkup
         sidecarTask = Task { [weak self] in
-            let cues: [SubtitleCue]
+            let result: SidecarDecodeResult
             do {
-                cues = try await SubtitleDecoder.decodeFile(url: url, httpHeaders: effectiveHeaders)
+                result = try await SubtitleDecoder.decodeFile(
+                    url: url, httpHeaders: effectiveHeaders,
+                    preserveASSMarkup: preserveASS
+                )
             } catch {
                 EngineLog.emit("[AetherEngine] sidecar decode failed: \(error)", category: .engine)
                 await MainActor.run {
@@ -545,7 +555,8 @@ extension AetherEngine {
                 // Sidecar cues stay in source PTS; host renders
                 // against `engine.sourceTime`, which already adds the
                 // active producer's playlist shift to AVPlayer's clock.
-                self.subtitleCues = cues
+                self.subtitleCues = result.cues
+                self.sidecarASSHeader = result.assHeader
                 self.isLoadingSubtitles = false
             }
         }
@@ -565,9 +576,12 @@ extension AetherEngine {
 
         let effectiveHeaders = httpHeaders ?? loadedOptions.httpHeaders
         secondarySidecarTask = Task { [weak self] in
-            let cues: [SubtitleCue]
+            let result: SidecarDecodeResult
             do {
-                cues = try await SubtitleDecoder.decodeFile(url: url, httpHeaders: effectiveHeaders)
+                // Secondary is always rendered as plain text by the host
+                // (it never drives libass), so it never preserves ASS
+                // markup, mirroring the embedded secondary path (#47).
+                result = try await SubtitleDecoder.decodeFile(url: url, httpHeaders: effectiveHeaders)
             } catch {
                 EngineLog.emit("[AetherEngine] secondary sidecar decode failed: \(error)", category: .engine)
                 await MainActor.run {
@@ -579,7 +593,7 @@ extension AetherEngine {
             await MainActor.run {
                 guard !Task.isCancelled, let self = self else { return }
                 guard self.isSecondarySubtitleActive else { return }
-                self.secondarySubtitleCues = cues
+                self.secondarySubtitleCues = result.cues
                 self.isLoadingSecondarySubtitles = false
             }
         }
@@ -594,6 +608,7 @@ extension AetherEngine {
         loadedSidecarURL = nil
         isSubtitleActive = false
         subtitleCues = []
+        sidecarASSHeader = nil
         isLoadingSubtitles = false
     }
 

@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`preserveASSMarkup` now covers external ASS sidecars.** `selectSidecarSubtitle(url:)` honours the session's `LoadOptions.preserveASSMarkup` for `.ass` / `.ssa` files exactly like embedded tracks: cues carry the raw libavcodec event line (override tags and style references intact) instead of stripped plain text, and the script header (`[Script Info]` + `[V4+ Styles]`) extracted from the file's subtitle-stream extradata is surfaced on the new published `engine.sidecarASSHeader`. Hosts pair the two through `ASSScriptBuilder` to drive a whole-script renderer (swift-ass-renderer's `loadTrack(content:)`) for external subtitles, not just embedded ones. SRT / VTT sidecars and the text-only secondary channel are unaffected (no ASS payload, header stays nil). `SubtitleRectText.rawASSLine(for:)` is now the shared raw-line extractor behind both the inline and sidecar decoders (AetherEngine#48).
+
 ## [3.9.0] — 2026-06-17
 
 ### Added

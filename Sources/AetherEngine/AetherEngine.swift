@@ -247,6 +247,17 @@ public final class AetherEngine: ObservableObject {
     /// True when sidecar subtitles are the active subtitle source.
     @Published public internal(set) var isSubtitleActive: Bool = false
 
+    /// ASS script header (`[Script Info]` + `[V4+ Styles]` + the
+    /// `[Events]` Format line) for the active PRIMARY sidecar track,
+    /// or nil. The sidecar analogue of `TrackInfo.assHeader` (which
+    /// covers embedded tracks): populated by `selectSidecarSubtitle`
+    /// only when the session loaded with `LoadOptions.preserveASSMarkup`
+    /// and the file is ASS/SSA, in which case `subtitleCues` carry raw
+    /// event lines. Hosts pair the two to drive a whole-script renderer
+    /// (swift-ass-renderer via `ASSScriptBuilder`); see AetherEngine#48.
+    /// Nil for SRT / VTT sidecars and when markup preservation is off.
+    @Published public internal(set) var sidecarASSHeader: String? = nil
+
     /// Decoded cues for the independent SECONDARY subtitle track
     /// (issue #47). Text-only: bitmap codecs are rejected at selection.
     /// Populated by `selectSecondarySubtitleTrack(index:)` (embedded)
@@ -2066,6 +2077,7 @@ public final class AetherEngine: ObservableObject {
         loadedSidecarURL = nil
         isSubtitleActive = false
         subtitleCues = []
+        sidecarASSHeader = nil
         isLoadingSubtitles = false
         cancelSidecarTask(channel: .secondary)
         cancelEmbeddedSubtitleReader(channel: .secondary)

@@ -30,6 +30,19 @@ enum SubtitleRectText {
         return nil
     }
 
+    /// Raw ASS event line for the rect, exactly as libavcodec hands
+    /// it over (the `ReadOrder,Layer,Style,...,Text` payload with all
+    /// override tags and escapes intact). Used by the
+    /// `preserveASSMarkup` opt-in path on both the embedded
+    /// (`EmbeddedSubtitleDecoder`) and sidecar (`SubtitleDecoder`)
+    /// readers; nil when the rect carries no ASS payload (bitmap
+    /// rects, plain-text-only rects).
+    static func rawASSLine(for rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
+        guard let assPtr = rect.pointee.ass else { return nil }
+        let line = String(cString: assPtr)
+        return line.isEmpty ? nil : line
+    }
+
     /// Strip ASS escapes (`\\N` newline, `\\h` hard space) and
     /// `{...}` override tags; nil when nothing displayable remains.
     static func cleanASSBody(_ raw: String) -> String? {

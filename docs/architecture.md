@@ -158,7 +158,7 @@ Sources/AetherEngine/
 │   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments
 ├── Subtitles/
 │   ├── ASSScriptBuilder.swift               Reassembles raw ASS event cues + TrackInfo.assHeader into a complete script for whole-file renderers
-│   └── SubtitleRectText.swift               Plain-text extraction from subtitle rects (ASS dialogue parsing), shared by the inline and sidecar decoders
+│   └── SubtitleRectText.swift               Plain-text + raw ASS event-line extraction from subtitle rects, shared by the inline and sidecar decoders
 ├── Video/
 │   ├── HLSVideoEngine.swift                 Native path: session orchestrator (start/stop, producer construction + restart, shift handling)
 │   ├── HLSVideoEngine+AudioRoute.swift      Native path: stream-copy -> FLAC-bridge -> video-only audio cascade

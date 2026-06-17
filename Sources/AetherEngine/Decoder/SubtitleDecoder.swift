@@ -10,6 +10,16 @@ enum SubtitleDecoderError: Error {
     case codecOpenFailed(code: Int32)
 }
 
+/// Result of a sidecar decode: the cue list plus, for ASS/SSA files
+/// loaded under `preserveASSMarkup`, the script header (`[Script Info]`
+/// + `[V4+ Styles]` + `[Events]` Format line) extracted from the
+/// subtitle stream's extradata. `assHeader` is nil for non-ASS files
+/// and whenever markup preservation is off.
+struct SidecarDecodeResult {
+    let cues: [SubtitleCue]
+    let assHeader: String?
+}
+
 /// One-shot decoder for sidecar subtitle files (.srt / .ass / .vtt /
 /// .ssa next to the media). Opens the URL as its own AVFormatContext,
 /// finds the single subtitle stream, walks every packet, and returns
@@ -25,8 +35,21 @@ enum SubtitleDecoder {
 
     /// Decode every cue out of the subtitle file at `url`. Cancellable
     /// via `Task.cancel()`; throws on open / codec failure. Returns
-    /// cues sorted by `startTime`.
-    static func decodeFile(url: URL, httpHeaders: [String: String] = [:]) async throws -> [SubtitleCue] {
+    /// cues sorted by `startTime`, plus the ASS header when
+    /// `preserveASSMarkup` is set and the file is ASS/SSA.
+    ///
+    /// `preserveASSMarkup`: when true, ASS/SSA cues carry the raw
+    /// libavcodec event line (`ReadOrder,Layer,Style,...,Text`) as
+    /// their text body instead of stripped plain text, mirroring the
+    /// embedded `EmbeddedSubtitleDecoder` path so a whole-script
+    /// renderer (swift-ass-renderer via `ASSScriptBuilder`) can style
+    /// them. No effect on non-ASS files (SRT / VTT carry no ASS
+    /// payload, so the path falls back to plain text).
+    static func decodeFile(
+        url: URL,
+        httpHeaders: [String: String] = [:],
+        preserveASSMarkup: Bool = false
+    ) async throws -> SidecarDecodeResult {
         // Task.cancel() does NOT propagate into a detached task (and
         // `Task.isCancelled` inside it refers to the detached task, so it
         // was always false): a superseded sidecar load used to decode the
@@ -37,7 +60,10 @@ enum SubtitleDecoder {
         let token = CancelFlag()
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
-                try decodeFileSync(url: url, httpHeaders: httpHeaders, cancel: token)
+                try decodeFileSync(
+                    url: url, httpHeaders: httpHeaders,
+                    preserveASSMarkup: preserveASSMarkup, cancel: token
+                )
             }.value
         } onCancel: {
             token.cancel()
@@ -76,8 +102,9 @@ enum SubtitleDecoder {
     // MARK: - Synchronous core
 
     private static func decodeFileSync(
-        url: URL, httpHeaders: [String: String], cancel: CancelFlag
-    ) throws -> [SubtitleCue] {
+        url: URL, httpHeaders: [String: String],
+        preserveASSMarkup: Bool, cancel: CancelFlag
+    ) throws -> SidecarDecodeResult {
         let isHTTP = url.scheme == "http" || url.scheme == "https"
 
         var formatContext: UnsafeMutablePointer<AVFormatContext>?
@@ -154,6 +181,27 @@ enum SubtitleDecoder {
             throw SubtitleDecoderError.noSubtitleStream
         }
 
+        // ASS / SSA sidecars carry their script header ([Script Info] +
+        // [V4+ Styles] + the [Events] Format line) as codec extradata,
+        // exactly like embedded tracks (mirrors Demuxer.trackInfo). Hosts
+        // that opt into raw ASS event lines need it to resolve style
+        // references. Only surfaced under preserveASSMarkup; the raw
+        // event-line path below is the only consumer.
+        let codecID = codecpar.pointee.codec_id
+        let isASS = codecID == AV_CODEC_ID_ASS || codecID == AV_CODEC_ID_SSA
+        let keepMarkup = preserveASSMarkup && isASS
+        var assHeader: String? = nil
+        if keepMarkup,
+           let extradata = codecpar.pointee.extradata,
+           codecpar.pointee.extradata_size > 0 {
+            let bytes = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
+            // Strip NUL bytes: extradata is frequently NUL-terminated and
+            // libass parses C-string-style, so a single embedded NUL would
+            // hide every line a host appends after the header.
+            assHeader = String(data: bytes, encoding: .utf8)?
+                .replacingOccurrences(of: "\0", with: "")
+        }
+
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw SubtitleDecoderError.noDecoder
         }
@@ -180,6 +228,15 @@ enum SubtitleDecoder {
         // PTS anchor for events surfaced by the post-loop flush, which
         // have no packet of their own.
         var lastPktPTS: Double = 0
+
+        // Body extraction honours preserveASSMarkup: under it keep the
+        // raw ASS event line (so the host can rebuild a styled script
+        // via ASSScriptBuilder), otherwise strip to plain text. The
+        // raw line carries its own timing in the cue's start/end, which
+        // ASSScriptBuilder re-stamps, so the merged join below is safe.
+        let lineForRect: (UnsafeMutablePointer<AVSubtitleRect>) -> String? = { rect in
+            keepMarkup ? SubtitleRectText.rawASSLine(for: rect) : textForRect(rect)
+        }
 
         while !cancel.isCancelled {
             var pktPtr: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc()
@@ -221,7 +278,7 @@ enum SubtitleDecoder {
                 if sub.num_rects > 0, let rects = sub.rects {
                     for i in 0..<Int(sub.num_rects) {
                         guard let rect = rects[i] else { continue }
-                        if let text = textForRect(rect) {
+                        if let text = lineForRect(rect) {
                             lines.append(text)
                         }
                     }
@@ -270,7 +327,7 @@ enum SubtitleDecoder {
             if flushSub.num_rects > 0, let rects = flushSub.rects {
                 for i in 0..<Int(flushSub.num_rects) {
                     guard let rect = rects[i] else { continue }
-                    if let text = textForRect(rect) {
+                    if let text = lineForRect(rect) {
                         lines.append(text)
                     }
                 }
@@ -293,7 +350,10 @@ enum SubtitleDecoder {
             }
         }
 
-        return cues.sorted { $0.startTime < $1.startTime }
+        return SidecarDecodeResult(
+            cues: cues.sorted { $0.startTime < $1.startTime },
+            assHeader: assHeader
+        )
     }
 
     // MARK: - Rect → text
