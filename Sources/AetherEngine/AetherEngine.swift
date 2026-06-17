@@ -1704,6 +1704,20 @@ public final class AetherEngine: ObservableObject {
             }
         }
 
+        // Mirror the re-arm for the secondary companion track (issue #47).
+        if activeSecondaryEmbeddedSubtitleStreamIndex >= 0, let url = loadedURL {
+            let streamIdx = activeSecondaryEmbeddedSubtitleStreamIndex
+            cancelEmbeddedSubtitleReader(channel: .secondary)
+            secondarySubtitleCues = []
+            if isCustomSource {
+                if let clone = customReader?.makeIndependentReader() {
+                    startEmbeddedSubtitleTask(url: url, reader: clone, formatHint: customFormatHint, streamIndex: streamIdx, startAt: target, channel: .secondary)
+                }
+            } else {
+                startEmbeddedSubtitleTask(url: url, reader: nil, formatHint: nil, streamIndex: streamIdx, startAt: target, channel: .secondary)
+            }
+        }
+
         // The host seek has physically landed (we awaited it). Flip back to
         // .playing and clear the in-flight seek signal.
         state = .playing
