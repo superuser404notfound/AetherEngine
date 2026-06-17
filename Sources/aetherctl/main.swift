@@ -83,6 +83,7 @@ func printUsage() {
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
       aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--gen-highbitrate-seed]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
+      aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
       aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N]
                            [--master] [--discontinuity-at N] [--slow-refresh]
                            [--drop-segment N] [--encrypted] [--fmp4] [--self-test]
@@ -242,6 +243,32 @@ if first == "smbtest" {
     rest.removeAll { $0 == urlArg }
     rejectStrayFlags(rest, subcommand: "smbtest")
     exit(runSMBTest([urlArg, "--reads", "\(reads)"]))
+}
+
+// Dual subtitle channel harness (issue #47).
+if first == "dualsubs" {
+    var rest = Array(args.dropFirst(2))
+    let primaryIndex   = takeIntFlag("--primary",   from: &rest)
+    let secondaryIndex = takeIntFlag("--secondary", from: &rest)
+    let seekTo         = takeDoubleFlag("--seek",   from: &rest)
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("ERROR: dualsubs requires a <file> argument")
+        print("Usage: aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    guard let primary = primaryIndex else {
+        print("ERROR: dualsubs requires --primary <streamIndex>")
+        print("Usage: aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]")
+        exit(64)
+    }
+    guard let secondary = secondaryIndex else {
+        print("ERROR: dualsubs requires --secondary <streamIndex>")
+        print("Usage: aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]")
+        exit(64)
+    }
+    rejectStrayFlags(rest, subcommand: "dualsubs")
+    exit(runDualSubs(path: urlArg, primaryIndex: primary, secondaryIndex: secondary, seekTo: seekTo))
 }
 
 // HLS live fixture subcommand.
