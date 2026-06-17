@@ -91,6 +91,28 @@ extension AetherEngine {
         startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: sourceTime)
     }
 
+    /// Activate an embedded subtitle stream as the SECONDARY companion
+    /// track, independent of the primary selection (issue #47). Text-only:
+    /// bitmap codecs are rejected by the reader. A second side demuxer runs
+    /// concurrently with the primary one.
+    public func selectSecondarySubtitleTrack(index: Int) {
+        guard let url = loadedURL else { return }
+        var customClone: IOReader? = nil
+        if isCustomSource {
+            guard let clone = customReader?.makeIndependentReader() else { return }
+            customClone = clone
+        }
+        cancelSidecarTask(channel: .secondary)
+        cancelEmbeddedSubtitleReader(channel: .secondary)
+
+        isSecondarySubtitleActive = true
+        secondarySubtitleCues = []
+        isLoadingSecondarySubtitles = true
+        activeSecondaryEmbeddedSubtitleStreamIndex = Int32(index)
+
+        startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: sourceTime, channel: .secondary)
+    }
+
     /// Spin up the side-demuxer Task that streams cues into the
     /// engine. Captured-on-init: the URL, the stream index, the
     /// start position, and the source video dimensions. The Task's
@@ -213,6 +235,19 @@ extension AetherEngine {
                 // flight) must not clear the SUCCESSOR's loading spinner.
                 guard !Task.isCancelled else { return }
                 self?.setLoadingSubtitles(false, for: channel)
+            }
+            return
+        }
+
+        // Secondary channel is text-only (issue #47): a bitmap codec
+        // (PGS / DVB / DVD / XSUB) cannot stack as a companion line, so
+        // refuse it here as the safety net behind the host's track filter.
+        if channel == .secondary, EmbeddedSubtitleDecoder.isBitmapCodec(decoder.codecID) {
+            EngineLog.emit("[AetherEngine] secondary subtitle rejected: bitmap codec=\(decoder.codecID.rawValue) not supported as companion track", category: .engine)
+            await MainActor.run { [weak self] in
+                guard !Task.isCancelled else { return }
+                self?.setLoadingSubtitles(false, for: .secondary)
+                self?.isSecondarySubtitleActive = false
             }
             return
         }
@@ -507,6 +542,40 @@ extension AetherEngine {
                 // active producer's playlist shift to AVPlayer's clock.
                 self.subtitleCues = cues
                 self.isLoadingSubtitles = false
+            }
+        }
+    }
+
+    /// Decode a sidecar subtitle file as the SECONDARY companion track
+    /// (issue #47), independent of the primary selection.
+    public func selectSecondarySidecarSubtitle(url: URL, httpHeaders: [String: String]? = nil) {
+        cancelSidecarTask(channel: .secondary)
+        cancelEmbeddedSubtitleReader(channel: .secondary)
+        activeSecondaryEmbeddedSubtitleStreamIndex = -1
+
+        loadedSecondarySidecarURL = url
+        isSecondarySubtitleActive = true
+        secondarySubtitleCues = []
+        isLoadingSecondarySubtitles = true
+
+        let effectiveHeaders = httpHeaders ?? loadedOptions.httpHeaders
+        secondarySidecarTask = Task { [weak self] in
+            let cues: [SubtitleCue]
+            do {
+                cues = try await SubtitleDecoder.decodeFile(url: url, httpHeaders: effectiveHeaders)
+            } catch {
+                EngineLog.emit("[AetherEngine] secondary sidecar decode failed: \(error)", category: .engine)
+                await MainActor.run {
+                    guard !Task.isCancelled, let self = self else { return }
+                    if self.isSecondarySubtitleActive { self.isLoadingSecondarySubtitles = false }
+                }
+                return
+            }
+            await MainActor.run {
+                guard !Task.isCancelled, let self = self else { return }
+                guard self.isSecondarySubtitleActive else { return }
+                self.secondarySubtitleCues = cues
+                self.isLoadingSecondarySubtitles = false
             }
         }
     }
