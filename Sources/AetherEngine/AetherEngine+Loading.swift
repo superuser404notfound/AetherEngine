@@ -802,6 +802,10 @@ extension AetherEngine {
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
             : nil
+        let secondaryEmbeddedToResume: Int32 = activeSecondaryEmbeddedSubtitleStreamIndex
+        let secondarySidecarToResume: URL? = isSecondarySubtitleActive && activeSecondaryEmbeddedSubtitleStreamIndex < 0
+            ? loadedSecondarySidecarURL
+            : nil
         EngineLog.emit(
             "[AetherEngine] reload begin: audioStream=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s embeddedSub=\(embeddedStreamToResume) sidecar=\(sidecarToResume?.lastPathComponent ?? "nil")",
             category: .engine
@@ -1004,6 +1008,11 @@ extension AetherEngine {
             selectSidecarSubtitle(url: sidecar)
         } else if embeddedStreamToResume >= 0 {
             selectSubtitleTrack(index: Int(embeddedStreamToResume))
+        }
+        if let secondarySidecar = secondarySidecarToResume {
+            selectSecondarySidecarSubtitle(url: secondarySidecar)
+        } else if secondaryEmbeddedToResume >= 0 {
+            selectSecondarySubtitleTrack(index: Int(secondaryEmbeddedToResume))
         }
     }
 
