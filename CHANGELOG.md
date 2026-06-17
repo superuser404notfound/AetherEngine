@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-06-17
+
+### Added
+
+- **SMB2/3 playback via the optional `AetherEngineSMB` product.** Play media off an SMB share through the normal decode path, no server-side mount: `SMBConnection` (backed by AMSMB2 / libsmb2, LGPL-2.1, the same license tier as the bundled FFmpeg) is a read-only `ByteRangeSource`, and `SMBIOReader` adapts it to the engine's existing `IOReader`, bridging each synchronous demux-thread read to AMSMB2's async API. Seekable, so audio-track switching, background reload, embedded subtitles, and scrub previews all work. The SMB dependency is scoped to the new product, so the core engine and its tvOS hosts never link libsmb2. Read-only, NTLMv2 / guest auth; on tvOS the host supplies the local-network entitlement. `aetherctl smbtest <smb-url>` validates a share from macOS (AetherEngine#46).
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.8.0))
+
 ## [3.7.0] — 2026-06-17
 
 ### Fixed
