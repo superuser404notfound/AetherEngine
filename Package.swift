@@ -31,12 +31,15 @@ let package = Package(
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
         .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "1.0.0"),
         .package(url: "https://github.com/amosavian/AMSMB2", from: "4.0.3"),
+        // libdovi (Dolby Vision RPU parser/converter) — local xcframework, no Rust needed at build time.
+        .package(path: "../LibDovi"),
     ],
     targets: [
         .target(
             name: "AetherEngine",
             dependencies: [
                 .product(name: "FFmpegBuild", package: "FFmpegBuild"),
+                .product(name: "Dovi", package: "LibDovi"),
             ],
             linkerSettings: [
                 .linkedFramework("AVFoundation"),
