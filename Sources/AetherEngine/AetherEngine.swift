@@ -1523,6 +1523,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func play() {
+        EngineLog.emit("[AetherEngine] play() dispatch: state=\(state) nativeEffPlaying=\(nativeHost?.isEffectivelyPlaying.description ?? "-")", category: .engine)
         activeTransportHost?.play()
         if state == .paused || state == .loading {
             state = .playing
@@ -1531,6 +1532,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
+        EngineLog.emit("[AetherEngine] pause() dispatch: state=\(state)", category: .engine)
         activeTransportHost?.pause()
         isBuffering = false
         if state == .playing {
@@ -1571,6 +1573,7 @@ public final class AetherEngine: ObservableObject {
         } else {
             isPlaying = (state == .playing)
         }
+        EngineLog.emit("[AetherEngine] togglePlayPause: state=\(state) isPlaying=\(isPlaying) -> \(isPlaying ? "pause" : "play")", category: .engine)
         if isPlaying { pause() } else { play() }
     }
 
@@ -1697,6 +1700,7 @@ public final class AetherEngine: ObservableObject {
             nativeClockSeconds = clockTarget
             clock.currentTime = target
             clock.sourceTime = target
+            EngineLog.emit("[AetherEngine] live seek landed: target=\(String(format: "%.2f", target)) clockLead=\(String(format: "%.3f", clockLeadSeconds)) audio=\(activeAudioDecoder ?? "-")", category: .engine)
             // publishLiveWindow on the next tick recomputes behindLiveSeconds
             // against the new playhead.
             state = .playing
@@ -1742,6 +1746,7 @@ public final class AetherEngine: ObservableObject {
         nativeClockSeconds = clockTarget
         clock.currentTime = target
         clock.sourceTime = target
+        EngineLog.emit("[AetherEngine] seek landed: target=\(String(format: "%.2f", target)) clockLead=\(String(format: "%.3f", clockLeadSeconds)) audio=\(activeAudioDecoder ?? "-")", category: .engine)
 
         // Re-arm the side subtitle demuxer at the new playhead so cues
         // for the post-scrub content surface immediately. Skip when
