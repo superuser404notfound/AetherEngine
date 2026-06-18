@@ -1,5 +1,5 @@
 {
-  "originHash" : "90bfdfdbc43e335ac25a12637e1590f189caac35dbb7ddf5681ad5040688689c",
+  "originHash" : "2c28091996c29a63f226e66c31e169d2465835c9e709223f018a818d02de37fc",
   "pins" : [
     {
       "identity" : "amsmb2",
@@ -16,6 +16,15 @@
       "location" : "https://github.com/superuser404notfound/FFmpegBuild",
       "state" : {
         "revision" : "1fffb842f5c6708ace29863a160209e3e2d377c7",
+        "version" : "1.0.0"
+      }
+    },
+    {
+      "identity" : "libdovi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/LibDovi",
+      "state" : {
+        "revision" : "eb20a6354d3923115fafede5296ee96e95061c6f",
         "version" : "1.0.0"
       }
     }
