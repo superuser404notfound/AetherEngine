@@ -40,7 +40,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Disc | DVD-Video and Blu-ray ISO (decrypted): main title only, demuxed through the normal path |
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 where HW AV1 exists |
 | Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1; bwdif deinterlace |
-| HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5 / P8.1 / P8.4, AV1 P10.x), HLG |
+| HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG |
 | Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / DTS / MP3 / Opus bridge to EAC3 5.1 (default) or lossless FLAC |
 | Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |

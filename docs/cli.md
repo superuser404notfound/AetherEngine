@@ -7,6 +7,7 @@ swift run aetherctl probe <url>          # dump container + streams + duration, 
 swift run aetherctl serve <url>          # park the engine's loopback HLS-fMP4 server
 swift run aetherctl validate <url>       # serve + run mediastreamvalidator, exit
 swift run aetherctl swdecode <url>       # open SoftwareVideoDecoder, decode N packets, report
+swift run aetherctl dovitest <url>       # convert a DV Profile 7 stream to 8.1, dump for dovi_tool
 swift run aetherctl extract <url>        # FrameExtractor still-image extraction + leak testing
 swift run aetherctl audio [--seconds N] <url>   # audio-only pipeline smoke test (default 10 s)
 swift run aetherctl customio <path>      # exercise the custom IOReader path end-to-end
@@ -19,7 +20,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Thirteen subcommands plus the bare-URL `serve` alias.
+Fourteen subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -53,6 +54,16 @@ Opens `SoftwareVideoDecoder` for the source's video stream, feeds up to N packet
 - SW decode end-to-end healthy (if real playback still hangs, the failure is downstream in `SoftwarePlaybackHost` frame-enqueue, display-layer attach, or audio-clock sync)
 
 Backed by the public `AetherEngine.swDecodeProbe(url:maxPackets:options:)` static API returning `SoftwareDecodeProbeResult`. Hosts can use the same probe in their own diagnostic overlays.
+
+## dovitest
+
+Runs the Dolby Vision Profile 7 to 8.1 converter over every video packet of the source and writes the converted elementary stream (Annex B) to `/tmp/aetherctl-dovitest.hevc`, reporting packets processed, conversions, and failures. Lets you confirm the in-engine `DoviRpuConverter` (libdovi) output matches the `dovi_tool -m 2` ground truth offline, without a DV panel:
+
+```bash
+swift run aetherctl dovitest <p7-source>
+dovi_tool extract-rpu -i /tmp/aetherctl-dovitest.hevc -o out.rpu
+dovi_tool info -i out.rpu -f 0   # expect dovi_profile 8, disable_residual_flag true
+```
 
 ## extract
 
