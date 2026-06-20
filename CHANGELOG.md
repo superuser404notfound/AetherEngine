@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.11.4] — 2026-06-20
+
+### Fixed
+
+- **Spurious terminal `.failed` published while the AVPlayer kept playing (#50).** On engine-native loopback-HLS playback the engine could publish a terminal failure while the player was demonstrably still advancing (clock and subtitle cues moving, segments flowing, title playing to the end), aborting a session that had self-healed. AVPlayer flips `item.status` to `.failed` on transient errors it then recovers from (an in-range loopback 404, or an AVIOReader range-read reconnect), and the `.failed` KVO is not synchronized with the `timeControlStatus` KVO, so the earlier gate (3.11.3) that checked the instantaneous transport state at the failure instant still let a transient through whenever it fired during a brief `.waitingToPlayAtSpecifiedRate` blip. The failure publish now discriminates on whether playback was ever established (a latch set on the first `.playing` transition) instead of an instantaneous sample: before playback establishes a `.failed` surfaces promptly (genuine startup failure), and after it every `.failed` is deferred and only surfaced if, after a settle, the player is both stopped and has not advanced its clock. No transient that keeps the clock moving can publish a terminal failure anymore.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.11.4))
+
 ## [3.11.3] — 2026-06-19
 
 ### Fixed
