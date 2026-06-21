@@ -423,6 +423,10 @@ extension AetherEngine {
                 let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift
                     ?? self.playlistShiftSeconds
                 self.clock.sourceTime = value + shift
+                // Buffered frontier on the same folded source axis: end of
+                // AVPlayer's contiguous loaded span, shifted like the playhead.
+                // Clamp so it never trails the rendered frame (#54).
+                self.clock.bufferedPosition = max(value + shift, host.bufferedEnd + shift)
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
@@ -570,6 +574,9 @@ extension AetherEngine {
                 guard let self = self else { return }
                 self.clock.currentTime = value
                 self.clock.sourceTime = value
+                // SW buffered frontier: newest demuxed source PTS in session
+                // time, clamped to never trail the playhead (#54).
+                self.clock.bufferedPosition = max(value, host.bufferedSessionTime)
             }
             .store(in: &softwareCancellables)
         wireCommonHostSinks(
@@ -638,6 +645,9 @@ extension AetherEngine {
                 guard let self = self else { return }
                 self.clock.currentTime = value
                 self.clock.sourceTime = value
+                // Audio path exposes no buffer-ahead surface; mirror the
+                // playhead so bufferedPosition stays defined and resets (#54).
+                self.clock.bufferedPosition = value
             }
             .store(in: &audioCancellables)
         wireCommonHostSinks(

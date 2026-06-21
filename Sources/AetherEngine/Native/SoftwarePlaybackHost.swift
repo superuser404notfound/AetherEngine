@@ -146,6 +146,19 @@ final class SoftwarePlaybackHost {
     /// thread writing while the main-actor time tick reads them.
     private let liveEdgeLock = NSLock()
 
+    /// Newest demuxed source position in session time (seconds), i.e. how
+    /// far ahead of the playhead the demuxer has pulled and demuxed data
+    /// from the (possibly remote) source (AetherEngine#54). This is the
+    /// SW path's buffered frontier; the engine publishes it as
+    /// `clock.bufferedPosition`. Returns 0 before the first packet. Reads
+    /// the same demux-thread state as the live edge, under `liveEdgeLock`.
+    nonisolated var bufferedSessionTime: Double {
+        liveEdgeLock.lock()
+        defer { liveEdgeLock.unlock() }
+        guard sessionStartPts.isFinite, newestSourcePts.isFinite else { return 0 }
+        return max(0, newestSourcePts - sessionStartPts)
+    }
+
     // MARK: - Live reader/feeder split (DVR sessions)
     //
     // A live session WITH a DVR ring runs two loops instead of the

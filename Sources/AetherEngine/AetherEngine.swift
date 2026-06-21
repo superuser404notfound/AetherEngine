@@ -665,6 +665,12 @@ public final class AetherEngine: ObservableObject {
     /// Forwarder; for push updates subscribe to `clock.$sourceTime`.
     public var sourceTime: Double { clock.sourceTime }
 
+    /// Source-axis position (seconds) up to which content is buffered
+    /// ahead of the playhead (AetherEngine#54). Read-only forwarder; for
+    /// push updates subscribe to `clock.$bufferedPosition`. See
+    /// `clock.bufferedPosition` for per-path semantics.
+    public var bufferedPosition: Double { clock.bufferedPosition }
+
     /// The `LoadOptions` the host passed for the current session.
     /// Replayed on every internal reopen of the source URL
     /// (selectAudioTrack reload, embedded subtitle side demuxer,
@@ -968,6 +974,7 @@ public final class AetherEngine: ObservableObject {
         state = .loading
         isBuffering = false
         clock.currentTime = 0
+        clock.bufferedPosition = 0
         nativeClockSeconds = 0
         duration = 0
         clock.progress = 0
@@ -1794,6 +1801,7 @@ public final class AetherEngine: ObservableObject {
         stopInternal()
         state = .idle
         clock.currentTime = 0
+        clock.bufferedPosition = 0
         clock.progress = 0
         // Published-surface hygiene: without these, the PREVIOUS
         // session's metadata/track lists/duration/format survive until
@@ -2106,6 +2114,7 @@ public final class AetherEngine: ObservableObject {
         liveShiftSeams.removeAll()
         nativeClockSeconds = 0
         clock.sourceTime = 0
+        clock.bufferedPosition = 0
         isBuffering = false
         // A stop landing mid-seek must not strand the in-flight signal: a
         // late host completion or restart-drain callback is dropped by the

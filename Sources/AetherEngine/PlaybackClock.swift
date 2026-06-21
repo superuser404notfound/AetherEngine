@@ -65,4 +65,21 @@ public final class PlaybackClock: ObservableObject {
 
     /// Seconds the playhead trails the live edge. 0 at the edge.
     @Published public internal(set) var behindLiveSeconds: Double = 0
+
+    /// Source-axis position (seconds) up to which the engine has data
+    /// buffered ahead of the playhead (AetherEngine#54). On the SAME
+    /// axis as `sourceTime`, so a host draws a YouTube-style buffer bar
+    /// as `bufferedPosition / duration`. Clamped to never trail the
+    /// rendered frame, so it equals `sourceTime` when nothing ahead is
+    /// buffered or before the first frame.
+    ///
+    /// What "buffered" means per path:
+    /// - **Native AVPlayer** (HLS / direct): end of the contiguous
+    ///   `loadedTimeRanges` span covering the playhead, folded onto the
+    ///   source axis with the same seam shift as `sourceTime`.
+    /// - **Software** (dav1d / libavcodec): the newest source PTS the
+    ///   demuxer has pulled from the (possibly remote) source, i.e. how
+    ///   far ahead bytes have been fetched and demuxed.
+    /// - **Audio**: mirrors `currentTime` (no buffer-ahead surface).
+    @Published public internal(set) var bufferedPosition: Double = 0
 }

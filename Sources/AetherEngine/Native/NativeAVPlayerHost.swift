@@ -754,6 +754,29 @@ final class NativeAVPlayerHost {
         return end.isFinite ? end : 0
     }
 
+    /// End (seconds, AVPlayer clock) of the contiguous `loadedTimeRanges`
+    /// span covering the current playhead, i.e. how far ahead AVPlayer has
+    /// actually buffered (AetherEngine#54). Returns the playhead itself when
+    /// no loaded range covers it, so the engine's folded `bufferedPosition`
+    /// never trails `sourceTime`. Disjoint ranges ahead of a gap are ignored
+    /// on purpose: a buffer bar should show the continuously playable span.
+    var bufferedEnd: Double {
+        guard let item = avPlayer.currentItem else { return 0 }
+        let now = item.currentTime().seconds
+        guard now.isFinite else { return 0 }
+        var end = now
+        for value in item.loadedTimeRanges {
+            let r = value.timeRangeValue
+            let s = r.start.seconds
+            let e = (r.start + r.duration).seconds
+            guard s.isFinite, e.isFinite else { continue }
+            // Contiguous with the playhead (small tolerance for the gap
+            // between the rendered frame and the range's reported start).
+            if s <= now + 1.0 && e >= now { end = max(end, e) }
+        }
+        return end
+    }
+
     func play() {
         // Record the standing intent FIRST so the readyToPlay observer
         // can re-assert a play() that the replaceCurrentItem swap

@@ -87,7 +87,7 @@ Sources/AetherEngine/
 ├── AetherEngine+Subtitles.swift             Embedded + sidecar subtitle pipeline (side demuxer task, cue apply / prune)
 ├── AetherEngine+Live.swift                  Live window publishing, edge snap, resume clamp, scrub thumbnails
 ├── AetherEngine+Diagnostics.swift           Memory probe + live-telemetry bridge
-├── PlaybackClock.swift                      engine.clock: the ~10 Hz ticking values (currentTime, sourceTime, progress, live-edge fields) as a separate ObservableObject
+├── PlaybackClock.swift                      engine.clock: the ~10 Hz ticking values (currentTime, sourceTime, bufferedPosition, progress, live-edge fields) as a separate ObservableObject
 ├── PlayerState.swift                        PlaybackState, VideoFormat, PlaybackBackend, LoadOptions, SourceProbe, TrackInfo, FontAttachment, MediaMetadata, SubtitleCue, SubtitleImage
 ├── LiveReloadPolicy.swift                   Pure decision functions for live reloads: rejoin at the live edge (no stale resume position), skip the pre-readiness zero seek
 ├── TransportControllable.swift              Common transport surface of the four playback hosts (single active-host dispatch)

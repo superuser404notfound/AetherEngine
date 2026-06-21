@@ -115,8 +115,9 @@ player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPla
 // Time lives on player.clock, a SEPARATE ObservableObject, so the ~10 Hz
 // ticks never fire objectWillChange on the engine (track lists / state views
 // don't re-render per tick; native tvOS Menu dropdowns stay stable).
-player.clock.$currentTime   // ~10 Hz playback clock (transport / scrub / resume)
-player.clock.$sourceTime    // source PTS of the displayed frame (render subtitles against this)
+player.clock.$currentTime      // ~10 Hz playback clock (transport / scrub / resume)
+player.clock.$sourceTime       // source PTS of the displayed frame (render subtitles against this)
+player.clock.$bufferedPosition // source-axis position buffered ahead; draw a buffer bar as bufferedPosition / duration
 
 // Tracks
 player.audioTracks                             // [TrackInfo]
