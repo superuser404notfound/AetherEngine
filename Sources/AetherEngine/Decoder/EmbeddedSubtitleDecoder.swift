@@ -78,44 +78,15 @@ final class EmbeddedSubtitleDecoder {
             return nil
         }
 
-        // Bitmap codecs need a canvas to position their rects against.
-        // The probe step often can't determine those dimensions when
-        // the file is big and the sub stream sparse, so seed a fallback;
-        // the codec's PCS / display-definition segment overwrites once
-        // an epoch-start arrives.
-        //
-        // PGS/HDMV is special: it is authored against the Blu-ray
-        // presentation composition plane (the PCS video descriptor),
-        // which is the HD 1920x1080 plane, NOT the source video frame.
-        // On a 4K (2160p) remux carrying a 1080p PGS track, seeding the
-        // source frame (3840x2160) makes any cue decoded before the next
-        // epoch-start PCS normalize against the wrong, too-large canvas,
-        // it renders shrunk and pulled toward screen center. That window
-        // is hit after an audio-track reload re-arms the side demuxer
-        // mid-epoch: the first resumed cue uses the seed (wrong), and
-        // only the next line (an epoch start) corrects ctx dimensions.
-        // Seed the standard composition plane for PGS so the pre-PCS
-        // window is already correct. DVB/DVD/XSUB do author against the
-        // video frame, so they keep the source-dimension seed.
+        // Bitmap codecs author their bitmaps against a known canvas
+        // (the source video frame). The probe step often can't
+        // determine those dimensions when the file is big and the
+        // sub stream sparse; seed from the captured video frame size
+        // as a fallback. The codec's PCS will overwrite once it
+        // arrives.
         if Self.isBitmapCodec(id) {
-            if id == AV_CODEC_ID_HDMV_PGS_SUBTITLE {
-                // Force the standard composition plane UNCONDITIONALLY,
-                // overriding any width/height carried in the subtitle
-                // stream's codecpar. A `if width == 0` guard is not enough:
-                // some muxes copy the source video frame size into the PGS
-                // stream's codecpar, so ctx.width arrives non-zero and
-                // wrong (e.g. 3840x2160 on a 4K remux whose PGS plane is
-                // 1920x1080). The PCS overwrites with the true plane on the
-                // next epoch start; this value only governs the pre-PCS
-                // window, the mid-epoch first cue after an audio-track
-                // reload re-arms the side demuxer, where 1920x1080 is the
-                // correct PGS default.
-                ctx.pointee.width = 1920
-                ctx.pointee.height = 1080
-            } else {
-                if ctx.pointee.width == 0 { ctx.pointee.width = sourceVideoWidth }
-                if ctx.pointee.height == 0 { ctx.pointee.height = sourceVideoHeight }
-            }
+            if ctx.pointee.width == 0 { ctx.pointee.width = sourceVideoWidth }
+            if ctx.pointee.height == 0 { ctx.pointee.height = sourceVideoHeight }
         }
 
         if avcodec_open2(ctx, codec, nil) < 0 {
