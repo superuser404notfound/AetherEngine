@@ -12,6 +12,17 @@ public struct NativeSubtitleTrack: Sendable, Equatable {
     public let ordinal: Int
     public let language: String?
     public let displayName: String
+
+    /// Returns how many tracks in `tracks[0..<ordinal]` share the same
+    /// language as `tracks[ordinal]`. This rank is used by
+    /// `setNativeSubtitleSelected` to pick the correct AVMediaSelectionOption
+    /// when two tracks carry the same language tag (e.g. eng "Full" and eng "SDH").
+    ///
+    /// Returns 0 when `ordinal` is out of range or the track has no language.
+    public static func sameLanguageRank(of ordinal: Int, in tracks: [NativeSubtitleTrack]) -> Int {
+        guard ordinal < tracks.count, let lang = tracks[ordinal].language else { return 0 }
+        return tracks[0..<ordinal].filter { $0.language == lang }.count
+    }
 }
 
 /// Sole owner of the bounded decoded-cue array backing the native

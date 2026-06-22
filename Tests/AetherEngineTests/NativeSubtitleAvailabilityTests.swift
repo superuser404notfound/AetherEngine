@@ -102,4 +102,34 @@ final class NativeSubtitleAvailabilityTests: XCTestCase {
         XCTAssertEqual(a, b)
         XCTAssertNotEqual(a, c)
     }
+
+    // MARK: - sameLanguageRank (same-language selection fix)
+
+    /// Two eng tracks followed by one deu track.
+    /// rank(0 eng) = 0, rank(1 eng) = 1, rank(2 deu) = 0.
+    func test_sameLanguageRank_twoEngOneDeu() {
+        let tracks = [
+            NativeSubtitleTrack(ordinal: 0, language: "en", displayName: "English"),
+            NativeSubtitleTrack(ordinal: 1, language: "en", displayName: "English SDH"),
+            NativeSubtitleTrack(ordinal: 2, language: "de", displayName: "German"),
+        ]
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 0, in: tracks), 0)
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 1, in: tracks), 1)
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 2, in: tracks), 0)
+    }
+
+    func test_sameLanguageRank_outOfRange_returnsZero() {
+        let tracks = [NativeSubtitleTrack(ordinal: 0, language: "en", displayName: "English")]
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 5, in: tracks), 0)
+    }
+
+    func test_sameLanguageRank_nilLanguage_returnsZero() {
+        let tracks = [NativeSubtitleTrack(ordinal: 0, language: nil, displayName: "Subtitle 1")]
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 0, in: tracks), 0)
+    }
+
+    func test_sameLanguageRank_singleTrack_isZero() {
+        let tracks = [NativeSubtitleTrack(ordinal: 0, language: "fr", displayName: "French")]
+        XCTAssertEqual(NativeSubtitleTrack.sameLanguageRank(of: 0, in: tracks), 0)
+    }
 }

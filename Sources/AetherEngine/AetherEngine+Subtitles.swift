@@ -928,15 +928,22 @@ extension AetherEngine {
                 item.select(nil, in: group)
                 return
             }
-            // Language-match-with-positional-fallback: prefer the option whose
-            // extendedLanguageTag matches the declared track language so the
-            // selection is correct even if AVFoundation reorders the options.
-            // Fall back to positional when the language is unknown or no option
-            // carries the right tag.
+            // Rank-based same-language selection: when multiple tracks share a
+            // language tag (e.g. eng "Full" at ordinal 0 and eng "SDH" at
+            // ordinal 1) a naive .first { hasPrefix(lang) } always returns the
+            // first eng option regardless of which ordinal was requested.
+            // Instead, compute the rank of `ordinal` among same-language tracks
+            // and pick the same-ranked option from the AVFoundation legible group.
+            // Fall back to positional when the language is unknown or AVFoundation
+            // exposes fewer same-language options than expected (out-of-range guard).
             var selected: AVMediaSelectionOption?
             if ordinal < tracks.count, let lang = tracks[ordinal].language {
-                selected = group.options.first {
+                let rank = NativeSubtitleTrack.sameLanguageRank(of: ordinal, in: tracks)
+                let sameLangOptions = group.options.filter {
                     $0.extendedLanguageTag?.hasPrefix(lang) == true
+                }
+                if rank < sameLangOptions.count {
+                    selected = sameLangOptions[rank]
                 }
             }
             if selected == nil, ordinal < group.options.count {
