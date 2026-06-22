@@ -432,9 +432,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds
                 )
-                let detectedFirstKeyframePts = keyframes.sorted().first ?? 0
-                self.firstKeyframePts = detectedFirstKeyframePts
-                let firstKeyframePts = detectedFirstKeyframePts
+                let firstKeyframePts = keyframes.sorted().first ?? 0
+                self.firstKeyframePts = firstKeyframePts
                 let firstKeyframeSeconds = Double(firstKeyframePts) * Double(videoTimeBase.num) / Double(videoTimeBase.den)
                 self.firstKeyframeSeconds = firstKeyframeSeconds
                 let videoStreamStart = videoStream.pointee.start_time
@@ -1198,7 +1197,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             performRestart(at: target)
             restartLock.lock()
             let nextTarget = restartCoalescer.next(justRan: target)
-            let nextSeekTime = nextTarget.map { segmentStartSecondsLocked($0) } ?? nil
+            let nextSeekTime = nextTarget.flatMap { segmentStartSecondsLocked($0) }
             restartLock.unlock()
             guard let nextTarget else { break }
             EngineLog.emit(

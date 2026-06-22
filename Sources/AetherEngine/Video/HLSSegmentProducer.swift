@@ -137,7 +137,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var mergeSideEOF = false
     // var (not let): SSAI ad creative arrives on a new video PID mid-pump; re-pointed at the new stream.
     private var videoStreamIndex: Int32
-    private let videoOutputStreamIndex: Int32 = 0
     private let cache: SegmentCache
     /// Segment index offset; 0 for initial-start, non-zero for restart sessions.
     private let baseIndex: Int

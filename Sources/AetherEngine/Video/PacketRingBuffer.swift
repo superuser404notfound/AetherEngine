@@ -148,12 +148,6 @@ final class PacketRingBuffer {
         return entries.first.map(\.pts)
     }
 
-    var newestPts: Double? {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries.last.map(\.pts)
-    }
-
     // MARK: - Internal
 
     private func nextCounter() -> Int {

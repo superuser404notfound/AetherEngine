@@ -264,14 +264,6 @@ final class MP4SegmentMuxer {
     /// Diverging from producerPacketsWritten / pktsPerFragment flags a flush stall.
     var fragmentCutCount: Int { byteCounter.fragmentCuts }
 
-    var avioPendingBytes: Int {
-        guard let pb = pb else { return 0 }
-        let base = UInt(bitPattern: Int(bitPattern: OpaquePointer(pb.pointee.buffer)))
-        let cur = UInt(bitPattern: Int(bitPattern: OpaquePointer(pb.pointee.buf_ptr)))
-        guard cur >= base else { return 0 }
-        return Int(cur - base)
-    }
-
     // MARK: - Eager probe
 
     /// Dry-run avformat_write_header to catch cascade failures the lazy muxer init would miss.

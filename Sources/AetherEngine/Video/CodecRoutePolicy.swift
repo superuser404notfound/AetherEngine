@@ -43,10 +43,6 @@ extension HLSVideoEngine {
         return nil
     }
 
-    private func isHDRTransfer(_ codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
-        ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
-    }
-
     private func classifyDVVariant(
         _ record: AVDOVIDecoderConfigurationRecord?,
         codecID: AVCodecID
