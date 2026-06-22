@@ -1,9 +1,6 @@
 import Foundation
 
-/// FFmpeg error sentinels whose C macros (`AVERROR_EOF`,
-/// `AVERROR(EAGAIN)`, `AVERROR_INVALIDDATA`) Swift cannot import.
-/// Single source of truth; the same values were previously redefined
-/// privately in five files.
+/// FFmpeg error sentinels whose C macros (`AVERROR_EOF`, `AVERROR(EAGAIN)`, `AVERROR_INVALIDDATA`) Swift cannot import directly.
 enum FFmpegErr {
     /// `AVERROR_EOF` = FFERRTAG('E','O','F',' ') = -0x20464F45 = -541478725.
     static let eof: Int32 = -0x20464F45

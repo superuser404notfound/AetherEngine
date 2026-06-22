@@ -11,46 +11,24 @@ public enum PlaybackState: Sendable, Equatable {
     case error(String)
 }
 
-/// Which internal backend is rendering the current session.
-///
-/// Engine-internal in spirit; exposed read-only on `AetherEngine` so
-/// diagnostic overlays / TestFlight badges can show which path drove
-/// a given playback. Hosts should not switch behavior on this value;
-/// the engine handles all backend-specific concerns internally.
+/// Internal rendering backend. Exposed read-only for diagnostic overlays; hosts must not branch on this value.
 public enum PlaybackBackend: String, Sendable, Equatable {
-    /// No session loaded.
     case none
-    /// Legacy FFmpeg + VideoToolbox + AVSampleBufferDisplayLayer path.
-    /// Removed in 1.0.0; reserved for compatibility with hosts that
-    /// still switch on this value.
+    /// Removed in 1.0.0; reserved for hosts that still switch on it.
     case aether
-    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. Default path
-    /// for codecs AVPlayer can decode natively (HEVC / H.264 / VP9 on
-    /// supported hardware).
+    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. Default for HEVC / H.264 / VP9.
     case native
-    /// FFmpeg / dav1d + AVSampleBufferDisplayLayer path. Used when the
-    /// source's video codec isn't decodable by AVPlayer on the active
-    /// platform — primarily AV1 on tvOS where Apple ships no SW decoder
-    /// and no Apple TV chip has HW AV1.
+    /// FFmpeg / dav1d + AVSampleBufferDisplayLayer. Used for AV1 on tvOS (no HW decoder).
     case software
-    /// FFmpeg audio decode → AVSampleBufferAudioRenderer. The audio-only
-    /// path: no video pipeline, no display layer, no loopback. Used for
-    /// music and other audio-only sources.
+    /// FFmpeg audio + AVSampleBufferAudioRenderer. No video pipeline.
     case audio
 }
 
-/// Static snapshot of what the current display can present.
-///
-/// Lifted from Sodalite's `DisplayCapabilities.swift`; exposed by the
-/// engine so hosts have one source of truth.
+/// Static snapshot of what the current display can present. Single source of truth shared with the host.
 public struct DisplayCapabilities: Sendable, Equatable {
-    /// True iff the display can show any HDR (HDR10, HDR10+, HLG, or DV).
     public let supportsHDR: Bool
-    /// True iff the display can show Dolby Vision.
     public let supportsDolbyVision: Bool
-    /// True iff the display can show HDR10.
     public let supportsHDR10: Bool
-    /// True iff the display can show HLG.
     public let supportsHLG: Bool
 
     public init(supportsHDR: Bool, supportsDolbyVision: Bool, supportsHDR10: Bool, supportsHLG: Bool) {
@@ -61,188 +39,49 @@ public struct DisplayCapabilities: Sendable, Equatable {
     }
 }
 
-/// Options for the unified `AetherEngine.load(url:options:)` entry
-/// point. All flags default to safe values; hosts only need to set
-/// what differs from default.
+/// Options for `AetherEngine.load(url:options:)`. All flags default to safe values.
 public struct LoadOptions: Sendable, Equatable {
-    /// When `true`, omit BT.2020 / transfer / YCbCr matrix extensions
-    /// from the AVDisplayCriteria format description so AVPlayer falls
-    /// back to reading the actual bitstream's color metadata at session
-    /// start. Diagnostic lever only; default off.
+    /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
-    /// When `true`, skip the display-criteria handshake entirely. Used
-    /// by previews and `aetherctl` where there's no panel to switch.
+    /// Skip display-criteria handshake entirely. For previews and `aetherctl` where no panel exists. Default off.
     public var suppressDisplayCriteria: Bool
-    /// Extra HTTP headers to attach to every request the engine makes
-    /// against the source URL (HEAD probe, Range chunks in seekable
-    /// mode, the single GET in streaming mode, and the side-demuxer
-    /// runs for embedded subtitles). Use this for `Authorization`
-    /// tokens, custom auth headers, or anything else the source server
-    /// requires. Headers are NOT forwarded to AVPlayer (AVPlayer hits
-    /// the engine's loopback HLS server, not the source). Sidecar
-    /// subtitle fetches via `selectSidecarSubtitle(url:)` forward
-    /// these by default; pass that call's own `httpHeaders` parameter
-    /// to override per fetch (#32).
-    /// Default is empty (no extra headers).
+    /// Extra HTTP headers for HEAD probe, Range chunks, side-demuxer fetches. NOT forwarded to AVPlayer (it hits the loopback server). Forwarded to `selectSidecarSubtitle` by default; pass explicit headers to override (#32). Default empty.
     public var httpHeaders: [String: String]
 
-    /// Force the engine into the DV codec-classification branch even
-    /// when the active display reports `dvModeAvailable == false`.
-    /// Diagnostic / opt-in lever, default OFF.
-    ///
-    /// When OFF (default), non-DV displays route DV sources through
-    /// `HLSLocalServer.mediaPlaylistURL` (no master variant) so
-    /// AVPlayer's auto-tonemap engages on the HEVC base layer. This
-    /// is the only path that works on tvOS 26 — the master-level
-    /// codec filter rejects bare `dvh1` AND cross-compat
-    /// `hvc1+SUPPLEMENTAL=dvh1` on non-DV panels with
-    /// `AVFoundationErrorDomain -11868`.
-    ///
-    /// When ON, the engine emits bare `dvh1` codec tags and serves
-    /// the master playlist regardless of display capability. Tested
-    /// working on macOS Tahoe AVPlayer against the Dolby reference
-    /// kit per AetherEngine#4. Use this for DV-capable panels that
-    /// misreport their `availableHDRModes`.
+    /// Diagnostic lever: force dvh1 codec tags + master playlist regardless of display capability. OFF by default: non-DV displays route DV through the media playlist (no master) so AVPlayer auto-tonemaps the HEVC base layer (only path that avoids AVFoundationErrorDomain -11868 on tvOS 26). AetherEngine#4.
     public var keepDvh1TagWithoutDV: Bool
 
-    /// Whether the user has tvOS Match Content (Dynamic Range and/or
-    /// Frame Rate) enabled. Mirrors `AVDisplayManager.
-    /// isDisplayCriteriaMatchingEnabled`; default `true` so non-tvOS
-    /// callers and hosts that don't query don't accidentally regress
-    /// HDR routing.
-    ///
-    /// One of the two inputs to the master-vs-media-playlist routing
-    /// decision in `HLSVideoEngine` (see `panelIsInHDRMode` for the
-    /// other). When `false`, tvOS keeps the panel locked in its
-    /// current mode regardless of what the playlist advertises;
-    /// engine treats the panel as "won't switch into HDR" and routes
-    /// HDR sources through the media playlist for AVPlayer's
-    /// auto-tonemap path.
+    /// Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. Default `true`. When `false`, engine routes HDR sources through the media playlist (auto-tonemap path) because AVKit cannot switch the panel.
     public var matchContentEnabled: Bool
 
-    /// Whether the connected panel is currently presenting in HDR
-    /// (EDR active) at load time. Mirrors `UIScreen.main.currentEDRHeadroom > 1`
-    /// on tvOS / iOS; default `false` so callers that don't query
-    /// stay on the conservative "treat as SDR" branch.
-    ///
-    /// The other input to the master-vs-media-playlist routing
-    /// decision. When the panel is already in HDR, the master
-    /// playlist's `VIDEO-RANGE=PQ` and `SUPPLEMENTAL-CODECS=dvh1`
-    /// signals are accepted upfront (per DrHurt's empirical test:
-    /// HDR-mode panel honours master + supplemental for the
-    /// HDR10-to-DV upgrade). When in SDR, the master path only works
-    /// if `matchContentEnabled == true` so AVKit can drive the
-    /// panel-mode switch into HDR; otherwise routes via media.
+    /// Mirror of `UIScreen.main.currentEDRHeadroom > 1`. Default `false` (conservative SDR branch). When in HDR, master playlist VIDEO-RANGE=PQ and SUPPLEMENTAL-CODECS=dvh1 are accepted upfront for the HDR10-to-DV upgrade.
     public var panelIsInHDRMode: Bool
 
-    /// Audio bridge encoder choice for source codecs that can't
-    /// stream-copy into fMP4 (TrueHD, DTS, DTS-HD MA, MP3, Opus, and
-    /// EAC3-from-MKV-without-dec3-extradata).
+    /// Bridge encoder for codecs that cannot stream-copy into fMP4 (TrueHD, DTS, DTS-HD MA, MP3, Opus, EAC3-from-MKV-without-dec3-extradata).
     ///
-    /// - `.surroundCompat` (default): EAC3 at 128 kbps per channel (256 kbps stereo, 768 kbps 5.1). AVPlayer
-    ///   hands the encoded bitstream to HDMI; the sink decodes its
-    ///   own 5.1 mix. Works on soundbars (Sonos Arc, Samsung HW-Q,
-    ///   Bose) and AVRs that don't accept multichannel LPCM via HDMI.
-    ///   Lossy; caps 7.1 sources to 5.1.
-    /// - `.lossless`: FLAC up to 7.1 lossless. AVPlayer decodes to
-    ///   LPCM and routes via the active HDMI port. Needs a sink that
-    ///   accepts multichannel LPCM (Denon / Marantz / NAD AVRs).
-    ///   On stereo-LPCM-only routes, multichannel LPCM gets downmixed
-    ///   to stereo before output (silent regression versus EAC3).
-    ///
-    /// Default `.surroundCompat` because the LPCM-multichannel-over-
-    /// HDMI capability needed by the lossless path is rarer than the
-    /// soundbar / basic-AVR install base.
+    /// - `.surroundCompat` (default): EAC3 128 kbps/ch. Works on soundbars (Sonos Arc, Samsung HW-Q, Bose). Lossy; caps 7.1 to 5.1.
+    /// - `.lossless`: FLAC up to 7.1. Needs a sink that accepts multichannel LPCM (Denon / Marantz / NAD AVRs); stereo-only routes silently downmix.
     public var audioBridgeMode: AudioBridgeMode
 
-    /// Treat the source as a live stream (e.g. IPTV HTTP MPEG-TS, raw
-    /// `live.ts` over HTTP, broadcaster feeds). When `true`:
-    ///
-    /// - `seek(to:)` becomes a no-op with a warning log. Live sources
-    ///   have no random-access guarantee and seek would either stall
-    ///   AVPlayer indefinitely or land outside the producer's segment
-    ///   window.
-    /// - The engine's `isLive` published surface reflects this for
-    ///   host UIs (hide the scrubber, hide duration, etc.).
-    ///
-    /// Scope today: H.264 / HEVC inside MPEG-TS over HTTP routes
-    /// through the native AVPlayer path via the existing HLS-fMP4
-    /// remuxer. MPEG-2 / MPEG-4 Part 2 / VC-1 inside MPEG-TS routes
-    /// through the SW pipeline. The sliding-window segment eviction
-    /// for unbounded-duration sources is not yet implemented; long
-    /// sessions on the native path will accumulate cached segments.
-    /// Set this flag explicitly when the host knows the URL is a live
-    /// feed; auto-detection from `probe.durationSeconds == 0` is too
-    /// noisy (VOD MKVs with broken duration headers report the same).
-    /// Default `false`.
+    /// Treat the source as a live stream. `seek(to:)` becomes a no-op; `isLive` surface reflects this for host UIs. Set explicitly: auto-detection from `probe.durationSeconds == 0` is too noisy (VOD MKVs with broken duration headers). Default `false`.
     public var isLive: Bool
 
-    /// Route the source through the lean audio-only path: FFmpeg decodes
-    /// directly into `AVSampleBufferAudioRenderer`, skipping the video
-    /// probe, the display-criteria handshake, and the entire HLS /
-    /// segment-producer / muxer / loopback stack. Set this for music
-    /// playback. The engine also falls into the audio path automatically
-    /// when the probe finds no video stream, so a host that doesn't set
-    /// the flag still gets audio playback for audio-only sources; the
-    /// flag lets the host skip the (cheap) video probe entirely and
-    /// guarantees the audio path even for malformed containers that
-    /// advertise a phantom video stream. Default `false`.
+    /// Lean audio-only path (FFmpeg + AVSampleBufferAudioRenderer): skips video probe, display-criteria handshake, HLS/muxer/loopback stack. Also set automatically when the probe finds no video stream. Default `false`.
     public var audioOnly: Bool
 
-    /// Enables in-session timeshift (DVR) for a live source. nil keeps live-only
-    /// behavior (seek is a no-op). A value is the rewind window in seconds; the
-    /// engine retains roughly this much past content (disk-backed) and clamps
-    /// seeks to it. Suggested host default when enabling DVR: 1800. Ignored when
-    /// `isLive == false`. Default nil.
+    /// DVR rewind window in seconds; nil = live-only (seek is a no-op). Engine retains roughly this much past content disk-backed. Suggested default: 1800. Ignored when `isLive == false`. Default nil.
     public var dvrWindowSeconds: Double?
 
-    /// Play the URL as a native AVPlayer HLS stream directly: build an
-    /// `AVPlayerItem` from the (remote) URL and hand it to the native
-    /// `AVPlayer`, skipping the demuxer probe, the display-criteria
-    /// handshake, and the entire HLS segment-producer / muxer / loopback
-    /// stack. Use this for a live source the upstream server already
-    /// exposes as HLS (e.g. Jellyfin live `master.m3u8`): AVPlayer manages
-    /// the live edge, buffering, and reconnect natively. Same lean-bypass
-    /// shape as `audioOnly`, but for native HLS video. Pair with
-    /// `isLive: true` for the live UI surfaces. Default `false`.
+    /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
 
-    /// Emit ASS / SSA subtitle cues as the RAW event line (the full
-    /// `ReadOrder,Layer,Style,...,Text` payload including override
-    /// tags like `{\pos(...)}` and `\N` escapes) instead of the
-    /// engine's default plain-text extraction, which strips all
-    /// styling. Opt-in for hosts that render ASS styling themselves;
-    /// pair with `TrackInfo.assHeader` (the track's `[Script Info]` +
-    /// `[V4+ Styles]` header) to resolve style references. Only
-    /// affects tracks whose codec is ASS / SSA; SubRip / WebVTT /
-    /// bitmap tracks are untouched. Default `false` (AetherEngine#30).
+    /// Emit raw ASS event lines (`ReadOrder,Layer,Style,...,Text` including override tags) instead of plain-text extraction. Opt-in for hosts that render ASS styling themselves; pair with `TrackInfo.assHeader`. Only affects ASS / SSA codecs. Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
-    /// When set and the title has text subtitles, the engine declares a
-    /// mov_text track in the init moov so subtitles can survive
-    /// PiP / AirPlay / external display selection via native AVMediaSelection.
-    /// The side demuxer's decoded cues flow into both `subtitleCues` (for
-    /// the host overlay) and the `NativeSubtitleCueStore` that the
-    /// segment producer drains per cut (for the muxed mov_text track).
-    /// Bitmap subtitle codecs (PGS / DVB / DVD) are excluded from the
-    /// native track automatically. Default `false` (#55).
+    /// Declare a mov_text track in the init moov so text subtitles survive PiP / AirPlay / external display via AVMediaSelection. Bitmap codecs (PGS / DVB / DVD) excluded automatically. Default `false` (#55).
     public var prepareNativeSubtitles: Bool = false
 
-    /// ENGINE-INTERNAL: marks this load as a live REJOIN (a reload of
-    /// an already-running live session: background-return reopen via
-    /// `reloadAtCurrentPosition`). Not part of the public API and not
-    /// settable through the public initializer; hosts always load with
-    /// the default `false`.
-    ///
-    /// Why it exists: a live rejoin reuses the SAME upstream URL, and
-    /// servers like Jellyfin re-serve their transcode buffer from the
-    /// start at I/O speed, so the rebuilt producer presents a
-    /// multi-segment backlog at AVPlayer's first playlist fetch
-    /// instead of the fresh-join 2-segment cushion. The native load
-    /// path must then skip its explicit initial seek and let AVPlayer
-    /// pick its own live-edge join (see `LiveReloadPolicy`), or the
-    /// reloaded item can wedge in `waitingToPlay` without ever
-    /// reaching `readyToPlay`. Only meaningful when `isLive` is true.
+    /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
     public init(
@@ -276,15 +115,7 @@ public struct LoadOptions: Sendable, Equatable {
     }
 }
 
-/// The detected video dynamic range format.
-///
-/// `hdr10Plus` shares the underlying HDR10 base layer with `hdr10`,
-/// what makes it distinct is the per-frame ST 2094-40 dynamic metadata
-/// the engine forwards to the display via
-/// `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. From an
-/// AVDisplayCriteria perspective both formats request the same TV
-/// mode (PQ + BT.2020); the badge / detection split exists so the host
-/// UI can show the right label and so reporting is accurate.
+/// Detected video dynamic range format. `hdr10Plus` shares the HDR10 base layer with `hdr10`; the distinction is the per-frame ST 2094-40 metadata forwarded via `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. Both map to PQ + BT.2020 in AVDisplayCriteria; the split is for badge accuracy.
 public enum VideoFormat: Sendable, Equatable {
     case sdr
     case hdr10
@@ -293,50 +124,29 @@ public enum VideoFormat: Sendable, Equatable {
     case hlg
 }
 
-/// One-shot read of a media source's container + stream metadata.
-/// Returned from `AetherEngine.probe(url:options:)`; no HLS server is
-/// spun up, no decoders are opened. Intended for "what's in this
-/// file?" debugging and host-side detail surfaces. The probe does the
-/// same demuxer-open dance `load(url:)` does internally but tears down
-/// immediately after reading metadata.
+/// One-shot container + stream metadata from `AetherEngine.probe(url:options:)`. No HLS server, no decoders.
 public struct SourceProbe: Sendable {
-    /// The URL that was probed (echoed back for convenience).
     public let url: URL
-    /// Total duration in seconds, or 0 if the source's container does
-    /// not advertise one (live streams, pipes).
+    /// 0 for live streams / pipes.
     public let durationSeconds: Double
-    /// HDR / DV classification of the video track. `.sdr` for sources
-    /// without HDR signaling or without a video track at all.
+    /// `.sdr` when no HDR signaling or no video track.
     public let videoFormat: VideoFormat
-    /// FFmpeg AVCodecID raw value of the video stream's codec, or
-    /// `AV_CODEC_ID_NONE.rawValue` (0) if there is no video track.
+    /// FFmpeg AVCodecID raw value; 0 (AV_CODEC_ID_NONE) when no video track.
     public let videoCodecID: Int32
-    /// Best-effort human-readable codec name (e.g. "hevc", "h264",
-    /// "av1", "vp9"). `nil` when libavcodec doesn't expose one.
+    /// Codec name from libavcodec (e.g. "hevc", "h264", "av1"). nil when unavailable.
     public let videoCodecName: String?
-    /// Pixel width of the video frame, 0 if no video track.
+    /// 0 when no video track.
     public let videoWidth: Int32
-    /// Pixel height of the video frame, 0 if no video track.
+    /// 0 when no video track.
     public let videoHeight: Int32
-    /// Frame rate snapped to a standard rate (23.976, 24, 25, ...) or
-    /// `nil` when the source does not advertise one or has no video.
+    /// Snapped to a standard rate (23.976, 24, 25, ...). nil when not advertised.
     public let videoFrameRate: Double?
-    /// True if the video track signals Dolby Vision (any profile).
     public let isDolbyVision: Bool
-    /// Audio tracks in source order. Empty when the source has no
-    /// audio.
     public let audioTracks: [TrackInfo]
-    /// Subtitle tracks in source order, both embedded text and
-    /// bitmap (PGS / DVB) variants.
+    /// Includes both text and bitmap (PGS / DVB) variants.
     public let subtitleTracks: [TrackInfo]
-    /// Container metadata (tags + embedded cover art), normalized.
     public let metadata: MediaMetadata
-    /// Best-effort live-stream hint: `true` when the source advertises
-    /// no duration AND the URL scheme suggests a network feed
-    /// (http / https / udp / rtp / rtsp). False positives are possible
-    /// (VOD MKVs with broken duration headers), so this is a hint for
-    /// hosts to decide whether to set `LoadOptions.isLive`, not a
-    /// definitive classification.
+    /// Heuristic: no duration + network scheme (http / https / udp / rtp / rtsp). False positives possible (VOD MKVs with broken duration). Hosts decide the final `LoadOptions.isLive`.
     public let isLive: Bool
 
     public init(
@@ -370,12 +180,7 @@ public struct SourceProbe: Sendable {
     }
 }
 
-/// Result of `AetherEngine.swDecodeProbe(url:)`. SW-decoder repro
-/// shape for `aetherctl swdecode` and host-side SW-pipeline diagnostics
-/// (MPEG-4 Part 2, MPEG-2, VC-1, AV1 on platforms without HW AV1).
-/// Distinguishes "decoder couldn't open" from "decoder opened but
-/// produced no frames" from "decode works end-to-end" so failures
-/// can be localised without spinning up a render layer.
+/// Result of `AetherEngine.swDecodeProbe(url:)`. Distinguishes open-failure, open-but-no-frames, and healthy decode without a render layer.
 public struct SoftwareDecodeProbeResult: Sendable {
     public let codecName: String
     public let codecID: Int32
@@ -422,33 +227,21 @@ public struct SoftwareDecodeProbeResult: Sendable {
     }
 }
 
-/// Metadata about an audio or subtitle track in the loaded media.
+/// Audio or subtitle track metadata.
 public struct TrackInfo: Identifiable, Sendable, Equatable {
-    /// Track index as reported by FFmpeg's AVStream.
+    /// FFmpeg AVStream index.
     public let id: Int
-    /// Human-readable track name (title or fallback).
     public let name: String
-    /// Codec name (e.g. "aac", "ac3", "subrip").
+    /// Lower-case libavcodec name (e.g. "aac", "ac3", "subrip").
     public let codec: String
-    /// BCP-47 language tag if available (e.g. "en", "de", "ja").
     public let language: String?
-    /// Number of audio channels (2=stereo, 6=5.1, 8=7.1). 0 for non-audio.
+    /// 2=stereo, 6=5.1, 8=7.1. 0 for non-audio.
     public let channels: Int
-    /// True if this track is marked as default in the container.
     public let isDefault: Bool
-    /// True if this is a Dolby Atmos track, currently means EAC3 with
-    /// the JOC (Joint Object Coding) profile, which is what every
-    /// streaming-quality Atmos elementary stream looks like in practice.
-    /// Lets the player UI surface "Atmos" instead of just the channel
-    /// count of the bed (typically 5.1).
+    /// EAC3 with JOC profile (Dolby Atmos). Lets the UI surface "Atmos" instead of the bed channel count (typically 5.1).
     public let isAtmos: Bool
 
-    /// For ASS / SSA subtitle tracks: the script header from the
-    /// container's codec extradata (`[Script Info]`, `[V4+ Styles]`,
-    /// and the `[Events]` format line). Hosts rendering ASS styling
-    /// themselves (see `LoadOptions.preserveASSMarkup`) need it to
-    /// resolve the style names referenced by each event line. nil for
-    /// every other track kind.
+    /// ASS / SSA tracks only: `[Script Info]` + `[V4+ Styles]` + `[Events]` format line from codec extradata. Hosts rendering ASS styling themselves (see `LoadOptions.preserveASSMarkup`) need it to resolve style references. nil for all other track kinds.
     public let assHeader: String?
 
     public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, isDefault: Bool, isAtmos: Bool = false, assHeader: String? = nil) {
@@ -463,18 +256,11 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     }
 }
 
-/// An attached file carried by the container (MKV attachment streams),
-/// filtered to font payloads. Anime releases embed the TTF/OTF fonts
-/// their ASS styles reference; hosts that render ASS styling themselves
-/// (see `LoadOptions.preserveASSMarkup`) hand these to their renderer's
-/// font directory so the authored typography resolves (AetherEngine#30).
+/// MKV attachment filtered to font payloads. Anime releases embed TTF/OTF fonts for their ASS styles; pass to the renderer's font directory (AetherEngine#30).
 public struct FontAttachment: Sendable, Equatable {
-    /// Attachment filename from the container metadata ("filename").
     public let filename: String
-    /// MIME type from the container metadata ("mimetype"); empty when
-    /// the container does not carry one.
+    /// Empty when the container does not carry a MIME type.
     public let mimeType: String
-    /// The font file bytes.
     public let data: Data
 
     public init(filename: String, mimeType: String, data: Data) {
@@ -492,35 +278,26 @@ public struct FontAttachment: Sendable, Equatable {
 
     private static let fontExtensions: Set<String> = ["ttf", "otf", "ttc"]
 
-    /// True when the MIME type or, as a fallback for missing / generic
-    /// MIME, the filename extension identifies a font payload.
+    /// True when MIME type or (as fallback for absent / generic MIME) filename extension identifies a font.
     static func isFontPayload(mimeType: String?, filename: String?) -> Bool {
         if let mime = mimeType?.lowercased(), fontMIMEs.contains(mime) {
             return true
         }
         if let ext = filename.flatMap({ ($0 as NSString).pathExtension.lowercased() }),
            fontExtensions.contains(ext) {
-            // Only trust the extension when the MIME is absent or generic;
-            // a declared non-font MIME wins.
-            let mime = mimeType?.lowercased() ?? ""
+            let mime = mimeType?.lowercased() ?? ""  // A declared non-font MIME wins over the extension.
             return mime.isEmpty || mime == "application/octet-stream"
         }
         return false
     }
 }
 
-/// Container-level media metadata (tags + embedded cover art) for the
-/// loaded source. Every field is optional: audio files frequently ship
-/// with partial or no tags, and video files usually have none. Built
-/// via `MediaMetadata.from(...)`, which applies the album-artist fallback
-/// and drops empty strings.
+/// Container-level tags + embedded cover art. Fields are optional; video files usually have none. `from(...)` applies album-artist fallback and drops empty strings.
 public struct MediaMetadata: Sendable, Equatable {
     public let title: String?
     public let artist: String?
     public let album: String?
-    /// Embedded cover art bytes exactly as stored in the container
-    /// (typically JPEG or PNG); no format validation is performed.
-    /// nil when the source has no attached picture.
+    /// Raw cover-art bytes (typically JPEG or PNG); no format validation.
     public let artworkData: Data?
 
     public init(title: String?, artist: String?, album: String?, artworkData: Data?) {
@@ -530,14 +307,12 @@ public struct MediaMetadata: Sendable, Equatable {
         self.artworkData = artworkData
     }
 
-    /// True when at least one human-readable text field is present, so
-    /// hosts can decide between a metadata layout and a filename fallback.
+    /// True when at least one text field is present; lets hosts decide between a metadata layout and a filename fallback.
     public var hasDisplayMetadata: Bool {
         title != nil || artist != nil || album != nil
     }
 
-    /// Normalize raw demuxer values: trim whitespace, map empty to nil,
-    /// and fall back to `albumArtist` when `artist` is absent.
+    /// Trim whitespace, map empty to nil, fall back to `albumArtist` when `artist` is absent.
     public static func from(
         title: String?, artist: String?, album: String?,
         albumArtist: String?, artworkData: Data?
@@ -556,10 +331,7 @@ public struct MediaMetadata: Sendable, Equatable {
     }
 }
 
-/// A single decoded subtitle cue, start/end in container seconds plus a
-/// payload. The payload is either plain text (SubRip / ASS / SSA / WebVTT
-/// / mov_text after override-stripping) or a rendered bitmap (PGS / DVB
-/// / HDMV) with a position normalised against the source video frame.
+/// Decoded subtitle cue (start/end in container seconds). Payload is plain text (SubRip / ASS / SSA / WebVTT / mov_text) or a rendered bitmap (PGS / DVB / HDMV) with position normalized against the source video frame.
 /// Both paths land in the same `subtitleCues` array, so the host renders
 /// them with one switch in the overlay view.
 public struct SubtitleCue: Identifiable, Sendable {
@@ -580,8 +352,7 @@ public struct SubtitleCue: Identifiable, Sendable {
         self.body = body
     }
 
-    /// Convenience for callers that only handle text cues. Returns nil
-    /// for bitmap cues, which the host should render as `.image` instead.
+    /// nil for bitmap cues.
     public var text: String? {
         if case .text(let s) = body { return s }
         return nil
@@ -590,25 +361,16 @@ public struct SubtitleCue: Identifiable, Sendable {
 
 extension SubtitleCue: Equatable {
     public static func == (lhs: SubtitleCue, rhs: SubtitleCue) -> Bool {
-        // ID is monotonic per subtitle session and unique within the
-        // current `subtitleCues` array, that's enough to drive
-        // SwiftUI animation diffing without comparing CGImage refs.
+        // ID monotonic per session; sufficient for SwiftUI diffing without comparing CGImage refs.
         lhs.id == rhs.id
             && lhs.startTime == rhs.startTime
             && lhs.endTime == rhs.endTime
     }
 }
 
-/// A decoded bitmap subtitle rect, the kind PGS, HDMV PGS, DVB and
-/// DVD subtitles produce. The CGImage is fully rendered (palette
-/// applied, RGBA, premultiplied alpha) and ready to display. Position
-/// is normalised in [0, 1] against the source video frame so the host
-/// can scale to any display rect.
+/// Decoded PGS / HDMV PGS / DVB / DVD bitmap subtitle. CGImage is fully rendered (RGBA, premultiplied alpha). Position is [0, 1] against the source video frame; multiply by the on-screen video rect to place it.
 public struct SubtitleImage: @unchecked Sendable {
     public let cgImage: CGImage
-    /// Origin and size in [0, 1] coordinates of the source video frame.
-    /// Hosts multiply by the on-screen video rect to position the
-    /// bitmap correctly.
     public let position: CGRect
 
     public init(cgImage: CGImage, position: CGRect) {
@@ -621,16 +383,7 @@ public struct SubtitleImage: @unchecked Sendable {
 
 import CoreAudio
 
-/// Map channel count to the appropriate CoreAudio channel layout tag.
-/// Used by AudioDecoder for channel layout mapping.
-///
-/// 7.1 note: `MPEG_7_1_A` is the ITU "center-sides" layout (L R C LFE
-/// Ls Rs Lc Rc) almost nobody ships. Blu-ray, TrueHD, DTS-HD MA and
-/// streaming 7.1 are all the "Hollywood" layout, L R C LFE Ls Rs Lsr
-/// Rsr, which is `MPEG_7_1_C`. Using the wrong tag made tvOS silently
-/// drop the stream: the audio pipeline can't reconcile 7.1-A samples
-/// with a 7.1-C output route, and just emits silence instead of
-/// routing them.
+/// CoreAudio channel layout tag for a given channel count. 7.1 uses `AAC_7_1` (MPEG_7_1_C, "Hollywood" L R C LFE Ls Rs Lsr Rsr), NOT `MPEG_7_1_A` (ITU center-sides); the wrong tag causes tvOS to silently emit silence.
 func audioChannelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
     switch channels {
     case 1:  return kAudioChannelLayoutTag_Mono

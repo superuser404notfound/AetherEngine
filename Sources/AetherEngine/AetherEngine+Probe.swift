@@ -9,21 +9,11 @@ extension AetherEngine {
 
     // MARK: - Probe
 
-    /// One-shot read of a source's container + stream metadata,
-    /// without spinning up the HLS server or any decoders. Returns
-    /// the same kind of info `load(url:)` collects internally before
-    /// dispatching, packaged as a `SourceProbe` for hosts and CLI
-    /// tools that just want to know "what's in this file?".
-    ///
-    /// Network sources fetch a HEAD probe + a small initial range
-    /// for libavformat's stream info pass; total bytes pulled depend
-    /// on the container but typically a few MB. File sources read
-    /// from disk directly via FFmpeg's file protocol.
+    /// One-shot container + stream metadata read; no HLS server or decoders. Network sources pull a HEAD probe + small initial range (typically a few MB). File sources read directly via FFmpeg's file protocol.
     ///
     /// - Parameters:
     ///   - url: Media source (`file://`, `http://`, or `https://`).
-    ///   - options: Forwarded for `httpHeaders` only; other flags are
-    ///     ignored since no playback session starts.
+    ///   - options: Forwarded for `httpHeaders` only; other flags ignored (no playback session).
     /// - Throws: Any error the demuxer raises during open / probe.
     public nonisolated static func probe(
         url: URL,
@@ -32,20 +22,7 @@ extension AetherEngine {
         try probe(source: .url(url), options: options)
     }
 
-    /// `probe(url:)` for a custom byte source (AetherEngine#27). Same
-    /// one-shot metadata read, but against a caller-supplied
-    /// `IOReader` instead of a URL.
-    ///
-    /// Reader contract: the caller retains ownership. The probe seeks
-    /// and reads through the reader for libavformat's stream-info
-    /// pass and leaves the cursor at an unspecified position; it does
-    /// NOT call `close()`. Hand the engine a fresh reader (or one you
-    /// rewind yourself) when you `load(source:)` afterwards. For the
-    /// `.url` case this is exactly `probe(url:)`.
-    ///
-    /// `SourceProbe.url` echoes the probed URL for `.url` sources and
-    /// the synthetic `aether-custom://source` for custom readers
-    /// (mirroring what `load(source:)` publishes as `loadedURL`).
+    /// `probe(url:)` for a custom byte source (AetherEngine#27). Caller retains reader ownership; cursor is left at an unspecified position and `close()` is NOT called. Pass a fresh (or rewound) reader to `load(source:)` afterwards. `SourceProbe.url` is `aether-custom://source` for custom readers.
     public nonisolated static func probe(
         source: MediaSource,
         options: LoadOptions = .init()
@@ -64,10 +41,7 @@ extension AetherEngine {
         return makeSourceProbe(demuxer: demuxer, displayURL: displayURL)
     }
 
-    /// Assemble a `SourceProbe` from an open demuxer. Shared by the
-    /// static probe entry points and `load(source:)`'s internal probe
-    /// stage, so all of them report identical metadata for the same
-    /// source.
+    /// Assemble a `SourceProbe` from an open demuxer. Shared by static probe entry points and `load(source:)`'s internal probe stage so all report identical metadata.
     nonisolated static func makeSourceProbe(
         demuxer: Demuxer,
         displayURL: URL
@@ -92,11 +66,7 @@ extension AetherEngine {
         }()
         let snappedRate = detectedRate.flatMap { FrameRateSnap.snap($0) }
         let duration = demuxer.duration
-        // Live-stream hint: duration absent + network-feed URL scheme.
-        // Heuristic only; hosts decide whether to flip
-        // LoadOptions.isLive based on this plus their own context
-        // (e.g. an IPTV catalog entry vs a movie file). Custom readers
-        // (synthetic aether-custom:// scheme) never match.
+        // Heuristic only: duration absent + network scheme. aether-custom:// never matches. Hosts decide the final LoadOptions.isLive.
         let liveSchemes: Set<String> = ["http", "https", "udp", "rtp", "rtsp"]
         let isLive = duration <= 0
             && liveSchemes.contains(displayURL.scheme?.lowercased() ?? "")
@@ -120,28 +90,7 @@ extension AetherEngine {
 
     // MARK: - SW-decoder repro probe
 
-    /// One-shot SW-decoder repro for `aetherctl swdecode` and any
-    /// future host-side diagnostic that wants to localise SW-pipeline
-    /// failures (MPEG-4 Part 2, MPEG-2, VC-1, AV1 on platforms without
-    /// HW AV1) without spinning up a render target.
-    ///
-    /// Opens the demuxer, opens `SoftwareVideoDecoder` for the video
-    /// stream, reads up to `maxPackets` packets and feeds the video
-    /// ones to the decoder, returns counters + first-frame metadata.
-    /// Useful failure modes the result discriminates:
-    ///
-    /// - `openSucceeded == false`: decoder couldn't open (FFmpegBuild
-    ///   missing the libavcodec decoder, codec-private extradata
-    ///   malformed). `openError` carries the reason.
-    /// - `openSucceeded == true && framesDecoded == 0`: decoder
-    ///   opened but never produced a frame from the packets fed.
-    ///   Suggests pixel-format conversion failure or all-skipped
-    ///   non-IDR packets.
-    /// - `framesDecoded > 0` with a populated `firstFramePixelFormat`:
-    ///   SW decode path is functionally healthy end-to-end; if real
-    ///   playback still hangs, the failure is downstream
-    ///   (`SoftwarePlaybackHost` frame-enqueue, `AVSampleBufferDisplayLayer`
-    ///   attach, audio-clock sync).
+    /// SW-decode repro for `aetherctl swdecode` (MPEG-4 Part 2, MPEG-2, VC-1, AV1 without HW). No render target. Discriminates: `openSucceeded == false` (missing libavcodec decoder / bad extradata), `framesDecoded == 0` (pixel-format conversion failure / all non-IDR), `framesDecoded > 0` (SW path healthy; downstream issue if real playback still hangs).
     public nonisolated static func swDecodeProbe(
         url: URL,
         maxPackets: Int = 100,
@@ -165,10 +114,7 @@ extension AetherEngine {
         let height = stream.pointee.codecpar.pointee.height
 
         let decoder = SoftwareVideoDecoder()
-        // Captured-by-reference accumulators via a class so the onFrame
-        // closure can mutate them safely without inout / @escaping
-        // capture gymnastics. Closure fires synchronously from inside
-        // avcodec_send_packet / receive_frame, all on this thread.
+        // Class for captured-by-reference mutable accumulators; closure fires synchronously inside avcodec_send_packet / receive_frame.
         final class Accum {
             var framesDecoded = 0
             var firstFramePixelFormat: String?
@@ -256,22 +202,12 @@ extension AetherEngine {
         )
     }
 
-    /// Decide whether a load should use the audio-only path. Pure and
-    /// `nonisolated` so it is unit-testable without a `@MainActor`
-    /// engine instance. The audio path is taken when the host explicitly
-    /// requested it OR the probe found no video stream.
+    /// Pure, nonisolated, and unit-testable: audio-only path when the host requested it OR the probe found no video stream.
     nonisolated static func shouldUseAudioOnlyPath(audioOnlyRequested: Bool, hasVideoStream: Bool) -> Bool {
         audioOnlyRequested || !hasVideoStream
     }
 
-    /// Whether AVPlayer/AVFoundation can natively decode this audio codec
-    /// on Apple platforms, so the engine can hand the source straight to a
-    /// lean AVPlayer (hardware-accelerated, energy-efficient, native system
-    /// integration) instead of the FFmpeg software path. Whitelist, not
-    /// blacklist: anything not known-native (Opus, Vorbis, APE, WavPack,
-    /// Musepack, ...) falls back to `AudioPlaybackHost`, which decodes
-    /// everything via FFmpeg. AAC, MP3, MP2, ALAC, AC-3/E-AC-3, LPCM, and
-    /// FLAC (AVFoundation has decoded FLAC since iOS/tvOS 11) are native.
+    /// Whitelist (not blacklist) of AVPlayer-native audio codecs: AAC, MP3, MP2, ALAC, AC-3/E-AC-3, LPCM, FLAC (native since iOS/tvOS 11). Anything else falls back to `AudioPlaybackHost` (FFmpeg).
     nonisolated static func avPlayerCanDecodeAudio(_ codecID: AVCodecID) -> Bool {
         switch codecID {
         case AV_CODEC_ID_AAC,
@@ -295,13 +231,7 @@ extension AetherEngine {
 
     // MARK: - Decoder identity helpers
 
-    /// Build a user-facing label for the active video decoder. Native
-    /// dispatch goes through VideoToolbox on every Apple platform we
-    /// ship to, so the "HW" tag holds even on HW-AV1 capable devices;
-    /// the SW branch covers the dav1d-on-tvOS AV1 case and the libavcodec
-    /// VP9 path. Returns `nil` when the source had no video track
-    /// (AV_CODEC_ID_NONE) so the caller can hide the row instead of
-    /// printing a placeholder.
+    /// User-facing label for the active video decoder. nil when no video track (AV_CODEC_ID_NONE). Native = VideoToolbox HW; SW = dav1d (AV1) or libavcodec (VP9, MPEG-2, VC-1).
     static func videoDecoderLabel(codecID: AVCodecID, isSoftware: Bool) -> String? {
         guard codecID != AV_CODEC_ID_NONE else { return nil }
         let name: String = {
@@ -309,11 +239,6 @@ extension AetherEngine {
             return String(cString: cstr).uppercased()
         }()
         if isSoftware {
-            // SW host paths: AV1 via dav1d, VP9 via libavcodec's vp9
-            // decoder, plus legacy codecs AVPlayer's HLS-fMP4 pipeline
-            // does not accept (MPEG-4 Part 2 / MPEG-2 / VC-1) via the
-            // matching libavcodec native decoder. SoftwareVideoDecoder
-            // resolves the actual decoder via `avcodec_find_decoder`.
             switch codecID {
             case AV_CODEC_ID_AV1: return "dav1d \(name) (SW)"
             default:              return "libavcodec \(name) (SW)"
@@ -322,10 +247,7 @@ extension AetherEngine {
         return "VideoToolbox \(name) (HW)"
     }
 
-    /// Build a user-facing label for the active audio decoder on the
-    /// software path. The SW host always uses libavcodec for audio
-    /// decode then hands PCM to CoreAudio, so the label is uniform.
-    /// Returns `nil` when the source has no audio.
+    /// User-facing label for the active audio decoder on the SW path (libavcodec -> CoreAudio). nil when no audio track.
     static func softwareAudioDecoderLabel(
         audioTracks: [TrackInfo],
         activeIndex: Int32
@@ -341,19 +263,7 @@ extension AetherEngine {
 
     nonisolated static func detectVideoFormat(stream: UnsafeMutablePointer<AVStream>) -> VideoFormat {
         let codecpar = stream.pointee.codecpar.pointee
-        // Dolby Vision side-data (the `dvcC` / `dvvC` box parsed out of
-        // the container) is the authoritative DV marker, independent of
-        // base-layer transfer characteristic. Profile 5 is non-backward-
-        // compatible (no HDR10/HLG base; ships with SMPTE2084 OR an
-        // unspecified trc depending on muxer); Profile 7 and 8.1 use
-        // SMPTE2084 base; Profile 8.4 uses HLG base. Branching on
-        // `color_trc` first mis-classifies the HLG-base case (P8.4
-        // reported as plain HLG) and any unspecified-trc case (P5 with
-        // an empty base-layer VUI reported as SDR) — both surface as
-        // criteria writes with `codec=hvc1` instead of `dvh1`, so the
-        // panel never enters DV mode even when it could. DrHurt#4
-        // (2026-05-26): on a DV-capable panel, only P8.1 was producing
-        // `format=dolbyvision codec=dvh1` pre-fix.
+        // dvcC/dvvC side-data is the authoritative DV marker, independent of color_trc. Branching on color_trc first mis-classifies HLG-base P8.4 (reported as HLG) and unspecified-trc P5 (reported as SDR) -- both emit hvc1 instead of dvh1, so the panel never enters DV (DrHurt#4 2026-05-26: only P8.1 produced dolbyvision pre-fix).
         if Self.streamHasDV(stream: stream) {
             return .dolbyVision
         }
@@ -363,14 +273,7 @@ extension AetherEngine {
         return .sdr
     }
 
-    /// Clamp the source-detected format to what the active display can
-    /// actually present. AVPlayer renders DV's HDR10 (PQ) or HLG base
-    /// layer on a non-DV panel — HLSVideoEngine forces this by emitting
-    /// plain `hvc1` when `dvModeAvailable=false` — so the engine publishes
-    /// the base format the panel ends up showing, not the source's DV
-    /// claim. Picks the base from the source `color_trc`: PQ → hdr10,
-    /// HLG → hlg. SDR-base DV (P8.2) collapses to .sdr; HLSVideoEngine
-    /// refuses to serve it anyway so the badge never reaches the UI.
+    /// Clamp source format to what the panel can present. On non-DV panels, publishes the HDR10/HLG base layer format (hvc1 path); SDR-base DV (P8.2) collapses to .sdr (HLSVideoEngine refuses to serve it).
     static func effectiveVideoFormat(
         detected: VideoFormat,
         stream: UnsafeMutablePointer<AVStream>
@@ -382,10 +285,7 @@ extension AetherEngine {
         if trc == AVCOL_TRC_ARIB_STD_B67 {
             return caps.supportsHLG ? .hlg : .sdr
         }
-        // SMPTE2084 base (P5 / P7 / P8.1) or an unspecified trc (P5
-        // sometimes ships with an empty base-layer VUI). Both are
-        // HDR-derived; AVPlayer tonemaps via the dvh1 sample entry on
-        // a non-DV panel. Map to HDR10 if the panel can present it.
+        // SMPTE2084 base (P5/P7/P8.1) or unspecified trc (P5 with empty VUI): AVPlayer tonemaps via dvh1 on non-DV panel.
         return caps.supportsHDR10 ? .hdr10 : .sdr
     }
 
