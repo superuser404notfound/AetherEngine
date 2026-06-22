@@ -94,7 +94,9 @@ enum SubtitleDecoder {
                 throw SubtitleDecoderError.openFailed(code: -1)
             }
             ctx.pointee.pb = reader.context
-            formatContext = ctx
+            // Assign formatContext only after a successful open: avformat_open_input frees the
+            // supplied context and NULLs its pointer on failure, so an early assignment would
+            // leave a dangling pointer for the defer to double-close (mirrors Demuxer.swift).
             var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
             let ret = avformat_open_input(&ctxPtr, nil, nil, nil)
             guard ret == 0 else {
