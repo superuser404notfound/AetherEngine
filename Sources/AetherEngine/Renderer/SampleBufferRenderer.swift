@@ -12,8 +12,6 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     private(set) var displayLayer: AVSampleBufferDisplayLayer
 
-    private var currentlyHDR: Bool = false
-
     /// B-frame reorder buffer (4 frames): collects decoder output, flushes to display layer in ascending PTS order. Third tuple slot carries per-frame HDR10+ T.35 SEI bytes, paired through the reorder to kCMSampleAttachmentKey_HDR10PlusPerFrameData.
     private let reorderLock = NSLock()
     private var reorderBuffer: [(CVPixelBuffer, CMTime, Data?)] = []
@@ -92,7 +90,6 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     /// Opt the display layer into HDR mode. Pass true only when the decoder delivers raw HDR10/DV pixel buffers; false for SDR or tone-mapped output.
     func setHDROutput(_ isHDR: Bool) {
-        currentlyHDR = isHDR
         if #available(tvOS 26.0, iOS 26.0, macOS 26.0, *) {
             displayLayer.preferredDynamicRange = isHDR ? .high : .standard
         } else {
