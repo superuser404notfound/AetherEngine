@@ -189,37 +189,64 @@ final class FrameDecodeContext: @unchecked Sendable {
         guard frame != nil else { return nil }
         defer { av_frame_free(&frame) }
 
+        func makeImage(_ f: UnsafeMutablePointer<AVFrame>) -> CGImage? {
+            let width = mode == .thumbnail
+                ? targetWidth
+                : Self.clampedWidth(frame: f, maxSize: maxSize)
+            if isHDR {
+                var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase)
+                if toned != nil {
+                    defer { av_frame_free(&toned) }
+                    if let img = Self.cgImageFromRGBAFrame(toned!) { return img }
+                }
+                // tone-map failed: fall through to sws path (degraded but non-nil)
+            }
+            return convertToCGImage(frame: f, targetWidth: width)
+        }
+
+        // Once the demuxer hits EOF, flush the decoder (NULL packet) and keep draining: the
+        // context is frame-threaded, so the last GOP's frames only emit after the flush. Without
+        // this, a snapshot/thumbnail targeting the final frames returned nil (blank preview).
+        var draining = false
         while true {
             if isCancelled() { return nil }
 
-            let packetOrNil: UnsafeMutablePointer<AVPacket>?
-            do {
-                packetOrNil = try demuxer.readPacket()
-            } catch {
-                return nil
-            }
-            guard let packet = packetOrNil else {
-                return nil
-            }
-
-            if packet.pointee.stream_index != videoStreamIndex {
+            if !draining {
+                let packetOrNil: UnsafeMutablePointer<AVPacket>?
+                do {
+                    packetOrNil = try demuxer.readPacket()
+                } catch {
+                    return nil
+                }
+                guard let packet = packetOrNil else {
+                    avcodec_send_packet(ctx, nil)
+                    draining = true
+                    continue
+                }
+                if packet.pointee.stream_index != videoStreamIndex {
+                    av_packet_unref(packet)
+                    av_packet_free_safe(packet)
+                    continue
+                }
+                // Receive loop below drains before each send, so send-side EAGAIN cannot occur here.
+                let sendRet = avcodec_send_packet(ctx, packet)
                 av_packet_unref(packet)
                 av_packet_free_safe(packet)
-                continue
+                guard sendRet >= 0 else { continue }
             }
-
-            // Receive loop below drains before each send, so send-side EAGAIN cannot occur here.
-            let sendRet = avcodec_send_packet(ctx, packet)
-            av_packet_unref(packet)
-            av_packet_free_safe(packet)
-            guard sendRet >= 0 else { continue }
 
             while true {
                 if isCancelled() { return nil }
                 let recvRet = avcodec_receive_frame(ctx, frame)
-                if recvRet == FFmpegErr.eagain { break }           // need another packet
+                if recvRet == FFmpegErr.eagain {
+                    if draining { return nil }      // flushed dry without reaching the target
+                    break                           // need another packet
+                }
                 if recvRet == FFmpegErr.eof { return nil } // decoder drained
-                guard recvRet >= 0, let f = frame else { break }       // real error: try next packet
+                guard recvRet >= 0, let f = frame else {
+                    if draining { return nil }      // avoid re-flushing the same error forever
+                    break                           // real error: try next packet
+                }
 
                 // Skip frames before targetPTS for frame-accuracy. No-PTS frames
                 // (AV_NOPTS_VALUE == Int64.min) are accepted, so PTS-less streams
@@ -231,18 +258,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                 }
 
                 if isCancelled() { return nil }
-                let width = mode == .thumbnail
-                    ? targetWidth
-                    : Self.clampedWidth(frame: f, maxSize: maxSize)
-                if isHDR {
-                    var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase)
-                    if toned != nil {
-                        defer { av_frame_free(&toned) }
-                        if let img = Self.cgImageFromRGBAFrame(toned!) { return img }
-                    }
-                    // tone-map failed: fall through to sws path (degraded but non-nil)
-                }
-                return convertToCGImage(frame: f, targetWidth: width)
+                return makeImage(f)
             }
         }
     }
