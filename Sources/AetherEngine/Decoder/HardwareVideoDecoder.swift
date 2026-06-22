@@ -52,9 +52,6 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var width: Int32 = 0
     private var height: Int32 = 0
 
-    /// True when source transfer is PQ ST.2084 or HLG; tells the host to flip SampleBufferRenderer into HDR mode.
-    private(set) var isHDR: Bool = false
-
     /// Color metadata from codecpar, re-applied to every CVPixelBuffer.
     /// VTDecompressionSession should propagate these from SPS+hvcC but has been observed not to;
     /// without them an HDR buffer renders as desaturated SDR on AVSampleBufferDisplayLayer.
@@ -130,7 +127,6 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
         let use10Bit = bitsPerSample > 8 || isHDRTransfer
-        self.isHDR = isHDRTransfer
 
         self.colorPrimaries = ColorAttachments.primaries(codecpar.pointee.color_primaries)
         self.colorTransfer = ColorAttachments.transfer(codecpar.pointee.color_trc)
