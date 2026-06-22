@@ -1111,13 +1111,7 @@ public final class AetherEngine: ObservableObject {
         // toggle AVPlayer directly; the $timeControlStatus reconciliation is async, so a fast press on a stale
         // value would no-op. SW/audio hosts have no competing transport owner so `state` is authoritative there.
         let isPlaying: Bool
-        if audioAVPlayerActive {
-            isPlaying = (state == .playing)
-        } else if audioHost != nil {
-            isPlaying = (state == .playing)
-        } else if softwareHost != nil {
-            isPlaying = (state == .playing)
-        } else if let nativeHost {
+        if let nativeHost, !audioAVPlayerActive && audioHost == nil && softwareHost == nil {
             isPlaying = nativeHost.isEffectivelyPlaying
         } else {
             isPlaying = (state == .playing)
