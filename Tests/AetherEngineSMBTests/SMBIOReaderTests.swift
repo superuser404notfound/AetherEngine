@@ -82,10 +82,8 @@ final class SMBIOReaderTests: XCTestCase {
 
     func testNegativeSeekDoesNotCorruptCursor() {
         let r = SMBIOReader(source: FakeByteRangeSource(payload))
-        // Advance to a known position.
         XCTAssertEqual(r.seek(offset: 10, whence: SEEK_SET), 10)
         XCTAssertEqual(readN(r, 2), Data([10, 11]))
-        // Cursor is now at 12; confirm a negative-result seek returns < 0.
         XCTAssertLessThan(r.seek(offset: -999, whence: SEEK_SET), 0)
         // Cursor must be unchanged: next read should still start at 12.
         XCTAssertEqual(readN(r, 2), Data([12, 13]))

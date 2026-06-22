@@ -2,9 +2,7 @@ import Foundation
 import os
 import AetherEngine
 
-/// Sendable one-shot holder for a blocking read's result. Written exactly once
-/// inside the bridging Task and read exactly once after the semaphore wait, so
-/// the `@unchecked Sendable` assertion holds.
+/// One-shot holder for a blocking read's result. Written once inside the bridging Task, read once after the semaphore wait; the DispatchSemaphore provides the happens-before edge that makes @unchecked Sendable safe.
 private final class ReadOutcome: @unchecked Sendable {
     var result: Result<Data, Error> = .success(Data())
 }
@@ -37,10 +35,6 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
         let want = Int(size)
 
         let semaphore = DispatchSemaphore(value: 0)
-        // `outcome` is written once inside the Task and read once after wait().
-        // It lives in a Sendable box (not a captured local var) so the Task's
-        // closure stays Sendable under strict concurrency; the semaphore
-        // provides the happens-before edge that makes the single write/read safe.
         let outcome = ReadOutcome()
         let task = Task { [source] in
             do { outcome.result = .success(try await source.read(at: offset, length: want)) }

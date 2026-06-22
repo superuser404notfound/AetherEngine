@@ -147,9 +147,7 @@ public struct AetherPlayerSurface: UIViewRepresentable {
         return view
     }
 
-    public func updateUIView(_ uiView: AetherPlayerView, context: Context) {
-        // No-op. State updates flow through engine's @Published properties.
-    }
+    public func updateUIView(_ uiView: AetherPlayerView, context: Context) {}
 
     public static func dismantleUIView(_ uiView: AetherPlayerView, coordinator: ()) {
         // The engine releases its weak ref when the view deinits, but
