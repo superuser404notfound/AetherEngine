@@ -53,12 +53,18 @@ enum DiscReader {
 
     /// Read all bytes of an extent list into memory (small files only: mpls).
     private static func readAll(_ base: IOReader, _ exts: [(offset: Int64, length: Int64)]) -> [UInt8] {
+        // Extent lengths are untrusted on-disc bytes (up to ~1 GB each). Cap the total before
+        // allocating so a crafted .mpls cannot drive an arbitrary allocation (jetsam/DoS); 8 MB
+        // matches UDFReader.readDirectory's guard and dwarfs any real playlist (KB-scale).
+        let maxBytes: Int64 = 8 * 1024 * 1024
+        let declared = exts.reduce(Int64(0)) { $0 + max(0, $1.length) }
+        guard declared > 0, declared <= maxBytes else { return [] }
+        let total = Int(declared)
         let r = ConcatIOReader(base: base, extents: exts)
-        let total = Int(exts.reduce(0) { $0 + $1.length })
         var out = [UInt8](repeating: 0, count: total); var got = 0
         out.withUnsafeMutableBufferPointer { p in
             while got < total {
-                let n = r.read(p.baseAddress!.advanced(by: got), size: Int32(total - got))
+                let n = r.read(p.baseAddress!.advanced(by: got), size: Int32(min(Int64(total - got), Int64(Int32.max))))
                 if n <= 0 { break }; got += Int(n)
             }
         }
