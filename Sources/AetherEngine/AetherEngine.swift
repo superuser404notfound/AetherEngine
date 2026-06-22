@@ -1178,6 +1178,10 @@ public final class AetherEngine: ObservableObject {
         seekGeneration &+= 1
         let seekGen = seekGeneration
         setProgrammaticSeek(inFlight: true, target: target)
+        // Capture loadGeneration so the live finalize can detect a concurrent stop()/load()/zap
+        // (which bumps loadGeneration in stopInternal but leaves seekGeneration untouched), matching
+        // the VOD guard below. Without it a superseded live seek writes clock/state onto a torn-down session.
+        let loadGen = loadGeneration
         if isLive {
             // Live/DVR native: translate session-time target into AVPlayer live clock via behind-delta
             // (robust if the edge advances between publish tick and seek; collapses to clockTarget = target - shift).
@@ -1185,7 +1189,7 @@ public final class AetherEngine: ObservableObject {
             if softwareHost != nil, nativeHost == nil {
                 EngineLog.emit("[AetherEngine] SW live seek target=\(target)", category: .engine)
                 await softwareHost?.seek(to: target)
-                guard seekGeneration == seekGen else { return }
+                guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
                 clock.currentTime = target
                 clock.sourceTime = target
                 state = .playing
@@ -1200,7 +1204,7 @@ public final class AetherEngine: ObservableObject {
             nativeClockSeconds = clockTarget
             clock.currentTime = target
             await nativeHost?.seek(to: clockTarget)
-            guard seekGeneration == seekGen else { return }
+            guard loadGeneration == loadGen, seekGeneration == seekGen else { return }
             nativeClockSeconds = clockTarget
             clock.currentTime = target
             clock.sourceTime = target
