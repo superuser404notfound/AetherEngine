@@ -552,7 +552,19 @@ final class AudioBridge: @unchecked Sendable {
         try receiveDecodedFrames()
 
         // Drain the FIFO into encoder-frame-size chunks, each fed as one AVFrame.
-        try drainFIFOIntoEncoder(enc: enc, fifo: fifoPtr, requireFull: true, results: &results)
+        // The helper may append encoded packets before throwing; feed propagates the error (the
+        // caller logs and continues, holding no reference), so free the partial results here or
+        // they leak. flush() intentionally keeps its partial results via try?, so this cleanup
+        // lives in feed(), not in the shared helper.
+        do {
+            try drainFIFOIntoEncoder(enc: enc, fifo: fifoPtr, requireFull: true, results: &results)
+        } catch {
+            for p in results {
+                var pp: UnsafeMutablePointer<AVPacket>? = p
+                trackedPacketFree(&pp)
+            }
+            throw error
+        }
 
         return results
     }
