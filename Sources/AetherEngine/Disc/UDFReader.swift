@@ -166,12 +166,12 @@ final class UDFReader {
     // MARK: file entry parsing
 
     private struct AllocExt { let block: Int; let length: Int; let longPartRef: Int? }
-    private struct FE { let fileType: Int; let isDir: Bool; let partRef: Int; let allocationExtents: [AllocExt] }
+    private struct FE { let partRef: Int; let allocationExtents: [AllocExt] }
 
     private func readFileEntry(block: Int, partRef: Int) throws -> FE {
         let sector = try resolve(block: block, partRef: partRef)
         let raw = try readFileEntryRaw(sector: sector)
-        return FE(fileType: raw.fileType, isDir: raw.isDir, partRef: partRef, allocationExtents: raw.allocationExtents)
+        return FE(partRef: partRef, allocationExtents: raw.allocationExtents)
     }
 
     /// Parse (E)FE at a physical sector. Tag 261 (FE) and 266 (EFE);
@@ -180,8 +180,6 @@ final class UDFReader {
         let d = try readSector(sector)
         let tid = tagID(d)
         guard tid == 261 || tid == 266 else { throw DiscError.malformed("not a file entry @\(sector): tag \(tid)") }
-        let fileType = Int(d[27])
-        let isDir = fileType == 4
         let adType = u16(d, 34) & 0x07
         let (lEAOff, lADOff, adBase): (Int, Int, Int) = tid == 266 ? (208, 212, 216) : (168, 172, 176)
         let lEA = u32(d, lEAOff)
@@ -200,7 +198,7 @@ final class UDFReader {
             exts.append(AllocExt(block: blk, length: len, longPartRef: longRef))
             p += stride
         }
-        return FE(fileType: fileType, isDir: isDir, partRef: 0, allocationExtents: exts)
+        return FE(partRef: 0, allocationExtents: exts)
     }
 
     // MARK: directory parsing
