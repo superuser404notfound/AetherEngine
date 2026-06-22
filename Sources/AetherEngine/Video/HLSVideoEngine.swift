@@ -168,21 +168,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Also settable via the public `enableNativeSubtitles()` affordance.
     var enableNativeSubtitleTrackForSession: Bool = false
 
-    /// Session-persistent cue store for the native mov_text subtitle track
-    /// (#55). Mirrors `enableNativeSubtitleTrackForSession`: set by
-    /// `AetherEngine.selectSubtitleTrack` when a text track is activated
-    /// and cleared by `clearSubtitle` / `stopInternal`. `makeProducer`
-    /// re-threads it onto every fresh producer (initial + restart) so the
-    /// producer can drain cues per segment cut even after a seek or
-    /// audio-switch restart. Nil when no text subtitle track is active;
-    /// the nil path is byte-identical to pre-#55 output.
-    var nativeSubtitleCueStoreForSession: NativeSubtitleCueStore?
+    /// Session-persistent cue stores for the native mov_text subtitle
+    /// tracks (#55, all-tracks). One store per declared text track, ordinal-
+    /// aligned with `nativeSubtitleLanguagesForSession` and the muxer's
+    /// mov_text stream order. Mirrors `enableNativeSubtitleTrackForSession`:
+    /// set by `AetherEngine` when native subtitles are enabled and cleared
+    /// by `clearSubtitle` / `stopInternal`. `makeProducer` re-threads the
+    /// set onto every fresh producer (initial + restart) so per-segment cue
+    /// drain survives a seek or audio-switch restart. Empty when no text
+    /// subtitle track is active; the empty path is byte-identical to
+    /// pre-#55 output.
+    var nativeSubtitleCueStoresForSession: [NativeSubtitleCueStore] = []
+
+    /// Language tags (ISO 639-2 / BCP-47) parallel to
+    /// `nativeSubtitleCueStoresForSession`. Threaded onto the producer so
+    /// the muxer can label each mov_text track for AVFoundation's media-
+    /// selection menu. A nil entry => no language box for that track.
+    var nativeSubtitleLanguagesForSession: [String?] = []
 
     /// Diagnostics affordance (#55): request the native mov_text track
     /// in the init moov. Call BEFORE `start()` so `makeProducer` picks
     /// up the flag when allocating the first muxer. Then call
-    /// `attachNativeSubtitleStore()` after `start()` to wire the cue
-    /// store to the already-running producer.
+    /// `attachNativeSubtitleStores(count:languages:)` after `start()` to
+    /// wire the cue stores to the already-running producer.
     /// In a full `AetherEngine` session this is wired automatically;
     /// these methods exist so `aetherctl serve --native-subs N` can
     /// confirm the plumbing at the HLS-engine level.
@@ -190,14 +198,38 @@ public final class HLSVideoEngine: @unchecked Sendable {
         enableNativeSubtitleTrackForSession = true
     }
 
-    /// Attach a fresh `NativeSubtitleCueStore` to the current producer.
-    /// Call AFTER `start()`. The store starts empty; cues arrive once
-    /// `selectSubtitleTrack` on an `AetherEngine` instance feeds the
-    /// side demuxer.
-    public func attachNativeSubtitleStore() {
-        let store = NativeSubtitleCueStore()
-        nativeSubtitleCueStoreForSession = store
-        producer?.subtitleCueStore = store
+    /// Attach `count` fresh `NativeSubtitleCueStore`s (one per declared
+    /// text track) to the current producer (#55, all-tracks). Call AFTER
+    /// `start()`. The stores start empty; cues arrive once `AetherEngine`
+    /// feeds them via the native multi-decode reader. `languages` is
+    /// ordinal-aligned (nil-padded to `count`). Used by
+    /// `aetherctl serve --native-subs` to confirm the init moov declares N
+    /// tracks; a full `AetherEngine` session wires the stores directly.
+    public func attachNativeSubtitleStores(count: Int, languages: [String?] = []) {
+        guard count > 0 else { return }
+        let stores = (0..<count).map { _ in NativeSubtitleCueStore() }
+        nativeSubtitleCueStoresForSession = stores
+        nativeSubtitleLanguagesForSession = (0..<count).map { i in
+            i < languages.count ? languages[i] : nil
+        }
+        producer?.subtitleCueStores = stores
+        producer?.nativeSubtitleLanguages = nativeSubtitleLanguagesForSession
+    }
+
+    /// Discover every non-bitmap subtitle stream on the engine's own
+    /// demuxer and attach one store per track, ordinal-aligned with source
+    /// order and labelled with each track's metadata language (#55,
+    /// all-tracks). Call AFTER `start()`. Returns the per-track languages
+    /// (for logging). Used by `aetherctl serve --native-subs` to declare ALL
+    /// native tracks in the init moov; a full `AetherEngine` session wires
+    /// the stores itself via the multi-decode reader.
+    @discardableResult
+    public func attachAllNativeSubtitleStores() -> [String?] {
+        let bitmap: Set<String> = ["hdmv_pgs_subtitle", "dvb_subtitle", "dvd_subtitle", "xsub"]
+        let text = (demuxer?.subtitleTrackInfos() ?? []).filter { !bitmap.contains($0.codec) }
+        let languages = text.map { $0.language }
+        attachNativeSubtitleStores(count: text.count, languages: languages)
+        return languages
     }
 
     /// Per-frame fallback durations (in the respective source
@@ -1887,7 +1919,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // subtitle track is active; the nil path is byte-identical to
         // sessions without native subtitle support (no-op in advanceMuxer).
         prod.enableNativeSubtitleTrack = enableNativeSubtitleTrackForSession
-        prod.subtitleCueStore = nativeSubtitleCueStoreForSession
+        // Thread the full store set + languages UNCONDITIONALLY (#55,
+        // all-tracks): an empty session set clears the producer to [] so a
+        // session without native subtitles is byte-identical, and a restart
+        // after the stores were detached (clearSubtitle) does not carry the
+        // old set forward. Setting the array only when non-empty was the
+        // Task 2 latent gap this closes.
+        prod.subtitleCueStores = nativeSubtitleCueStoresForSession
+        prod.nativeSubtitleLanguages = nativeSubtitleLanguagesForSession
         return prod
     }
 
@@ -1929,7 +1968,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // cue timestamps onto the updated AVPlayer axis after a restart
         // (the shift can change when matroska seek lands past the planned
         // keyframe). No-op when no text subtitle track is active (#55).
-        nativeSubtitleCueStoreForSession?.setShiftSeconds(seconds)
+        // Refresh EVERY store so all native tracks stay on the same axis.
+        nativeSubtitleCueStoresForSession.forEach { $0.setShiftSeconds(seconds) }
         onPlaylistShiftChanged?(seconds)
     }
 

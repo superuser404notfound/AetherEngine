@@ -46,7 +46,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
-| Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD) as `CGImage`, sidecar files, opt-in raw ASS markup + fonts; opt-in native mov_text track for PiP / AirPlay / external display (`LoadOptions.prepareNativeSubtitles`) |
+| Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD) as `CGImage`, sidecar files, opt-in raw ASS markup + fonts; opt-in native legible menu (all text tracks as language-tagged tx3g traks for PiP / AirPlay / external display, `LoadOptions.prepareNativeSubtitles`) |
 | Frames | Off-playback `FrameExtractor`: `thumbnail` (scrub preview) + `snapshot` (frame-accurate) |
 | Metadata | `MediaMetadata` (title / artist / album + cover) parsed on load |
 | Seek | Producer restart for backward / far-forward; short forward scrubs ride the cached window |

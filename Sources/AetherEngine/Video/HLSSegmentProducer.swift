@@ -907,15 +907,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// reopen-with-backoff recovery when the source was lost.
     var onPumpFinished: (@Sendable (PumpExitReason) -> Void)?
 
-    /// Optional cue store for native mov_text subtitle injection (#55).
-    /// When non-nil, the segment-cut path drains cues for each segment
-    /// window and writes mov_text samples into the muxer before the cut.
-    /// Nil by default: sessions without a subtitle track are unchanged
-    /// (byte-identical output).
-    var subtitleCueStore: NativeSubtitleCueStore?
+    /// Ordinal-indexed cue stores for native mov_text subtitle injection (#55).
+    /// Each entry corresponds to one subtitle track; the ordinal matches
+    /// `MP4SegmentMuxer.subtitleOutputStreamIndices`. Empty = disabled;
+    /// all sessions without subtitle tracks are byte-identical to v1.
+    var subtitleCueStores: [NativeSubtitleCueStore] = []
 
-    /// When true, `allocateMuxer` passes a `SubtitleConfig` to
-    /// `MP4SegmentMuxer` so the init moov declares a mov_text track.
+    /// BCP-47 language tags parallel to `subtitleCueStores` (ordinal-indexed).
+    /// Set by the engine alongside the stores; used to build the per-track
+    /// `SubtitleConfig` array that `allocateMuxer` passes to the muxer.
+    /// Nil entry = no language box for that track.
+    var nativeSubtitleLanguages: [String?] = []
+
+    /// When true, `allocateMuxer` passes `SubtitleConfig` entries to
+    /// `MP4SegmentMuxer` so the init moov declares mov_text tracks.
     /// Must be set BEFORE the first call to `allocateMuxer` (i.e.
     /// before the pump loop runs). Set by the engine based on
     /// `LoadOptions.prepareNativeSubtitles` and whether the probe
@@ -1345,17 +1350,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
 
         do {
-            // Pass a SubtitleConfig when the native mov_text track is requested
-            // (#55). Only the first (non-reinit) muxer declares the track; a
-            // re-init at an SSAI seam keeps the original track layout.
-            let muxerSubtitle: MP4SegmentMuxer.SubtitleConfig? =
-                (!isReinit && enableNativeSubtitleTrack) ? MP4SegmentMuxer.SubtitleConfig() : nil
+            // Pass one SubtitleConfig per cue store when native mov_text tracks are
+            // requested (#55). Each entry carries the BCP-47 language tag so the
+            // muxer can label the track for AVFoundation's media-selection menu.
+            // Only the first (non-reinit) muxer declares the tracks; a re-init at
+            // an SSAI seam keeps the original track layout (empty array).
+            let muxerSubtitles: [MP4SegmentMuxer.SubtitleConfig] = {
+                guard !isReinit && enableNativeSubtitleTrack && !subtitleCueStores.isEmpty else {
+                    return []
+                }
+                return subtitleCueStores.indices.map { i in
+                    MP4SegmentMuxer.SubtitleConfig(
+                        language: i < nativeSubtitleLanguages.count ? nativeSubtitleLanguages[i] : nil
+                    )
+                }
+            }()
             let muxer = try MP4SegmentMuxer(
                 initialSegmentIndex: initialSegmentIndex,
                 sessionDir: cache.sessionDir,
                 video: muxerVideo,
                 audio: muxerAudio,
-                subtitle: muxerSubtitle,
+                subtitles: muxerSubtitles,
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if isReinit {
@@ -1434,23 +1449,29 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // Native mov_text subtitle injection (#55): drain cues for the
         // segment being finalized and write mov_text samples before the
         // cut so AVPlayer sees them in the same fragment as the A/V data.
-        // Fully gated on subtitleCueStore being non-nil; no-op (and
+        // Fully gated on subtitleCueStores being non-empty; no-op (and
         // byte-identical output) for all video/audio-only sessions.
-        if let store = subtitleCueStore {
+        // The window is computed once and shared across all tracks.
+        if !subtitleCueStores.isEmpty {
             let segWindow = segmentWindowAVPlayerSeconds(
                 segIdx: currentMuxerSegmentIndex, nextSegIdx: newIdx)
             if let (t0, t1) = segWindow, t1 > t0 {
-                let cues = store.cuesInWindow(start: t0, end: t1)
-                let plan = Self.movTextSamples(forWindow: (t0, t1), cues: cues)
-                for s in plan {
-                    muxer.writeSubtitleSample(s.payload,
-                                              ptsSeconds: s.pts,
-                                              durationSeconds: s.duration)
+                var totalSamples = 0
+                for (ordinal, store) in subtitleCueStores.enumerated() {
+                    let cues = store.cuesInWindow(start: t0, end: t1)
+                    let plan = Self.movTextSamples(forWindow: (t0, t1), cues: cues)
+                    for s in plan {
+                        muxer.writeSubtitleSample(s.payload,
+                                                  trackOrdinal: ordinal,
+                                                  ptsSeconds: s.pts,
+                                                  durationSeconds: s.duration)
+                    }
+                    totalSamples += plan.count
                 }
                 EngineLog.emit(
                     "[HLSSegmentProducer] subtitle inject seg-\(currentMuxerSegmentIndex) "
                     + "window=[\(String(format: "%.3f", t0)), \(String(format: "%.3f", t1)))s "
-                    + "samples=\(plan.count) (\(cues.count) cue(s) + \(plan.count - cues.count) gap(s))",
+                    + "tracks=\(subtitleCueStores.count) totalSamples=\(totalSamples)",
                     category: .engine, level: .verbose
                 )
             }

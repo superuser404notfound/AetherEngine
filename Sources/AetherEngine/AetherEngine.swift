@@ -240,7 +240,7 @@ public final class AetherEngine: ObservableObject {
     /// (embedded streams via a side demuxer). When `LoadOptions.prepareNativeSubtitles`
     /// is set, cues also flow into the `NativeSubtitleCueStore` so the
     /// muxer can inject them into the mov_text track. Native text-subtitle
-    /// selection is available via `setNativeSubtitleSelected(_:)`.
+    /// selection is available via `setNativeSubtitleSelected(track:)`.
     @Published public internal(set) var subtitleCues: [SubtitleCue] = []
     /// True while a sidecar file is being downloaded + decoded.
     @Published public internal(set) var isLoadingSubtitles: Bool = false
@@ -276,6 +276,16 @@ public final class AetherEngine: ObservableObject {
     /// whether to surface the native AVMediaSelection picker (PiP /
     /// AirPlay). Cleared by `clearSubtitle` and `stopInternal`.
     @Published public internal(set) var nativeSubtitleRenditionAvailable: Bool = false
+
+    /// The ordered list of native mov_text subtitle tracks available on the
+    /// current session (#55). One entry per text subtitle stream declared in
+    /// the muxer init moov, in ordinal order. Populated from
+    /// `nativeSubtitleTrackTable` after the session starts and
+    /// `LoadOptions.prepareNativeSubtitles` was set; empty otherwise.
+    /// Cleared on stop and at the start of each `load()`. Hosts use this
+    /// list to populate a track picker and call
+    /// `setNativeSubtitleSelected(track:)` with the chosen ordinal.
+    @Published public internal(set) var nativeSubtitleTracks: [NativeSubtitleTrack] = []
 
     /// True while the active session is a live stream (the host set
     /// `LoadOptions.isLive = true` at load time). Hosts use this to
@@ -761,13 +771,33 @@ public final class AetherEngine: ObservableObject {
     /// reconnect loop otherwise survives stop()/track switches.
     var activeSubtitleSideDemuxer: Demuxer?
 
-    /// Cue store backing the native mov_text track (#55). Non-nil only
-    /// when `LoadOptions.prepareNativeSubtitles` is set and a text
-    /// subtitle track has been selected. The side-demuxer reader
-    /// appends decoded cues here concurrently with `subtitleCues`;
-    /// the segment producer drains it per cut via `cuesInWindow`.
-    /// Cleared by `clearSubtitle` and `stopInternal`.
-    var nativeSubtitleCueStore: NativeSubtitleCueStore?
+    /// One entry per native text subtitle track, in the order the muxer
+    /// declares its mov_text streams (#55, all-tracks). Built at load time
+    /// from the probed `subtitleTracks` (non-bitmap codecs, source order),
+    /// then sidecar entries appended as they are selected at runtime.
+    /// `sourceStreamIndex` is the source AVStream index for embedded tracks
+    /// (nil for sidecars); `language` is the track's metadata language tag
+    /// (ISO 639-2, e.g. "eng"). The ordinal is the entry's position in the
+    /// array. Empty => native subtitles stay disabled (the existing gating
+    /// in `enableNativeSubtitleTrackForSession`). Cleared on stop/load.
+    struct NativeSubtitleTrackEntry: Sendable {
+        let sourceStreamIndex: Int?
+        let language: String?
+    }
+    var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
+
+    /// Detached reader that decodes EVERY embedded text subtitle stream in
+    /// ONE side-demuxer pass into its ordinal's `NativeSubtitleCueStore`
+    /// (#55, all-tracks). Separate from and parallel to the inline single-
+    /// track reader (`embeddedSubtitleTask`), which still drives
+    /// `subtitleCues` for the active track with full styling. Cancelled on
+    /// stop / clear / load.
+    var nativeSubtitleReadersTask: Task<Void, Never>?
+
+    /// Abort handle for the native multi-decode side demuxer. `markClosed`
+    /// unblocks a read parked in the AVIO reconnect loop so the reader exits
+    /// promptly on stop / clear (mirrors `activeSubtitleSideDemuxer`).
+    var nativeSubtitleReadersDemuxer: Demuxer?
 
     /// Cap the per-session subtitle event diagnostic logs so the in-
     /// app overlay stays readable. Reset on `load()` so each new
@@ -1007,6 +1037,8 @@ public final class AetherEngine: ObservableObject {
         clock.progress = 0
         audioTracks = []
         subtitleTracks = []
+        nativeSubtitleTrackTable = []
+        nativeSubtitleTracks = []
         metadata = nil
         fontAttachments = []
         subtitleCueDiagnosticCount = 0
@@ -2162,7 +2194,9 @@ public final class AetherEngine: ObservableObject {
         subtitleCues = []
         sidecarASSHeader = nil
         isLoadingSubtitles = false
-        nativeSubtitleCueStore = nil
+        nativeSubtitleTrackTable = []
+        nativeSubtitleTracks = []
+        cancelNativeSubtitleReaders()
         nativeSubtitleRenditionAvailable = false
         cancelSidecarTask(channel: .secondary)
         cancelEmbeddedSubtitleReader(channel: .secondary)

@@ -41,7 +41,7 @@ open 'http://127.0.0.1:<port>/master.m3u8'   # macOS QuickTime
 
 `--no-dv` forces the SDR / HDR10 route even for a Dolby Vision source (compare the two playlists).
 
-`--native-subs <index>` enables `LoadOptions.prepareNativeSubtitles` and selects the subtitle stream at `<index>` (zero-based among the subtitle tracks reported by `probe`). The init segment will carry a `mov_text` track; inspect it with `mp4dump` or open the playlist in QuickTime to verify the legible `AVMediaSelection` group appears. Omit the flag to reproduce the default behavior (no native subtitle track, muxer output byte-identical to before).
+`--native-subs <index>` enables `LoadOptions.prepareNativeSubtitles`, which causes the engine to mux ALL text subtitle tracks as separate language-tagged `mov_text` (tx3g) traks in the init segment (all `disposition:default=0`, none auto-displayed). The `<index>` argument (zero-based among the subtitle tracks reported by `probe`) is passed to `setNativeSubtitleSelected(track:)` after the session starts, so the diagnostic selects that track via the host API. The init segment will carry one `mov_text` trak per text subtitle stream; inspect with `mp4dump` or open the playlist in QuickTime to verify the legible `AVMediaSelection` group enumerates every language. Omit the flag to reproduce the default behavior (no native subtitle traks, muxer output byte-identical to before).
 
 ## validate
 

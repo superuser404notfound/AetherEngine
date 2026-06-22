@@ -24,4 +24,15 @@ final class SubtitleInjectionWindowTests: XCTestCase {
         XCTAssertEqual(samples[0].duration, 6)
         XCTAssertEqual([UInt8](samples[0].payload), [0x00, 0x00])
     }
+
+    func test_perTrackWindowsAreIndependent() {
+        // Two tracks with different cues in the same window; each plan covers only its own cues.
+        let a: [(start: Double, end: Double, text: String)] = [(1, 2, "a")]
+        let b: [(start: Double, end: Double, text: String)] = [(3, 4, "b")]
+        let planA = HLSSegmentProducer.movTextSamples(forWindow: (0, 6), cues: a)
+        let planB = HLSSegmentProducer.movTextSamples(forWindow: (0, 6), cues: b)
+        XCTAssertTrue(planA.contains { String(bytes: $0.payload.suffix(1), encoding: .utf8) == "a" })
+        XCTAssertFalse(planA.contains { String(bytes: $0.payload.suffix(1), encoding: .utf8) == "b" })
+        XCTAssertTrue(planB.contains { String(bytes: $0.payload.suffix(1), encoding: .utf8) == "b" })
+    }
 }

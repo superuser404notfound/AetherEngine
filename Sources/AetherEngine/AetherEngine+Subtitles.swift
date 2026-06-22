@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import Libavformat
 import Libavcodec
 import Libavutil
@@ -81,25 +82,11 @@ extension AetherEngine {
         isLoadingSubtitles = true
         activeEmbeddedSubtitleStreamIndex = Int32(index)
 
-        // Wire the native mov_text cue store when requested (#55).
-        // The store is created fresh on each track selection so a
-        // track switch does not carry stale cues into the new stream.
-        // The producer drains it per segment cut; only text cues land
-        // there (NativeSubtitleCueStore filters out bitmap bodies).
-        if loadedOptions.prepareNativeSubtitles {
-            let store = NativeSubtitleCueStore()
-            // playlistShiftSeconds is the AVPlayer-axis offset that
-            // NativeSubtitleCueStore.cuesInWindow must subtract from
-            // source-PTS cue timestamps to map them onto AVPlayer time.
-            store.setShiftSeconds(playlistShiftSeconds)
-            nativeSubtitleCueStore = store
-            // Persist the store on the video session so makeProducer can
-            // re-thread it onto every subsequent producer after a seek or
-            // audio-switch restart (#55). Also wire the current producer
-            // immediately so it can drain cues before the first restart.
-            nativeVideoSession?.nativeSubtitleCueStoreForSession = store
-            nativeVideoSession?.producer?.subtitleCueStore = store
-        }
+        // The native mov_text rendition (#55, all-tracks) is fed by the
+        // dedicated multi-decode reader launched at load (it fills one store
+        // per declared text track regardless of the inline selection here).
+        // This inline path only drives `subtitleCues` for the host overlay,
+        // so it must NOT touch the native stores or the producer wiring.
 
         // Side-demuxer seeks in source PTS. sourceTime is the unified
         // source-PTS playhead (equal to currentTime now that the native
@@ -472,9 +459,10 @@ extension AetherEngine {
     }
 
     /// Shared cue-array mutation: PGS clear-event trim, sorted insert, prune.
-    /// Operates on whichever channel's cue store the caller passes in.
-    /// For the primary channel, also forwards text cues into the native
-    /// mov_text store when one is attached (#55).
+    /// Operates on whichever channel's cue store the caller passes in. The
+    /// native mov_text stores (#55) are NOT fed here; they are filled by the
+    /// dedicated multi-decode reader so the inline overlay path stays the
+    /// single owner of `subtitleCues`.
     @MainActor
     private func applyEventMutations(_ event: EmbeddedSubtitleDecoder.SubtitleEvent, to cues: inout [SubtitleCue], channel: SubtitleChannel = .primary) {
         if let trimAt = event.pgsTrimAt {
@@ -500,15 +488,6 @@ extension AetherEngine {
             cues.insert(cue, at: lo)
         }
         pruneOldSubtitleCues(&cues)
-
-        // Feed the native mov_text store for the primary channel (#55).
-        // The store itself filters out bitmap cues, so no codec check needed here.
-        if channel == .primary, let store = nativeSubtitleCueStore, !event.cues.isEmpty {
-            store.appendCues(event.cues)
-            if store.cueCount > 0 {
-                nativeSubtitleRenditionAvailable = true
-            }
-        }
     }
 
     /// Remove subtitle cues whose `endTime` has fallen further behind
@@ -613,11 +592,11 @@ extension AetherEngine {
                 self.subtitleCues = result.cues
                 self.sidecarASSHeader = result.assHeader
                 self.isLoadingSubtitles = false
-                // Feed the native mov_text store when one is attached (#55).
-                if let store = self.nativeSubtitleCueStore {
-                    store.replaceCues(result.cues)
-                    self.nativeSubtitleRenditionAvailable = store.cueCount > 0
-                }
+                // The native mov_text rendition (#55) declares its tracks in
+                // the init moov at start; a sidecar selected at runtime can
+                // not be added to an already-started moov, so it drives only
+                // the host overlay here. Sidecars present at load are decoded
+                // into their stores by the multi-decode reader.
             }
         }
     }
@@ -659,10 +638,15 @@ extension AetherEngine {
         }
     }
 
-    /// Turn subtitles off and clear cached cues. Tears down both the
-    /// sidecar SRT decode task and the side-demuxer embedded reader.
-    /// Also detaches the native mov_text cue store from the producer
-    /// and clears the rendition-available signal (#55).
+    /// Turn subtitles off and clear cached cues. Tears down the sidecar
+    /// SRT decode task and the inline side-demuxer reader (host overlay),
+    /// then detaches the native mov_text rendition: cancels the multi-decode
+    /// reader, clears every store, drops the session set, and clears the
+    /// rendition-available signal (#55, all-tracks).
+    ///
+    /// Note: `nativeSubtitleTracks` is intentionally NOT cleared here.
+    /// The host needs the list to re-select a track after an audio or subtitle
+    /// switch. Only `stop()` and a new `load()` reset the list to empty.
     public func clearSubtitle() {
         cancelSidecarTask()
         cancelEmbeddedSubtitleReader()
@@ -672,9 +656,12 @@ extension AetherEngine {
         subtitleCues = []
         sidecarASSHeader = nil
         isLoadingSubtitles = false
-        nativeSubtitleCueStore = nil
-        nativeVideoSession?.nativeSubtitleCueStoreForSession = nil
-        nativeVideoSession?.producer?.subtitleCueStore = nil
+        cancelNativeSubtitleReaders()
+        nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
+        nativeVideoSession?.nativeSubtitleCueStoresForSession = []
+        nativeVideoSession?.nativeSubtitleLanguagesForSession = []
+        nativeVideoSession?.producer?.subtitleCueStores = []
+        nativeVideoSession?.producer?.nativeSubtitleLanguages = []
         nativeSubtitleRenditionAvailable = false
     }
 
@@ -701,22 +688,269 @@ extension AetherEngine {
         isLoadingSecondarySubtitles = false
     }
 
-    /// Enable or disable the native mov_text rendition on the current
-    /// AVPlayer item's legible media-selection group (#55). Lets hosts
-    /// hand subtitle rendering to AVKit / AirPlay / PiP rather than
-    /// driving the host overlay. Only effective when
-    /// `LoadOptions.prepareNativeSubtitles` was set at load time and
-    /// `nativeSubtitleRenditionAvailable` is true. Silently no-ops when
-    /// no native item is loaded or the item carries no legible group.
-    public func setNativeSubtitleSelected(_ on: Bool) {
+    // MARK: - Native multi-track decode (#55, all-tracks)
+
+    /// Launch the dedicated reader that decodes EVERY embedded text subtitle
+    /// stream into its ordinal's store in ONE side-demuxer pass. Separate
+    /// from the inline single-track reader so the host overlay path
+    /// (`subtitleCues`) is untouched. Idempotent within a session: cancels a
+    /// prior reader before launching. `stores` is ordinal-aligned with the
+    /// embedded entries of `nativeSubtitleTrackTable`.
+    func startNativeSubtitleReaders(url: URL, stores: [NativeSubtitleCueStore]) {
+        cancelNativeSubtitleReaders()
+        // Embedded entries only (sourceStreamIndex != nil); pair each store
+        // with its source stream index by ordinal.
+        var pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)] = []
+        for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
+            guard ordinal < stores.count, let src = entry.sourceStreamIndex else { continue }
+            pairs.append((Int32(src), stores[ordinal]))
+        }
+        guard !pairs.isEmpty else { return }
+
+        var customClone: IOReader? = nil
+        if isCustomSource {
+            guard let clone = customReader?.makeIndependentReader() else { return }
+            customClone = clone
+        }
+        let headers = loadedOptions.httpHeaders
+        let formatHint = customFormatHint
+        let w = sourceVideoWidth > 0 ? sourceVideoWidth : 1920
+        let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
+        let startAt = sourceTime
+        let reader = customClone
+        nativeSubtitleReadersTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.runNativeSubtitleReaders(
+                url: url, reader: reader, formatHint: formatHint, headers: headers,
+                pairs: pairs, startAt: startAt, videoWidth: w, videoHeight: h
+            )
+        }
+    }
+
+    /// Cancel the native multi-decode reader and abort its side demuxer.
+    /// `markClosed` unblocks a read parked in the AVIO reconnect loop so the
+    /// task exits promptly (mirrors `cancelEmbeddedSubtitleReader`).
+    func cancelNativeSubtitleReaders() {
+        nativeSubtitleReadersTask?.cancel()
+        nativeSubtitleReadersTask = nil
+        nativeSubtitleReadersDemuxer?.markClosed()
+        nativeSubtitleReadersDemuxer = nil
+    }
+
+    /// One side-demuxer pass that opens an `EmbeddedSubtitleDecoder` for
+    /// every text stream in `pairs` and routes each decoded cue into that
+    /// stream's `NativeSubtitleCueStore`. Mirrors `runEmbeddedSubtitleReader`
+    /// (prewarm seek, playhead re-sample, -2s lead-in, read-ahead park) but
+    /// decodes N streams at once and writes to stores instead of the inline
+    /// `subtitleCues` array, so it never touches the host overlay. The native
+    /// stores are always plain text (no `preserveASSMarkup`): the mov_text
+    /// muxer carries text only, and AVKit/AirPlay render it.
+    nonisolated private func runNativeSubtitleReaders(
+        url: URL, reader: IOReader?, formatHint: String?,
+        headers: [String: String],
+        pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)],
+        startAt: Double, videoWidth: Int32, videoHeight: Int32
+    ) async {
+        let demuxer = Demuxer()
+        let registered = await MainActor.run { [weak self] () -> Bool in
+            guard !Task.isCancelled, let self else { return false }
+            self.nativeSubtitleReadersDemuxer = demuxer
+            return true
+        }
+        guard registered else {
+            reader?.close()
+            return
+        }
+        defer {
+            Task { @MainActor [weak self, weak demuxer] in
+                if let self, let demuxer, self.nativeSubtitleReadersDemuxer === demuxer {
+                    self.nativeSubtitleReadersDemuxer = nil
+                }
+            }
+        }
+        do {
+            if let reader = reader {
+                try demuxer.open(reader: reader, formatHint: formatHint)
+            } else {
+                try demuxer.open(url: url, extraHeaders: headers)
+            }
+        } catch {
+            EngineLog.emit("[AetherEngine] native subtitle readers open failed: \(error)", category: .engine)
+            reader?.close()
+            return
+        }
+        defer {
+            demuxer.close()
+            reader?.close()
+        }
+
+        // Prewarm the cue table (MKV cues live at EOF) before the real seek,
+        // same as the inline reader.
+        let duration = demuxer.duration
+        if duration > 0 {
+            demuxer.seek(to: duration * 0.5)
+        }
+        let freshPlayhead = await MainActor.run { [weak self] in self?.sourceTime }
+        let effectiveStart = max(startAt, freshPlayhead ?? startAt)
+        let seekTo = max(0, effectiveStart - 2.0)
+        demuxer.seek(to: seekTo)
+
+        // Open one decoder + bind its store per text stream. A decoder that
+        // fails to open is skipped (its track simply gets no cues).
+        var routes: [Int32: (decoder: EmbeddedSubtitleDecoder, store: NativeSubtitleCueStore, tb: AVRational)] = [:]
+        for pair in pairs {
+            guard let stream = demuxer.stream(at: pair.streamIndex),
+                  let decoder = EmbeddedSubtitleDecoder(
+                      stream: stream,
+                      sourceVideoWidth: videoWidth,
+                      sourceVideoHeight: videoHeight,
+                      preserveASSMarkup: false
+                  )
+            else {
+                EngineLog.emit("[AetherEngine] native subtitle decoder open failed for stream=\(pair.streamIndex)", category: .engine)
+                continue
+            }
+            // Bitmap codecs are excluded from the table at load, but guard
+            // here too: a bitmap body can never become a mov_text sample.
+            if EmbeddedSubtitleDecoder.isBitmapCodec(decoder.codecID) { continue }
+            routes[pair.streamIndex] = (decoder, pair.store, stream.pointee.time_base)
+        }
+        guard !routes.isEmpty else { return }
+
+        EngineLog.emit(
+            "[AetherEngine] native subtitle readers started: streams=\(routes.keys.sorted()) " +
+            "startAt=\(String(format: "%.2f", startAt))s effectiveStart=\(String(format: "%.2f", effectiveStart))s " +
+            "seekTo=\(String(format: "%.2f", seekTo))s",
+            category: .engine
+        )
+
+        var playheadSnapshot = effectiveStart
+        var parkLogged = false
+        var timeBaseCache: [Int32: AVRational] = [:]
+        var totalCues = 0
+
+        readLoop: while !Task.isCancelled {
+            guard let pkt = try? demuxer.readPacket() else { break }
+            let streamIdx = pkt.pointee.stream_index
+
+            let rawTS = pkt.pointee.pts != Int64.min ? pkt.pointee.pts : pkt.pointee.dts
+            var pktSeconds: Double?
+            if rawTS != Int64.min {
+                let ptb: AVRational
+                if let cached = timeBaseCache[streamIdx] {
+                    ptb = cached
+                } else {
+                    ptb = demuxer.stream(at: streamIdx)?.pointee.time_base ?? AVRational(num: 0, den: 1)
+                    timeBaseCache[streamIdx] = ptb
+                }
+                if ptb.num > 0, ptb.den > 0 {
+                    pktSeconds = Double(rawTS) * Double(ptb.num) / Double(ptb.den)
+                }
+            }
+
+            if let route = routes[streamIdx] {
+                let event = route.decoder.decode(packet: pkt, streamTimeBase: route.tb)
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+                if let event, !event.cues.isEmpty {
+                    totalCues += event.cues.count
+                    route.store.appendCues(event.cues)
+                    // Snapshot the flag locally (no `route` capture in the
+                    // MainActor closure) to keep the hop Sendable-clean.
+                    let hasCues = route.store.cueCount > 0
+                    if hasCues {
+                        await MainActor.run { [weak self] in
+                            guard !Task.isCancelled, let self else { return }
+                            self.nativeSubtitleRenditionAvailable = true
+                        }
+                    }
+                }
+            } else {
+                var p: UnsafeMutablePointer<AVPacket>? = pkt
+                trackedPacketFree(&p)
+            }
+
+            // Read-ahead park: keep the v1 invariant (90s park > 60s producer
+            // buffer-ahead). Stops the side connection draining at line rate
+            // and bounds store growth.
+            if let pktSeconds, pktSeconds > playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds {
+                while !Task.isCancelled {
+                    guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime }) else {
+                        break readLoop
+                    }
+                    playheadSnapshot = fresh
+                    if pktSeconds <= playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds { break }
+                    if !parkLogged {
+                        parkLogged = true
+                        EngineLog.emit(
+                            "[AetherEngine] native subtitle readers parked: " +
+                            "demuxPos=\(String(format: "%.1f", pktSeconds))s " +
+                            "playhead=\(String(format: "%.1f", playheadSnapshot))s",
+                            category: .engine
+                        )
+                    }
+                    do { try await Task.sleep(nanoseconds: 500_000_000) } catch { break readLoop }
+                }
+            }
+        }
+
+        EngineLog.emit(
+            "[AetherEngine] native subtitle readers exited (cancelled=\(Task.isCancelled)) totalCues=\(totalCues)",
+            category: .engine
+        )
+    }
+
+    /// Select or deselect the native mov_text subtitle track by ordinal (#55).
+    ///
+    /// Replaces the v1 bool form: pass a non-nil `ordinal` to activate the
+    /// track at that position, or nil to deselect all native subtitles.
+    ///
+    /// The selection resolves against the current AVPlayer item's legible
+    /// media-selection group. The group's options are expected to be in the
+    /// same order the muxer declared the mov_text streams (ordinal 0 = first
+    /// text track, etc.). When the session's language metadata is available
+    /// the selection first tries to match by `extendedLanguageTag` against
+    /// `nativeSubtitleTracks[ordinal].language`, then falls back to the
+    /// positional `group.options[ordinal]` if no language match is found.
+    /// This makes the selection robust whether AVFoundation preserves the
+    /// muxer declaration order or reorders by locale preference.
+    ///
+    /// Silently no-ops when no native item is loaded, the item carries no
+    /// legible group, or `ordinal` is out of range.
+    public func setNativeSubtitleSelected(track ordinal: Int?) {
         guard let item = currentAVPlayer?.currentItem else { return }
+        // Capture the current track list for the async closure (avoid
+        // capturing self so MainActor re-entrancy stays one hop).
+        let tracks = nativeSubtitleTracks
         Task { @MainActor in
             guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
-            if on, let option = group.options.first {
-                item.select(option, in: group)
-            } else {
+            guard !group.options.isEmpty else { return }
+            guard let ordinal else {
                 item.select(nil, in: group)
+                return
             }
+            // Rank-based same-language selection: when multiple tracks share a
+            // language tag (e.g. eng "Full" at ordinal 0 and eng "SDH" at
+            // ordinal 1) a naive .first { hasPrefix(lang) } always returns the
+            // first eng option regardless of which ordinal was requested.
+            // Instead, compute the rank of `ordinal` among same-language tracks
+            // and pick the same-ranked option from the AVFoundation legible group.
+            // Fall back to positional when the language is unknown or AVFoundation
+            // exposes fewer same-language options than expected (out-of-range guard).
+            var selected: AVMediaSelectionOption?
+            if ordinal < tracks.count, let lang = tracks[ordinal].language {
+                let rank = NativeSubtitleTrack.sameLanguageRank(of: ordinal, in: tracks)
+                let sameLangOptions = group.options.filter {
+                    $0.extendedLanguageTag?.hasPrefix(lang) == true
+                }
+                if rank < sameLangOptions.count {
+                    selected = sameLangOptions[rank]
+                }
+            }
+            if selected == nil, ordinal < group.options.count {
+                selected = group.options[ordinal]
+            }
+            guard let option = selected else { return }
+            item.select(option, in: group)
         }
     }
 }

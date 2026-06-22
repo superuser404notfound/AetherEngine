@@ -38,13 +38,16 @@ func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil) -> N
         print("ERROR: \(error)")
         exit(1)
     }
-    // Attach the cue store to the producer after start. The store
-    // starts empty; in a full AetherEngine session selectSubtitleTrack
-    // feeds it via the side demuxer.
-    if let idx = nativeSubsIndex {
-        engine.attachNativeSubtitleStore()
-        print("[native-subs] mov_text track declared in init moov, cue store attached for stream index \(idx)")
-        print("[native-subs] use a full AetherEngine session to feed cues via selectSubtitleTrack")
+    // Attach one cue store per declared text track after start (#55,
+    // all-tracks). The stores start empty; in a full AetherEngine session
+    // the native multi-decode reader feeds them via the side demuxer. The
+    // legacy `--native-subs N` index argument is kept for CLI compatibility
+    // but ALL non-bitmap subtitle streams are now declared, not just N.
+    if nativeSubsIndex != nil {
+        let languages = engine.attachAllNativeSubtitleStores()
+        print("[native-subs] \(languages.count) mov_text track(s) declared in init moov, cue stores attached")
+        print("[native-subs] languages: \(languages.map { $0 ?? "und" })")
+        print("[native-subs] use a full AetherEngine session to feed cues via the native multi-decode reader")
     }
 
     print("")
