@@ -346,6 +346,19 @@ final class AudioPlaybackHost {
             }
 
             guard let packet else {
+                // Drain decoder-delay frames + the sub-threshold tail and enqueue them before flush()
+                // discards pending; extend the high-water mark so the playthrough wait below covers the
+                // tail. flush() alone dropped the final ~21ms+ of every audio-only title.
+                if let aDec = audioDecoder, let aOut = audioOutput,
+                   seekGeneration() == seenSeekGeneration {
+                    let tail = aDec.drain()
+                    for buf in tail { aOut.enqueue(sampleBuffer: buf) }
+                    if let last = tail.last {
+                        let end = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(last))
+                            + CMTimeGetSeconds(CMSampleBufferGetDuration(last))
+                        if end.isFinite, end > lastEnqueuedEnd { lastEnqueuedEnd = end }
+                    }
+                }
                 audioDecoder?.flush()
                 // Demuxer EOF is NOT end-of-track: renderer still has up to maxBufferAhead seconds queued.
                 // Wait for the clock to play through before signaling end, else host advances seconds early.

@@ -175,6 +175,35 @@ final class AudioDecoder: @unchecked Sendable {
         #endif
     }
 
+    /// Drain at source EOF: send a NULL packet to flush the decoder's internal delay frames into the
+    /// accumulator, then force-emit the residual (< minSamplesPerBuffer) tail that the gated decode()
+    /// path never emits. Without this the final ~21ms+ of every audio-only title was dropped (flush()
+    /// discards pending). Mirrors AudioBridge.flush(). Call once at demuxer EOF, before flush()/close().
+    func drain() -> [CMSampleBuffer] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let ctx = codecContext else { return [] }
+        var results: [CMSampleBuffer] = []
+
+        avcodec_send_packet(ctx, nil)
+        var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
+        defer { av_frame_free(&frame) }
+        if let f = frame {
+            while avcodec_receive_frame(ctx, f) >= 0 {
+                if swrContext == nil {
+                    if !initResamplerFromFrame(f) { continue }
+                }
+                appendFrameToPending(f)
+                if pendingSampleCount >= Self.minSamplesPerBuffer {
+                    if let sampleBuffer = emitPending() { results.append(sampleBuffer) }
+                }
+            }
+        }
+        // Force-emit whatever is left below the coalescing threshold (emitPending only needs > 0 samples).
+        if let sampleBuffer = emitPending() { results.append(sampleBuffer) }
+        return results
+    }
+
     func close() {
         stateLock.lock()
         defer { stateLock.unlock() }
