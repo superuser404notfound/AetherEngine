@@ -185,11 +185,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// reports EIO (-5) instead of EOF when the reconnect cap is hit.
     let isLive: Bool
 
-    /// Set by `readPersistent` when the reconnect cap hits on a live source.
-    /// Causes AVERROR(EIO) = -5 instead of AVERROR_EOF so the demuxer raises
-    /// `readFailed` ("live source lost") rather than a silent stall. Demux-thread-only.
-    private(set) var liveExhausted = false
-
     /// Timestamp of the last unplanned reconnect (drop/stall, not a seek).
     /// Producer correlates with a backward source-PTS reset to detect Jellyfin
     /// transcode respawn (re-serves from byte 0 on re-GET, invisible at byte level).
@@ -602,7 +597,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     if recordReconnectAndShouldGiveUp() {
                         EngineLog.emit("[AVIOReader] Persistent stall gave up at offset \(frontier) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
                         if isLive {
-                            liveExhausted = true
                             return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                         }
                         return totalRead > 0 ? Int32(totalRead) : -1
@@ -620,7 +614,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if recordReconnectAndShouldGiveUp(status: status) {
                 EngineLog.emit("[AVIOReader] Persistent reconnect exhausted at offset \(frontier) status=\(status) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
                 if isLive {
-                    liveExhausted = true
                     return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
