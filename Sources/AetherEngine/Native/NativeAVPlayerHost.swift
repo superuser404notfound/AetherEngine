@@ -344,7 +344,7 @@ final class NativeAVPlayerHost {
 
         // Explicitly load each key separately: AVPlayerItem(asset:)+KVO was observed stuck in .unknown (build-123), and separate awaits let DrHurt's "1 success, 3 failures" pattern identify which key -1008 hits.
         let urlStr = url.absoluteString
-        Task { [weak self] in
+        Task {
             for key in ["isPlayable", "tracks", "duration"] {
                 do {
                     switch key {
@@ -369,7 +369,6 @@ final class NativeAVPlayerHost {
                     }
                     // Dump partial track info even on failure: DrHurt's -1008 stall still surfaces the FourCC (hev1 vs hvc1, dvhe vs dvh1).
                     Self.dumpAssetTracks(asset, sid: sid, reason: "asset.load(\(key)).failed")
-                    _ = self
                     return
                 }
             }
