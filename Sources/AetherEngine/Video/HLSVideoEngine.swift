@@ -116,12 +116,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     public func attachNativeSubtitleStores(count: Int, languages: [String?] = []) {
         guard count > 0 else { return }
         let stores = (0..<count).map { _ in NativeSubtitleCueStore() }
+        let langs = (0..<count).map { i in i < languages.count ? languages[i] : nil }
+        // Guard the session arrays under restartLock: a runtime attach (this call, host thread) otherwise
+        // races the pump thread iterating them in handleVideoShiftKnown and makeProducer's read (#55).
+        restartLock.lock()
         nativeSubtitleCueStoresForSession = stores
-        nativeSubtitleLanguagesForSession = (0..<count).map { i in
-            i < languages.count ? languages[i] : nil
-        }
-        producer?.subtitleCueStores = stores
-        producer?.nativeSubtitleLanguages = nativeSubtitleLanguagesForSession
+        nativeSubtitleLanguagesForSession = langs
+        let prod = producer
+        restartLock.unlock()
+        prod?.subtitleCueStores = stores
+        prod?.nativeSubtitleLanguages = langs
     }
 
     /// Attach one store per non-bitmap subtitle track from the engine's demuxer (#55, all-tracks).
@@ -1151,8 +1155,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let seconds = shiftPts == Int64.min ? 0 : Double(shiftPts) * sourceVideoTbSeconds
         setPlaylistShiftSeconds(seconds)
         // Refresh every native subtitle store's shift so cuesInWindow stays on the correct AVPlayer
-        // axis after a restart (matroska seek can land past the planned keyframe, #55).
-        nativeSubtitleCueStoresForSession.forEach { $0.setShiftSeconds(seconds) }
+        // axis after a restart (matroska seek can land past the planned keyframe, #55). Snapshot under
+        // restartLock: this runs on the pump thread and the array is reassigned by attach* on another
+        // thread, so iterating the live array would race a CoW reassignment.
+        restartLock.lock()
+        let stores = nativeSubtitleCueStoresForSession
+        restartLock.unlock()
+        stores.forEach { $0.setShiftSeconds(seconds) }
         onPlaylistShiftChanged?(seconds)
     }
 
