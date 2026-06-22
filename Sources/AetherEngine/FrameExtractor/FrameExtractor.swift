@@ -32,8 +32,8 @@ public actor FrameExtractor {
     private let idleInterval: Duration = .seconds(10)
     private var idleTask: Task<Void, Never>?
 
-    public init(url: URL, httpHeaders: [String: String] = [:]) {
-        self.context = FrameDecodeContext(url: url, httpHeaders: httpHeaders)
+    private init(context: FrameDecodeContext) {
+        self.context = context
         self.cache = FrameCache(
             thumbnailLimit: 24,
             snapshotLimit: 2,
@@ -42,16 +42,14 @@ public actor FrameExtractor {
         self.decodeQueue = DispatchQueue(label: "com.aetherengine.frameextractor", qos: .userInitiated)
     }
 
+    public init(url: URL, httpHeaders: [String: String] = [:]) {
+        self.init(context: FrameDecodeContext(url: url, httpHeaders: httpHeaders))
+    }
+
     /// Construct over a custom `IOReader` source (a clone with its own cursor).
     /// The extractor owns the reader and closes it on teardown.
     public init(reader: IOReader, formatHint: String? = nil) {
-        self.context = FrameDecodeContext(reader: reader, formatHint: formatHint)
-        self.cache = FrameCache(
-            thumbnailLimit: 24,
-            snapshotLimit: 2,
-            thumbnailBucketSeconds: 1.0
-        )
-        self.decodeQueue = DispatchQueue(label: "com.aetherengine.frameextractor", qos: .userInitiated)
+        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint))
     }
 
     // MARK: - Public API
