@@ -86,7 +86,6 @@ private func hlsLiveRun(entryURL: String, seconds: Int, server: HLSFixtureServer
     }
     print(String(format: "  post-load state=%@ isLive=%@", "\(engine.state)", "\(engine.isLive)"))
 
-    var stalled = false // EngineLog stream shows "live seg-N finalized"
     for tick in 0..<seconds {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         if case .error(let m) = engine.state {
@@ -94,7 +93,7 @@ private func hlsLiveRun(entryURL: String, seconds: Int, server: HLSFixtureServer
         }
         _ = tick
     }
-    if !stalled { print("VERDICT: ran \(seconds)s, see seg-N finalize log above for cut continuity") }
+    print("VERDICT: ran \(seconds)s, see seg-N finalize log above for cut continuity")
     engine.stop()
     server.stop()
     try? await Task.sleep(nanoseconds: 500_000_000)
