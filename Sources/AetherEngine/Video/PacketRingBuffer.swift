@@ -140,6 +140,17 @@ final class PacketRingBuffer {
             .map { firstSeq + $0 }
     }
 
+    /// Sequence of the EARLIEST retained keyframe, or nil if the ring holds no keyframe yet. DVR reseed
+    /// floor when a target precedes every keyframe: seeding seqBounds.first (firstSeq) can land mid-GOP,
+    /// since leading entries appended before the first eviction are not guaranteed keyframe-aligned.
+    func firstKeyframeSeq() -> Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.indices
+            .first(where: { entries[$0].isKeyframe })
+            .map { firstSeq + $0 }
+    }
+
     // MARK: - Diagnostics
 
     var oldestPts: Double? {

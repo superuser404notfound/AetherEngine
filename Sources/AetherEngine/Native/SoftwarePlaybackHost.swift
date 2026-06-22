@@ -457,8 +457,12 @@ final class SoftwarePlaybackHost {
         }
         clockArmed = true
 
-        // Reposition cursor to newest keyframe at or before target (eviction keeps ring keyframe-aligned).
-        let seq = ring.seq(forKeyframeAtOrBefore: targetSource) ?? ring.seqBounds.first
+        // Reposition cursor to the newest keyframe at or before target. If the target precedes every
+        // retained keyframe, fall to the EARLIEST keyframe, not seqBounds.first, which can be a mid-GOP
+        // leading entry before the ring's first eviction and would decode as garbage until the next keyframe.
+        let seq = ring.seq(forKeyframeAtOrBefore: targetSource)
+            ?? ring.firstKeyframeSeq()
+            ?? ring.seqBounds.first
         setFeedCursor(seq)
         EngineLog.emit(
             "[SWHost] DVR rewind: targetSession=\(String(format: "%.2f", targetSession)) "
