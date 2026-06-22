@@ -77,6 +77,10 @@ final class ConcatIOReader: IOReader, @unchecked Sendable {
 
     func close() {}  // base reader is owned by the engine lifecycle
 
+    // Forward cancel to the base (mirrors makeIndependentReader) so teardown unblocks a
+    // read parked inside base.read() on a network source; close() being a no-op does not.
+    func cancel() { base.cancel() }
+
     /// Vend a second concat reader over an independent cursor of the base, so
     /// the engine's side demuxer (embedded subtitles) and scrub preview can read
     /// concurrently. Nil if the base cannot fork a cursor.
