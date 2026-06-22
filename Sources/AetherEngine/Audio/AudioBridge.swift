@@ -666,7 +666,6 @@ final class AudioBridge: @unchecked Sendable {
             of.pointee.nb_samples = readSamples
             of.pointee.pts = nextEncoderPTS
             nextEncoderPTS += Int64(readSamples)
-            _ = nChannels
 
             let sendFrameRet = avcodec_send_frame(enc, of)
             if sendFrameRet < 0 && sendFrameRet != FFmpegErr.eof {

@@ -208,7 +208,7 @@ final class AudioDecoder: @unchecked Sendable {
             mReserved: 0
         )
 
-        let layoutTag = channelLayoutTag(for: channels)
+        let layoutTag = audioChannelLayoutTag(for: channels)
         var layout = AudioChannelLayout(
             mChannelLayoutTag: layoutTag,
             mChannelBitmap: [],
@@ -232,10 +232,6 @@ final class AudioDecoder: @unchecked Sendable {
             throw AudioDecoderError.formatDescriptionFailed
         }
         audioFormatDescription = desc
-    }
-
-    private func channelLayoutTag(for channels: Int32) -> AudioChannelLayoutTag {
-        audioChannelLayoutTag(for: channels)
     }
 
     // MARK: - Frame → pending buffer → CMSampleBuffer
@@ -373,6 +369,5 @@ enum AudioDecoderError: Error {
     case contextAllocationFailed
     case parameterCopyFailed
     case openFailed
-    case resamplerFailed
     case formatDescriptionFailed
 }
