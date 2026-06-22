@@ -188,7 +188,7 @@ enum SubtitleDecoder {
 
         // Under preserveASSMarkup: keep raw ASS event line (ASSScriptBuilder re-stamps timing); otherwise plain text.
         let lineForRect: (UnsafeMutablePointer<AVSubtitleRect>) -> String? = { rect in
-            keepMarkup ? SubtitleRectText.rawASSLine(for: rect) : textForRect(rect)
+            keepMarkup ? SubtitleRectText.rawASSLine(for: rect) : SubtitleRectText.plainText(for: rect)
         }
 
         while !cancel.isCancelled {
@@ -302,12 +302,6 @@ enum SubtitleDecoder {
             cues: cues.sorted { $0.startTime < $1.startTime },
             assHeader: assHeader
         )
-    }
-
-    // MARK: - Rect → text
-
-    private static func textForRect(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
-        SubtitleRectText.plainText(for: rect)
     }
 
 }

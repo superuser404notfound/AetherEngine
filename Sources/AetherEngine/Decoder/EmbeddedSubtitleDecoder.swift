@@ -146,9 +146,9 @@ final class EmbeddedSubtitleDecoder {
         if sub.num_rects > 0, let rects = sub.rects {
             for i in 0..<Int(sub.num_rects) {
                 guard let rect = rects[i] else { continue }
-                if preserveASSMarkup, let raw = Self.rawASSLine(rect) {
+                if preserveASSMarkup, let raw = SubtitleRectText.rawASSLine(for: rect) {
                     textLines.append(raw)
-                } else if let text = Self.textForSubtitleRect(rect) {
+                } else if let text = SubtitleRectText.plainText(for: rect) {
                     textLines.append(text)
                 } else if let image = Self.imageForSubtitleRect(
                     rect,
@@ -391,16 +391,6 @@ final class EmbeddedSubtitleDecoder {
     }
 
     // MARK: - Rect → text / image
-
-    /// Raw ASS event line as libavcodec delivers it. Delegates to SubtitleRectText so embedded and sidecar paths share one source of truth.
-    private static func rawASSLine(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
-        SubtitleRectText.rawASSLine(for: rect)
-    }
-
-    private static func textForSubtitleRect(_ rect: UnsafeMutablePointer<AVSubtitleRect>) -> String? {
-        SubtitleRectText.plainText(for: rect)
-    }
-
 
     /// Render a PGS/DVB/HDMV bitmap rect into a CGImage with normalised position.
     /// Palette from libavcodec is 32-bit with alpha in the high byte and BGR below ([B,G,R,A] on little-endian);
