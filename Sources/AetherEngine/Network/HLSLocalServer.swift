@@ -113,16 +113,9 @@ final class HLSLocalServer: @unchecked Sendable {
 
     // MARK: - Provider
 
-    private weak var externalProvider: HLSSegmentProvider?
-
-    private var provider: HLSSegmentProvider? {
-        externalProvider
-    }
+    private weak var provider: HLSSegmentProvider?
 
     // MARK: - Public state
-
-    /// When seg0 was first fetched; used to measure HLS pipeline latency.
-    private(set) var seg0FetchTime: Date?
 
     /// Kernel-assigned ephemeral port. Zero until start() succeeds.
     private(set) var port: UInt16 = 0
@@ -220,7 +213,7 @@ final class HLSLocalServer: @unchecked Sendable {
     private let subResourceBaseURL: URL?
 
     init(provider: HLSSegmentProvider, subResourceBaseURL: URL? = nil) {
-        self.externalProvider = provider
+        self.provider = provider
         self.subResourceBaseURL = subResourceBaseURL
     }
 
@@ -308,7 +301,6 @@ final class HLSLocalServer: @unchecked Sendable {
         mediaPlaylistBuildCount = 0
         let clients = clientFds
         clientFds.removeAll()
-        seg0FetchTime = nil
         stateLock.unlock()
 
         // shutdown() BEFORE close() on the listen fd: close releases the fd number while the accept loop may have captured it; a new session could recycle that number and the dying loop would accept on the new session's socket. shutdown() wakes the blocked accept without releasing the number.
@@ -584,11 +576,6 @@ final class HLSLocalServer: @unchecked Sendable {
                normalizedPath.hasSuffix(".mp4") {
                 let indexStr = normalizedPath.dropFirst(4).dropLast(4)
                 if let index = Int(indexStr), index >= 0 {
-                    if index == 0 {
-                        stateLock.lock()
-                        if seg0FetchTime == nil { seg0FetchTime = Date() }
-                        stateLock.unlock()
-                    }
                     // File-backed fast path: stream page cache -> socket without Data materialization.
                     if let url = provider?.mediaSegmentURL(at: index) {
                         return send200File(fd: fd, path: normalizedPath,
