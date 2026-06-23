@@ -48,7 +48,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
 | Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD) as `CGImage`, sidecar files, opt-in raw ASS markup + fonts; opt-in native legible menu (all text tracks as language-tagged tx3g traks for PiP / AirPlay / external display, `LoadOptions.prepareNativeSubtitles`) |
 | Frames | Off-playback `FrameExtractor`: `thumbnail` (scrub preview) + `snapshot` (frame-accurate) |
-| Metadata | `MediaMetadata` (title / artist / album + cover) parsed on load |
+| Metadata | `MediaMetadata` (title / artist / album / albumArtist + cover) parsed on load |
 | Seek | Producer restart for backward / far-forward; short forward scrubs ride the cached window |
 | Streaming | One long-lived forward-streaming connection, reconnect-on-drop; CDN-stutter resilient |
 | Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
@@ -127,6 +127,13 @@ player.selectSubtitleTrack(index: streamID)
 player.selectSidecarSubtitle(url: srtURL)      // .srt / .ass / .vtt next to the media
 player.clearSubtitle()
 player.$subtitleCues                           // [SubtitleCue]: .text(String) or .image(SubtitleImage)
+
+// Second simultaneous subtitle track (bilingual / language learning)
+player.selectSecondarySubtitleTrack(index: streamID)
+player.selectSecondarySidecarSubtitle(url: srt2URL)
+player.clearSecondarySubtitle()
+player.$secondarySubtitleCues                  // [SubtitleCue] for the secondary track
+player.$isSecondarySubtitleActive             // Bool
 
 // Info panel / Now Playing (iOS / tvOS)
 player.setExternalMetadata([ AVMetadataItem(/* title, artwork, etc. */) ])
@@ -252,7 +259,7 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 
 - **[docs/architecture.md](docs/architecture.md)** — the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
 - **[docs/formats.md](docs/formats.md)** — codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
-- **[docs/cli.md](docs/cli.md)** — the `aetherctl` repro CLI (twelve subcommands).
+- **[docs/cli.md](docs/cli.md)** — the `aetherctl` repro CLI (fifteen subcommands).
 - **[CHANGELOG.md](CHANGELOG.md)** — per-release index.
 
 ## Stability and versioning

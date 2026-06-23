@@ -20,7 +20,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Fourteen subcommands plus the bare-URL `serve` alias.
+Fifteen subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -84,6 +84,10 @@ Plays a source through the audio-only pipeline (default ten seconds, `--seconds 
 ## customio
 
 Wraps a local file in a custom `IOReader` and plays it through `load(source:)`. `--memory` reads via `DataIOReader`, `--forward-only` drops the seek capability, and `--reload` / `--switch-audio` / `--select-subs` / `--extract` exercise the optional capabilities (background reload, audio-track switch, embedded subtitles, scrub preview) end-to-end.
+
+## dualsubs
+
+Activates two subtitle tracks simultaneously on one source (primary + secondary) and prints both cue lists, exercising the dual / bilingual subtitle path. `--primary <streamIndex> --secondary <streamIndex>` select the tracks; `--seek <seconds>` jumps first so you can confirm both channels re-resolve after a seek.
 
 ## live
 
