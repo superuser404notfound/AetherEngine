@@ -1,13 +1,13 @@
 import Foundation
 
 /// A file entry discovered in an ISO9660 directory.
-public struct DiscFile: Equatable, Sendable {
-    public let name: String      // version suffix (";1") and "." / ".." stripped
-    public let startSector: Int  // logical block address
-    public let length: Int       // bytes
+struct DiscFile: Equatable, Sendable {
+    let name: String      // version suffix (";1") and "." / ".." stripped
+    let startSector: Int  // logical block address
+    let length: Int       // bytes
 }
 
-public enum DiscError: Error, Equatable {
+enum DiscError: Error, Equatable {
     case notISO9660
     case notUDF
     case directoryNotFound(String)

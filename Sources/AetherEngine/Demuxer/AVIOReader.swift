@@ -1078,16 +1078,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         if semaphore.wait(timeout: .now() + .seconds(25)) == .timedOut {
             task.cancel()
-            #if DEBUG
-            EngineLog.emit("[AVIOReader] Range probe timed out → trying HEAD", category: .demux)
-            #endif
+            EngineLog.emit("[AVIOReader] Range probe timed out, trying HEAD", category: .demux, level: .verbose)
             return nil
         }
 
         if delegate.totalSize == nil {
-            #if DEBUG
-            EngineLog.emit("[AVIOReader] Range probe didn't yield a size → trying HEAD", category: .demux)
-            #endif
+            EngineLog.emit("[AVIOReader] Range probe didn't yield a size, trying HEAD", category: .demux, level: .verbose)
         }
         return delegate.totalSize
     }
@@ -1103,9 +1099,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let (_, response) = try syncRequest(request)
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode) else {
-                #if DEBUG
-                EngineLog.emit("[AVIOReader] HEAD failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)) → streaming mode", category: .demux)
-                #endif
+                EngineLog.emit("[AVIOReader] HEAD failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)), streaming mode", category: .demux, level: .verbose)
                 return -1
             }
             let length = http.expectedContentLength
@@ -1114,9 +1108,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             #endif
             return length
         } catch {
-            #if DEBUG
-            EngineLog.emit("[AVIOReader] HEAD probe failed: \(error.localizedDescription) → streaming mode", category: .demux)
-            #endif
+            EngineLog.emit("[AVIOReader] HEAD probe failed: \(error.localizedDescription), streaming mode", category: .demux, level: .verbose)
             return -1
         }
     }
@@ -1152,6 +1144,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         if usingCachedURL && Self.isResolvedExpiryStatus(status) {
                             invalidateResolvedURL()
                         }
+                        EngineLog.emit("[AVIOReader] chunk fetch got HTTP \(status) at offset \(offset)\(usingCachedURL ? " (cached URL, will retry source)" : "")", category: .demux, level: .verbose)
                         return nil
                     }
                     // VOD: 200 at offset > 0 = server ignored Range; silent corruption. Reject.
@@ -1173,9 +1166,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
 
-        #if DEBUG
-        EngineLog.emit("[AVIOReader] Fetch failed after \(Self.maxRetries) retries at offset \(offset): \(lastError?.localizedDescription ?? "?")", category: .demux)
-        #endif
+        EngineLog.emit("[AVIOReader] Fetch failed after \(Self.maxRetries) retries at offset \(offset): \(lastError?.localizedDescription ?? "?")", category: .demux, level: .verbose)
         return nil
     }
 

@@ -67,7 +67,11 @@ public final class SMBIOReader: IOReader, @unchecked Sendable {
         if wasCancelled { return -1 }
 
         switch outcome.result {
-        case .failure:
+        case .failure(let error):
+            // Log the underlying SMB error (auth failure, share gone, connection reset) before the
+            // -1 sentinel; without it a NAS bug report has nothing to go on. .verbose = Release-retrievable.
+            EngineLog.emit("[SMBIOReader] read failed at offset \(offset): \(error.localizedDescription)",
+                           category: .demux, level: .verbose)
             return -1
         case .success(let data):
             if data.isEmpty { return 0 } // EOF
