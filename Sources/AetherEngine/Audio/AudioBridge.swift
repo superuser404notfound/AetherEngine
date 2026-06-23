@@ -78,6 +78,15 @@ final class AudioBridge: @unchecked Sendable {
     /// (~4608 @48kHz); EAC3 decodes 1536 samples/packet, so without the FIFO we'd hit -22 EINVAL on the first send.
     private var fifo: OpaquePointer?
 
+    /// Serializes the public mutators (feed/flush/startSegment/noteTimelineJump/close) against each
+    /// other. On a producer restart whose old pump did not exit within the 5s budget (slow/remote
+    /// source), the abandoned pump can still be inside feed() while the restart thread calls
+    /// startSegment() on this otherwise lock-free bridge; concurrent libswresample/libavcodec calls on
+    /// the same contexts are a data race. Uncontended in the normal single-pump case. Mirrors
+    /// AudioDecoder.stateLock. Diagnostic reads (fifoSampleCount/liveBytes) stay lock-free; the engine
+    /// lifecycle (restartLock ref-handoff + waitForFinish-gated cleanup) forecloses their races.
+    private let opLock = NSLock()
+
     /// PCM intermediate format end-to-end (resampler -> FIFO -> encoder). S16 for lossy sources (EAC3/AC3);
     /// S32 @ bits_per_raw_sample=24 for lossless sources (TrueHD, DTS-HD MA, FLAC, ALAC, raw 24/32-bit PCM) so
     /// FLAC output stays bit-perfect (S16 would dither away the bottom 8 bits, audible in quiet passages).
@@ -333,6 +342,8 @@ final class AudioBridge: @unchecked Sendable {
     }
 
     func close() {
+        opLock.lock()
+        defer { opLock.unlock() }
         cleanup()
     }
 
@@ -397,6 +408,8 @@ final class AudioBridge: @unchecked Sendable {
     /// encoder PTS off the next decoded frame's pts. Caller (VideoSegmentProvider) invokes before each fragment's
     /// audio so A/V timestamps stay aligned across muxer fragment boundaries.
     func startSegment() {
+        opLock.lock()
+        defer { opLock.unlock() }
         if let f = fifo {
             av_audio_fifo_reset(f)
         }
@@ -418,6 +431,8 @@ final class AudioBridge: @unchecked Sendable {
     /// drain only emits FULL frames and nothing sent the encoder its EOF frame). Returns the tail packets; caller
     /// writes them via the same muxer path. Call once at pump EOF before muxer finalize. Not meaningful for live.
     func flush() -> [UnsafeMutablePointer<AVPacket>] {
+        opLock.lock()
+        defer { opLock.unlock() }
         guard let dec = decoderCtx, let enc = encoderCtx,
               let swr = swrCtx, let fifoPtr = fifo else { return [] }
         var results: [UnsafeMutablePointer<AVPacket>] = []
@@ -463,6 +478,8 @@ final class AudioBridge: @unchecked Sendable {
     /// (splice overlap) are clamped, the counter never rewinds. Called on the pump thread (same as feed). FIFO
     /// leftover (< one frame) is stamped post-jump; that error is one-shot, bounded by one frame (~32 ms).
     func noteTimelineJump(deltaSeconds: Double) {
+        opLock.lock()
+        defer { opLock.unlock() }
         guard deltaSeconds > 0, encoderTimeBase.den > 0 else { return }
         let samples = Int64((deltaSeconds * Double(encoderTimeBase.den)).rounded())
         nextEncoderPTS += samples
@@ -500,6 +517,8 @@ final class AudioBridge: @unchecked Sendable {
     /// Decode one source packet, resample, buffer, encode. Returns 0+ encoded packets, ownership transferred to
     /// the caller (must av_packet_free after muxing). PTS is in encoderTimeBase units; the muxer rescales during writePacket.
     func feed(packet: UnsafePointer<AVPacket>) throws -> [UnsafeMutablePointer<AVPacket>] {
+        opLock.lock()
+        defer { opLock.unlock() }
         guard let dec = decoderCtx,
               let enc = encoderCtx,
               let swr = swrCtx,
