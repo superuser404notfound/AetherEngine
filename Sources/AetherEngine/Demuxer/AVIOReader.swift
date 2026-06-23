@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Libavformat
 import Libavutil
 
@@ -254,8 +255,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
-    private var isClosed = false
-    private var isFullyClosed = false
+    // Close flags written on the teardown thread (markClosed / fullyClose) and read on the demux
+    // thread plus the URLSession delegate threads (persistent-connection callbacks). Backed by a
+    // leaf unfair lock so every access is synchronized; the bare Bools were a TSan-confirmed data
+    // race (markClosed write vs appendPersistentData read). The lock is only ever held for the
+    // get/set itself (never across another lock), so it cannot invert with winCond/streamLock.
+    private let isClosedLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+    private var isClosed: Bool {
+        get { isClosedLock.withLock { $0 } }
+        set { isClosedLock.withLock { $0 = newValue } }
+    }
+    private let isFullyClosedLock = OSAllocatedUnfairLock<Bool>(initialState: false)
+    private var isFullyClosed: Bool {
+        get { isFullyClosedLock.withLock { $0 } }
+        set { isFullyClosedLock.withLock { $0 = newValue } }
+    }
 
     /// Wall-clock deadline for reads. Armed by `beginReadDeadline` to abort
     /// a `avformat_seek_file` that degrades into a linear scan when MKV Cues
