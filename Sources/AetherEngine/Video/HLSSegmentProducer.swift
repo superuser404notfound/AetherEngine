@@ -588,14 +588,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Map post-shift pts to absolute segment index. Folds shift back before comparing against source-axis boundaries.
     private func segmentIndex(forSourcePts pts: Int64) -> Int {
-        guard !segmentBoundaries.isEmpty else { return baseIndex }
         let absolute = videoShiftPts == Int64.min ? pts : pts &+ videoShiftPts
-        for i in 0..<(segmentBoundaries.count - 1) {
-            if absolute < segmentBoundaries[i + 1] {
-                return baseIndex + i
-            }
+        return baseIndex + Self.segmentOffset(forAbsolutePts: absolute, boundaries: segmentBoundaries)
+    }
+
+    /// 0-based segment offset for `absolute` within the sorted-ascending `boundaries`: segment i spans
+    /// [boundaries[i], boundaries[i+1]), clamped to [0, count-2]. Binary search, exactly equivalent to the
+    /// former linear "first i where absolute < boundaries[i+1]" scan but O(log n) instead of O(n) per packet
+    /// (the scan walked ~one compare per elapsed segment, growing across a VOD title). Returns 0 if empty.
+    static func segmentOffset(forAbsolutePts absolute: Int64, boundaries: [Int64]) -> Int {
+        let count = boundaries.count
+        guard count > 0 else { return 0 }
+        // upperBound: first index whose boundary is > absolute (i.e. how many boundaries are <= absolute).
+        var lo = 0
+        var hi = count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if boundaries[mid] <= absolute { lo = mid + 1 } else { hi = mid }
         }
-        return baseIndex + max(0, segmentBoundaries.count - 2)
+        return min(max(lo - 1, 0), max(0, count - 2))
     }
 
     /// Returns muxer for targetIdx, advancing/allocating as needed. Forward-only: clamps late packets
