@@ -1,7 +1,9 @@
 import Foundation
 
 /// Keyframe-indexed disk-spooled DVR ring buffer. Eviction is keyframe-aligned (retained span always starts at a decodable keyframe). Bytes stored as flat files under a scratch dir; in-RAM index holds only metadata; `Data(contentsOf:,.alwaysMapped)` keeps RSS flat. NSLock guards the index (demux-thread appends, seek-thread reads).
-final class PacketRingBuffer {
+// Thread-safe: all mutable state is guarded by `lock` (NSLock), so it is safe to share across the
+// demux/seek/feeder threads and capture in @Sendable closures.
+final class PacketRingBuffer: @unchecked Sendable {
 
     // MARK: - Public types
 

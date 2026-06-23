@@ -491,8 +491,8 @@ final class SoftwarePlaybackHost {
         let tbSec = pkt.isVideo ? videoTimeBaseSeconds : audioTimeBaseSeconds
         guard tbSec > 0, !pkt.bytes.isEmpty else { return false }
 
-        guard var avPkt: UnsafeMutablePointer<AVPacket>? = trackedPacketAlloc(),
-              let p = avPkt else { return false }
+        guard let p = trackedPacketAlloc() else { return false }
+        var avPkt: UnsafeMutablePointer<AVPacket>? = p
         defer { trackedPacketFree(&avPkt) }
 
         if av_new_packet(p, Int32(pkt.bytes.count)) < 0 { return false }

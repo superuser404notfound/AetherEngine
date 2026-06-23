@@ -5,7 +5,9 @@ import Foundation
 /// Reads use .alwaysMapped (kernel pages in/out under memory pressure). Window:
 /// [currentTargetIndex - backwardWindow, currentTargetIndex + forwardWindow].
 /// The producer pauses via awaitFetchHighWater once forwardWindow ahead of target.
-final class SegmentCache {
+// Thread-safe: all mutable state is guarded by `condition` (NSCondition), so it is safe to share
+// across the producer/provider threads and capture in @Sendable closures.
+final class SegmentCache: @unchecked Sendable {
 
     private let condition = NSCondition()
 

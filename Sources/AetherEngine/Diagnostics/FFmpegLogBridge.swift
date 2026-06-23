@@ -39,7 +39,9 @@ enum FFmpegLogBridge {
                                        &printPrefixState)
         }
 
-        var line = String(cString: buf)
+        // buf is a NUL-terminated CChar buffer from av_log_format_line2; decode up to the NUL as
+        // UTF-8 (String(cString:) is deprecated).
+        var line = String(decoding: buf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }, as: UTF8.self)
         if line.hasSuffix("\n") { line.removeLast() }  // av_log_format_line2 always appends \n
         if line.isEmpty { return }
 

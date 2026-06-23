@@ -272,9 +272,12 @@ final class NativeAVPlayerHost {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self, let event = self.playerItem?.errorLog()?.events.last else { return }
-            let comment = event.errorComment ?? "no comment"
-            EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog code=\(event.errorStatusCode) domain=\(event.errorDomain) uri=\(event.uri ?? "-") '\(comment)'", category: .engine)
+            // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
+            MainActor.assumeIsolated {
+                guard let self = self, let event = self.playerItem?.errorLog()?.events.last else { return }
+                let comment = event.errorComment ?? "no comment"
+                EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog code=\(event.errorStatusCode) domain=\(event.errorDomain) uri=\(event.uri ?? "-") '\(comment)'", category: .engine)
+            }
         }
         notificationObservers.append(errLogObs)
 
@@ -284,11 +287,14 @@ final class NativeAVPlayerHost {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            guard let self = self,
-                  self.accessLogCount < 5,
-                  let event = self.playerItem?.accessLog()?.events.last else { return }
-            self.accessLogCount += 1
-            EngineLog.emit("[NativeAVPlayerHost] #\(sid) accessLog uri=\(event.uri ?? "-") server=\(event.serverAddress ?? "-") bytes=\(event.numberOfBytesTransferred) reqs=\(event.numberOfMediaRequests)", category: .engine)
+            // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
+            MainActor.assumeIsolated {
+                guard let self = self,
+                      self.accessLogCount < 5,
+                      let event = self.playerItem?.accessLog()?.events.last else { return }
+                self.accessLogCount += 1
+                EngineLog.emit("[NativeAVPlayerHost] #\(sid) accessLog uri=\(event.uri ?? "-") server=\(event.serverAddress ?? "-") bytes=\(event.numberOfBytesTransferred) reqs=\(event.numberOfMediaRequests)", category: .engine)
+            }
         }
         notificationObservers.append(accessLogObs)
 
@@ -347,18 +353,14 @@ final class NativeAVPlayerHost {
         Task {
             for key in ["isPlayable", "tracks", "duration"] {
                 do {
-                    switch key {
-                    case "isPlayable": _ = try await asset.load(.isPlayable)
-                    case "tracks":     _ = try await asset.load(.tracks)
-                    case "duration":   _ = try await asset.load(.duration)
-                    default: continue
-                    }
+                    // Use the value returned by the async load instead of re-reading the deprecated
+                    // synchronous accessor (asset.isPlayable / .tracks / .duration).
                     let detail: String
                     switch key {
-                    case "isPlayable": detail = "value=\(asset.isPlayable)"
-                    case "tracks":     detail = "count=\(asset.tracks.count)"
-                    case "duration":   detail = "seconds=\(asset.duration.seconds)"
-                    default: detail = "-"
+                    case "isPlayable": detail = "value=\(try await asset.load(.isPlayable))"
+                    case "tracks":     detail = "count=\(try await asset.load(.tracks).count)"
+                    case "duration":   detail = "seconds=\(try await asset.load(.duration).seconds)"
+                    default: continue
                     }
                     EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.load(\(key)) ok url=\(urlStr) \(detail)", category: .engine)
                 } catch {
@@ -565,7 +567,7 @@ final class NativeAVPlayerHost {
     }
 
     /// Dump asset URL + track FourCCs on .failed and asset.load failure; d9b8aa5 added the asset.load path because item.status never went .failed in DrHurt's P5 MKV session.
-    private static func dumpAssetTracks(_ asset: AVAsset, sid: Int, reason: String) {
+    nonisolated private static func dumpAssetTracks(_ asset: AVAsset, sid: Int, reason: String) {
         if let urlAsset = asset as? AVURLAsset {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.url=\(urlAsset.url.absoluteString) (\(reason))", category: .engine)
         }
@@ -591,7 +593,7 @@ final class NativeAVPlayerHost {
     }
 
     /// Dump item.tracks at readyToPlay (HLS: asset.tracks is empty; item.tracks has the resolved list after playlist+init.mp4 parse). Channel layout tag diagnoses multichannel-routing path.
-    private static func dumpPlayerItemTracks(_ item: AVPlayerItem, sid: Int) {
+    nonisolated private static func dumpPlayerItemTracks(_ item: AVPlayerItem, sid: Int) {
         let tracks = item.tracks
         if tracks.isEmpty {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.tracks empty (readyToPlay)", category: .engine)
@@ -629,7 +631,7 @@ final class NativeAVPlayerHost {
     }
 
     /// Compact video track summary: dimensions + color attachments (primaries/transfer/matrix). Mismatch vs source-side codecpar signals DV/HDR signaling didn't survive the muxer.
-    private static func videoFormatDescription(_ fmt: CMFormatDescription) -> String {
+    nonisolated private static func videoFormatDescription(_ fmt: CMFormatDescription) -> String {
         var parts: [String] = []
         let dims = CMVideoFormatDescriptionGetDimensions(fmt)
         parts.append("dim=\(dims.width)x\(dims.height)")
@@ -732,7 +734,7 @@ final class NativeAVPlayerHost {
     }
 
     /// Dump audio route channel capability post-load (route renegotiates on asset load; pre-load poll is stale). outputNumberOfChannels is the actual LPCM limit; EAC3/Atmos bypasses it via bitstream tunnel.
-    private static func dumpAudioRoute(sid: Int, phase: String) {
+    nonisolated private static func dumpAudioRoute(sid: Int, phase: String) {
         #if os(iOS) || os(tvOS)
         let session = AVAudioSession.sharedInstance()
         let out = session.outputNumberOfChannels
@@ -754,7 +756,7 @@ final class NativeAVPlayerHost {
     }
 
     /// Read sr/ch/bits/layoutTag from CMAudioFormatDescription. Layout tag diagnoses where downmix occurs: unknown/stereo tag = AVPlayer parse layer; correct 7.1 tag = route/soundbar layer.
-    private static func audioFormatDescription(_ fmt: CMFormatDescription) -> String {
+    nonisolated private static func audioFormatDescription(_ fmt: CMFormatDescription) -> String {
         var parts: [String] = []
         if let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(fmt) {
             let asbd = asbdPtr.pointee
