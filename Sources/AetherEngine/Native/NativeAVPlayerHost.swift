@@ -147,7 +147,6 @@ final class NativeAVPlayerHost {
                    let underlying = nsErr.userInfo[NSUnderlyingErrorKey] as? NSError {
                     EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.error.underlying=\(underlying.domain)/\(underlying.code) '\(underlying.localizedDescription)'", category: .engine)
                 }
-                Self.dumpAssetTracks(item.asset, sid: sid, reason: "item.failed")
                 // Poll full errorLog on .failed (notification observer misses synchronous entries during replaceCurrentItem).
                 if let log = item.errorLog() {
                     EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog dump: \(log.events.count) events", category: .engine)
@@ -169,27 +168,12 @@ final class NativeAVPlayerHost {
                 } else {
                     EngineLog.emit("[NativeAVPlayerHost] #\(sid) accessLog dump: <nil>", category: .engine)
                 }
-                // For HLS, asset.tracks is empty; item.tracks shows what AVPlayer built from the playlist before init.mp4 parse.
-                EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.tracks count=\(item.tracks.count)", category: .engine)
-                for (idx, itrack) in item.tracks.enumerated() {
-                    let mediaType = itrack.assetTrack?.mediaType.rawValue ?? "?"
-                    let fdesc = itrack.assetTrack?.formatDescriptions.first
-                    let fourCC: String
-                    if let cm = fdesc {
-                        // swiftlint:disable:next force_cast
-                        let cmDesc = cm as! CMFormatDescription
-                        let code = CMFormatDescriptionGetMediaSubType(cmDesc)
-                        let b: [UInt8] = [
-                            UInt8((code >> 24) & 0xff),
-                            UInt8((code >> 16) & 0xff),
-                            UInt8((code >> 8) & 0xff),
-                            UInt8(code & 0xff),
-                        ]
-                        fourCC = String(bytes: b.map { ($0 >= 0x20 && $0 < 0x7f) ? $0 : 0x2e }, encoding: .ascii) ?? "????"
-                    } else {
-                        fourCC = "<no fdesc>"
-                    }
-                    EngineLog.emit("[NativeAVPlayerHost] #\(sid)   item.tracks[\(idx)] mediaType=\(mediaType) fourCC=\(fourCC) enabled=\(itrack.isEnabled)", category: .engine)
+                // AVAsset/AVAssetTrack track info is load-based + main-actor in current SDKs; dump it off
+                // the KVO callback on the main actor (HLS asset.tracks is empty; item.tracks shows what
+                // AVPlayer built from the playlist before init.mp4 parse).
+                Task { @MainActor in
+                    await Self.dumpAssetTracks(item.asset, sid: sid, reason: "item.failed")
+                    await Self.dumpFailedItemTracks(item, sid: sid)
                 }
                 EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.presentationSize=\(item.presentationSize)", category: .engine)
                 EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.seekableTimeRanges.count=\(item.seekableTimeRanges.count)", category: .engine)
@@ -199,8 +183,10 @@ final class NativeAVPlayerHost {
                 EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.appliesPerFrameHDRDisplayMetadata=\(item.appliesPerFrameHDRDisplayMetadata)", category: .engine)
             } else if item.status == .readyToPlay {
                 // HLS: asset.tracks is empty; dump item.tracks for audio codec/layout. Route not warned yet: stereo-idle sinks (Continuous Audio off) read ch=2 until first .playing (issue #24).
-                Self.dumpPlayerItemTracks(item, sid: sid)
-                Self.dumpAudioRoute(sid: sid, phase: "readyToPlay, route may still be negotiating")
+                Task { @MainActor in
+                    await Self.dumpPlayerItemTracks(item, sid: sid)
+                    Self.dumpAudioRoute(sid: sid, phase: "readyToPlay, route may still be negotiating")
+                }
             }
 
             Task { @MainActor in
@@ -350,7 +336,7 @@ final class NativeAVPlayerHost {
 
         // Explicitly load each key separately: AVPlayerItem(asset:)+KVO was observed stuck in .unknown (build-123), and separate awaits let DrHurt's "1 success, 3 failures" pattern identify which key -1008 hits.
         let urlStr = url.absoluteString
-        Task {
+        Task { @MainActor in
             for key in ["isPlayable", "tracks", "duration"] {
                 do {
                     // Use the value returned by the async load instead of re-reading the deprecated
@@ -370,7 +356,7 @@ final class NativeAVPlayerHost {
                         EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.load(\(key)) underlying=\(underlying.domain)/\(underlying.code) '\(underlying.localizedDescription)'", category: .engine)
                     }
                     // Dump partial track info even on failure: DrHurt's -1008 stall still surfaces the FourCC (hev1 vs hvc1, dvhe vs dvh1).
-                    Self.dumpAssetTracks(asset, sid: sid, reason: "asset.load(\(key)).failed")
+                    await Self.dumpAssetTracks(asset, sid: sid, reason: "asset.load(\(key)).failed")
                     return
                 }
             }
@@ -567,11 +553,14 @@ final class NativeAVPlayerHost {
     }
 
     /// Dump asset URL + track FourCCs on .failed and asset.load failure; d9b8aa5 added the asset.load path because item.status never went .failed in DrHurt's P5 MKV session.
-    nonisolated private static func dumpAssetTracks(_ asset: AVAsset, sid: Int, reason: String) {
+    // async: AVAsset.tracks and AVAssetTrack.formatDescriptions/isEnabled/isPlayable are load-based in
+    // current SDKs (the synchronous accessors are deprecated). @MainActor (implicit on this @MainActor
+    // type) so the AVAsset/AVAssetTrack reads stay on the main actor.
+    private static func dumpAssetTracks(_ asset: AVAsset, sid: Int, reason: String) async {
         if let urlAsset = asset as? AVURLAsset {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.url=\(urlAsset.url.absoluteString) (\(reason))", category: .engine)
         }
-        let tracks = asset.tracks
+        let tracks = (try? await asset.load(.tracks)) ?? []
         if tracks.isEmpty {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.tracks empty (\(reason))", category: .engine)
             return
@@ -579,8 +568,7 @@ final class NativeAVPlayerHost {
         for track in tracks {
             let fourcc: String
             var extra = ""
-            if let fmt = track.formatDescriptions.first {
-                let cm = fmt as! CMFormatDescription
+            if let cm = (try? await track.load(.formatDescriptions))?.first {
                 fourcc = fourccString(CMFormatDescriptionGetMediaSubType(cm))
                 if track.mediaType == .audio {
                     extra = " " + audioFormatDescription(cm)
@@ -588,12 +576,14 @@ final class NativeAVPlayerHost {
             } else {
                 fourcc = "?"
             }
-            EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.track type=\(track.mediaType.rawValue) codec='\(fourcc)' enabled=\(track.isEnabled) playable=\(track.isPlayable)\(extra) (\(reason))", category: .engine)
+            let enabled = (try? await track.load(.isEnabled)) ?? false
+            let playable = (try? await track.load(.isPlayable)) ?? false
+            EngineLog.emit("[NativeAVPlayerHost] #\(sid) asset.track type=\(track.mediaType.rawValue) codec='\(fourcc)' enabled=\(enabled) playable=\(playable)\(extra) (\(reason))", category: .engine)
         }
     }
 
     /// Dump item.tracks at readyToPlay (HLS: asset.tracks is empty; item.tracks has the resolved list after playlist+init.mp4 parse). Channel layout tag diagnoses multichannel-routing path.
-    nonisolated private static func dumpPlayerItemTracks(_ item: AVPlayerItem, sid: Int) {
+    private static func dumpPlayerItemTracks(_ item: AVPlayerItem, sid: Int) async {
         let tracks = item.tracks
         if tracks.isEmpty {
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.tracks empty (readyToPlay)", category: .engine)
@@ -603,8 +593,7 @@ final class NativeAVPlayerHost {
             guard let assetTrack = itemTrack.assetTrack else { continue }
             let fourcc: String
             var extra = ""
-            if let fmt = assetTrack.formatDescriptions.first {
-                let cm = fmt as! CMFormatDescription
+            if let cm = (try? await assetTrack.load(.formatDescriptions))?.first {
                 fourcc = fourccString(CMFormatDescriptionGetMediaSubType(cm))
                 if assetTrack.mediaType == .audio {
                     extra = " " + audioFormatDescription(cm)
@@ -631,6 +620,34 @@ final class NativeAVPlayerHost {
     }
 
     /// Compact video track summary: dimensions + color attachments (primaries/transfer/matrix). Mismatch vs source-side codecpar signals DV/HDR signaling didn't survive the muxer.
+    /// Dump item.tracks on .failed (FourCC per track). Async: AVAssetTrack.formatDescriptions is
+    /// load-based; assetTrack access is main-actor.
+    private static func dumpFailedItemTracks(_ item: AVPlayerItem, sid: Int) async {
+        EngineLog.emit("[NativeAVPlayerHost] #\(sid) item.tracks count=\(item.tracks.count)", category: .engine)
+        for (idx, itrack) in item.tracks.enumerated() {
+            let assetTrack = itrack.assetTrack
+            let mediaType = assetTrack?.mediaType.rawValue ?? "?"
+            var fdesc: CMFormatDescription?
+            if let assetTrack {
+                fdesc = (try? await assetTrack.load(.formatDescriptions))?.first
+            }
+            let fourCC: String
+            if let cm = fdesc {
+                let code = CMFormatDescriptionGetMediaSubType(cm)
+                let b: [UInt8] = [
+                    UInt8((code >> 24) & 0xff),
+                    UInt8((code >> 16) & 0xff),
+                    UInt8((code >> 8) & 0xff),
+                    UInt8(code & 0xff),
+                ]
+                fourCC = String(bytes: b.map { ($0 >= 0x20 && $0 < 0x7f) ? $0 : 0x2e }, encoding: .ascii) ?? "????"
+            } else {
+                fourCC = "<no fdesc>"
+            }
+            EngineLog.emit("[NativeAVPlayerHost] #\(sid)   item.tracks[\(idx)] mediaType=\(mediaType) fourCC=\(fourCC) enabled=\(itrack.isEnabled)", category: .engine)
+        }
+    }
+
     nonisolated private static func videoFormatDescription(_ fmt: CMFormatDescription) -> String {
         var parts: [String] = []
         let dims = CMVideoFormatDescriptionGetDimensions(fmt)
