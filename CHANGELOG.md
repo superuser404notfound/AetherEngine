@@ -10,6 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.13.2] — 2026-06-23
+
+### Fixed
+
+- **Adversarial bug-audit pass: roughly a dozen correctness, concurrency, and memory-safety fixes across the engine.** The demuxer now synchronizes its `AVIOReader` close flags to close a persistent-connection teardown race, the audio bridge serializes its mutators under an internal lock, drains the decoder at EOF so the final tail is not dropped, and frees partial encoded packets when a FIFO drain throws. The native subtitle cue store is now guarded against the pump thread, SMB `cancel()` unblocks a parked read instead of waiting out the timeout, live seek finalize is guarded on the load generation to drop superseded seeks, and `FrameExtractor` flushes its decoder at EOF so last-GOP snapshots are not lost.
+- **Disc reader hardened against untrusted and cancelled reads.** `DiscReader.readAll` now caps untrusted UDF extent allocation, `ConcatIOReader.cancel()` forwards to the base reader, and the sidecar subtitle path avoids a double-free of its `AVFormatContext` when an HTTP open fails. The DVR feeder also seeds at a real keyframe when the seek target precedes the ring.
+
+### Performance
+
+- **O(log n) `segmentIndex` lookup.** The per-packet segment-index resolution now uses a binary search instead of an O(n) linear scan over stored segments.
+
+### Changed
+
+- **Internal quality pass.** Strict-concurrency and deprecation warnings cleared (27 in total), dead code and redundant comments pruned, FragmentSplitter and SegmentCache index math covered by new tests, and the dual-subtitle API plus `dualsubs` CLI documented.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.13.2))
+
 ## [3.13.1] — 2026-06-22
 
 ### Fixed
