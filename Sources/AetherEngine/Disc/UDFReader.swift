@@ -175,13 +175,17 @@ final class UDFReader {
 
     private func readFileEntry(block: Int, partRef: Int) throws -> FE {
         let sector = try resolve(block: block, partRef: partRef)
-        let raw = try readFileEntryRaw(sector: sector)
+        let raw = try readFileEntryRaw(sector: sector, recordingPartRef: partRef)
         return FE(partRef: partRef, allocationExtents: raw.allocationExtents)
     }
 
     /// Parse (E)FE at a physical sector. Tag 261 (FE) and 266 (EFE);
     /// short_ad (adType 0) and long_ad (adType 1) allocation descriptors.
-    private func readFileEntryRaw(sector: Int) throws -> FE {
+    /// `recordingPartRef` is the partition the FE is recorded in; it resolves a
+    /// short_ad allocation-extent continuation (extent type 3) to its sector. nil
+    /// for the bootstrap Metadata File read, where the partition map is not yet
+    /// resolvable and a continuation is not expected.
+    private func readFileEntryRaw(sector: Int, recordingPartRef: Int? = nil) throws -> FE {
         let d = try readSector(sector)
         let tid = tagID(d)
         guard tid == 261 || tid == 266 else { throw DiscError.malformed("not a file entry @\(sector): tag \(tid)") }
@@ -189,22 +193,44 @@ final class UDFReader {
         let (lEAOff, lADOff, adBase): (Int, Int, Int) = tid == 266 ? (208, 212, 216) : (168, 172, 176)
         let lEA = u32(d, lEAOff)
         let lAD = u32(d, lADOff)
-        let start = adBase + lEA
         var exts: [AllocExt] = []
-        var p = start
-        let end = start + lAD
+        try parseAllocDescriptors(d, start: adBase + lEA, length: lAD, adType: adType,
+                                  recordingPartRef: recordingPartRef, into: &exts)
+        dbg("FE @\(sector): tag=\(tid) adType=\(adType) lEA=\(lEA) lAD=\(lAD) exts=\(exts.map { "(blk:\($0.block),len:\($0.length),ref:\($0.longPartRef.map(String.init) ?? "-"))" })")
+        return FE(partRef: 0, allocationExtents: exts)
+    }
+
+    /// Parse one run of allocation descriptors. Extent type (top 2 bits of the
+    /// length field) 0-2 are data extents; type 3 is a continuation pointer to an
+    /// Allocation Extent Descriptor (tag 258) holding the next run -- used when a
+    /// file's descriptors overflow the (E)FE. Follows the chain, bounded by depth.
+    private func parseAllocDescriptors(_ buf: [UInt8], start: Int, length: Int, adType: Int,
+                                       recordingPartRef: Int?, into exts: inout [AllocExt], depth: Int = 0) throws {
         let stride = adType == 1 ? 16 : 8
-        while p + stride <= min(end, d.count) {
-            let lenField = u32(d, p)
+        var p = start
+        let end = min(start + length, buf.count)
+        while p + stride <= end {
+            let lenField = u32(buf, p)
+            let extType = (lenField >> 30) & 0x3
             let len = lenField & 0x3fffffff
-            let blk = u32(d, p + 4)
+            let blk = u32(buf, p + 4)
+            let longRef: Int? = adType == 1 ? u16(buf, p + 8) : nil
+            if extType == 3 {
+                // Continuation: blk points to an AED with more descriptors. Bounded to
+                // avoid a crafted self-referential chain; one sector holds the AED.
+                guard depth < 16, len > 0, let pref = longRef ?? recordingPartRef,
+                      let contSector = try? resolve(block: blk, partRef: pref) else { break }
+                let aed = try readSector(contSector)
+                guard tagID(aed) == 258 else { break }              // Allocation Extent Descriptor
+                let aedLAD = u32(aed, 20)                            // LengthOfAllocationDescriptors @20 (16 tag + 4 prevLoc)
+                try parseAllocDescriptors(aed, start: 24, length: aedLAD, adType: adType,
+                                          recordingPartRef: recordingPartRef, into: &exts, depth: depth + 1)
+                break  // type 3 is always the final descriptor of the current run
+            }
             if len == 0 { break }
-            let longRef: Int? = adType == 1 ? u16(d, p + 8) : nil
             exts.append(AllocExt(block: blk, length: len, longPartRef: longRef))
             p += stride
         }
-        dbg("FE @\(sector): tag=\(tid) adType=\(adType) lEA=\(lEA) lAD=\(lAD) exts=\(exts.map { "(blk:\($0.block),len:\($0.length),ref:\($0.longPartRef.map(String.init) ?? "-"))" })")
-        return FE(partRef: 0, allocationExtents: exts)
     }
 
     // MARK: directory parsing

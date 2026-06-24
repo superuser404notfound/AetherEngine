@@ -28,8 +28,22 @@ enum UDFFixture {
     static func longAD(lenBytes: Int, block: Int, partRef: Int) -> [UInt8] {
         le32(lenBytes) + le32(block) + le16(partRef) + [UInt8](repeating:0,count:6)
     }
+    /// long_ad with an explicit extent type in the high 2 bits of the length field
+    /// (type 3 = allocation-extent continuation pointer to an AED).
+    static func longADTyped(type: Int, lenBytes: Int, block: Int, partRef: Int) -> [UInt8] {
+        le32(((type & 0x3) << 30) | (lenBytes & 0x3fffffff)) + le32(block) + le16(partRef) + [UInt8](repeating:0,count:6)
+    }
     /// short_ad: lenBytes, block.
     static func shortAD(lenBytes: Int, block: Int) -> [UInt8] { le32(lenBytes) + le32(block) }
+
+    /// Allocation Extent Descriptor (tag 258) holding one run of allocation descriptors.
+    static func aed(location: Int, ads: [UInt8]) -> [UInt8] {
+        var b = [UInt8](repeating: 0, count: 24 + ads.count)
+        tag(258, location: location, into: &b)
+        b[20..<24] = ArraySlice(le32(ads.count))   // LengthOfAllocationDescriptors (@24: the descriptors)
+        for (i, v) in ads.enumerated() { b[24 + i] = v }
+        return b
+    }
 
     /// An Extended File Entry (tag 266). `fileType` 4=dir 5=file. `adType` 0=short_ad.
     /// `ads` is the concatenated allocation-descriptor bytes. `infoLen` is the file's
@@ -68,7 +82,9 @@ enum UDFFixture {
     /// 8=STREAM EFE, 9=STREAM data, 10=mpls EFE, 11=mpls data,
     /// 12=m2ts EFE. m2ts data is two physical extents (fragmented), placed in
     /// the physical partition AFTER the metadata region.
-    static func make(mplsBytes: [UInt8], m2tsBytes: [UInt8]) -> Data {
+    /// `m2tsViaAED`: place the m2ts EFE's second extent behind a type-3 allocation-extent
+    /// continuation (an AED at vblock 13) instead of inline, to exercise AED chaining.
+    static func make(mplsBytes: [UInt8], m2tsBytes: [UInt8], m2tsViaAED: Bool = false) -> Data {
         let partStart = 270
         // metadata partition extent = physical blocks 2.. of partition 0.
         // virtual block V -> physical sector partStart + 2 + V.
@@ -99,9 +115,18 @@ enum UDFFixture {
         // referenced via long_ad (adType 1) carrying partition ref 0 -- exactly how real UDF 2.50
         // Blu-rays store m2ts (a metadata-partition FE pointing at physical data). short_ad here
         // would be metadata-partition-relative and could not address data past the metadata region.
-        let m2tsADs = longAD(lenBytes: m2tsExt1.count, block: frag1Block, partRef: 0)
-                    + longAD(lenBytes: m2tsExt2.count, block: frag2Block, partRef: 0)
-        putV(efe(location: 12, fileType: 5, partRefOfSelf: 1, adType: 1, infoLen: m2tsBytes.count, ads: m2tsADs), vblock: 12)
+        if m2tsViaAED {
+            // Inline: extent 1 (physical) + a type-3 continuation pointer to an AED at vblock 13.
+            let m2tsADs = longAD(lenBytes: m2tsExt1.count, block: frag1Block, partRef: 0)
+                        + longADTyped(type: 3, lenBytes: ss, block: 13, partRef: 1)
+            putV(efe(location: 12, fileType: 5, partRefOfSelf: 1, adType: 1, infoLen: m2tsBytes.count, ads: m2tsADs), vblock: 12)
+            // AED (vblock 13): extent 2 (physical).
+            putV(padTo(aed(location: 13, ads: longAD(lenBytes: m2tsExt2.count, block: frag2Block, partRef: 0)), ss), vblock: 13)
+        } else {
+            let m2tsADs = longAD(lenBytes: m2tsExt1.count, block: frag1Block, partRef: 0)
+                        + longAD(lenBytes: m2tsExt2.count, block: frag2Block, partRef: 0)
+            putV(efe(location: 12, fileType: 5, partRefOfSelf: 1, adType: 1, infoLen: m2tsBytes.count, ads: m2tsADs), vblock: 12)
+        }
         // mpls EFE (vblock 10): long_ad (adType=1) into metadata partition ref 1, block 11.
         putV(efe(location: 10, fileType: 5, partRefOfSelf: 1, adType: 1, infoLen: mplsBytes.count,
                  ads: longAD(lenBytes: mplsBytes.count, block: 11, partRef: 1)), vblock: 10)
