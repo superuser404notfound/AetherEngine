@@ -18,11 +18,22 @@ the public-API contract.
 
 ### Fixed
 
+- **Music Now Playing crashed on tvOS 26 with embedded cover art.** The bare-AVPlayer audio Now Playing path crashed on tvOS 26 (`dispatch_assert_queue_fail`) when a track carried embedded artwork: the system harvested and decoded the asset's embedded cover off the expected queue, and a non-Sendable artwork closure ran off its actor. The engine now follows Apple's recommended path, an auto-publishing `MPNowPlayingSession` with per-item `AVPlayerItem.nowPlayingInfo` instead of manual `MPNowPlayingInfoCenter` writes or `externalMetadata`, with writes gated on item readiness to avoid the serial-queue crash during item swaps, and the audio is wrapped in a metadata-free composition so the system never decodes the asset's (sometimes corrupt) embedded artwork.
 - **Blu-ray ISO playback failed for every real UDF 2.50 disc image (#62).** The UDF reader found the volume anchor and parsed the volume structure, but listing the root directory returned nothing, so no `BDMV` was found, `DiscReader.wrap` returned `nil`, and the raw image fell through to a plain FFmpeg open that reports `AVERROR_INVALIDDATA`. The cause was a partition-reference bug: a metadata-resident file entry's `short_ad` allocation descriptors were resolved against the physical partition. A `short_ad` carries no partition reference, so it is relative to the file entry's own recording partition; for a metadata-partition entry that means metadata-virtual blocks resolved through the Metadata File. The root directory data lives in the metadata partition, so the wrong sectors were read. `short_ad` now resolves against the file entry's own partition (`long_ad`, which carries an explicit reference for the physical m2ts payload, was already correct). Verified end to end against the Blender Sintel Blu-ray ISO.
+- **Audio bridge pipeline diagnostics label ordered as "source -> bridge"** so the logged stage order reads correctly.
+
+### Changed
+
+- **The video decoder frame-handler contract is now `@Sendable`,** hardening the off-actor decode callback for Swift 6 strict concurrency.
+- **Bumped FFmpegBuild to 1.0.1 (FFmpeg n8.1.2).**
 
 ### Added
 
 - **`AetherEngine.inspectDisc(url:)` plus `aetherctl disc-inspect [--dump]`.** An FFmpeg-free, stage-by-stage walk of a local disc image (ISO9660/UDF signatures, UDF root and BDMV tree, parsed `.mpls` playlists, selected main title, resolved m2ts extents) that reports exactly where recognition bails. `DiscReader` also emits gated `[disc]` diagnostics on the playback path so a future failure is debuggable instead of a silent `nil`.
+
+### Documentation
+
+- **Live MPEG-TS sliding-window and DVR rewind marked device-confirmed** in the formats documentation.
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.13.3))
 
