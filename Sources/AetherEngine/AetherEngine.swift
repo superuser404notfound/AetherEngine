@@ -1342,10 +1342,11 @@ public final class AetherEngine: ObservableObject {
     var pendingAudioNowPlayingInfo: [String: Any] = [:]
 
     /// Stage the system Now-Playing dictionary for the audio AVPlayer path (MPMediaItemProperty /
-    /// MPNowPlayingInfoProperty keys). With `automaticallyPublishesNowPlayingInfo` enabled on the audio session, the
-    /// system merges these keys with the player's elapsed/rate/duration. This writes the queue-safe per-item channel
-    /// (AVPlayerItem.nowPlayingInfo), NOT MPNowPlayingInfoCenter, so it can't race MediaPlayer's serial queue (the
-    /// tvOS 26 assertion crash). Pass an empty dict to clear. Safe before load(); replayed at host creation.
+    /// MPNowPlayingInfoProperty keys, including the host's already-force-decoded MPMediaItemArtwork). The host owns
+    /// the AVPlayer session with auto-publish OFF and publishes this to the session's own center, appending the
+    /// player-derived elapsed/rate/duration. Auto-publish is off deliberately: enabled, the session harvests and
+    /// decodes the asset's OWN embedded cover, crashing on a corrupt one (see AudioAVPlayerHost). Pass an empty dict
+    /// to clear. Safe before load(); replayed at host creation.
     public func setAudioNowPlayingInfo(_ info: [String: Any]) {
         pendingAudioNowPlayingInfo = info
         audioAVPlayerHost?.setNowPlayingInfo(info)
