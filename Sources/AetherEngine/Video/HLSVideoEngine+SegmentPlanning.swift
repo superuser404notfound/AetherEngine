@@ -17,8 +17,38 @@ extension HLSVideoEngine {
 
     // MARK: - Segment planning
 
+    /// True when the indexed keyframe list is dense enough to trust for a keyframe-aligned plan (#64).
+    ///
+    /// MPEG-TS / M2TS have no upfront keyframe table the way MKV Cues / MP4 stss do: the libavformat
+    /// index holds only what `avformat_find_stream_info` plus the mid-file cue-prewarm seek happened to
+    /// scan, so for a TS source it comes back sparse and clustered (e.g. one entry near the start, a
+    /// handful near the seek point). `buildKeyframeSegmentPlan` would then emit a single multi-thousand-
+    /// second first segment, and the `frag_custom` muxer buffers that whole span in libavformat's
+    /// interleaver before its first flush, which on a 110 min Blu-ray climbed to ~13 GB of RAM and
+    /// swapped until the device disk filled. The witness is the largest gap between consecutive
+    /// keyframes: a real index never gaps more than a few GOPs (well under the cap), a clustered TS
+    /// index gaps by thousands of seconds. Such an index is routed to the uniform-stride fallback.
+    static func keyframeIndexIsTrustworthy(
+        keyframes: [Int64],
+        videoTimeBase: AVRational,
+        sourceDurationSeconds: Double,
+        maxTrustedGapSeconds: Double = Swift.max(HLSVideoEngine.targetSegmentDuration * 4, 30)
+    ) -> Bool {
+        guard keyframes.count >= 2,
+              sourceDurationSeconds > 0,
+              videoTimeBase.num > 0, videoTimeBase.den > 0 else { return false }
+        let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
+        let sorted = keyframes.sorted()
+        var largestGapSeconds = 0.0
+        for i in 1..<sorted.count {
+            let gapSeconds = Double(sorted[i] - sorted[i - 1]) * tb
+            if gapSeconds > largestGapSeconds { largestGapSeconds = gapSeconds }
+        }
+        return largestGapSeconds <= maxTrustedGapSeconds
+    }
+
     /// Uniform-duration fallback plan when the keyframe index is too sparse. The muxer still snaps cuts to real keyframes, so EXTINF drift accumulates per segment; restart machinery renegotiates alignment after scrubs.
-    func buildUniformSegmentPlan(
+    static func buildUniformSegmentPlan(
         videoTimeBase: AVRational,
         sourceDurationSeconds: Double
     ) -> [Segment] {
@@ -46,7 +76,7 @@ extension HLSVideoEngine {
     }
 
     /// Keyframe-aligned plan mirroring libavformat's hls muxer cut algorithm: segment N ends at the first keyframe where `(keyframe_pts - start_pts) >= (N+1) * targetDuration`. Absolute thresholds match the muxer; relative per-segment thresholds diverged on irregular GOPs.
-    func buildKeyframeSegmentPlan(
+    static func buildKeyframeSegmentPlan(
         keyframes: [Int64],
         videoTimeBase: AVRational,
         sourceDurationSeconds: Double

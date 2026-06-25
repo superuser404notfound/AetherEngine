@@ -430,8 +430,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
             //    (first IDR at-or-after `(segIdx+1) * hls_time`); falls back to uniform stride
             //    if the index has < 2 entries (restart machinery handles any plan/muxer drift).
             let keyframes = dem.indexedKeyframes(streamIndex: videoIndex)
-            if keyframes.count >= 2 {
-                plan = buildKeyframeSegmentPlan(
+            let indexTrustworthy = Self.keyframeIndexIsTrustworthy(
+                keyframes: keyframes,
+                videoTimeBase: videoTimeBase,
+                sourceDurationSeconds: durationSeconds
+            )
+            if keyframes.count >= 2, indexTrustworthy {
+                plan = Self.buildKeyframeSegmentPlan(
                     keyframes: keyframes,
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds
@@ -450,12 +455,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     category: .session
                 )
             } else {
-                plan = buildUniformSegmentPlan(
+                plan = Self.buildUniformSegmentPlan(
                     videoTimeBase: videoTimeBase,
                     sourceDurationSeconds: durationSeconds
                 )
+                // A sparse/clustered index (MPEG-TS / M2TS: no Cues, only what find_stream_info + the
+                // mid-file seek scanned) would otherwise build a multi-thousand-second first segment that
+                // the frag_custom muxer buffers whole in RAM (#64). Report the witness gap.
+                let tb = (videoTimeBase.num > 0 && videoTimeBase.den > 0)
+                    ? Double(videoTimeBase.num) / Double(videoTimeBase.den) : 0
+                let sorted = keyframes.sorted()
+                var largestGapSeconds = 0.0
+                if tb > 0, sorted.count >= 2 {
+                    for i in 1..<sorted.count {
+                        let g = Double(sorted[i] - sorted[i - 1]) * tb
+                        if g > largestGapSeconds { largestGapSeconds = g }
+                    }
+                }
+                let reason = keyframes.count < 2
+                    ? "\(keyframes.count) IRAPs in index, need >=2"
+                    : "index too sparse (\(keyframes.count) IRAPs, largestGap=\(String(format: "%.1f", largestGapSeconds))s)"
                 EngineLog.emit(
-                    "[HLSVideoEngine] segment plan: uniform stride fallback (\(keyframes.count) IRAPs in index, need >=2)",
+                    "[HLSVideoEngine] segment plan: uniform stride fallback (\(reason))",
                     category: .session
                 )
             }
