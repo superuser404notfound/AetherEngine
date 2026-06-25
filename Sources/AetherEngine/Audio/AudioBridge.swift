@@ -71,14 +71,19 @@ final class AudioBridge: @unchecked Sendable {
     // MARK: - State
 
     private var decoderCtx: UnsafeMutablePointer<AVCodecContext>?
-    /// dca_core bitstream filter, set only for DTS sources when the FFmpeg build provides it. Strips each
-    /// DTS-HD (MA / HRA) packet to its mandatory DTS core before the decoder sees it, so the lossless XLL
-    /// extension (which can residual-code channels that fail to reconstruct standalone) never reaches the
-    /// decoder. nil for non-DTS sources or an older FFmpeg without the filter, in which case feed() decodes
-    /// the source packet directly and leans on the per-packet EINVAL skip (#64).
-    private var dcaCoreBSF: UnsafeMutablePointer<AVBSFContext>?
     private var encoderCtx: UnsafeMutablePointer<AVCodecContext>?
     private var swrCtx: OpaquePointer?
+    /// The (sample_fmt, sample_rate, ch_layout) the swr context's INPUT side is currently configured for.
+    /// Seeded at init from the decoder, then re-derived from each decoded frame in resampleAndPushIntoFIFO:
+    /// libswresample reads raw extended_data per its configured input format, so the config MUST match the
+    /// frame the decoder actually produced. The init seed is only a guess - dca/mlp leave sample_fmt
+    /// unresolved at open unless avformat_find_stream_info pre-decoded a probe frame, and a bailed probe
+    /// (live MPEG-TS) leaves it AV_SAMPLE_FMT_NONE -> the FLTP fallback. Reconfiguring from the frame keeps
+    /// every codec/container correct (no S32P-XLL-misread-as-FLTP noise). swrInLayout is owned: uninit it
+    /// before overwrite and in cleanup.
+    private var swrInFmt: AVSampleFormat = AV_SAMPLE_FMT_NONE
+    private var swrInRate: Int32 = 0
+    private var swrInLayout = AVChannelLayout()
     /// FIFO buffering resampled PCM until >= encoderCtx.frame_size samples. FLAC's wrapper has
     /// AV_CODEC_CAP_SMALL_LAST_FRAME but not VARIABLE_FRAME_SIZE, so non-final frames must hit frame_size exactly
     /// (~4608 @48kHz); EAC3 decodes 1536 samples/packet, so without the FIFO we'd hit -22 EINVAL on the first send.
@@ -183,44 +188,19 @@ final class AudioBridge: @unchecked Sendable {
             cleanup()
             throw AudioBridgeError.decoderParametersFailed(code: copyRet)
         }
-        // DTS-HD MA / HRA carry a lossless XLL extension on top of the mandatory DTS core, and the
-        // bridge re-encodes to lossy EAC3 (or FLAC) so the XLL refinement is discarded anyway. An
-        // earlier fix opened `dca` with `core_only=1` to skip XLL, but on Blu-ray the core is usually
-        // carried as an asset INSIDE the extension substream (EXSS), not as a standalone core sync, so
-        // `core_only` makes the decoder report "No valid DCA sub-stream found" and produce no audio
-        // (libavcodec then prints "Consider disabling 'core_only'"; #64). The full path parses the EXSS
-        // and decodes the embedded core fine; the only failures are the occasional XLL frame whose
-        // channels residual-code without a usable core ("Residual encoded channels are present without
-        // core", EINVAL -22), and feed() now skips just that packet instead of failing the whole feed.
+        // DTS-HD MA / HRA carry a lossless XLL extension on top of the mandatory DTS core. Decode the FULL
+        // stream: for DTS-HD MA the dca decoder reconstructs the lossless XLL (S32P), which .lossless mode
+        // re-encodes bit-perfectly to FLAC; .surroundCompat re-encodes lossy EAC3 either way. An earlier #64
+        // fix routed DTS through the dca_core bitstream filter to strip every packet to its lossy core, but
+        // that (a) discarded lossless XLL for streams that decode fine (#66) and (b) on a stripped standalone
+        // core the decoder takes the FLOAT path (FLTP), mismatching the S32P input swr is seeded with from the
+        // probe -> garbled audio. The full path is correct; the only genuine failures are XLL frames that
+        // residual-code channels without a usable core ("Residual encoded channels are present without core",
+        // EINVAL -22), which feed() skips per-packet instead of failing the whole feed (#64).
         let openRet = avcodec_open2(dec, srcCodec, nil)
         guard openRet >= 0 else {
             cleanup()
             throw AudioBridgeError.decoderOpenFailed(code: openRet)
-        }
-
-        // For DTS, route packets through the dca_core bitstream filter (when this FFmpeg build ships it) so the
-        // decoder only ever sees the mandatory DTS core: full-rate 5.1/7.1 core PCM on every frame, with the XLL
-        // extension stripped at the bitstream level instead of failing per-frame inside the decoder. Best-effort:
-        // if the filter or its init is unavailable, leave dcaCoreBSF nil and feed() decodes the source directly.
-        if srcCodecID == AV_CODEC_ID_DTS, let bsf = av_bsf_get_by_name("dca_core") {
-            var bsfCtx: UnsafeMutablePointer<AVBSFContext>?
-            if av_bsf_alloc(bsf, &bsfCtx) >= 0, let bsfCtx {
-                _ = avcodec_parameters_copy(bsfCtx.pointee.par_in, srcCodecpar)
-                bsfCtx.pointee.time_base_in = srcTimeBase
-                if av_bsf_init(bsfCtx) >= 0 {
-                    dcaCoreBSF = bsfCtx
-                } else {
-                    var freeMe: UnsafeMutablePointer<AVBSFContext>? = bsfCtx
-                    av_bsf_free(&freeMe)
-                }
-            }
-        }
-        if srcCodecID == AV_CODEC_ID_DTS {
-            EngineLog.emit(
-                "[AudioBridge] DTS core extraction: "
-                + (dcaCoreBSF != nil ? "dca_core bitstream filter active" : "unavailable, decoding full path (EINVAL frames skipped)"),
-                category: .session
-            )
         }
 
         // 2. Bridge encoder by mode: .surroundCompat -> EAC3 128 kbps/ch max 6; .lossless -> FLAC VBR max 8.
@@ -330,8 +310,11 @@ final class AudioBridge: @unchecked Sendable {
             throw AudioBridgeError.encoderOpenFailed(code: fillRet)
         }
 
-        // 4. Resampler input format: decoder ctx sample_fmt if populated (most lossy codecs fill it at open),
-        //    else seed FLTP for codecs that defer until the first frame (TrueHD); resampler reconfigures on feed.
+        // 4. Resampler input format: seed from the decoder ctx if avformat_find_stream_info already resolved it
+        //    (most VOD sources - the probe decoded a frame and wrote the real sample_fmt back into codecpar),
+        //    else fall back to FLTP + codecpar rate for codecs that defer until the first frame (TrueHD) or a
+        //    bailed probe. This is only a seed: resampleAndPushIntoFIFO re-derives the input config from each
+        //    decoded frame, so a wrong seed self-corrects on the first frame.
         let inFmtRaw = dec.pointee.sample_fmt.rawValue
         let inFmt = inFmtRaw >= 0 ? dec.pointee.sample_fmt : AV_SAMPLE_FMT_FLTP
         let inRate = dec.pointee.sample_rate > 0 ? dec.pointee.sample_rate : sampleRate
@@ -343,6 +326,11 @@ final class AudioBridge: @unchecked Sendable {
         }
         // copy() allocates a channel map for custom-order layouts; uninit the stack struct or that map leaks per session.
         defer { av_channel_layout_uninit(&inLayout) }
+
+        // Remember the input config so resampleAndPushIntoFIFO knows when a decoded frame diverges from it.
+        swrInFmt = inFmt
+        swrInRate = inRate
+        av_channel_layout_copy(&swrInLayout, &inLayout)
 
         let swrRet = swr_alloc_set_opts2(
             &swrCtx,
@@ -531,9 +519,6 @@ final class AudioBridge: @unchecked Sendable {
     }
 
     private func cleanup() {
-        if dcaCoreBSF != nil {
-            av_bsf_free(&dcaCoreBSF)
-        }
         if decoderCtx != nil {
             avcodec_free_context(&decoderCtx)
         }
@@ -543,6 +528,8 @@ final class AudioBridge: @unchecked Sendable {
         if swrCtx != nil {
             swr_free(&swrCtx)
         }
+        // Releases the channel map allocated by av_channel_layout_copy; idempotent when already empty.
+        av_channel_layout_uninit(&swrInLayout)
         if encoderCodecpar != nil {
             avcodec_parameters_free(&encoderCodecpar)
         }
@@ -595,7 +582,7 @@ final class AudioBridge: @unchecked Sendable {
             }
         }
 
-        // Push one source packet (or one dca_core-stripped core packet) into the decoder and drain its frames.
+        // Push one source packet into the decoder and drain its frames.
         func decodeOnePacket(_ pkt: UnsafePointer<AVPacket>) throws {
             var sendRet = avcodec_send_packet(dec, pkt)
             if sendRet == FFmpegErr.eagain {
@@ -606,9 +593,10 @@ final class AudioBridge: @unchecked Sendable {
             if sendRet == FFmpegErr.invalidData || sendRet == FFmpegErr.einval {
                 // Skippable single-packet rejections, decoder stays usable for the next packet:
                 //   invalidData = corrupt source packet (glitchy live MPEG-TS, broken mp2 header);
-                //   einval (-22) = a DTS-HD MA XLL frame residual-coding channels without a usable core, only
-                //   reachable when the dca_core BSF is absent (#64). Skip rather than throw: per-packet throwing
-                //   floods the caller hundreds/sec on a bad feed, and dropping the rare bad frame keeps the rest playing.
+                //   einval (-22) = a DTS-HD MA XLL frame that residual-codes channels without a usable core
+                //   ("Residual encoded channels are present without core"; #64). Skip rather than throw:
+                //   per-packet throwing floods the caller hundreds/sec on a bad feed, and dropping the rare
+                //   bad frame keeps the rest playing.
                 return
             }
             if sendRet < 0 && sendRet != FFmpegErr.eof {
@@ -617,26 +605,7 @@ final class AudioBridge: @unchecked Sendable {
             try receiveDecodedFrames()
         }
 
-        if let bsf = dcaCoreBSF {
-            // Strip the DTS-HD packet to its core, then decode each core packet. av_bsf_send_packet consumes the
-            // packet it is handed, so feed it a ref-copy and leave the caller's `packet` untouched (caller owns it).
-            var inPkt: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
-            defer { av_packet_free(&inPkt) }
-            if let inPkt, av_packet_ref(inPkt, packet) >= 0, av_bsf_send_packet(bsf, inPkt) >= 0 {
-                var coreP: UnsafeMutablePointer<AVPacket>? = av_packet_alloc()
-                defer { av_packet_free(&coreP) }
-                if let coreP {
-                    while av_bsf_receive_packet(bsf, coreP) >= 0 {
-                        if coreP.pointee.size > 0 {
-                            try decodeOnePacket(coreP)
-                        }
-                        av_packet_unref(coreP)
-                    }
-                }
-            }
-        } else {
-            try decodeOnePacket(packet)
-        }
+        try decodeOnePacket(packet)
 
         // Drain the FIFO into encoder-frame-size chunks, each fed as one AVFrame.
         // The helper may append encoded packets before throwing; feed propagates the error (the
@@ -656,6 +625,64 @@ final class AudioBridge: @unchecked Sendable {
         return results
     }
 
+    /// Align swr's INPUT side to the frame the decoder actually produced. libswresample reads `extended_data`
+    /// planes strictly per its configured input format, so if the decoder emits a different (sample_fmt,
+    /// sample_rate, ch_layout) than swr was set up for, the bytes are misread: lossless DTS-HD MA decodes to
+    /// S32P, but the init seed can be FLTP (codec sample_fmt unresolved at avcodec_open2, or a bailed live
+    /// probe), and reading S32 integers as FLTP floats is noise. Re-derive the input from the frame, keeping
+    /// the output side pinned to the encoder, exactly as AudioDecoder configures its resampler from the frame.
+    /// No-op in the common case where find_stream_info already resolved the format (frame == seed), so working
+    /// paths are untouched; only a wrong seed or a genuine mid-stream format change rebuilds. swr_alloc_set_opts2
+    /// reuses the context pointer on success and frees it on failure (the caller re-binds swrCtx); swr_init drops
+    /// the sub-frame resampler delay, as startSegment already does. Runs under feed()'s opLock (never re-lock).
+    private func reconfigureSwrInputIfNeeded(
+        forFrame sf: UnsafeMutablePointer<AVFrame>,
+        enc: UnsafeMutablePointer<AVCodecContext>
+    ) {
+        let frameFmtRaw = sf.pointee.format
+        let frameRate = sf.pointee.sample_rate
+        guard frameFmtRaw >= 0, frameRate > 0, sf.pointee.ch_layout.nb_channels > 0 else { return }
+        let matchesCurrent = frameFmtRaw == swrInFmt.rawValue
+            && frameRate == swrInRate
+            && av_channel_layout_compare(&swrInLayout, &sf.pointee.ch_layout) == 0
+        guard !matchesCurrent else { return }
+
+        let frameFmt = AVSampleFormat(rawValue: frameFmtRaw)
+        let setRet = swr_alloc_set_opts2(
+            &swrCtx,
+            &enc.pointee.ch_layout,
+            pcmSampleFmt,
+            enc.pointee.sample_rate,
+            &sf.pointee.ch_layout,
+            frameFmt,
+            frameRate,
+            0,
+            nil
+        )
+        guard setRet >= 0, swrCtx != nil, swr_init(swrCtx) >= 0 else { return }
+
+        av_channel_layout_uninit(&swrInLayout)
+        av_channel_layout_copy(&swrInLayout, &sf.pointee.ch_layout)
+        swrInFmt = frameFmt
+        swrInRate = frameRate
+
+        // .lossless pins the encoder + swr OUTPUT to the codecpar rate/layout at init (the muxer header is
+        // already written from it, so it cannot change now). If the decoded frame differs, swr must resample
+        // or rematrix and the FLAC is no longer bit-perfect. Surface it loudly; a deferred encoder open (open
+        // the encoder from the first decoded frame) is the follow-up if this ever fires on real material.
+        if mode == .lossless,
+           frameRate != enc.pointee.sample_rate
+            || av_channel_layout_compare(&sf.pointee.ch_layout, &enc.pointee.ch_layout) != 0 {
+            EngineLog.emit(
+                "[AudioBridge] WARNING: lossless not bit-perfect - decoded "
+                + "\(frameRate)Hz/\(sf.pointee.ch_layout.nb_channels)ch differs from encoder "
+                + "\(enc.pointee.sample_rate)Hz/\(enc.pointee.ch_layout.nb_channels)ch; swr will resample/downmix "
+                + "(source codecpar under-described the stream, e.g. the probe reported the core rate/layout).",
+                category: .session
+            )
+        }
+    }
+
     /// Resample sf (decoded source frame) to encoder format and push into the FIFO (swr_convert may produce
     /// more/fewer samples; the FIFO smooths that). Buffer layout by pcmSampleFmt: interleaved (S16/S32, FLAC mode)
     /// is one contiguous buffer in out[0]; planar (FLTP, EAC3 mode) is N pointers, one per channel. Passing a
@@ -666,15 +693,22 @@ final class AudioBridge: @unchecked Sendable {
         swr: OpaquePointer,
         fifo: OpaquePointer
     ) throws {
-        let outNbSamples = swr_get_out_samples(swr, sf.pointee.nb_samples)
-        guard outNbSamples > 0 else { return }
-
         // Corrupt source audio (glitchy live MPEG-TS, mp2 with missing frame headers) can decode to a frame with
         // nb_samples > 0 but a NULL channel pointer in extended_data; swr_convert then derefs NULL and crashes
         // EXC_BAD_ACCESS at 0x0. Skip such frames (the video path tolerates the same corruption).
         guard sf.pointee.nb_samples > 0,
               let ext = sf.pointee.extended_data,
               ext.pointee != nil else { return }
+
+        // Align swr's INPUT to the frame the decoder actually produced before converting. No-op once the seed
+        // matched (the usual case); only a wrong init seed or a genuine mid-stream format change rebuilds swr.
+        reconfigureSwrInputIfNeeded(forFrame: sf, enc: enc)
+        // The rebuild reuses the context pointer on success, but swr_alloc_set_opts2 frees it on a set-opts
+        // failure (swr_free(ps) -> swrCtx == nil), which would dangle the caller's `swr`. Re-bind to the live one.
+        guard let swr = swrCtx else { return }
+
+        let outNbSamples = swr_get_out_samples(swr, sf.pointee.nb_samples)
+        guard outNbSamples > 0 else { return }
 
         let nChannels = enc.pointee.ch_layout.nb_channels
         let isPlanar = av_sample_fmt_is_planar(pcmSampleFmt) != 0
