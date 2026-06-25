@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.13.9] — 2026-06-25
+
+Maintenance release on the 3.13.x line. Backports the #64 audio fix from 4.0.6.
+
+### Fixed
+
+- **DTS-HD Master Audio on a Blu-ray (MPEG-TS / M2TS) played silent (#64).** The bundled FFmpeg build was missing the `dca` parser, so on M2TS the DTS core (`0x7FFE8001`) and the DTS-HD extension substream (`0x64582025`) reached the decoder as separate packets and every extension frame was rejected with "Residual encoded channels are present without core". Matroska was unaffected (its blocks are whole frames). Fixed by bumping to FFmpegBuild 1.0.3, which enables `dca` plus the other parsers missing for already-bundled decoders (`mlp`, `vc1`, `dvbsub`, `dvdsub`). No engine code change.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.13.9))
+
 ## [3.13.8] — 2026-06-25
 
 Maintenance release on the 3.13.x line. Backports the #64 follow-up from 4.0.5.
