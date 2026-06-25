@@ -36,14 +36,35 @@ struct HTTPDiscIOReaderTests {
         #expect(Demuxer.isDiscImageURL(URL(string: "https://h/stream.m3u8")!) == false)
     }
 
+    @Test("Read-ahead window grows on sequential continuation and resets otherwise")
+    func adaptiveWindow() {
+        // Sequential continuation (position == lastFetchEnd) doubles, capped at maxChunk.
+        #expect(HTTPDiscIOReader.nextChunkSize(position: 4096, lastFetchEnd: 4096, current: 4096,
+                                               base: 4096, maxChunk: 32768) == 8192)
+        #expect(HTTPDiscIOReader.nextChunkSize(position: 8192, lastFetchEnd: 8192, current: 8192,
+                                               base: 4096, maxChunk: 32768) == 16384)
+        #expect(HTTPDiscIOReader.nextChunkSize(position: 99999, lastFetchEnd: 99999, current: 32768,
+                                               base: 4096, maxChunk: 32768) == 32768)  // capped
+        // A non-contiguous read (seek) resets to base.
+        #expect(HTTPDiscIOReader.nextChunkSize(position: 200000, lastFetchEnd: 8192, current: 16384,
+                                               base: 4096, maxChunk: 32768) == 4096)
+        // No prior refill yet -> base.
+        #expect(HTTPDiscIOReader.nextChunkSize(position: 0, lastFetchEnd: -1, current: 4096,
+                                               base: 4096, maxChunk: 32768) == 4096)
+    }
+
     // MARK: - Read / seek over a mock range server
 
-    private func makeReader(_ bytes: [UInt8]) -> HTTPDiscIOReader? {
+    private func makeReader(_ bytes: [UInt8], base: Int = 4096, maxChunk: Int = 4096,
+                            failFirst: Int = 0) -> HTTPDiscIOReader? {
         let url = URL(string: "http://disc.test/test.iso")!
+        MockRangeURLProtocol.reset()
         MockRangeURLProtocol.bytesByURL[url.absoluteString] = Data(bytes)
+        if failFirst > 0 { MockRangeURLProtocol.failFirstForURL[url.absoluteString] = failFirst }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockRangeURLProtocol.self]
-        return HTTPDiscIOReader(url: url, chunkSize: 4096, sessionConfiguration: config)
+        return HTTPDiscIOReader(url: url, baseChunkSize: base, maxChunkSize: maxChunk,
+                                requestTimeout: 5, sessionConfiguration: config)
     }
 
     @Test("AVSEEK_SIZE returns the total size from the range probe")
@@ -79,6 +100,18 @@ struct HTTPDiscIOReaderTests {
         #expect(n == 0)
     }
 
+    @Test("A transient request failure is retried")
+    func retry() throws {
+        let src = (0..<2000).map { UInt8($0 & 0xff) }
+        let r = try #require(makeReader(src))  // probe succeeds cleanly
+        // Inject one network failure for the first read's range request; the retry must recover it.
+        MockRangeURLProtocol.failFirstForURL["http://disc.test/test.iso"] = 1
+        var out = [UInt8](repeating: 0, count: 100)
+        let n = out.withUnsafeMutableBufferPointer { r.read($0.baseAddress, size: 100) }
+        #expect(n == 100)
+        #expect(Array(out[0..<100]) == Array(src[0..<100]))
+    }
+
     @Test("A server without range support fails init (caller falls back to streaming)")
     func noRangeSupport() {
         let url = URL(string: "http://disc.test/noRange.iso")!
@@ -108,6 +141,12 @@ struct HTTPDiscIOReaderTests {
 final class MockRangeURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var bytesByURL: [String: Data] = [:]
     nonisolated(unsafe) static var disableRangeFor: Set<String> = []
+    /// Number of leading requests per URL that should fail with a network error (retry testing).
+    nonisolated(unsafe) static var failFirstForURL: [String: Int] = [:]
+
+    static func reset() {
+        bytesByURL = [:]; disableRangeFor = []; failFirstForURL = [:]
+    }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -116,6 +155,16 @@ final class MockRangeURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         guard let url = request.url, let data = Self.bytesByURL[url.absoluteString] else {
             client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+            return
+        }
+        if let remaining = Self.failFirstForURL[url.absoluteString], remaining > 0 {
+            Self.failFirstForURL[url.absoluteString] = remaining - 1
+            // A clean 503 (rather than a transport error) completes the task and exercises the
+            // reader's non-2xx -> retry path without URLProtocol failure-handling quirks.
+            let resp = HTTPURLResponse(url: url, statusCode: 503, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Length": "0"])!
+            client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
             return
         }
         let total = data.count
