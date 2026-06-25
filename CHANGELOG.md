@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.0.4] — 2026-06-25
+
+### Fixed
+
+- **A Blu-ray (MPEG-TS / M2TS) source could fill the device disk and play neither video nor audio (#64).** MPEG-TS carries no upfront keyframe table the way Matroska Cues or MP4 `stss` do, so the VOD segment planner only saw the handful of keyframes that `avformat_find_stream_info` plus the mid-file prewarm seek happened to index (on a long title: one near the start, a cluster near the seek point). The keyframe-aligned planner trusted that sparse, clustered list whenever it had at least two entries and built a degenerate plan whose first segment spanned the whole gap (a 110 minute title produced a single ~3288 second segment). The fragmented-MP4 muxer runs with `+frag_custom`, so it emits a fragment only at an explicit segment cut; with one enormous segment it buffered nearly the entire title in libavformat's interleaver before any flush, which grew to multiple gigabytes that the device compressed and swapped until the disk filled, and `+delay_moov` kept `init.mp4` empty until that first flush so the player got no video either. Two fixes, both engine-internal: (1) the planner now rejects a keyframe index whose largest inter-keyframe gap exceeds `max(targetSegmentDuration * 4, 30)` seconds and falls back to the uniform-stride plan (regular ~4 second segments); (2) the muxer now caps how much it buffers within any one segment, force-flushing a fragment into the current file once the buffered video span exceeds ~2 segment durations (the same drain the cut uses, without rotating the file), which bounds memory on any long segment regardless of plan shape and also populates `init.mp4` promptly so video starts. No public API change.
+
+### Known limitations
+
+- On the same disc, the default DTS-HD Master Audio track decodes to no audio: its frames code the lossless extension as a residual on top of the core, which libavcodec's DCA decoder cannot reconstruct, so the bridge skips them. The fix above restores video; selecting one of the disc's AC3 tracks gives audio. The DTS-HD MA case is tracked separately.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.0.4))
+
 ## [4.0.3] — 2026-06-25
 
 ### Fixed
