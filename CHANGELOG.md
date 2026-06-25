@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [3.13.7] — 2026-06-25
+
+Maintenance release on the 3.13.x line. Backports the #64 Blu-ray (MPEG-TS)
+disk-fill fix from 4.0.4, so adopters pinned to 3.x get it without migrating to
+4.x.
+
+### Fixed
+
+- **A Blu-ray (MPEG-TS / M2TS) source could fill the device disk and play neither video nor audio (#64).** MPEG-TS carries no upfront keyframe table the way Matroska Cues or MP4 `stss` do, so the VOD segment planner only saw the handful of keyframes that `avformat_find_stream_info` plus the mid-file prewarm seek happened to index, and on a long title built a degenerate plan whose first segment spanned thousands of seconds (a 110 minute title produced a single ~3288 second segment). The `+frag_custom` muxer flushes a fragment only at a segment cut, so it buffered nearly the whole title in libavformat's interleaver, which grew to multiple gigabytes that the device compressed and swapped until the disk filled, and `+delay_moov` kept `init.mp4` empty so the player got no video either. The planner now falls back to the uniform-stride plan when the keyframe index's largest gap is too large, and the muxer now caps how much it buffers within any one segment (force-flushing a fragment, which also populates `init.mp4` promptly). No public API change. The default DTS-HD Master Audio track on that disc still decodes to no audio (a separate libavcodec DCA limitation); selecting an AC3 track gives sound.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/3.13.7))
+
 ## [3.13.6] — 2026-06-25
 
 Maintenance release on the 3.13.x line. Backports the #66 audio fix from 4.0.2,

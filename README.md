@@ -144,7 +144,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.13.6")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.13.7")
 ```
 
 Two complementary samples ship in `Examples/`:
@@ -267,10 +267,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface — every `public` declaration in `Sources/AetherEngine/` — is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.13.6")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "3.13.7")
 ```
 
-Pin to `.upToNextMinor(from: "3.13.6")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "3.13.7")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
