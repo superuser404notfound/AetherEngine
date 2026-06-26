@@ -155,6 +155,28 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Cap on CONSECUTIVE unproductive reconnects; resets on real progress.
     private static let reconnectMaxUnproductive = 12
 
+    // MARK: - Detour Block Cache (random-access parse reads; AetherEngine#69)
+
+    // A non-faststart / coarsely-interleaved remote MP4 makes the demuxer ping-pong between
+    // distant file regions (header, trailing moov, sample data) during find_stream_info /
+    // index parse. Each non-sequential read used to tear down + reopen the persistent
+    // connection (seekReconnect), so the parse storm hammered the origin into a 429.
+    // Instead, serve those random-access reads through the pooled keep-alive chunkSession
+    // (the one fetchChunk already uses), caching 4 MB aligned blocks. The streaming
+    // connection stays ANCHORED; the ping-pong becomes cache hits; the storm collapses to
+    // the two legitimate reconnects (open + the one seek to the moov). The sequential
+    // playback fast path never enters this code, so it carries zero overhead.
+    private static let detourBlockSize = 4 * 1024 * 1024
+    private static let detourMaxBlocks = 8                       // ~32 MB LRU ceiling
+    // Once detour reads turn sequential past this much, re-anchor the streaming connection
+    // there so sustained playback returns to the cheap window path (e.g. after a backward scrub).
+    private static let detourReanchorBytes: Int64 = 8 * 1024 * 1024
+
+    // Cap on CONSECUTIVE rate-limited (429/503) network attempts before giving up cleanly.
+    // Distinct axis from unproductiveReconnects: NOT reset by seekReconnect, so parse-driven
+    // seeks cannot mask a throttled origin into an infinite reconnect loop (AetherEngine#71).
+    private static let rateLimitMaxStreak = 6
+
     /// NSCondition guards all persistent-mode fields and serves as the
     /// edge-triggered condition variable for read waits and backpressure.
     private let winCond = NSCondition()
@@ -174,6 +196,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Consecutive unproductive reconnects (demux-thread-only).
     private var unproductiveReconnects = 0
     private var bytesAtLastReconnect: Int64 = 0
+    // Consecutive 429/503 attempts; survives seekReconnect, resets on real read progress (#71).
+    private var rateLimitStreak = 0
+
+    /// Detour LRU block cache (its own leaf lock, never held across `fetchChunk`/network or
+    /// `winCond`). Stores only full-size blocks; short bodies are served once but never cached
+    /// (see serveFromDetour), so eviction never shadows a re-fetchable tail. Pure copy/eviction
+    /// math lives on the cache and is unit-tested without any network.
+    private let detourCache = DetourBlockCache(blockSize: AVIOReader.detourBlockSize,
+                                               maxBlocks: AVIOReader.detourMaxBlocks)
+    // Re-anchor run tracking (demux-thread-only): the file offset the next sequential detour read
+    // would continue from, and how many contiguous bytes the current detour run has served.
+    private var detourRunNextExpected: Int64 = -1
+    private var detourRunBytes: Int64 = 0
 
     /// Playback path (known size + prefetch) or live feeds. Live always uses the
     /// persistent reader; the streaming reader has no reconnect machinery.
@@ -185,6 +220,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// True for endless live feeds. Suppresses `position >= fileSize` EOF synthesis;
     /// reports EIO (-5) instead of EOF when the reconnect cap is hit.
     let isLive: Bool
+
+    /// Detour cache is VOD-only: live feeds have no meaningful random access and a
+    /// non-authoritative size, so they stay on the unchanged reconnect path.
+    private var detourEligible: Bool { !isLive && fileSize > 0 }
 
     /// Timestamp of the last unplanned reconnect (drop/stall, not a seek).
     /// Producer correlates with a backward source-PTS reset to detect Jellyfin
@@ -355,6 +394,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         currentBuffer = Data()
         prefetchBuffer = nil
         bufferLock.unlock()
+
+        detourCache.clear()
 
         streamLock.lock()
         streamEnded = true
@@ -584,6 +625,46 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
             if curPosition < winStart {
                 winCond.unlock()
+                // Backward random-access read (MP4 parse ping-pong, or a large backward scrub).
+                // Serve via the pooled detour cache so the anchored streaming connection is NOT
+                // torn down (the reconnect storm + origin 429, AetherEngine#69).
+                if detourEligible {
+                    // Re-anchor the streaming connection once detour reads have turned sequential
+                    // past the threshold (playback resumed here), so steady playback returns to
+                    // the cheap window path instead of fetching 4 MB blocks forever.
+                    if curPosition == detourRunNextExpected && detourRunBytes >= Self.detourReanchorBytes {
+                        detourResetRun()
+                        seekReconnect(at: curPosition)
+                        continue
+                    }
+                    switch serveFromDetour(into: buf.advanced(by: totalRead),
+                                           maxLen: requestSize - totalRead,
+                                           at: curPosition, allowFetch: true) {
+                    case .served(let n):
+                        winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
+                        totalRead += n
+                        unproductiveReconnects = 0
+                        rateLimitStreak = 0
+                        detourTrackSequential(at: curPosition, length: n)
+                        continue
+                    case .rateLimited(let retryAfter):
+                        // Origin is throttling the detour fetch too (#71). Back off in place and
+                        // RETRY the detour fetch; do NOT open a fresh connection (that re-enters
+                        // the 429 churn the cache exists to remove). Give up cleanly at the cap.
+                        if recordRateLimitAndShouldGiveUp() {
+                            EngineLog.emit("[AVIOReader] Detour rate-limit gave up at offset \(curPosition) (\(rateLimitStreak) consecutive 429/503)", category: .demux)
+                            return totalRead > 0 ? Int32(totalRead) : -1
+                        }
+                        backoffBeforeReconnect(streak: rateLimitStreak, retryAfter: retryAfter)
+                        continue
+                    case .miss:
+                        if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
+                        if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
+                        // Hard transport failure: degrade to the OLD single-reconnect behavior.
+                        seekReconnect(at: curPosition)
+                        continue
+                    }
+                }
                 seekReconnect(at: curPosition)
                 continue
             }
@@ -601,6 +682,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 totalRead += copyNow
                 trimWindowLocked()
                 unproductiveReconnects = 0      // real progress
+                rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
                 winCond.broadcast()              // window may have shrunk: wake backpressure
                 winCond.unlock()
                 continue
@@ -620,6 +702,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
             if curPosition > frontier + Int64(Self.seekKeepForwardLimit) {
                 winCond.unlock()
+                // Far-forward seek. Serve from the detour cache ONLY if the block is already
+                // resident (e.g. the moov region the parser revisits); a genuine forward scrub
+                // misses and re-anchors the streaming window there, never chunk-serving forever.
+                if detourEligible {
+                    switch serveFromDetour(into: buf.advanced(by: totalRead),
+                                           maxLen: requestSize - totalRead,
+                                           at: curPosition, allowFetch: false) {
+                    case .served(let n):
+                        winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
+                        totalRead += n
+                        unproductiveReconnects = 0
+                        rateLimitStreak = 0
+                        detourTrackSequential(at: curPosition, length: n)
+                        continue
+                    case .rateLimited, .miss:
+                        break   // allowFetch:false never rate-limits; a miss falls through to reconnect
+                    }
+                }
                 seekReconnect(at: curPosition)
                 continue
             }
@@ -650,16 +750,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
             // Connection ended before EOF; reconnect at frontier. Honour Retry-After for 429/503.
             winCond.unlock()
-            if recordReconnectAndShouldGiveUp(status: status) {
-                EngineLog.emit("[AVIOReader] Persistent reconnect exhausted at offset \(frontier) status=\(status) (\(unproductiveReconnects) unproductive)\(isLive ? " [live source lost]" : "")", category: .demux)
+            // A 429/503 is rate limiting, not a dead source: drive give-up + backoff off the
+            // rate-limit streak, which (unlike unproductiveReconnects) survives the seekReconnect
+            // that parse seeks fire, so a throttled origin fails cleanly instead of looping (#71).
+            let isRateLimited = (status == 429 || status == 503)
+            let giveUp = isRateLimited ? recordRateLimitAndShouldGiveUp()
+                                       : recordReconnectAndShouldGiveUp(status: status)
+            if giveUp {
+                let streakDesc = isRateLimited ? "\(rateLimitStreak) consecutive 429/503" : "\(unproductiveReconnects) unproductive"
+                EngineLog.emit("[AVIOReader] Persistent reconnect exhausted at offset \(frontier) status=\(status) (\(streakDesc))\(isLive ? " [live source lost]" : "")", category: .demux)
                 if isLive {
                     return totalRead > 0 ? Int32(totalRead) : AVERROR_EIO_VALUE
                 }
                 return totalRead > 0 ? Int32(totalRead) : -1
             }
-            EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(unproductiveReconnects) retryAfter=\(retryAfter)s)", category: .demux)
+            let backoffStreak = isRateLimited ? rateLimitStreak : unproductiveReconnects
+            EngineLog.emit("[AVIOReader] Persistent conn ended at offset \(frontier) status=\(status), reconnecting (streak=\(backoffStreak) retryAfter=\(retryAfter)s)", category: .demux)
             lastUnplannedReconnectAt = Date()
-            backoffBeforeReconnect(streak: unproductiveReconnects, retryAfter: retryAfter)
+            backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
             startPersistentConnection(at: frontier)
         }
 
@@ -729,6 +837,117 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.1)
             slept += 0.1
         }
+    }
+
+    /// Increments the consecutive 429/503 streak; returns true once the bounded cap is hit.
+    /// Demux-thread-only. Deliberately NOT reset by `seekReconnect` (parse seeks must not mask a
+    /// throttled origin into an endless reconnect loop, #71); only real read progress clears it.
+    /// Internal (not private) so the bounded give-up is unit-tested without a live origin.
+    func recordRateLimitAndShouldGiveUp() -> Bool {
+        rateLimitStreak += 1
+        return rateLimitStreak > Self.rateLimitMaxStreak
+    }
+
+    // MARK: - Detour Block Cache (AetherEngine#69)
+
+    private enum DetourServe { case served(Int); case rateLimited(TimeInterval); case miss }
+    private enum DetourFetch { case ok(Data); case rateLimited(TimeInterval); case failed }
+
+    /// Serve `[offset, offset+maxLen)` (clamped to one 4 MB block) from the detour cache,
+    /// fetching the block over the pooled keep-alive chunkSession on a miss when `allowFetch`.
+    /// Demux-thread call; may block on the network via `detourFetchBlock` (no lock held across it).
+    /// Returns `.miss` (never `.served(0)`) so callers fall back to a single reconnect.
+    private func serveFromDetour(into dst: UnsafeMutablePointer<UInt8>, maxLen: Int,
+                                 at offset: Int64, allowFetch: Bool) -> DetourServe {
+        guard fileSize > 0, offset < fileSize, maxLen > 0 else { return .miss }
+
+        // Resident-block hit: pure copy, no network.
+        if let n = detourCache.serveCached(into: dst, maxLen: maxLen, at: offset) {
+            return .served(n)
+        }
+        guard allowFetch else { return .miss }
+
+        let blockStart = (offset / Int64(Self.detourBlockSize)) * Int64(Self.detourBlockSize)
+        let blockLen = Int(min(Int64(Self.detourBlockSize), fileSize - blockStart))
+        let block: Data
+        switch detourFetchBlock(from: blockStart, size: blockLen) {
+        case .ok(let fetched):
+            // Cache only FULL-length blocks. A truncated 206 cached verbatim would shadow the
+            // re-fetch path for its uncovered tail, so the parser ping-ponging into that tail
+            // would cost one reconnect per read, reintroducing a mild storm (#69 review). Serve
+            // the short body once; the next read of this block re-fetches.
+            if fetched.count == blockLen, !isFullyClosed {
+                detourCache.insert(blockStart / Int64(Self.detourBlockSize), fetched)
+                #if DEBUG
+                EngineLog.emit("[AVIOReader] detour fill block=\(blockStart / Int64(Self.detourBlockSize)) offset=\(blockStart) size=\(fetched.count) (resident=\(detourCache.residentCount))", category: .demux)
+                #endif
+            }
+            block = fetched
+        case .rateLimited(let retryAfter):
+            return .rateLimited(retryAfter)
+        case .failed:
+            return .miss
+        }
+
+        let inBlock = Int(offset - blockStart)
+        guard inBlock >= 0, inBlock < block.count else { return .miss }
+        let n = min(maxLen, block.count - inBlock)
+        block.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                dst.update(from: base.advanced(by: inBlock).assumingMemoryBound(to: UInt8.self), count: n)
+            }
+        }
+        return .served(n)
+    }
+
+    /// Single Range fetch for a detour block over the pooled chunkSession. Surfaces 429/503 with
+    /// its Retry-After so the caller can back off in place rather than churn the connection (#71).
+    private func detourFetchBlock(from offset: Int64, size: Int) -> DetourFetch {
+        let rangeEnd = offset + Int64(size) - 1
+        var request = URLRequest(url: requestURL())
+        request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
+        request.timeoutInterval = min(15, chunkRequestTimeout)
+        applyExtraHeaders(&request)
+        do {
+            let (data, response) = try syncRequest(request, budget: chunkRequestTimeout)
+            if let http = response as? HTTPURLResponse {
+                let status = http.statusCode
+                if status == 429 || status == 503 {
+                    return .rateLimited(Self.parseRetryAfter(http))
+                }
+                if status != 200 && status != 206 {
+                    if Self.isResolvedExpiryStatus(status) { invalidateResolvedURL() }
+                    return .failed
+                }
+                // VOD: 200 at offset > 0 = server ignored Range; silent corruption. Reject.
+                if status == 200 && offset > 0 && !isLive {
+                    EngineLog.emit("[AVIOReader] detour: server ignored Range (200 for offset \(offset)); rejecting", category: .demux, level: .verbose)
+                    return .failed
+                }
+            }
+            addBytesFetched(data.count)
+            return .ok(data)
+        } catch {
+            return .failed
+        }
+    }
+
+    /// Tracks contiguity of detour reads for the re-anchor heuristic. Shared by BOTH the backward
+    /// and far-forward branches; the re-anchor check itself lives only in the backward branch on
+    /// purpose, so a forward-accumulated run later met by a contiguous backward read is an intended
+    /// re-anchor, not an accident. A non-contiguous read restarts the run. Demux-thread-only.
+    private func detourTrackSequential(at offset: Int64, length: Int) {
+        if offset == detourRunNextExpected {
+            detourRunBytes += Int64(length)
+        } else {
+            detourRunBytes = Int64(length)
+        }
+        detourRunNextExpected = offset + Int64(length)
+    }
+
+    private func detourResetRun() {
+        detourRunNextExpected = -1
+        detourRunBytes = 0
     }
 
     // MARK: - Persistent Connection (lifecycle + delegate callbacks)
@@ -1267,6 +1486,81 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if let err = delegate.error { throw err }
         guard let response = delegate.response else { throw AVIOReaderError.noResponse }
         return (delegate.body, response)
+    }
+}
+
+// MARK: - Detour Block Cache
+
+/// Fixed-block LRU cache backing the persistent reader's detour path (AetherEngine#69). Random-access
+/// parse reads on a non-faststart remote MP4 are served from here over the pooled keep-alive session
+/// instead of tearing down the anchored streaming connection. Thread-safe via a single leaf lock
+/// (demux-thread reads + teardown-thread `clear`); never held across the network. Stores only
+/// full-size blocks (the fetch/insert decision is the caller's), so eviction can't shadow a
+/// re-fetchable short-body tail. The copy + eviction math is pure and unit-tested without a network.
+final class DetourBlockCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var blocks: [Int64: Data] = [:]
+    private var lru: [Int64] = []
+    private let maxBlocks: Int
+    let blockSize: Int
+
+    init(blockSize: Int, maxBlocks: Int) {
+        self.blockSize = blockSize
+        self.maxBlocks = maxBlocks
+    }
+
+    /// Returns the resident block for `idx` and bumps its recency, or nil on a miss.
+    func block(_ idx: Int64) -> Data? {
+        lock.lock(); defer { lock.unlock() }
+        guard let data = blocks[idx] else { return nil }
+        if let i = lru.firstIndex(of: idx) {
+            lru.remove(at: i)
+            lru.append(idx)
+        }
+        return data
+    }
+
+    /// Inserts a (full-size) block, evicting the least-recently-used tail beyond `maxBlocks`.
+    func insert(_ idx: Int64, _ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        if blocks[idx] == nil { lru.append(idx) }
+        blocks[idx] = data
+        while lru.count > maxBlocks {
+            blocks.removeValue(forKey: lru.removeFirst())
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        blocks.removeAll()
+        lru.removeAll()
+        lock.unlock()
+    }
+
+    var residentCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return blocks.count
+    }
+
+    /// Copy up to `maxLen` bytes covering `offset` from the resident block into `dst`, returning the
+    /// byte count. Returns nil if the covering block is not resident, or if `offset` lands in the
+    /// uncovered tail of a short block (so the caller re-fetches rather than serving stale bytes).
+    /// One call serves at most to the block boundary; a read spanning blocks is driven by the caller
+    /// re-entering at the advanced offset. Pure given the cache contents; bumps recency on a hit.
+    func serveCached(into dst: UnsafeMutablePointer<UInt8>, maxLen: Int, at offset: Int64) -> Int? {
+        guard maxLen > 0, offset >= 0 else { return nil }
+        let idx = offset / Int64(blockSize)
+        let blockStart = idx * Int64(blockSize)
+        guard let blk = block(idx) else { return nil }
+        let inBlock = Int(offset - blockStart)
+        guard inBlock >= 0, inBlock < blk.count else { return nil }
+        let n = min(maxLen, blk.count - inBlock)
+        blk.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                dst.update(from: base.advanced(by: inBlock).assumingMemoryBound(to: UInt8.self), count: n)
+            }
+        }
+        return n
     }
 }
 
