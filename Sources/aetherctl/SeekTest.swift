@@ -18,6 +18,11 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     let maxLedgerDriftAbs = UncheckedBox<Double>(0)
     let ledgerCount = UncheckedBox<Int>(0)
     let parkCount = UncheckedBox<Int>(0)
+    // #65 fix signals: did the VOD wedge breaker fire and recover (Piece A producer re-anchor + Piece B
+    // engine seek-deadline clock reconcile)? A wedge that is BROKEN + re-anchored is the fix engaging.
+    let wedgeBrokenCount = UncheckedBox<Int>(0)
+    let reanchorCount = UncheckedBox<Int>(0)
+    let seekReconcileCount = UncheckedBox<Int>(0)
     // EngineLog.handler fires from many threads concurrently (demuxer, producer, server, audio). Serialize the
     // whole body: unsynchronized append to the Swift arrays below corrupts the heap (SIGTRAP) under load.
     let handlerLock = NSLock()
@@ -62,6 +67,10 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
         }
         // "[HLSSegmentProducer] #65 backpressure PARK ...". Count abnormal parks (VOD wedge signature).
         if line.contains("#65 backpressure PARK") { parkCount.value += 1 }
+        // Fix engaging: the wedge breaker exited the pump, the host re-anchored, and/or the seek deadline reconciled.
+        if line.contains("#65 backpressure WEDGE BROKEN") { wedgeBrokenCount.value += 1 }
+        if line.contains("#65 backpressure wedge: re-anchoring") { reanchorCount.value += 1 }
+        if line.contains("#65 seek did not land") { seekReconcileCount.value += 1 }
     }
 
     print("")
@@ -252,6 +261,13 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     print("  clockLead settle = \(String(format: "%.2f", settleClockLead))s  (headless ~0 by design; #65 is presented-vs-clock, invisible to ct-src)")
     print("  ledger segments opened = \(ledgerCount.value)  maxContentDrift = \(String(format: "%.3f", maxLedgerDriftAbs.value))s  (the POSITIVE Root-B signal)")
     print("  abnormal backpressure parks (VOD wedge signature) = \(parkCount.value)")
+    print("  #65 FIX signals: wedge breaks=\(wedgeBrokenCount.value)  producer re-anchors=\(reanchorCount.value)  seek-deadline reconciles=\(seekReconcileCount.value)")
+    let fixEngaged = wedgeBrokenCount.value > 0 || reanchorCount.value > 0 || seekReconcileCount.value > 0
+    if fixEngaged {
+        print("  >> #65 FIX ENGAGED: the VOD wedge breaker / seek-deadline reconcile fired during the burst. A")
+        print("     non-zero break+re-anchor with playback resuming afterward (clock advancing, no sustained PARK")
+        print("     escalation) is the recovery the fix is meant to produce. Confirm on device that picture resumes.")
+    }
     if fullRestart == 0 {
         print("  >> INCONCLUSIVE: 0 producer restarts. The file was fully produced before the burst, so")
         print("     every seek hit the cache and the cross-epoch cascade never fired. Re-run with a LONGER")
@@ -266,9 +282,15 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
         print("     the burst. Buffered bytes from a superseded epoch fold with the latest scalar -> picture")
         print("     leads the clock. The live seam-history port is the fix.")
     } else if parkCount.value > 0 {
-        print("  >> PRODUCER WEDGE: invariant shift AND ~zero ledger drift, but \(parkCount.value) abnormal backpressure")
-        print("     park(s). The 6s symptom is the frozen-clock/stall artifact, not a content offset. Fix the VOD")
-        print("     backpressure wedge (add a watchdog / re-base the producer onto AVPlayer's index), not the fold.")
+        if fixEngaged {
+            print("  >> PRODUCER WEDGE DETECTED AND BROKEN: \(parkCount.value) abnormal park(s) but the breaker fired")
+            print("     (\(wedgeBrokenCount.value) break(s), \(reanchorCount.value) re-anchor(s), \(seekReconcileCount.value) seek reconcile(s)).")
+            print("     This is the #65 fix recovering the livelock; verify on device that playback actually resumes.")
+        } else {
+            print("  >> PRODUCER WEDGE (UNRECOVERED): invariant shift AND ~zero ledger drift, but \(parkCount.value) abnormal")
+            print("     backpressure park(s) and the breaker did NOT fire. The 6s symptom is the frozen-clock/stall")
+            print("     artifact. Either the park stayed under the break threshold or the fix is not in this build.")
+        }
     } else {
         print("  >> NO ENGINE-LEVEL DIVERGENCE REPRODUCED: invariant shift, ledger drift ~0, no wedge. The headless")
         print("     harness did not surface #65 in any engine signal. The avBufAhead+zeros from #65's earlier diag")

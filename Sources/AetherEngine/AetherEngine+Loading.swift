@@ -209,6 +209,8 @@ extension AetherEngine {
                 self.setNativeScrubSeek(inFlight: inFlight, target: target)
             }
         }
+        // #65: let the producer read AVPlayer's real position off-main when it re-anchors on a backpressure wedge.
+        session.currentPlaybackPositionProvider = { [renderedPositionMirror] in renderedPositionMirror.get() }
         session.onPlaylistShiftRebased = { [weak self] seconds, seamOutputSeconds in
             Task { @MainActor in
                 guard let self = self else { return }
@@ -335,6 +337,8 @@ extension AetherEngine {
         host.$renderedTime
             .sink { [weak self] value in
                 guard let self = self else { return }
+                // #65: mirror AVPlayer's rendered (playlist-axis) position for off-main wedge re-anchoring.
+                self.renderedPositionMirror.set(value)
                 let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift
                     ?? self.playlistShiftSeconds
                 self.clock.sourceTime = value + shift

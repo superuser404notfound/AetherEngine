@@ -184,6 +184,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `playlistShiftSeconds` onto the source-PTS `seekTarget`.
     var onSeekStateChanged: (@Sendable (Bool, Double?) -> Void)?
 
+    /// AVPlayer's rendered (playlist-axis) position, readable off the main actor. Wired by AetherEngine
+    /// to a thread-safe mirror of the host clock. Used to re-anchor the producer on AVPlayer's REAL
+    /// position when a VOD backpressure wedge breaks (#65).
+    var currentPlaybackPositionProvider: (@Sendable () -> Double?)?
+
     /// Deep copy of AVCodecParameters decoupled from the demuxer's lifetime. Raw pointers into
     /// AVStreams become use-after-free on live reopen (avformat_close_input frees them while the
     /// continuation producer still reads via saved configs). Freed after pump unwinds.
@@ -231,6 +236,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// Coalesces burst seek restart requests (#35). Mutated only under `restartLock`.
     private var restartCoalescer = RestartCoalescer()
+
+    /// #65 wedge re-anchor storm guard (under `restartLock`). If AVPlayer never resumes requesting even
+    /// after we re-anchor the producer on its real position, the producer re-wedges at the same spot;
+    /// cap consecutive re-anchors to the same position so we stop spinning restarts (the clock is already
+    /// reconciled by the engine-seek deadline path, so the engine no longer lies even if we give up here).
+    var consecutiveWedgeReanchors = 0
+    var lastWedgeReanchorPosition = -Double.greatestFiniteMagnitude
+    static let maxConsecutiveWedgeReanchors = 5
 
     /// Bumped by `stop()` under `restartLock`. Restarts re-validate before installing the new
     /// producer; a mid-restart stop() wins and the restart unwinds.
@@ -1265,6 +1278,22 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private func segmentStartSecondsLocked(_ idx: Int) -> Double? {
         guard idx >= 0, idx < segmentPlan.count else { return nil }
         return segmentPlan[idx].startSeconds
+    }
+
+    /// Segment index whose plan span covers `seconds` on the AVPlayer/playlist axis (the same axis
+    /// `segmentStartSecondsLocked` uses). Last segment whose `startSeconds <= seconds`, clamped. Used to
+    /// re-anchor the producer on AVPlayer's real position after a backpressure wedge (#65). Thread-safe.
+    func segmentIndexForPlaylistTime(_ seconds: Double) -> Int {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        guard !segmentPlan.isEmpty else { return 0 }
+        var lo = 0
+        var hi = segmentPlan.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if segmentPlan[mid].startSeconds <= seconds { lo = mid + 1 } else { hi = mid }
+        }
+        return min(max(lo - 1, 0), segmentPlan.count - 1)
     }
 
     // Driven exclusively through requestRestart(at:) so bursts coalesce (#35).

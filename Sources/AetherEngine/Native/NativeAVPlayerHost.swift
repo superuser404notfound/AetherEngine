@@ -509,16 +509,41 @@ final class NativeAVPlayerHost {
     /// Resolve only when the seek physically lands (loopback source lands seeks seconds after the call; issue #37).
     /// seekInFlight suppresses the periodic observer across the wait; only the latest seekGeneration clears it.
     func seek(to seconds: Double) async {
+        _ = await seek(to: seconds, deadlineSeconds: nil)
+    }
+
+    /// Deadline-bounded seek (#65). Returns `true` if AVPlayer physically landed (or no deadline was set),
+    /// `false` if `deadlineSeconds` elapsed with the seek still pending. On a deadline expiry the in-flight
+    /// `avPlayer.seek` is NOT cancelled (it lands later if it ever can), but `seekInFlight` is cleared for the
+    /// latest generation so the periodic observer resumes publishing AVPlayer's real position, letting the
+    /// engine reconcile a clock that would otherwise stay latched at an unreachable optimistic target.
+    @discardableResult
+    func seek(to seconds: Double, deadlineSeconds: Double?) async -> Bool {
         let target = CMTime(seconds: seconds, preferredTimescale: 600)
         seekGeneration &+= 1
         let gen = seekGeneration
         seekInFlight = true
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+        let resumeGuard = SeekResumeGuard()
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            if let deadlineSeconds, deadlineSeconds > 0 {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: UInt64(deadlineSeconds * 1_000_000_000))
+                    guard resumeGuard.claim() else { return } // landing already won the race
+                    // Clear seekInFlight for the latest generation so the periodic observer un-gates and the
+                    // engine can fold AVPlayer's real position back in. Do not cancel the underlying seek.
+                    if let self, gen == self.seekGeneration { self.seekInFlight = false }
+                    cont.resume(returning: false)
+                }
+            }
             // Zero tolerances: unbounded tolerances caused AVPlayer to land on arbitrary sync samples for loopback HLS-fMP4 (openradar 44904505).
             avPlayer.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self else { cont.resume(); return }
-                    // Superseded seek: just unblock, leave the newer generation's flags intact.
+                    guard let self else {
+                        if resumeGuard.claim() { cont.resume(returning: true) }
+                        return
+                    }
+                    // Settle the clock on a real landing even if the deadline already returned (late landing).
+                    // Superseded seek: leave the newer generation's flags intact.
                     if gen == self.seekGeneration {
                         self.seekInFlight = false
                         let landed = self.avPlayer.currentTime().seconds
@@ -528,7 +553,7 @@ final class NativeAVPlayerHost {
                             self.renderedTime = landed
                         }
                     }
-                    cont.resume()
+                    if resumeGuard.claim() { cont.resume(returning: true) }
                 }
             }
         }

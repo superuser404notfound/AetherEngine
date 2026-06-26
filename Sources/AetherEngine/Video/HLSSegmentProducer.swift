@@ -326,10 +326,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Max segments ahead of AVPlayer's highest fetched segment (cut from 20 to 10; 4K HEVC ~10 MB/seg = 200 MB old buffer).
     private static let bufferAheadSegments = 10
 
-    /// #65 stall diag: VOD has no watchdog to break a permanent backpressure park (every pump watchdog is
-    /// isLive-gated). Only log a park once it exceeds ~2 segment durations of zero playback progress, so normal
+    /// #65 stall diag: only log a park once it exceeds ~2 segment durations of zero playback progress, so normal
     /// backpressure (releases within one segment) stays silent and a real wedge surfaces its frozen tuple.
     private static let backpressureWedgeLogThresholdSeconds = 12
+
+    /// #65 watchdog: break a VOD backpressure park once the consumer fetch target has been frozen this long.
+    /// Set above the log threshold so the diag tuple surfaces first. The host then re-anchors the producer on
+    /// AVPlayer's real position; a slow-but-advancing consumer never trips the detector (see BackpressureWedgeDetector).
+    private static let backpressureWedgeBreakThresholdSeconds = 24
 
     private let pumpQueue = DispatchQueue(
         label: "AetherEngine.HLSSegmentProducer.pump",
@@ -339,6 +343,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let stateLock = NSLock()
     private var pumpStarted = false
     private var shouldStop = false
+    /// #65: set when awaitBackpressureRelease breaks a frozen VOD park. runPumpLoop maps the resulting
+    /// muxer-nil exit to .backpressureWedge so the host re-anchors rather than treating it as a failure.
+    private var _backpressureWedgeBroken = false
 
     /// Video packet write counter; excludes bridge packets (different path). Read under packetCounterLock.
     private let packetCounterLock = NSLock()
@@ -395,6 +402,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         case sourceReplay
         /// Pump read packets but finalized no segment for stall window (hostile SSAI ad pod wedge).
         case segmentStall
+        /// VOD backpressure park frozen past the break threshold (consumer fetch target stuck, AVPlayer
+        /// wedged and issuing no forward request). Host re-anchors the producer on AVPlayer's real
+        /// position (#65). Live keeps its own watchdogs; this only fires on VOD.
+        case backpressureWedge
 
         var description: String {
             switch self {
@@ -405,6 +416,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             case .keyframeStarvation: return "keyframeStarvation"
             case .sourceReplay: return "sourceReplay"
             case .segmentStall: return "segmentStall"
+            case .backpressureWedge: return "backpressureWedge"
             }
         }
     }
@@ -671,8 +683,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// it) is distinguishable from healthy backpressure (cacheTarget climbing toward target). VOD only; live keeps
     /// its own watchdogs.
     private func awaitBackpressureRelease(target: Int, head: Int, context: String) -> Bool {
+        // Already broken on this session (e.g. a teardown-flush ensureMuxer call): stay broken, don't re-park.
+        if isBackpressureWedgeBroken() { return false }
         var parked = 0
         var nextLogAt = Self.backpressureWedgeLogThresholdSeconds
+        // #65 Piece A: a genuine VOD wedge is the consumer fetch target frozen past the break threshold.
+        // The detector resets whenever the target advances, so healthy backpressure (slow CDN, cold cache)
+        // keeps the target climbing and never trips. Live keeps its own pump watchdogs.
+        var wedgeDetector = BackpressureWedgeDetector(
+            breakThresholdSeconds: Self.backpressureWedgeBreakThresholdSeconds,
+            initialTarget: cache.targetIndex
+        )
         while !checkShouldStop() {
             if cache.awaitFetchHighWater(reaching: target, timeout: 1.0) {
                 if parked >= Self.backpressureWedgeLogThresholdSeconds {
@@ -686,18 +707,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 return true
             }
             parked += 1
+            let cacheTarget = cache.targetIndex
             if !isLive, parked >= nextLogAt {
                 nextLogAt += 10
                 EngineLog.emit(
                     "[HLSSegmentProducer] #65 backpressure PARK (\(context)) head=\(head) "
-                    + "target=\(target) cacheTarget=\(cache.targetIndex) "
+                    + "target=\(target) cacheTarget=\(cacheTarget) "
                     + "highStored=\(cache.highestStoredIndex) cached=\(cache.count) parked=\(parked)s "
-                    + "(no playback progress; VOD has no watchdog to break this)",
+                    + "(no playback progress)",
                     category: .session
                 )
             }
+            if !isLive, wedgeDetector.observe(currentTarget: cacheTarget) {
+                markBackpressureWedgeBroken()
+                EngineLog.emit(
+                    "[HLSSegmentProducer] #65 backpressure WEDGE BROKEN (\(context)) head=\(head) "
+                    + "target=\(target) cacheTarget=\(cacheTarget) parked=\(parked)s; "
+                    + "exiting pump for host re-anchor on AVPlayer position",
+                    category: .session
+                )
+                return false
+            }
         }
         return false
+    }
+
+    private func markBackpressureWedgeBroken() {
+        stateLock.lock()
+        _backpressureWedgeBroken = true
+        stateLock.unlock()
+    }
+
+    private func isBackpressureWedgeBroken() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _backpressureWedgeBroken
     }
 
     /// Allocate (or re-allocate at SSAI program switch) the session's mp4 muxer.
@@ -1910,12 +1954,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         }
 
-        // muxerFailed during stop() is teardown, not an error.
+        // muxerFailed from a backpressure break is a wedge (host re-anchors) or a stop (teardown), not a real failure.
         if case .muxerFailed = exitReason {
             stateLock.lock()
             let stopped = shouldStop
+            let wedged = _backpressureWedgeBroken
             stateLock.unlock()
             if stopped { exitReason = .stopRequested }
+            else if wedged { exitReason = .backpressureWedge }
         }
 
         freeMergeLookaheads()

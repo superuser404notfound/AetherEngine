@@ -310,6 +310,15 @@ public final class AetherEngine: ObservableObject {
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
     var nativeVideoSession: HLSVideoEngine?
 
+    /// #65: thread-safe mirror of AVPlayer's rendered (playlist-axis) position, updated on the main actor by
+    /// the $renderedTime sink. Read off-main by the producer when it re-anchors on a backpressure wedge.
+    let renderedPositionMirror = AtomicDouble(0)
+
+    /// #65: how long a native VOD seek may stay pending before the engine checks for a wedge. A normal
+    /// loopback seek lands in ~1-2s and slow-but-buffering seeks refill within it; only a starved seek
+    /// (no forward buffer after the budget) is reconciled.
+    static let nativeSeekReconcileBudgetSeconds: Double = 8.0
+
     /// Native AVPlayer + AVPlayerLayer host. Non-nil between load and stop.
     var nativeHost: NativeAVPlayerHost?
 
@@ -1283,8 +1292,43 @@ public final class AetherEngine: ObservableObject {
         } else if let host = softwareHost {
             await host.seek(to: clockTarget)
         } else {
-            // Await real AVPlayer landing so isSeeking spans it (#37/#38).
-            await nativeHost?.seek(to: clockTarget)
+            // Await real AVPlayer landing so isSeeking spans it (#37/#38), but bound the wait (#65): a seek
+            // AVPlayer can never land (producer-wedge starvation) must not leave the optimistic clock latched
+            // forever. A normal/slow-but-buffering seek lands or keeps buffering well within the budget.
+            let landed = await nativeHost?.seek(to: clockTarget,
+                                                deadlineSeconds: Self.nativeSeekReconcileBudgetSeconds) ?? true
+            if !landed {
+                // Deadline expired. Only the surviving (winning) generation reconciles; a superseded seek
+                // returns at the guard below and lets the newer seek own the final state.
+                guard loadGeneration == gen, seekGeneration == seekGen else { return }
+                if let host = nativeHost,
+                   seekIsWedged(renderedTime: host.renderedTime, bufferedEnd: host.bufferedEnd) {
+                    // Genuine wedge: snap the clock back to AVPlayer's REAL rendered position (not the
+                    // unreachable optimistic target) and re-anchor the producer there.
+                    let avpReal = host.renderedTime
+                    nativeClockSeconds = avpReal
+                    clock.currentTime = avpReal + playlistShiftSeconds
+                    clock.sourceTime = avpReal + playlistShiftSeconds
+                    setProgrammaticSeek(inFlight: false, target: nil)
+                    // Hand state to AVPlayer's ACTUAL transport status, not the phantom .playing the normal
+                    // finalize forces nor the stuck .seeking we entered with: the $timeControlStatus sink is
+                    // gated on state already being .playing/.paused, so leaving .seeking would latch it there
+                    // forever even after the producer re-anchor recovers playback.
+                    state = (host.timeControlStatus == .paused) ? .paused : .playing
+                    isBuffering = host.timeControlStatus == .waitingToPlayAtSpecifiedRate
+                    reanchorProducerToPlaylistTime(avpReal)
+                    EngineLog.emit(
+                        "[AetherEngine] #65 seek did not land within \(Self.nativeSeekReconcileBudgetSeconds)s "
+                        + "and AVPlayer is starved (rendered=\(String(format: "%.2f", avpReal))s "
+                        + "buffered=\(String(format: "%.2f", host.bufferedEnd))s); reconciled clock to rendered "
+                        + "position and re-anchored producer",
+                        category: .engine
+                    )
+                    return
+                }
+                // Slow-but-buffering: preserve the #37/#38 await-real-landing contract.
+                await nativeHost?.seek(to: clockTarget)
+            }
         }
         // Guard: stop/load during the await tore the session down; writing clock state would publish a phantom.
         // A superseding seek owns the final state.
@@ -1325,6 +1369,17 @@ public final class AetherEngine: ObservableObject {
         // Seek has physically landed.
         state = .playing
         setProgrammaticSeek(inFlight: false, target: nil)
+    }
+
+    /// #65: re-base the loopback producer onto AVPlayer's real (playlist-axis) position after a seek-deadline
+    /// wedge reconcile, so the segments AVPlayer is starved for get produced. requestRestart does blocking
+    /// teardown (old.stop + waitForFinish up to 5s) and is designed to run off-main, so dispatch it detached.
+    private func reanchorProducerToPlaylistTime(_ seconds: Double) {
+        guard let session = nativeVideoSession else { return }
+        Task.detached {
+            let idx = session.segmentIndexForPlaylistTime(seconds)
+            session.requestRestart(at: idx)
+        }
     }
 
     /// Deprecated alias. The engine clock is now unified onto source PTS; prefer `seek(to:)` in new code.
