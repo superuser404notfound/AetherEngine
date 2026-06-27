@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.5.5] — 2026-06-27
+
+### Fixed
+
+- **Selecting an embedded subtitle on a network ISO (Blu-ray / DVD over http) never showed cues, while the same disc worked from a local ISO (#76).** The embedded subtitle side-demuxer logged `embedded subtitle reader exited (cancelled=true) packetsRead=0`: it was superseded by a seek / title switch / re-select before it read a single packet. The open was glacially slow on a remote disc. It re-opened with the full 50 MB / 60 s probe, and the disc's sparse `hdmv_pgs_subtitle` streams never resolve codec parameters, so `find_stream_info` read to the full 50 MB over http chasing them (the #75 pattern). It then ran the MKV cue-index prewarm seek (`duration × 0.5`), a cold range read to the middle of a 32 GB ISO that buys nothing for a concat MPEG-TS / VOB disc. Together the open ran tens of seconds; locally both are instant, so it only failed over http. `EmbeddedSubtitleDecoder` needs only codec id / type (carried in the container header / MPEG-TS PMT and resolved by the open itself) and seeds bitmap canvas dims from the source video size, so the full chase is pure cost. The side-demuxer now caps its probe to 4 MB / 5 s (honouring an even tighter caller budget), skips the cue-index prewarm seek for disc sources, and opens the same BD/DVD title the user is watching rather than always title 0. Applied to both the inline reader and the native multi-decode (#55) reader. Reported by the AetherPlayer community.
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.5.5))
+
 ## [4.5.4] — 2026-06-26
 
 ### Fixed
