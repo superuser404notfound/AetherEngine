@@ -23,7 +23,8 @@ Interlaced sources (DVD-rip MPEG-2, SD broadcast) are deinterlaced through a per
 | H.264, HEVC (SDR) | BT.709 |
 | HEVC Main10 (HDR10) | BT.2020 / PQ |
 | HEVC Main10 (HDR10+) | BT.2020 / PQ + per-frame ST 2094-40 SEI stream-copied |
-| HEVC Main10 (DV P5 / P8.1 / P8.4) | `dvh1` / `dvhe` track type with the source's `dvcC` box preserved |
+| HEVC Main10 (DV P5) | `dvh1` track type (DV-only, IPT-PQ base; forced even on SDR panels) |
+| HEVC Main10 (DV P8.1 / P8.4 / P7) | `hvc1` primary + `dvvC` box, DV engaged via `SUPPLEMENTAL-CODECS` on DV panels, plain HDR10 / HLG base elsewhere |
 | HEVC Main10 (HLG) | BT.2020 / HLG |
 | AV1 HDR | BT.2020 / PQ |
 
@@ -31,9 +32,16 @@ HDR-to-SDR mapping is handled by AVPlayer and the system compositor according to
 
 ### Dolby Vision signaling
 
-For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord`. On DV-capable displays, `HLSVideoEngine` writes the matching ISO BMFF `dvcC` box into the HLS-fMP4 sample description and emits a bare `dvh1.<profile>.<dvLevel>` codec tag for Profile 5, 8.1, and 8.4 so AVKit's auto-criteria reads `dvh1` from the sample entries and engages DV mode directly. On non-DV displays the engine downgrades to plain `hvc1`: Profile 5 is unplayable there (no HDR10 base), and Profiles 8.1 / 8.4 fall back to their HDR10 / HLG base layer with AVPlayer's tone-mapping path. AV1+DV (Profile 10.0 / 10.1 / 10.4) uses the parallel `dav1` / `av01` track type plus `dvvC` box on hardware-AV1 hosts.
+For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord`, and the route depends on the profile's base-layer compatibility:
+
+- **Profile 5** (DV-only, IPT-PQ, no base layer) emits a bare `dvh1.05.<dvLevel>` codec tag in the primary `CODECS` attribute with the `dvcC` box preserved. `dvh1` is forced even on non-DV panels (AVPlayer's system DV decoder tonemaps IPT-PQ internally; without `dvh1` the IPT chroma reads as YCbCr and shows a green / purple cast), so P5-on-non-DV is routed through a media playlist to dodge the `-11868` variant rejection.
+- **Profiles 8.1 / 8.4** (HDR10- / HLG-compatible base) emit `hvc1.2.4.L<level>` as the primary `CODECS` tag. On a DV-capable display the muxer writes the `dvvC` box and the variant carries `dvh1.08.<dvLevel>/db1p` (8.1) or `/db4h` (8.4) in `SUPPLEMENTAL-CODECS`, which is what makes AVKit engage DV. On a non-DV display the `dvvC` is stripped (a lone `hvc1` + `dvvC` still trips `-11868`) and the stream plays as its plain HDR10 / HLG base with AVPlayer's tone-mapping.
+
+AV1+DV emits a bare `dav1.10.<dvLevel>` primary for Profile 10.0 (DV-only) and Profile 10.1 (HDR10-compat base) with no supplemental entry, and an `av01...` primary plus `dav1.10.<dvLevel>/db4h` in `SUPPLEMENTAL-CODECS` for Profile 10.4 (HLG-compat base), on hardware-AV1 hosts.
 
 **Profile 7** (dual-layer, the common UHD-Blu-ray remux profile) has no decoder on any Apple platform, so the engine converts it to single-layer **Profile 8.1** live during muxing: the RPU of each video packet is rewritten with [libdovi](https://github.com/superuser404notfound/LibDovi) (`dovi_convert_rpu_with_mode`, mode 2, the same transform as `dovi_tool -m 2`), the enhancement-layer NALs are dropped, and the container `dvvC` is set to Profile 8.1. On a DV-capable display this means real Dolby Vision (`dvh1.08/db1p` supplemental) instead of the plain HDR10 base; on a non-DV display Profile 7 still falls back to its HDR10 base, unchanged. The conversion is loss-free relative to what Apple could show before (the enhancement layer was never decodable on Apple hardware), and any per-packet conversion failure falls back to the HDR10 strip. MEL and FEL sources are both handled.
+
+**SDR-compatible-base profiles** (HEVC **Profile 8.2**, AV1 **Profile 10.2**) carry a Rec.709 base layer that no Apple platform has a DV decoder for. The engine strips the `dvcC` / DV config and plays the base as plain `hvc1` / `av01` (logging `not DV-routable, playing Rec.709 base`); there is no Dolby Vision on any display for these, on DV panels and SDR panels alike.
 
 ### HDR10+ dynamic metadata
 

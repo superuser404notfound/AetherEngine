@@ -42,7 +42,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 where HW AV1 exists |
 | Video (SW) | AV1 (dav1d) without HW, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1; bwdif deinterlace |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG |
-| Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / DTS / MP3 / Opus bridge to EAC3 5.1 (default) or lossless FLAC |
+| Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / DTS / DTS-HD MA / MP3 / Opus bridge to EAC3 5.1 (default) or lossless FLAC |
 | Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
@@ -218,6 +218,8 @@ try await player.load(
 ```
 
 Direct ingest covers MPEG-TS with demuxed-audio and packed-audio renditions, in-line AES-128 clear-key decryption, and SSAI ad-pod direct play (versioned init segments, audio re-anchoring, no-cut watchdog). Unsupported encryption / fMP4 playlists surface a typed `HLSIngestError` so the host can fall back. Details in [docs/formats.md › Live ingest](docs/formats.md#live-ingest-aes-128-ssai).
+
+For an upstream AVPlayer can play natively (a standard remote `master.m3u8`, e.g. a Jellyfin live channel), `LoadOptions.nativeRemoteHLS` skips the demuxer probe and the loopback server entirely and hands the URL straight to AVPlayer, which manages the live edge and reconnect itself. Pair it with `isLive: true`.
 
 ## Used by
 

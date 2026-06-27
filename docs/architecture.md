@@ -131,6 +131,7 @@ Sources/AetherEngine/
 │   ├── UDFReader.swift                      Read-only UDF 2.50 reader (Blu-ray BDMV, including the metadata partition and fragmented-file allocation descriptors)
 │   ├── MPLSParser.swift                     Blu-ray `.mpls` playlist parser (clips, duration, PlayListMark chapters)
 │   ├── BDTitleSelector.swift               Enumerates Blu-ray playlists as selectable titles (longest first; short menu / decoy playlists filtered)
+│   ├── DiscRecognitionCache.swift           Memoises `DiscReader.wrap` per URL + title index so disc recognition does not re-run on every subtitle / track switch (load-bearing for remote-ISO track switches, #76)
 │   └── DiscInspector.swift                  Diagnostic mirror of `DiscReader.wrap` for `aetherctl disc-inspect` (titles, chapters, recognition stages)
 ├── Display/
 │   ├── DisplayCriteriaController.swift      AVDisplayManager content-rate / dynamic-range hints (native path)
@@ -146,6 +147,7 @@ Sources/AetherEngine/
 │   ├── IOReader.swift                       Public custom byte-source protocol + MediaSource (load(source:) input)
 │   ├── DataIOReader.swift                   Ready-made in-memory IOReader over an immutable Data buffer
 │   ├── FileIOReader.swift                   Seekable IOReader over a local file via FileHandle (multi-GB ISO images)
+│   ├── HTTPDiscIOReader.swift               Seekable IOReader over a remote HTTP(S) disc image with adaptive read-ahead (the network-ISO counterpart to FileIOReader)
 │   └── HLSIngest/
 │       ├── HLSLiveIngestReader.swift        Public forward-only IOReader ingesting a live HLS upstream (resolver, playlist poller, segment fetcher, companion audio-rendition reader)
 │       ├── HLSPlaylist.swift                Line-oriented RFC 8216 subset parser (master / media playlists)
@@ -164,6 +166,8 @@ Sources/AetherEngine/
 │   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments
 ├── Subtitles/
 │   ├── ASSScriptBuilder.swift               Reassembles raw ASS event cues + TrackInfo.assHeader into a complete script for whole-file renderers
+│   ├── MovTextSampleBuilder.swift           Stateless tx3g (mov_text) sample builder for the native legible-subtitle injection path (LoadOptions.prepareNativeSubtitles, #55)
+│   ├── NativeSubtitleCueStore.swift         Owns the decoded-cue array backing a native mov_text track; the producer drains it per segment cut (#55)
 │   └── SubtitleRectText.swift               Plain-text + raw ASS event-line extraction from subtitle rects, shared by the inline and sidecar decoders
 ├── Video/
 │   ├── HLSVideoEngine.swift                 Native path: session orchestrator (start/stop, producer construction + restart, shift handling)
@@ -172,6 +176,8 @@ Sources/AetherEngine/
 │   ├── HLSVideoEngine+LiveReopen.swift      Native path: live source-loss recovery (capped-backoff reopen on the same timeline)
 │   ├── CodecRoutePolicy.swift               Native path: DV / HDR / codec routing decisions (track types, CODECS strings, VIDEO-RANGE)
 │   ├── DoviRpuConverter.swift               Native path: per-packet DV Profile 7 → 8.1 RPU conversion via libdovi (NAL surgery: convert type-62 RPU, drop type-63 EL)
+│   ├── DoviRpuConverter+Probe.swift         Diagnostic DV-conversion probe (`doviConvertProbe` / `DoviConvertProbeResult`), backs `aetherctl dovitest`
+│   ├── Issue65LivelockBreakers.swift        Pure backpressure-wedge detection (`BackpressureWedgeDetector`) breaking the VOD HLS scrub-burst livelock (#65)
 │   ├── VideoSegmentProvider.swift           Native path: playlist-facing segment provider (live sliding window, restart heuristics)
 │   ├── HLSSegmentProducer.swift             Native path: pump loop reading from Demuxer, feeding MP4SegmentMuxer, cutting fragments at segment-plan boundaries; SSAI program-switch detection + no-cut watchdog
 │   ├── H264SPS.swift                        Hand-rolled H.264 SPS parser (SSAI ad-creative coded dimensions / codec config)
@@ -186,6 +192,19 @@ Sources/AetherEngine/
 └── View/
     └── AetherPlayerView.swift               Polymorphic surface: hosts either AVPlayerLayer (native) or AVSampleBufferDisplayLayer (SW)
 ```
+
+The `AetherEngineSMB` product is a separate, opt-in target so its AMSMB2 (LGPL-2.1) dependency never enters the core engine binary. Hosts that need LAN-share playback link it and hand the engine an `smb://` source via the standard `IOReader` seam:
+
+```
+Sources/AetherEngineSMB/
+├── AetherEngineSMB.swift                    Product entry point: opt-in SMB2/3 byte source, depends on AMSMB2 (libsmb2); never linked by the core engine
+├── SMBURL.swift                             Parses smb://[user[:password]@]host[:port]/share/path URLs (missing credentials default to guest)
+├── SMBConnection.swift                      Read-only SMB2/3 byte source over one share + path via AMSMB2 (per-read open/seek/close, no persistent handle)
+├── ByteRangeSource.swift                    Random-access read-only byte-source protocol, isolates the network backend from cursor / seek logic for testability
+└── SMBIOReader.swift                        Bridges a ByteRangeSource into the engine's IOReader (blocking read via a happens-before semaphore edge)
+```
+
+The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [docs/cli.md](cli.md).
 
 ## Dependencies
 

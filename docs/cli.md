@@ -21,7 +21,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Fifteen subcommands plus the bare-URL `serve` alias.
+Sixteen subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -42,7 +42,7 @@ open 'http://127.0.0.1:<port>/master.m3u8'   # macOS QuickTime
 
 `--no-dv` forces the SDR / HDR10 route even for a Dolby Vision source (compare the two playlists).
 
-`--native-subs <index>` enables `LoadOptions.prepareNativeSubtitles`, which causes the engine to mux ALL text subtitle tracks as separate language-tagged `mov_text` (tx3g) traks in the init segment (all `disposition:default=0`, none auto-displayed). The `<index>` argument (zero-based among the subtitle tracks reported by `probe`) is passed to `setNativeSubtitleSelected(track:)` after the session starts, so the diagnostic selects that track via the host API. The init segment will carry one `mov_text` trak per text subtitle stream; inspect with `mp4dump` or open the playlist in QuickTime to verify the legible `AVMediaSelection` group enumerates every language. Omit the flag to reproduce the default behavior (no native subtitle traks, muxer output byte-identical to before).
+`--native-subs <index>` turns on the native mov_text subtitle path: the engine calls `requestNativeSubtitleTrack()` before `start()` (so the init `moov` declares the tracks), then `attachAllNativeSubtitleStores()` after start. ALL text subtitle tracks are muxed as separate language-tagged `mov_text` (tx3g) traks (all `disposition:default=0`, none auto-displayed). The `<index>` value is legacy and now ignored, kept only for CLI compatibility: every non-bitmap track is always declared, and actual track selection happens via the host API in a full session, not from this flag. Inspect the init segment with `mp4dump` or open the playlist in QuickTime to verify the legible `AVMediaSelection` group enumerates every language. Omit the flag to reproduce the default behavior (no native subtitle traks, muxer output byte-identical to before).
 
 ## validate
 
@@ -84,7 +84,7 @@ Plays a source through the audio-only pipeline (default ten seconds, `--seconds 
 
 ## customio
 
-Wraps a local file in a custom `IOReader` and plays it through `load(source:)`. `--memory` reads via `DataIOReader`, `--forward-only` drops the seek capability, and `--reload` / `--switch-audio` / `--select-subs` / `--extract` exercise the optional capabilities (background reload, audio-track switch, embedded subtitles, scrub preview) end-to-end.
+Wraps a local file in a custom `IOReader` and plays it through `load(source:)`. `--memory` reads via `DataIOReader`, `--forward-only` drops the seek capability, `--audio-only` routes through the audio-only pipeline, and `--reload` / `--switch-audio` / `--select-subs` / `--extract` exercise the optional capabilities (background reload, audio-track switch, embedded subtitles, scrub preview) end-to-end.
 
 ## disc-inspect
 
@@ -96,7 +96,7 @@ Activates two subtitle tracks simultaneously on one source (primary + secondary)
 
 ## live
 
-Runs a live MPEG-TS session against a built-in fixture that serves an endless broadcast by looping a seed `.ts` with rewritten timestamps. Flags simulate the failure modes the live path hardens against: `--drop-after N` (mid-stream connection drop + reconnect), `--discontinuity-at N` (program-boundary PTS / PCR jump), `--realtime` (1x wall-clock pacing), `--dvr-window N` (timeshift), `--measure-rss` (sliding-window retention), `--reload-test` (live rejoin end to end, including the full-backlog replay shape some origins serve on reconnect). `--seed <ts>` overrides the seed clip, `--sw` forces the software live path, `--report-cache-bytes` tracks on-disk DVR footprint.
+Runs a live MPEG-TS session against a built-in fixture that serves an endless broadcast by looping a seed `.ts` with rewritten timestamps. Flags simulate the failure modes the live path hardens against: `--drop-after N` (mid-stream connection drop + reconnect), `--discontinuity-at N` (program-boundary PTS / PCR jump), `--realtime` (1x wall-clock pacing), `--dvr-window N` (timeshift), `--measure-rss` (sliding-window retention), `--reload-test` (live rejoin end to end, including the full-backlog replay shape some origins serve on reconnect). `--seed <ts>` overrides the seed clip, `--sw` forces the software live path, `--report-cache-bytes` tracks on-disk DVR footprint, `--serve-only` parks the fixture without attaching an engine (raw `curl` / `ffprobe` inspection), `--rewind-test` runs the DVR rewind-and-return matrix variant, and `--gen-highbitrate-seed` generates a ~22 Mbps 1080p H.264 MPEG-TS seed (for RSS-retention measurement) then exits.
 
 ## dvr
 
@@ -112,7 +112,7 @@ Drives a real AVPlayer (native loopback-HLS path) through a burst of rapid seeks
 
 ## hlslive
 
-Replays a synthetic SSAI ad-pod feed through the live-direct-play path to repro the FAST-channel ad-break handling (program-switch detection, muxer rotation with versioned `#EXT-X-MAP`, audio re-anchor, no-cut watchdog). `--segments N`, `--seconds N`, `--segment-seconds N` size the run; `--disc` injects discontinuities at the ad boundaries.
+Replays a synthetic SSAI ad-pod feed through the live-direct-play path to repro the FAST-channel ad-break handling (program-switch detection, muxer rotation with versioned `#EXT-X-MAP`, audio re-anchor, no-cut watchdog). `--segments a.ts,b.ts,c.ts` is required: a comma-separated list of real `.ts` segment files served in order (content / ad / content) without timestamp rewriting. `--seconds N` (default 40) and `--segment-seconds N` (default 5) size the run; `--disc i,j` marks which segment indices carry a leading `#EXT-X-DISCONTINUITY` (default: auto-detected on every file change).
 
 ## smbtest
 
