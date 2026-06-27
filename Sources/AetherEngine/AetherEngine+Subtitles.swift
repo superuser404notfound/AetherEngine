@@ -126,12 +126,18 @@ extension AetherEngine {
         let headers = loadedOptions.httpHeaders
         // Secondary never drives libass; raw ASS event lines would leak into the overlay (issue #47).
         let preserveASS = (channel == .primary) ? loadedOptions.preserveASSMarkup : false
+        // #76: bound the open probe + open the title the user is watching. Captured on MainActor here
+        // (loadedOptions / activeDiscTitleID are MainActor-isolated, the reader is nonisolated).
+        let probesize = loadedOptions.probesize
+        let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
+        let titleID = activeDiscTitleID
         let task = Task.detached(priority: .userInitiated) { [weak self] () -> Void in
             await self?.runEmbeddedSubtitleReader(
                 url: url, reader: reader, formatHint: formatHint,
                 headers: headers, streamIndex: streamIndex, startAt: startAt,
                 videoWidth: w, videoHeight: h, preserveASSMarkup: preserveASS,
-                channel: channel
+                callerProbesize: probesize, callerMaxAnalyzeDuration: maxAnalyzeDuration,
+                selectTitleID: titleID, channel: channel
             )
         }
         switch channel {
@@ -145,9 +151,15 @@ extension AetherEngine {
         url: URL, reader: IOReader?, formatHint: String?,
         headers: [String: String], streamIndex: Int32, startAt: Double,
         videoWidth: Int32, videoHeight: Int32, preserveASSMarkup: Bool = false,
+        callerProbesize: Int64? = nil, callerMaxAnalyzeDuration: Int64? = nil,
+        selectTitleID: Int? = nil,
         channel: SubtitleChannel = .primary
     ) async {
         let demuxer = Demuxer()
+        // #76: cap find_stream_info so a remote disc's sparse PGS tracks don't drag the open to the
+        // full 50 MB budget (the reader would be superseded before it reads a packet).
+        let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
+            callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
         // markClosed makes AVIO-blocked reads return promptly (Task.cancel() only fires between readPacket calls). Without it a stalled side demuxer survives track switches and keeps reconnecting into the next session.
         // Stale-task guard: if already cancelled (A->B switch where B registered first), overwriting hijacks B's abort handle, leaving B's reader unabortable.
         let registered = await MainActor.run { [weak self] () -> Bool in
@@ -168,9 +180,9 @@ extension AetherEngine {
         }
         do {
             if let reader = reader {
-                try demuxer.open(reader: reader, formatHint: formatHint)
+                try demuxer.open(reader: reader, formatHint: formatHint, profile: openProfile, selectTitleID: selectTitleID)
             } else {
-                try demuxer.open(url: url, extraHeaders: headers)
+                try demuxer.open(url: url, extraHeaders: headers, profile: openProfile, selectTitleID: selectTitleID)
             }
         } catch {
             EngineLog.emit("[AetherEngine] embedded subtitle open failed: \(error)", category: .engine)
@@ -188,8 +200,9 @@ extension AetherEngine {
         }
 
         // MKV cue index lives at EOF; without this prewarm the playhead seek lands inaccurately (same technique HLSVideoEngine uses).
+        // Skip it for disc sources (#76): a concat MPEG-TS / VOB has no EOF cue index, so the seek buys nothing and a cold mid-disc range read is expensive on a remote ISO.
         let duration = demuxer.duration
-        if duration > 0 {
+        if duration > 0, !demuxer.isDiscSource {
             demuxer.seek(to: duration * 0.5)
         }
 
@@ -601,10 +614,16 @@ extension AetherEngine {
         let h = sourceVideoHeight > 0 ? sourceVideoHeight : 1080
         let startAt = sourceTime
         let reader = customClone
+        // #76: same bounded-probe + active-title open as the inline reader.
+        let probesize = loadedOptions.probesize
+        let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
+        let titleID = activeDiscTitleID
         nativeSubtitleReadersTask = Task.detached(priority: .utility) { [weak self] in
             await self?.runNativeSubtitleReaders(
                 url: url, reader: reader, formatHint: formatHint, headers: headers,
-                pairs: pairs, startAt: startAt, videoWidth: w, videoHeight: h
+                pairs: pairs, startAt: startAt, videoWidth: w, videoHeight: h,
+                callerProbesize: probesize, callerMaxAnalyzeDuration: maxAnalyzeDuration,
+                selectTitleID: titleID
             )
         }
     }
@@ -622,9 +641,13 @@ extension AetherEngine {
         url: URL, reader: IOReader?, formatHint: String?,
         headers: [String: String],
         pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)],
-        startAt: Double, videoWidth: Int32, videoHeight: Int32
+        startAt: Double, videoWidth: Int32, videoHeight: Int32,
+        callerProbesize: Int64? = nil, callerMaxAnalyzeDuration: Int64? = nil,
+        selectTitleID: Int? = nil
     ) async {
         let demuxer = Demuxer()
+        let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
+            callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
         let registered = await MainActor.run { [weak self] () -> Bool in
             guard !Task.isCancelled, let self else { return false }
             self.nativeSubtitleReadersDemuxer = demuxer
@@ -643,9 +666,9 @@ extension AetherEngine {
         }
         do {
             if let reader = reader {
-                try demuxer.open(reader: reader, formatHint: formatHint)
+                try demuxer.open(reader: reader, formatHint: formatHint, profile: openProfile, selectTitleID: selectTitleID)
             } else {
-                try demuxer.open(url: url, extraHeaders: headers)
+                try demuxer.open(url: url, extraHeaders: headers, profile: openProfile, selectTitleID: selectTitleID)
             }
         } catch {
             EngineLog.emit("[AetherEngine] native subtitle readers open failed: \(error)", category: .engine)
@@ -657,9 +680,9 @@ extension AetherEngine {
             reader?.close()
         }
 
-        // Prewarm MKV cue index (lives at EOF), same as the inline reader.
+        // Prewarm MKV cue index (lives at EOF), same as the inline reader. Skip for disc sources (#76).
         let duration = demuxer.duration
-        if duration > 0 {
+        if duration > 0, !demuxer.isDiscSource {
             demuxer.seek(to: duration * 0.5)
         }
         let freshPlayhead = await MainActor.run { [weak self] in self?.sourceTime }

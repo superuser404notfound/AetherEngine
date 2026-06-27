@@ -54,6 +54,25 @@ struct DemuxerOpenProfile: Sendable {
         if let maxAnalyzeDuration { copy.maxAnalyzeDuration = maxAnalyzeDuration }
         return copy
     }
+
+    /// Open profile for the embedded subtitle side-demuxer (#76). `EmbeddedSubtitleDecoder`
+    /// needs only `codec_id` / `codec_type` (carried in the container header / MPEG-TS PMT,
+    /// resolved by `avformat_open_input` itself) and seeds bitmap (PGS/DVB/DVD) canvas dims
+    /// from the source video size, so the full 50 MB `find_stream_info` chase after sparse,
+    /// never-resolving subtitle streams is pure cost. On a remote disc that chase reads tens
+    /// of MB over HTTP (every PGS track keeps `has_codec_parameters` false to the budget cap,
+    /// the #75 pattern); the side reader is then superseded by a seek / title switch before it
+    /// reads a single packet, so subtitles never appear (works on a local ISO, where the open
+    /// is instant). Cap the probe to a subtitle-sized ceiling; honor an even tighter caller
+    /// budget (#68). Keeps the playback AVIO tuning (prefetch, chunk size, per-chunk timeout):
+    /// the reader does sustained paced reads, not a one-shot still fetch.
+    static func subtitleSideDemuxer(callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?) -> DemuxerOpenProfile {
+        let probeCeiling: Int64 = 4 * 1024 * 1024
+        let analyzeCeiling: Int64 = 5 * 1_000_000
+        let probesize = min(callerProbesize ?? probeCeiling, probeCeiling)
+        let analyze = min(callerMaxAnalyzeDuration ?? analyzeCeiling, analyzeCeiling)
+        return playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: analyze)
+    }
 }
 
 /// AVFormatContext wrapper. HTTP(S) uses custom AVIO via URLSession (no built-in
@@ -95,6 +114,11 @@ public final class Demuxer: @unchecked Sendable {
         discTitles = info.titles
         selectedDiscTitleIndex = info.selectedTitleIndex
     }
+
+    /// True once a disc structure (BD/DVD/UDF) was recognized at open. Disc sources concat
+    /// MPEG-TS / VOB clips and have no EOF cue index, so the MKV cue-index prewarm seek is
+    /// useless there and a cold mid-disc range read is expensive on a remote ISO (#76).
+    var isDiscSource: Bool { !discTitles.isEmpty }
 
     /// The disc's titles mapped to the public model (empty for non-disc sources).
     func discTitleInfos() -> [TitleInfo] { discTitles.map { $0.titleInfo() } }
