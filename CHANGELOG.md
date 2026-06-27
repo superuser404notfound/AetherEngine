@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.5.7] — 2026-06-27
+
+### Fixed
+
+- **On macOS the video image slid off-center during a live window resize, snapping back centered once the drag ended (#80).** The hosted video `CALayer` was added as a sublayer with no autoresizing mask, so its frame only caught up on the next `layout()` pass, a frame behind the continuously-changing view `bounds` during the drag. Because an `NSView`'s backing layer is anchored bottom-left, that one-pass lag read as the image drifting off-center while resizing. The layer now gets a flexible autoresizing mask (`[.layerWidthSizable, .layerHeightSizable]`) in the AppKit branch, so Core Animation stretches it in lockstep with the superlayer's bounds on every frame; initialized to full bounds, it starts and stays full-bounds (and centered) throughout. AppKit-only branch, so iOS/tvOS are untouched, and no effect on decode, timing, or audio. Reported by reckloon from a downstream consumer (Ocelot).
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.5.7))
+
 ## [4.5.6] — 2026-06-27
 
 ### Fixed
