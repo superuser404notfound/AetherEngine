@@ -143,7 +143,7 @@ public final class Demuxer: @unchecked Sendable {
             // Route a local DVD ISO through the disc adapter (FileIOReader keeps it
             // out of RAM). Falls back to the normal local open when not a disc.
             if url.isFileURL, let fileReader = FileIOReader(url: url),
-               let discInfo = try DiscReader.wrap(fileReader, selectTitleID: selectTitleID) {
+               let discInfo = try DiscReader.wrap(fileReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
                 adoptDiscInfo(discInfo)
                 let bridge = CustomIOReaderBridge(reader: discInfo.reader)
                 let inputFormat = av_find_input_format(discInfo.formatHint)
@@ -180,9 +180,9 @@ public final class Demuxer: @unchecked Sendable {
     /// no filename is available. `isLive` suppresses SEEK_END that latches EOF
     /// on forward-only readers (38ad60b). AetherEngine#36: DiscReader adapts
     /// DVD/BD ISOs to VOB/MPEGTS concat streams.
-    func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil) throws {
+    func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil, discCacheKey: String? = nil) throws {
         self.openProfile = profile
-        if let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID) {
+        if let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
             adoptDiscInfo(discInfo)
             let bridge = CustomIOReaderBridge(reader: discInfo.reader)
             let inputFormat = av_find_input_format(discInfo.formatHint)
@@ -207,7 +207,7 @@ public final class Demuxer: @unchecked Sendable {
         // the source is not a recognizable disc, fall through to the streaming reader.
         if !isLive, Self.isDiscImageURL(url),
            let discReader = HTTPDiscIOReader(url: url, extraHeaders: extraHeaders) {
-            if let discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID) {
+            if let discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString) {
                 adoptDiscInfo(discInfo)
                 let bridge = CustomIOReaderBridge(reader: discInfo.reader)
                 let inputFormat = av_find_input_format(discInfo.formatHint)

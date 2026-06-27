@@ -712,6 +712,11 @@ public final class AetherEngine: ObservableObject {
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
         stopInternal(keepNativeHost: priorBackendWasNative)
+        // Drop disc recognition memoized for the previous media. Track-switch reopens (audio / subtitle
+        // side demuxer) deliberately keep it so a remote ISO is parsed once per session (#76); only a
+        // genuinely new load clears it, which also keeps custom sources (shared placeholder URL) from
+        // bleeding one disc's structure into the next.
+        DiscReader.clearCache()
         // Capture generation; every suspension point re-checks for supersession.
         let gen = loadGeneration
         // For custom sources this is a synthetic placeholder; all I/O runs against the preopened probe demuxer.

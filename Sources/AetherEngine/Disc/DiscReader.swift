@@ -7,6 +7,10 @@ import Foundation
 /// No decryption: encrypted retail ISOs parse but their streams will not
 /// decode; that surfaces downstream as a normal demux/decode failure.
 enum DiscReader {
+    /// Drop every memoized disc recognition. Called when a new URL loads so a different disc at a
+    /// reused cache key can never bleed (the cross-disc safety net `selectTitle` also relies on).
+    static func clearCache() { DiscRecognitionCache.clear() }
+
     /// Cheap content sniff: the ISO9660 "CD001" signature at byte 0x8001.
     static func looksLikeISO9660(_ reader: IOReader) -> Bool {
         guard reader.seek(offset: 0x8001, whence: SEEK_SET) >= 0 else { return false }
@@ -29,7 +33,7 @@ enum DiscReader {
     /// Emits `.demux` diagnostics once the UDF anchor is confirmed so a disc image
     /// that fails recognition is debuggable (it would otherwise fall back to a raw
     /// FFmpeg open that reports a bare INVALIDDATA). Non-disc sources stay silent.
-    static func wrapBluRay(_ reader: IOReader, selectTitleID: Int? = nil) throws -> DiscInfo? {
+    static func wrapBluRay(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
         guard looksLikeUDF(reader) else { return nil }
         EngineLog.emit("[disc] UDF anchor present; attempting Blu-ray BDMV", category: .demux)
         let udf: UDFReader
@@ -72,8 +76,24 @@ enum DiscReader {
         }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
         EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes)", category: .demux)
+        storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
+                         formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex, extents: allExtents)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: allExtents),
                         formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex)
+    }
+
+    /// Memoize a successful recognition so a re-open of the same source (track switch on a remote ISO)
+    /// reuses it. No-op when the caller passed no cache key (custom sources opt in explicitly).
+    private static func storeRecognition(
+        cacheKey: String?, selectTitleID: Int?,
+        formatHint: String, titles: [DiscTitle], selectedIndex: Int,
+        extents: [(offset: Int64, length: Int64)]
+    ) {
+        guard let cacheKey else { return }
+        DiscRecognitionCache.store(
+            key: cacheKey, selectTitleID: selectTitleID,
+            DiscRecognition(formatHint: formatHint, titles: titles,
+                            selectedTitleIndex: selectedIndex, extents: extents))
     }
 
     /// Read all bytes of an extent list into memory (small files only: mpls).
@@ -100,22 +120,27 @@ enum DiscReader {
     /// Returns a `DiscInfo` (selected-title reader + format hint + the full title list) for a DVD or
     /// Blu-ray ISO, else nil. `selectTitleID` chooses the title (default = main). DVD titles are the
     /// per-VTS VOB groups, filtered by the VMGI TT_SRPT title list (whole-VTS; per-cell splitting deferred).
-    static func wrap(_ reader: IOReader, selectTitleID: Int? = nil) throws -> DiscInfo? {
-        guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID) }
+    static func wrap(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
+        if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
+            return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
+                            formatHint: cached.formatHint, titles: cached.titles,
+                            selectedTitleIndex: cached.selectedTitleIndex)
+        }
+        guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
         let iso: ISO9660Reader
         do {
             iso = try ISO9660Reader(reader: reader)
         } catch DiscError.notISO9660 {
-            return try wrapBluRay(reader, selectTitleID: selectTitleID)
+            return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)
         }
         let files: [DiscFile]
         do {
             files = try iso.list(directory: "VIDEO_TS")
         } catch DiscError.directoryNotFound {
-            return try wrapBluRay(reader, selectTitleID: selectTitleID)  // ISO9660 but not a DVD-Video disc (Blu-ray / data disc)
+            return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)  // ISO9660 but not a DVD-Video disc (Blu-ray / data disc)
         }
         let groups = DVDTitleSelector.enumerateTitleVOBGroups(files)
-        guard !groups.isEmpty else { return try wrapBluRay(reader, selectTitleID: selectTitleID) }
+        guard !groups.isEmpty else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
         // VIDEO_TS.IFO's TT_SRPT names which title sets are real titles; filter the VOB groups to those so
         // incidental content VTS are excluded. Any parse failure (or a filter that would empty the list)
         // falls back to the full VOB-grouped set, so a disc with an unreadable VMGI still plays multi-title.
@@ -153,6 +178,8 @@ enum DiscReader {
             }
             return DiscTitle(id: idx, durationTicks: durationTicks, chapters: chapters, dvdVTSN: g.vtsn)
         }
+        storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
+                         formatHint: "mpeg", titles: titles, selectedIndex: selectedIndex, extents: extents)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: extents),
                         formatHint: "mpeg", titles: titles, selectedTitleIndex: selectedIndex)
     }

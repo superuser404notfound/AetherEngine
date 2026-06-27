@@ -663,11 +663,14 @@ extension AetherEngine {
             let hint = customFormatHint
             do {
                 let isLiveReload = loadedOptions.isLive
+                let discCacheKey = url.absoluteString
                 customPreopened = try await Task.detached(priority: .userInitiated) {
                     let d = Demuxer()
                     // isLive preserved: a live custom source must not trigger SEEK_END on reopen.
                     // selectTitleID rebuilds the disc concat stream for the chosen title (#67).
-                    try d.open(reader: reader, formatHint: hint, profile: reloadProfile, isLive: isLiveReload, selectTitleID: titleToReopen)
+                    // discCacheKey reuses the disc recognition cached at load so an audio switch on a
+                    // remote ISO does not re-parse the UDF directory / playlists (#76).
+                    try d.open(reader: reader, formatHint: hint, profile: reloadProfile, isLive: isLiveReload, selectTitleID: titleToReopen, discCacheKey: discCacheKey)
                     return d
                 }.value
             } catch {
