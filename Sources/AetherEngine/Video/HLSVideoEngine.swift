@@ -855,6 +855,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.producer = prod
         self.activeAudioSourceStreamIndex = savedAudioConfig != nil ? audioStreamIndex : -1
 
+        // #15: native subtitles requested but no host pre-populated the cue stores (the `aetherctl serve
+        // --native-subs` path). Auto-attach one store per non-bitmap text track HERE, before the provider is
+        // built, so the master advertises the WebVTT SUBTITLES rendition. The host's full-session path sets
+        // these before start() (AetherEngine+Loading), so the isEmpty guard makes this a no-op there and the
+        // tvOS/iOS host path stays byte-identical. The lazy readers that fill the stores are the host's job;
+        // exposure of the legible option only needs the rendition declared, not cues present.
+        if enableNativeSubtitleTrackForSession && nativeSubtitleCueStoresForSession.isEmpty {
+            let textTracks = dem.subtitleTrackInfos().filter { !AetherEngine.isBitmapSubtitleCodec($0.codec) }
+            if !textTracks.isEmpty {
+                let stores = textTracks.map { _ in NativeSubtitleCueStore() }
+                let langs = textTracks.map { $0.language }
+                nativeSubtitleCueStoresForSession = stores
+                nativeSubtitleLanguagesForSession = langs
+                prod.subtitleCueStores = stores
+                prod.nativeSubtitleLanguages = langs
+                EngineLog.emit(
+                    "[HLSVideoEngine] #15 auto-attached \(stores.count) native subtitle store(s) for the "
+                    + "WebVTT rendition (langs=\(langs.map { $0 ?? "und" }))",
+                    category: .session
+                )
+            }
+        }
+
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
         let prov = VideoSegmentProvider(
@@ -876,7 +899,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             targetDurationFloorSeconds: liveTargetDurationFloorSeconds,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.requestRestart(at: idx)
-            }
+            },
+            nativeSubtitleStores: nativeSubtitleCueStoresForSession,
+            nativeSubtitleLanguages: nativeSubtitleLanguagesForSession
         )
         self.provider = prov
         if isLiveSession {
@@ -921,9 +946,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
         let dv5OnNonDVPanel = dvVariant == .profile5 && !effectiveDvMode
+        // #15: a SUBTITLES rendition lives only in a master. Force the master for routing-safe subtitled
+        // sources (SDR any panel, or HDR/DV on an HDR/DV panel where a master is already used) so PiP can show
+        // subtitles. HDR-on-SDR-panel and DV5-on-non-DV-panel stay media-direct (no PiP subs) to avoid
+        // -11848 / -11868; the subtitle rendition is orthogonal to the video VIDEO-RANGE/CODECS attributes.
+        let hasNativeSubs = enableNativeSubtitleTrackForSession && !nativeSubtitleCueStoresForSession.isEmpty
+        let routingSafeForMaster = !sourceIsHDR || panelReadyForHDR
         let useMasterPlaylist: Bool
         if dv5OnNonDVPanel {
             useMasterPlaylist = false
+        } else if hasNativeSubs && routingSafeForMaster {
+            useMasterPlaylist = true
         } else {
             useMasterPlaylist = sourceIsHDR && panelReadyForHDR
         }

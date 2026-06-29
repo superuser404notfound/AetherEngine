@@ -829,17 +829,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
 
         do {
-            // Native subtitle tracks (#55): only first (non-reinit) muxer declares them.
-            let muxerSubtitles: [MP4SegmentMuxer.SubtitleConfig] = {
-                guard !isReinit && enableNativeSubtitleTrack && !subtitleCueStores.isEmpty else {
-                    return []
-                }
-                return subtitleCueStores.indices.map { i in
-                    MP4SegmentMuxer.SubtitleConfig(
-                        language: i < nativeSubtitleLanguages.count ? nativeSubtitleLanguages[i] : nil
-                    )
-                }
-            }()
+            // #15: subtitles ship as a separate WebVTT rendition (HLSLocalServer), NOT muxed into the A/V
+            // fMP4. In-band timed text is non-conformant for HLS and fails the AVPlayer open (RFC 8216 §3.1,
+            // empirically -11829/-12848). Never re-feed the muxer subtitles; the cue stores feed the WebVTT.
+            let muxerSubtitles: [MP4SegmentMuxer.SubtitleConfig] = []
             let muxer = try MP4SegmentMuxer(
                 initialSegmentIndex: initialSegmentIndex,
                 sessionDir: cache.sessionDir,
@@ -906,32 +899,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func advanceMuxer(to newIdx: Int) -> MP4SegmentMuxer? {
         guard let muxer = currentMuxer else { return nil }
-
-        // Native mov_text subtitle injection (#55): drain cues for the finalizing segment; no-op for A/V-only sessions.
-        if !subtitleCueStores.isEmpty {
-            let segWindow = segmentWindowAVPlayerSeconds(
-                segIdx: currentMuxerSegmentIndex, nextSegIdx: newIdx)
-            if let (t0, t1) = segWindow, t1 > t0 {
-                var totalSamples = 0
-                for (ordinal, store) in subtitleCueStores.enumerated() {
-                    let cues = store.cuesInWindow(start: t0, end: t1)
-                    let plan = Self.movTextSamples(forWindow: (t0, t1), cues: cues)
-                    for s in plan {
-                        muxer.writeSubtitleSample(s.payload,
-                                                  trackOrdinal: ordinal,
-                                                  ptsSeconds: s.pts,
-                                                  durationSeconds: s.duration)
-                    }
-                    totalSamples += plan.count
-                }
-                EngineLog.emit(
-                    "[HLSSegmentProducer] subtitle inject seg-\(currentMuxerSegmentIndex) "
-                    + "window=[\(String(format: "%.3f", t0)), \(String(format: "%.3f", t1)))s "
-                    + "tracks=\(subtitleCueStores.count) totalSamples=\(totalSamples)",
-                    category: .engine, level: .verbose
-                )
-            }
-        }
 
         if let result = muxer.cutFragmentForNextSegment(newIdx) {
             EngineLog.emit(

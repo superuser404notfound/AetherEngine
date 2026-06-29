@@ -54,4 +54,9 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
         }
         return out.sorted { $0.start < $1.start }
     }
+
+    /// All text cues, shift-applied, sorted by start (whole-program VOD .vtt source). #15.
+    func allCues() -> [(start: Double, end: Double, text: String)] {
+        cuesInWindow(start: 0, end: .greatestFiniteMagnitude)
+    }
 }

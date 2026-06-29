@@ -51,6 +51,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let hdcpLevel: String?
     private let sourceBitrate: Int64
 
+    /// #15: native subtitle cue stores (one per text track) for the WebVTT rendition served to AVPlayer.
+    /// Immutable references; each store is internally locked and filled lazily by the readers on selection.
+    private let nativeSubStores: [NativeSubtitleCueStore]
+    private let nativeSubLanguages: [String?]
+
     /// Synchronous teardown + relaunch at the given absolute segment index.
     private let restartHandler: ((Int) -> Void)?
 
@@ -102,7 +107,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         blockingReloadEnabled: Bool = true,
         targetDurationFloorSeconds: Double? = nil,
-        restartHandler: ((Int) -> Void)? = nil
+        restartHandler: ((Int) -> Void)? = nil,
+        nativeSubtitleStores: [NativeSubtitleCueStore] = [],
+        nativeSubtitleLanguages: [String?] = []
     ) {
         self.cache = cache
         self.segments = segments
@@ -118,7 +125,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.hdcpLevel = hdcpLevel
         self.sourceBitrate = sourceBitrate
         self.restartHandler = restartHandler
-
+        self.nativeSubStores = nativeSubtitleStores
+        self.nativeSubLanguages = nativeSubtitleLanguages
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.
@@ -519,4 +527,35 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var masterFrameRate: Double? { frameRate }
     var masterHDCPLevel: String? { hdcpLevel }
     var masterClosedCaptions: String? { "NONE" }
+
+    // MARK: - Native subtitle renditions (#15)
+
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] {
+        guard !nativeSubStores.isEmpty else { return [] }
+        return nativeSubStores.indices.map { i in
+            let lang = i < nativeSubLanguages.count ? nativeSubLanguages[i] : nil
+            let name = lang.flatMap { Locale.current.localizedString(forIdentifier: $0) } ?? "Subtitle \(i + 1)"
+            return (ordinal: i, language: lang, name: name)
+        }
+    }
+
+    /// WebVTT for one subtitle segment: the cues overlapping video segment `segmentIndex`'s [start, end) on
+    /// the AVPlayer timeline. `segments[i].startSeconds` is the absolute output-axis start (correct for both
+    /// VOD and the live sliding window, where a cumulative EXTINF sum from firstVisible would not be), so the
+    /// window is read straight off the segment plan rather than recomputed.
+    func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
+        guard ordinal >= 0, ordinal < nativeSubStores.count else { return nil }
+        stateLock.lock()
+        guard segmentIndex >= 0, segmentIndex < segments.count else {
+            stateLock.unlock()
+            return nil
+        }
+        let start = segments[segmentIndex].startSeconds
+        let end = start + segments[segmentIndex].durationSeconds
+        stateLock.unlock()
+        let cues = nativeSubStores[ordinal].cuesInWindow(start: start, end: end)
+        // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:
+        // relativeToStart: true) if on-device PiP shows subtitles shifted by the segment start. See WebVTTBuilder.segment.
+        return WebVTTBuilder.segment(cues: cues, segmentStart: start)
+    }
 }

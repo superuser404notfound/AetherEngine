@@ -51,6 +51,15 @@ protocol HLSSegmentProvider: AnyObject {
     var masterHDCPLevel: String? { get }
     var masterClosedCaptions: String? { get }
 
+    /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
+    /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { get }
+    /// WebVTT body for one subtitle SEGMENT (#15): cues whose window overlaps video segment `segmentIndex` of
+    /// `ordinal`. nil if either index is out of range. The subtitle media playlist mirrors the video media
+    /// playlist one segment per video segment, so the embedded reader (parked ~90s ahead of the playhead)
+    /// has the cues for a segment in the store by the time AVPlayer fetches it.
+    func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String?
+
     /// Atomic snapshot at the top of each playlist build. discontinuitySequence = EXT-X-DISCONTINUITY-tagged segments that slid out of the window (RFC 8216 §6.2.2 requires incrementing it; omission slips AVPlayer's discontinuity tracking one window per boundary). firstVisible in the same snapshot: a separate lock acquisition let a concurrent slide produce MEDIA-SEQUENCE newer than the count.
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
 
@@ -79,6 +88,8 @@ extension HLSSegmentProvider {
     var masterAverageBandwidth: Int? { nil }
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { [] }
+    func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
     var liveTargetSegmentDuration: Double? { nil }
     var liveBlockingReloadEnabled: Bool { true }
     var liveTargetDurationFloorSeconds: Double? { nil }
@@ -578,6 +589,26 @@ final class HLSLocalServer: @unchecked Sendable {
                            data: Data(body.utf8),
                            contentType: "application/vnd.apple.mpegurl")
 
+        case let p where p.hasPrefix("/subs_") && p.hasSuffix(".m3u8"):
+            // #15: windowed subtitle media playlist, one WebVTT segment per video segment.
+            guard let parsed = Self.parseSubsPath(p), let prov = provider else {
+                return send404(fd: fd, path: normalizedPath, reason: "unparseable subtitle playlist path")
+            }
+            let subBody = Self.buildSubtitleMediaPlaylistText(ordinal: parsed.ordinal, provider: prov)
+            return send200(fd: fd, path: normalizedPath,
+                           data: Data(subBody.utf8),
+                           contentType: "application/vnd.apple.mpegurl")
+
+        case let p where p.hasPrefix("/subs_") && p.hasSuffix(".vtt"):
+            // #15: one WebVTT segment built on demand from the cue store's window for this video segment.
+            guard let parsed = Self.parseSubsPath(p), let seg = parsed.segment,
+                  let vtt = provider?.nativeSubtitleVTT(ordinal: parsed.ordinal, segmentIndex: seg) else {
+                return send404(fd: fd, path: normalizedPath, reason: "no subtitle segment for \(normalizedPath)")
+            }
+            return send200(fd: fd, path: normalizedPath,
+                           data: Data(vtt.utf8),
+                           contentType: "text/vtt")
+
         case "/init.mp4":
             let data = provider?.initSegment() ?? Data()
             if data.isEmpty {
@@ -882,9 +913,93 @@ final class HLSLocalServer: @unchecked Sendable {
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
+        // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is
+        // non-conformant for HLS). DEFAULT/AUTOSELECT=NO so the host overlay stays in fullscreen and the
+        // native track is selected only in PiP. Orthogonal to the video VIDEO-RANGE/CODECS attributes.
+        let subRenditions = provider.nativeSubtitleRenditions
+        for r in subRenditions {
+            var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
+            if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
+            mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO", "URI=\"subs_\(r.ordinal).m3u8\""])
+            lines.append("#EXT-X-MEDIA:\(mediaAttrs.joined(separator: ","))")
+        }
+        if !subRenditions.isEmpty {
+            streamInfAttrs.append("SUBTITLES=\"subs\"")
+        }
         lines.append("#EXT-X-STREAM-INF:\(streamInfAttrs.joined(separator: ","))")
         lines.append("media.m3u8")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Windowed WebVTT subtitle media playlist (#15): MIRRORS the video media playlist one-for-one.
+    ///
+    /// The native subtitle path is embedded-only and its reader parks ~90s ahead of the playhead
+    /// (`embeddedSubtitleReadAheadSeconds`), filling the cue store incrementally; the store never holds the
+    /// whole program at once. A single VOD .vtt fetched once would be truncated for embedded subs. Instead we
+    /// emit ONE .vtt segment per video segment (same count, same per-segment EXTINF, same MEDIA-SEQUENCE,
+    /// same PLAYLIST-TYPE/ENDLIST as the video) using the SAME `notePlaylistBuild()` snapshot so the two
+    /// playlists stay consistent. AVPlayer fetches `subs_{ord}_{i}.vtt` around when it plays `seg{i}.mp4`, by
+    /// which point the ~90s-ahead reader has that window's cues in the store. WebVTT segments carry no init
+    /// segment, so no EXT-X-MAP.
+    static func buildSubtitleMediaPlaylistText(ordinal: Int, provider: HLSSegmentProvider) -> String {
+        let snapshot = provider.notePlaylistBuild()
+        let count = snapshot.visibleCount
+        let firstVisible = min(snapshot.firstVisible, count)
+        let typeIsEvent = (provider.playlistType == .event && !snapshot.endlistAdded)
+        let typeIsLive = (provider.playlistType == .live && !snapshot.endlistAdded)
+
+        var maxDuration: Double = 0
+        for i in firstVisible..<count {
+            maxDuration = max(maxDuration, provider.segmentDuration(at: i))
+        }
+        var targetDuration = Int(ceil(max(1.0, maxDuration)))
+        if typeIsLive, let liveTarget = provider.liveTargetSegmentDuration {
+            targetDuration = max(targetDuration, Int(ceil(liveTarget * 1.5)))
+        }
+        if typeIsLive, let cadenceFloor = provider.liveTargetDurationFloorSeconds {
+            targetDuration = max(targetDuration, Int(ceil(cadenceFloor)))
+        }
+
+        var lines: [String] = []
+        lines.append("#EXTM3U")
+        lines.append("#EXT-X-VERSION:7")
+        lines.append("#EXT-X-TARGETDURATION:\(targetDuration)")
+        lines.append("#EXT-X-MEDIA-SEQUENCE:\(firstVisible)")
+        if typeIsLive {
+            lines.append("#EXT-X-DISCONTINUITY-SEQUENCE:\(snapshot.discontinuitySequence)")
+        } else if typeIsEvent {
+            lines.append("#EXT-X-PLAYLIST-TYPE:EVENT")
+        } else {
+            lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
+        }
+        for i in firstVisible..<count {
+            if typeIsLive && provider.segmentIsDiscontinuous(at: i) {
+                lines.append("#EXT-X-DISCONTINUITY")
+            }
+            let dur = provider.segmentDuration(at: i)
+            lines.append("#EXTINF:\(String(format: "%.3f", dur)),")
+            lines.append("subs_\(ordinal)_\(i).vtt")
+        }
+        if !typeIsLive && (snapshot.endlistAdded || !typeIsEvent) {
+            lines.append("#EXT-X-ENDLIST")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Parse a subtitle endpoint path. "/subs_{ord}.m3u8" -> (ord, nil); "/subs_{ord}_{seg}.vtt" -> (ord, seg).
+    /// nil when the path is not a well-formed subs_ endpoint. #15.
+    static func parseSubsPath(_ path: String) -> (ordinal: Int, segment: Int?)? {
+        let name = path.hasPrefix("/") ? String(path.dropFirst()) : path
+        guard name.hasPrefix("subs_") else { return nil }
+        var body = String(name.dropFirst("subs_".count))
+        if let dot = body.lastIndex(of: ".") { body = String(body[..<dot]) }
+        let parts = body.split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first, let ord = Int(first) else { return nil }
+        if parts.count == 2 {
+            guard let seg = Int(parts[1]) else { return nil }
+            return (ord, seg)
+        }
+        return (ord, nil)
     }
 
     static func buildMediaPlaylistText(provider: HLSSegmentProvider,
