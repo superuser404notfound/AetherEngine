@@ -279,6 +279,14 @@ extension AetherEngine {
         // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.
         setupClosedCaptionTapIfNeeded(session: session)
 
+        // #15: create the native subtitle cue stores BEFORE start() so the VideoSegmentProvider receives the
+        // references at init (the WebVTT rendition master tags + /subs endpoints read them; readers fill them
+        // lazily on selection). The shift is applied after start() once the playlist shift is known.
+        if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
+            session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
+            session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
+        }
+
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
         var playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
             try session.start()
@@ -300,19 +308,16 @@ extension AetherEngine {
         }
         self.nativeVideoSession = session
 
-        // #55 all-tracks: one cue store per text track, wired to the session + producer so makeProducer re-threads them across restarts. SEPARATE from the inline selectSubtitleTrack path (which owns subtitleCues / host overlay).
-        if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
-            let stores = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
-            let shift = session.playlistShiftSeconds
-            stores.forEach { $0.setShiftSeconds(shift) }
-            let languages = nativeSubtitleTrackTable.map { $0.language }
-            session.nativeSubtitleCueStoresForSession = stores
-            session.nativeSubtitleLanguagesForSession = languages
-            session.producer?.subtitleCueStores = stores
-            session.producer?.nativeSubtitleLanguages = languages
-            // #15: defer the readers; start them only when a native track is selected (PiP). The mov_text
-            // track is already declared above so AVKit can offer it; until selection the samples are empty.
-            nativeSubtitleReaderParams = (url: url, stores: stores)
+        // #15: the stores were created before start() (above) so the VideoSegmentProvider got the references at
+        // init for the WebVTT rendition. Now that the playlist shift is known, apply it, and arm the lazy
+        // readers (started only when a native track is selected / PiP). The producer no longer muxes subtitles.
+        if session.enableNativeSubtitleTrackForSession {
+            let stores = session.nativeSubtitleCueStoresForSession
+            if !stores.isEmpty {
+                let shift = session.playlistShiftSeconds
+                stores.forEach { $0.setShiftSeconds(shift) }
+                nativeSubtitleReaderParams = (url: url, stores: stores)
+            }
         }
 
         // Reuse the existing host across native->native reloads (issue #15): a fresh AVPlayer breaks AVKit's MediaRemote re-registration ("Code=14 client callback"), blanking the Control Center widget. stopInternal kept the host alive (keepNativeHost).

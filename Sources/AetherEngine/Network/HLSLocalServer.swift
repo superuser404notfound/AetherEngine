@@ -51,6 +51,14 @@ protocol HLSSegmentProvider: AnyObject {
     var masterHDCPLevel: String? { get }
     var masterClosedCaptions: String? { get }
 
+    /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
+    /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { get }
+    /// WebVTT body for the native subtitle ordinal (whole program), or nil if out of range.
+    func nativeSubtitleVTT(ordinal: Int) -> String?
+    /// Program duration (seconds) for the ordinal's VOD subtitle media playlist EXTINF/TARGETDURATION.
+    func nativeSubtitleProgramDuration(ordinal: Int) -> Double
+
     /// Atomic snapshot at the top of each playlist build. discontinuitySequence = EXT-X-DISCONTINUITY-tagged segments that slid out of the window (RFC 8216 §6.2.2 requires incrementing it; omission slips AVPlayer's discontinuity tracking one window per boundary). firstVisible in the same snapshot: a separate lock acquisition let a concurrent slide produce MEDIA-SEQUENCE newer than the count.
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int)
 
@@ -79,6 +87,9 @@ extension HLSSegmentProvider {
     var masterAverageBandwidth: Int? { nil }
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { [] }
+    func nativeSubtitleVTT(ordinal: Int) -> String? { nil }
+    func nativeSubtitleProgramDuration(ordinal: Int) -> Double { 1.0 }
     var liveTargetSegmentDuration: Double? { nil }
     var liveBlockingReloadEnabled: Bool { true }
     var liveTargetDurationFloorSeconds: Double? { nil }

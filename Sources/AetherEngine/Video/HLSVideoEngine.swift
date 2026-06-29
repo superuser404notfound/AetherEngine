@@ -876,7 +876,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             targetDurationFloorSeconds: liveTargetDurationFloorSeconds,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.requestRestart(at: idx)
-            }
+            },
+            nativeSubtitleStores: nativeSubtitleCueStoresForSession,
+            nativeSubtitleLanguages: nativeSubtitleLanguagesForSession
         )
         self.provider = prov
         if isLiveSession {
