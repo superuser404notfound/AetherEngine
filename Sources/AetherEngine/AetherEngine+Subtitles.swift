@@ -934,6 +934,17 @@ extension AetherEngine {
                 selected = group.options[ordinal]
             }
             guard let option = selected else { return }
+            // #15: pre-fill the near window BEFORE selecting, so AVPlayer fetches a populated rendition instead
+            // of racing the just-started reader (empty .vtt). Done here (off the loopback connection) rather
+            // than blocking the .vtt handler, which serializes the connection and stalls the legible pipeline.
+            if ordinal < nativeSubtitleCueStoresForSession.count {
+                let store = nativeSubtitleCueStoresForSession[ordinal]
+                let target = currentTime + 5.0
+                let deadline = Date().addingTimeInterval(6.0)
+                while store.readMaxCueEnd() < target, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
             item.select(option, in: group)
         }
     }
