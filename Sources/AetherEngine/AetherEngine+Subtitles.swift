@@ -913,6 +913,10 @@ extension AetherEngine {
         // Capture track list; avoid capturing self to keep MainActor re-entrancy to one hop.
         let tracks = nativeSubtitleTracks
         Task { @MainActor in
+            // #15: with automatic media-selection criteria on (the default), AVKit can override/not-render an
+            // explicit legible selection until a view refresh. Pin manual selection so the explicit choice
+            // renders immediately and survives.
+            currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
             guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
             guard !group.options.isEmpty else { return }
             guard let ordinal else {
