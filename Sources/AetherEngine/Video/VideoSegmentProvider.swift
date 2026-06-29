@@ -553,9 +553,17 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let start = segments[segmentIndex].startSeconds
         let end = start + segments[segmentIndex].durationSeconds
         stateLock.unlock()
-        let cues = nativeSubStores[ordinal].cuesInWindow(start: start, end: end)
-        let all = nativeSubStores[ordinal].allCues()
-        EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) store=\(all.count) range=[\(String(format: "%.1f", all.first?.start ?? -1)),\(String(format: "%.1f", all.last?.end ?? -1))]", category: .hlsServer)
+        // #15: AVPlayer can fetch a subtitle segment before the lazy reader has read its window (empty store
+        // -> empty .vtt -> no subtitles). Block until the reader has read past this window, bounded so a
+        // far-ahead prefetch (beyond the reader's parked range) returns quickly instead of stalling. The
+        // server workQueue is concurrent, so this does not block video segment serving.
+        let store = nativeSubStores[ordinal]
+        let deadline = Date().addingTimeInterval(4.0)
+        while store.readMaxCueEnd() < end, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let cues = store.cuesInWindow(start: start, end: end)
+        EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) readMax=\(String(format: "%.1f", store.readMaxCueEnd()))", category: .hlsServer)
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:
         // relativeToStart: true) if on-device PiP shows subtitles shifted by the segment start. See WebVTTBuilder.segment.
         return WebVTTBuilder.segment(cues: cues, segmentStart: start)

@@ -59,4 +59,13 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     func allCues() -> [(start: Double, end: Double, text: String)] {
         cuesInWindow(start: 0, end: .greatestFiniteMagnitude)
     }
+
+    /// Latest-read cue's end time (shift-applied AVPlayer seconds), or 0 if empty. Cues append in read order,
+    /// so the last entry marks how far the reader has read; the .vtt handler waits on this so AVPlayer gets
+    /// cues instead of an empty segment when it fetches ahead of the lazy reader (#15).
+    func readMaxCueEnd() -> Double {
+        lock.lock(); defer { lock.unlock() }
+        guard let last = cues.last else { return 0 }
+        return last.endTime - shiftSeconds
+    }
 }
