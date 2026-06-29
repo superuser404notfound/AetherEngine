@@ -937,8 +937,8 @@ extension AetherEngine {
             // #15: pre-fill the near window BEFORE selecting, so AVPlayer fetches a populated rendition instead
             // of racing the just-started reader (empty .vtt). Done here (off the loopback connection) rather
             // than blocking the .vtt handler, which serializes the connection and stalls the legible pipeline.
-            if ordinal < nativeSubtitleCueStoresForSession.count {
-                let store = nativeSubtitleCueStoresForSession[ordinal]
+            if let stores = nativeSubtitleReaderParams?.stores, ordinal < stores.count {
+                let store = stores[ordinal]
                 let target = currentTime + 5.0
                 let deadline = Date().addingTimeInterval(6.0)
                 while store.readMaxCueEnd() < target, Date() < deadline {
