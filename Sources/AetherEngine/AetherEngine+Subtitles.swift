@@ -869,14 +869,16 @@ extension AetherEngine {
                 trackedPacketFree(&p)
             }
 
-            // Park to keep 90 s read-ahead > 60 s producer buffer, stopping the connection draining at line rate.
-            if let pktSeconds, pktSeconds > playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds {
+            // #15: keep the native readers ahead of AVPlayer's ~240s subtitle prefetch burst (larger lead than
+            // the inline overlay reader), so the served .vtt segments carry cues instead of being fetched empty
+            // and cached empty for the VOD rendition. Only runs while a native rendition is selected (PiP).
+            if let pktSeconds, pktSeconds > playheadSnapshot + Self.nativeSubtitleReadAheadSeconds {
                 while !Task.isCancelled {
                     guard let fresh = await MainActor.run(body: { [weak self] in self?.sourceTime }) else {
                         break readLoop
                     }
                     playheadSnapshot = fresh
-                    if pktSeconds <= playheadSnapshot + Self.embeddedSubtitleReadAheadSeconds { break }
+                    if pktSeconds <= playheadSnapshot + Self.nativeSubtitleReadAheadSeconds { break }
                     if !parkLogged {
                         parkLogged = true
                         EngineLog.emit(

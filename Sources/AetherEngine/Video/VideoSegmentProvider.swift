@@ -553,15 +553,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let start = segments[segmentIndex].startSeconds
         let end = start + segments[segmentIndex].durationSeconds
         stateLock.unlock()
-        // #15: AVPlayer can fetch a subtitle segment before the lazy reader has read its window (empty store
-        // -> empty .vtt -> no subtitles). Block until the reader has read past this window, bounded so a
-        // far-ahead prefetch (beyond the reader's parked range) returns quickly instead of stalling. The
-        // server workQueue is concurrent, so this does not block video segment serving.
+        // #15: return immediately with whatever the reader has filled. Never block here: HLSLocalServer
+        // processes requests per-connection serially and AVPlayer uses only 1-3 connections, so holding the
+        // response serializes the legible-track pipeline. The native reader's large read-ahead keeps it ahead
+        // of AVPlayer's prefetch so the window is already filled.
         let store = nativeSubStores[ordinal]
-        let deadline = Date().addingTimeInterval(4.0)
-        while store.readMaxCueEnd() < end, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
         let cues = store.cuesInWindow(start: start, end: end)
         EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) readMax=\(String(format: "%.1f", store.readMaxCueEnd()))", category: .hlsServer)
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:

@@ -575,6 +575,10 @@ public final class AetherEngine: ObservableObject {
     /// park horizon is inside the buffer window, segments beyond it get no cues and the native tx3g track gaps.
     /// Verify this constraint when raising bufferAheadSegments or targetSegmentDurationSeconds.
     nonisolated static let embeddedSubtitleReadAheadSeconds: Double = 90
+    /// #15: native WebVTT readers must stay ahead of AVPlayer's subtitle prefetch (~240s burst at PiP start),
+    /// otherwise far segments are fetched empty and cached empty for the VOD rendition. Larger than the inline
+    /// reader's 90s lead; only runs while a native rendition is selected (PiP), so the extra read is bounded.
+    nonisolated static let nativeSubtitleReadAheadSeconds: Double = 300
 
     /// Source-time flush window for ASS cue batching (#56). Previously each event triggered a MainActor.run hop;
     /// on packet-dense tracks (hundreds of events in a few seconds) those hops serialised the demux loop against
