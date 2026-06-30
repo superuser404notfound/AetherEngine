@@ -99,7 +99,29 @@ extension AetherEngine {
         let demuxer = Demuxer()
         try demuxer.open(url: url, extraHeaders: options.httpHeaders)
         defer { demuxer.close() }
+        return try swDecodeProbeRun(demuxer: demuxer, maxPackets: maxPackets)
+    }
 
+    /// SW-decode an in-memory media blob (e.g. an HLS `init.mp4` + one fMP4 segment concatenation) with a
+    /// fresh decoder and no render target. Used by `aetherctl segverify` to test whether one segment is
+    /// independently decodable: `framesDecoded == 0` means the blob carries no usable IRAP to start from
+    /// (the #92 open-GOP defect, where the segment's IRAP landed in the previous segment).
+    public nonisolated static func swDecodeProbe(
+        data: Data,
+        formatHint: String? = "mp4",
+        maxPackets: Int = 200,
+        options: LoadOptions = .init()
+    ) throws -> SoftwareDecodeProbeResult {
+        let demuxer = Demuxer()
+        try demuxer.open(reader: DataIOReader(data: data), formatHint: formatHint)
+        defer { demuxer.close() }
+        return try swDecodeProbeRun(demuxer: demuxer, maxPackets: maxPackets)
+    }
+
+    private nonisolated static func swDecodeProbeRun(
+        demuxer: Demuxer,
+        maxPackets: Int
+    ) throws -> SoftwareDecodeProbeResult {
         let videoIdx = demuxer.videoStreamIndex
         guard videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) else {
             throw AetherEngineError.noVideoStream

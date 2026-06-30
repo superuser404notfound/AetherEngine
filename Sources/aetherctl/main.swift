@@ -69,6 +69,8 @@ func printUsage() {
       aetherctl serve [--no-dv] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
+      aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
+                          (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
       aetherctl dovitest <file>
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
@@ -230,6 +232,22 @@ if first == "dvr" {
     }
     rejectStrayFlags(rest, subcommand: "dvr")
     exit(runDVR(path: path, seconds: seconds, dvrWindow: dvrWin))
+}
+
+// #92 verifier: SW-decode each segment in isolation; framesDecoded==0 => not independently decodable.
+if first == "segverify" {
+    var rest = Array(args.dropFirst(2))
+    let fromIdx = takeIntFlag("--from", from: &rest) ?? 0
+    let count   = takeIntFlag("--count", from: &rest) ?? 12
+    let noDV    = takeFlag("--no-dv", from: &rest)
+    let dumpDir = takeStringFlag("--dump", from: &rest)
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("ERROR: segverify requires a <url> argument")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    rejectStrayFlags(rest, subcommand: "segverify")
+    exit(runSegVerify(url: parseSourceURL(urlArg), from: fromIdx, count: count, dvModeAvailable: !noDV, dumpDir: dumpDir))
 }
 
 // Rapid-seek burst repro (issue #35).
