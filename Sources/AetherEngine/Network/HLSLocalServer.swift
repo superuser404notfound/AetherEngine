@@ -54,6 +54,8 @@ protocol HLSSegmentProvider: AnyObject {
     /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { get }
+    /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
+    var nativeSubtitleDefaultOrdinal: Int { get }
     /// WebVTT body for one subtitle SEGMENT (#15): cues whose window overlaps video segment `segmentIndex` of
     /// `ordinal`. nil if either index is out of range. The subtitle media playlist mirrors the video media
     /// playlist one segment per video segment, so the embedded reader (parked ~90s ahead of the playhead)
@@ -89,6 +91,7 @@ extension HLSSegmentProvider {
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String)] { [] }
+    var nativeSubtitleDefaultOrdinal: Int { 0 }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
     var liveTargetSegmentDuration: Double? { nil }
     var liveBlockingReloadEnabled: Bool { true }
@@ -918,14 +921,15 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is
         // non-conformant for HLS). Orthogonal to the video VIDEO-RANGE/CODECS attributes.
-        // PROBE (Sodalite#32, DrHurt): the first rendition is DEFAULT=YES,AUTOSELECT=YES so AVKit
-        // auto-selects the legible track at load and OWNS selection end to end (matching DrHurt's working
-        // recipe), instead of the host force-selecting it (which AVSmartSubtitlesController disabled).
+        // Sodalite#32: the rendition matching the host's preferred subtitle language is DEFAULT=YES; a host-
+        // selected legible track only renders if it is the group default (AVKit's AVSmartSubtitlesController
+        // hides a non-default legible selection as mute-only). The host selects `nativeSubtitleDefaultOrdinal`.
         let subRenditions = provider.nativeSubtitleRenditions
-        for (idx, r) in subRenditions.enumerated() {
+        let defaultOrdinal = provider.nativeSubtitleDefaultOrdinal
+        for r in subRenditions {
             var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
             if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
-            let isDefault = (idx == 0)
+            let isDefault = (r.ordinal == defaultOrdinal)
             mediaAttrs.append(contentsOf: ["DEFAULT=\(isDefault ? "YES" : "NO")", "AUTOSELECT=YES", "URI=\"subs_\(r.ordinal).m3u8\""])
             lines.append("#EXT-X-MEDIA:\(mediaAttrs.joined(separator: ","))")
         }

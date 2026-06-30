@@ -55,6 +55,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Immutable references; each store is internally locked and filled lazily by the readers on selection.
     private let nativeSubStores: [NativeSubtitleCueStore]
     private let nativeSubLanguages: [String?]
+    /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
+    let nativeSubtitleDefaultOrdinal: Int
 
     /// Synchronous teardown + relaunch at the given absolute segment index.
     private let restartHandler: ((Int) -> Void)?
@@ -109,7 +111,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         targetDurationFloorSeconds: Double? = nil,
         restartHandler: ((Int) -> Void)? = nil,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
-        nativeSubtitleLanguages: [String?] = []
+        nativeSubtitleLanguages: [String?] = [],
+        nativeSubtitleDefaultOrdinal: Int = 0
     ) {
         self.cache = cache
         self.segments = segments
@@ -127,6 +130,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.restartHandler = restartHandler
         self.nativeSubStores = nativeSubtitleStores
         self.nativeSubLanguages = nativeSubtitleLanguages
+        self.nativeSubtitleDefaultOrdinal = nativeSubtitleDefaultOrdinal
     }
 
     /// Append a finalized live segment. Index must equal segments.count; out-of-order ignored.

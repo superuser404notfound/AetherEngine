@@ -289,6 +289,20 @@ extension AetherEngine {
         if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
             session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
             session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
+            // Sodalite#32: the native rendition matching the preferred subtitle language must be the master's
+            // DEFAULT=YES one, because a host-selected legible track only renders if it is the group default
+            // (AVKit hides a non-default selection as mute-only). Resolved here, before start() builds the
+            // master, so the default is correct on AVKit's first fetch; the host selects this same ordinal.
+            var defaultOrdinal = 0
+            for pref in loadedOptions.nativeSubtitlePreferredLanguages {
+                if let idx = nativeSubtitleTrackTable.firstIndex(where: { AetherEngine.languageMatches($0.language, pref) }) {
+                    defaultOrdinal = idx
+                    break
+                }
+            }
+            session.nativeSubtitleDefaultOrdinal = defaultOrdinal
+            nativeSubtitleDefaultOrdinal = defaultOrdinal
+            EngineLog.emit("[PiPDiag] default native ordinal=\(defaultOrdinal) prefLangs=\(loadedOptions.preferredSubtitleLanguages) trackLangs=\(nativeSubtitleTrackTable.map { $0.language ?? "?" })", category: .engine)
         }
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
