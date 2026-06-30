@@ -54,6 +54,18 @@ audioOnly == true
 
 On tvOS and iOS the AVPlayer audio host owns a persistent per-player `MPNowPlayingSession` (exposed via `audioNowPlayingSession`) so the system Now-Playing overlay stays bound to the app across a background pause, auto-publishes now-playing info from the player, and carries `externalMetadata`. The host survives across tracks and does not pause when the app backgrounds. All of this is gated `#if os(tvOS) || os(iOS)`; on macOS the path compiles and plays without the system session (a macOS host drives Now-Playing through the shared centers itself).
 
+### Playback status (`playbackPhase`)
+
+`AetherEngine.playbackPhase` is the single observable for what playback is doing right now, across all three pipelines. It is *derived*, not a parallel state machine: a pure fold of `state`, `isBuffering`, `isSeeking`, and a typed source-reconnect axis, recomputed on every input change so it can never desync from them. Each input's `didSet` triggers an idempotent recompute that re-emits only on an actual change.
+
+Precedence (highest first): `error > ended > idle > loading > seeking > stalled > rebuffering > playing/paused`.
+
+- `.rebuffering` is a healthy-connection buffer underrun (AVPlayer waiting to play); `state` stays `.playing` across it.
+- `.stalled(reconnecting:)` is a source-connection problem (drop / 429 / 503 backoff) where the `AVIOReader` is retrying. It is promoted from log text to a typed signal: the reader pushes a `flowing` / `reconnecting` phase through `Demuxer.onNetworkPhaseChanged`, the owning host (`HLSVideoEngine` on the native path, the software / audio hosts directly) forwards it, and the engine hops it to the main actor. The flag is `true` whenever the reader is reconnecting; the `false` case is reserved for a future "stalled, retries paused" distinction. The subtitle side-demuxer is deliberately left unwired so its stalls never move `playbackPhase`.
+- The direct AVPlayer-HLS live path (`nativeRemoteHLS`) and the whitelisted-codec audio host (`AudioAVPlayerHost`) have no demuxer / `AVIOReader`, so they cannot report `.stalled`; a reconnect there reads as `.rebuffering`.
+
+Hosts should observe `$playbackPhase` instead of combining `state == .loading`, `$isBuffering`, and `$isSeeking`, and instead of regex-matching `EngineLog` for stall / reconnect, which is no longer needed.
+
 ## SwiftUI `Menu` in custom player chrome
 
 On tvOS 26, the focused row of an open SwiftUI `Menu` blinks whenever any SwiftUI render transaction runs in the hosting tree, even one fully contained in an unrelated leaf view (a `TimelineView(.periodic)` wall clock, a playbar observing `engine.clock`, a subtitle overlay). Minimal repro: a `Menu` next to a `TimelineView(.periodic(from: .now, by: 1))`, open the menu, the focused item blinks once per second. This is a SwiftUI issue, not an engine one; reported to Apple by an AetherEngine adopter (see [AetherEngine#29](https://github.com/superuser404notfound/AetherEngine/issues/29)).

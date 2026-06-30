@@ -112,6 +112,10 @@ player.$duration
 player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
 player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs)
 player.$seekTarget     // in-flight seek destination (source-PTS), nil otherwise
+player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.rebuffering/
+                       // .stalled(reconnecting:)/.ended/.error. One source of truth for a status
+                       // spinner; derived from state + isBuffering + isSeeking + source reconnect.
+                       // Prefer this over stitching the raw signals or matching EngineLog text.
 player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession)
 
 // Time lives on player.clock, a SEPARATE ObservableObject, so the ~10 Hz
