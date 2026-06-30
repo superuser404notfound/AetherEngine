@@ -314,6 +314,12 @@ extension AetherEngine {
         let seekTo = max(0, effectiveStart - 2.0)
         demuxer.seek(to: seekTo)
 
+        // #87: a fresh open skips find_stream_info (codec_id comes from the container header / PMT). For the rare
+        // container that does not declare the subtitle codec there, run a bounded find_stream_info before decoding.
+        if !reused, demuxer.streamCodecUnresolved(at: streamIndex) {
+            demuxer.resolveStreamInfo()
+        }
+
         guard let stream = demuxer.stream(at: streamIndex),
               let decoder = EmbeddedSubtitleDecoder(
                   stream: stream,

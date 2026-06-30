@@ -23,6 +23,13 @@ struct DemuxerOpenProfile: Sendable {
     /// to a single attempt: a scrub thumbnail is disposable and must fail fast
     /// rather than ride a 3-retry-times-2-URL storm (issue #27).
     var avioMaxRetries: Int
+    /// Skip the open-time `avformat_find_stream_info` pass (#87). The subtitle side demuxer
+    /// needs only `codec_id` / `codec_type`, which `avformat_open_input` already resolves from the
+    /// container header / MPEG-TS PMT; find_stream_info would then chase sparse PGS/DVB tracks to the
+    /// probe cap (they keep `has_codec_parameters` false, the #75 pattern) for nothing, landing as a
+    /// flat ~5 s startup stall on a slow remote source. The side reader runs a bounded find_stream_info
+    /// on demand only if its target subtitle stream's codec is genuinely unresolved at open.
+    var skipStreamInfo: Bool
 
     static let playback = DemuxerOpenProfile(
         probesize: 50 * 1024 * 1024,
@@ -30,7 +37,8 @@ struct DemuxerOpenProfile: Sendable {
         avioPrefetch: true,
         avioChunkSize: 4 * 1024 * 1024,
         avioRequestTimeout: 35,
-        avioMaxRetries: 3
+        avioMaxRetries: 3,
+        skipStreamInfo: false
     )
 
     static let stillExtraction = DemuxerOpenProfile(
@@ -39,7 +47,8 @@ struct DemuxerOpenProfile: Sendable {
         avioPrefetch: false,
         avioChunkSize: 1 * 1024 * 1024,
         avioRequestTimeout: 8,
-        avioMaxRetries: 1
+        avioMaxRetries: 1,
+        skipStreamInfo: false
     )
 
     /// A copy of `self` with only the open-time probe budget overridden (#68).
@@ -55,23 +64,26 @@ struct DemuxerOpenProfile: Sendable {
         return copy
     }
 
-    /// Open profile for the embedded subtitle side-demuxer (#76). `EmbeddedSubtitleDecoder`
+    /// Open profile for the embedded subtitle side-demuxer (#76, #87). `EmbeddedSubtitleDecoder`
     /// needs only `codec_id` / `codec_type` (carried in the container header / MPEG-TS PMT,
     /// resolved by `avformat_open_input` itself) and seeds bitmap (PGS/DVB/DVD) canvas dims
-    /// from the source video size, so the full 50 MB `find_stream_info` chase after sparse,
-    /// never-resolving subtitle streams is pure cost. On a remote disc that chase reads tens
-    /// of MB over HTTP (every PGS track keeps `has_codec_parameters` false to the budget cap,
-    /// the #75 pattern); the side reader is then superseded by a seek / title switch before it
-    /// reads a single packet, so subtitles never appear (works on a local ISO, where the open
-    /// is instant). Cap the probe to a subtitle-sized ceiling; honor an even tighter caller
-    /// budget (#68). Keeps the playback AVIO tuning (prefetch, chunk size, per-chunk timeout):
-    /// the reader does sustained paced reads, not a one-shot still fetch.
+    /// from the source video size, so the `find_stream_info` chase after sparse, never-resolving
+    /// subtitle streams is pure cost. Every PGS track keeps `has_codec_parameters` false to the
+    /// budget cap (the #75 pattern), so even the #76 5 s ceiling is paid in full on a remote URL
+    /// source, landing as a flat ~5 s startup stall when the track is selected at load (#87). So
+    /// `skipStreamInfo` opts out of the chase entirely; the side reader runs a bounded find_stream_info
+    /// on demand only if its target subtitle stream's codec is genuinely unresolved at open. The probe
+    /// ceiling still bounds that fallback pass and honors an even tighter caller budget (#68). Keeps the
+    /// playback AVIO tuning (prefetch, chunk size, per-chunk timeout): the reader does sustained paced
+    /// reads, not a one-shot still fetch.
     static func subtitleSideDemuxer(callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?) -> DemuxerOpenProfile {
         let probeCeiling: Int64 = 4 * 1024 * 1024
         let analyzeCeiling: Int64 = 5 * 1_000_000
         let probesize = min(callerProbesize ?? probeCeiling, probeCeiling)
         let analyze = min(callerMaxAnalyzeDuration ?? analyzeCeiling, analyzeCeiling)
-        return playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: analyze)
+        var profile = playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: analyze)
+        profile.skipStreamInfo = true
+        return profile
     }
 }
 
@@ -325,12 +337,47 @@ public final class Demuxer: @unchecked Sendable {
     }
 
     private func probeStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>) throws {
+        // #87: the subtitle side demuxer opts out of find_stream_info. avformat_open_input already
+        // carries codec_id / codec_type for every subtitle track (container header / PMT), and
+        // reclassifyAttachedPictures only exists to bound the find_stream_info cost, so both are skipped.
+        // The reader runs `resolveStreamInfo()` on demand if its target stream's codec is unresolved.
+        guard !openProfile.skipStreamInfo else {
+            logStreams(ctx)
+            return
+        }
         reclassifyAttachedPictures(ctx)
         let findRet = avformat_find_stream_info(ctx, nil)
         guard findRet >= 0 else {
             throw DemuxerError.streamInfoFailed(code: findRet)
         }
+        logStreams(ctx)
+    }
 
+    /// Run a bounded `avformat_find_stream_info` on an already-open context (#87). Used by the subtitle
+    /// side reader as a fallback when its target stream's codec is still unresolved after a `skipStreamInfo`
+    /// open (a container that does not declare the subtitle codec in its header). The probe budget applied
+    /// at open already caps the pass, so this stays bounded by the side demuxer's subtitle-sized ceiling.
+    func resolveStreamInfo() {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext else { return }
+        reclassifyAttachedPictures(ctx)
+        _ = avformat_find_stream_info(ctx, nil)
+    }
+
+    /// True if the stream at `index` is missing or carries no resolved codec yet (`AV_CODEC_ID_NONE`).
+    /// The side reader uses this to decide whether a `skipStreamInfo` open needs a `resolveStreamInfo()`
+    /// fallback before handing the stream to `EmbeddedSubtitleDecoder` (#87).
+    func streamCodecUnresolved(at index: Int32) -> Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams,
+              let stream = ctx.pointee.streams[Int(index)],
+              let codecpar = stream.pointee.codecpar else { return true }
+        return codecpar.pointee.codec_id == AV_CODEC_ID_NONE
+    }
+
+    private func logStreams(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
         #if DEBUG
         EngineLog.emit("[Demuxer] Opened: \(ctx.pointee.nb_streams) streams, duration=\(ctx.pointee.duration) us", category: .demux)
         for i in 0..<Int(ctx.pointee.nb_streams) {

@@ -123,4 +123,30 @@ struct DemuxerProfileTests {
         #expect(p.probesize == 4 * 1024 * 1024)
         #expect(p.maxAnalyzeDuration == 5 * 1_000_000)
     }
+
+    // MARK: - skipStreamInfo (#87: drop the find_stream_info chase on the side demuxer)
+
+    /// #87: PGS/HDMV bitmap tracks keep `has_codec_parameters` false to the budget cap, so
+    /// find_stream_info reads to the full 5 s ceiling on a remote URL source, landing as a flat
+    /// startup stall. The side demuxer only needs `codec_id` / `codec_type` (carried in the
+    /// container header / PMT, resolved by avformat_open_input), so it opts out of the chase.
+    @Test("subtitleSideDemuxer opts out of find_stream_info")
+    func subtitleSideDemuxerSkipsStreamInfo() {
+        let p = DemuxerOpenProfile.subtitleSideDemuxer(callerProbesize: nil, callerMaxAnalyzeDuration: nil)
+        #expect(p.skipStreamInfo == true)
+    }
+
+    @Test("playback + stillExtraction keep find_stream_info")
+    func mainProfilesKeepStreamInfo() {
+        #expect(DemuxerOpenProfile.playback.skipStreamInfo == false)
+        #expect(DemuxerOpenProfile.stillExtraction.skipStreamInfo == false)
+    }
+
+    @Test("withProbeBudget preserves the receiver's skipStreamInfo")
+    func withProbeBudgetPreservesSkipStreamInfo() {
+        var skipping = DemuxerOpenProfile.playback
+        skipping.skipStreamInfo = true
+        #expect(skipping.withProbeBudget(probesize: 1, maxAnalyzeDuration: nil).skipStreamInfo == true)
+        #expect(DemuxerOpenProfile.playback.withProbeBudget(probesize: 1, maxAnalyzeDuration: nil).skipStreamInfo == false)
+    }
 }
