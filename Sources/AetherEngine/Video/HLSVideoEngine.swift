@@ -981,6 +981,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.openFailed(reason: "server URL not ready")
         }
         self.servingMasterPlaylist = useMasterPlaylist
+        EngineLog.emit("[PiPDiag] serving useMaster=\(useMasterPlaylist) videoRange=\(videoRange) hasNativeSubs=\(hasNativeSubs) routingSafe=\(routingSafeForMaster) dv5OnNonDV=\(dv5OnNonDVPanel)", category: .engine)
         EngineLog.emit("[HLSVideoEngine] serving on \(url.absoluteString) (dvModeAvailable=\(dvModeAvailable) effectiveDvMode=\(effectiveDvMode) panelIsHDR=\(panelIsInHDRMode) displaySupportsHDR=\(displaySupportsHDR) matchContent=\(matchContentEnabled) sourceIsHDR=\(sourceIsHDR) useMaster=\(useMasterPlaylist) videoRange=\(videoRange) dvVariant=\(dvVariant))")
         return url
     }

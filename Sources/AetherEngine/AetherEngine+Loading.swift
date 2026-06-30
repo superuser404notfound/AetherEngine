@@ -278,6 +278,7 @@ extension AetherEngine {
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
         session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
+        EngineLog.emit("[PiPDiag] load: prepare=\(loadedOptions.prepareNativeSubtitles) eager=\(loadedOptions.eagerNativeSubtitleReaders) textTracks=\(nativeSubtitleTrackTable.count) enable=\(session.enableNativeSubtitleTrackForSession)", category: .engine)
 
         // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.
         setupClosedCaptionTapIfNeeded(session: session)
@@ -326,6 +327,7 @@ extension AetherEngine {
                 // static VOD subtitle file is fully present up front.
                 if loadedOptions.eagerNativeSubtitleReaders {
                     startNativeSubtitleReaders(url: url, stores: stores)
+                    EngineLog.emit("[PiPDiag] eager readers started: stores=\(stores.count)", category: .engine)
                 }
             }
         }

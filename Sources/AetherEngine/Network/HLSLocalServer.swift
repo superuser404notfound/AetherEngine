@@ -547,6 +547,7 @@ final class HLSLocalServer: @unchecked Sendable {
                 if firstTime { loggedMasterPlaylist = true }
                 stateLock.unlock()
                 if firstTime {
+                    EngineLog.emit("[PiPDiag] master served: subRenditions=\(provider?.nativeSubtitleRenditions.count ?? 0)", category: .hlsServer)
                     EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)",
                                    category: .hlsServer)
                 }
@@ -594,6 +595,7 @@ final class HLSLocalServer: @unchecked Sendable {
             guard let parsed = Self.parseSubsPath(p), let prov = provider else {
                 return send404(fd: fd, path: normalizedPath, reason: "unparseable subtitle playlist path")
             }
+            EngineLog.emit("[PiPDiag] AVKit SELECTED rendition: fetched subs_\(parsed.ordinal).m3u8", category: .hlsServer)
             let subBody = Self.buildSubtitleMediaPlaylistText(ordinal: parsed.ordinal, provider: prov)
             return send200(fd: fd, path: normalizedPath,
                            data: Data(subBody.utf8),
