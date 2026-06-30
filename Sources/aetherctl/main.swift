@@ -91,7 +91,7 @@ func printUsage() {
                      non-DV TV / on macOS (where displayCapabilities
                      reports supportsDolbyVision=false anyway).
 
-    Flags (serve / seektest / audio / extract):
+    Flags (serve / seektest):
       --throttle-kbps N
                      TEST-ONLY slow-CDN simulation: cap source-IO
                      delivery to N kbit/s. Set below the stream bitrate

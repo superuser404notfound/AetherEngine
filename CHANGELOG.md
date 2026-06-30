@@ -10,6 +10,36 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-06-30
+
+### Added
+
+- **Unified `playbackPhase` as the playback-status source of truth (#85).** A published `playbackPhase` enum replaces ad hoc status flags, with a typed `.stalled(reconnecting:)` case and a typed `onNetworkPhaseChanged` reader callback wired across the native, software, and audio hosts.
+- **Software-path background audio on iOS.** Software-decode playback keeps audio alive when the app backgrounds, via a background-audio-only demux loop and a wedge-safe keepalive policy. Exercised by the new `aetherctl bgaudio` harness.
+- **`aetherctl segverify`.** A deterministic, headless probe that decodes each loopback segment in isolation and reports whether it is independently decodable (the segment-independence ground truth used to verify #92).
+- **`aetherctl --throttle-kbps`.** Slow-CDN simulation for `serve` / `segverify`, to reproduce backpressure and recovery behaviour under a bandwidth cap.
+
+### Fixed
+
+- **Open-GOP and B-frame VOD segments decode cleanly after a fresh decode (#92).** VOD segment cutting is now keyframe-gated in decode order (the IRAP opens its own segment, like the live path and FFmpeg's hls muxer), so a rebuffer or seek landing on a segment boundary no longer starts mid-GOP with a decode dependency on its predecessor. This removes the transient blocky corruption on reordered content.
+- **A bunched keyframe index that spans under one segment is rejected (#91).** Such an index passed the gap check but produced a single whole-file segment that AVPlayer rejected with no tracks; the planner now also requires the index to span at least one target segment, else it falls back to a uniform plan.
+- **No black flash on a software-path seek (#90).** The software path holds the last displayed frame across a seek instead of blanking the display before the post-seek keyframe.
+- **No audio crackle on software-decode playback (#89).** Software-decode audio buffers are stamped from a gapless running sample clock, fixing a per-frame click on frames that do not land on integer-millisecond boundaries.
+- **No multi-second startup stall on remote PGS subtitles (#87).** The subtitle side demuxer skips `find_stream_info` and reads the codec from the header or PMT, with a bounded fallback, removing the blocking probe at load.
+- **Correct HDR and Dolby Vision format label in Stats for Nerds on iOS.**
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.8.0))
+
+## [4.7.0] - 2026-06-29
+
+### Added
+
+- **AirPlay (#86).** The in-process loopback HLS is served over the device's active LAN IP with the media playlist forced while AirPlay external playback is active, so the receiver gets the engine-processed stream (Dolby Vision / Atmos / subtitles preserved) instead of a master it would reject.
+- **iOS background playback.** A wedge-safe background keepalive policy plus a PiP and background-playback API for hosts, so native-path iOS playback survives backgrounding and Picture-in-Picture.
+- **Experimental native WebVTT subtitles (gated).** A WebVTT `SUBTITLES` rendition served over the loopback so text subtitles can reach PiP / AirPlay via `AVMediaSelection`, opt-in behind `LoadOptions.prepareNativeSubtitles` and inert by default (reliable display through a custom-transport player is still open, #55).
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.7.0))
+
 ## [4.6.3] — 2026-06-27
 
 ### Fixed

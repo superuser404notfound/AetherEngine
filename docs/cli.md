@@ -6,8 +6,10 @@ A standalone macOS CLI shipped alongside the library for repro work without goin
 swift run aetherctl probe <url>          # dump container + streams + duration, exit
 swift run aetherctl serve <url>          # park the engine's loopback HLS-fMP4 server
 swift run aetherctl validate <url>       # serve + run mediastreamvalidator, exit
+swift run aetherctl segverify <url>      # SW-decode each loopback segment in isolation; report independence (#92)
 swift run aetherctl swdecode <url>       # open SoftwareVideoDecoder, decode N packets, report
 swift run aetherctl dovitest <url>       # convert a DV Profile 7 stream to 8.1, dump for dovi_tool
+swift run aetherctl dualsubs <file> ...  # dual subtitle-track render probe (--primary / --secondary stream index)
 swift run aetherctl extract <url>        # FrameExtractor still-image extraction + leak testing
 swift run aetherctl audio [--seconds N] <url>   # audio-only pipeline smoke test (default 10 s)
 swift run aetherctl bgaudio <url>        # SW-path background-audio keepalive probe (iOS background behavior)
@@ -22,7 +24,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Seventeen subcommands plus the bare-URL `serve` alias.
+Eighteen subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -45,6 +47,8 @@ open 'http://127.0.0.1:<port>/master.m3u8'   # macOS QuickTime
 
 `--native-subs <index>` turns on the native mov_text subtitle path: the engine calls `requestNativeSubtitleTrack()` before `start()` (so the init `moov` declares the tracks), then `attachAllNativeSubtitleStores()` after start. ALL text subtitle tracks are muxed as separate language-tagged `mov_text` (tx3g) traks (all `disposition:default=0`, none auto-displayed). The `<index>` value is legacy and now ignored, kept only for CLI compatibility: every non-bitmap track is always declared, and actual track selection happens via the host API in a full session, not from this flag. Inspect the init segment with `mp4dump` or open the playlist in QuickTime to verify the legible `AVMediaSelection` group enumerates every language. Omit the flag to reproduce the default behavior (no native subtitle traks, muxer output byte-identical to before).
 
+`--throttle-kbps N` is a TEST-ONLY slow-CDN simulation: it caps source-IO delivery to N kbit/s. Set it below the stream bitrate to starve the producer below real-time and provoke AVPlayer rebuffers (for example the #92 open-GOP repro). Also available on `seektest`.
+
 ## validate
 
 `serve` plus an inline `xcrun mediastreamvalidator` run against the loopback manifest, with the report printed and the engine torn down on completion.
@@ -58,6 +62,10 @@ Opens `SoftwareVideoDecoder` for the source's video stream, feeds up to N packet
 - SW decode end-to-end healthy (if real playback still hangs, the failure is downstream in `SoftwarePlaybackHost` frame-enqueue, display-layer attach, or audio-clock sync)
 
 Backed by the public `AetherEngine.swDecodeProbe(url:maxPackets:options:)` static API returning `SoftwareDecodeProbeResult`. Hosts can use the same probe in their own diagnostic overlays.
+
+## segverify
+
+Fetches `init.mp4` and then each media segment in turn from the loopback server and SW-decodes each segment **in isolation** (a fresh decoder per segment, no carried reference frames), reporting how many are independently decodable. A segment that yields `framesDecoded == 0` is not self-contained: its first sample is not an IRAP, so it depends on a predecessor, which is the open-GOP / B-frame boundary defect (#92). `--from N` / `--count K` bound the range (default 0 / 12), `--no-dv` forces the SDR route, `--dump <dir>` writes each fetched segment for offline inspection. Exit 0 when every tested segment is independent, 2 when any is not. This is the ground-truth verifier the #92 fix was validated against (ffmpeg's `hls` muxer scores every segment independent).
 
 ## dovitest
 
@@ -113,7 +121,7 @@ Slices a local `.ts` into a sliding live HLS playlist and serves it over loopbac
 
 ## seektest
 
-Drives a real AVPlayer (native loopback-HLS path) through a burst of rapid seeks and reports the producer-restart coalescing behavior, the longest "wedge" (state `.playing` but the clock frozen), and final settle accuracy (AetherEngine#35). A concurrent sampler probe also checks the seek clock-bounce / `isSeeking` signal (AetherEngine#37 / #38): a single backward seek must not bounce the clock back through the pre-seek position, and `isSeeking` must span the real landing. `--seeks N`, `--gap-ms N`, `--settle N` shape the burst; needs `> 30 s` of seekable VOD.
+Drives a real AVPlayer (native loopback-HLS path) through a burst of rapid seeks and reports the producer-restart coalescing behavior, the longest "wedge" (state `.playing` but the clock frozen), and final settle accuracy (AetherEngine#35). A concurrent sampler probe also checks the seek clock-bounce / `isSeeking` signal (AetherEngine#37 / #38): a single backward seek must not bounce the clock back through the pre-seek position, and `isSeeking` must span the real landing. `--seeks N`, `--gap-ms N`, `--settle N` shape the burst; needs `> 30 s` of seekable VOD. `--throttle-kbps N` caps source-IO delivery to simulate a slow CDN and force rebuffers during the burst (see `serve`).
 
 ## hlslive
 
