@@ -38,6 +38,8 @@ Source URL ──► Demuxer ──┬─► SoftwareVideoDecoder (dav1d) ──
                                               AVR / speakers
 ```
 
+A seek holds the last frame on screen rather than blanking it. `SampleBufferRenderer.flush()` takes a `removingDisplayedImage` flag (`DisplayFlushOp` is the pure decision split out for testing): stop/teardown clears the visible frame (the default), but `SoftwarePlaybackHost.seek()` passes `false`, so the previous frame stays up until the post-seek keyframe decodes instead of flashing black on slow sources like MPEG-2. This matches the native/AVPlayer path, which holds the frame through a seek (#90).
+
 `AudioDecoder` stamps each `CMSampleBuffer` from a running sample count anchored to the first frame (`AudioClockAnchor`), not from the container-quantized per-packet PTS. Container timebases are coarse (1 ms in MKV), so when a frame's duration is not an integer number of ticks (a 1536-sample AC-3 frame is 34.83 ms at 44.1 kHz but exactly 32 ms at 48 kHz) the quantized PTS leave a sub-millisecond gap or overlap at every buffer boundary, and `AVSampleBufferAudioRenderer` reconciles a discontinuity at each one (~29 clicks/sec, a continuous crackle). Anchoring to the sample clock makes consecutive buffers abut exactly; a real source discontinuity (> 100 ms off the predicted clock, i.e. a seek or edit) re-anchors so genuine gaps are not papered over, and `flush()` drops the anchor. The clock advances only on a successfully emitted buffer, so a dropped buffer injects no phantom samples.
 
 AV1+DV (Profile 10.0 / 10.1 / 10.4) routes through the native path on hardware-AV1 hosts via the `dav1` / `av01` track type plus the source's `dvvC` box. AV1+Atmos is genuinely rare in the wild (mastering still runs in HEVC overwhelmingly), so the SW pipeline's lack of Atmos passthrough is a theoretical limitation rather than a real one. The dispatch happens once at load time; hosts see a unified `@Published` state surface either way.
@@ -179,7 +181,7 @@ Sources/AetherEngine/
 ├── Network/
 │   └── HLSLocalServer.swift                 Native path: local HTTP server (127.0.0.1) serving playlist + segments
 ├── Renderer/
-│   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments
+│   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments; `flush(removingDisplayedImage:)` holds the last frame through a seek (`DisplayFlushOp`, #90)
 ├── Subtitles/
 │   ├── ASSScriptBuilder.swift               Reassembles raw ASS event cues + TrackInfo.assHeader into a complete script for whole-file renderers
 │   ├── MovTextSampleBuilder.swift           Stateless tx3g (mov_text) sample builder for the native legible-subtitle injection path (LoadOptions.prepareNativeSubtitles, #55)

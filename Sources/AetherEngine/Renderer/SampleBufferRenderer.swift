@@ -8,6 +8,25 @@ import CoreVideo
 /// Includes a small reorder buffer (4 frames) to handle B-frame decode
 /// order from VTDecompressionSession. Frames are sorted by PTS before
 /// being enqueued to the display layer in strict presentation order.
+/// Which display-layer flush operation a flush request maps to. Split out of SampleBufferRenderer.flush()
+/// as a pure value so the seek-holds-frame contract (issue #90) is testable without a live
+/// AVSampleBufferDisplayLayer.
+enum DisplayFlushOp: Equatable {
+    /// tvOS 18+/iOS 18+/macOS 15+: AVSampleBufferVideoRenderer.flush(removingDisplayedImage:).
+    case rendererFlush(removingDisplayedImage: Bool)
+    /// Legacy AVSampleBufferDisplayLayer.flushAndRemoveImage() — clears the visible frame.
+    case removeImage
+    /// Legacy AVSampleBufferDisplayLayer.flush() — keeps the last frame on screen (hold through seek).
+    case holdImage
+
+    static func resolve(removingDisplayedImage: Bool, modernRenderer: Bool) -> DisplayFlushOp {
+        if modernRenderer {
+            return .rendererFlush(removingDisplayedImage: removingDisplayedImage)
+        }
+        return removingDisplayedImage ? .removeImage : .holdImage
+    }
+}
+
 final class SampleBufferRenderer: @unchecked Sendable {
 
     private(set) var displayLayer: AVSampleBufferDisplayLayer
@@ -135,8 +154,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
-    /// Discard all buffered and displayed frames (seek/stop). Clears the currently visible frame immediately.
-    func flush() {
+    /// Discard all buffered frames. `removingDisplayedImage: true` (stop/teardown) also clears the visible
+    /// frame; `false` (seek) holds the last frame on screen until the post-seek frame is enqueued, so a seek
+    /// doesn't flash black between the old and new positions (matches the hardware path's hold-last-frame).
+    func flush(removingDisplayedImage: Bool = true) {
         reorderLock.lock()
         reorderBuffer.removeAll()
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
@@ -144,10 +165,17 @@ final class SampleBufferRenderer: @unchecked Sendable {
         cachedFormatKey = nil
         reorderLock.unlock()
 
-        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
-            displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true) { }
-        } else {
+        let modern: Bool
+        if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) { modern = true } else { modern = false }
+        switch DisplayFlushOp.resolve(removingDisplayedImage: removingDisplayedImage, modernRenderer: modern) {
+        case .rendererFlush(let remove):
+            if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) {
+                displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: remove) { }
+            }
+        case .removeImage:
             displayLayer.flushAndRemoveImage()
+        case .holdImage:
+            displayLayer.flush()
         }
     }
 

@@ -436,7 +436,10 @@ final class SoftwarePlaybackHost {
 
         videoDecoder.flush()
         audioDecoder?.flush()
-        renderer.flush()
+        // Hold the last frame through the seek (don't blank the display) so the viewer sees the previous
+        // frame until the post-seek frame decodes, instead of a black flash (issue #90). Stop/teardown and
+        // background-return still clear via the default.
+        renderer.flush(removingDisplayedImage: false)
         audioOutput?.flush()
 
         // Live source is forward-only; DVR rewind reseeds decoders from the ring without touching the live demuxer's read position.
