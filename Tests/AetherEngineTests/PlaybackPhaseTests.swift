@@ -61,3 +61,45 @@ struct PlaybackPhaseDeriveTests {
         #expect(PlaybackPhase.derive(state: .paused, isBuffering: false, isSeeking: false, stall: .reconnecting) == .stalled(reconnecting: true))
     }
 }
+
+/// Engine-level wiring of #85: the published phase tracks the four inputs and only re-emits on change.
+@Suite("AetherEngine.playbackPhase wiring (#85)")
+@MainActor
+struct PlaybackPhaseEngineTests {
+
+    @Test("phase starts idle and follows state/buffer/stall/seek transitions")
+    func followsInputs() throws {
+        let engine = try AetherEngine()
+        #expect(engine.playbackPhase == .idle)
+
+        engine.state = .loading
+        #expect(engine.playbackPhase == .loading)
+
+        engine.state = .playing
+        #expect(engine.playbackPhase == .playing)
+
+        engine.isBuffering = true
+        #expect(engine.playbackPhase == .rebuffering)
+
+        engine.setReaderNetworkPhase(.reconnecting)
+        #expect(engine.playbackPhase == .stalled(reconnecting: true))   // stall outranks rebuffer
+
+        engine.isSeeking = true
+        #expect(engine.playbackPhase == .seeking)                       // seek outranks stall
+
+        engine.isSeeking = false
+        engine.setReaderNetworkPhase(.flowing)
+        engine.isBuffering = false
+        #expect(engine.playbackPhase == .playing)
+    }
+
+    @Test("setReaderNetworkPhase clears back to a non-stalled phase")
+    func stallClears() throws {
+        let engine = try AetherEngine()
+        engine.state = .playing
+        engine.setReaderNetworkPhase(.reconnecting)
+        #expect(engine.playbackPhase == .stalled(reconnecting: true))
+        engine.setReaderNetworkPhase(.flowing)
+        #expect(engine.playbackPhase == .playing)
+    }
+}

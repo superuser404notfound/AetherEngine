@@ -54,21 +54,54 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Public State
 
-    @Published public internal(set) var state: PlaybackState = .idle
+    @Published public internal(set) var state: PlaybackState = .idle {
+        didSet { recomputePlaybackPhase() }
+    }
 
     /// Mid-playback rebuffer flag. `state` stays `.playing` across a rebuffer to avoid icon flicker;
     /// gate on this when you need to distinguish a stall from real playback (AetherEngine#35).
     /// Always false during initial load spin-up (`state == .loading`).
-    @Published public internal(set) var isBuffering: Bool = false
+    @Published public internal(set) var isBuffering: Bool = false {
+        didSet { recomputePlaybackPhase() }
+    }
 
     /// True from seek entry until physical landing, covering both programmatic and native AVKit scrubs.
     /// Unlike `state == .seeking` (optimistically flipped to `.playing`), this spans the real
     /// loopback-HLS landing, which resolves seconds after the call (AetherEngine#38). Paired with `seekTarget`.
-    @Published public internal(set) var isSeeking: Bool = false
+    @Published public internal(set) var isSeeking: Bool = false {
+        didSet { recomputePlaybackPhase() }
+    }
 
     /// Source-PTS seek destination, or nil when idle. Cleared on landing. For native scrubs, set to the
     /// out-of-range segment time AVPlayer requested (AetherEngine#38).
     @Published public internal(set) var seekTarget: Double? = nil
+
+    /// Single source of truth for what playback is doing right now (#85), derived from
+    /// `state` / `isBuffering` / `isSeeking` / the reader network phase. Recomputed on every input change;
+    /// never a parallel state machine. Hosts should observe this instead of stitching the raw signals or
+    /// regex-matching `EngineLog`.
+    @Published public internal(set) var playbackPhase: PlaybackPhase = .idle
+
+    /// Reader source-fetch axis feeding `playbackPhase`. Updated off the demux thread via
+    /// `setReaderNetworkPhase`. `didSet` keeps `playbackPhase` in sync (#85).
+    private var readerStall: ReaderNetworkPhase = .flowing {
+        didSet { recomputePlaybackPhase() }
+    }
+
+    /// Idempotent: assigns `playbackPhase` only when the derived value actually changes, so a flapping
+    /// origin or redundant input write never fires a spurious `objectWillChange`.
+    private func recomputePlaybackPhase() {
+        let next = PlaybackPhase.derive(state: state,
+                                        isBuffering: isBuffering,
+                                        isSeeking: isSeeking,
+                                        stall: readerStall)
+        if playbackPhase != next { playbackPhase = next }
+    }
+
+    /// Main-actor entry point for the demuxer's `@Sendable onNetworkPhaseChanged` callback (#85).
+    func setReaderNetworkPhase(_ phase: ReaderNetworkPhase) {
+        if readerStall != phase { readerStall = phase }
+    }
 
     /// Bumped at every `seek(to:)` entry; a seek finalizes isSeeking only when its generation still matches,
     /// preventing a superseded seek from clobbering a newer one.
@@ -796,6 +829,7 @@ public final class AetherEngine: ObservableObject {
             : nil
         state = .loading
         isBuffering = false
+        readerStall = .flowing
         clock.currentTime = 0
         clock.bufferedPosition = 0
         nativeClockSeconds = 0
@@ -1873,6 +1907,7 @@ public final class AetherEngine: ObservableObject {
         clock.sourceTime = 0
         clock.bufferedPosition = 0
         isBuffering = false
+        readerStall = .flowing
         // Hard-clear in-flight seek state: late callbacks are dropped by generation guards, but isSeeking
         // must not strand (#38).
         programmaticSeekInFlight = false
