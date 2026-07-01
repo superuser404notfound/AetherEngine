@@ -590,10 +590,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let start = segments[segmentIndex].startSeconds
         let end = start + segments[segmentIndex].durationSeconds
         stateLock.unlock()
-        // #15: return immediately with whatever the reader has filled. Never block here: HLSLocalServer
-        // processes requests per-connection serially and AVPlayer uses only 1-3 connections, so holding the
-        // response serializes the legible-track pipeline. The native reader's large read-ahead keeps it ahead
-        // of AVPlayer's prefetch so the window is already filled.
+        // Sodalite#32: on a persisted/auto-selected-at-load subtitle, AVKit bursts EVERY segment before the
+        // multi-track reader has filled the selected store, then caches the empties it never re-fetches (device:
+        // 264 empty subs_N fetches, readMax=0). Wait for the reader to finish (store complete) so the window is
+        // populated. Only the first fetch blocks; isFinished then short-circuits every later fetch.
+        let deadline = Date().addingTimeInterval(25.0)
+        while !store.isFinished, Date() < deadline { usleep(100_000) }
         let cues = store.cuesInWindow(start: start, end: end)
         EngineLog.emit("[PiPSubsDiag] ord=\(ordinal) seg=\(segmentIndex) win=[\(String(format: "%.1f", start)),\(String(format: "%.1f", end))) inWin=\(cues.count) readMax=\(String(format: "%.1f", store.readMaxCueEnd()))", category: .hlsServer)
         // Absolute media-timeline cue times + MPEGTS:0 identity map. Flip to segment-relative here (one line:
