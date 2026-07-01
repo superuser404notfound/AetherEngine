@@ -130,6 +130,17 @@ final class MP4SegmentMuxer {
     /// +delay_moov: first cut may need a second av_write_frame(nil) because FFmpeg can split
     /// ftyp+moov and moof+mdat across calls; gate ensures it only fires once.
     private var moovFlushed: Bool = false
+    /// EAC3/AC-3 moov-wedge guard (#92 follow-up): latched once the first audio packet is written so
+    /// the first moov flush can never fire before FFmpeg has parsed an audio packet — mov_write_moov
+    /// builds the E-AC-3 `dec3` / AC-3 `dac3` (and TrueHD `dmlp`) sample-entry box from a parsed packet,
+    /// and flushing moov video-only errors -22 "Cannot write moov atom before EAC3 packets parsed" and
+    /// wedges the muxer.
+    private var audioPacketWritten: Bool = false
+    /// True only when the audio codec's mp4 sample entry requires a PARSED packet before moov can be
+    /// written (AC-3 `dac3`, E-AC-3 `dec3`, TrueHD `dmlp`). AAC and other codecs build their sample entry
+    /// from codecpar alone, so they never wedge — and gating the #64 RAM-cap flush on them would needlessly
+    /// weaken that memory bound. Latched at init from the audio codec_id.
+    private let audioNeedsParsedPacketForMoov: Bool
     /// Latched when the next staging file open fails; producer must stop the pump.
     private(set) var isWedged: Bool = false
     /// Latched after avformat_write_header; mp4 muxer rewrites time_base to its own pick
@@ -178,6 +189,16 @@ final class MP4SegmentMuxer {
         self.currentSegmentIndex = initialSegmentIndex
         self.sessionDir = sessionDir
         self.haveAudio = audio != nil
+        // Only AC-3 / E-AC-3 / TrueHD build their mp4 sample entry from a parsed packet (dac3/dec3/dmlp),
+        // so only they can hit the "moov before audio parsed" wedge and need the #64-flush guard.
+        if let audioCodecID = audio?.codecpar.pointee.codec_id {
+            self.audioNeedsParsedPacketForMoov =
+                audioCodecID == AV_CODEC_ID_AC3 ||
+                audioCodecID == AV_CODEC_ID_EAC3 ||
+                audioCodecID == AV_CODEC_ID_TRUEHD
+        } else {
+            self.audioNeedsParsedPacketForMoov = false
+        }
 
         let firstPath = Self.stagingPath(forSegmentIndex: initialSegmentIndex,
                                          in: sessionDir)
@@ -515,12 +536,14 @@ final class MP4SegmentMuxer {
         packet.pointee.pts = clean.pts
         packet.pointee.dts = clean.dts
 
+        let streamIndex = packet.pointee.stream_index
+
         // #64 mid-segment flush bound: cap libavformat's interleaver RAM on a very long segment
         // (degenerate sparse-keyframe plan, or an audio stream that decodes to nothing) by emitting a
         // moof+mdat into the current staging file before the buffered span grows without bound. Tracked
         // on the video output stream only; audio/subtitle packets ride along and are force-drained by the
         // flush. Flush BEFORE writing the triggering packet so it opens a fresh window.
-        if packet.pointee.stream_index == videoOutputStreamIndex, packet.pointee.dts != Int64.min {
+        if streamIndex == videoOutputStreamIndex, packet.pointee.dts != Int64.min {
             let dts = packet.pointee.dts
             if fragmentWindowFirstVideoDts == Int64.min {
                 fragmentWindowFirstVideoDts = dts
@@ -537,7 +560,33 @@ final class MP4SegmentMuxer {
         // av_write_frame was tried as a leak hypothesis; no impact on 8 MB/s mallocMB growth
         // (leak was Data(d) dispatch_data aliasing in AVIOReader). Reverted to interleaved for
         // cross-stream DTS monotonicity and audio+video re-ordering via libavformat.
-        return av_interleaved_write_frame(ctx, packet)
+        let rc = av_interleaved_write_frame(ctx, packet)
+
+        // EAC3/AC-3/TrueHD moov-wedge guard (#92 follow-up). Under +delay_moov the first fragment flush
+        // writes moov lazily, and FFmpeg's mp4 muxer can only build the AC-3/E-AC-3/TrueHD dac3/dec3/dmlp
+        // sample-entry box once it has PARSED an audio packet. On a mid-file backward seek the producer
+        // tears down and rebuilds a FRESH muxer at the restart segment; if that muxer's first moov flush
+        // (a #64 RAM-cap flush, or the first segment cut) fires before any audio packet is written,
+        // mov_write_moov errors -22 "Cannot write moov atom before EAC3 packets parsed", the cut fails, and
+        // the segment is retried forever (AVPlayer 503 -> forever-loading). AAC never hits this (its sample
+        // entry needs no parsed packet). Fix has two parts: (1) latch that an audio packet has been written;
+        // (2) in the video-leads-audio case — the first audio packet arrives after a video packet is already
+        // in the fragment window — proactively flush so moov is emitted WITH a parsed audio packet present
+        // rather than waiting for the first cut. In the common backward-seek path the #74 pregate buffer
+        // replays captured audio BEFORE the first video look-behind packet, so fragmentWindowFirstVideoDts
+        // is still unset here and this proactive arm is skipped — moov is instead primed correctly at the
+        // first cut, which already holds the audio in the interleaver. Idempotent once moovFlushed. Audio
+        // routing/placement is untouched, so no audio dropouts. The proactive flush is scoped to
+        // AC-3/E-AC-3/TrueHD (audioNeedsParsedPacketForMoov): AAC (and every other codec) never wedges and
+        // must keep the exact stock code path — no extra early fragment flush — so nothing perturbs its audio.
+        if streamIndex == audioOutputStreamIndex {
+            audioPacketWritten = true
+            if audioNeedsParsedPacketForMoov, !moovFlushed, fragmentWindowFirstVideoDts != Int64.min {
+                flushPendingFragment()
+            }
+        }
+
+        return rc
     }
 
     /// Emit a moof+mdat for everything buffered into the CURRENT staging file, without rotating the fd or
@@ -546,6 +595,14 @@ final class MP4SegmentMuxer {
     /// ftyp+moov under +delay_moov, populating init.mp4 early instead of only at the (far-off) first cut.
     private func flushPendingFragment() {
         guard let ctx = formatContext, headerWritten, fd >= 0 else { return }
+        // EAC3/AC-3/TrueHD moov-wedge guard (#92 follow-up): never let a video-only flush emit moov while
+        // an audio stream whose sample entry needs a parsed packet is declared but no audio packet has been
+        // written yet — mov_write_moov needs a parsed AC-3/E-AC-3/TrueHD packet for its dac3/dec3/dmlp box
+        // (see writePacket). Scoped to those codecs so AAC (which never wedges) keeps the full #64 RAM-cap
+        // bound. Skipping an interim #64 RAM-cap flush is harmless (the interleaver window just grows a
+        // little longer); the first audio packet primes moov here or at the first cut (which already holds
+        // the audio in the interleaver).
+        if audioNeedsParsedPacketForMoov, !audioPacketWritten, !moovFlushed { return }
         _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
         if !moovFlushed {
