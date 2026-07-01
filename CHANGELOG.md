@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **E-AC-3/AC-3/TrueHD no longer wedge the fragmented-mp4 muxer on an out-of-cache backward seek (#94).** Under `+delay_moov` the mp4 muxer writes `moov` lazily on the first flush, and for AC-3/E-AC-3/TrueHD the audio sample entry (`dac3`/`dec3`/`dmlp`) can only be built from a parsed audio packet — so a first `moov` flush that fires video-only errors `-22` ("Cannot write moov atom before EAC3 packets parsed"), the segment cut fails, and the fresh muxer the producer builds at a backward-seek restart is retried forever (AVPlayer 503 → forever-loading spinner). `MP4SegmentMuxer` now latches at init whether the audio codec needs a parsed packet and, scoped to those codecs only, guards the #64 RAM-cap interim flush and proactively primes `moov` with the first audio packet. AAC and every other codec keep the stock path (no early flush, full RAM-cap bound), so there is no audio-dropout regression.
+
 ## [4.8.0] - 2026-06-30
 
 ### Added
