@@ -275,6 +275,15 @@ final class NativeAVPlayerHost {
                 guard let self = self, let event = self.playerItem?.errorLog()?.events.last else { return }
                 let comment = event.errorComment ?? "no comment"
                 EngineLog.emit("[NativeAVPlayerHost] #\(sid) errorLog code=\(event.errorStatusCode) domain=\(event.errorDomain) uri=\(event.uri ?? "-") '\(comment)'", category: .engine)
+                // #93 startup: -15628 is the loader-poison signature. Before the first frame no
+                // playbackStalled will ever fire (playback never started), so the stall-driven
+                // dead-consumer watchdog would never arm; surface the poison as a stall signal.
+                // The watchdog's own guards (fetches frozen, waitingToPlay, item healthy) drop
+                // transients where the loader in fact survived.
+                if event.errorStatusCode == -15628 {
+                    EngineLog.emit("[NativeAVPlayerHost] #\(sid) -15628 loader poison: surfacing as stall signal", category: .engine)
+                    self.stallCount += 1
+                }
             }
         }
         notificationObservers.append(errLogObs)

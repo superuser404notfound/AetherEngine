@@ -23,14 +23,35 @@ private func fixtureExists(_ name: String) -> Bool {
 /// Session-coupled extractors therefore yield while the playback pipeline is starved.
 struct FrameExtractorYieldTests {
 
-    @Test("yield while a restart is in flight or the forward buffer is thin/unknown")
+    @Test("yield while a restart is in flight or the buffer has not been healthy long enough")
     func yieldDecision() {
-        #expect(FrameExtractor.shouldYield(restartInFlight: true, forwardBufferSeconds: 10.0))
-        #expect(FrameExtractor.shouldYield(restartInFlight: false, forwardBufferSeconds: nil))
-        #expect(FrameExtractor.shouldYield(restartInFlight: false, forwardBufferSeconds: 0.0))
-        #expect(FrameExtractor.shouldYield(restartInFlight: false, forwardBufferSeconds: 2.9))
-        #expect(!FrameExtractor.shouldYield(restartInFlight: false, forwardBufferSeconds: 3.0))
-        #expect(!FrameExtractor.shouldYield(restartInFlight: false, forwardBufferSeconds: 8.0))
+        // Hysteresis: a single 1 Hz tick above the floor let a 3.3 MB warm pull through the
+        // exact startup window that killed the loader (device 07-03); one spike must not open.
+        #expect(FrameExtractor.shouldYield(restartInFlight: true, consecutiveHealthyTicks: 99))
+        #expect(FrameExtractor.shouldYield(restartInFlight: false, consecutiveHealthyTicks: 0))
+        #expect(FrameExtractor.shouldYield(restartInFlight: false, consecutiveHealthyTicks: 1))
+        #expect(FrameExtractor.shouldYield(restartInFlight: false, consecutiveHealthyTicks: 2))
+        #expect(!FrameExtractor.shouldYield(restartInFlight: false, consecutiveHealthyTicks: 3))
+        #expect(!FrameExtractor.shouldYield(restartInFlight: false, consecutiveHealthyTicks: 30))
+    }
+
+    @Test("the yield state counts consecutive healthy ticks and resets on any unhealthy one")
+    func healthyTickCounter() {
+        let state = ExtractorYieldState()
+        #expect(state.snapshot().consecutiveHealthyTicks == 0)
+        state.setForwardBuffer(4.0)
+        state.setForwardBuffer(5.0)
+        #expect(state.snapshot().consecutiveHealthyTicks == 2)
+        state.setForwardBuffer(1.4)   // thin tick resets the run
+        #expect(state.snapshot().consecutiveHealthyTicks == 0)
+        state.setForwardBuffer(nil)   // unknown stays reset
+        #expect(state.snapshot().consecutiveHealthyTicks == 0)
+        state.setForwardBuffer(3.0)
+        state.setForwardBuffer(3.0)
+        state.setForwardBuffer(3.0)
+        #expect(state.snapshot().consecutiveHealthyTicks == 3)
+        state.deactivate()
+        #expect(state.snapshot().consecutiveHealthyTicks == 0)
     }
 
     @Test("a yielded thumbnail returns nil cheaply; extraction resumes once healthy",

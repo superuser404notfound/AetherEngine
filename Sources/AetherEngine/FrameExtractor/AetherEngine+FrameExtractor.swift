@@ -7,34 +7,40 @@ import Foundation
 final class ExtractorYieldState: @unchecked Sendable {
     private let lock = NSLock()
     private weak var _session: HLSVideoEngine?
-    private var _forwardBufferSeconds: Double?
+    /// Consecutive 1 Hz ticks with a healthy (>= floor) forward buffer; any thin or unknown
+    /// tick resets the run. Hysteresis against post-load buffer spikes (#93 startup).
+    private var _consecutiveHealthyTicks = 0
 
     func activate(session: HLSVideoEngine) {
         lock.lock()
         _session = session
-        _forwardBufferSeconds = nil
+        _consecutiveHealthyTicks = 0
         lock.unlock()
     }
 
     func deactivate() {
         lock.lock()
         _session = nil
-        _forwardBufferSeconds = nil
+        _consecutiveHealthyTicks = 0
         lock.unlock()
     }
 
     func setForwardBuffer(_ seconds: Double?) {
         lock.lock()
-        _forwardBufferSeconds = seconds
+        if let seconds, seconds >= FrameExtractor.yieldMinForwardBufferSeconds {
+            _consecutiveHealthyTicks += 1
+        } else {
+            _consecutiveHealthyTicks = 0
+        }
         lock.unlock()
     }
 
     /// Session returned outside the lock so its own lock-guarded accessors are never
     /// nested under this one.
-    func snapshot() -> (session: HLSVideoEngine?, forwardBufferSeconds: Double?) {
+    func snapshot() -> (session: HLSVideoEngine?, consecutiveHealthyTicks: Int) {
         lock.lock()
         defer { lock.unlock() }
-        return (_session, _forwardBufferSeconds)
+        return (_session, _consecutiveHealthyTicks)
     }
 }
 
@@ -78,7 +84,7 @@ extension AetherEngine {
             guard let session = snap.session else { return false }
             return FrameExtractor.shouldYield(
                 restartInFlight: session.restartInFlight,
-                forwardBufferSeconds: snap.forwardBufferSeconds
+                consecutiveHealthyTicks: snap.consecutiveHealthyTicks
             )
         }
     }

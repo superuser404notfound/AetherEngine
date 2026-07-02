@@ -624,6 +624,12 @@ public final class AetherEngine: ObservableObject {
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 
+    /// Last ordinal the host requested via setNativeSubtitleSelected (nil after a deselect).
+    /// The #93 stage-2 recovery reload swaps AVPlayerItems and legible selection is per-item,
+    /// so the reload re-applies this to keep an active rendition (PiP) rendering. Cleared with
+    /// the track table on load/stop so a new session never inherits a stale selection.
+    var nativeSubtitleReapplyOrdinal: Int?
+
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
     var externalNativeStoreFillTask: Task<Void, Never>? = nil
 
@@ -675,8 +681,8 @@ public final class AetherEngine: ObservableObject {
     /// GETs follow. Only a fresh AVPlayerItem resets the loader, the same effect as the user's
     /// manual back-out. Same URL + same host (the #15 reuse path keeps AVKit/Control Center and
     /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
-    /// Native subtitle rendition selection is per-item and is lost; acceptable against an
-    /// otherwise endless spinner.
+    /// Native subtitle rendition selection is per-item, so the host's last request is replayed
+    /// onto the fresh item below (an active PiP rendition otherwise silently disappeared).
     func reloadStalledConsumerItem(position: Double) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
@@ -689,6 +695,15 @@ public final class AetherEngine: ObservableObject {
         )
         host.load(url: url, startPosition: position)
         host.play()
+        if let ordinal = nativeSubtitleReapplyOrdinal {
+            EngineLog.emit(
+                "[AetherEngine] #65 re-applying native subtitle ordinal=\(ordinal) after item reload",
+                category: .engine
+            )
+            // The select path's own stall-recovery retries (#32) cover the fresh item's
+            // not-ready window; the stores are already filled, so the pre-fill returns fast.
+            setNativeSubtitleSelected(track: ordinal)
+        }
     }
 
     /// Pure decision for the tcs sink (#93 residual): re-assert play() instead of latching a pause?
@@ -989,6 +1004,7 @@ public final class AetherEngine: ObservableObject {
         stallReengageTask?.cancel()
         stallReengageTask = nil
         nativeSubtitleTrackTable = []
+        nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         metadata = nil
@@ -2093,6 +2109,7 @@ public final class AetherEngine: ObservableObject {
         sidecarASSHeader = nil
         isLoadingSubtitles = false
         nativeSubtitleTrackTable = []
+        nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         cancelNativeSubtitleReaders()

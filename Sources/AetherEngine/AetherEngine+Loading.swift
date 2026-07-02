@@ -223,7 +223,26 @@ extension AetherEngine {
         // the nudge can bounce the transport state.
         session.onConsumerReengageNeeded = { [weak self] position in
             Task { @MainActor [weak self] in
-                self?.reengageStalledConsumer(position: position, trigger: "wedge re-anchor")
+                guard let self else { return }
+                self.reengageStalledConsumer(position: position, trigger: "wedge re-anchor")
+                // #93 startup: a loader that died BEFORE the first frame never posts
+                // playbackStalled, so this path arms its own stage-2 escalation instead of
+                // relying on the stall watchdog. Same contract as the watchdog's stage 2:
+                // fetches still frozen after the grace window while waitingToPlay on a
+                // healthy item means only a fresh AVPlayerItem revives the loader.
+                let fetchesAfterNudge = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                self.stallReengageTask?.cancel()
+                self.stallReengageTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, let self else { return }
+                    let fetchesFinal = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                    guard fetchesFinal == fetchesAfterNudge,
+                          let player = self.currentAVPlayer,
+                          player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                          player.currentItem?.status != .failed else { return }
+                    self.reloadStalledConsumerItem(position: position)
+                }
             }
         }
         session.onPlaylistShiftRebased = { [weak self] seconds, seamOutputSeconds in

@@ -67,13 +67,16 @@ public actor FrameExtractor {
     /// megabytes over the same link the segment producer needs; during startup and recovery that
     /// contention tipped the first segment past CoreMedia's ~4 s media timeout and killed the
     /// AVPlayer loader (-15628, #93 startup). Yield while a producer restart is in flight or the
-    /// consumer's forward buffer is thin; unknown (nil) buffer counts as thin, which also covers
-    /// the cold pre-telemetry startup window.
+    /// consumer's forward buffer has not stayed healthy long enough: a SINGLE 1 Hz tick above
+    /// the floor (post-load seek shapes buffer spikes) let a 3.3 MB warm pull through the exact
+    /// startup window that killed the loader, so the gate opens only after several consecutive
+    /// healthy ticks. Unknown (nil) buffer resets the run, covering the cold startup window.
     public nonisolated static let yieldMinForwardBufferSeconds: Double = 3.0
+    public nonisolated static let yieldHealthyTicksRequired = 3
     public nonisolated static func shouldYield(
-        restartInFlight: Bool, forwardBufferSeconds: Double?
+        restartInFlight: Bool, consecutiveHealthyTicks: Int
     ) -> Bool {
-        restartInFlight || (forwardBufferSeconds ?? 0) < yieldMinForwardBufferSeconds
+        restartInFlight || consecutiveHealthyTicks < yieldHealthyTicksRequired
     }
 
     // MARK: - Public API
