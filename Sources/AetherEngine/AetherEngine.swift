@@ -693,7 +693,7 @@ public final class AetherEngine: ObservableObject {
             + "\(String(format: "%.2f", position))s (same URL, same host)",
             category: .engine
         )
-        host.load(url: url, startPosition: position)
+        host.load(url: url, startPosition: position, inPlaceSwap: true)
         host.play()
         if let ordinal = nativeSubtitleReapplyOrdinal {
             EngineLog.emit(
