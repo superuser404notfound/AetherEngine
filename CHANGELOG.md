@@ -8,6 +8,16 @@ Versioning follows [Semantic Versioning](https://semver.org). See
 [README › Stability and versioning](README.md#stability-and-versioning) for
 the public-API contract.
 
+## Unreleased
+
+### Added
+
+- **External subtitles as first-class tracks (#88).** External subtitle files register with the engine (`LoadOptions.externalSubtitles` at load, `addExternalSubtitleTrack` any time) and appear in `subtitleTracks` with a synthetic id and `isExternal == true`, selectable through the unified `selectSubtitleTrack` (primary and secondary). Load-declared tracks join the native WebVTT renditions (subtitles in PiP / AirPlay) via a whole-file store fill, and a finished store backfills the fullscreen overlay instantly on select. `preferredSubtitleLanguages` ranks external tracks too; a track added mid-session auto-activates only while the host has made no explicit subtitle choice. `removeExternalSubtitleTrack` unregisters.
+
+### Fixed
+
+- A pump-tap-fed subtitle selection kept forwarding cues into the overlay after switching to a sidecar file (stale tap-overlay stream index).
+
 ## [4.9.1] - 2026-07-02
 
 ### Fixed

@@ -110,7 +110,7 @@ Sources/AetherEngine/
 ├── AetherEngine.swift                       Engine core: stored state, load dispatch, transport, stop/seek, track selection
 ├── AetherEngine+Probe.swift                 Static probe machinery: probe(url:/source:), swDecodeProbe, format / frame-rate / codec-label detection
 ├── AetherEngine+Loading.swift               The per-backend loaders (remote-HLS, native, software, audio, audio-native) + reload
-├── AetherEngine+Subtitles.swift             Embedded + sidecar subtitle pipeline (side demuxer task, cue apply / prune)
+├── AetherEngine+Subtitles.swift             Embedded + external subtitle pipeline (side demuxer task, cue apply / prune, external track registry + unified selection routing, #88)
 ├── AetherEngine+ClosedCaptions.swift        In-band CEA-608 closed captions: ClosedCaptionTap (read-only producer observer) + cue mirroring (#77)
 ├── AetherEngine+Live.swift                  Live window publishing, edge snap, resume clamp, scrub thumbnails
 ├── AetherEngine+Diagnostics.swift           Memory probe + live-telemetry bridge
@@ -192,8 +192,9 @@ Sources/AetherEngine/
 │   └── SampleBufferRenderer.swift           SW path: AVSampleBufferDisplayLayer + B-frame reorder, HDR10+ attachments; `flush(removingDisplayedImage:)` holds the last frame through a seek (`DisplayFlushOp`, #90)
 ├── Subtitles/
 │   ├── ASSScriptBuilder.swift               Reassembles raw ASS event cues + TrackInfo.assHeader into a complete script for whole-file renderers
+│   ├── ExternalSubtitleTrack.swift          Host-facing descriptor for external subtitle files registered as first-class tracks (synthetic TrackInfo ids, #88)
 │   ├── MovTextSampleBuilder.swift           Stateless tx3g (mov_text) sample builder for the native legible-subtitle injection path (LoadOptions.prepareNativeSubtitles, #55)
-│   ├── NativeSubtitleCueStore.swift         Owns the decoded-cue array behind a native WebVTT subtitle rendition + the overlay tap feed; deduped, filled by the pump tap (#55, Sodalite#32)
+│   ├── NativeSubtitleCueStore.swift         Owns the decoded-cue array behind a native WebVTT subtitle rendition + the overlay tap feed; deduped, filled by the pump tap (embedded) or one whole-file decode (load-declared external, #88) (#55, Sodalite#32)
 │   └── SubtitleRectText.swift               Plain-text + raw ASS event-line extraction from subtitle rects, shared by the inline and sidecar decoders
 ├── Video/
 │   ├── HLSVideoEngine.swift                 Native path: session orchestrator (start/stop, producer construction + restart, shift handling)
