@@ -2139,19 +2139,39 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     // MARK: - Look-behind finalize helpers
 
+    /// Sample duration (source video TB) written for a look-behind video packet. Always telescope to
+    /// the true decode-order DTS delta when a forward `nextDts` is available, so movenc's per-track
+    /// `track_duration` equals the elapsed DTS and its fragment-boundary reference (`start_dts +
+    /// track_duration`) can never overshoot the next real DTS. matroska hands a CONSTANT DefaultDuration
+    /// for every block while the ms-quantized block timecodes make the real DTS deltas jitter; trusting
+    /// the constant drifts track_duration ~one frame ahead per segment and trips `check_pkt`
+    /// (`Packet duration: -N ... out of range` -> DTS clamp + `pts has no value` -> wrong trun timing,
+    /// the #92 transient blocky glitch). Falls back to the source packet's own positive duration, then
+    /// `fallback`, only when no usable forward delta exists (EOF tail, NOPTS, or a non-increasing next).
+    static func resolveVideoSampleDuration(
+        existingDuration: Int64,
+        dts: Int64,
+        nextDts: Int64?,
+        fallback: Int64
+    ) -> Int64 {
+        if let next = nextDts, dts != Int64.min, next != Int64.min {
+            let inferred = next - dts
+            if inferred > 0 { return inferred }
+        }
+        return existingDuration > 0 ? existingDuration : fallback
+    }
+
     private func finalizeAndWriteVideo(
         _ packet: UnsafeMutablePointer<AVPacket>,
         nextDts: Int64?,
         muxer: MP4SegmentMuxer
     ) {
-        if packet.pointee.duration <= 0 {
-            if let next = nextDts {
-                let inferred = next - packet.pointee.dts
-                packet.pointee.duration = inferred > 0 ? inferred : videoFallbackDurationPts
-            } else {
-                packet.pointee.duration = videoFallbackDurationPts
-            }
-        }
+        packet.pointee.duration = Self.resolveVideoSampleDuration(
+            existingDuration: packet.pointee.duration,
+            dts: packet.pointee.dts,
+            nextDts: nextDts,
+            fallback: videoFallbackDurationPts
+        )
 
         packet.pointee.stream_index = muxer.videoOutputStreamIndex
 
