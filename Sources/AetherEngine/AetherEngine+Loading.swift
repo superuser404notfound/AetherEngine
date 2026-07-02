@@ -368,6 +368,7 @@ extension AetherEngine {
             try checkLoadCurrent(generation)
         }
         self.nativeVideoSession = session
+        extractorYieldState.activate(session: session)
 
         // #15: the stores were created before start() (above) so the VideoSegmentProvider got the references at
         // init for the WebVTT rendition. Now that the playlist shift is known, apply it, and arm the lazy

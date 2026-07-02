@@ -10,6 +10,9 @@ public actor FrameExtractor {
     private let context: FrameDecodeContext
     private let cache: FrameCache
     private let decodeQueue: DispatchQueue
+    /// #93 startup: session-coupled extractors yield elective thumbnail decodes while the
+    /// playback pipeline is starved (see `shouldYield`). nil = never yield (standalone use).
+    private let yieldWhile: (@Sendable () -> Bool)?
 
     /// Cancellation flag for the in-flight decode; a new request flips the previous
     /// token so a superseded scrub decode bails promptly.
@@ -32,8 +35,9 @@ public actor FrameExtractor {
     private let idleInterval: Duration = .seconds(10)
     private var idleTask: Task<Void, Never>?
 
-    private init(context: FrameDecodeContext) {
+    private init(context: FrameDecodeContext, yieldWhile: (@Sendable () -> Bool)?) {
         self.context = context
+        self.yieldWhile = yieldWhile
         self.cache = FrameCache(
             thumbnailLimit: 24,
             snapshotLimit: 2,
@@ -45,14 +49,31 @@ public actor FrameExtractor {
         self.decodeQueue = DispatchQueue(label: "com.aetherengine.frameextractor", qos: .utility)
     }
 
-    public init(url: URL, httpHeaders: [String: String] = [:]) {
-        self.init(context: FrameDecodeContext(url: url, httpHeaders: httpHeaders))
+    public init(url: URL, httpHeaders: [String: String] = [:],
+                yieldWhile: (@Sendable () -> Bool)? = nil) {
+        self.init(context: FrameDecodeContext(url: url, httpHeaders: httpHeaders),
+                  yieldWhile: yieldWhile)
     }
 
     /// Construct over a custom `IOReader` source (a clone with its own cursor).
     /// The extractor owns the reader and closes it on teardown.
-    public init(reader: IOReader, formatHint: String? = nil) {
-        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint))
+    public init(reader: IOReader, formatHint: String? = nil,
+                yieldWhile: (@Sendable () -> Bool)? = nil) {
+        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint),
+                  yieldWhile: yieldWhile)
+    }
+
+    /// Yield decision for elective (thumbnail) extraction. The disposable decode's demuxer pulls
+    /// megabytes over the same link the segment producer needs; during startup and recovery that
+    /// contention tipped the first segment past CoreMedia's ~4 s media timeout and killed the
+    /// AVPlayer loader (-15628, #93 startup). Yield while a producer restart is in flight or the
+    /// consumer's forward buffer is thin; unknown (nil) buffer counts as thin, which also covers
+    /// the cold pre-telemetry startup window.
+    public nonisolated static let yieldMinForwardBufferSeconds: Double = 3.0
+    public nonisolated static func shouldYield(
+        restartInFlight: Bool, forwardBufferSeconds: Double?
+    ) -> Bool {
+        restartInFlight || (forwardBufferSeconds ?? 0) < yieldMinForwardBufferSeconds
     }
 
     // MARK: - Public API
@@ -95,6 +116,13 @@ public actor FrameExtractor {
         if let hit = cache.get(mode: mode, seconds: seconds) {
             scheduleIdleClose()
             return hit
+        }
+        // Elective thumbnails yield to a starved playback pipeline (snapshots are deliberate
+        // one-shot user actions and stay ungated). Checked after the cache: hits are free.
+        if mode == .thumbnail, yieldWhile?() == true {
+            EngineLog.emit("[FrameExtractor] thumbnail yielded: playback pipeline starved",
+                           category: .swPlayback, level: .verbose)
+            return nil
         }
         currentToken?.cancel()
         let token = CancelToken()

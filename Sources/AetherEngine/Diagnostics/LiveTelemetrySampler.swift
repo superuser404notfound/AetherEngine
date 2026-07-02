@@ -166,6 +166,10 @@ final class LiveTelemetrySampler {
             forwardBufferSeconds = nil
         }
 
+        // Feed the extractor yield gate (#93 startup): nil on non-native paths keeps the
+        // gate conservative there, but those paths have no active session to gate anyway.
+        engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
+
         if engine.playbackBackend == .native {
             emitLagDiag(engine: engine, forwardBuffer: forwardBufferSeconds, netMbps: instantBitrateMbps)
         }

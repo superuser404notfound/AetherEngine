@@ -399,6 +399,9 @@ public final class AetherEngine: ObservableObject {
 
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
     var nativeVideoSession: HLSVideoEngine?
+    /// Thread-safe starvation inputs for session-coupled FrameExtractor yield closures
+    /// (#93 startup); written on load/stop and by the 1 Hz telemetry tick.
+    let extractorYieldState = ExtractorYieldState()
 
     /// #65: thread-safe mirror of AVPlayer's rendered (playlist-axis) position, updated on the main actor by
     /// the $renderedTime sink. Read off-main by the producer when it re-anchors on a backpressure wedge.
@@ -2023,6 +2026,7 @@ public final class AetherEngine: ObservableObject {
         }
         nativeVideoSession?.stop()
         nativeVideoSession = nil
+        extractorYieldState.deactivate()
 
         // Shut down live scrub-thumbnail FrameExtractors with the session.
         let liveThumbs = liveThumbnailExtractors
