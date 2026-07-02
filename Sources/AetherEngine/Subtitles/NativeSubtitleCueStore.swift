@@ -20,8 +20,18 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     private var cues: [SubtitleCue] = []
     private var shiftSeconds: Double = 0
     private var finished = false
+    /// Sodalite#32: the pump tap and a side reader can feed the same store concurrently (and a producer
+    /// restart re-reads a region), so appends dedup on (start, end, text) instead of trusting the source.
+    private var seenKeys: Set<String> = []
+    /// Highest cue end appended (source axis). `cues.last` stopped being the read head once two feeders
+    /// with different positions share the store.
+    private var maxCueEndSeconds: Double = 0
 
     init() {}
+
+    private static func key(start: Double, end: Double, text: String) -> String {
+        "\(Int((start * 1000).rounded()))|\(Int((end * 1000).rounded()))|\(text)"
+    }
 
     func setShiftSeconds(_ s: Double) { lock.lock(); shiftSeconds = s; lock.unlock() }
 
@@ -31,15 +41,34 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
 
     func replaceCues(_ newCues: [SubtitleCue]) {
         lock.lock(); defer { lock.unlock() }
-        cues = newCues.filter { if case .text = $0.body { return true } else { return false } }
+        cues.removeAll(keepingCapacity: true)
+        seenKeys.removeAll(keepingCapacity: true)
+        maxCueEndSeconds = 0
+        appendLocked(newCues)
     }
 
     func appendCues(_ extra: [SubtitleCue]) {
         lock.lock(); defer { lock.unlock() }
-        for c in extra { if case .text = c.body { cues.append(c) } }
+        appendLocked(extra)
     }
 
-    func clear() { lock.lock(); cues.removeAll(keepingCapacity: false); finished = false; lock.unlock() }
+    private func appendLocked(_ extra: [SubtitleCue]) {
+        for c in extra {
+            guard case .text(let t) = c.body else { continue }
+            guard seenKeys.insert(Self.key(start: c.startTime, end: c.endTime, text: t)).inserted else { continue }
+            cues.append(c)
+            if c.endTime > maxCueEndSeconds { maxCueEndSeconds = c.endTime }
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        cues.removeAll(keepingCapacity: false)
+        seenKeys.removeAll(keepingCapacity: false)
+        maxCueEndSeconds = 0
+        finished = false
+        lock.unlock()
+    }
 
     var cueCount: Int { lock.lock(); defer { lock.unlock() }; return cues.count }
 
@@ -65,12 +94,12 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
         cuesInWindow(start: 0, end: .greatestFiniteMagnitude)
     }
 
-    /// Latest-read cue's end time (shift-applied AVPlayer seconds), or 0 if empty. Cues append in read order,
-    /// so the last entry marks how far the reader has read; the .vtt handler waits on this so AVPlayer gets
-    /// cues instead of an empty segment when it fetches ahead of the lazy reader (#15).
+    /// Highest cue end seen (shift-applied AVPlayer seconds), or 0 if empty. Marks how far ANY feeder
+    /// (pump tap or side reader) has covered; the .vtt handler waits on this so AVPlayer gets cues
+    /// instead of an empty segment when it fetches ahead of the coverage (#15).
     func readMaxCueEnd() -> Double {
         lock.lock(); defer { lock.unlock() }
-        guard let last = cues.last else { return 0 }
-        return last.endTime - shiftSeconds
+        guard !cues.isEmpty else { return 0 }
+        return maxCueEndSeconds - shiftSeconds
     }
 }

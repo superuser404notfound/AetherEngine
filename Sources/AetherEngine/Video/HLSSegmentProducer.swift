@@ -470,6 +470,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// never muxed (output byte-identical). Set via init so it's in the keep-set; observer attached after.
     var closedCaptionStreamIndex: Int32 = -1
     var closedCaptionObserver: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
+
+    /// Sodalite#32: text-subtitle tap, generalizing the #77 CC tap. Streams in this set are kept by the
+    /// pump (not discarded) and each of their packets is handed to `subtitleTapObserver` (with the
+    /// stream's time_base), then dropped below as a foreign packet — never muxed. The pump already reads
+    /// the source's full interleave, so harvesting subtitle packets here costs no extra bandwidth: the
+    /// session's cue stores fill for exactly the region the producer has produced, across restarts.
+    var subtitleTapStreamIndices: Set<Int32> = []
+    var subtitleTapObserver: (@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational) -> Void)?
+    private var subtitleTapTimeBases: [Int32: AVRational] = [:]
     private var closedCaptionStreamTimeBase = AVRational(num: 1, den: 1)
 
     /// Must be set before first allocateMuxer call. Enables mov_text track declaration in init moov (#55).
@@ -584,6 +593,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         if let side = sideAudioDemuxer {
             var keep: Set<Int32> = [videoStreamIndex]
             if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
+            keep.formUnion(subtitleTapStreamIndices)   // Sodalite#32
             demuxer.discardAllStreamsExcept(keep)
             if let audio = audio {
                 side.discardAllStreamsExcept([audio.sourceStreamIndex])
@@ -594,12 +604,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 keep.insert(audio.sourceStreamIndex)
             }
             if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
+            keep.formUnion(subtitleTapStreamIndices)   // Sodalite#32
             demuxer.discardAllStreamsExcept(keep)
         }
         // #77: cache the CC stream's time_base for the observer's PTS conversion.
         if closedCaptionStreamIndex >= 0 {
             closedCaptionStreamTimeBase = demuxer.stream(at: closedCaptionStreamIndex)?.pointee.time_base
                 ?? AVRational(num: 1, den: 1)
+        }
+        // Sodalite#32: same for the tapped subtitle streams.
+        for idx in subtitleTapStreamIndices {
+            subtitleTapTimeBases[idx] = demuxer.stream(at: idx)?.pointee.time_base
+                ?? AVRational(num: 1, den: 1000)
         }
 
         let audioDesc = audio.map { a -> String in
@@ -1333,6 +1349,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // packet (the eia_608/c608 caption stream) and is dropped below — never muxed.
                 if pktStreamIdx == closedCaptionStreamIndex, let observe = closedCaptionObserver {
                     observe(packet, closedCaptionStreamTimeBase)
+                }
+                // Sodalite#32: hand tapped subtitle packets to the session's decode tap, then drop them
+                // below as foreign packets. Main demuxer only; side-demuxer indices alias a different space.
+                if origin == .main, subtitleTapStreamIndices.contains(pktStreamIdx),
+                   let observe = subtitleTapObserver {
+                    observe(pktStreamIdx, packet,
+                            subtitleTapTimeBases[pktStreamIdx] ?? AVRational(num: 1, den: 1000))
                 }
 
                 if packet.pointee.dts == Int64.min {

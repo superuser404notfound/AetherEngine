@@ -15,6 +15,7 @@
 #
 #   restart-witness-av.mp4        - H.264 B-frames + AAC, 12 s (3 segments)
 #   restart-witness-leadaudio.mp4 - same, video delayed 0.3 s so audio leads
+#   restart-witness-subs.mkv      - same as MKV with an embedded SRT track (pump tap)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -106,6 +107,38 @@ ffmpeg -hide_banner -loglevel error -y \
     -i "$FIXTURES_DIR/restart-witness-av.mp4" \
     -map 0:v -map 1:a -c copy -t 8 \
     "$FIXTURES_DIR/restart-witness-leadaudio.mp4"
+
+# Same content as MKV with an embedded SRT track (the subtitle pump-tap scenario,
+# SubtitlePumpTapTests).
+echo "→ restart-witness-subs.mkv (embedded SRT track)"
+SRT_TMP="$(mktemp -t witness-subs).srt"
+cat > "$SRT_TMP" <<'SRT'
+1
+00:00:00,500 --> 00:00:02,000
+First cue
+
+2
+00:00:02,500 --> 00:00:04,500
+Second cue crossing the first boundary
+
+3
+00:00:05,000 --> 00:00:07,000
+Third cue
+
+4
+00:00:08,200 --> 00:00:10,000
+Fourth cue
+
+5
+00:00:10,500 --> 00:00:11,500
+Fifth cue
+SRT
+ffmpeg -hide_banner -loglevel error -y \
+    -i "$FIXTURES_DIR/restart-witness-av.mp4" -i "$SRT_TMP" \
+    -map 0:v -map 0:a -map 1:0 -c:v copy -c:a copy -c:s srt \
+    -metadata:s:s:0 language=eng \
+    "$FIXTURES_DIR/restart-witness-subs.mkv"
+rm -f "$SRT_TMP"
 
 echo ""
 echo "Done. Try:"

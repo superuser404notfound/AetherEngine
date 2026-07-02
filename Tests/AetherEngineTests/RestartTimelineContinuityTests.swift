@@ -209,3 +209,36 @@ struct RestartTimelineContinuityTests {
         }
     }
 }
+
+// MARK: - Subtitle pump tap (Sodalite#32)
+
+@Suite("Subtitle pump tap", .serialized)
+struct SubtitlePumpTapTests {
+
+    /// The pump already reads the source's full interleave; tapping the text-subtitle streams there
+    /// must fill the native cue stores for the produced region with NO side reader (this bare
+    /// HLSVideoEngine layer has none), and the served .vtt window must carry those cues.
+    @Test("Producing segments fills the native cue stores via the pump tap alone",
+          .enabled(if: fixtureExists("restart-witness-subs.mkv"),
+                   "run Scripts/fetch-fixtures.sh to generate the witness clip"),
+          .timeLimit(.minutes(2)))
+    func pumpTapFillsStores() throws {
+        let engine = HLSVideoEngine(url: fixtureURL("restart-witness-subs.mkv"), dvModeAvailable: false)
+        engine.requestNativeSubtitleTrack()
+        _ = try engine.start()
+        defer { engine.stop() }
+        let prov = try #require(engine.provider)
+
+        #expect(prov.mediaSegment(at: 0) != nil)
+        #expect(prov.mediaSegment(at: 1) != nil)
+
+        let store = try #require(engine.nativeSubtitleCueStoresForSession.first)
+        let deadline = Date().addingTimeInterval(10)
+        while store.cueCount == 0, Date() < deadline { usleep(50_000) }
+        #expect(store.cueCount > 0, "pump tap delivered no cues for the produced region")
+
+        let vtt = try #require(prov.nativeSubtitleVTT(ordinal: 0, segmentIndex: 0))
+        #expect(vtt.contains("-->"), "served .vtt window for seg-0 carries no cues")
+        #expect(vtt.contains("First cue"))
+    }
+}

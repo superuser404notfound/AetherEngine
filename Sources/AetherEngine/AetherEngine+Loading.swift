@@ -300,6 +300,9 @@ extension AetherEngine {
         if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
             session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
             session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
+            // Sodalite#32: stream indices arm the producer's subtitle pump tap, which harvests cue packets
+            // from the main pump's existing read (no side-channel bandwidth) for the produced region.
+            session.nativeSubtitleSourceStreamIndicesForSession = nativeSubtitleTrackTable.map { $0.sourceStreamIndex.map(Int32.init) }
             // Sodalite#32: the native rendition matching the preferred subtitle language must be the master's
             // DEFAULT=YES one, because a host-selected legible track only renders if it is the group default
             // (AVKit hides a non-default selection as mute-only). Resolved here, before start() builds the
