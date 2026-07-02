@@ -231,14 +231,28 @@ struct SubtitlePumpTapTests {
 
         #expect(prov.mediaSegment(at: 0) != nil)
         #expect(prov.mediaSegment(at: 1) != nil)
+        #expect(prov.mediaSegment(at: 2) != nil)
 
+        // The tap must cover the WHOLE produced region, not just packets that leaked through the
+        // demuxer's open-time queue before the discard set applied (the first-device-run bug: the
+        // tap set was armed after the producer's init had already discarded the subtitle streams,
+        // so only two open-time cues ever arrived).
         let store = try #require(engine.nativeSubtitleCueStoresForSession.first)
         let deadline = Date().addingTimeInterval(10)
-        while store.cueCount == 0, Date() < deadline { usleep(50_000) }
-        #expect(store.cueCount > 0, "pump tap delivered no cues for the produced region")
+        while store.readMaxCueEnd() < 11.0, Date() < deadline { usleep(50_000) }
+        #expect(store.readMaxCueEnd() >= 11.0,
+                "pump tap coverage stalled at \(store.readMaxCueEnd())s of ~12s produced")
 
         let vtt = try #require(prov.nativeSubtitleVTT(ordinal: 0, segmentIndex: 0))
         #expect(vtt.contains("-->"), "served .vtt window for seg-0 carries no cues")
         #expect(vtt.contains("First cue"))
+        let vttTail = try #require(prov.nativeSubtitleVTT(ordinal: 0, segmentIndex: 2))
+        #expect(vttTail.contains("Fifth cue"), "tail window missing tap-harvested cues")
+
+        // And a producer restart must keep harvesting: re-produce seg-1 and confirm coverage stays.
+        engine.requestRestart(at: 1)
+        let redeadline = Date().addingTimeInterval(15)
+        while store.readMaxCueEnd() < 11.0, Date() < redeadline { usleep(50_000) }
+        #expect(store.readMaxCueEnd() >= 11.0, "coverage lost after a producer restart")
     }
 }

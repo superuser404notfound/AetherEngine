@@ -963,6 +963,27 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 : 1
         }
 
+        // #15: native subtitles requested but no host pre-populated the cue stores (the `aetherctl serve
+        // --native-subs` path). Auto-attach one store per non-bitmap text track BEFORE the producer is
+        // built: the producer's init applies the demuxer discard set, and the subtitle tap streams must
+        // be in it (Sodalite#32; a post-init arm only ever saw open-time queued packets). The host's
+        // full-session path sets these before start() (AetherEngine+Loading), so the isEmpty guard makes
+        // this a no-op there. makeProducer threads the stores + tap onto the producer.
+        if enableNativeSubtitleTrackForSession && nativeSubtitleCueStoresForSession.isEmpty {
+            let textTracks = dem.subtitleTrackInfos().filter { !AetherEngine.isBitmapSubtitleCodec($0.codec) }
+            if !textTracks.isEmpty {
+                nativeSubtitleCueStoresForSession = textTracks.map { _ in NativeSubtitleCueStore() }
+                nativeSubtitleLanguagesForSession = textTracks.map { $0.language }
+                nativeSubtitleSourceStreamIndicesForSession = textTracks.map { Int32($0.id) }
+                EngineLog.emit(
+                    "[HLSVideoEngine] #15 auto-attached \(nativeSubtitleCueStoresForSession.count) native "
+                    + "subtitle store(s) for the WebVTT rendition "
+                    + "(langs=\(nativeSubtitleLanguagesForSession.map { $0 ?? "und" }))",
+                    category: .session
+                )
+            }
+        }
+
         // 6b. Run the stream-copy / FLAC-bridge / video-only cascade.
         let prod: HLSSegmentProducer
         prod = try buildProducerWithAudioCascade(
@@ -974,33 +995,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
         self.producer = prod
         self.activeAudioSourceStreamIndex = savedAudioConfig != nil ? audioStreamIndex : -1
-
-        // #15: native subtitles requested but no host pre-populated the cue stores (the `aetherctl serve
-        // --native-subs` path). Auto-attach one store per non-bitmap text track HERE, before the provider is
-        // built, so the master advertises the WebVTT SUBTITLES rendition. The host's full-session path sets
-        // these before start() (AetherEngine+Loading), so the isEmpty guard makes this a no-op there and the
-        // tvOS/iOS host path stays byte-identical. The lazy readers that fill the stores are the host's job;
-        // exposure of the legible option only needs the rendition declared, not cues present.
-        if enableNativeSubtitleTrackForSession && nativeSubtitleCueStoresForSession.isEmpty {
-            let textTracks = dem.subtitleTrackInfos().filter { !AetherEngine.isBitmapSubtitleCodec($0.codec) }
-            if !textTracks.isEmpty {
-                let stores = textTracks.map { _ in NativeSubtitleCueStore() }
-                let langs = textTracks.map { $0.language }
-                nativeSubtitleCueStoresForSession = stores
-                nativeSubtitleLanguagesForSession = langs
-                nativeSubtitleSourceStreamIndicesForSession = textTracks.map { Int32($0.id) }
-                prod.subtitleCueStores = stores
-                prod.nativeSubtitleLanguages = langs
-                // Sodalite#32: the initial producer was built before these stores existed; arm its tap now.
-                rebuildSubtitleTapRoutes()
-                armSubtitleTap(on: prod)
-                EngineLog.emit(
-                    "[HLSVideoEngine] #15 auto-attached \(stores.count) native subtitle store(s) for the "
-                    + "WebVTT rendition (langs=\(langs.map { $0 ?? "und" }))",
-                    category: .session
-                )
-            }
-        }
 
         // 7. Wire provider, server, and URL.
         let manifestCodecs = audioHLSCodecs.map { "\(primaryCodecs),\($0)" } ?? primaryCodecs
@@ -1346,6 +1340,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoDts: videoTarget,
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
+            subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             desiredFirstVideoTfdtPts: desiredVideoTfdt,
             desiredFirstAudioTfdtPts: desiredAudioTfdt,
             segmentBoundaries: segmentBoundaries,

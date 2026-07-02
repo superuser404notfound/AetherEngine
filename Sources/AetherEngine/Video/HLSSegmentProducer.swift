@@ -476,7 +476,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// stream's time_base), then dropped below as a foreign packet — never muxed. The pump already reads
     /// the source's full interleave, so harvesting subtitle packets here costs no extra bandwidth: the
     /// session's cue stores fill for exactly the region the producer has produced, across restarts.
-    var subtitleTapStreamIndices: Set<Int32> = []
+    /// Set at init (BEFORE the discard block: a post-init assignment came too late, the demuxer had
+    /// already discarded the subtitle streams and only open-time queued packets ever reached the tap;
+    /// device repro: readMax frozen at 5.2s on a resumed remote MKV).
+    var subtitleTapStreamIndices: Set<Int32>
     var subtitleTapObserver: (@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational) -> Void)?
     private var subtitleTapTimeBases: [Int32: AVRational] = [:]
     private var closedCaptionStreamTimeBase = AVRational(num: 1, den: 1)
@@ -548,6 +551,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioFallbackDurationPts: Int64 = 0,
         restartTargetVideoDts: Int64 = Int64.min,
         closedCaptionStreamIndex: Int32 = -1,
+        subtitleTapStreamIndices: Set<Int32> = [],
         desiredFirstVideoTfdtPts: Int64,
         desiredFirstAudioTfdtPts: Int64 = 0,
         segmentBoundaries: [Int64],
@@ -566,6 +570,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         self.videoStreamIndex = videoStreamIndex
         self.closedCaptionStreamIndex = closedCaptionStreamIndex   // #77: before the discard block below
+        self.subtitleTapStreamIndices = subtitleTapStreamIndices   // Sodalite#32: same reason
         self.videoConfig = video
         self.convertP7Active = video.convertP7ToProfile81
         self.audioConfig = audio
