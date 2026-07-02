@@ -401,13 +401,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             // only while no restart is executing.
             let rideDeadline = DispatchTime.now() + repositionRideCapSeconds
             var attempt = 0
+            var firedThisCall = false
             while attempt < Self.repositionMaxWaits {
                 if restartActivity?() == true {
                     if DispatchTime.now() > rideDeadline {
                         break
                     }
                 } else {
-                    if attempt == 0 || lastRestartIndex != index {
+                    // #93 residual: a fetch whose index was JUST restarted to (lastRestartIndex ==
+                    // index) waits for the producer to deliver instead of re-firing; each AVPlayer
+                    // re-request otherwise tore down the fresh producer mid-capture (device: three
+                    // back-to-back restarts at the same index, one dropped frame each). The #50
+                    // same-index orphan (producer settled elsewhere) is covered by one backstop
+                    // re-fire on the final attempt.
+                    let orphanBackstop = attempt == Self.repositionMaxWaits - 1 && !firedThisCall
+                    if lastRestartIndex != index || orphanBackstop {
                         EngineLog.emit(
                             "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
                             category: .session
@@ -418,6 +426,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                         // Pre-restart reset would be clobbered by the old producer's final write re-bumping
                         // highWater, re-arming producerPassedAndPruned and cascading into per-segment restarts.
                         cache.resetHighWaterForRestart()
+                        firedThisCall = true
                     }
                     attempt += 1
                 }
