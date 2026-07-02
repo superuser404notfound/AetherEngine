@@ -140,6 +140,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let cache: SegmentCache
     /// Segment index offset; 0 for initial-start, non-zero for restart sessions.
     private let baseIndex: Int
+    /// The segment index this producer is anchored at (#93 residual: the provider skips firing
+    /// restarts at indices the active producer demonstrably covers).
+    var anchoredBaseIndex: Int { baseIndex }
 
     /// Source video TB, carried to rescale timestamps (avformat_write_header rewrites the muxer's TB).
     private let sourceVideoTimeBase: AVRational

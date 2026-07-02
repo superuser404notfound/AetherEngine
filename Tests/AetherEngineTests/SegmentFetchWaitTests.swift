@@ -241,3 +241,73 @@ extension SegmentFetchWaitTests {
             statusIsPaused: false, engineStateIsPlaying: true, now: now, windowUntil: open, reasserts: 0))
     }
 }
+
+/// #93 residual: an index the ACTIVE producer covers must never be fired or backstopped away.
+extension SegmentFetchWaitTests {
+    private func makeCoverageProvider(cache: SegmentCache, recorder: Recorder,
+                                      producerBase: Int?) -> VideoSegmentProvider {
+        VideoSegmentProvider(
+            cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
+            sourceBitrate: 8_000_000,
+            restartHandler: { idx in recorder.record(idx) },
+            restartActivity: { false },
+            activeProducerBase: { producerBase },
+            repositionWaitSlice: 0.05,
+            repositionRideCapSeconds: 5.0
+        )
+    }
+
+    @Test("no fire and no backstop while the active producer covers the requested index")
+    func producerCoverageSuppressesFires() {
+        let cache = SegmentCache(forwardWindow: 30, backwardWindow: 30)
+        defer { cache.close() }
+        let recorder = Recorder()
+        // Producer anchored at 38, marching; request 40 (covered). Old segments above keep the
+        // request on the fire-loop path. The march delivers on the second coverage poll
+        // (deterministic; wall-clock timers flake under parallel test load).
+        final class CountingBase: @unchecked Sendable {
+            private let lock = NSLock()
+            private var polls = 0
+            private let deliver: @Sendable () -> Void
+            init(deliver: @escaping @Sendable () -> Void) { self.deliver = deliver }
+            func get() -> Int? {
+                lock.lock()
+                polls += 1
+                let fire = polls == 2
+                lock.unlock()
+                if fire { deliver() }
+                return 38
+            }
+        }
+        let base = CountingBase { [weak cache] in
+            cache?.store(index: 40, data: Data(repeating: 0x44, count: 8))
+        }
+        let provider = VideoSegmentProvider(
+            cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
+            sourceBitrate: 8_000_000,
+            restartHandler: { idx in recorder.record(idx) },
+            restartActivity: { false },
+            activeProducerBase: { base.get() },
+            repositionWaitSlice: 0.05,
+            repositionRideCapSeconds: 5.0
+        )
+        storeAbove(cache, range: 45...50)
+        let served = provider.mediaSegment(at: 40)
+        #expect(served != nil)
+        #expect(recorder.all.isEmpty)
+    }
+
+    @Test("an index outside the producer's march window still fires")
+    func outsideCoverageFires() {
+        let cache = SegmentCache(forwardWindow: 30, backwardWindow: 30)
+        defer { cache.close() }
+        let recorder = Recorder()
+        // Producer anchored far ahead at 55; request 40 is behind it: fire as before.
+        let provider = makeCoverageProvider(cache: cache, recorder: recorder, producerBase: 55)
+        storeAbove(cache, range: 55...58)
+        _ = provider.mediaSegment(at: 40)
+        #expect(recorder.all == [40])
+    }
+}

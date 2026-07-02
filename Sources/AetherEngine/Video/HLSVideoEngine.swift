@@ -1099,6 +1099,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             restartActivity: isLiveSession ? nil : { [weak self] in
                 self?.restartInFlight ?? false
             },
+            activeProducerBase: isLiveSession ? nil : { [weak self] in
+                self?.currentProducerBaseIndex
+            },
             // #93 residual: the first producer may be anchored at the resume segment; without this
             // the cold-start heuristic (abs(index - lastRestartIndex) > 2) restarts it immediately.
             initialRestartIndex: initialProducerBaseIndex,
@@ -1560,6 +1563,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         restartLock.lock()
         defer { restartLock.unlock() }
         return restartCoalescer.isInFlight
+    }
+
+    /// Base index of the currently-installed producer, nil when none (#93 residual: a fetch for
+    /// an index the active producer covers must WAIT for its march, not tear it down; device saw
+    /// a 75%-complete capture killed by a backstop re-fire and a fresh forward march restarted).
+    var currentProducerBaseIndex: Int? {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return producer?.anchoredBaseIndex
     }
 
     func requestRestart(at idx: Int, authoritative: Bool = false) {

@@ -86,6 +86,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// True while the engine's restart coalescer has an in-flight run (#93 residual): waiting
     /// fetches ride it instead of burning fixed retry budgets, and never re-fire at stale indices.
     private let restartActivity: (() -> Bool)?
+    /// Base index of the active producer (#93 residual): a fetch for an index within the
+    /// producer's forward march window waits for the march instead of tearing it down.
+    private let activeProducerBase: (() -> Int?)?
 
     /// Base index of the engine's current producer. Guards against stale-producer waits:
     /// abs(index - lastRestartIndex) <= 2 = cold start, wait; larger = restart needed.
@@ -141,6 +144,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         targetDurationFloorSeconds: Double? = nil,
         restartHandler: ((Int) -> Void)? = nil,
         restartActivity: (() -> Bool)? = nil,
+        activeProducerBase: (() -> Int?)? = nil,
         initialRestartIndex: Int = 0,
         repositionWaitSlice: TimeInterval = 8.0,
         repositionRideCapSeconds: TimeInterval = 90.0,
@@ -167,6 +171,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.sourceBitrate = sourceBitrate
         self.restartHandler = restartHandler
         self.restartActivity = restartActivity
+        self.activeProducerBase = activeProducerBase
         self._lastRestartIndex = initialRestartIndex
         self.repositionWaitSlice = repositionWaitSlice
         self.repositionRideCapSeconds = repositionRideCapSeconds
@@ -426,9 +431,17 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     // re-request otherwise tore down the fresh producer mid-capture (device: three
                     // back-to-back restarts at the same index, one dropped frame each). The #50
                     // same-index orphan (producer settled elsewhere) is covered by one backstop
-                    // re-fire on the final attempt.
-                    let orphanBackstop = attempt == Self.repositionMaxWaits - 1 && !firedThisCall
-                    if lastRestartIndex != index || orphanBackstop {
+                    // re-fire on the final attempt. An index the ACTIVE producer demonstrably
+                    // covers (base <= index <= base + forward window) never fires OR backstops:
+                    // the march will deliver it, and the backstop killed a 75%-complete capture
+                    // on device while a forward-march neighbor got its healthy producer restarted.
+                    let producerCovers: Bool = {
+                        guard let base = activeProducerBase?() else { return false }
+                        return base <= index && index - base <= Self.forwardWaitWindow
+                    }()
+                    let orphanBackstop = attempt == Self.repositionMaxWaits - 1
+                        && !firedThisCall && !producerCovers
+                    if (lastRestartIndex != index && !producerCovers) || orphanBackstop {
                         EngineLog.emit(
                             "[HLSVideoEngine] seg\(index): out-of-range fetch (cache.range=\(range.map { "\($0.0)..\($0.1)" } ?? "empty") highWater=\(highWater) attempt=\(attempt + 1)/\(Self.repositionMaxWaits)), restarting producer",
                             category: .session
