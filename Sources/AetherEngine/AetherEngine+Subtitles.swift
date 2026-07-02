@@ -620,6 +620,42 @@ extension AetherEngine {
         }
     }
 
+    // MARK: - External subtitle tracks (#88)
+
+    /// Register an external subtitle file as a first-class track (AetherEngine#88): it appears in
+    /// `subtitleTracks` with a synthetic id and `isExternal == true` and is selectable via
+    /// `selectSubtitleTrack(index:)`. Overlay-only (no native WebVTT rendition / PiP); declare via
+    /// `LoadOptions.externalSubtitles` for rendition eligibility. If `preferredSubtitleLanguages`
+    /// is set, nothing is active, and the host made no explicit choice yet, the preference re-runs
+    /// so a late-added matching track auto-activates.
+    @discardableResult
+    public func addExternalSubtitleTrack(_ track: ExternalSubtitleTrack) -> TrackInfo {
+        let info = registerExternalSubtitleTrack(track)
+        applyPreferredSubtitleSelection(startAnchor: sourceTime,
+                                        sourceDuration: duration > 0 ? duration : nil)
+        return info
+    }
+
+    /// Registration without the preference re-run; the load path runs its own selection at load end.
+    @discardableResult
+    func registerExternalSubtitleTrack(_ track: ExternalSubtitleTrack) -> TrackInfo {
+        let id = Self.externalSubtitleTrackIDBase + nextExternalSubtitleOrdinal
+        nextExternalSubtitleOrdinal += 1
+        externalSubtitleRegistry[id] = track
+        let info = track.makeTrackInfo(id: id, fallbackNumber: nextExternalSubtitleOrdinal)
+        subtitleTracks.append(info)
+        return info
+    }
+
+    /// Unregister an external track: delist + drop the registry entry; an active selection
+    /// (primary or secondary) is cleared. Embedded ids no-op.
+    public func removeExternalSubtitleTrack(id: Int) {
+        guard externalSubtitleRegistry.removeValue(forKey: id) != nil else { return }
+        subtitleTracks.removeAll { $0.id == id }
+        if activeSubtitleTrackIndex == id { clearSubtitle() }
+        if activeSecondaryExternalSubtitleTrackID == id { clearSecondarySubtitle() }
+    }
+
     /// Fetch and decode a sidecar subtitle file (.srt / .ass / .vtt / .ssa) via `SubtitleDecoder.decodeFile`, replacing `subtitleCues` atomically. `httpHeaders` nil forwards `LoadOptions.httpHeaders` (same auth as the media, #32).
     public func selectSidecarSubtitle(url: URL, httpHeaders: [String: String]? = nil) {
         cancelSidecarTask()

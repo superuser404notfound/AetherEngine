@@ -611,6 +611,20 @@ public final class AetherEngine: ObservableObject {
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 
+    /// External subtitle registrations by synthetic TrackInfo id (AetherEngine#88). Cleared on
+    /// load()/stop() alongside subtitleTracks.
+    var externalSubtitleRegistry: [Int: ExternalSubtitleTrack] = [:]
+    var nextExternalSubtitleOrdinal = 0
+    /// True once the host made an explicit subtitle choice this session (select / sidecar / clear).
+    /// Gates the preferred-language re-run after a late external add, so a user who turned
+    /// subtitles off does not get them re-enabled (#88).
+    var hostExplicitSubtitleAction = false
+    /// Synthetic id of the external track active on the secondary channel, nil when the secondary
+    /// is off or embedded (#88).
+    var activeSecondaryExternalSubtitleTrackID: Int? = nil
+    /// Base for synthetic external-subtitle TrackInfo ids; far above any real AVStream index.
+    public static let externalSubtitleTrackIDBase = 100_000
+
     /// Sodalite#32 Phase 2: source stream index of the embedded text track whose OVERLAY cues are fed
     /// by the producer's pump tap (no side demuxer). nil = tap-overlay mode off (bitmap/CC/sidecar/live
     /// selections keep the reader paths).
@@ -863,6 +877,10 @@ public final class AetherEngine: ObservableObject {
         clock.progress = 0
         audioTracks = []
         subtitleTracks = []
+        externalSubtitleRegistry = [:]
+        nextExternalSubtitleOrdinal = 0
+        hostExplicitSubtitleAction = false
+        activeSecondaryExternalSubtitleTrackID = nil
         nativeSubtitleTrackTable = []
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
@@ -988,6 +1006,9 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = detectedFormat
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
+        // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
+        // and the native rendition table are built from it.
+        for track in options.externalSubtitles { registerExternalSubtitleTrack(track) }
         metadata = probeOpened ? probe.mediaMetadata() : nil
         fontAttachments = probeOpened ? probe.fontAttachmentInfos() : []
         // Disc titles/chapters off the probe demuxer (post-detach, on MainActor) so the host can populate
@@ -1587,6 +1608,10 @@ public final class AetherEngine: ObservableObject {
         metadata = nil
         audioTracks = []
         subtitleTracks = []
+        externalSubtitleRegistry = [:]
+        nextExternalSubtitleOrdinal = 0
+        hostExplicitSubtitleAction = false
+        activeSecondaryExternalSubtitleTrackID = nil
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []

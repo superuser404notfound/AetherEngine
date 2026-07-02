@@ -169,6 +169,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// `setNativeSubtitleSelected`. Default empty (#73).
     public var preferredSubtitleLanguages: [String]
 
+    /// External subtitle files to register at load (AetherEngine#88). Each appears in
+    /// `subtitleTracks` (id = `externalSubtitleTrackIDBase` + array index, `isExternal == true`),
+    /// participates in `preferredSubtitleLanguages` ranking, and, with `prepareNativeSubtitles`,
+    /// joins the native WebVTT rendition (PiP). Tracks added later via `addExternalSubtitleTrack`
+    /// are overlay-only until the next load. Default empty.
+    public var externalSubtitles: [ExternalSubtitleTrack]
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -191,7 +198,8 @@ public struct LoadOptions: Sendable, Equatable {
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
         preferredAudioLanguages: [String] = [],
-        preferredSubtitleLanguages: [String] = []
+        preferredSubtitleLanguages: [String] = [],
+        externalSubtitles: [ExternalSubtitleTrack] = []
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -212,6 +220,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.maxAnalyzeDuration = maxAnalyzeDuration
         self.preferredAudioLanguages = preferredAudioLanguages
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
+        self.externalSubtitles = externalSubtitles
     }
 }
 
