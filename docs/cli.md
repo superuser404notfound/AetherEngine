@@ -77,6 +77,17 @@ dovi_tool extract-rpu -i /tmp/aetherctl-dovitest.hevc -o out.rpu
 dovi_tool info -i out.rpu -f 0   # expect dovi_profile 8, disable_residual_flag true
 ```
 
+## pktdump
+
+Opens the demuxer under a selectable open profile, optionally seeks, and dumps raw video packet timing exactly as the demuxer delivers it (before any producer-side dts repair and before muxing): per-packet dts / pts / duration / keyframe flag samples, NOPTS and non-monotonic dts counts, and dts-delta / duration histograms. Also prints the resolved stream fields that `find_stream_info` fills (`avg_frame_rate`, `codecpar.video_delay`).
+
+```bash
+swift run aetherctl pktdump --at 660 --count 300 --profile playback      <url>
+swift run aetherctl pktdump --at 660 --count 300 --profile restartReopen <url>
+```
+
+The profile differential is the diagnostic: a `video_delay=0` plus NOPTS or non-monotonic dts under one profile while the other is clean means that profile's open path cannot reconstruct decode-order dts for B-frame content (the #93 post-recovery judder root cause). Backed by the public `PacketTimingProbe.run(url:seekSeconds:packetCount:profileName:)`.
+
 ## extract
 
 Opens a `FrameExtractor` against the source and pulls a still frame. Thumbnail mode (default) snaps to the nearest keyframe and downscales to `--width` (default 320); `--snapshot` decodes frame-accurately at full resolution. `--at <sec>` sets the seek position (default 60.0). The first frame is written to `/tmp/aetherctl-extract-<mode>.png`. `--loops N` repeats the extraction across eight cycling positions, which pairs with `leaks --atExit` to validate the decode-context teardown is clean:

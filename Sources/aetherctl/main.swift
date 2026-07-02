@@ -350,6 +350,22 @@ if first == "dovitest" {
     exit(runDoviTest(url: parseSourceURL(urlArg)))
 }
 
+// #93 post-recovery judder: raw video packet timing per demuxer open profile.
+if first == "pktdump" {
+    var rest = Array(args.dropFirst(2))
+    let atSeconds = takeDoubleFlag("--at", from: &rest) ?? 0
+    let count = takeIntFlag("--count", from: &rest) ?? 200
+    let profileName = takeStringFlag("--profile", from: &rest) ?? "playback"
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("ERROR: pktdump requires a <url> argument")
+        print("Usage: aetherctl pktdump [--at S] [--count N] [--profile playback|restartReopen|stillExtraction] <url>")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    rejectStrayFlags(rest, subcommand: "pktdump")
+    exit(runPktDump(url: parseSourceURL(urlArg), at: atSeconds, count: count, profileName: profileName))
+}
+
 if first == "hlsfixture" {
     let rest = Array(args.dropFirst(2))
     exit(runHLSFixture(args: rest))

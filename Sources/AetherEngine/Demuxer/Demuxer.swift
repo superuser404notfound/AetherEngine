@@ -64,18 +64,22 @@ struct DemuxerOpenProfile: Sendable {
         return copy
     }
 
-    /// Open profile for the #79 wedged-restart fresh reopen (#93 residual). The session already
-    /// probed the source at start (saved codec configs, built segment plan), so the reopen needs
-    /// only avformat_open_input's header/PMT parse plus a working seek index; find_stream_info
-    /// would re-pay the full probe budget over an already-starved link (device: a 44 s restart,
-    /// most of it in this reopen). Keeps the playback AVIO tuning for the sustained pump reads
-    /// that follow; the probe ceiling bounds the on-demand resolve fallback like the side demuxer.
-    static let restartReopen: DemuxerOpenProfile = {
-        var profile = playback.withProbeBudget(probesize: 4 * 1024 * 1024,
-                                               maxAnalyzeDuration: 5 * 1_000_000)
-        profile.skipStreamInfo = true
-        return profile
-    }()
+    /// Open profile for the #79 wedged-restart fresh reopen (#93 residual). The 44 s device
+    /// restart was find_stream_info re-paying the FULL playback probe budget (50 MB / 60 s)
+    /// over an already-starved link, so the reopen shrinks the budget instead of skipping the
+    /// pass. It must NOT set `skipStreamInfo`: without find_stream_info the video stream's
+    /// reorder depth stays unresolved (codecpar.video_delay == 0) and FFmpeg's generic layer
+    /// cannot reconstruct decode-order dts for matroska B-frame content. Packets then arrive
+    /// with NOPTS or presentation-ordered (dts == pts, non-monotonic) dts, and the producer's
+    /// dts repair telescopes sample durations or drops every reordered frame it cannot bump
+    /// past the dts <= pts muxer invariant: sustained video judder after every wedge recovery
+    /// while stream-copied audio stays clean (#93 post-recovery judder, device-traced 07-02).
+    /// The bounded budget resolves video_delay from the first few packets (HEVC/H.264 parser
+    /// reads it from SPS) at a small bounded read cost. Keeps the playback AVIO tuning for the
+    /// sustained pump reads that follow.
+    static let restartReopen: DemuxerOpenProfile =
+        playback.withProbeBudget(probesize: 4 * 1024 * 1024,
+                                 maxAnalyzeDuration: 5 * 1_000_000)
 
     /// Open profile for the embedded subtitle side-demuxer (#76, #87). `EmbeddedSubtitleDecoder`
     /// needs only `codec_id` / `codec_type` (carried in the container header / MPEG-TS PMT,

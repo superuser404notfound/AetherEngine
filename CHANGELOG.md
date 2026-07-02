@@ -8,6 +8,16 @@ Versioning follows [Semantic Versioning](https://semver.org). See
 [README › Stability and versioning](README.md#stability-and-versioning) for
 the public-API contract.
 
+## [Unreleased]
+
+### Fixed
+
+- **Post-recovery video judder (#93 residual).** The wedged-restart fresh reopen skipped `avformat_find_stream_info` entirely, so the reopened demuxer never resolved the video stream's B-frame reorder depth (`video_delay` stayed 0) and delivered matroska B-frame packets with NOPTS or presentation-ordered, non-monotonic dts. The producer's dts repair then telescoped sample durations or dropped every reordered frame it could not bump past the `dts <= pts` muxer invariant, so every region produced after a wedge recovery played with heavy sustained video judder while stream-copied audio stayed clean. The reopen now keeps `find_stream_info` under a bounded probe budget (4 MB / 5 s), which resolves the reorder depth from the first packets at a small bounded read cost.
+
+### Added
+
+- **`aetherctl pktdump`.** Raw video packet timing (dts / pts / duration, NOPTS and monotonicity stats, delta histograms) as delivered by the demuxer under a selectable open profile (`--profile playback|restartReopen|stillExtraction`). The differential between profiles is what isolated the #93 judder root cause; backed by the public `PacketTimingProbe`.
+
 ## [4.10.0] - 2026-07-02
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.10.0))

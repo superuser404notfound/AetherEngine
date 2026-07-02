@@ -152,13 +152,15 @@ struct DemuxerProfileTests {
 }
 
 /// #93 residual: the #79 wedged-restart fresh reopen paid the FULL first-open cost
-/// (find_stream_info probe budget) over an already-starved link; the session has the saved codec
-/// configs and the segment plan, so the reopen needs only the header/PMT parse plus a seek index.
+/// (find_stream_info probe budget) over an already-starved link, so the reopen shrinks the
+/// budget. It must NOT skip find_stream_info: with the pass skipped, video_delay stays 0 and
+/// matroska B-frame content arrives with NOPTS / presentation-ordered dts, which the producer
+/// repair turns into telescoped durations and mass frame drops (#93 post-recovery judder).
 extension DemuxerProfileTests {
-    @Test("restartReopen skips find_stream_info and bounds the fallback probe")
+    @Test("restartReopen keeps find_stream_info but bounds its probe budget")
     func restartReopenProfile() {
         let p = DemuxerOpenProfile.restartReopen
-        #expect(p.skipStreamInfo)
+        #expect(!p.skipStreamInfo)
         #expect(p.probesize < DemuxerOpenProfile.playback.probesize)
         #expect(p.maxAnalyzeDuration < DemuxerOpenProfile.playback.maxAnalyzeDuration)
         // Sustained pump reads follow the reopen: keep the playback AVIO tuning.

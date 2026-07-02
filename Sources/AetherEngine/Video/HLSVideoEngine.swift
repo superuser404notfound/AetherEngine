@@ -1676,8 +1676,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 if !isLiveSession, sideAudioDemuxer == nil {
                     let fresh = Demuxer()
                     do {
-                        // .restartReopen: header/PMT parse only; the full find_stream_info budget was
-                        // the bulk of a 44 s wedge-reopen over WAN (#93 residual).
+                        // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
+                        // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
+                        // run so video_delay resolves, else B-frame dts arrive broken (#93 judder).
                         try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: .restartReopen, isLive: false)
                         dem.markClosed() // abort the wedged read now that the replacement is ready
                         freshDemuxer = fresh

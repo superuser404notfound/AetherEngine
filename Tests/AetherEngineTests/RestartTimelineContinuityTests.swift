@@ -8,6 +8,7 @@
 // segment k produced continuously and segment k re-produced by a restart must match.
 import Foundation
 import Testing
+import Libavcodec
 @testable import AetherEngine
 
 // MARK: - Minimal fMP4 reader (moof/traf: tfhd track id, tfdt base time, trun sample count)
@@ -295,5 +296,54 @@ struct ASSMarkupStripTests {
         #expect(vtt?.contains("Top line") == true)
         #expect(vtt?.contains("{\\an8}") != true, "override tags leaked into the .vtt")
         #expect(vtt?.contains("Default") != true, "ASS header fields leaked into the .vtt")
+    }
+}
+
+// MARK: - Wedged-restart reopen dts integrity (#93 post-recovery judder)
+
+/// The wedged-restart fresh reopen (.restartReopen) must still resolve the video stream's
+/// B-frame reorder depth. With find_stream_info skipped entirely, video_delay stayed 0 and
+/// matroska B-frame content came out with NOPTS or presentation-ordered (dts == pts,
+/// non-monotonic) dts. The producer's NOPTS / monotonicity repair then telescoped sample
+/// durations or dropped every reordered frame it could not bump past the dts <= pts muxer
+/// invariant: sustained video judder after every wedge recovery while audio stayed clean.
+@Suite("Restart reopen dts integrity")
+struct RestartReopenDtsIntegrityTests {
+
+    @Test("restartReopen resolves the B-frame reorder depth and delivers monotonic dts",
+          .enabled(if: fixtureExists("restart-witness-subs.mkv"),
+                   "run Scripts/fetch-fixtures.sh to generate the witness clip"),
+          .timeLimit(.minutes(1)))
+    func restartReopenDeliversDecodeOrderDts() throws {
+        let demuxer = Demuxer()
+        try demuxer.open(url: fixtureURL("restart-witness-subs.mkv"), profile: .restartReopen)
+        defer { demuxer.close() }
+        let videoIdx = demuxer.videoStreamIndex
+        let stream = try #require(demuxer.stream(at: videoIdx))
+        #expect((stream.pointee.codecpar?.pointee.video_delay ?? 0) > 0,
+                "reopen must resolve the reorder depth (video_delay), else dts reconstruction is disabled")
+
+        var noptsDts = 0
+        var nonMonotonic = 0
+        var lastDts: Int64?
+        var videoSeen = 0
+        while videoSeen < 120, let pkt = try demuxer.readPacket() {
+            var toFree: UnsafeMutablePointer<AVPacket>? = pkt
+            defer { trackedPacketFree(&toFree) }
+            guard Int(pkt.pointee.stream_index) == videoIdx else { continue }
+            videoSeen += 1
+            let dts = pkt.pointee.dts
+            if dts == Int64.min {
+                noptsDts += 1
+                continue
+            }
+            if let last = lastDts, dts <= last { nonMonotonic += 1 }
+            lastDts = dts
+        }
+        #expect(videoSeen == 120, "fixture too short for the witness window")
+        // Playback-profile baseline on this fixture: 2 head packets carry NOPTS before the
+        // reconstruction window fills; anything beyond that means reconstruction is off.
+        #expect(noptsDts <= 2, "reopen delivered \(noptsDts)/120 NOPTS dts; dts reconstruction is disabled")
+        #expect(nonMonotonic == 0, "decode-order dts must be monotonic, got \(nonMonotonic) regressions")
     }
 }
