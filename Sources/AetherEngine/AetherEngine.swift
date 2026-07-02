@@ -641,6 +641,32 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let stallRecoveryWindowSeconds: TimeInterval = 30
     nonisolated static let maxStallRecoveryReasserts = 3
 
+    /// Stall-triggered re-engage watchdog (#93 residual): the producer-wedge chain needs ~60 s
+    /// (park build-up + 24 s break threshold + grace) before its nudge fires; a dead consumer
+    /// pipeline (-15628 signature: stall, then ZERO media fetches) is detectable within seconds
+    /// of the playbackStalled notification. Cancelled on load reset; superseded by newer stalls.
+    var stallReengageTask: Task<Void, Never>? = nil
+    nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
+
+    /// Nudge a consumer that stopped requesting: a zero-tolerance seek to its own position
+    /// rebuilds AVFoundation's loading pipeline (the effect a manual back-out had), play()
+    /// re-asserts intent. Opens the spurious-pause window, since the nudge can bounce transport.
+    func reengageStalledConsumer(position: Double, trigger: String) {
+        guard let host = nativeHost, let player = currentAVPlayer,
+              let item = player.currentItem else { return }
+        guard player.timeControlStatus != .paused else { return }
+        stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
+        EngineLog.emit(
+            "[AetherEngine] #65 re-engaging stalled AVPlayer (\(trigger)): nudge seek to "
+            + "\(String(format: "%.2f", position))s",
+            category: .engine
+        )
+        item.cancelPendingSeeks()
+        player.seek(to: CMTime(seconds: position, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
+        host.play()
+    }
+
     /// Pure decision for the tcs sink (#93 residual): re-assert play() instead of latching a pause?
     nonisolated static func shouldReassertPlayDuringRecovery(
         statusIsPaused: Bool, engineStateIsPlaying: Bool,
@@ -936,6 +962,8 @@ public final class AetherEngine: ObservableObject {
         externalNativeStoreFillTask = nil
         stallRecoveryWindowUntil = .distantPast
         stallRecoveryReasserts = 0
+        stallReengageTask?.cancel()
+        stallReengageTask = nil
         nativeSubtitleTrackTable = []
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil

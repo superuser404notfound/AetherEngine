@@ -1574,6 +1574,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return producer?.anchoredBaseIndex
     }
 
+    /// Total media-segment requests seen this session (#93 residual): the stall-triggered
+    /// re-engage watchdog compares snapshots to detect a consumer that stopped requesting.
+    var mediaFetchCountSnapshot: UInt64 {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return provider?.mediaFetchCount ?? 0
+    }
+
     func requestRestart(at idx: Int, authoritative: Bool = false) {
         restartLock.lock()
         let shouldRun = restartCoalescer.begin(idx, authoritative: authoritative)

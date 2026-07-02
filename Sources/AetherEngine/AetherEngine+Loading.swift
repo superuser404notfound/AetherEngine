@@ -223,19 +223,7 @@ extension AetherEngine {
         // the nudge can bounce the transport state.
         session.onConsumerReengageNeeded = { [weak self] position in
             Task { @MainActor [weak self] in
-                guard let self, let host = self.nativeHost,
-                      let player = self.currentAVPlayer, let item = player.currentItem else { return }
-                guard player.timeControlStatus != .paused else { return }
-                self.stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
-                EngineLog.emit(
-                    "[AetherEngine] #65 re-engaging stalled AVPlayer: nudge seek to "
-                    + "\(String(format: "%.2f", position))s",
-                    category: .engine
-                )
-                item.cancelPendingSeeks()
-                player.seek(to: CMTime(seconds: position, preferredTimescale: 600),
-                            toleranceBefore: .zero, toleranceAfter: .zero) { _ in }
-                host.play()
+                self?.reengageStalledConsumer(position: position, trigger: "wedge re-anchor")
             }
         }
         session.onPlaylistShiftRebased = { [weak self] seconds, seamOutputSeconds in
@@ -514,13 +502,32 @@ extension AetherEngine {
             .store(in: &nativeCancellables)
 
         // #93 residual: every stall opens the spurious-pause recovery window (a fresh stall resets
-        // the re-assert budget; the pause can trail the stall by tens of seconds while fetches stay silent).
+        // the re-assert budget; the pause can trail the stall by tens of seconds while fetches stay
+        // silent) AND arms the fast re-engage watchdog: the producer-wedge chain needs ~60 s before
+        // its nudge, but a dead consumer pipeline (-15628 signature: stall, then ZERO media fetches
+        // while waitingToPlay) is detectable within seconds of the notification.
         host.$stallCount
             .dropFirst()
-            .sink { [weak self] _ in
+            .sink { [weak self, weak host] count in
                 guard let self = self else { return }
                 self.stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
                 self.stallRecoveryReasserts = 0
+                let fetchesAtStall = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                self.stallReengageTask?.cancel()
+                self.stallReengageTask = Task { @MainActor [weak self, weak host] in
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.stallReengageGraceSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, let self, let host,
+                          host.stallCount == count else { return }
+                    let fetchesNow = self.nativeVideoSession?.mediaFetchCountSnapshot ?? 0
+                    guard fetchesNow == fetchesAtStall,
+                          let player = self.currentAVPlayer,
+                          player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                          player.currentItem?.status != .failed else { return }
+                    self.reengageStalledConsumer(
+                        position: player.currentTime().seconds,
+                        trigger: "stall + \(Int(Self.stallReengageGraceSeconds))s without fetches")
+                }
             }
             .store(in: &nativeCancellables)
 
