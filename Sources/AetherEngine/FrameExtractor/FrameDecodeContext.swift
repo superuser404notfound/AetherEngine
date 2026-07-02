@@ -31,6 +31,10 @@ final class FrameDecodeContext: @unchecked Sendable {
     private(set) var isOpen = false
     private(set) var isHDR = false
 
+    /// Cumulative bytes this context's demuxer pulled from the source (decode-queue only).
+    /// Diagnostic: quantifies the extractor's share of link bandwidth per extraction.
+    var bytesFetched: Int64 { demuxer?.avioBytesFetched ?? 0 }
+
     /// PQ (ST 2084) / HLG transfers mean the frame is HDR and needs tone-mapping to SDR.
     static func isHDRTransfer(_ trc: AVColorTransferCharacteristic) -> Bool {
         ColorAttachments.isHDRTransfer(trc)

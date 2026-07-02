@@ -51,6 +51,10 @@ final class LiveTelemetrySampler {
     private var sessionStartTime: Date?
     private var sessionStartBytes: Int64 = 0
 
+    /// [LagDiag] tick-over-tick state (#93 post-recovery lag diagnosis).
+    private var lagLastClock: Double?
+    private var lagLastDroppedSum: Int = 0
+
     init(engine: AetherEngine) {
         self.engine = engine
     }
@@ -64,6 +68,8 @@ final class LiveTelemetrySampler {
         lastFramesEnqueued = 0
         sessionStartTime = Date()
         sessionStartBytes = 0
+        lagLastClock = nil
+        lagLastDroppedSum = 0
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 self?.tick()
@@ -160,6 +166,10 @@ final class LiveTelemetrySampler {
             forwardBufferSeconds = nil
         }
 
+        if engine.playbackBackend == .native {
+            emitLagDiag(engine: engine, forwardBuffer: forwardBufferSeconds, netMbps: instantBitrateMbps)
+        }
+
         let snapshot = LiveTelemetry(
             instantBitrateMbps: instantBitrateMbps,
             averageBitrateMbps: averageBitrateMbps,
@@ -179,6 +189,48 @@ final class LiveTelemetrySampler {
             rssMb: AetherEngine.residentMemoryMB()
         )
         engine.applyLiveTelemetry(snapshot)
+    }
+
+    /// One line per tick on the native path (#93 post-recovery lag diagnosis). Discriminates
+    /// buffer starvation (fwd/keepUp/empty + dclk pauses) from render-side stutter (drop
+    /// climbing while tcs=playing and dclk~1.0) from thermal throttling (thermal field).
+    private func emitLagDiag(engine: AetherEngine, forwardBuffer: Double?, netMbps: Double?) {
+        guard let player = engine.currentAVPlayer, let item = player.currentItem else { return }
+        let clock = player.currentTime().seconds
+        let dclk = (clock.isFinite && lagLastClock != nil) ? clock - lagLastClock! : nil
+        if clock.isFinite { lagLastClock = clock }
+
+        let droppedSum = item.accessLog()?.events.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) } ?? 0
+        let dDrop = droppedSum - lagLastDroppedSum
+        lagLastDroppedSum = droppedSum
+
+        let tcs: String
+        switch player.timeControlStatus {
+        case .paused:                       tcs = "paused"
+        case .waitingToPlayAtSpecifiedRate: tcs = "waiting"
+        case .playing:                      tcs = "playing"
+        @unknown default:                   tcs = "unknown"
+        }
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal:    thermal = "nominal"
+        case .fair:       thermal = "fair"
+        case .serious:    thermal = "serious"
+        case .critical:   thermal = "critical"
+        @unknown default: thermal = "unknown"
+        }
+        let fmt2 = { (v: Double) in String(format: "%.2f", v) }
+        EngineLog.emit(
+            "[LagDiag] clk=\(clock.isFinite ? fmt2(clock) : "-") dclk=\(dclk.map(fmt2) ?? "-") "
+            + "tcs=\(tcs) rate=\(fmt2(Double(player.rate))) wait=\(player.reasonForWaitingToPlay?.rawValue ?? "-") "
+            + "fwd=\(forwardBuffer.map { String(format: "%.1f", $0) } ?? "-") "
+            + "keepUp=\(item.isPlaybackLikelyToKeepUp ? "y" : "n") empty=\(item.isPlaybackBufferEmpty ? "y" : "n") "
+            + "drop=\(droppedSum)+\(dDrop) stall=\(engine.nativeHost?.stallCount ?? 0) "
+            + "ready=\((engine.nativeHost?.playerLayer.isReadyForDisplay ?? false) ? "y" : "n") "
+            + "thermal=\(thermal) net=\(netMbps.map { String(format: "%.1f", $0) } ?? "-") "
+            + "restarts=\(engine.producerRestartCount)",
+            category: .engine
+        )
     }
 
     private static func computeNativeForwardBuffer(engine: AetherEngine) -> Double? {

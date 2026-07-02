@@ -103,6 +103,9 @@ public actor FrameExtractor {
         let context = self.context
         let result = await runOnQueue { () -> FrameResult in
             if token.isCancelled { return FrameResult(image: nil) }
+            let start = DispatchTime.now()
+            let wasOpen = context.isOpen
+            let bytesBefore = context.bytesFetched
             do {
                 try context.ensureOpen()
             } catch {
@@ -113,6 +116,17 @@ public actor FrameExtractor {
                 at: seconds, mode: mode,
                 targetWidth: targetWidth, maxSize: maxSize,
                 isCancelled: { token.isCancelled }
+            )
+            // Per-miss cost line: correlates extraction bursts with playback stutter
+            // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+            let bytes = context.bytesFetched - bytesBefore
+            EngineLog.emit(
+                "[FrameExtractor] miss mode=\(mode) t=\(String(format: "%.2f", seconds))s "
+                + "took=\(String(format: "%.0f", ms))ms bytes=\(bytes) "
+                + "reopened=\(wasOpen ? "n" : "y") image=\(image == nil ? "nil" : "ok") "
+                + "cancelled=\(token.isCancelled ? "y" : "n")",
+                category: .swPlayback
             )
             return FrameResult(image: image)
         }
