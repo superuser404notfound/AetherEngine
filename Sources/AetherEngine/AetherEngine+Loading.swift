@@ -463,6 +463,11 @@ extension AetherEngine {
         host.$renderedTime
             .sink { [weak self] value in
                 guard let self = self else { return }
+                // #93 PiP skips: AVKit-side seeks never reach the engine seek API; a far rendered-
+                // time jump is the engine-visible signal to re-anchor the subtitle readers.
+                if Self.isSubtitleReanchorJump(from: self.renderedPositionMirror.get(), to: value) {
+                    self.scheduleNativeSubtitleReanchor()
+                }
                 // #65: mirror AVPlayer's rendered (playlist-axis) position for off-main wedge re-anchoring.
                 self.renderedPositionMirror.set(value)
                 let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift

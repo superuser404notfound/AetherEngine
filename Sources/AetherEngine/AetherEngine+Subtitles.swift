@@ -970,6 +970,7 @@ extension AetherEngine {
 
     /// Cancel the multi-decode reader + markClosed its side demuxer (mirrors `cancelEmbeddedSubtitleReader`).
     func cancelNativeSubtitleReaders() {
+        nativeSubtitleReaderCoverageStart = nil
         nativeSubtitleReaderDeferralTask?.cancel()
         nativeSubtitleReaderDeferralTask = nil
         nativeSubtitleReadersTask?.cancel()
@@ -1033,6 +1034,10 @@ extension AetherEngine {
         // max-with-playhead (so the PiP reader doesn't start behind the playhead) would drop all cues before it.
         let effectiveStart = readToEOF ? startAt : max(startAt, freshPlayhead ?? startAt)
         let seekTo = max(0, effectiveStart - 2.0)
+        await MainActor.run { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            self.nativeSubtitleReaderCoverageStart = seekTo
+        }
         demuxer.seek(to: seekTo)
 
         // A decoder that fails to open is skipped (track gets no cues).
@@ -1143,6 +1148,43 @@ extension AetherEngine {
             "[AetherEngine] native subtitle readers exited (cancelled=\(Task.isCancelled)) totalCues=\(totalCues) readToEOF=\(readToEOF)",
             category: .engine
         )
+    }
+
+    /// #93 PiP skips: debounced re-anchor after a far rendered-time jump. Waits for the skip
+    /// storm to settle, then, if the readers do not cover the playhead while a rendition is
+    /// selected, restarts them at the new position by replaying the remembered selection (whose
+    /// pre-fill + deselect/reselect also busts AVKit's cached empty .vtt windows, #32). The
+    /// whole-program eager reader is left alone: it converges on full coverage by itself.
+    func scheduleNativeSubtitleReanchor() {
+        guard nativeSubtitleReapplyOrdinal != nil,
+              !nativeSubtitleReadersRunToEOF,
+              nativeVideoSession != nil else { return }
+        nativeSubtitleReanchorTask?.cancel()
+        nativeSubtitleReanchorTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: AetherEngine.subtitleReanchorSettleNanos)
+            guard !Task.isCancelled, let self else { return }
+            guard let ordinal = self.nativeSubtitleReapplyOrdinal,
+                  !self.nativeSubtitleReadersRunToEOF,
+                  self.nativeVideoSession != nil else { return }
+            let position = self.sourceTime
+            let readMax = self.nativeSubtitleReaderParams.flatMap { params in
+                ordinal < params.stores.count ? params.stores[ordinal].readMaxCueEnd() : nil
+            } ?? 0
+            if Self.nativeSubtitleReadersCover(
+                position: position,
+                coverageStart: self.nativeSubtitleReaderCoverageStart,
+                readMax: readMax
+            ) { return }
+            EngineLog.emit(
+                "[AetherEngine] native subtitle readers re-anchoring: playhead "
+                + "\(String(format: "%.2f", position))s outside coverage "
+                + "(start=\(self.nativeSubtitleReaderCoverageStart.map { String(format: "%.2f", $0) } ?? "none") "
+                + "readMax=\(String(format: "%.2f", readMax))); replaying selection ordinal=\(ordinal)",
+                category: .engine
+            )
+            self.cancelNativeSubtitleReaders()
+            self.setNativeSubtitleSelected(track: ordinal)
+        }
     }
 
     /// Select or deselect the native mov_text track by ordinal (#55). nil deselects all. Matches by `extendedLanguageTag` first (language-rank-aware for same-language duplicates), falls back to positional index. No-op when no legible group or ordinal out of range.

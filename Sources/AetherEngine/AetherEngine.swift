@@ -657,6 +657,18 @@ public final class AetherEngine: ObservableObject {
     var stallReengageTask: Task<Void, Never>? = nil
     nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
 
+    /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
+    /// playhead jump is detected on $renderedTime and, once settled, the native subtitle readers
+    /// re-anchor and the remembered rendition selection replays (its deselect/reselect busts
+    /// AVKit's cached empty .vtt windows). Cancelled on load reset / stop; newer jumps supersede.
+    var nativeSubtitleReanchorTask: Task<Void, Never>? = nil
+    /// seekTo anchor of the currently running native subtitle readers; nil = no readers running.
+    var nativeSubtitleReaderCoverageStart: Double?
+    nonisolated static let subtitleReanchorJumpSeconds: Double = 60
+    nonisolated static let subtitleReanchorSettleNanos: UInt64 = 2_500_000_000
+    nonisolated static let subtitleReanchorBackwardSlack: Double = 5
+    nonisolated static let subtitleReanchorForwardSlack: Double = 90
+
     /// Nudge a consumer that stopped requesting: a zero-tolerance seek to its own position
     /// rebuilds AVFoundation's loading pipeline (the effect a manual back-out had), play()
     /// re-asserts intent. Opens the spurious-pause window, since the nudge can bounce transport.
@@ -704,6 +716,22 @@ public final class AetherEngine: ObservableObject {
             // not-ready window; the stores are already filled, so the pre-fill returns fast.
             setNativeSubtitleSelected(track: ordinal)
         }
+    }
+
+    /// Pure decision (#93 PiP skips): does a rendered-time transition qualify as a seek-like jump?
+    nonisolated static func isSubtitleReanchorJump(from: Double, to: Double) -> Bool {
+        abs(to - from) >= subtitleReanchorJumpSeconds
+    }
+
+    /// Pure decision (#93 PiP skips): do the running readers cover `position`? Slightly ahead of
+    /// readMax is covered (the parked reader catches up on its own); far ahead or anywhere behind
+    /// the read anchor is not.
+    nonisolated static func nativeSubtitleReadersCover(
+        position: Double, coverageStart: Double?, readMax: Double
+    ) -> Bool {
+        guard let start = coverageStart else { return false }
+        return position >= start - subtitleReanchorBackwardSlack
+            && position <= readMax + subtitleReanchorForwardSlack
     }
 
     /// Pure decision for the tcs sink (#93 residual): re-assert play() instead of latching a pause?
@@ -1003,6 +1031,8 @@ public final class AetherEngine: ObservableObject {
         stallRecoveryReasserts = 0
         stallReengageTask?.cancel()
         stallReengageTask = nil
+        nativeSubtitleReanchorTask?.cancel()
+        nativeSubtitleReanchorTask = nil
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleTracks = []
