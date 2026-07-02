@@ -98,6 +98,27 @@ extension AetherEngine {
             return
         }
 
+        // Sodalite#32 Phase 2: text track covered by the producer's pump tap: the overlay is fed from
+        // the tap (backfill the already-harvested produced region now, live events forwarded by
+        // onSubtitleTapEvent). No side demuxer, so enabling subtitles over a remote source is instant.
+        subtitleTapOverlayStreamIndex = nil
+        if !isLive, let session = nativeVideoSession, session.subtitleTapCoversStream(Int32(index)) {
+            cancelSidecarTask()
+            cancelEmbeddedSubtitleReader()
+            isSubtitleActive = true
+            activeEmbeddedSubtitleStreamIndex = Int32(index)
+            activeSubtitleTrackIndex = index
+            subtitleTapOverlayStreamIndex = Int32(index)
+            subtitleCues = tapOverlayBackfill(streamIndex: Int32(index))
+            isLoadingSubtitles = false
+            EngineLog.emit(
+                "[AetherEngine] overlay fed by pump tap for stream=\(index) "
+                + "(backfilled \(subtitleCues.count) cues)",
+                category: .engine
+            )
+            return
+        }
+
         // Custom sources: side demuxer needs an independent cursor; no-op if reader cannot clone.
         var customClone: IOReader? = nil
         if isCustomSource {
@@ -497,6 +518,25 @@ extension AetherEngine {
 
     /// Apply a decoded event: PGS clear-event trim + sorted insert so the overlay lookup stays correct after backward scrubs.
     @MainActor
+    /// Sodalite#32 Phase 2: snapshot the tap store backing `streamIndex` for the overlay backfill.
+    func tapOverlayBackfill(streamIndex: Int32) -> [SubtitleCue] {
+        guard let session = nativeVideoSession,
+              let ord = nativeSubtitleTrackTable.firstIndex(where: { $0.sourceStreamIndex == Int(streamIndex) }),
+              ord < session.nativeSubtitleCueStoresForSession.count else { return [] }
+        return session.nativeSubtitleCueStoresForSession[ord].snapshotCues()
+    }
+
+    /// Sodalite#32 Phase 2: forward the ACTIVE tap-overlay track's decoded events into the host overlay
+    /// (subtitleCues), replacing the side reader's publish path. Called at load, before start().
+    func armSubtitleTapOverlayForwarding(on session: HLSVideoEngine) {
+        session.onSubtitleTapEvent = { [weak self] streamIndex, event in
+            Task { @MainActor [weak self] in
+                guard let self, self.subtitleTapOverlayStreamIndex == streamIndex else { return }
+                self.applySubtitleEvent(event, channel: .primary)
+            }
+        }
+    }
+
     private func applySubtitleEvent(_ event: EmbeddedSubtitleDecoder.SubtitleEvent, channel: SubtitleChannel) {
         guard isSubtitleActive(for: channel) else { return }
 
@@ -672,13 +712,19 @@ extension AetherEngine {
         subtitleCues = []
         sidecarASSHeader = nil
         isLoadingSubtitles = false
+        subtitleTapOverlayStreamIndex = nil
         cancelNativeSubtitleReaders()
-        nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
-        nativeVideoSession?.nativeSubtitleCueStoresForSession = []
-        nativeVideoSession?.nativeSubtitleLanguagesForSession = []
-        nativeVideoSession?.producer?.subtitleCueStores = []
-        nativeVideoSession?.producer?.nativeSubtitleLanguages = []
-        nativeSubtitleRenditionAvailable = false
+        // Sodalite#32 Phase 2: with the pump tap active the stores are the session's cue source of
+        // truth (the tap's decoder dedup would never refill a cleared store), so subtitles-off keeps
+        // them; only the reader-driven path tears them down.
+        if nativeVideoSession?.subtitleTapActive != true {
+            nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
+            nativeVideoSession?.nativeSubtitleCueStoresForSession = []
+            nativeVideoSession?.nativeSubtitleLanguagesForSession = []
+            nativeVideoSession?.producer?.subtitleCueStores = []
+            nativeVideoSession?.producer?.nativeSubtitleLanguages = []
+            nativeSubtitleRenditionAvailable = false
+        }
     }
 
     func cancelSidecarTask(channel: SubtitleChannel = .primary) {

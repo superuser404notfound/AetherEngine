@@ -289,6 +289,10 @@ extension AetherEngine {
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
         session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
+        // Sodalite#32 Phase 2: tap decoders honor the host's markup preference (overlay renders styled
+        // ASS; the WebVTT rendition strips at serve), and decoded tap events feed the overlay directly.
+        session.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
+        armSubtitleTapOverlayForwarding(on: session)
         EngineLog.emit("[PiPDiag] load: prepare=\(loadedOptions.prepareNativeSubtitles) eager=\(loadedOptions.eagerNativeSubtitleReaders) textTracks=\(nativeSubtitleTrackTable.count) enable=\(session.enableNativeSubtitleTrackForSession)", category: .engine)
 
         // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.

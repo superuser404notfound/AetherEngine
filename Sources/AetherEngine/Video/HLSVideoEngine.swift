@@ -135,6 +135,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var subtitleTapRoutes: [Int32: (decoder: EmbeddedSubtitleDecoder, store: NativeSubtitleCueStore)] = [:]
     private let subtitleTapLock = NSLock()
 
+    /// Sodalite#32 Phase 2: tap decoders honor the host's markup preference so the overlay can render
+    /// styled ASS from tap-fed cues; the WebVTT rendition strips the markup at serve time instead.
+    /// Set before start() (AetherEngine+Loading).
+    var preserveASSMarkupForSubtitleTap = false
+
+    /// Sodalite#32 Phase 2: decoded tap events, forwarded after the store append. AetherEngine routes
+    /// the ACTIVE track's events into the host overlay (subtitleCues), replacing the side reader.
+    var onSubtitleTapEvent: (@Sendable (Int32, EmbeddedSubtitleDecoder.SubtitleEvent) -> Void)?
+
+    var subtitleTapActive: Bool {
+        subtitleTapLock.lock(); defer { subtitleTapLock.unlock() }
+        return !subtitleTapRoutes.isEmpty
+    }
+
+    func subtitleTapCoversStream(_ idx: Int32) -> Bool {
+        subtitleTapLock.lock(); defer { subtitleTapLock.unlock() }
+        return subtitleTapRoutes[idx] != nil
+    }
+
     /// Request the native mov_text track in the init moov (#55). Call before `start()`.
     /// `aetherctl serve --native-subs N` uses this; a full session wires it automatically.
     public func requestNativeSubtitleTrack() {
@@ -193,7 +212,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                   let stream = dem.stream(at: sidx),
                   let decoder = EmbeddedSubtitleDecoder(stream: stream,
                                                         sourceVideoWidth: w > 0 ? w : 1920,
-                                                        sourceVideoHeight: h > 0 ? h : 1080)
+                                                        sourceVideoHeight: h > 0 ? h : 1080,
+                                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap)
             else { continue }
             subtitleTapRoutes[sidx] = (decoder, nativeSubtitleCueStoresForSession[ordinal])
         }
@@ -232,6 +252,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         if let event = route.decoder.decode(packet: packet, streamTimeBase: timeBase),
            !event.cues.isEmpty {
             route.store.appendCues(event.cues)
+            onSubtitleTapEvent?(streamIndex, event)
         }
     }
 
@@ -1020,6 +1041,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             },
             nativeSubtitleStores: nativeSubtitleCueStoresForSession,
             nativeSubtitleLanguages: nativeSubtitleLanguagesForSession,
+            stripASSMarkupInVTT: preserveASSMarkupForSubtitleTap,
             nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
             nativeSubtitleWholeProgram: nativeSubtitleWholeProgram,
             currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) }

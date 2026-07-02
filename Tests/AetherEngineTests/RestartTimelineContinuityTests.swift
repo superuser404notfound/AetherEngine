@@ -256,3 +256,44 @@ struct SubtitlePumpTapTests {
         #expect(store.readMaxCueEnd() >= 11.0, "coverage lost after a producer restart")
     }
 }
+
+// MARK: - Tap overlay markup handling (Sodalite#32 Phase 2)
+
+@Suite("ASS markup strip for the WebVTT rendition")
+struct ASSMarkupStripTests {
+
+    @Test("A raw ASS event line strips to plain text")
+    func rawEventStrips() {
+        let line = "1,0,Default,,0,0,0,,{\\i1}Hello{\\i0}\\NWorld, nice"
+        #expect(SubtitleRectText.plainText(fromASSEventLine: line) == "Hello\nWorld, nice")
+    }
+
+    @Test("A non-event line passes through with tag cleaning only")
+    func nonEventPassthrough() {
+        #expect(SubtitleRectText.plainText(fromASSEventLine: "Just, some text") == "Just, some text")
+        // 9 comma fields but no integer ReadOrder: must NOT be misparsed as an ASS event.
+        let commaHeavy = "a, b, c, d, e, f, g, h, i still plain"
+        #expect(SubtitleRectText.plainText(fromASSEventLine: commaHeavy) == commaHeavy)
+    }
+
+    @Test("The provider strips markup-preserving cues when serving the .vtt window")
+    func providerStripsForVTT() {
+        let store = NativeSubtitleCueStore()
+        store.appendCues([SubtitleCue(id: 1, startTime: 1.0, endTime: 2.0,
+                                      body: .text("7,0,Default,,0,0,0,,{\\an8}Top line\\Nsecond"))])
+        let provider = VideoSegmentProvider(
+            cache: SegmentCache(),
+            segments: [HLSVideoEngine.Segment(startPts: 0, endPts: 4000,
+                                              startSeconds: 0, durationSeconds: 4.0)],
+            codecsString: "avc1.640028", supplementalCodecs: nil,
+            resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0,
+            hdcpLevel: nil, sourceBitrate: 1_000_000,
+            nativeSubtitleStores: [store], nativeSubtitleLanguages: ["eng"],
+            stripASSMarkupInVTT: true
+        )
+        let vtt = provider.nativeSubtitleVTT(ordinal: 0, segmentIndex: 0)
+        #expect(vtt?.contains("Top line") == true)
+        #expect(vtt?.contains("{\\an8}") != true, "override tags leaked into the .vtt")
+        #expect(vtt?.contains("Default") != true, "ASS header fields leaked into the .vtt")
+    }
+}

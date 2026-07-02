@@ -72,6 +72,14 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
 
     var cueCount: Int { lock.lock(); defer { lock.unlock() }; return cues.count }
 
+    /// Snapshot of all text cues sorted by start, source axis (the overlay backfill on selection,
+    /// Sodalite#32 Phase 2: the tap has already harvested the produced region when the user enables
+    /// subtitles, so the overlay starts fully populated instead of waiting on a side demuxer).
+    func snapshotCues() -> [SubtitleCue] {
+        lock.lock(); defer { lock.unlock() }
+        return cues.sorted { $0.startTime < $1.startTime }
+    }
+
     /// Cues overlapping `[start, end)` in AVPlayer-axis seconds, text only,
     /// sorted by start.
     func cuesInWindow(start: Double, end: Double) -> [(start: Double, end: Double, text: String)] {

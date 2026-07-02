@@ -611,6 +611,11 @@ public final class AetherEngine: ObservableObject {
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 
+    /// Sodalite#32 Phase 2: source stream index of the embedded text track whose OVERLAY cues are fed
+    /// by the producer's pump tap (no side demuxer). nil = tap-overlay mode off (bitmap/CC/sidecar/live
+    /// selections keep the reader paths).
+    var subtitleTapOverlayStreamIndex: Int32?
+
     /// Detached reader that decodes ALL embedded text subtitle streams in one side-demuxer pass into their
     /// ordinal's NativeSubtitleCueStore (#55, all-tracks). Parallel to embeddedSubtitleTask (which drives
     /// subtitleCues for the active track with full styling). Cancelled on stop/clear/load.
@@ -1513,6 +1518,10 @@ public final class AetherEngine: ObservableObject {
                 subtitleCues = []
                 ccCueSnapshot = []
                 closedCaptionTap?.requestReset()
+            } else if subtitleTapOverlayStreamIndex == streamIdx {
+                // Sodalite#32 Phase 2: tap-fed overlay; nothing to re-arm, the tap rides the producer
+                // across the seek. Re-backfill from the store so earlier-pruned cues reappear.
+                subtitleCues = tapOverlayBackfill(streamIndex: streamIdx)
             } else {
                 subtitleCues = []
                 // startEmbeddedSubtitleTask cancels + drains the prior reader, then reuses the open side demuxer
