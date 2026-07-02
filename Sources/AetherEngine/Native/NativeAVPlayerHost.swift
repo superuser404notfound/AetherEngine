@@ -96,8 +96,14 @@ final class NativeAVPlayerHost {
     // MARK: - Lifecycle
 
     /// Load the loopback HLS-fMP4 URL into AVPlayer. DisplayCriteriaController.apply must run first so the HDR pipeline is configured before the first segment fetch.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false) {
-        unloadCurrentItem()
+    /// `inPlaceSwap`: atomic same-content item swap for the #93 recovery reload. The default
+    /// teardown pauses and drops the current item to nil before the new one exists; during PiP
+    /// that nil-item gap invalidates AVKit's content source (the PiP window was dismissed ~16 s
+    /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
+    /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
+    /// AVPlayer the fresh one.
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false) {
+        unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
         Self.nextSessionID += 1
@@ -594,7 +600,7 @@ final class NativeAVPlayerHost {
 
     // MARK: - Internal
 
-    private func unloadCurrentItem() {
+    private func unloadCurrentItem(inPlaceSwap: Bool = false) {
         if let to = timeObserver {
             avPlayer.removeTimeObserver(to)
             timeObserver = nil
@@ -618,6 +624,14 @@ final class NativeAVPlayerHost {
         didSampleSettledRoute = false
         // Re-arm #50 hasEverPlayed: reused host must not inherit prior session's established state.
         hasEverPlayed = false
+        // #93 recovery reload: same content, same position, playback must continue. Skip the
+        // pause + nil-item gap below (PiP content-source invalidation + transport bounce); the
+        // old item keeps playing until replaceCurrentItem swaps in the fresh one, and playIntent
+        // stays latched so the new item's readyToPlay re-asserts play().
+        if inPlaceSwap {
+            isReady = false
+            return
+        }
         // Pause before item swap: keepNativeHost reload carries rate=1.0 across replaceCurrentItem; without this the new item auto-resumes and beats the waitForSwitch gate (audio leads video on episode autoplay, issue #15).
         // Clear playIntent so the previous session can't restart the next item at ITS readyToPlay.
         playIntent = false
