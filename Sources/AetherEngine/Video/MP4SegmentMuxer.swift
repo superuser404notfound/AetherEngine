@@ -448,11 +448,21 @@ final class MP4SegmentMuxer {
 
         var opts: OpaquePointer? = nil
         defer { av_dict_free(&opts) }
-        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov", 0)
+        // +frag_discont with avoid_negative_ts=disabled makes tfdt carry the ABSOLUTE input dts:
+        // a muxer built at a producer restart continues the session timeline instead of zero-basing
+        // it. Without them, movenc forces the first sample's dts to 0 (movenc.c, the use_editlist=0 +
+        // make_zero branch runs before frag_discont can), so every restart-produced segment carried
+        // tfdt=0 while the VOD playlist placed it at its plan offset: an implicit timeline
+        // discontinuity per restart that AVPlayer papers over for plain playback but that detaches
+        // AVKit's legible renderer (Sodalite#32) and decouples playhead from loaded ranges (#93).
+        // The producer guarantees non-negative output timestamps (leading head-of-stream audio is
+        // dropped), so disabling the negative-ts rewrite is safe.
+        av_dict_set(&opts, "movflags", "+empty_moov+default_base_moof+frag_custom+delay_moov+frag_discont", 0)
         // use_editlist=0: +delay_moov derives an elst from the first packet timestamp (restart anchor);
         // AVPlayer fetches EXT-X-MAP once so post-restart fragments play against a stale elst causing
         // lipsync drift. Position belongs in each fragment's tfdt; moov stays restart-invariant.
         av_dict_set(&opts, "use_editlist", "0", 0)
+        av_dict_set(&opts, "avoid_negative_ts", "disabled", 0)
         // infer_no_subs: skip default-track inference for subtitle traks only; movenc 62.x still
         // forces enabled=1 on the first subtitle tkhd regardless, handled by clearSubtitleTkhdEnabled.
         if !subtitles.isEmpty {

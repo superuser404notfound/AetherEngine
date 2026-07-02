@@ -293,6 +293,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// PTS of first kept video packet (AV_PKT_FLAG_KEY); used to drop HEVC RASL leading B-frames (open-GOP CRA).
     private var firstActualVideoPts: Int64 = Int64.min
     private var loggedFirstLeadingDrop: Bool = false
+    /// Head-of-stream audio frames preceding the video anchor, dropped because the output
+    /// timeline starts at 0 and the muxer no longer absorbs negative timestamps.
+    private var droppedLeadingAudioCount: Int = 0
 
     /// Pre-gate drop counters; surface the "lädt unendlich" failure mode when the gate never opens.
     private var pregateVideoDropCount: Int = 0
@@ -1799,8 +1802,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                             pendingAudioInheritSeamOut = nil
                         } else {
-                            // Restart: snap to video keyframe tfdt (residual is sub-frame; part of HEVC-resume alignment stack).
-                            audioShiftPts = firstActualAudioDts - desiredFirstAudioTfdtPts
+                            // Restart: inherit the session mapping exactly like head-of-stream. The old snap onto
+                            // the video seam (firstActualAudioDts - desiredFirstAudioTfdtPts) compensated for the
+                            // fresh muxer zero-basing each restart epoch; with tfdt continuity (frag_discont) the
+                            // snap itself became the divergence: it moved audio off the source frame grid by up to
+                            // one frame per epoch and skewed the shift fold-back in segmentIndex(forSourcePts:) by
+                            // the same amount, so a restarted segment carried a different audio timeline (and a
+                            // different boundary frame) than continuous production.
+                            audioShiftPts = av_rescale_q(
+                                videoShiftPts,
+                                sourceVideoTimeBase,
+                                audioTb
+                            )
                         }
                         let gapInAudioTb: Int64
                         if restartTargetVideoDts == Int64.min {
@@ -1871,6 +1884,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     if packet.pointee.pts != Int64.min {
                         packet.pointee.pts -= activeShift
                     }
+                }
+
+                // Defense in depth: the audio gate anchors head-of-stream audio at the video anchor,
+                // so audio reaching here is non-negative in practice; rescale rounding between the
+                // gate target and the inherited shift (or an exotic source) can still yield a
+                // marginally negative out-dts. The muxer no longer absorbs negatives
+                // (avoid_negative_ts=disabled so restarts can continue the timeline; tfdt is
+                // unsigned), so drop such frames outright.
+                if !isVideoPkt, packet.pointee.dts != Int64.min, packet.pointee.dts < 0 {
+                    droppedLeadingAudioCount += 1
+                    if droppedLeadingAudioCount == 1 {
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] dropping leading audio before the video anchor "
+                            + "(out dts=\(packet.pointee.dts)); the output timeline starts at 0",
+                            category: .session
+                        )
+                    }
+                    continue
                 }
 
                 if isVideoPkt {
