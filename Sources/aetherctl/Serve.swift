@@ -3,7 +3,8 @@ import AetherEngine
 
 // MARK: - serve
 
-func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil) -> Never {
+func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil,
+              startPosition: Double? = nil) -> Never {
     EngineLog.handler = { line in
         let timestamp = ISO8601DateFormatter.string(
             from: Date(),
@@ -15,6 +16,7 @@ func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil) -> N
 
     var flagSuffix = dvModeAvailable ? "" : " [--no-dv]"
     if let idx = nativeSubsIndex { flagSuffix += " [--native-subs \(idx)]" }
+    if let pos = startPosition { flagSuffix += " [--start-position \(pos)]" }
     print("aetherctl serve: \(url.absoluteString)\(flagSuffix)")
     print("")
 
@@ -22,6 +24,8 @@ func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil) -> N
         url: url,
         dvModeAvailable: dvModeAvailable
     )
+    // Resume anchor exactly like AetherEngine.loadNative's load(startPosition:) (#99 repro).
+    engine.initialStartSeconds = startPosition
     // Request native mov_text track before start() so the muxer's init moov declares it (#55). Must precede start().
     if nativeSubsIndex != nil {
         engine.requestNativeSubtitleTrack()

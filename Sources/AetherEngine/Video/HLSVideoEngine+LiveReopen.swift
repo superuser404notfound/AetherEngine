@@ -10,6 +10,14 @@ extension HLSVideoEngine {
             handleBackpressureWedge()
             return
         }
+        // #99 failure mode B: a VOD muxer death (e.g. first cut before any bridged audio packet, so
+        // mov_write_moov cannot build the dec3 box) previously had NO recovery arm; the session sat
+        // starved forever. Bounded revive through the normal restart path, which rebuilds the muxer
+        // and re-arms (post-EOF: rebuilds) the audio bridge.
+        if case .muxerFailed = reason, !isLiveSession {
+            handleVODMuxerFailure()
+            return
+        }
         guard isLiveSession else { return }
         switch reason {
         case .stopRequested, .muxerFailed, .backpressureWedge:
@@ -69,6 +77,37 @@ extension HLSVideoEngine {
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.performLiveReopen(failedProducer: prod)
         }
+    }
+
+    /// #99: revive a VOD session whose pump died with muxerFailed. The restart path rebuilds the
+    /// producer with a fresh muxer and calls audioBridge.startSegment() (which also rebuilds a
+    /// post-EOF-drained encoder), so the known transient causes heal. Aimed like the wedge re-anchor:
+    /// a pending never-landed seek target owns the recovery aim, else AVPlayer's real position.
+    func handleVODMuxerFailure() {
+        restartLock.lock()
+        let admitted = muxerFailureReviveGate.admit()
+        let attempts = muxerFailureReviveGate.attempts
+        let cap = muxerFailureReviveGate.maxAttempts
+        restartLock.unlock()
+        guard admitted else {
+            EngineLog.emit(
+                "[HLSVideoEngine] #99 VOD muxerFailed revive cap reached "
+                + "(\(attempts) failures, cap \(cap)); giving up (source not muxable in this session)",
+                category: .session
+            )
+            return
+        }
+        let frozen = currentPlaybackPositionProvider?() ?? 0
+        let anchor = AetherEngine.recoveryAnchorPosition(
+            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?())
+        let idx = segmentIndexForPlaylistTime(anchor)
+        EngineLog.emit(
+            "[HLSVideoEngine] #99 VOD pump died with muxerFailed; rebuilding producer + muxer at "
+            + "\(String(format: "%.2f", anchor))s -> seg\(idx) "
+            + "(attempt \(attempts)/\(cap))",
+            category: .session
+        )
+        requestRestart(at: idx, authoritative: true)
     }
 
     /// #65: re-base the producer onto AVPlayer's real (lagging) position after a VOD backpressure wedge.

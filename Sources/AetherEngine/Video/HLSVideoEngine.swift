@@ -112,7 +112,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// before `start()`; anchors the FIRST producer at the matching segment instead of seg0
     /// (#93 residual: the seg0 cold start was torn down unwatched on every resume, and the
     /// fetch/restart race could 404 the item into a host reload). nil/0 keeps baseIndex 0.
-    var initialStartSeconds: Double?
+    // Public so aetherctl's serve --start-position can repro the anchored resume path (#99).
+    public var initialStartSeconds: Double?
     /// Resolved in start() from `initialStartSeconds` once the segment plan exists.
     private(set) var initialProducerBaseIndex: Int = 0
 
@@ -392,6 +393,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var consecutiveWedgeReanchors = 0
     var lastWedgeReanchorPosition = -Double.greatestFiniteMagnitude
     static let maxConsecutiveWedgeReanchors = 5
+
+    /// #99: bounded revive for a VOD pump that died with muxerFailed (under `restartLock`).
+    /// performRestart rebuilds muxer AND re-arms the audio bridge, so transient causes heal;
+    /// a persistent cause exhausts the cap instead of restart-storming.
+    var muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
 
     /// #93 residual: a stalled AVPlayer sometimes never resumes REQUESTING after a wedge re-anchor
     /// (device: plain playback, one -15628 errorLog, then zero segment GETs while parked in

@@ -66,7 +66,7 @@ func printUsage() {
 
     Usage:
       aetherctl probe <url>
-      aetherctl serve [--no-dv] <url>
+      aetherctl serve [--no-dv] [--start-position S] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
@@ -449,6 +449,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let nativeSubsIndex = takeIntFlag("--native-subs", from: &rest)
     // --throttle-kbps: slow-CDN simulation; starves the producer below real-time to provoke rebuffers.
     let throttleKbps = takeIntFlag("--throttle-kbps", from: &rest)
+    // --start-position: anchor the first producer at a resume position like load(startPosition:) (#99); serve only.
+    let startPosition = takeDoubleFlag("--start-position", from: &rest)
     rejectStrayFlags(rest, subcommand: first)
     guard let urlArg = rest.first else {
         print("ERROR: \(first) requires a <url> argument")
@@ -466,7 +468,8 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     case "probe":
         exit(runProbe(url: url))
     case "serve":
-        runServe(url: url, dvModeAvailable: dvModeAvailable, nativeSubsIndex: nativeSubsIndex)
+        runServe(url: url, dvModeAvailable: dvModeAvailable, nativeSubsIndex: nativeSubsIndex,
+                 startPosition: startPosition)
     case "validate":
         exit(runValidate(url: url, dvModeAvailable: dvModeAvailable))
     case "swdecode":

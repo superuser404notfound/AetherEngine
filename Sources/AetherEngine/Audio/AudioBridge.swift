@@ -120,10 +120,21 @@ final class AudioBridge: @unchecked Sendable {
     /// increasing PTS in 1/sample_rate units.
     private var nextEncoderPTS: Int64 = 0
 
-    /// Set by startSegment, consumed on the next decoded frame: rebases nextEncoderPTS off that frame's source-TB
-    /// pts so per-fragment audio PTS tracks the source. Without it the counter drifts vs video across fragments
-    /// because the FIFO retains a partial frame at each segment boundary.
-    private var rebaseFromNextSourcePTS: Bool = false
+    /// Consumed on the next decoded frame: rebases nextEncoderPTS off that frame's packet source-TB pts so the
+    /// audio PTS tracks the source. Without it the counter drifts vs video across fragments because the FIFO
+    /// retains a partial frame at each segment boundary. Armed at INIT (not just by startSegment): the packets
+    /// reaching feed() are already gate-shifted onto the output timeline, so the first session must track them
+    /// too. Before #99 only producer restarts armed it; an ANCHORED initial load (resume into the file) then
+    /// emitted audio from 0 while video carried the anchor's source PTS, every fragment held tracks the whole
+    /// resume offset apart, and AVPlayer silently discarded everything (loadedTimeRanges never populated).
+    private var rebaseFromNextSourcePTS: Bool = true
+
+    /// Latched by flush(): avcodec_send_frame(enc, nil) leaves the encoder in a terminal draining state that
+    /// avcodec_flush_buffers cannot clear (ac3/flac lack AV_CODEC_CAP_ENCODER_FLUSH). startSegment() rebuilds
+    /// the encoder context when this is set, so a producer restart into a finished session (seek after EOF)
+    /// gets a working bridge again (#99 failure mode B: it otherwise emitted zero packets forever and the
+    /// restarted muxer died on the unparsed dec3 box, "Cannot write moov atom before EAC3 packets parsed").
+    private var drainedAtEOF = false
 
     private static let avNoPTS: Int64 = -0x7FFFFFFFFFFFFFFF - 1
 
@@ -432,12 +443,18 @@ final class AudioBridge: @unchecked Sendable {
         )
     }
 
-    /// Mark a fragment boundary: drain the FIFO (drops the buffered partial frame, max ~96 ms @48kHz) and rebase
-    /// encoder PTS off the next decoded frame's pts. Caller (VideoSegmentProvider) invokes before each fragment's
-    /// audio so A/V timestamps stay aligned across muxer fragment boundaries.
+    /// Mark a producer restart boundary: drain the FIFO (drops the buffered partial frame, max ~96 ms @48kHz) and
+    /// rebase encoder PTS off the next decoded frame's pts. Caller is HLSVideoEngine.performRestart, before the
+    /// new pump starts, so A/V timestamps stay aligned across producer generations.
     func startSegment() {
         opLock.lock()
         defer { opLock.unlock() }
+        // A prior pump reached EOF and flush() drained the encoder into its terminal state; rebuild it
+        // before this restart feeds new frames (#99 failure mode B).
+        if drainedAtEOF {
+            rebuildEncoderAfterEOFDrain()
+            drainedAtEOF = false
+        }
         if let f = fifo {
             av_audio_fifo_reset(f)
         }
@@ -458,11 +475,15 @@ final class AudioBridge: @unchecked Sendable {
     /// encoder internal delay. Without this the final ~100-200 ms of every VOD title were dropped (feed's FIFO
     /// drain only emits FULL frames and nothing sent the encoder its EOF frame). Returns the tail packets; caller
     /// writes them via the same muxer path. Call once at pump EOF before muxer finalize. Not meaningful for live.
+    /// Latches `drainedAtEOF`: the encoder is unusable afterwards until startSegment() rebuilds it, and a second
+    /// flush is a no-op.
     func flush() -> [UnsafeMutablePointer<AVPacket>] {
         opLock.lock()
         defer { opLock.unlock() }
+        guard !drainedAtEOF else { return [] }
         guard let dec = decoderCtx, let enc = encoderCtx,
               let swr = swrCtx, let fifoPtr = fifo else { return [] }
+        drainedAtEOF = true
         var results: [UnsafeMutablePointer<AVPacket>] = []
 
         // 1. Drain the decoder's internal delay.
@@ -514,6 +535,49 @@ final class AudioBridge: @unchecked Sendable {
         EngineLog.emit(
             "[AudioBridge] live timeline jump: +\(String(format: "%.3f", deltaSeconds))s "
             + "(\(samples) samples) at encoder pts \(nextEncoderPTS)",
+            category: .session
+        )
+    }
+
+    /// Replace the EOF-drained encoder with a freshly opened one of identical configuration. The muxer holds
+    /// the `encoderCodecpar` POINTER from session setup, so the codecpar is refreshed in place, never
+    /// reallocated. On any failure the old context stays; the next feed() then throws loudly instead of
+    /// silently emitting nothing. Runs under opLock (callers hold it).
+    private func rebuildEncoderAfterEOFDrain() {
+        guard let oldEnc = encoderCtx else { return }
+        let encoderCodecID: AVCodecID = mode == .surroundCompat ? AV_CODEC_ID_EAC3 : AV_CODEC_ID_FLAC
+        guard let encCodec = avcodec_find_encoder(encoderCodecID),
+              let enc = avcodec_alloc_context3(encCodec) else {
+            EngineLog.emit(
+                "[AudioBridge] WARNING: encoder rebuild after EOF drain failed (alloc); "
+                + "subsequent feeds will fail",
+                category: .session
+            )
+            return
+        }
+        enc.pointee.sample_rate = oldEnc.pointee.sample_rate
+        enc.pointee.sample_fmt = pcmSampleFmt
+        enc.pointee.bits_per_raw_sample = pcmBitsPerRawSample
+        enc.pointee.bit_rate = oldEnc.pointee.bit_rate
+        enc.pointee.time_base = oldEnc.pointee.time_base
+        let layoutRet = av_channel_layout_copy(&enc.pointee.ch_layout, &oldEnc.pointee.ch_layout)
+        guard layoutRet >= 0, avcodec_open2(enc, encCodec, nil) >= 0 else {
+            var tmp: UnsafeMutablePointer<AVCodecContext>? = enc
+            avcodec_free_context(&tmp)
+            EngineLog.emit(
+                "[AudioBridge] WARNING: encoder rebuild after EOF drain failed (open); "
+                + "subsequent feeds will fail",
+                category: .session
+            )
+            return
+        }
+        avcodec_free_context(&encoderCtx)
+        encoderCtx = enc
+        if let cp = encoderCodecpar {
+            _ = avcodec_parameters_from_context(cp, enc)
+        }
+        EngineLog.emit(
+            "[AudioBridge] encoder rebuilt after EOF drain (producer restart into a finished session)",
             category: .session
         )
     }
@@ -599,7 +663,9 @@ final class AudioBridge: @unchecked Sendable {
                 //   bad frame keeps the rest playing.
                 return
             }
-            if sendRet < 0 && sendRet != FFmpegErr.eof {
+            // EOF is NOT exempt: a draining decoder here means feed-after-flush without startSegment
+            // (#99); swallowing it produced zero output with zero diagnostics.
+            if sendRet < 0 {
                 throw AudioBridgeError.sendPacketFailed(code: sendRet)
             }
             try receiveDecodedFrames()
@@ -800,8 +866,10 @@ final class AudioBridge: @unchecked Sendable {
             of.pointee.pts = nextEncoderPTS
             nextEncoderPTS += Int64(readSamples)
 
+            // EOF is NOT exempt: a draining encoder here means the EOF-drain latch was bypassed (#99);
+            // swallowing it starved the muxer of audio with zero diagnostics.
             let sendFrameRet = avcodec_send_frame(enc, of)
-            if sendFrameRet < 0 && sendFrameRet != FFmpegErr.eof {
+            if sendFrameRet < 0 {
                 throw AudioBridgeError.sendFrameFailed(code: sendFrameRet)
             }
 
