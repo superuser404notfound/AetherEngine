@@ -113,6 +113,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Hard cap on riding an in-flight restart (#93 residual): a fetch waits past the fixed
     /// budget while a restart is genuinely executing, but never indefinitely.
     private let repositionRideCapSeconds: TimeInterval
+    /// #93 round 3: a VOD serve still running at this age signals `onSlow` so the server can emit
+    /// an early chunked header, keeping time-to-first-byte under AVPlayer's ~3.5 s -12889 window.
+    private let slowServeThresholdSeconds: TimeInterval
 
     // MARK: - Playlist state
 
@@ -148,6 +151,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         initialRestartIndex: Int = 0,
         repositionWaitSlice: TimeInterval = 8.0,
         repositionRideCapSeconds: TimeInterval = 90.0,
+        slowServeThresholdSeconds: TimeInterval = 2.0,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
         nativeSubtitleLanguages: [String?] = [],
         nativeSubtitleRenditionInfos: [NativeSubtitleRenditionInfo] = [],
@@ -175,6 +179,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self._lastRestartIndex = initialRestartIndex
         self.repositionWaitSlice = repositionWaitSlice
         self.repositionRideCapSeconds = repositionRideCapSeconds
+        self.slowServeThresholdSeconds = slowServeThresholdSeconds
         self.nativeSubStores = nativeSubtitleStores
         self.nativeSubLanguages = nativeSubtitleLanguages
         self.nativeSubRenditionInfos = nativeSubtitleRenditionInfos
@@ -340,6 +345,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     func mediaSegment(at index: Int) -> Data? {
+        mediaSegment(at: index, onSlow: nil)
+    }
+
+    /// #93 round 3: VOD serves arm a one-shot slow signal so the server can emit an early chunked
+    /// header once the serve outlives the threshold (a restart-window segment can take 25-50 s;
+    /// AVPlayer -12889s at ~3.5 s of silence and three strikes kill the item). Live keeps its own
+    /// contracts (below-window fast 404, LL-HLS blocking reload) and never signals.
+    func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? {
+        guard let onSlow, !isLive else { return serveSegment(at: index) }
+        let signal = SlowServeSignal(thresholdSeconds: slowServeThresholdSeconds, onSlow: onSlow)
+        defer { signal.complete() }
+        return serveSegment(at: index)
+    }
+
+    private func serveSegment(at index: Int) -> Data? {
         guard index >= 0, index < currentSegmentCount else { return nil }
 
         // Segment below the live window is evicted; returning nil = fast 404 so AVPlayer resyncs.

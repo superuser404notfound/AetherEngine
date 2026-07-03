@@ -671,6 +671,13 @@ public final class AetherEngine: ObservableObject {
     var stallReengageTask: Task<Void, Never>? = nil
     nonisolated static let stallReengageGraceSeconds: TimeInterval = 6.0
 
+    /// #93 round 3: item death (failedToPlayToEndTime after -12889 strikes) escalation.
+    /// Deferred-confirm task (a transient that resumes within the window self-clears) plus the
+    /// bounded reload budget. Cancelled on load reset; superseded by newer deaths.
+    var itemDeathConfirmTask: Task<Void, Never>? = nil
+    var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+    nonisolated static let itemDeathConfirmSeconds: TimeInterval = 3.0
+
     /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
     /// playhead jump is detected on $renderedTime and, once settled, the native subtitle readers
     /// re-anchor and the remembered rendition selection replays (its deselect/reselect busts
@@ -751,10 +758,13 @@ public final class AetherEngine: ObservableObject {
     /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
     /// Native subtitle rendition selection is per-item, so the host's last request is replayed
     /// onto the fresh item below (an active PiP rendition otherwise silently disappeared).
-    func reloadStalledConsumerItem(position: Double) {
+    func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
-        guard player.timeControlStatus != .paused else { return }
+        // Item death parks tcs at .paused; only that trigger may bypass the user-pause guard.
+        guard Self.stalledConsumerRecoveryAllowed(
+            consumerIsPaused: player.timeControlStatus == .paused,
+            allowPausedConsumer: allowPausedConsumer) else { return }
         let anchor = Self.recoveryAnchorPosition(
             frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget)
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
@@ -1091,6 +1101,9 @@ public final class AetherEngine: ObservableObject {
         stallRecoveryReasserts = 0
         stallReengageTask?.cancel()
         stallReengageTask = nil
+        itemDeathConfirmTask?.cancel()
+        itemDeathConfirmTask = nil
+        itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil
         setPendingRecoverySeekTarget(nil)

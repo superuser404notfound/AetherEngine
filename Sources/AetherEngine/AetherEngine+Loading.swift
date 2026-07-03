@@ -596,6 +596,48 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
 
+        // #93 round 3: accumulated -12889 media timeouts (a wedge-window segment outliving
+        // AVPlayer's ~3.5 s time-to-first-byte watchdog) fire failedToPlayToEndTime and park the
+        // item at rate 0 / tcs .paused with item.status often still readyToPlay. Every recovery
+        // layer above reads that pause as user intent and disarms (producer wedge detector
+        // suspends, nudge and stage-2 guard on .paused), which made the session terminal from the
+        // couch. Item death is categorically NOT user intent: confirm it survived the deferred
+        // window (a transient that resumes self-clears, same contract as the .failed KVO), then
+        // reload through the stage-2 chain with the pause guard bypassed, bounded by the revive
+        // gate (a frozen position across deaths exhausts; progress or a user seek restores).
+        host.$endFailureCount
+            .dropFirst()
+            .sink { [weak self, weak host] count in
+                guard let self, let host else { return }
+                let clockAtFailure = host.renderedTime
+                self.itemDeathConfirmTask?.cancel()
+                self.itemDeathConfirmTask = Task { @MainActor [weak self, weak host] in
+                    try? await Task.sleep(
+                        nanoseconds: UInt64(Self.itemDeathConfirmSeconds * 1_000_000_000))
+                    guard !Task.isCancelled, let self, let host,
+                          host.endFailureCount == count else { return }
+                    guard NativeAVPlayerHost.shouldSurfaceDeferredFailure(
+                        isPlaying: host.timeControlStatus == .playing,
+                        clockAtFailure: clockAtFailure,
+                        clockNow: host.renderedTime) else { return }
+                    let position = host.renderedTime
+                    guard self.itemDeathReviveGate.admit(position: position) else {
+                        EngineLog.emit(
+                            "[AetherEngine] #93 item death (failedToPlayToEndTime) at "
+                            + "\(String(format: "%.2f", position))s; revive budget exhausted, giving up",
+                            category: .engine)
+                        return
+                    }
+                    EngineLog.emit(
+                        "[AetherEngine] #93 item death (failedToPlayToEndTime) at "
+                        + "\(String(format: "%.2f", position))s; reloading item through stage-2 "
+                        + "recovery (attempt \(self.itemDeathReviveGate.attempts), pause guard bypassed)",
+                        category: .engine)
+                    self.reloadStalledConsumerItem(position: position, allowPausedConsumer: true)
+                }
+            }
+            .store(in: &nativeCancellables)
+
         // appliesPerFrameHDRDisplayMetadata unconditionally true: DV P5 has no HDR10 base layer, so the per-frame RPU is what AVPlayer's tone-mapper needs on a non-DV panel (DrHurt #4 2026-05-26). Prior servingMasterPlaylist gate broke P5. Apple's default is also true; explicit write surfaces the live value in diagnostics.
         // forwardBufferDuration default (4 s): deep buffer lets AVPlayer race to the live edge and hit the transcode warm-up gap head-on (-12888); 4 s PACES consumption. Verified: 8 s worsened startup pause (8-10 s vs ~1 s).
         // Live REJOIN: skip initial seek so AVPlayer picks edge-minus-holdback instead; seek-to-0 against the re-served backlog wedged the reloaded item in waitingToPlay (device repro: tvOS 26, Jellyfin stream.ts). See LiveReloadPolicy.
