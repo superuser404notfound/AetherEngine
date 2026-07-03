@@ -28,7 +28,9 @@ Interlaced sources (DVD-rip MPEG-2, SD broadcast) are deinterlaced through a per
 | HEVC Main10 (HLG) | BT.2020 / HLG |
 | AV1 HDR | BT.2020 / PQ |
 
-HDR-to-SDR mapping is handled by AVPlayer and the system compositor according to the connected display. AetherEngine doesn't tonemap on the host; it tells the system "this is BT.2020 PQ" (or DV, or HLG) via the HLS-fMP4 sample description and lets tvOS / iOS pick the right path. `DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see the README's "Host setup on tvOS" section.)
+HDR-to-SDR mapping is handled by AVPlayer and the system compositor according to the connected display. AetherEngine doesn't tonemap on the host; it tells the system "this is BT.2020 PQ" (or DV, or HLG) via the HLS-fMP4 sample description and lets tvOS / iOS pick the right path.
+
+An HDR master playlist is only served when the panel is ready for it. On tvOS the external panel must already be in HDR mode or Match Dynamic Range must be on (an SDR-parked panel rejects an HDR master with `-11848`). On iOS and macOS the built-in panel engages EDR on demand with no display mode switch, so `AVPlayer.eligibleForHDRPlayback` counts as readiness there; SDR-only devices read ineligible and stay media-direct. `DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see the README's "Host setup on tvOS" section.)
 
 ### Dolby Vision signaling
 

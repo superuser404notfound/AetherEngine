@@ -1165,19 +1165,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // #15: a SUBTITLES rendition lives only in a master; the pure decision below forces the
         // master for routing-safe subtitled sources so PiP can show subtitles.
         let hasNativeSubs = enableNativeSubtitleTrackForSession && !nativeSubtitleCueStoresForSession.isEmpty
-        // iOS built-in panels engage EDR on demand once HDR content renders; the tvOS SDR-parked-
-        // panel failure mode (-11848) does not exist there, so HDR-eligibility is the readiness
-        // signal (Sodalite AE#88 retest: every HDR/DV film on iPhone routed media-direct and PiP
-        // subtitles silently never worked for them).
-        #if os(iOS)
-        let builtInPanelEngagesOnDemand = true
-        #else
-        let builtInPanelEngagesOnDemand = false
-        #endif
         let useMasterPlaylist = Self.resolveUseMasterPlaylist(
             videoRange: videoRange, dvVariant: dvVariant, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelIsInHDRMode, displaySupportsHDR: displaySupportsHDR,
-            hasNativeSubs: hasNativeSubs, builtInPanelEngagesOnDemand: builtInPanelEngagesOnDemand)
+            hasNativeSubs: hasNativeSubs,
+            builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand)
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
             : srv.mediaPlaylistURL
@@ -1190,11 +1182,25 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return url
     }
 
+    /// Built-in panels that engage EDR on demand once HDR content renders; the tvOS SDR-parked-
+    /// panel failure mode (-11848) exists only behind the HDMI mode switch, so HDR-eligibility is
+    /// the readiness signal on these platforms (Sodalite AE#88 retest: every HDR/DV film on iPhone
+    /// routed media-direct and PiP subtitles silently never worked for them). macOS composites EDR
+    /// per-window with no display mode switch, same physics as the iOS built-in panel; an SDR-only
+    /// Mac reads ineligible and stays media-direct (#98).
+    static let builtInPanelEngagesOnDemand: Bool = {
+        #if os(iOS) || os(macOS)
+        return true
+        #else
+        return false
+        #endif
+    }()
+
     /// Pure master-vs-media playlist routing decision (#4, #15, #63). A master claiming HDR while
     /// the panel sits in SDR fails with -11848, so HDR/DV sources need a ready panel; a
     /// single-variant DV P5 master has no backward-compat brand and non-DV panels reject it with
     /// -11868, so it is always media-direct. SDR content is routable on any panel, so native
-    /// subtitles force the master there. `builtInPanelEngagesOnDemand` (iOS) treats
+    /// subtitles force the master there. `builtInPanelEngagesOnDemand` (iOS/macOS) treats
     /// HDR-eligibility (`AVPlayer.eligibleForHDRPlayback`, passed as `displaySupportsHDR`) as
     /// panel readiness: the built-in panel engages EDR when HDR content renders, and an
     /// SDR-only device or route still reads ineligible and stays media-direct.

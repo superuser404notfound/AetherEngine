@@ -1,12 +1,13 @@
 import Testing
 @testable import AetherEngine
 
-/// Master-vs-media playlist routing matrix (#4, #15, #63, iOS gate). The decision is pure so the
-/// platform matrix is testable offline: tvOS gates HDR masters on the panel being ALREADY in HDR
-/// mode (an SDR-parked external panel rejects an HDR master with -11848), while iOS built-in
-/// panels engage EDR on demand, so HDR-eligibility (AVPlayer.eligibleForHDRPlayback) is the
-/// readiness signal there. Without the iOS gate every HDR/DV film on iPhone routed media-direct,
-/// whose playlist has no SUBTITLES renditions, so PiP subtitles silently never worked for them.
+/// Master-vs-media playlist routing matrix (#4, #15, #63, on-demand gate). The decision is pure
+/// so the platform matrix is testable offline: tvOS gates HDR masters on the panel being ALREADY
+/// in HDR mode (an SDR-parked external panel rejects an HDR master with -11848), while iOS and
+/// macOS built-in panels engage EDR on demand, so HDR-eligibility
+/// (AVPlayer.eligibleForHDRPlayback) is the readiness signal there (#98). Without the iOS gate
+/// every HDR/DV film on iPhone routed media-direct, whose playlist has no SUBTITLES renditions,
+/// so PiP subtitles silently never worked for them.
 @MainActor
 struct MasterRoutingTests {
 
@@ -66,5 +67,14 @@ struct MasterRoutingTests {
         #expect(route(videoRange: .pq, dvVariant: .profile81, effectiveDvMode: true, panelHDR: true))
         #expect(route(videoRange: .pq, dvVariant: .profile81, effectiveDvMode: true,
                       displayHDR: true, panelEngagesOnDemand: true))
+    }
+
+    @Test("macOS built-in panels count as engage-on-demand (#98); tvOS keeps the handshake path")
+    func platformOnDemandGate() {
+        #if os(macOS) || os(iOS)
+        #expect(HLSVideoEngine.builtInPanelEngagesOnDemand)
+        #elseif os(tvOS)
+        #expect(!HLSVideoEngine.builtInPanelEngagesOnDemand)
+        #endif
     }
 }
