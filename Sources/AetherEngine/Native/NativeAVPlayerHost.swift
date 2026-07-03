@@ -29,6 +29,11 @@ final class NativeAVPlayerHost {
     /// Monotonic count of AVPlayerItem playbackStalled notifications (#93 residual): the engine
     /// opens its spurious-pause recovery window on each stall.
     @Published private(set) var stallCount: Int = 0
+    /// Monotonic count of loopback-path `failedToPlayToEndTime` deaths after playback was
+    /// established (#93 round 3). Accumulated -12889 media timeouts fail the item with tcs parked
+    /// at .paused, which every pause-guarded recovery layer misreads as user intent; the engine
+    /// subscribes and escalates into the stage-2 item reload with the pause guard bypassed.
+    @Published private(set) var endFailureCount: Int = 0
 
     // MARK: - Seek landing state
 
@@ -326,13 +331,20 @@ final class NativeAVPlayerHost {
                 ?? "The live stream stopped (the source could not continue)."
             // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
             MainActor.assumeIsolated {
-                guard let self = self, self.surfaceEndFailures, self.sessionID == sid,
+                guard let self = self, self.sessionID == sid,
                       let current = self.playerItem else { return }
-                // AVPlayer gave up on this item (rate 0, no more segments) and `.failed` may never fire
-                // (item.status can stay readyToPlay). Route into the same deferred confirmation as a .failed
-                // KVO: a transient that resumes within the window self-clears; a dead upstream (live IPTV
-                // token expiry, persistent segment 404) surfaces .error so the host can retune / show it.
-                self.handleItemFailed(desc, item: current)
+                if self.surfaceEndFailures {
+                    // AVPlayer gave up on this item (rate 0, no more segments) and `.failed` may never fire
+                    // (item.status can stay readyToPlay). Route into the same deferred confirmation as a .failed
+                    // KVO: a transient that resumes within the window self-clears; a dead upstream (live IPTV
+                    // token expiry, persistent segment 404) surfaces .error so the host can retune / show it.
+                    self.handleItemFailed(desc, item: current)
+                } else if Self.shouldCountEndFailureForRevive(
+                    surfaceEndFailures: false, hasEverPlayed: self.hasEverPlayed) {
+                    // #93 round 3: loopback path. Count the death for the engine's revive
+                    // escalation; a startup death (never played) stays with the startup watchdogs.
+                    self.endFailureCount += 1
+                }
             }
         }
         notificationObservers.append(failedToEndObs)
@@ -430,6 +442,16 @@ final class NativeAVPlayerHost {
         if isPlaying { return false }
         if clockNow > clockAtFailure + threshold { return false }
         return true
+    }
+
+    /// #93 round 3, pure decision: does a `failedToPlayToEndTime` count toward the loopback
+    /// revive escalation? The lean remote-live path (`surfaceEndFailures`) keeps its own
+    /// deferred-failure contract; a startup death before the first frame stays with the
+    /// startup watchdogs.
+    nonisolated static func shouldCountEndFailureForRevive(
+        surfaceEndFailures: Bool, hasEverPlayed: Bool
+    ) -> Bool {
+        !surfaceEndFailures && hasEverPlayed
     }
 
     /// #50: AVPlayer fires .failed for self-healing transients (loopback 404, AVIOReader reconnect) while playback advances uninterrupted (rrgomes: tcs=playing at .failed).

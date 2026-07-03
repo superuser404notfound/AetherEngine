@@ -11,6 +11,12 @@ protocol HLSSegmentProvider: AnyObject {
     /// Media segment bytes (0-based index). Nil if not yet available or out of range; server returns 404 for nil.
     func mediaSegment(at index: Int) -> Data?
 
+    /// #93 round 3: like `mediaSegment(at:)`, but a serve that cannot deliver promptly invokes
+    /// `onSlow` exactly once (and never after returning) so the server can emit an early chunked
+    /// response header before AVPlayer's ~3.5 s time-to-first-byte -12889 window closes.
+    /// Default forwards to `mediaSegment(at:)` without ever signalling.
+    func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data?
+
     /// Optional file URL for disk-backed segments (cache adopt path). Server streams file -> socket bypassing Foundation Data; sendfile(2) was tried but SIGSYS'd on tvOS sandbox.
     func mediaSegmentURL(at index: Int) -> URL?
 
@@ -79,6 +85,7 @@ protocol HLSSegmentProvider: AnyObject {
 }
 
 extension HLSSegmentProvider {
+    func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? { mediaSegment(at: index) }
     func mediaSegmentURL(at index: Int) -> URL? { nil }
     var firstVisibleSegmentIndex: Int { 0 }
     func segmentIsDiscontinuous(at index: Int) -> Bool { false }
@@ -652,8 +659,34 @@ final class HLSLocalServer: @unchecked Sendable {
                                             fileURL: url,
                                             contentType: "video/mp4")
                     }
-                    if let data = provider?.mediaSegment(at: index),
-                       !data.isEmpty {
+                    // #93 round 3: a serve outliving the provider's slow threshold (wedge-window
+                    // restart, 25-50 s worst case) emits response headers NOW as a chunked
+                    // transfer; the body follows when the segment lands. Without this, AVPlayer's
+                    // ~3.5 s time-to-first-byte watchdog logs -12889 per silent request and three
+                    // strikes fail the item (failedToPlayToEndTime, terminal from the couch).
+                    let early = EarlyHeaderState()
+                    let data = provider?.mediaSegment(at: index, onSlow: { [weak self] in
+                        guard let self, early.markSentOnce() else { return }
+                        EngineLog.emit(
+                            "[HLSLocalServer] seg\(index): slow serve, sending early chunked header",
+                            category: .hlsServer)
+                        _ = self.writeAll(fd: fd,
+                                          data: Self.chunkedResponseHeader(contentType: "video/mp4"),
+                                          path: "\(normalizedPath) [early header]")
+                    })
+                    if early.wasSent {
+                        guard let data, !data.isEmpty else {
+                            // Headers are committed; abort so AVPlayer sees a truncated transfer
+                            // and retries, instead of a cacheable empty 200.
+                            EngineLog.emit(
+                                "[HLSLocalServer] seg\(index): early-header serve missed; "
+                                + "closing connection for AVPlayer retry",
+                                category: .hlsServer)
+                            return false
+                        }
+                        return sendChunkedBody(fd: fd, path: normalizedPath, data: data)
+                    }
+                    if let data, !data.isEmpty {
                         return send200(fd: fd, path: normalizedPath, data: data,
                                        contentType: "video/mp4")
                     }
@@ -678,6 +711,57 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     // MARK: - HTTP framing
+
+    /// #93 round 3: once-latch for the early chunked header. The provider guarantees `onSlow`
+    /// never runs after `mediaSegment(at:onSlow:)` returns (SlowServeSignal's complete() barrier),
+    /// so the handler thread's `wasSent` read is ordered after any header write.
+    private final class EarlyHeaderState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sent = false
+        func markSentOnce() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if sent { return false }
+            sent = true
+            return true
+        }
+        var wasSent: Bool { lock.lock(); defer { lock.unlock() }; return sent }
+    }
+
+    /// #93 round 3: chunked 200 header for a serve that cannot deliver within the slow threshold.
+    /// No Content-Length (the segment size is unknown until produced); keep-alive is preserved,
+    /// chunked framing delimits the message.
+    static func chunkedResponseHeader(contentType: String) -> Data {
+        var header = "HTTP/1.1 200 OK\r\n"
+        header += "Content-Type: \(contentType)\r\n"
+        header += "Transfer-Encoding: chunked\r\n"
+        header += "Access-Control-Allow-Origin: *\r\n"
+        header += "Cache-Control: no-cache\r\n"
+        header += "Connection: keep-alive\r\n\r\n"
+        return Data(header.utf8)
+    }
+
+    /// Chunk-size line: hex byte count + CRLF (RFC 9112 §7.1).
+    static func chunkFrameHeader(size: Int) -> Data {
+        Data("\(String(size, radix: 16))\r\n".utf8)
+    }
+
+    static let chunkFrameTrailer = Data("\r\n".utf8)
+    static let chunkedFinal = Data("0\r\n\r\n".utf8)
+
+    /// Body for an early-header serve: the whole segment as one chunk. Four separate send()
+    /// calls so mmap-backed segment Data is never copied into a Swift heap buffer.
+    private func sendChunkedBody(fd: Int32, path: String, data: Data) -> Bool {
+        EngineLog.emit(
+            "[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=video/mp4 [chunked, early header]",
+            category: .hlsServer, level: .verbose)
+        guard writeAll(fd: fd, data: Self.chunkFrameHeader(size: data.count), path: "\(path) [chunk size]"),
+              writeAll(fd: fd, data: data, path: path),
+              writeAll(fd: fd, data: Self.chunkFrameTrailer, path: "\(path) [chunk trailer]"),
+              writeAll(fd: fd, data: Self.chunkedFinal, path: "\(path) [chunk final]") else {
+            return false
+        }
+        return true
+    }
 
     /// Shared response-header builder. Header and body are sent in two separate send() calls: data may be mmap-backed and must NOT be copied via Data.append (would materialize segment into Swift heap, defeating the BSD-socket rewrite).
     private static func responseHeader(
