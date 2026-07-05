@@ -1081,6 +1081,15 @@ extension AetherEngine {
         }
         guard !routes.isEmpty else { return }
 
+        // #104: discard video/audio (and any non-routed subtitle stream) on this side demuxer. Without it the
+        // reader pulls and allocs EVERY video+audio sample byte-for-byte through a second AVIOReader just to
+        // reach the sparse mov_text samples (mov_read_packet reads the sample unless AVDISCARD_ALL). On a file
+        // with many subtitle tracks that meant streaming the whole program through a parallel connection, RSS
+        // growing with playback position until jetsam. Matches the main pump / FrameDecodeContext, which already
+        // discard. AVDISCARD_ALL drops before AVPacket alloc; seeks stay index-driven, park pacing rides the
+        // subtitle PTS (av_read_frame fast-walks the discarded index between cues, no I/O).
+        demuxer.discardAllStreamsExcept(Set(routes.keys))
+
         EngineLog.emit(
             "[AetherEngine] native subtitle readers started: streams=\(routes.keys.sorted()) " +
             "startAt=\(String(format: "%.2f", startAt))s effectiveStart=\(String(format: "%.2f", effectiveStart))s " +
