@@ -35,6 +35,11 @@ final class NativeAVPlayerHost {
     /// subscribes and escalates into the stage-2 item reload with the pause guard bypassed.
     @Published private(set) var endFailureCount: Int = 0
 
+    /// Published when a startup `.failed` is a display-rejection of the served master (#98). The
+    /// engine's fallback subscriber reads it, decides, and either reloads the media playlist or
+    /// surfaces the failure. Reset on each load.
+    @Published private(set) var pendingDisplayRejection: DisplayRejection?
+
     // MARK: - Seek landing state
 
     /// Monotonic seek counter; only the latest generation clears seekInFlight and publishes the landed time (abandoned seeks complete with finished==false).
@@ -148,6 +153,7 @@ final class NativeAVPlayerHost {
         playerItem = item
         accessLogCount = 0
         failureMessage = nil
+        pendingDisplayRejection = nil
         isReady = false
 
         // KVO fires on AVPlayerItem's queue; Task round-trips to MainActor.
@@ -465,8 +471,19 @@ final class NativeAVPlayerHost {
         failureConfirmToken &+= 1
         let token = failureConfirmToken
 
-        // Startup failure: never reached .playing, so nothing to recover.
+        // Startup failure: never reached .playing, so nothing to recover here. A display-rejection
+        // of the served master (#98) is instead handed to the engine, which reloads the media
+        // playlist; only a non-rejection startup failure surfaces immediately.
         if !hasEverPlayed {
+            let code = (item.error as NSError?)?.code
+            if let code, MasterFallbackDecision.isDisplayRejectionCode(code) {
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sessionID) startup .failed is a display rejection "
+                    + "(code=\(code)); signalling engine for media fallback instead of surfacing",
+                    category: .engine)
+                pendingDisplayRejection = DisplayRejection(code: code, message: desc)
+                return
+            }
             failureMessage = desc
             return
         }

@@ -1264,6 +1264,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// `true` when `start()` chose the master playlist (HDR/DV signaling). Read after `start()`.
     public private(set) var servingMasterPlaylist: Bool = false
 
+    /// The loopback server's media (single-variant) playlist URL, for the reactive master->media
+    /// fallback (#98). Nil before the server starts.
+    public var mediaPlaylistURL: URL? { server?.mediaPlaylistURL }
+
+    /// Flip the serving flag after the engine has reloaded the media playlist on a display rejection.
+    func markServingMediaAfterFallback() { servingMasterPlaylist = false }
+
     // MARK: - Diagnostics
 
     /// Point-in-time pipeline counters for the memory probe. Fields are uncoordinated snapshots

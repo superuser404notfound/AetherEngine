@@ -682,6 +682,14 @@ public final class AetherEngine: ObservableObject {
     var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
     nonisolated static let itemDeathConfirmSeconds: TimeInterval = 3.0
 
+    /// Single-shot latch for the reactive master->media fallback (#98): fall back at most once per
+    /// session so a media reload that also fails cannot loop. Reset on each load.
+    var masterFallbackUsed = false
+
+    /// Start position of the current loopback video load, replayed if the master is rejected and we
+    /// reload the media playlist (a startup-failed item has no reliable renderedTime).
+    var lastNativeVideoStartPosition: Double = 0
+
     /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
     /// playhead jump is detected on $renderedTime and, once settled, the native subtitle readers
     /// re-anchor and the remembered rendition selection replays (its deselect/reselect busts
@@ -762,6 +770,34 @@ public final class AetherEngine: ObservableObject {
     /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
     /// Native subtitle rendition selection is per-item, so the host's last request is replayed
     /// onto the fresh item below (an active PiP rendition otherwise silently disappeared).
+    /// React to a display rejecting the served master (#98): if eligible, reload the media playlist
+    /// in place (single-variant, SDR-tone-mappable); otherwise surface the failure normally.
+    @MainActor
+    func fallBackToMediaPlaylist(_ rejection: DisplayRejection) {
+        guard let host = nativeHost, let session = nativeVideoSession else {
+            state = .error(rejection.message)
+            return
+        }
+        guard MasterFallbackDecision.shouldFallBackToMediaPlaylist(
+            errorCode: rejection.code,
+            servingMasterPlaylist: session.servingMasterPlaylist,
+            alreadyFellBack: masterFallbackUsed),
+              let mediaURL = session.mediaPlaylistURL else {
+            state = .error(rejection.message)
+            return
+        }
+        masterFallbackUsed = true
+        session.markServingMediaAfterFallback()
+        let position = lastNativeVideoStartPosition
+        EngineLog.emit(
+            "[AetherEngine] display rejected the master (code=\(rejection.code)); falling back to "
+            + "media playlist (SDR tone-mapping, no CC/subtitle renditions) at "
+            + "\(String(format: "%.2f", position))s",
+            category: .session)
+        host.load(url: mediaURL, startPosition: position, inPlaceSwap: true)
+        host.play()
+    }
+
     func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
@@ -1105,6 +1141,7 @@ public final class AetherEngine: ObservableObject {
         itemDeathConfirmTask?.cancel()
         itemDeathConfirmTask = nil
         itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+        masterFallbackUsed = false
         nativeSubtitleReanchorTask?.cancel()
         nativeSubtitleReanchorTask = nil
         setPendingRecoverySeekTarget(nil)

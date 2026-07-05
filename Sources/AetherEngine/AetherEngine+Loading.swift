@@ -640,9 +640,19 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
 
+        // #98: a display rejecting the served master fails the item at startup; reload the media
+        // playlist in place instead of hard-failing. Gated + single-shot in fallBackToMediaPlaylist.
+        host.$pendingDisplayRejection
+            .compactMap { $0 }
+            .sink { [weak self] rejection in
+                Task { @MainActor [weak self] in self?.fallBackToMediaPlaylist(rejection) }
+            }
+            .store(in: &nativeCancellables)
+
         // appliesPerFrameHDRDisplayMetadata unconditionally true: DV P5 has no HDR10 base layer, so the per-frame RPU is what AVPlayer's tone-mapper needs on a non-DV panel (DrHurt #4 2026-05-26). Prior servingMasterPlaylist gate broke P5. Apple's default is also true; explicit write surfaces the live value in diagnostics.
         // forwardBufferDuration default (4 s): deep buffer lets AVPlayer race to the live edge and hit the transcode warm-up gap head-on (-12888); 4 s PACES consumption. Verified: 8 s worsened startup pause (8-10 s vs ~1 s).
         // Live REJOIN: skip initial seek so AVPlayer picks edge-minus-holdback instead; seek-to-0 against the re-served backlog wedged the reloaded item in waitingToPlay (device repro: tvOS 26, Jellyfin stream.ts). See LiveReloadPolicy.
+        lastNativeVideoStartPosition = startPosition ?? 0
         host.load(url: playbackURL,
                   startPosition: startPosition,
                   perFrameHDR: true,
