@@ -10,9 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.12.0] - 2026-07-05
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.12.0))
+
 ### Added
 
 - **Opt-in decoded PCM audio tap (#95).** `installAudioTap()` streams playback audio as mono Float32 48 kHz `AVAudioPCMBuffer`s with source-PTS timestamps and discontinuity flags, for host-side speech/audio features (live transcription, ShazamKit). Native path decodes the engine's own loopback segments near the playhead (zero extra network, follows the active track, cannot stall playback); software path mirrors the existing PCM decode. New `aetherctl audiotap` verification command.
+- **Configurable forward-buffer window (#102).** `LoadOptions.forwardBufferSegments` sets how many segments the native path buffers ahead (clamped 4...150); nil keeps the adaptive default, letting hosts trade memory for resilience on slow or unstable sources.
+- **Dolby Vision profile exposed for stats (#103).** `SourceProbe.dvProfile` and the live `sourceDVProfile` publish the source's DV profile number (5 / 7 / 8 / 10), so hosts can label "Dolby Vision P5" without a separate probe.
+- **CEA-608 as a native WebVTT rendition on iOS (#98).** Decoded 608 captions are bridged into the native rendition machinery, so they survive PiP and AirPlay through the existing WebVTT path.
 
 ### Fixed
 
@@ -21,6 +28,22 @@ the public-API contract.
 - **Single-digit wedge detection once the producer parks (#93 retest).** The VOD backpressure wedge was detected by a 24 s frozen-fetch-target counter alone, putting recovery latency at 30-70 s (reporter timings). The detector now has a fast path keyed on the signal pair the reporter's trace isolated: producer parked while the consumer's fetch target AND rendered clock are both frozen with intact play intent. Both frozen for 5 s breaks the park immediately; healthy steady-state playback (the clock advances between segment fetches) and post-seek decode ramps (clock flat but prefetch keeps advancing the target) never trip it. The 24 s counter remains as fallback when no clock signal is wired.
 
 - **Producer re-anchor aims at the requested seek target too (#93 retest).** Both producer re-anchor sites (the seek-deadline reconcile and the wedge break) re-anchored at the frozen rendered position even while an unlanded user seek was pending, pulling the producer away from the target window its own seek restart had just anchored; the wrong-window refill could also evict the target's segments from retention (a follow-on cache-miss stall shape). All recovery stages, producer re-anchor, consumer nudge, and stage-2 reload, now share one anchor decision: pending seek target first, frozen position only when none is pending.
+
+- **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnail colour (#103).** `FrameExtractor` software-decoded the IPT-PQ-C2 base layer and read its planes as BT.2020 YCbCr, producing a green / magenta cast. It now applies the Dolby Vision colour transform from the RPU metadata (the IPT-PQ matrices + PQ EOTF, then a Hable tone-map to SDR) on the CPU; no Apple still-image API (AVAssetImageGenerator, QuickLook) resolves this on its own, since the reshape runs only in the live display compositor. Playback was never affected. The per-frame reshaping curves are intentionally skipped, validated against a libplacebo reference render as not driving the visible corruption.
+- **mov_text subtitle memory growth (#104).** The native subtitle side demuxer lacked `discardAllStreamsExcept`, so it streamed the whole video + audio program through a second reader just to harvest sparse mov_text packets; RSS scaled with playback position and freed on deselect. It now discards the non-subtitle streams before packet allocation.
+- **Bridged-resume alignment and post-EOF revive (#99).** Bridge PTS rebase, post-EOF encoder rebuild, and a bounded VOD muxer-failed revive.
+- **PGS catch-up burst suppression (#100).** Stale PGS arrivals are held for successor resolution instead of flashing on screen.
+- **Reactive master to media fallback on display rejection (#98).** Routing falls back from a master to a media playlist when the display rejects the advertised codec; the obsolete P5 always-media-direct guard was dropped now that the engine emits a well-formed `dvh1.05` master.
+- **macOS on-demand HDR master routing (#98).** macOS built-in panels count as engage-on-demand for HDR masters.
+- **Bounded wedge-restart reopen (#93 residual latency).** The wedge-restart reopen is bounded to a finite byte range, cutting residual restart latency.
+
+### Changed
+
+- **SMB uses SMBClient (#97).** The NWConnection-based `SMBClient` replaces AMSMB2, so SMB shares work on tvOS / iOS (AMSMB2 hit EPERM). Support boundary is SMB 2.0.2 / 2.1.
+
+### Removed
+
+- **Dead in-band mov_text / tx3g subtitle muxing.** Native subtitles ship as a separate WebVTT rendition; the unused in-band muxing path was removed.
 
 ## [4.11.0] - 2026-07-03
 
