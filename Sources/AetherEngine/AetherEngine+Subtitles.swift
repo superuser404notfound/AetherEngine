@@ -389,6 +389,18 @@ extension AetherEngine {
             return
         }
 
+        // #104: discard video/audio (and every non-selected subtitle stream) on this side demuxer, same as
+        // runNativeSubtitleReaders / the main pump / FrameDecodeContext. Without it the overlay reader pulls
+        // and allocs EVERY video+audio sample byte-for-byte through a second AVIOReader just to reach the
+        // sparse mov_text samples (mov_read_packet reads the sample unless AVDISCARD_ALL), streaming the whole
+        // program through a parallel connection with RSS growing by playback position until jetsam. On the
+        // reporter's 16-subtitle-track MP4 that was ~1 GB per few minutes. AVDISCARD_ALL drops before AVPacket
+        // alloc; mov fast-walks the in-memory index between cues with no I/O. Applied after the seek above so
+        // libavformat's find_stream_info read-ahead is already flushed (an unflushed buffer would leak one
+        // pre-discard video packet), and re-applied on every entry so a reused demuxer (#76) that was pinned to
+        // the previous track's stream is re-pointed at the newly selected one.
+        demuxer.discardAllStreamsExcept([streamIndex])
+
         let tb = stream.pointee.time_base
         let streamStartTime = stream.pointee.start_time
 
