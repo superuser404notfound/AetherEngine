@@ -268,7 +268,8 @@ extension HLSVideoEngine {
 
         // HEVC path. Always classify DV: P5 needs dvh1 even on non-DV panels because AVPlayer's system
         // DV decoder tonemaps IPT-PQ-c2 internally; without dvh1 IPT chroma reads as YCbCr (green/purple
-        // cast, AetherEngine#4 Build 160+163 / DrHurt#19). Routing forces media playlist for P5-on-non-DV.
+        // cast, AetherEngine#4 Build 160+163 / DrHurt#19). The dvh1.05 master is accepted on non-DV
+        // HDR10 panels and tonemapped (#98), so P5 routes like any HDR source (resolveUseMasterPlaylist).
         let dvRecord = doviConfigRecord(from: codecpar)
         let dvVariant = classifyDVVariant(dvRecord, codecID: AV_CODEC_ID_HEVC)
 
@@ -295,7 +296,8 @@ extension HLSVideoEngine {
         switch dvVariant {
         case .profile5:
             // P5: DV-only (IPT-PQ-c2, no base). dvh1 always required; see HEVC-path comment above.
-            // Bare dvh1.05 in master playlist fires -11868 on non-DV panels; routing forces media playlist.
+            // A well-formed bare dvh1.05 master is accepted on non-DV HDR10 panels and tonemapped to
+            // HDR10 (#98, device-verified tvOS 26.5). No routing special-case; see resolveUseMasterPlaylist.
             return CodecRoute(
                 codecTagOverride: "dvh1",
                 videoRange: .pq,

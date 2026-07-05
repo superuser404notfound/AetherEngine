@@ -11,12 +11,12 @@ import Testing
 @MainActor
 struct MasterRoutingTests {
 
-    private func route(videoRange: HLSVideoRange, dvVariant: HLSVideoEngine.DVVariant = .none,
+    private func route(videoRange: HLSVideoRange,
                        effectiveDvMode: Bool = false, panelHDR: Bool = false,
                        displayHDR: Bool = false, nativeSubs: Bool = false,
                        panelEngagesOnDemand: Bool = false) -> Bool {
         HLSVideoEngine.resolveUseMasterPlaylist(
-            videoRange: videoRange, dvVariant: dvVariant, effectiveDvMode: effectiveDvMode,
+            videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelHDR, displaySupportsHDR: displayHDR,
             hasNativeSubs: nativeSubs, builtInPanelEngagesOnDemand: panelEngagesOnDemand)
     }
@@ -54,18 +54,26 @@ struct MasterRoutingTests {
         #expect(!route(videoRange: .sdr))
     }
 
-    @Test("DV Profile 5 on a non-DV panel is always media-direct (-11868 guard)")
-    func dv5NonDVPanel() {
-        #expect(!route(videoRange: .pq, dvVariant: .profile5, effectiveDvMode: false,
-                       panelHDR: true, displayHDR: true))
-        #expect(!route(videoRange: .pq, dvVariant: .profile5, displayHDR: true,
-                       nativeSubs: true, panelEngagesOnDemand: true))
+    // P5/P8.x route by videoRange (.pq) + panel readiness, with NO per-variant special-case. The
+    // P5 rows below stand in for a bare dvh1.05 master (non-DV panel, effectiveDvMode=false): it is
+    // accepted and tonemapped from 26.5 (#98), so P5 masters on a ready HDR panel exactly like plain
+    // HDR10. Do not reinstate the old always-media-direct P5 guard; it was compensating for an
+    // earlier malformed master, not a platform limitation.
+
+    @Test("DV P5 (non-DV panel) routes master on a ready HDR panel, media-direct on an SDR route (#98)")
+    func dv5RoutesByPanelReadiness() {
+        // tvOS handshake done (panelHDR) or iOS/macOS engage-on-demand + eligible: master.
+        #expect(route(videoRange: .pq, effectiveDvMode: false, panelHDR: true, displayHDR: true))
+        #expect(route(videoRange: .pq, effectiveDvMode: false,
+                      displayHDR: true, panelEngagesOnDemand: true))
+        // SDR route (DrHurt's external SDR monitor): media-direct, no HDR master to reject.
+        #expect(!route(videoRange: .pq, effectiveDvMode: false, panelHDR: false, displayHDR: false))
     }
 
-    @Test("DV P8.1 with DV mode active routes master when the panel is ready")
+    @Test("DV P8.x with DV mode active routes master when the panel is ready")
     func dv81Master() {
-        #expect(route(videoRange: .pq, dvVariant: .profile81, effectiveDvMode: true, panelHDR: true))
-        #expect(route(videoRange: .pq, dvVariant: .profile81, effectiveDvMode: true,
+        #expect(route(videoRange: .pq, effectiveDvMode: true, panelHDR: true))
+        #expect(route(videoRange: .pq, effectiveDvMode: true,
                       displayHDR: true, panelEngagesOnDemand: true))
     }
 
