@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [4.12.1] - 2026-07-05
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.12.1))
+
+### Fixed
+
+- **mov_text subtitle OOM on the host overlay (#104 follow-up).** 4.12.0 added the video/audio discard to the native PiP/AirPlay subtitle rendition path only. The tvOS host-overlay reader is a different side demuxer and still lacked the discard, so selecting an embedded text subtitle streamed the whole video and audio through a second connection just to reach the sparse subtitle samples, RSS climbing with playback position until jetsam (worst on files with many subtitle tracks). The overlay side demuxer now discards everything except the selected subtitle stream, so it fast-walks the index between cues with no video/audio I/O.
+
 ## [4.12.0] - 2026-07-05
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/4.12.0))
