@@ -182,7 +182,7 @@ final class HLSLocalServer: @unchecked Sendable {
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &host, socklen_t(host.count),
                            nil, 0, NI_NUMERICHOST) == 0 {
-                byInterface[name] = String(cString: host)
+                byInterface[name] = host.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
             }
         }
         if let wifi = byInterface["en0"] { return wifi }

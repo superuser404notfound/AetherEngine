@@ -362,7 +362,10 @@ final class NativeAVPlayerHost {
         ) { [weak self] _ in
             EngineLog.emit("[NativeAVPlayerHost] #\(sid) playbackStalled", category: .engine)
             // #93 residual: the engine opens its spurious-pause recovery window on every stall.
-            self?.stallCount += 1
+            // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
+            MainActor.assumeIsolated {
+                self?.stallCount += 1
+            }
         }
         notificationObservers.append(stalledObs)
 

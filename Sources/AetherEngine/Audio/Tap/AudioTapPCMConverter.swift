@@ -51,7 +51,9 @@ final class AudioTapPCMConverter: @unchecked Sendable {
         let outCapacity = AVAudioFrameCount((Double(frames) * ratio).rounded(.up) + 64)
         guard let outBuf = AVAudioPCMBuffer(pcmFormat: AetherEngine.audioTapFormat,
                                             frameCapacity: outCapacity) else { return [] }
-        var fed = false
+        // The converter invokes this input block synchronously on the calling thread,
+        // so the one-shot `fed` flag is never touched concurrently; opt out of the check.
+        nonisolated(unsafe) var fed = false
         var convError: NSError?
         converter.convert(to: outBuf, error: &convError) { _, outStatus in
             if fed { outStatus.pointee = .noDataNow; return nil }
