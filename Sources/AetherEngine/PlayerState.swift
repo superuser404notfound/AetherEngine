@@ -263,6 +263,8 @@ public struct SourceProbe: Sendable {
     /// Snapped to a standard rate (23.976, 24, 25, ...). nil when not advertised.
     public let videoFrameRate: Double?
     public let isDolbyVision: Bool
+    /// Dolby Vision profile number (5, 7, 8, 10) read from the dvcC/dvvC configuration record; nil when not DV.
+    public let dvProfile: Int?
     public let audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
     public let subtitleTracks: [TrackInfo]
@@ -280,6 +282,7 @@ public struct SourceProbe: Sendable {
         videoHeight: Int32,
         videoFrameRate: Double?,
         isDolbyVision: Bool,
+        dvProfile: Int? = nil,
         audioTracks: [TrackInfo],
         subtitleTracks: [TrackInfo],
         metadata: MediaMetadata = MediaMetadata(title: nil, artist: nil, album: nil, artworkData: nil),
@@ -294,6 +297,7 @@ public struct SourceProbe: Sendable {
         self.videoHeight = videoHeight
         self.videoFrameRate = videoFrameRate
         self.isDolbyVision = isDolbyVision
+        self.dvProfile = dvProfile
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
         self.metadata = metadata

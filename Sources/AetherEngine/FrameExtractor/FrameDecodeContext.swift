@@ -30,6 +30,9 @@ final class FrameDecodeContext: @unchecked Sendable {
     private var streamSAR = AVRational(num: 1, den: 1)
     private(set) var isOpen = false
     private(set) var isHDR = false
+    /// True for Dolby Vision Profile 5 / Profile 10.0 (no base layer): the decoded planes are
+    /// IPT-PQ-C2, not standard YCbCr, so they route through DolbyVisionStillConverter (#103).
+    private(set) var isDolbyVisionNoBaseLayer = false
 
     /// Cumulative bytes this context's demuxer pulled from the source (decode-queue only).
     /// Diagnostic: quantifies the extractor's share of link bandwidth per extraction.
@@ -38,6 +41,26 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// PQ (ST 2084) / HLG transfers mean the frame is HDR and needs tone-mapping to SDR.
     static func isHDRTransfer(_ trc: AVColorTransferCharacteristic) -> Bool {
         ColorAttachments.isHDRTransfer(trc)
+    }
+
+    /// True when the stream is Dolby Vision Profile 5 (HEVC) or Profile 10.0 (AV1) - the
+    /// no-base-layer profiles whose decoded planes are IPT-PQ-C2, not standard YCbCr. Read
+    /// from the dvcC/dvvC configuration record (`AVDOVIDecoderConfigurationRecord`). Profiles
+    /// 7 / 8.x carry HDR10/HLG base layers FFmpeg decodes correctly, so they are excluded.
+    static func isDVNoBaseLayer(codecpar: UnsafePointer<AVCodecParameters>) -> Bool {
+        let count = Int(codecpar.pointee.nb_coded_side_data)
+        guard count > 0, let sideData = codecpar.pointee.coded_side_data else { return false }
+        for i in 0..<count {
+            let item = sideData[i]
+            guard item.type == AV_PKT_DATA_DOVI_CONF, let raw = item.data, item.size >= 8 else { continue }
+            let record = raw.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
+            let profile = Int(record.dv_profile)
+            let compat = Int(record.dv_bl_signal_compatibility_id)
+            if profile == 5 { return true }             // HEVC P5: IPT-PQ-c2, no base
+            if profile == 10 && compat == 0 { return true } // AV1 P10.0: no base
+            return false
+        }
+        return false
     }
 
     /// Thread budget for the disposable still/thumbnail decoder. Capped well below the
@@ -99,6 +122,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         demuxer = nil
         videoStreamIndex = -1
         isHDR = false
+        isDolbyVisionNoBaseLayer = false
         isOpen = false
     }
 
@@ -130,6 +154,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             streamSAR = parSAR
         }
         isHDR = Self.isHDRTransfer(codecpar.pointee.color_trc)
+        isDolbyVisionNoBaseLayer = Self.isDVNoBaseLayer(codecpar: codecpar)
         guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else {
             throw FrameDecodeError.unsupportedCodec
         }
@@ -217,6 +242,16 @@ final class FrameDecodeContext: @unchecked Sendable {
             let width = mode == .thumbnail
                 ? targetWidth
                 : Self.clampedWidth(frame: f, maxSize: maxSize)
+            if isDolbyVisionNoBaseLayer {
+                let frameSAR = f.pointee.sample_aspect_ratio
+                let sar = (streamSAR.num > 1 || streamSAR.den > 1)
+                    ? streamSAR
+                    : (frameSAR.num > 0 && frameSAR.den > 0 ? frameSAR : AVRational(num: 1, den: 1))
+                if let img = DolbyVisionStillConverter.makeImage(frame: f, targetWidth: width, sar: sar) {
+                    return img
+                }
+                // No DV metadata on this frame / unsupported layout: fall through to the standard path.
+            }
             if isHDR {
                 var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase)
                 if toned != nil {

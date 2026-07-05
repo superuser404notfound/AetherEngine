@@ -51,6 +51,7 @@ extension AetherEngine {
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
         var width: Int32 = 0
         var height: Int32 = 0
+        var dvProfileNum: Int? = nil
         let videoIdx = demuxer.videoStreamIndex
         if videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) {
             detectedFormat = Self.detectVideoFormat(stream: stream)
@@ -58,6 +59,7 @@ extension AetherEngine {
             detectedCodecID = stream.pointee.codecpar.pointee.codec_id
             width = stream.pointee.codecpar.pointee.width
             height = stream.pointee.codecpar.pointee.height
+            dvProfileNum = Self.dvProfile(stream: stream)
         }
         let codecName: String? = {
             guard detectedCodecID != AV_CODEC_ID_NONE,
@@ -81,6 +83,7 @@ extension AetherEngine {
             videoHeight: height,
             videoFrameRate: snappedRate,
             isDolbyVision: detectedFormat == .dolbyVision,
+            dvProfile: dvProfileNum,
             audioTracks: demuxer.audioTrackInfos(),
             subtitleTracks: demuxer.subtitleTrackInfos(),
             metadata: demuxer.mediaMetadata(),
@@ -445,6 +448,21 @@ extension AetherEngine {
             }
         }
         return false
+    }
+
+    /// Dolby Vision profile number (5, 7, 8, 10) from the dvcC/dvvC configuration record; nil when the stream carries no DV side-data. Same record `CodecRoutePolicy` reads for routing.
+    nonisolated static func dvProfile(stream: UnsafeMutablePointer<AVStream>) -> Int? {
+        let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
+        guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {
+            return nil
+        }
+        for i in 0..<nb {
+            let item = sideData[i]
+            guard item.type == AV_PKT_DATA_DOVI_CONF, let raw = item.data, item.size >= 8 else { continue }
+            let record = raw.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
+            return Int(record.dv_profile)
+        }
+        return nil
     }
 
     nonisolated static func detectFrameRate(stream: UnsafeMutablePointer<AVStream>) -> Double? {
