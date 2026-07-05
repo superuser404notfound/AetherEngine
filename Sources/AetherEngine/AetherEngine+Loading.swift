@@ -323,7 +323,10 @@ extension AetherEngine {
             NativeSubtitleTrack(ordinal: ordinal, language: info.language, displayName: info.name)
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
-        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && hasTextSubtitleTrack
+        // #98: an in-band CEA-608 track (no text track needed) also warrants the native path so its
+        // decoded cues can ride a WebVTT rendition (survives PiP/AirPlay) instead of overlay-only.
+        let hasCC608 = subtitleTracks.contains { Self.isEmbeddedClosedCaptionCodec($0.codec) }
+        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && (hasTextSubtitleTrack || hasCC608)
         // Sodalite#32 Phase 2: tap decoders honor the host's markup preference (overlay renders styled
         // ASS; the WebVTT rendition strips at serve), and decoded tap events feed the overlay directly.
         session.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
@@ -336,7 +339,7 @@ extension AetherEngine {
         // #15: create the native subtitle cue stores BEFORE start() so the VideoSegmentProvider receives the
         // references at init (the WebVTT rendition master tags + /subs endpoints read them; readers fill them
         // lazily on selection). The shift is applied after start() once the playlist shift is known.
-        if session.enableNativeSubtitleTrackForSession, !nativeSubtitleTrackTable.isEmpty {
+        if session.enableNativeSubtitleTrackForSession, (!nativeSubtitleTrackTable.isEmpty || hasCC608) {
             session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
             session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
             session.nativeSubtitleRenditionInfosForSession = renditionInfos

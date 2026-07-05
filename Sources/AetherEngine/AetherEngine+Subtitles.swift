@@ -1362,8 +1362,8 @@ extension AetherEngine {
     /// #15: select the native track matching the currently-active subtitle so AVKit renders it inside
     /// the PiP window; nil deselects when PiP ends. Maps the active subtitle's source stream (embedded)
     /// or synthetic id (load-declared external, #88) to the native ordinal. No-op (no PiP subtitle) when
-    /// the active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-608/708, or a track
-    /// added after load (dynamic external / one-shot sidecar).
+    /// the active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-708 (608 now rides a
+    /// native rendition, #98), or a track added after load (dynamic external / one-shot sidecar).
     public func setNativeSubtitleForPiP(_ active: Bool) {
         guard active, let activeIdx = activeSubtitleTrackIndex,
               let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: activeIdx, in: nativeSubtitleTrackTable)
