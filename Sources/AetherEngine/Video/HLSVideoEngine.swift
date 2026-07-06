@@ -1268,6 +1268,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// fallback (#98). Nil before the server starts.
     public var mediaPlaylistURL: URL? { server?.mediaPlaylistURL }
 
+    /// The loopback server's master playlist URL, for the #35 cold-DV-master readiness gate that
+    /// reloads the same master with a fresh asset while the DV/HDCP link warms. Nil before start.
+    public var masterPlaylistURL: URL? { server?.playlistURL }
+
     /// Flip the serving flag after the engine has reloaded the media playlist on a display rejection.
     func markServingMediaAfterFallback() { servingMasterPlaylist = false }
 

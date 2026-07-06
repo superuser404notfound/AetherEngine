@@ -40,6 +40,15 @@ final class NativeAVPlayerHost {
     /// surfaces the failure. Reset on each load.
     @Published private(set) var pendingDisplayRejection: DisplayRejection?
 
+    /// #35 (Sodalite) cold-DV-master startup-readiness gate. While the engine drives the bounded
+    /// retry loop this is true, so a startup failure (`.failed` with any code, including a
+    /// display-rejection) is NOT published: the gate polls `awaitStartupReadiness` and decides to
+    /// reload the master, fall back to the media playlist, or give up. `lastSuppressedStartupFailure`
+    /// stashes the message so the engine can surface a real terminal error if the gate exhausts
+    /// every option (a timed-out silent 0-track park leaves it nil; the gate supplies a fallback).
+    var startupReadinessGateActive: Bool = false
+    private(set) var lastSuppressedStartupFailure: String?
+
     // MARK: - Seek landing state
 
     /// Monotonic seek counter; only the latest generation clears seekInFlight and publishes the landed time (abandoned seeks complete with finished==false).
@@ -154,6 +163,7 @@ final class NativeAVPlayerHost {
         accessLogCount = 0
         failureMessage = nil
         pendingDisplayRejection = nil
+        lastSuppressedStartupFailure = nil
         isReady = false
 
         // KVO fires on AVPlayerItem's queue; Task round-trips to MainActor.
@@ -479,6 +489,18 @@ final class NativeAVPlayerHost {
         // playlist; only a non-rejection startup failure surfaces immediately.
         if !hasEverPlayed {
             let code = (item.error as NSError?)?.code
+            // #35: while the cold-DV-master readiness gate drives the retry loop it owns ALL startup
+            // failures (a display rejection AND the -11819 "Cannot Complete Action" cold handshake).
+            // Stash the message and stay silent; the gate polls item state and reloads the master /
+            // falls back to media / surfaces a terminal error itself. Publishing here would race it.
+            if startupReadinessGateActive {
+                lastSuppressedStartupFailure = desc
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sessionID) startup .failed (code=\(code.map(String.init) ?? "?")) "
+                    + "held by the readiness gate: \(desc)",
+                    category: .engine)
+                return
+            }
             if let code, MasterFallbackDecision.isDisplayRejectionCode(code) {
                 EngineLog.emit(
                     "[NativeAVPlayerHost] #\(sessionID) startup .failed is a display rejection "
@@ -525,6 +547,25 @@ final class NativeAVPlayerHost {
                 )
             }
         }
+    }
+
+    /// #35: poll the current item after `play()` until it becomes playable, dies, or the settle
+    /// window elapses. `.ready` as soon as the item reports a non-zero presentation size or actually
+    /// starts playing (`hasEverPlayed`); `.dead` on `item.status == .failed`; `.timedOut` if neither
+    /// happens within `timeoutSeconds` (the silent 0-track park, `AVPlayerWaitingWithNoItemToPlay`).
+    /// Bounded by construction, so the engine's gate loop can never spin forever. `item.status` only
+    /// advances once AVPlayer is told to play, so the caller must `play()` before awaiting.
+    func awaitStartupReadiness(timeoutSeconds: Double) async -> StartupReadiness {
+        let tickMs: UInt64 = 100
+        let ticks = max(1, Int((timeoutSeconds * 1000).rounded()) / Int(tickMs))
+        for _ in 0..<ticks {
+            guard let item = playerItem else { return .dead }
+            if hasEverPlayed || item.presentationSize != .zero { return .ready }
+            if item.status == .failed { return .dead }
+            try? await Task.sleep(nanoseconds: tickMs * 1_000_000)
+        }
+        if let item = playerItem, hasEverPlayed || item.presentationSize != .zero { return .ready }
+        return .timedOut
     }
 
     // MARK: - Playback control

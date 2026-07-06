@@ -808,6 +808,99 @@ public final class AetherEngine: ObservableObject {
         host.play()
     }
 
+    /// #35 readiness-gate settle windows. Generous enough that a slow-but-healthy cold start reads as
+    /// ready (early-out on presentationSize / first play), tight enough that two failed master attempts
+    /// plus a media fallback stay within ~8.5s worst case. Tunable from device logs.
+    static let startupGateInitialSeconds: Double = 3.0
+    static let startupGateReloadSeconds: Double = 3.0
+    static let startupGateMediaSeconds: Double = 2.5
+
+    /// #35 cold-DV-master startup-readiness gate. A DV master (P7->P8.1, or any HDR master)
+    /// instantiated while the HDMI DV/HDCP decode path is still warming right after an SDR->HDR switch
+    /// resolves 0 tracks (silent park) or fails -11819 "Cannot Complete Action"; neither is a
+    /// -11868/-11848 rejection, so the reactive #98 path never fires and startup surfaces "Playback
+    /// stopped". A second launch just works because the failed attempt warmed the link. This gate
+    /// replays that recovery in-session: play, poll readiness, and on a cold failure reload the SAME
+    /// master with a fresh asset (bounded) before falling back to the media playlist (HDR10 base, no
+    /// DV upgrade). Bounded at every stage, so a cold resume can never hang forever on 0 tracks.
+    @MainActor
+    private func runStartupReadinessGate(
+        session: HLSVideoEngine, position: Double, gen: UInt64
+    ) async throws {
+        guard let host = nativeHost else { return }
+        host.startupReadinessGateActive = true
+        defer { host.startupReadinessGateActive = false }
+
+        var attempt = 1
+        while true {
+            // Attempt 1 plays the item the load path already created; later attempts replay it fresh.
+            host.play()
+            let timeout = attempt == 1
+                ? Self.startupGateInitialSeconds
+                : Self.startupGateReloadSeconds
+            let outcome = await host.awaitStartupReadiness(timeoutSeconds: timeout)
+            try checkLoadCurrent(gen)
+
+            switch StartupReadinessGate.nextAction(
+                outcome: outcome,
+                attempt: attempt,
+                masterAlreadyFellBack: masterFallbackUsed,
+                hasMediaFallbackURL: session.mediaPlaylistURL != nil
+            ) {
+            case .proceed:
+                return
+
+            case .reloadMaster:
+                guard let masterURL = session.masterPlaylistURL else {
+                    // Master URL unavailable (should not happen while serving the master): force the
+                    // fallback path on the next loop rather than reloading a URL we don't have.
+                    attempt = StartupReadinessGate.masterAttempts
+                    continue
+                }
+                EngineLog.emit(
+                    "[AetherEngine] #35 readiness gate: master did not start (\(outcome)) after a "
+                    + "panel switch; reloading the master (attempt \(attempt + 1)/"
+                    + "\(StartupReadinessGate.masterAttempts), link may still be warming) at "
+                    + "\(String(format: "%.2f", position))s",
+                    category: .session)
+                host.load(url: masterURL, startPosition: position, inPlaceSwap: true)
+                attempt += 1
+
+            case .fallBackToMedia:
+                guard let mediaURL = session.mediaPlaylistURL else {
+                    throw StartupGateFailure(message: startupGateFailureMessage(host))
+                }
+                masterFallbackUsed = true
+                session.markServingMediaAfterFallback()
+                EngineLog.emit(
+                    "[AetherEngine] #35 readiness gate: master never produced tracks after "
+                    + "\(StartupReadinessGate.masterAttempts) attempts; falling back to the media "
+                    + "playlist at \(String(format: "%.2f", position))s (HDR10 base, DV upgrade "
+                    + "dropped this session)",
+                    category: .session)
+                host.load(url: mediaURL, startPosition: position, inPlaceSwap: true)
+                host.play()
+                // Best-effort readiness confirm; the media playlist is the universal-compatible route.
+                // Clearing the gate (defer) lets a genuine residual media failure surface normally via
+                // the host's startup path -- no false-negative terminal error, still bounded.
+                _ = await host.awaitStartupReadiness(timeoutSeconds: Self.startupGateMediaSeconds)
+                try checkLoadCurrent(gen)
+                return
+
+            case .giveUp:
+                throw StartupGateFailure(message: startupGateFailureMessage(host))
+            }
+        }
+    }
+
+    /// The message for a terminal gate failure: prefer the real startup error the gate suppressed
+    /// while it held the item; fall back to a generic line for a silent 0-track park (no `.failed`).
+    @MainActor
+    private func startupGateFailureMessage(_ host: NativeAVPlayerHost) -> String {
+        host.lastSuppressedStartupFailure
+            ?? "The video could not start (no playable tracks after the display handshake)."
+    }
+
     func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = (player.currentItem?.asset as? AVURLAsset)?.url else { return }
@@ -1395,6 +1488,11 @@ public final class AetherEngine: ObservableObject {
         }
 
         // 2. Display-criteria handshake. Use effective format so a non-DV panel isn't asked to switch to dvh1.
+        // #35: remember whether an actual SDR->HDR panel switch happened this load. The cold-DV-master
+        // startup-readiness gate only arms on a real switch, when the DV/HDCP decode path is still
+        // warming and the served master resolves 0 tracks / fails -11819; a warm start (no switch) keeps
+        // the unchanged immediate-play path.
+        var didSwitchPanel = false
         if !options.suppressDisplayCriteria {
             let codecTag: FourCharCode? = detectedDVProfile ? 0x64766831 : nil
             let willSwitch = displayCriteria.apply(
@@ -1404,6 +1502,7 @@ public final class AetherEngine: ObservableObject {
                 omitColorExtensions: options.omitCriteriaColorExtensions
             )
             if willSwitch {
+                didSwitchPanel = true
                 await displayCriteria.waitForSwitch()
                 // Superseded during panel handshake: close local probe and unwind.
                 if loadGeneration != gen {
@@ -1572,7 +1671,17 @@ public final class AetherEngine: ObservableObject {
                 await displayCriteria.waitForSwitch()
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
-                nativeHost?.play()
+                // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded
+                // cold-start readiness gate (play -> poll -> reload master -> media fallback) instead
+                // of an unconditional play(); the gate calls play() itself. Warm/live/media paths keep
+                // the immediate play().
+                if didSwitchPanel, let session = nativeVideoSession,
+                   session.servingMasterPlaylist, !options.isLive {
+                    try await runStartupReadinessGate(
+                        session: session, position: startPosition ?? 0, gen: gen)
+                } else {
+                    nativeHost?.play()
+                }
                 state = .playing
                 startMemoryProbe()
                 startLiveTelemetrySampler()
