@@ -71,4 +71,20 @@ final class AudioTapDecoderTests: XCTestCase {
         let chunks = dec.decode(initData: Data([0, 1, 2, 3]), segment: Data(repeating: 0xAB, count: 512))
         XCTAssertTrue(chunks.isEmpty)
     }
+
+    func testSelfContainedSegmentDecodes() {
+        let wav = makeWAV(sampleRate: 48_000, channels: 1, seconds: 1.0)
+        let chunks = AudioTapSegmentDecoder().decode(selfContainedSegment: wav)
+        XCTAssertFalse(chunks.isEmpty)
+        var total: AVAudioFrameCount = 0
+        for c in chunks {
+            XCTAssertEqual(c.buffer.format.sampleRate, 48_000)
+            total += c.buffer.frameLength
+        }
+        XCTAssertEqual(Double(total), 48_000, accuracy: 2400)   // ~1 s at 48k
+    }
+
+    func testSelfContainedGarbageReturnsEmpty() {
+        XCTAssertTrue(AudioTapSegmentDecoder().decode(selfContainedSegment: Data([0, 1, 2, 3])).isEmpty)
+    }
 }

@@ -214,4 +214,36 @@ final class AudioTapSegmentDecoder: @unchecked Sendable {
         chunks.append(contentsOf: decoder.drain())
         return chunks
     }
+
+    /// Decode a self-describing HLS segment (MPEG-TS or fMP4-with-inline-moof) whose container
+    /// FFmpeg detects unaided. Used by the remote-HLS tap, where segments carry no separate init
+    /// blob (unlike the loopback fMP4 fragments). Same fresh-demux-per-segment discipline.
+    func decode(selfContainedSegment segment: Data) -> [AudioTapChunk] {
+        let demuxer = Demuxer()
+        do {
+            try demuxer.open(reader: DataIOReader(data: segment))
+        } catch {
+            return []
+        }
+        defer { demuxer.close() }
+        let audioIdx = demuxer.audioStreamIndex
+        guard audioIdx >= 0, let stream = demuxer.stream(at: audioIdx) else { return [] }
+        let decoder = AudioTapDecoder()
+        do {
+            try decoder.open(stream: stream)
+        } catch {
+            return []
+        }
+        defer { decoder.close() }
+
+        var chunks: [AudioTapChunk] = []
+        while let packet = (try? demuxer.readPacket()) ?? nil {
+            var p: UnsafeMutablePointer<AVPacket>? = packet
+            defer { trackedPacketFree(&p) }
+            guard packet.pointee.stream_index == audioIdx else { continue }
+            chunks.append(contentsOf: decoder.decode(packet: packet))
+        }
+        chunks.append(contentsOf: decoder.drain())
+        return chunks
+    }
 }
