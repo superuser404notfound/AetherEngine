@@ -7,6 +7,32 @@ import Libavutil
 
 extension AetherEngine {
 
+    /// Apply an AVPlayer clock tick (native VOD/live path) to the engine clock. `nativeClockSeconds`
+    /// (the raw pre-shift clock, re-derived against by `onPlaylistShiftChanged`) and the active seam
+    /// shift always track it. The UI scrub clock (`clock.currentTime`) is HELD while a recovery seek is
+    /// pending (#37 wedge resurface): the original seek's `seekInFlight` clears when it reconciles, so
+    /// the 100ms periodic observer resumes publishing, but the recovery nudges (`reengageStalledConsumer`
+    /// issues raw AVPlayer seeks to the target) bounce AVPlayer's reported clock between the frozen
+    /// position and the transient nudge target (device: engineClock 824 -> 634 -> 824 -> 634 while
+    /// avpClock holds). Holding the scrub clock at the reconciled position until the recovery lands
+    /// (`pendingRecoverySeekClockTarget` cleared) stops the scrubber from bouncing. `sourceTime` is owned
+    /// by the `$renderedTime` sink and is unaffected here (issue #49).
+    func applyNativeHostClockTick(_ value: Double) {
+        // nativeClockSeconds preserves the raw AVPlayer clock for onPlaylistShiftChanged to re-derive against.
+        nativeClockSeconds = value
+        // Newest seam at or before the raw clock wins: activates seams on forward play, re-applies pre-seam shift on backward DVR seeks.
+        if let active = liveShiftSeams.last(where: { value >= $0.activateAt }) {
+            playlistShiftSeconds = active.shift
+        }
+        if pendingRecoverySeekClockTarget == nil {
+            clock.currentTime = value + playlistShiftSeconds
+        }
+        // Live edge must fold with the same playlistShiftSeconds as the playhead; opposite sign would make behindLiveSeconds meaningless.
+        if isLive {
+            publishLiveWindow(edgeSessionTime: (nativeHost?.seekableEnd ?? 0) + playlistShiftSeconds)
+        }
+    }
+
     /// Wire `$duration`, `$isReady`, `$failureMessage`, `$didReachEnd` into the cancellable set. Pass `isReady: nil` for paths that skip the readiness -> .paused waypoint (e.g. loadRemoteHLS).
     private func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
@@ -471,19 +497,7 @@ extension AetherEngine {
         nativeCancellables.removeAll()
         host.$currentTime
             .sink { [weak self] value in
-                guard let self = self else { return }
-                // nativeClockSeconds preserves the raw AVPlayer clock for onPlaylistShiftChanged to re-derive against.
-                self.nativeClockSeconds = value
-                // Newest seam at or before the raw clock wins: activates seams on forward play, re-applies pre-seam shift on backward DVR seeks.
-                if let active = self.liveShiftSeams.last(where: { value >= $0.activateAt }) {
-                    self.playlistShiftSeconds = active.shift
-                }
-                self.clock.currentTime = value + self.playlistShiftSeconds
-                // sourceTime owned by $renderedTime: tracks the picture across a seek, not the optimistic scrub clock (issue #49).
-                // Live edge must fold with the same playlistShiftSeconds as the playhead; opposite sign would make behindLiveSeconds meaningless.
-                if self.isLive {
-                    self.publishLiveWindow(edgeSessionTime: host.seekableEnd + self.playlistShiftSeconds)
-                }
+                self?.applyNativeHostClockTick(value)
             }
             .store(in: &nativeCancellables)
         // sourceTime = AVPlayer's rendered position folded onto source PTS (same seam shift as playhead). Published during seeks so subtitle/scrub consumers follow the picture, not the scrub target (issue #49).
