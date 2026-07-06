@@ -7,11 +7,14 @@ import Libavutil
 /// colour transform carried in the RPU. Without this the base-layer planes are read as
 /// BT.2020 YCbCr and produce the characteristic green + magenta cast (AetherEngine #103).
 ///
-/// Only the colour transform is applied; the per-component reshaping curves are intentionally
-/// skipped. Empirically (validated against a libplacebo render of official Dolby P5 content)
-/// the reshaping is not what causes the visible corruption, and skipping it keeps this a small
-/// CPU pass rather than a full Dolby Vision compositor. If a frame carries no DV metadata the
-/// converter returns nil so the caller falls back to the standard path (no regression).
+/// The per-component reshaping curves are intentionally skipped (validated against a libplacebo
+/// render: reshaping does not drive the visible corruption, and skipping it keeps this a small
+/// CPU pass rather than a full Dolby Vision compositor). Highlights and shadows are brought to
+/// SDR with a hue-preserving BT.2390 EETF (`ToneCurve`) anchored on the RPU source PQ range, so
+/// the curve adapts to each clip's mastering envelope. This replaced a fixed-exposure per-channel
+/// Hable tone-map that mapped 100-nit diffuse white to mid-gray and crushed normally-lit content
+/// (validated too dark, 24-79% of a libplacebo reference luminance; #103 follow-up). If a frame
+/// carries no DV metadata the converter returns nil so the caller falls back to the standard path.
 enum DolbyVisionStillConverter {
 
     /// BT.2020 LMS -> RGB (Hunt-Pointer-Estevez, no crosstalk), applied after the RPU
@@ -92,6 +95,11 @@ enum DolbyVisionStillConverter {
             targetWidth: targetWidth > 0 ? targetWidth : srcW)
         guard dstW > 0, dstH > 0 else { return nil }
 
+        // Static per-clip tone curve, anchored on the RPU source PQ range (the mastering
+        // envelope). Matches libplacebo's canonical BT.2390 static mapping (within <1/255).
+        let tone = ToneCurve(srcMinPQ: Double(colorMeta.source_min_pq) / 4095.0,
+                             srcMaxPQ: Double(colorMeta.source_max_pq) / 4095.0)
+
         let bytesPerRow = dstW * 4
         var rgba = [UInt8](repeating: 0, count: bytesPerRow * dstH)
         rgba.withUnsafeMutableBufferPointer { out in
@@ -111,12 +119,30 @@ enum DolbyVisionStillConverter {
                     let b0 = nonlinear[6] * sig0 + nonlinear[7] * sig1 + nonlinear[8] * sig2
                     // PQ EOTF -> linear (1.0 == 10000 nits).
                     let lr = pqEOTF(r0), lg = pqEOTF(g0), lb = pqEOTF(b0)
-                    // (lms2rgb * rgb_to_lms) -> linear BT.2020 RGB.
-                    var rr = combined[0] * lr + combined[1] * lg + combined[2] * lb
-                    var gg = combined[3] * lr + combined[4] * lg + combined[5] * lb
-                    var bb = combined[6] * lr + combined[7] * lg + combined[8] * lb
-                    // Tone-map to SDR (Hable), scaling so 100 nits maps near diffuse white.
-                    rr = tonemap(rr); gg = tonemap(gg); bb = tonemap(bb)
+                    // (lms2rgb * rgb_to_lms) -> linear BT.2020 RGB (1.0 == 10000 nits).
+                    let rr0 = combined[0] * lr + combined[1] * lg + combined[2] * lb
+                    let gg0 = combined[3] * lr + combined[4] * lg + combined[5] * lb
+                    let bb0 = combined[6] * lr + combined[7] * lg + combined[8] * lb
+                    // Hue-preserving BT.2390 tone-map: tone-map scene luminance and scale RGB by the
+                    // same factor, so chroma ratios (hue + saturation) survive. Per-channel tone-mapping
+                    // (the old path) shifted hue and distorted saturated highlights.
+                    let y = 0.2627 * rr0 + 0.6780 * gg0 + 0.0593 * bb0   // BT.2020 luma
+                    let yd = tone.map(y)
+                    let scale = y > 1e-6 ? yd / y : 0
+                    var rr = rr0 * scale
+                    var gg = gg0 * scale
+                    var bb = bb0 * scale
+                    // Highlight desaturation: if a channel overshoots the display range, blend toward
+                    // the target luminance so the peak channel lands exactly at 1.0. Trades saturation
+                    // to stay in gamut instead of clipping (matches libplacebo's tone-map desaturation;
+                    // without it saturated highlights blow out, e.g. ~50% clipped on bright scenes).
+                    let m = max(rr, max(gg, bb))
+                    if m > 1.0 && m > yd {
+                        let t = (m - 1.0) / (m - yd)
+                        rr += (yd - rr) * t
+                        gg += (yd - gg) * t
+                        bb += (yd - bb) * t
+                    }
                     // BT.2020 -> BT.709.
                     let r7 = bt2020to709[0] * rr + bt2020to709[1] * gg + bt2020to709[2] * bb
                     let g7 = bt2020to709[3] * rr + bt2020to709[4] * gg + bt2020to709[5] * bb
@@ -172,17 +198,63 @@ enum DolbyVisionStillConverter {
         return pow(num / den, 1.0 / m1)
     }
 
-    /// Hable filmic tone-map. The exposure scale (65) was tuned against a libplacebo (mpv)
-    /// reference render of official Dolby Profile 5 content across a dark night scene and a
-    /// bright daylight scene, minimising mean sRGB delta (~15-25 / 255) without overexposing.
-    static func tonemap(_ v: Double) -> Double {
-        let x = max(v, 0) * 65.0
-        return hable(x) / hable(11.2)
+    /// Inverse of `pqEOTF`: scene-linear (1.0 == 10000 nits) -> normalised PQ code [0,1].
+    static func pqOETF(_ l: Double) -> Double {
+        let m1 = 0.1593017578125, m2 = 78.84375
+        let c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875
+        let lm = pow(max(l, 0), m1)
+        return pow((c1 + c2 * lm) / (1 + c3 * lm), m2)
     }
 
-    private static func hable(_ x: Double) -> Double {
-        let a = 0.15, b = 0.50, c = 0.10, d = 0.20, e = 0.02, f = 0.30
-        return ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+    /// BT.2390 EETF tone-mapping to an SDR display, anchored on the Dolby Vision RPU source PQ
+    /// range so the curve adapts to each clip's mastering envelope. `map` takes scene-linear
+    /// luminance (1.0 == 10000 nits) and returns SDR-linear luminance [0,1] (1.0 == 100-nit
+    /// diffuse white). Applied to luminance and used as a uniform RGB scale (hue-preserving).
+    struct ToneCurve {
+        private let srcMin: Double
+        private let rng: Double
+        private let maxLum: Double
+        private let minLum: Double
+        private let ks: Double
+
+        /// Target SDR display: 100-nit diffuse white; a near-zero black keeps shadow detail.
+        private static let dstWhiteLinear = 100.0 / 10000.0
+
+        init(srcMinPQ: Double, srcMaxPQ: Double) {
+            let lo = min(max(srcMinPQ, 0), 1)
+            // Guard degenerate / unpopulated ranges (e.g. source_max_pq == 0): assume a 1000-nit master.
+            var hi = min(max(srcMaxPQ, 0), 1)
+            if hi <= lo + 1e-4 { hi = DolbyVisionStillConverter.pqOETF(1000.0 / 10000.0) }
+            srcMin = lo
+            rng = hi - lo
+            let dstMax = DolbyVisionStillConverter.pqOETF(Self.dstWhiteLinear)
+            let dstMin = DolbyVisionStillConverter.pqOETF(0.05 / 10000.0)
+            maxLum = min(max((dstMax - lo) / (hi - lo), 0), 1)
+            minLum = max((dstMin - lo) / (hi - lo), 0)
+            // Knee point. The ITU BT.2390 spec value (1.5*maxLum - 0.5) maps mid-tones ~35/255
+            // too bright vs the de-facto reference (libplacebo). This slope/offset was fit to
+            // libplacebo's static BT.2390 curve and matches it within <1/255 across all realistic
+            // mastering peaks (600-10000 nits).
+            ks = min(max(1.982 * (maxLum - 0.5), 0), maxLum)
+        }
+
+        /// scene-linear luminance -> SDR-linear luminance [0,1].
+        func map(_ sceneLuma: Double) -> Double {
+            let x = DolbyVisionStillConverter.pqOETF(sceneLuma)
+            var e = min(max((x - srcMin) / rng, 0), 1)
+            // BT.2390 Hermite knee above KS; identity below (and when source peak <= display peak).
+            if e > ks && ks < 1.0 {
+                let t = (e - ks) / (1 - ks)
+                let t2 = t * t, t3 = t2 * t
+                e = (2 * t3 - 3 * t2 + 1) * ks
+                  + (t3 - 2 * t2 + t) * (1 - ks)
+                  + (-2 * t3 + 3 * t2) * maxLum
+            }
+            // BT.2390 black-point lift: raise the floor toward display min without milking mids.
+            e += minLum * pow(1 - e, 4)
+            let outPQ = e * rng + srcMin
+            return DolbyVisionStillConverter.pqEOTF(outPQ) / Self.dstWhiteLinear
+        }
     }
 
     static func srgbOETF(_ x: Double) -> Double {

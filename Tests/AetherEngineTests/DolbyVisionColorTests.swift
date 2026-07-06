@@ -44,19 +44,53 @@ struct DolbyVisionColorTests {
         for i in 0..<9 { #expect(tm[i] == 2 * m[i]) }
     }
 
-    @Test("Tone-map: 0 -> 0, monotonic, non-negative; final sRGB clamps to [0,1]")
-    func toneMap() {
-        #expect(DolbyVisionStillConverter.tonemap(0) == 0)
-        // Bright highlights may map above 1.0 (fixed white point); the sRGB OETF clips them.
+    @Test("PQ OETF inverts PQ EOTF; anchors + round-trip")
+    func pqOETFRoundTrip() {
+        #expect(abs(DolbyVisionStillConverter.pqOETF(0)) < 1e-6)
+        #expect(abs(DolbyVisionStillConverter.pqOETF(1.0) - 1.0) < 1e-6)
+        for i in 0...20 {
+            let e = Double(i) / 20.0
+            let back = DolbyVisionStillConverter.pqOETF(DolbyVisionStillConverter.pqEOTF(e))
+            #expect(abs(back - e) < 1e-4, "PQ round-trip off at code \(e)")
+        }
+    }
+
+    /// The #103 regression: the shipped fixed-exposure Hable curve mapped 100-nit diffuse
+    /// white to ~50% output (mid-gray), crushing normally-lit content (validated vs a
+    /// libplacebo ground truth: AE mean luma was 24-79% of reference). The BT.2390 EETF,
+    /// anchored on the RPU source PQ range, must lift diffuse white near display white while
+    /// keeping blacks dark and the curve monotonic.
+    @Test("BT.2390 tone curve: dark black, monotonic, source peak -> white, diffuse white lifted")
+    func toneCurve() {
+        let srcMinPQ = 62.0 / 4095.0, srcMaxPQ = 3696.0 / 4095.0   // real values from the Dolby P5 clip
+        let curve = DolbyVisionStillConverter.ToneCurve(srcMinPQ: srcMinPQ, srcMaxPQ: srcMaxPQ)
+        let peak = DolbyVisionStillConverter.pqEOTF(srcMaxPQ)       // scene-linear source peak
+
+        // Black must not turn milky.
+        #expect(curve.map(0) >= 0)
+        #expect(DolbyVisionStillConverter.srgbOETF(curve.map(0)) < 0.15, "black lifted too much")
+
+        // Monotonic non-negative across the scene-linear range.
         var prev = -1.0
-        for i in 0...50 {
-            let x = Double(i) / 50.0 * 2.0
-            let v = DolbyVisionStillConverter.tonemap(x)
-            #expect(v >= prev - 1e-9, "tone-map not monotonic")
-            #expect(v >= 0, "tone-map negative")
-            let clamped = DolbyVisionStillConverter.srgbOETF(v)
-            #expect(clamped >= 0 && clamped <= 1.0, "final sRGB not in [0,1]")
+        for i in 0...64 {
+            let v = curve.map(peak * Double(i) / 64.0)
+            #expect(v >= prev - 1e-9, "tone curve not monotonic")
+            #expect(v >= 0)
             prev = v
+        }
+
+        // Source mastering peak reaches SDR display white.
+        #expect(curve.map(peak) >= 0.98, "source peak should reach SDR white")
+
+        // Diffuse white (100 nits == 0.01 scene-linear) maps to libplacebo's static BT.2390 value
+        // (~0.65), well clear of the old fixed-exposure ~0.50 mid-gray crush.
+        let dwOut = DolbyVisionStillConverter.srgbOETF(curve.map(0.01))
+        #expect(dwOut >= 0.58 && dwOut <= 0.72, "diffuse white off libplacebo target (\(dwOut))")
+
+        // Final sRGB always clamps to [0,1].
+        for i in 0...50 {
+            let c = DolbyVisionStillConverter.srgbOETF(curve.map(peak * Double(i) / 50.0 * 1.2))
+            #expect(c >= 0 && c <= 1.0, "final sRGB out of range")
         }
     }
 
