@@ -90,12 +90,17 @@ final class EmbeddedSubtitleDecoder {
 
         var sub = AVSubtitle()
         var gotSub: Int32 = 0
-        let ret = decodeWithFixups(ctx: ctx, pkt: packet, sub: &sub, gotSub: &gotSub)
+        var fixedPayload: [UInt8]? = nil
+        let ret = decodeWithFixups(ctx: ctx, pkt: packet, sub: &sub, gotSub: &gotSub, capturedPayload: &fixedPayload)
 
-        // Some MKV converters drop the PGS trailing END (0x80); feed a synthetic one to flush accumulated state.
+        // Some MKV converters drop the PGS trailing END (0x80); feed a synthetic one to flush accumulated
+        // state. Gate it (#112): only when the decoded payload already carries a complete object and no END
+        // of its own. A split-M2TS intermediate packet (PCS/PDS ahead of the ODS) would otherwise force a
+        // compose against an object that is not defined yet ("Invalid object id", once per display set).
         if gotSub == 0,
            ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE,
-           packet.pointee.size > 30 {
+           packet.pointee.size > 30,
+           Self.pgsPayloadWarrantsSyntheticEnd(for: packet, fixedPayload: fixedPayload) {
             var endBytes: [UInt8] = [0x80, 0x00, 0x00,
                                      0, 0, 0, 0, 0, 0, 0, 0, 0,
                                      0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -226,13 +231,60 @@ final class EmbeddedSubtitleDecoder {
             || id == AV_CODEC_ID_XSUB
     }
 
+    /// Issue #112: decide whether a PGS payload that decoded with gotSub==0 warrants the synthetic
+    /// END flush. True ONLY when the payload already carries a complete object (an ODS whose
+    /// last-in-sequence flag is set) and no END segment of its own: the MKV-converter case the flush
+    /// targets (a full display set missing its trailing 0x80). It excludes the split-M2TS intermediate
+    /// packet (PCS/PDS before the ODS), where forcing a compose references an object that is not
+    /// defined yet and logs "Invalid object id".
+    ///
+    /// Payload layout: a run of `[type:1][length:2 BE][body:length]` segments (0x14 PDS, 0x15 ODS,
+    /// 0x16 PCS, 0x17 WDS, 0x80 END). Walked defensively; any malformed length ends the scan without a
+    /// read past `count`.
+    static func pgsPayloadWarrantsSyntheticEnd(_ base: UnsafePointer<UInt8>?, count: Int) -> Bool {
+        guard let base, count >= 3 else { return false }
+        var i = 0
+        var sawCompleteObject = false
+        while i + 3 <= count {
+            let type = base[i]
+            let len = (Int(base[i + 1]) << 8) | Int(base[i + 2])
+            let bodyStart = i + 3
+            if type == 0x80 { return false }   // real END present: the decoder emits on its own.
+            if type == 0x15,                   // ODS: complete only when the last-in-sequence bit is set.
+               len >= 4,
+               bodyStart + 3 < count {
+                // ODS body = object_id[2] + version[1] + sequence_flag[1]; 0x40 = last, 0xC0 = only.
+                if (base[bodyStart + 3] & 0x40) != 0 { sawCompleteObject = true }
+            }
+            let next = bodyStart + len
+            if next <= i { break }             // zero/negative advance guard.
+            i = next
+        }
+        return sawCompleteObject
+    }
+
+    /// Pick the bytes actually decoded (`fixedPayload` for stripped/inflated paths, else the raw
+    /// packet) and run the #112 synthetic-END gate over them.
+    private static func pgsPayloadWarrantsSyntheticEnd(
+        for packet: UnsafeMutablePointer<AVPacket>,
+        fixedPayload: [UInt8]?
+    ) -> Bool {
+        if let fixedPayload {
+            return fixedPayload.withUnsafeBufferPointer {
+                pgsPayloadWarrantsSyntheticEnd($0.baseAddress, count: $0.count)
+            }
+        }
+        return pgsPayloadWarrantsSyntheticEnd(packet.pointee.data, count: Int(packet.pointee.size))
+    }
+
     // MARK: - Decode fixups
 
     private func decodeWithFixups(
         ctx: UnsafeMutablePointer<AVCodecContext>,
         pkt: UnsafeMutablePointer<AVPacket>,
         sub: UnsafeMutablePointer<AVSubtitle>,
-        gotSub: UnsafeMutablePointer<Int32>
+        gotSub: UnsafeMutablePointer<Int32>,
+        capturedPayload: inout [UInt8]?
     ) -> Int32 {
         guard let data = pkt.pointee.data, pkt.pointee.size > 2 else {
             return avcodec_decode_subtitle2(ctx, sub, gotSub, pkt)
@@ -242,6 +294,7 @@ final class EmbeddedSubtitleDecoder {
         if data[0] == 0x78,
            data[1] == 0x01 || data[1] == 0x5E || data[1] == 0x9C || data[1] == 0xDA {
             if let decompressed = inflateZlibBlock(data, size: Int(pkt.pointee.size)) {
+                capturedPayload = decompressed
                 return decodeWithReplacedPayload(
                     ctx: ctx, pkt: pkt, payload: decompressed,
                     sub: sub, gotSub: gotSub
@@ -253,6 +306,7 @@ final class EmbeddedSubtitleDecoder {
         if pkt.pointee.size > 18,
            data[0] == 0x1F, data[1] == 0x8B {
             if let decompressed = inflateGzipBlock(data, size: Int(pkt.pointee.size)) {
+                capturedPayload = decompressed
                 return decodeWithReplacedPayload(
                     ctx: ctx, pkt: pkt, payload: decompressed,
                     sub: sub, gotSub: gotSub
@@ -265,6 +319,8 @@ final class EmbeddedSubtitleDecoder {
         if isPGS,
            pkt.pointee.size > 10,
            data[0] == 0x50, data[1] == 0x47 {
+            capturedPayload = Array(UnsafeBufferPointer(start: data.advanced(by: 10),
+                                                        count: Int(pkt.pointee.size) - 10))
             return decodeWithStrippedPrefix(ctx: ctx, pkt: pkt, prefix: 10, sub: sub, gotSub: gotSub)
         }
 
