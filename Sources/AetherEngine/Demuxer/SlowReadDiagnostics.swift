@@ -23,6 +23,13 @@ struct SlowReadDiagnostics {
     private(set) var backoffMs: Double = 0
     private(set) var staleGenDroppedBytes: Int64 = 0
     private(set) var iterations = 0
+    // #93/#96 residual: the two branches the "empty counters" case pointed at but that were never
+    // timed. lockWaitMs = time the loop head spent ACQUIRING winCond (a delegate thread holding it
+    // across a copy/backpressure window blocks the read here, invisibly). connectMs = time inside the
+    // synchronous reconnect/connect path on the demux thread (seekReconnect + startPersistentConnection,
+    // incl. the old session's invalidateAndCancel). Whichever eats the ~15-35s finally lands on a name.
+    private(set) var lockWaitMs: Double = 0
+    private(set) var connectMs: Double = 0
 
     init(thresholdMs: Double = 2000) {
         self.thresholdMs = thresholdMs
@@ -58,17 +65,26 @@ struct SlowReadDiagnostics {
         staleGenDroppedBytes += bytes
     }
 
+    mutating func recordLockWait(ms: Double) {
+        lockWaitMs += ms
+    }
+
+    mutating func recordConnect(ms: Double) {
+        connectMs += ms
+    }
+
     /// The summary line for a completed read, or nil while under the threshold.
     func line(elapsedMs: Double, offset: Int64, generationSpan: (Int, Int)) -> String? {
         guard elapsedMs >= thresholdMs else { return nil }
         // Time not attributable to any recorded branch: the read was blocked upstream of the loop
         // (fresh-connection first byte, a starved detour fetch not yet timed out, scheduling). This
         // is the #93/#96 residual's signature, so surfacing it turns "empty counters" into a number.
-        let unaccounted = max(0, elapsedMs - stallWaitMs - detourMs - backoffMs)
+        let unaccounted = max(0, elapsedMs - stallWaitMs - detourMs - backoffMs - lockWaitMs - connectMs)
         return "[AVIOReader] slow read: \(Int(elapsedMs))ms at offset=\(offset) "
             + "detour=\(detourServes)(\(Int(detourMs))ms,\(detourFetches)fetch) "
             + "stallWaits=\(stallWaits)(\(Int(stallWaitMs))ms,\(stallWaitsSignaled)signaled) "
             + "reconnects=\(reconnects) backoff=\(Int(backoffMs))ms "
+            + "lockWait=\(Int(lockWaitMs))ms connect=\(Int(connectMs))ms "
             + "staleGenDropped=\(staleGenDroppedBytes)b "
             + "iters=\(iterations) unaccounted=\(Int(unaccounted))ms "
             + "gen=\(generationSpan.0)->\(generationSpan.1)"

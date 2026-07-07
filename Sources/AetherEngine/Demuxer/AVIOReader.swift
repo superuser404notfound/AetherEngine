@@ -756,6 +756,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         func msSince(_ t: DispatchTime) -> Double {
             Double(DispatchTime.now().uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000
         }
+        // #93/#96 residual: count the reconnect AND time the synchronous connect path it drives
+        // (the old session's invalidateAndCancel + new task setup, all on this demux thread), so a
+        // slow read that sinks its time into reconnecting names it as `connect=` instead of `unaccounted=`.
+        func timedReconnect(seek: Bool, at offset: Int64) {
+            diag.recordReconnect()
+            let connectStart = DispatchTime.now()
+            if seek { seekReconnect(at: offset) } else { startPersistentConnection(at: offset) }
+            diag.recordConnect(ms: msSince(connectStart))
+        }
         winCond.lock()
         let diagEntryPosition = position
         let diagGenAtStart = connGeneration
@@ -781,13 +790,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
             if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
 
+            // #93/#96 residual: time the loop-head lock acquisition. A delegate thread holding winCond
+            // across its copy + backpressure window blocks the read HERE with nothing to show for it, so
+            // this turns that invisible wait into `lockWait=`.
+            let lockWaitStart = DispatchTime.now()
             winCond.lock()
+            diag.recordLockWait(ms: msSince(lockWaitStart))
 
             if activeTask == nil {
                 let target = position
                 winCond.unlock()
-                diag.recordReconnect()
-                seekReconnect(at: target)
+                timedReconnect(seek: true, at: target)
                 continue
             }
 
@@ -804,8 +817,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     // the cheap window path instead of fetching 4 MB blocks forever.
                     if curPosition == detourRunNextExpected && detourRunBytes >= Self.detourReanchorBytes {
                         detourResetRun()
-                        diag.recordReconnect()
-                        seekReconnect(at: curPosition)
+                        timedReconnect(seek: true, at: curPosition)
                         continue
                     }
                     let detourStart = DispatchTime.now()
@@ -839,13 +851,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
                         if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
                         // Hard transport failure: degrade to the OLD single-reconnect behavior.
-                        diag.recordReconnect()
-                        seekReconnect(at: curPosition)
+                        timedReconnect(seek: true, at: curPosition)
                         continue
                     }
                 }
-                diag.recordReconnect()
-                seekReconnect(at: curPosition)
+                timedReconnect(seek: true, at: curPosition)
                 continue
             }
 
@@ -903,8 +913,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         break   // allowFetch:false never rate-limits; a miss falls through to reconnect
                     }
                 }
-                diag.recordReconnect()
-                seekReconnect(at: curPosition)
+                timedReconnect(seek: true, at: curPosition)
                 continue
             }
 
@@ -933,8 +942,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                     let backoffStart = DispatchTime.now()
                     backoffBeforeReconnect(streak: unproductiveReconnects, retryAfter: 0)
                     diag.recordBackoff(ms: msSince(backoffStart))
-                    diag.recordReconnect()
-                    startPersistentConnection(at: frontier)
+                    timedReconnect(seek: false, at: frontier)
                 }
                 continue
             }
@@ -963,8 +971,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let backoffStart = DispatchTime.now()
             backoffBeforeReconnect(streak: backoffStreak, retryAfter: retryAfter)
             diag.recordBackoff(ms: msSince(backoffStart))
-            diag.recordReconnect()
-            startPersistentConnection(at: frontier)
+            timedReconnect(seek: false, at: frontier)
         }
 
         return Int32(totalRead)
