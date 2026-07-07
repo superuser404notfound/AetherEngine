@@ -41,6 +41,15 @@ final class MPLSParserTests: XCTestCase {
         XCTAssertEqual(pl.durationTicks, 270000)
     }
 
+    // AE#105: per-clip in_time and cumulative presentation offset are retained (parallel to clipIDs) so a
+    // multi-clip title can fold each clip's discontinuous STC onto one contiguous presentation timeline.
+    func test_retainsPerClipInTimesAndCumulativeOffsets() {
+        // makeMPLS: item0 in=0/out=90000 (dur 90000), item1 in=0/out=180000 (dur 180000).
+        let pl = try! XCTUnwrap(MPLSParser.parse(makeMPLS()))
+        XCTAssertEqual(pl.inTimes, [0, 0])
+        XCTAssertEqual(pl.cumulativeBefore, [0, 90000])   // item1 starts after item0's 90000-tick duration
+    }
+
     func test_rejectsBadMagic() {
         XCTAssertNil(MPLSParser.parse(Array("NOPE0200".utf8) + [UInt8](repeating: 0, count: 40)))
     }

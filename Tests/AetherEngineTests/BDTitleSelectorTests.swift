@@ -91,4 +91,42 @@ final class BDTitleSelectorTests: XCTestCase {
         XCTAssertFalse(BDTitleSelector.isRepeatedClipDecoy(branching))
         XCTAssertTrue(BDTitleSelector.isRepeatedClipDecoy(decoyPlaylist()))
     }
+
+    // MARK: - Per-clip presentation offsets (AE#105)
+
+    func test_clipSubtractTicksFoldsClipsContiguously() {
+        // Two clips whose STC both start at 0: clip0 runs 0..90000, clip1 (raw 0-based) must be pulled
+        // forward to continue at 90000, i.e. subtract -90000 (normalized = raw - (-90000)).
+        let pl = MPLSPlaylist(clipIDs: ["00001", "00002"], durationTicks: 270_000,
+                              inTimes: [0, 0], cumulativeBefore: [0, 90_000])
+        XCTAssertEqual(BDTitleSelector.clipSubtractTicks(pl), [0, -90_000])
+    }
+
+    func test_clipSubtractTicksMatchesObservedDiscontinuity() {
+        // AE#105 reporter's title: clip0 in_time ~4199.9s, clip1 in_time ~96043s, clip0 duration ~40s.
+        // The subtract for clip1 must equal the source PTS jump (the ~91803s ledger drift) so the
+        // normalized playhead stays contiguous instead of leaping to ~1:10:xx.
+        let i0: UInt64 = 189_000_000        // 4200.0s * 45000
+        let i1: UInt64 = 4_321_935_000      // 96043.0s * 45000
+        let dur0: UInt64 = 1_800_000        // 40.0s * 45000
+        let pl = MPLSPlaylist(clipIDs: ["00055", "00048"], durationTicks: dur0 + 90_000,
+                              inTimes: [i0, i1], cumulativeBefore: [0, dur0])
+        let sub = try! XCTUnwrap(BDTitleSelector.clipSubtractTicks(pl))
+        XCTAssertEqual(sub[0], 0)
+        // 4321935000 - 189000000 - 1800000 = 4131135000 ticks = 91803.0s (matches the observed drift).
+        XCTAssertEqual(sub[1], 4_131_135_000)
+        XCTAssertEqual(Double(sub[1]) / 45000.0, 91_803.0, accuracy: 0.001)
+    }
+
+    func test_clipSubtractTicksNilWhenTimingAbsent() {
+        // A playlist parsed without per-clip timing (older parse / malformed) disables normalization.
+        let pl = MPLSPlaylist(clipIDs: ["00001", "00002"], durationTicks: 270_000)
+        XCTAssertNil(BDTitleSelector.clipSubtractTicks(pl))
+    }
+
+    func test_clipSubtractTicksSingleClipIsZero() {
+        let pl = MPLSPlaylist(clipIDs: ["00001"], durationTicks: 90_000,
+                              inTimes: [12_345], cumulativeBefore: [0])
+        XCTAssertEqual(BDTitleSelector.clipSubtractTicks(pl), [0])
+    }
 }

@@ -27,6 +27,7 @@ final class BDDiscReaderTests: XCTestCase {
         XCTAssertEqual(info.formatHint, "mpegts")
         XCTAssertEqual(info.titles.count, 1)  // single-playlist fixture -> one title
         XCTAssertEqual(info.selectedTitleIndex, 0)
+        XCTAssertTrue(info.clipTimeline.isEmpty)  // AE#105: single-clip title needs no normalization (no-op)
         var buf = [UInt8](repeating: 0, count: 5)
         _ = buf.withUnsafeMutableBufferPointer { info.reader.read($0.baseAddress, size: 5) }
         XCTAssertEqual(buf, [0x00,0x00,0x00,0x00,0x47])

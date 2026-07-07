@@ -65,21 +65,34 @@ enum DiscReader {
         let selected = titles[selectedIndex]
         let streamDir = (try? udf.list(path: ["BDMV", "STREAM"])) ?? []
         var allExtents: [(offset: Int64, length: Int64)] = []
-        for clip in selected.bdClipIDs ?? [] {
+        // One ClipSpan per resolved clip: byte start in the concat stream + how far to pull its
+        // timestamps back so it continues contiguously from clip 0 (AE#105 multi-clip position drift).
+        var clipTimeline: [ClipSpan] = []
+        let subTicks = selected.bdClipSubtractTicks ?? []
+        for (k, clip) in (selected.bdClipIDs ?? []).enumerated() {
             guard let e = streamDir.first(where: { $0.name == "\(clip).m2ts" }),
                   let exts = try? udf.extents(of: e) else { continue }
+            let byteStart = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
+            let subSeconds = k < subTicks.count ? Double(subTicks[k]) / discTickRate : 0
+            clipTimeline.append(ClipSpan(concatByteStart: byteStart, subtractSeconds: subSeconds))
             allExtents += exts
         }
         guard !allExtents.isEmpty else {
             EngineLog.emit("[disc] selected title \(selectedIndex) clips=\(selected.bdClipIDs ?? []) but resolved no m2ts extents in BDMV/STREAM (\(streamDir.count) entries); cannot build stream", category: .demux)
             return nil
         }
+        // Only a multi-clip title with a real (non-zero) offset needs normalization; a single clip is a no-op.
+        if clipTimeline.count < 2 || !clipTimeline.contains(where: { $0.subtractSeconds != 0 }) {
+            clipTimeline = []
+        }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
-        EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes)", category: .demux)
+        EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count)", category: .demux)
         storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
-                         formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex, extents: allExtents)
+                         formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex,
+                         extents: allExtents, clipTimeline: clipTimeline)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: allExtents),
-                        formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex)
+                        formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex,
+                        clipTimeline: clipTimeline)
     }
 
     /// Memoize a successful recognition so a re-open of the same source (track switch on a remote ISO)
@@ -87,11 +100,12 @@ enum DiscReader {
     private static func storeRecognition(
         cacheKey: String?, selectTitleID: Int?,
         formatHint: String, titles: [DiscTitle], selectedIndex: Int,
-        extents: [(offset: Int64, length: Int64)]
+        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = []
     ) {
         guard let cacheKey else { return }
         let recognition = DiscRecognition(formatHint: formatHint, titles: titles,
-                                          selectedTitleIndex: selectedIndex, extents: extents)
+                                          selectedTitleIndex: selectedIndex, extents: extents,
+                                          clipTimeline: clipTimeline)
         DiscRecognitionCache.store(key: cacheKey, selectTitleID: selectTitleID, recognition)
         // The probe opens with selectTitleID == nil (default title), but the rest of the engine
         // references that same title by its resolved id (== selectedIndex): reloads and the subtitle
@@ -131,7 +145,8 @@ enum DiscReader {
         if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,
-                            selectedTitleIndex: cached.selectedTitleIndex)
+                            selectedTitleIndex: cached.selectedTitleIndex,
+                            clipTimeline: cached.clipTimeline)
         }
         guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
         let iso: ISO9660Reader

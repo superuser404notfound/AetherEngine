@@ -9,6 +9,18 @@ struct DiscRecognition: Sendable {
     let titles: [DiscTitle]
     let selectedTitleIndex: Int
     let extents: [(offset: Int64, length: Int64)]
+    /// Per-clip presentation-offset spans for the selected multi-clip Blu-ray title; empty otherwise.
+    /// Cached so a re-open (subtitle side demuxer, reload) rebuilds the same normalized timeline (AE#105).
+    let clipTimeline: [ClipSpan]
+
+    init(formatHint: String, titles: [DiscTitle], selectedTitleIndex: Int,
+         extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = []) {
+        self.formatHint = formatHint
+        self.titles = titles
+        self.selectedTitleIndex = selectedTitleIndex
+        self.extents = extents
+        self.clipTimeline = clipTimeline
+    }
 }
 
 /// Memoizes `DiscReader.wrap` per source identity + selected title.

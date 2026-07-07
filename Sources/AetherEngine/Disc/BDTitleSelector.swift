@@ -46,7 +46,24 @@ enum BDTitleSelector {
                     DiscChapter(id: i, startTicks: start)
                 }
                 return DiscTitle(id: index, durationTicks: playlist.durationTicks,
-                                 chapters: chapters, bdClipIDs: playlist.clipIDs)
+                                 chapters: chapters, bdClipIDs: playlist.clipIDs,
+                                 bdClipSubtractTicks: clipSubtractTicks(playlist))
             }
+    }
+
+    /// Per-clip amount to subtract from a raw source timestamp (45 kHz ticks) so each PlayItem continues
+    /// contiguously from the previous one on the title's presentation timeline, with clip 0 left untouched
+    /// (offset 0). For clip k: `inTime[k] - inTime[0] - cumulativeBefore[k]`. Derivation: clip k's presented
+    /// content must land at `inTime[0] + cumulativeBefore[k] + (raw - inTime[k])`, so the constant to remove
+    /// from `raw` is `inTime[k] - inTime[0] - cumulativeBefore[k]`. Nil when the playlist carried no per-clip
+    /// timing (older parse / malformed), leaving normalization disabled. See AE#105.
+    static func clipSubtractTicks(_ playlist: MPLSPlaylist) -> [Int64]? {
+        let inT = playlist.inTimes
+        let cumB = playlist.cumulativeBefore
+        guard inT.count == playlist.clipIDs.count, cumB.count == playlist.clipIDs.count,
+              let first = inT.first else { return nil }
+        return inT.indices.map { k in
+            Int64(bitPattern: inT[k]) - Int64(bitPattern: first) - Int64(bitPattern: cumB[k])
+        }
     }
 }

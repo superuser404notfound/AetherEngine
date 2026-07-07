@@ -3,6 +3,13 @@ import Foundation
 struct MPLSPlaylist: Equatable {
     let clipIDs: [String]
     let durationTicks: UInt64
+    /// Per-PlayItem in_time on the clip's STC, 45 kHz ticks, parallel to `clipIDs`. A clip's presented
+    /// frames begin at this STC value, so it is the origin used to fold each clip onto the title's
+    /// contiguous presentation timeline (AE#105 multi-clip position drift).
+    var inTimes: [UInt64] = []
+    /// Presentation offset of each PlayItem's start, 45 kHz ticks relative to the title's start (sum of the
+    /// durations of all earlier PlayItems), parallel to `clipIDs`.
+    var cumulativeBefore: [UInt64] = []
     /// Entry-mark chapter starts, 45 kHz ticks relative to the title's start, sorted ascending. Empty when
     /// the playlist declares no PlayListMark section (or only link-point marks). See `parseChapterStarts` (#67).
     var chapterStartTicks: [UInt64] = []
@@ -38,7 +45,9 @@ enum MPLSParser {
         }
         guard !clips.isEmpty else { return nil }
         let chapters = parseChapterStarts(data, inTimes: inTimes, cumulativeBefore: cumulativeBefore)
-        return MPLSPlaylist(clipIDs: clips, durationTicks: ticks, chapterStartTicks: chapters)
+        return MPLSPlaylist(clipIDs: clips, durationTicks: ticks,
+                            inTimes: inTimes, cumulativeBefore: cumulativeBefore,
+                            chapterStartTicks: chapters)
     }
 
     /// Parse the PlayListMark section (header offset 12 = PlayListMarkStartAddress) into title-relative chapter

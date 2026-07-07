@@ -163,9 +163,39 @@ public final class Demuxer: @unchecked Sendable {
     private(set) var discTitles: [DiscTitle] = []
     private(set) var selectedDiscTitleIndex: Int = 0
 
+    /// Per-clip presentation-offset spans for a selected multi-clip Blu-ray title (empty otherwise). When
+    /// non-empty, `readPacket` and `indexedKeyframes` fold each clip's timestamps onto one contiguous
+    /// timeline so the playhead does not leap at clip boundaries (AE#105). Guarded by `accessLock`.
+    private var clipTimeline: [ClipSpan] = []
+    /// Last clip index resolved from a packet byte position; reused when a packet reports pos < 0
+    /// (reads are sequential, so the clip only advances). Guarded by `accessLock`.
+    private var lastClipIndex: Int = 0
+
     private func adoptDiscInfo(_ info: DiscInfo) {
         discTitles = info.titles
         selectedDiscTitleIndex = info.selectedTitleIndex
+        clipTimeline = info.clipTimeline
+        lastClipIndex = 0
+    }
+
+    /// Seconds to subtract from a raw source timestamp of a packet/index entry at byte position `pos`,
+    /// attributing it to its clip via `clipTimeline`. 0 when normalization is off or `pos` is in clip 0.
+    /// Must be called under `accessLock`.
+    private func clipSubtractSeconds(forPos pos: Int64) -> Double {
+        guard !clipTimeline.isEmpty else { return 0 }
+        let idx = ClipSpan.index(forPos: pos, in: clipTimeline, fallback: lastClipIndex)
+        lastClipIndex = idx
+        return clipTimeline[idx].subtractSeconds
+    }
+
+    /// Fold a raw timestamp onto the contiguous presentation timeline given its byte position and time base.
+    /// Must be called under `accessLock`.
+    private func normalizedTimestamp(_ ts: Int64, pos: Int64, timeBase: AVRational) -> Int64 {
+        guard ts != Int64.min, !clipTimeline.isEmpty else { return ts }
+        let sub = clipSubtractSeconds(forPos: pos)
+        guard sub != 0, timeBase.num > 0, timeBase.den > 0 else { return ts }
+        let subTicks = Int64((sub * Double(timeBase.den) / Double(timeBase.num)).rounded())
+        return ts &- subTicks
     }
 
     /// True once a disc structure (BD/DVD/UDF) was recognized at open. Disc sources concat
@@ -704,6 +734,7 @@ public final class Demuxer: @unchecked Sendable {
         }
         let count = avformat_index_get_entries_count(stream)
         guard count > 0 else { return [] }
+        let tb = stream.pointee.time_base
         var result: [Int64] = []
         result.reserveCapacity(Int(count))
         for i in 0..<count {
@@ -711,7 +742,9 @@ public final class Demuxer: @unchecked Sendable {
             // AVINDEX_KEYFRAME = 0x0001
             if entry.pointee.flags & 0x0001 != 0,
                entry.pointee.timestamp != Int64.min {
-                result.append(entry.pointee.timestamp)
+                // Fold each entry onto the contiguous timeline (multi-clip disc) so the segment plan
+                // built from these IRAP positions matches the normalized packets (AE#105).
+                result.append(normalizedTimestamp(entry.pointee.timestamp, pos: entry.pointee.pos, timeBase: tb))
             }
         }
         return result
@@ -731,6 +764,20 @@ public final class Demuxer: @unchecked Sendable {
                 return nil
             }
             throw DemuxerError.readFailed(code: ret)
+        }
+        if !clipTimeline.isEmpty, let pkt = packet {
+            let si = Int(pkt.pointee.stream_index)
+            if si >= 0, si < Int(ctx.pointee.nb_streams), let st = ctx.pointee.streams[si] {
+                let sub = clipSubtractSeconds(forPos: pkt.pointee.pos)
+                if sub != 0 {
+                    let tb = st.pointee.time_base
+                    if tb.num > 0, tb.den > 0 {
+                        let subTicks = Int64((sub * Double(tb.den) / Double(tb.num)).rounded())
+                        if pkt.pointee.pts != Int64.min { pkt.pointee.pts &-= subTicks }
+                        if pkt.pointee.dts != Int64.min { pkt.pointee.dts &-= subTicks }
+                    }
+                }
+            }
         }
         return packet
     }

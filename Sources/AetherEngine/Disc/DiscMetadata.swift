@@ -46,19 +46,55 @@ struct DiscTitle: Sendable, Equatable {
     let chapters: [DiscChapter]
     /// Blu-ray: the m2ts clip basenames to concatenate for this title (exactly one of the resolution keys is set).
     let bdClipIDs: [String]?
+    /// Blu-ray: per-clip amount to SUBTRACT from a raw source timestamp, 45 kHz ticks, parallel to `bdClipIDs`.
+    /// Each m2ts clip carries its own STC, so a multi-clip title's concatenated source jumps at every clip
+    /// boundary. Subtracting this per-clip offset folds every clip onto one contiguous presentation timeline
+    /// that continues from clip 0 (whose offset is always 0, so the plan/anchor/seeks stay untouched). See
+    /// `Demuxer.readPacket` normalization and AE#105.
+    let bdClipSubtractTicks: [Int64]?
     /// DVD: the title-set number whose VOBs back this title.
     let dvdVTSN: Int?
     /// DVD: the title number within its VTS.
     let dvdTitleNumber: Int?
 
     init(id: Int, durationTicks: UInt64, chapters: [DiscChapter] = [],
-         bdClipIDs: [String]? = nil, dvdVTSN: Int? = nil, dvdTitleNumber: Int? = nil) {
+         bdClipIDs: [String]? = nil, bdClipSubtractTicks: [Int64]? = nil,
+         dvdVTSN: Int? = nil, dvdTitleNumber: Int? = nil) {
         self.id = id
         self.durationTicks = durationTicks
         self.chapters = chapters
         self.bdClipIDs = bdClipIDs
+        self.bdClipSubtractTicks = bdClipSubtractTicks
         self.dvdVTSN = dvdVTSN
         self.dvdTitleNumber = dvdTitleNumber
+    }
+}
+
+/// One clip's span inside a `ConcatIOReader` stream, plus how far to pull its timestamps back so the clip
+/// continues contiguously from the previous one. Built once at disc recognition for the SELECTED title and
+/// applied per packet by `Demuxer` (attributing packets to clips by their byte position). Empty / all-zero
+/// for single-clip titles and non-disc sources, where it is a no-op. See AE#105.
+struct ClipSpan: Sendable, Equatable {
+    /// Byte offset in the concatenated stream where this clip's bytes begin.
+    let concatByteStart: Int64
+    /// Seconds to subtract from a raw source timestamp of a packet in this clip (0 for the first clip).
+    let subtractSeconds: Double
+}
+
+extension ClipSpan {
+    /// Index of the clip span containing byte position `pos` (the last span whose `concatByteStart` <= pos).
+    /// `pos < 0` (a packet / index entry that reported no byte position) returns `fallback` clamped into
+    /// range, since reads are sequential and the clip only advances. Empty list returns `fallback`.
+    static func index(forPos pos: Int64, in spans: [ClipSpan], fallback: Int) -> Int {
+        guard !spans.isEmpty else { return fallback }
+        if pos < 0 { return min(max(fallback, 0), spans.count - 1) }
+        var lo = 0
+        var hi = spans.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if spans[mid].concatByteStart <= pos { lo = mid + 1 } else { hi = mid }
+        }
+        return max(0, lo - 1)
     }
 }
 
@@ -75,6 +111,18 @@ struct DiscInfo: Sendable {
     let formatHint: String
     let titles: [DiscTitle]
     let selectedTitleIndex: Int
+    /// Per-clip presentation-offset spans for the SELECTED multi-clip Blu-ray title, sorted by
+    /// `concatByteStart`. Empty for single-clip / DVD / non-disc sources (Demuxer normalization no-ops).
+    let clipTimeline: [ClipSpan]
+
+    init(reader: IOReader, formatHint: String, titles: [DiscTitle], selectedTitleIndex: Int,
+         clipTimeline: [ClipSpan] = []) {
+        self.reader = reader
+        self.formatHint = formatHint
+        self.titles = titles
+        self.selectedTitleIndex = selectedTitleIndex
+        self.clipTimeline = clipTimeline
+    }
 
     var selectedTitle: DiscTitle? {
         titles.indices.contains(selectedTitleIndex) ? titles[selectedTitleIndex] : nil
