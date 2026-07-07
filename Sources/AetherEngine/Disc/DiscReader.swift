@@ -75,6 +75,7 @@ enum DiscReader {
             let byteStart = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
             let subSeconds = k < subTicks.count ? Double(subTicks[k]) / discTickRate : 0
             clipTimeline.append(ClipSpan(concatByteStart: byteStart, subtractSeconds: subSeconds))
+            EngineLog.emit("[disc] AE#105 clip[\(k)] id=\(clip) subTicks=\(k < subTicks.count ? subTicks[k] : 0) subtractSec=\(String(format: "%.3f", subSeconds)) byteStart=\(byteStart)", category: .demux)
             allExtents += exts
         }
         guard !allExtents.isEmpty else {

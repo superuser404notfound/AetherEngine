@@ -170,6 +170,10 @@ public final class Demuxer: @unchecked Sendable {
     /// Last clip index resolved from a packet byte position; reused when a packet reports pos < 0
     /// (reads are sequential, so the clip only advances). Guarded by `accessLock`.
     private var lastClipIndex: Int = 0
+    /// AE#105 diag: last clip index we logged a boundary crossing for, and the last folded PTS
+    /// (seconds) seen, so a crossing can print the true raw jump against the applied offset.
+    private var diagLastLoggedClipIndex: Int = -1
+    private var diagPrevFoldedSec: Double = .nan
 
     private func adoptDiscInfo(_ info: DiscInfo) {
         discTitles = info.titles
@@ -768,14 +772,28 @@ public final class Demuxer: @unchecked Sendable {
         if !clipTimeline.isEmpty, let pkt = packet {
             let si = Int(pkt.pointee.stream_index)
             if si >= 0, si < Int(ctx.pointee.nb_streams), let st = ctx.pointee.streams[si] {
-                let sub = clipSubtractSeconds(forPos: pkt.pointee.pos)
-                if sub != 0 {
-                    let tb = st.pointee.time_base
-                    if tb.num > 0, tb.den > 0 {
-                        let subTicks = Int64((sub * Double(tb.den) / Double(tb.num)).rounded())
-                        if pkt.pointee.pts != Int64.min { pkt.pointee.pts &-= subTicks }
-                        if pkt.pointee.dts != Int64.min { pkt.pointee.dts &-= subTicks }
-                    }
+                let pos = pkt.pointee.pos
+                let idx = ClipSpan.index(forPos: pos, in: clipTimeline, fallback: lastClipIndex)
+                lastClipIndex = idx
+                let sub = clipTimeline[idx].subtractSeconds
+                let tb = st.pointee.time_base
+                let tbSec = (tb.num > 0 && tb.den > 0) ? Double(tb.num) / Double(tb.den) : 0
+                let rawPts = pkt.pointee.pts
+                let rawSec = (rawPts != Int64.min && tbSec > 0) ? Double(rawPts) * tbSec : Double.nan
+                if sub != 0, tbSec > 0 {
+                    let subTicks = Int64((sub / tbSec).rounded())
+                    if pkt.pointee.pts != Int64.min { pkt.pointee.pts &-= subTicks }
+                    if pkt.pointee.dts != Int64.min { pkt.pointee.dts &-= subTicks }
+                }
+                // AE#105 diag: log each clip-boundary crossing so the true per-clip STC jump
+                // (rawSec vs prevFoldedSec) can be compared against the MPLS-derived offset.
+                if idx != diagLastLoggedClipIndex {
+                    diagLastLoggedClipIndex = idx
+                    let foldedSec = (pkt.pointee.pts != Int64.min && tbSec > 0) ? Double(pkt.pointee.pts) * tbSec : Double.nan
+                    EngineLog.emit("[Demuxer] AE#105 clip boundary -> idx=\(idx) stream=\(si) pos=\(pos) rawSec=\(String(format: "%.3f", rawSec)) subtract=\(String(format: "%.3f", sub))s foldedSec=\(String(format: "%.3f", foldedSec)) prevFoldedSec=\(String(format: "%.3f", diagPrevFoldedSec))", category: .demux)
+                }
+                if pkt.pointee.pts != Int64.min, tbSec > 0 {
+                    diagPrevFoldedSec = Double(pkt.pointee.pts) * tbSec
                 }
             }
         }
