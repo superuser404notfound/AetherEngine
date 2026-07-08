@@ -283,6 +283,37 @@ extension AetherEngine {
         isDiscSource ? bitmapSubtitleReconstructLeadInDiscSeconds : bitmapSubtitleReconstructLeadInSeconds
     }
 
+    /// #112 full umbau: whether a seek to `target` (source PTS) is served by the already-decoded retained cue
+    /// store, so it needs neither a store clear nor a reconstruct back-scan. Derived from the store itself:
+    ///
+    /// - `storeFrontier` is the highest retained image-cue start. The target must be at/below it: beyond the
+    ///   frontier is unseen forward territory, where the open-ended tail cue's window nominally covers the target
+    ///   but is only a placeholder, not evidence the line was decoded there.
+    /// - `activeCueEnd` is the end of the newest image cue starting at/before the target (nil if none). The target
+    ///   must fall inside it (`target < activeCueEnd`): a candidate line trimmed to end before the target means a
+    ///   newer composition was held/dropped (the #100 catch-up case) or pruned, i.e. a gap the store cannot answer.
+    ///
+    /// When both hold, the overlay shows the active line instantly with zero I/O. A back-scan on such a seek was the
+    /// whole #112 dead-end: on a remote index-less disc it re-downloaded the look-back span every time, and it
+    /// clobbered the retained store that already held the answer for a backward seek.
+    nonisolated static func retainedStoreCoversSeek(
+        activeCueEnd: Double?, storeFrontier: Double?, target: Double
+    ) -> Bool {
+        guard let activeCueEnd, let storeFrontier else { return false }
+        return target <= storeFrontier && target < activeCueEnd
+    }
+
+    /// #112 full umbau: the bitmap (image) cues visible at `playhead` - those whose window covers it. An audio-track
+    /// switch does not move the playhead, so the engine snapshots these before the pipeline reload and restores them
+    /// after, keeping the on-screen PGS line up instead of tearing it down and reconstructing it from a back-scan.
+    /// Image-only: text tracks re-decode from their index cheaply and need no preservation.
+    nonisolated static func activeImageCues(in cues: [SubtitleCue], at playhead: Double) -> [SubtitleCue] {
+        cues.filter { cue in
+            guard case .image = cue.body else { return false }
+            return cue.startTime <= playhead && playhead < cue.endTime
+        }
+    }
+
     /// Side-demuxer read loop: opens a fresh Demuxer, prewarms MKV cue index by seeking mid-file, seeks to just before the start time, then streams packets through EmbeddedSubtitleDecoder. Paces against the playhead via `embeddedSubtitleReadAheadSeconds` instead of racing to EOF.
     nonisolated private func runEmbeddedSubtitleReader(
         url: URL, reader: IOReader?, formatHint: String?,
@@ -457,6 +488,14 @@ extension AetherEngine {
         if EmbeddedSubtitleDecoder.isBitmapCodec(decoder.codecID) {
             seekTo = max(0, effectiveStart - Self.bitmapSubtitleReconstructLeadIn(isDiscSource: demuxer.isDiscSource))
             demuxer.seek(to: seekTo)
+            // #112 full umbau: entering a reconstruction pass. Mark the gate so a self-contained composition
+            // (acquisition point / epoch start) covering the playhead publishes immediately instead of waiting for a
+            // successor trim (the "several tens of seconds" gap). The gate auto-leaves reconstruction mode once the
+            // reader decodes a cue at/after the playhead, so a later #100 catch-up backlog cannot flash.
+            await MainActor.run { [weak self] in
+                guard !Task.isCancelled, let self else { return }
+                self.pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()].reconstructing = true
+            }
         }
 
         let tb = stream.pointee.time_base
@@ -678,16 +717,49 @@ extension AetherEngine {
         // #100: a PGS event whose cues start well behind the playhead is a catch-up replay; its
         // open-ended placeholder window would cover the playhead the instant it inserts and flash
         // stale history through the overlay until the successor trims it. Hold it instead.
+        // #112: a self-contained composition (acquisition point / epoch start) during a reconstruction pass is
+        // the current line and publishes immediately (see PGSStaleArrivalGate.admit).
         let admitted = pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()]
-            .admit(cues: event.cues, isPGS: event.isPGS, playhead: sourceTime)
+            .admit(cues: event.cues, isPGS: event.isPGS,
+                   isSelfContained: event.isSelfContainedPGS, playhead: sourceTime)
         for cue in admitted {
             insertSorted(cue, into: &cues)
         }
         pruneOldSubtitleCues(&cues)
     }
 
+    /// #112 full umbau: whether a seek to `target` (source PTS) on the PRIMARY track is served by the retained
+    /// `subtitleCues` store (see `retainedStoreCoversSeek`). Derived live from the store: the frontier is the newest
+    /// retained image-cue start, the active-cue end is the end of the newest image cue starting at/before the
+    /// target. False for text tracks (no image cues) and when nothing is retained, so those seeks reconstruct as
+    /// before. `subtitleCues` is kept sorted ascending by start (insertSorted), so `.last` is the newest.
+    @MainActor
+    func retainedSubtitleSeekCoverage(target: Double) -> Bool {
+        let imageCues = subtitleCues.filter { if case .image = $0.body { return true } else { return false } }
+        let frontier = imageCues.last?.startTime
+        let activeCueEnd = imageCues.last(where: { $0.startTime <= target })?.endTime
+        return Self.retainedStoreCoversSeek(activeCueEnd: activeCueEnd, storeFrontier: frontier, target: target)
+    }
+
     @MainActor
     private func insertSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue]) {
+        Self.insertCueSorted(cue, into: &cues)
+    }
+
+    /// #112 full umbau: sorted insert of a decoded cue into the retained store, keeping ascending start order. An
+    /// image cue sharing a start with an existing image cue REPLACES it: a PGS composition has a unique start PTS, so
+    /// a same-start image cue is the same line re-decoded (the audio-switch preserved placeholder vs its
+    /// reconstruction), and a duplicate would render the bitmap twice until the next composition trims it. Text cues
+    /// at the same start are distinct simultaneous speakers and are both kept.
+    nonisolated static func insertCueSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue]) {
+        if case .image = cue.body,
+           let existing = cues.firstIndex(where: { other in
+               if case .image = other.body { return other.startTime == cue.startTime }
+               return false
+           }) {
+            cues[existing] = cue
+            return
+        }
         var lo = 0, hi = cues.count
         while lo < hi {
             let mid = (lo + hi) / 2

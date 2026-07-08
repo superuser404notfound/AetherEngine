@@ -977,6 +977,11 @@ extension AetherEngine {
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
             : nil
+        // #112 full umbau: an audio-track switch does not move the playhead, so the PGS line already on screen is
+        // still valid. Snapshot the visible bitmap cues before stopInternal wipes them; they are restored after the
+        // subtitle re-arm so the line stays up while the re-armed reader re-primes forward (old path reconstructed
+        // from scratch and the line vanished for the reconstruct duration).
+        let preservedActiveImageCues = Self.activeImageCues(in: subtitleCues, at: sourceTime)
         let secondaryEmbeddedToResume: Int32 = activeSecondaryEmbeddedSubtitleStreamIndex
         let secondarySidecarToResume: URL? = isSecondarySubtitleActive && activeSecondaryEmbeddedSubtitleStreamIndex < 0
             ? loadedSecondarySidecarURL
@@ -1199,6 +1204,12 @@ extension AetherEngine {
             selectSidecarSubtitle(url: sidecar)
         } else if embeddedStreamToResume >= 0 {
             selectSubtitleTrack(index: Int(embeddedStreamToResume))
+            // #112 full umbau: re-seed the on-screen bitmap line the switch would otherwise drop. selectSubtitleTrack
+            // cleared subtitleCues and spawned a fresh reader; restore the pre-switch visible cues so the line stays
+            // up until the reader's reconstruction pass republishes it (its first composition trims these cleanly).
+            if !preservedActiveImageCues.isEmpty, subtitleCues.isEmpty {
+                subtitleCues = preservedActiveImageCues
+            }
         }
         if let secondarySidecar = secondarySidecarToResume {
             selectSecondarySidecarSubtitle(url: secondarySidecar)

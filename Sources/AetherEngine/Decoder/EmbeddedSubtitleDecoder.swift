@@ -17,6 +17,10 @@ final class EmbeddedSubtitleDecoder {
         let isPGS: Bool
         /// PTS at which the previous PGS cue should be trimmed. nil for non-PGS.
         let pgsTrimAt: Double?
+        /// #112: the emitting display set was an Acquisition Point / Epoch Start - a self-contained restatement of
+        /// the line. A reconstruction pass publishes such a composition immediately (it IS the current line) rather
+        /// than holding it for successor resolution. False for Normal deltas and all non-PGS events.
+        var isSelfContainedPGS: Bool = false
     }
 
     /// Exposed so callers can gate on text-vs-bitmap or check for PGS specifically.
@@ -25,6 +29,11 @@ final class EmbeddedSubtitleDecoder {
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
     private var nextCueID: Int = 0
     private var seenKeys: Set<String> = []
+
+    /// #112: composition_state of the most recent PCS seen, carried until the display set's END emits the cue. In a
+    /// split M2TS the PCS and the emitting END arrive in different packets, so the state must be remembered across
+    /// packets rather than read off the packet that triggers `gotSub`.
+    private var pendingPGSCompositionState: PGSCompositionState?
 
     /// Fallback canvas for bitmap subtitle positioning; some codecs (PGS) override via PCS once it arrives.
     private let sourceVideoWidth: Int32
@@ -98,6 +107,13 @@ final class EmbeddedSubtitleDecoder {
         var gotSub: Int32 = 0
         var fixedPayload: [UInt8]? = nil
         let ret = decodeWithFixups(ctx: ctx, pkt: packet, sub: &sub, gotSub: &gotSub, capturedPayload: &fixedPayload)
+
+        // #112: remember this packet's PGS composition state (a PCS-only packet carries it; the later END emits the
+        // cue). Only overwrite when a PCS is actually present so the state survives the intervening ODS/END packets.
+        if ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE,
+           let state = Self.pgsCompositionState(for: packet, fixedPayload: fixedPayload) {
+            pendingPGSCompositionState = state
+        }
 
         // Some MKV converters drop the PGS trailing END (0x80); feed a synthetic one to flush accumulated
         // state. Gate it (#112): only when the decoded payload already carries a complete object and no END
@@ -221,10 +237,15 @@ final class EmbeddedSubtitleDecoder {
             )
         }
 
+        // #112: consume the remembered PGS composition state for this display set.
+        let selfContained = isPGS && (pendingPGSCompositionState?.isSelfContained ?? false)
+        pendingPGSCompositionState = nil
+
         return SubtitleEvent(
             cues: cues,
             isPGS: isPGS,
-            pgsTrimAt: isPGS ? startTime : nil
+            pgsTrimAt: isPGS ? startTime : nil,
+            isSelfContainedPGS: selfContained
         )
     }
 
@@ -275,6 +296,62 @@ final class EmbeddedSubtitleDecoder {
             i = next
         }
         return sawCompleteObject
+    }
+
+    /// #112 full umbau: PGS composition state (the PCS `composition_state` field). An acquisition point or epoch
+    /// start is a self-contained restatement of the current on-screen line - the disc's own random-access anchor -
+    /// so a reconstruction pass that decodes one can publish the line immediately instead of holding it as a stale
+    /// replay.
+    enum PGSCompositionState: Sendable, Equatable {
+        case normal            // 0x00: delta update; prior objects/palettes still required.
+        case acquisitionPoint  // 0x40: mid-epoch restatement; safe to begin decoding here.
+        case epochStart        // 0x80: fresh epoch; fully self-contained.
+
+        /// True when the composition re-establishes the visible line without any earlier segment.
+        var isSelfContained: Bool { self != .normal }
+    }
+
+    /// #112 full umbau: read the composition_state of the first PCS (0x16) segment in a PGS segment run. Payload
+    /// layout mirrors `pgsPayloadWarrantsSyntheticEnd`: a run of `[type:1][length:2 BE][body:length]`. The PCS body
+    /// is `width[2] height[2] frame_rate[1] composition_number[2] composition_state[1] ...`, so composition_state
+    /// is at body offset 7; its top two bits carry the state (0x00 Normal / 0x40 Acquisition Point / 0x80 Epoch
+    /// Start), the low bits are the palette-update flag + palette id. Returns nil when no PCS is present or its body
+    /// is too short to hold the field. Walked defensively; a malformed length ends the scan.
+    static func pgsCompositionState(_ base: UnsafePointer<UInt8>?, count: Int) -> PGSCompositionState? {
+        guard let base, count >= 3 else { return nil }
+        var i = 0
+        while i + 3 <= count {
+            let type = base[i]
+            let len = (Int(base[i + 1]) << 8) | Int(base[i + 2])
+            let bodyStart = i + 3
+            if type == 0x16 {                       // PCS: the composition segment carries the state.
+                let stateOffset = bodyStart + 7
+                guard len >= 8, stateOffset < count else { return nil }
+                switch base[stateOffset] & 0xC0 {
+                case 0x40: return .acquisitionPoint
+                case 0x80: return .epochStart
+                default:   return .normal           // 0x00 Normal; 0xC0 Epoch-Continue is not self-contained.
+                }
+            }
+            let next = bodyStart + len
+            if next <= i { break }                  // zero/negative advance guard.
+            i = next
+        }
+        return nil
+    }
+
+    /// #112: pick the bytes actually decoded (`fixedPayload` for stripped/inflated paths, else the raw packet) and
+    /// read the PGS composition state over them, mirroring the synthetic-END payload selection.
+    private static func pgsCompositionState(
+        for packet: UnsafeMutablePointer<AVPacket>,
+        fixedPayload: [UInt8]?
+    ) -> PGSCompositionState? {
+        if let fixedPayload {
+            return fixedPayload.withUnsafeBufferPointer {
+                pgsCompositionState($0.baseAddress, count: $0.count)
+            }
+        }
+        return pgsCompositionState(packet.pointee.data, count: Int(packet.pointee.size))
     }
 
     /// Pick the bytes actually decoded (`fixedPayload` for stripped/inflated paths, else the raw

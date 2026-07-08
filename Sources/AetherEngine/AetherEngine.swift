@@ -2073,6 +2073,17 @@ public final class AetherEngine: ObservableObject {
                 // Sodalite#32 Phase 2: tap-fed overlay; nothing to re-arm, the tap rides the producer
                 // across the seek. Re-backfill from the store so earlier-pruned cues reappear.
                 subtitleCues = tapOverlayBackfill(streamIndex: streamIdx)
+            } else if retainedSubtitleSeekCoverage(target: anchorSourceTime) {
+                // #112 full umbau: the retained cue store already covers this seek target (a backward / in-region
+                // seek on a bitmap track). The covering line is on screen instantly with zero I/O, so keep the store
+                // AND the running reader untouched - no clear, no reconstruct back-scan, no disc re-download. This is
+                // the common "re-watch that line" case and the whole point of the retained index. (Text tracks have
+                // no image cues so the coverage is false for them: they fall through to the reconstruct branch
+                // below, unchanged.)
+                EngineLog.emit(
+                    "[AetherEngine] #112 seek covered by retained subtitle store "
+                    + "(target=\(String(format: "%.1f", anchorSourceTime))s); no reconstruct",
+                    category: .engine)
             } else {
                 subtitleCues = []
                 // startEmbeddedSubtitleTask cancels + drains the prior reader, then reuses the open side demuxer

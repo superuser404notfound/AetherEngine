@@ -21,6 +21,14 @@ struct PGSStaleArrivalGate {
     let staleEpsilonSeconds: Double
     private(set) var heldCues: [SubtitleCue] = []
 
+    /// #112 full umbau: set while the reader decodes the region behind a fresh seek target to reconstruct the
+    /// active line. In this window a self-contained composition (Acquisition Point / Epoch Start) covering the
+    /// playhead is the current line and publishes immediately, instead of being held for successor resolution
+    /// (the "several tens of seconds" gap). Auto-cleared once the reader decodes a cue at/after the playhead, so a
+    /// #100 catch-up backlog outside a reconstruction (normal replays, or historical acquisition points long
+    /// behind the playhead) still cannot flash.
+    var reconstructing: Bool = false
+
     init(staleEpsilonSeconds: Double = 5.0) {
         self.staleEpsilonSeconds = staleEpsilonSeconds
     }
@@ -43,8 +51,21 @@ struct PGSStaleArrivalGate {
     /// Admit an incoming event's cues. Stale PGS arrivals (every cue starting more than the
     /// epsilon behind the playhead) are held for successor resolution and publish nothing yet;
     /// everything else passes through unchanged.
-    mutating func admit(cues: [SubtitleCue], isPGS: Bool, playhead: Double) -> [SubtitleCue] {
+    ///
+    /// #112 full umbau: `isSelfContained` marks an Acquisition Point / Epoch Start - a composition that rebuilds
+    /// the visible line on its own. While `reconstructing` (decoding just behind a fresh seek target), such a
+    /// composition covering the playhead publishes immediately: it is the current line, not stale replay. Seeing a
+    /// cue at/after the playhead means the reader caught up, so reconstruction mode ends and the #100 stale hold
+    /// governs again - a catch-up backlog of Normal replays (or acquisition points long behind the playhead, once
+    /// out of reconstruction) stays held and cannot flash.
+    mutating func admit(cues: [SubtitleCue], isPGS: Bool, isSelfContained: Bool = false, playhead: Double) -> [SubtitleCue] {
         guard isPGS, !cues.isEmpty else { return cues }
+        if cues.contains(where: { $0.startTime >= playhead - staleEpsilonSeconds }) {
+            reconstructing = false
+        }
+        if reconstructing, isSelfContained, cues.contains(where: { $0.startTime <= playhead }) {
+            return cues
+        }
         let stale = cues.allSatisfy { $0.startTime < playhead - staleEpsilonSeconds }
         guard stale else { return cues }
         heldCues = cues
