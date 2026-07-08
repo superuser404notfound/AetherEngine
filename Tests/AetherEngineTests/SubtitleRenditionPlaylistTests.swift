@@ -153,3 +153,49 @@ struct SubtitleRenditionPlaylistTests {
         #expect(!m.contains("SUBTITLES=\"subs\""))
     }
 }
+
+/// P8.1-on-DV-panel shape: hvc1 primary + DV via SUPPLEMENTAL + PQ range + one subtitle rendition.
+private final class ReducedMasterMockProvider: HLSSegmentProvider, @unchecked Sendable {
+    func initSegment() -> Data? { Data([0x00]) }
+    func mediaSegment(at index: Int) -> Data? { Data([0x00]) }
+    var segmentCount: Int { 1 }
+    func segmentDuration(at index: Int) -> Double { 4.0 }
+    var playlistType: HLSPlaylistType { .vod }
+    var masterCodecs: String? { "hvc1.2.4.L150,ec-3" }
+    var masterSupplementalCodecs: String? { "dvh1.08.06/db1p" }
+    var masterVideoRange: HLSVideoRange? { .pq }
+    var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] {
+        [(ordinal: 0, language: "en", name: "English", isForced: false)]
+    }
+}
+
+struct ReducedMasterPlaylistTests {
+
+    @Test("reducedSDR drops SUPPLEMENTAL, forces VIDEO-RANGE=SDR, keeps SUBTITLES + codecs")
+    func reducedSDR() {
+        let sdr = HLSLocalServer.buildMasterPlaylistText(provider: ReducedMasterMockProvider(), variant: .reducedSDR)
+        #expect(sdr.contains("VIDEO-RANGE=SDR"))
+        #expect(!sdr.contains("VIDEO-RANGE=PQ"))
+        #expect(!sdr.contains("SUPPLEMENTAL-CODECS"))
+        #expect(sdr.contains("CODECS=\"hvc1.2.4.L150,ec-3\""))
+        #expect(sdr.contains("#EXT-X-MEDIA:TYPE=SUBTITLES"))
+        #expect(sdr.contains("SUBTITLES=\"subs\""))
+        #expect(sdr.contains("media.m3u8"))
+    }
+
+    @Test("reducedHDR drops SUPPLEMENTAL, keeps the source range, keeps SUBTITLES")
+    func reducedHDR() {
+        let hdr = HLSLocalServer.buildMasterPlaylistText(provider: ReducedMasterMockProvider(), variant: .reducedHDR)
+        #expect(hdr.contains("VIDEO-RANGE=PQ"))
+        #expect(!hdr.contains("VIDEO-RANGE=SDR"))
+        #expect(!hdr.contains("SUPPLEMENTAL-CODECS"))
+        #expect(hdr.contains("SUBTITLES=\"subs\""))
+    }
+
+    @Test("primary keeps SUPPLEMENTAL and the source range")
+    func primaryUnchanged() {
+        let primary = HLSLocalServer.buildMasterPlaylistText(provider: ReducedMasterMockProvider(), variant: .primary)
+        #expect(primary.contains("SUPPLEMENTAL-CODECS=\"dvh1.08.06/db1p\""))
+        #expect(primary.contains("VIDEO-RANGE=PQ"))
+    }
+}

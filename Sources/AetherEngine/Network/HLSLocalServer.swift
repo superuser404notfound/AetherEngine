@@ -129,6 +129,17 @@ enum HLSVideoRange: String {
     case hlg = "HLG"
 }
 
+/// A served master's dynamic-range/DV form (#98 Stage 1.5). `.primary` is the DV/HDR master start()
+/// chose. The reduced forms drop SUPPLEMENTAL-CODECS (DV signaling) but keep the SUBTITLES renditions:
+/// `.reducedSDR` also forces VIDEO-RANGE=SDR (for an SDR external display that rejected the PQ/DV
+/// master), `.reducedHDR` keeps the source range (for the #35 cold-DV-start gate on an HDR TV, where
+/// forcing SDR would wash out HDR).
+enum MasterPlaylistVariant: Equatable {
+    case primary
+    case reducedHDR
+    case reducedSDR
+}
+
 // MARK: - Local HLS Server
 
 /// Loopback HTTP/BSD-socket server feeding HLS-fMP4 to AVPlayer. Uses Darwin BSD sockets, not NWConnection: NWConnection's send path retained segment bytes across contentProcessed causing ~3 MB/sec RSS growth on 4K HEVC (AetherEngine#4). BSD + mmap-backed Data gives kernel-to-kernel copy with zero heap allocation per segment.
@@ -160,6 +171,24 @@ final class HLSLocalServer: @unchecked Sendable {
         defer { stateLock.unlock() }
         guard port > 0 else { return nil }
         return URL(string: "http://127.0.0.1:\(port)/media.m3u8")
+    }
+
+    /// SDR-signalled reduced master (#98 Stage 1.5): VIDEO-RANGE=SDR, no SUPPLEMENTAL-CODECS, subtitle
+    /// renditions kept, for the reactive fallback when an SDR external display rejects the PQ/DV master.
+    var sdrMasterPlaylistURL: URL? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard port > 0, provider?.masterCodecs != nil else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)/master_sdr.m3u8")
+    }
+
+    /// HDR-preserving reduced master (#98 Stage 1.5): source VIDEO-RANGE kept, no SUPPLEMENTAL-CODECS
+    /// (DV dropped), subtitle renditions kept, for the #35 cold-DV-start gate on an HDR TV.
+    var reducedHDRMasterPlaylistURL: URL? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard port > 0, provider?.masterCodecs != nil else { return nil }
+        return URL(string: "http://127.0.0.1:\(port)/master_hdr.m3u8")
     }
 
     /// The device's active LAN IPv4 address for the AirPlay LAN-host swap (#86), or nil (caller keeps
@@ -243,6 +272,7 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     private var loggedMasterPlaylist = false
+    private var loggedReducedMasterPlaylist = false
     private var loggedMediaPlaylist = false
     private var loggedRequestHeaders = false
     private var mediaPlaylistBuildCount = 0  // periodic re-log of live playlist head/tail
@@ -352,6 +382,7 @@ final class HLSLocalServer: @unchecked Sendable {
         listenFd = -1
         port = 0
         loggedMasterPlaylist = false
+        loggedReducedMasterPlaylist = false
         loggedMediaPlaylist = false
         mediaPlaylistBuildCount = 0
         let clients = clientFds
@@ -562,6 +593,26 @@ final class HLSLocalServer: @unchecked Sendable {
                 stateLock.unlock()
                 if firstTime {
                     EngineLog.emit("[HLSLocalServer] master.m3u8 body:\n\(body)",
+                                   category: .hlsServer)
+                }
+                return send200(fd: fd, path: normalizedPath,
+                               data: Data(body.utf8),
+                               contentType: "application/vnd.apple.mpegurl")
+            }
+            return send404(fd: fd, path: normalizedPath, reason: "no masterCodecs")
+
+        case "/master_sdr.m3u8", "/master_hdr.m3u8":
+            // #98 Stage 1.5: reduced masters (DV signaling dropped, subtitle renditions kept) served as
+            // the reactive display-rejection fallback so subtitles survive on an SDR external display.
+            if provider?.masterCodecs != nil {
+                let variant: MasterPlaylistVariant = (normalizedPath == "/master_sdr.m3u8") ? .reducedSDR : .reducedHDR
+                let body = buildReducedMasterPlaylist(variant)
+                stateLock.lock()
+                let firstTime = !loggedReducedMasterPlaylist
+                if firstTime { loggedReducedMasterPlaylist = true }
+                stateLock.unlock()
+                if firstTime {
+                    EngineLog.emit("[HLSLocalServer] \(normalizedPath) body:\n\(body)",
                                    category: .hlsServer)
                 }
                 return send200(fd: fd, path: normalizedPath,
@@ -951,6 +1002,13 @@ final class HLSLocalServer: @unchecked Sendable {
                                              subResourceBaseURL: subResourceBaseURL)
     }
 
+    private func buildReducedMasterPlaylist(_ variant: MasterPlaylistVariant) -> String {
+        guard let provider = provider else { return "#EXTM3U\n" }
+        return Self.buildMasterPlaylistText(provider: provider,
+                                             subResourceBaseURL: subResourceBaseURL,
+                                             variant: variant)
+    }
+
     private func buildMediaPlaylist() -> String {
         guard let provider = provider else { return "#EXTM3U\n" }
         return Self.buildMediaPlaylistText(provider: provider,
@@ -971,7 +1029,8 @@ final class HLSLocalServer: @unchecked Sendable {
 
     /// Pure playlist builders callable without a live server instance. subResourceBaseURL emits absolute URIs for AVAssetResourceLoader; nil emits relative URIs for the HTTP workflow.
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
-                                         subResourceBaseURL: URL? = nil) -> String {
+                                         subResourceBaseURL: URL? = nil,
+                                         variant: MasterPlaylistVariant = .primary) -> String {
         guard let codecs = provider.masterCodecs else {
             return "#EXTM3U\n"
         }
@@ -988,7 +1047,9 @@ final class HLSLocalServer: @unchecked Sendable {
             streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
         }
         streamInfAttrs.append("CODECS=\"\(codecs)\"")
-        if let supplemental = provider.masterSupplementalCodecs {
+        // #98 Stage 1.5: a reduced master drops the DV SUPPLEMENTAL-CODECS so the variant reads as
+        // plain HDR/SDR HEVC; the segment sample entries still drive decoding.
+        if variant == .primary, let supplemental = provider.masterSupplementalCodecs {
             streamInfAttrs.append("SUPPLEMENTAL-CODECS=\"\(supplemental)\"")
         }
         if let resolution = provider.masterResolution {
@@ -997,8 +1058,16 @@ final class HLSLocalServer: @unchecked Sendable {
         if let frameRate = provider.masterFrameRate {
             streamInfAttrs.append("FRAME-RATE=\(String(format: "%.3f", frameRate))")
         }
-        if let range = provider.masterVideoRange {
-            streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
+        switch variant {
+        case .reducedSDR:
+            // An SDR external display rejects a PQ/DV master (-11868); advertising the same variant as
+            // SDR (segments still tone-map via their own colr atoms) lets it through while the SUBTITLES
+            // group below survives, unlike the bare media playlist.
+            streamInfAttrs.append("VIDEO-RANGE=SDR")
+        case .primary, .reducedHDR:
+            if let range = provider.masterVideoRange {
+                streamInfAttrs.append("VIDEO-RANGE=\(range.rawValue)")
+            }
         }
         if let hdcp = provider.masterHDCPLevel {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")

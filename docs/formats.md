@@ -120,6 +120,8 @@ Host-rendered subtitle overlays are invisible in Picture-in-Picture, AirPlay, an
 
 **Routing scope.** A `SUBTITLES` rendition can only live in a master playlist, so native subtitles ride the master-routing rules: SDR sources on any panel, HDR / DV sources on HDR-ready panels. HDR-on-SDR-panel and DV Profile 5 on non-DV panels stay media-direct (no master, hence no native subtitles there); the host overlay still covers fullscreen. Bitmap subtitles (PGS / DVB / DVD) cannot become text renditions and stay host-rendered only. Live sources are out of scope.
 
+**Reduced-master fallback (#98).** When a display rejects the served master (`-11868` AVErrorNoCompatibleAlternatesForExternalDisplay, or `-11848` for an SDR-parked panel), the engine reloads a reduced master (same variant with `SUPPLEMENTAL-CODECS` dropped and the `EXT-X-MEDIA:TYPE=SUBTITLES` group kept) before the bare media playlist, so subtitle renditions survive where the platform accepts it. The reactive path forces `VIDEO-RANGE=SDR` for an SDR external display; the cold-DV-start readiness gate keeps the source range (HDR10) on an HDR TV. The chain is bounded (`master -> reduced -> media`, single pass). DV Profile 5 (IPT, `dvh1` mandatory) may still fall through to the media playlist and play fullscreen without external subtitles.
+
 **Rich ASS styling.** With `LoadOptions.preserveASSMarkup` the tap keeps raw ASS event lines so the host overlay renders full styling (positions, colours); the WebVTT renditions strip the markup at serve time, so PiP shows plain text in the system caption style.
 
 **Timing.** Served cues are on the AVPlayer clock axis, and producer restarts are timeline-exact (see [architecture](architecture.md)), so cues stay in sync with the picture across seeks and restarts.

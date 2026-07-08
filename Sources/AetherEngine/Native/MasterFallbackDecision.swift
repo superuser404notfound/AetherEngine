@@ -8,9 +8,10 @@ struct DisplayRejection: Sendable, Equatable {
     let message: String
 }
 
-/// Pure master to media fallback decision (#98). Kept separate and pure so the gate is testable
-/// offline, matching the style of `ItemDeathReviveGate`. Stage 1 of the master-always initiative:
-/// react to an actual master rejection instead of predicting per-route display capability.
+/// Pure display-rejection fallback decision (#98). Kept separate and pure so the state machine is
+/// testable offline, matching the style of `ItemDeathReviveGate`. Stage 1.5 of the master-always
+/// initiative: on an actual master rejection, reload a reduced master that keeps the subtitle
+/// renditions before the bare media playlist, instead of dropping straight to the subtitle-less media.
 enum MasterFallbackDecision {
 
     /// The two AVFoundationErrorDomain codes that mean "this display cannot present the master".
@@ -18,11 +19,31 @@ enum MasterFallbackDecision {
         code == -11868 || code == -11848
     }
 
-    /// Fall back to the media playlist only when a display-rejection failed the item, the engine was
-    /// serving the master, and this session has not already fallen back (single-shot, no loop).
-    static func shouldFallBackToMediaPlaylist(
-        errorCode: Int, servingMasterPlaylist: Bool, alreadyFellBack: Bool
-    ) -> Bool {
-        isDisplayRejectionCode(errorCode) && servingMasterPlaylist && !alreadyFellBack
+    /// Which playlist is being served now, for the display-rejection fallback chain.
+    enum FallbackStage: Equatable {
+        case primaryMaster   // the DV/HDR master start() chose
+        case reducedMaster   // a reduced master (DV signaling dropped, subtitle renditions kept)
+        case media           // the bare media playlist (no subtitle renditions)
+    }
+
+    /// What to reload next, or `.none` to surface the failure. Bounded chain
+    /// primaryMaster -> reducedMaster -> media -> stop: single pass, so a repeatedly rejected reload
+    /// cannot loop. `.primaryMaster` skips straight to `.media` only when no reduced master exists
+    /// (no master metadata at all); every real HDR/DV master has a reduced variant.
+    enum FallbackTarget: Equatable {
+        case reducedMaster
+        case media
+        case none
+    }
+
+    static func nextFallbackTarget(
+        errorCode: Int, currentStage: FallbackStage, reducedMasterAvailable: Bool
+    ) -> FallbackTarget {
+        guard isDisplayRejectionCode(errorCode) else { return .none }
+        switch currentStage {
+        case .primaryMaster: return reducedMasterAvailable ? .reducedMaster : .media
+        case .reducedMaster: return .media
+        case .media:         return .none
+        }
     }
 }

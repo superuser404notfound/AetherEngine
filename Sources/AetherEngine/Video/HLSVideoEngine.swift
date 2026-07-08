@@ -1278,6 +1278,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// reloads the same master with a fresh asset while the DV/HDCP link warms. Nil before start.
     public var masterPlaylistURL: URL? { server?.playlistURL }
 
+    /// SDR-signalled reduced master URL (#98 Stage 1.5), reactive fallback for an SDR external display.
+    public var sdrMasterPlaylistURL: URL? { server?.sdrMasterPlaylistURL }
+
+    /// HDR-preserving reduced master URL (#98 Stage 1.5), subtitle-preserving fallback for the #35 gate.
+    public var reducedHDRMasterPlaylistURL: URL? { server?.reducedHDRMasterPlaylistURL }
+
     /// Flip the serving flag after the engine has reloaded the media playlist on a display rejection.
     func markServingMediaAfterFallback() { servingMasterPlaylist = false }
 

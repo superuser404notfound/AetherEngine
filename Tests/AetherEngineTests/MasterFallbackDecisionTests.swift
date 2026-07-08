@@ -12,21 +12,35 @@ struct MasterFallbackDecisionTests {
         #expect(!MasterFallbackDecision.isDisplayRejectionCode(0))
     }
 
-    @Test("Fall back only for a rejection code while serving the master and not yet fallen back")
-    func fallbackGate() {
-        // Eligible: rejection code, serving master, first time.
-        #expect(MasterFallbackDecision.shouldFallBackToMediaPlaylist(
-            errorCode: -11868, servingMasterPlaylist: true, alreadyFellBack: false))
-        #expect(MasterFallbackDecision.shouldFallBackToMediaPlaylist(
-            errorCode: -11848, servingMasterPlaylist: true, alreadyFellBack: false))
-        // Not a rejection code.
-        #expect(!MasterFallbackDecision.shouldFallBackToMediaPlaylist(
-            errorCode: -12889, servingMasterPlaylist: true, alreadyFellBack: false))
-        // Already serving media (not the master).
-        #expect(!MasterFallbackDecision.shouldFallBackToMediaPlaylist(
-            errorCode: -11868, servingMasterPlaylist: false, alreadyFellBack: false))
-        // Already fell back once this session (no loop).
-        #expect(!MasterFallbackDecision.shouldFallBackToMediaPlaylist(
-            errorCode: -11868, servingMasterPlaylist: true, alreadyFellBack: true))
+    @Test("Non-rejection codes never advance the chain")
+    func nonRejectionStops() {
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -12889, currentStage: .primaryMaster, reducedMasterAvailable: true) == .none)
+    }
+
+    @Test("Primary master rejection goes to the reduced master when one is available")
+    func primaryToReduced() {
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -11868, currentStage: .primaryMaster, reducedMasterAvailable: true) == .reducedMaster)
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -11848, currentStage: .primaryMaster, reducedMasterAvailable: true) == .reducedMaster)
+    }
+
+    @Test("Primary master rejection goes straight to media when no reduced master exists")
+    func primaryToMediaWithoutReduced() {
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -11868, currentStage: .primaryMaster, reducedMasterAvailable: false) == .media)
+    }
+
+    @Test("Reduced master rejection goes to the bare media playlist")
+    func reducedToMedia() {
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -11868, currentStage: .reducedMaster, reducedMasterAvailable: true) == .media)
+    }
+
+    @Test("Media rejection stops the chain (single pass, no loop)")
+    func mediaStops() {
+        #expect(MasterFallbackDecision.nextFallbackTarget(
+            errorCode: -11868, currentStage: .media, reducedMasterAvailable: true) == .none)
     }
 }
