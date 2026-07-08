@@ -1427,12 +1427,14 @@ extension AetherEngine {
         return matching[rank]
     }
 
-    /// #15: select the native track matching the currently-active subtitle so AVKit renders it inside
-    /// the PiP window; nil deselects when PiP ends. Maps the active subtitle's source stream (embedded)
-    /// or synthetic id (load-declared external, #88) to the native ordinal. No-op (no PiP subtitle) when
-    /// the active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-708 (608 now rides a
-    /// native rendition, #98), or a track added after load (dynamic external / one-shot sidecar).
-    public func setNativeSubtitleForPiP(_ active: Bool) {
+    /// #15 / Sodalite#34: select the native track matching the currently-active subtitle so AVKit renders it
+    /// itself whenever the video leaves the host's own view hierarchy (a PiP window, an AirPlay receiver, or a
+    /// wired external display), where the host's on-frame overlay cannot draw; `active == false` deselects when
+    /// the video returns to fullscreen inside the app. Maps the active subtitle's source stream (embedded) or
+    /// synthetic id (load-declared external, #88) to the native ordinal. No-op (no native subtitle) when the
+    /// active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-708 (608 now rides a native
+    /// rendition, #98), or a track added after load (dynamic external / one-shot sidecar).
+    public func setNativeSubtitleRendering(_ active: Bool) {
         guard active, let activeIdx = activeSubtitleTrackIndex,
               let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: activeIdx, in: nativeSubtitleTrackTable)
         else {
@@ -1450,8 +1452,9 @@ extension AetherEngine {
     /// await its options (available around readyToPlay), then re-assert `select(nil)` past AVKit's ready-time
     /// auto-select. A manual deselect sticks (device-confirmed: the PiP round-trip workaround, which ends in
     /// exactly this deselect, cleared the subtitle), so the loop only has to win the timing race, not fight a
-    /// forced re-selection. Bails the instant the host requests a native track (`setNativeSubtitleForPiP` /
-    /// PiP or AirPlay entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
+    /// forced re-selection. Bails the instant the host requests a native track (`setNativeSubtitleRendering` /
+    /// PiP, AirPlay, or external-display entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from
+    /// then on. A no-op
     /// when native subtitles are not prepared (no legible group, e.g. tvOS overlay-only).
     func forceNativeLegibleDeselectedUntilHostSelects() {
         guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
