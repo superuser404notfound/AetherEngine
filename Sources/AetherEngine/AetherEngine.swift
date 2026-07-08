@@ -177,6 +177,11 @@ public final class AetherEngine: ObservableObject {
     /// path (no usable counter); this nominal value fills that gap for the on-screen readout.
     @Published public internal(set) var sourceVideoFrameRate: Double? = nil
 
+    /// Declared source video bitrate in bits/second (0 when the container declares none). From the video
+    /// stream's `codecpar.bit_rate`, or the Matroska `BPS` statistics tag when that is 0 (mkvmerge). Static
+    /// container info for Stats-for-Nerds; the live per-second rate lives in `LiveTelemetry`.
+    @Published public internal(set) var sourceVideoBitrate: Int64 = 0
+
     // MARK: - Disc titles / chapters (#67)
 
     /// Selectable titles on the loaded disc image (Blu-ray playlists / DVD titles), longest first so
@@ -1291,6 +1296,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         sourceVideoFrameRate = nil
+        sourceVideoBitrate = 0
         sourceVideoWidth = 0
         sourceVideoHeight = 0
 
@@ -1316,6 +1322,7 @@ public final class AetherEngine: ObservableObject {
         var effectiveFormat: VideoFormat = .sdr
         var detectedDVProfileNum: Int? = nil
         var detectedRate: Double? = nil
+        var detectedVideoBitrate: Int64 = 0
         var detectedDVProfile: Bool = false
         var detectedCodecID: AVCodecID = AV_CODEC_ID_NONE
         var detectedFieldOrder: AVFieldOrder = AV_FIELD_UNKNOWN
@@ -1366,6 +1373,7 @@ public final class AetherEngine: ObservableObject {
                 detectedFieldOrder = stream.pointee.codecpar.pointee.field_order
                 sourceVideoWidth = stream.pointee.codecpar.pointee.width
                 sourceVideoHeight = stream.pointee.codecpar.pointee.height
+                detectedVideoBitrate = probe.declaredBitrate(stream: stream)
                 lastDetectedVideoCodec = detectedCodecID
             }
             probedAudioTracks = probe.audioTrackInfos()
@@ -1407,6 +1415,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = detectedFormat
         sourceDVProfile = detectedDVProfileNum
         sourceVideoFrameRate = detectedRate
+        sourceVideoBitrate = detectedVideoBitrate
         audioTracks = probedAudioTracks
         subtitleTracks = probedSubtitleTracks
         // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
@@ -2080,6 +2089,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         sourceVideoFrameRate = nil
+        sourceVideoBitrate = 0
         sourceVideoWidth = 0
         sourceVideoHeight = 0
         pendingExternalMetadata = []

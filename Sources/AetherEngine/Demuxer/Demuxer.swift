@@ -647,7 +647,7 @@ public final class Demuxer: @unchecked Sendable {
         let isHearingImpaired = (disposition & AV_DISPOSITION_HEARING_IMPAIRED) != 0
         let isCommentary = (disposition & AV_DISPOSITION_COMMENT) != 0
         let channels = Int(codecpar.pointee.ch_layout.nb_channels)
-        let bitrate = Int64(codecpar.pointee.bit_rate)
+        let bitrate = declaredBitrate(stream: stream)
 
         // EAC3 profile 30 = JOC (Dolby Atmos on streaming). Lets UI label "Atmos".
         let isAtmos = (codecpar.pointee.codec_id == AV_CODEC_ID_EAC3)
@@ -713,10 +713,31 @@ public final class Demuxer: @unchecked Sendable {
         return fonts
     }
 
-    private func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
+    private func metadataValue(_ dict: OpaquePointer?, key: String, flags: Int32 = 0) -> String? {
         guard let dict = dict else { return nil }
-        guard let entry = av_dict_get(dict, key, nil, 0) else { return nil }
+        guard let entry = av_dict_get(dict, key, nil, flags) else { return nil }
         return String(cString: entry.pointee.value)
+    }
+
+    /// Declared per-stream bitrate in bits/second. Prefers `codecpar.bit_rate` (populated for MP4/TS);
+    /// falls back to the Matroska per-track `BPS` statistics tag that mkvmerge writes (as `BPS` or a
+    /// language-suffixed `BPS-eng`), because Matroska leaves `codecpar.bit_rate` at 0. Returns 0 when the
+    /// container declares neither, matching the "unavailable" contract of `TrackInfo.bitrate`.
+    func declaredBitrate(stream: UnsafeMutablePointer<AVStream>) -> Int64 {
+        let codecparRate = Int64(stream.pointee.codecpar.pointee.bit_rate)
+        // AV_DICT_IGNORE_SUFFIX matches `BPS-eng`/`BPS-deu` when querying `BPS`.
+        let bpsTag = metadataValue(stream.pointee.metadata, key: "BPS", flags: Int32(AV_DICT_IGNORE_SUFFIX))
+        return Self.resolveBitrate(codecparBitrate: codecparRate, bpsTag: bpsTag)
+    }
+
+    /// Pure bitrate resolution: a positive declared `codecpar.bit_rate` wins; otherwise a positive parsed
+    /// `BPS` tag; otherwise 0. Factored out so the codecpar-vs-tag precedence is unit-testable without a fixture.
+    static func resolveBitrate(codecparBitrate: Int64, bpsTag: String?) -> Int64 {
+        if codecparBitrate > 0 { return codecparBitrate }
+        if let bpsTag, let parsed = Int64(bpsTag.trimmingCharacters(in: .whitespaces)), parsed > 0 {
+            return parsed
+        }
+        return 0
     }
 
     func stream(at index: Int32) -> UnsafeMutablePointer<AVStream>? {
