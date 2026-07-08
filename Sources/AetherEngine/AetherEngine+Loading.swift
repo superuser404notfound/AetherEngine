@@ -557,11 +557,18 @@ extension AetherEngine {
                 let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift
                     ?? self.playlistShiftSeconds
                 self.clock.sourceTime = value + shift
-                // bufferedPosition = end of AVPlayer's contiguous loadedTimeRanges, folded the same way. Clamp so
-                // it never trails the rendered frame (#54). Drawn against the 0-based duration, so map onto the
-                // display axis to keep the buffer bar aligned with currentTime (0 off disc). AE#105.
-                self.clock.bufferedPosition = PresentationAxis.display(
-                    sourcePTS: max(value + shift, host.bufferedEnd + shift), origin: self.sourcePresentationOrigin)
+                // bufferedPosition = the disk SegmentCache read-ahead frontier (origin -> disk), which is
+                // what the Network Buffer setting controls, expressed on the display axis as the playhead
+                // plus the seconds of contiguously cached-ahead content. Replaces AVPlayer's shallow ~4 s
+                // loadedTimeRanges end (pinned by preferredForwardBufferDuration), which did not move with
+                // the setting. readAhead >= 0 keeps the #54 contract that bufferedPosition never trails the
+                // rendered frame. Drawn against the 0-based duration, so map onto the display axis to keep
+                // the buffer bar aligned with currentTime (0 off disc). AE#105. See docs issue #33 follow-up.
+                let renderedDisplay = PresentationAxis.display(
+                    sourcePTS: value + shift, origin: self.sourcePresentationOrigin)
+                let readAhead = self.nativeVideoSession?
+                    .contiguousForwardReadAheadSeconds(playlistSeconds: value) ?? 0
+                self.clock.bufferedPosition = renderedDisplay + max(0, readAhead)
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)

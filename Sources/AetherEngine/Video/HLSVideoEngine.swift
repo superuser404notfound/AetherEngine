@@ -1339,6 +1339,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var segmentCacheTotalBytes: Int { subsystemSnapshot().cache?.totalBytes ?? 0 }
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
+
+    /// Seconds of contiguously cached content ahead of the playhead on the media-playlist axis.
+    /// Reflects the disk SegmentCache read-ahead (what the Network Buffer setting controls), NOT
+    /// AVPlayer's shallow forward buffer. Returns 0 when nothing is cached ahead or the plan is empty.
+    /// segmentIndexForPlaylistTime and the plan read each take restartLock briefly and sequentially
+    /// (no nesting); a plan rebuilt between them at worst yields one transiently wrong tick, acceptable
+    /// for a visual bar.
+    func contiguousForwardReadAheadSeconds(playlistSeconds: Double) -> Double {
+        guard let cache = subsystemSnapshot().cache else { return 0 }
+        let targetIdx = segmentIndexForPlaylistTime(playlistSeconds)
+        let frontier = cache.contiguousForwardFrontier(from: targetIdx)
+        guard frontier >= targetIdx else { return 0 }
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        guard frontier >= 0, frontier < segmentPlan.count else { return 0 }
+        let seg = segmentPlan[frontier]
+        return max(0, (seg.startSeconds + seg.durationSeconds) - playlistSeconds)
+    }
     var producerRestartCount: Int { subsystemSnapshot().producer?.restartCount ?? 0 }
     var muxedBytesLifetime: Int { subsystemSnapshot().producer?.muxerLifetimeFragmentBytes ?? 0 }
     var serverLifetimeBytesSent: Int { subsystemSnapshot().server?.lifetimeBytesSent ?? 0 }
