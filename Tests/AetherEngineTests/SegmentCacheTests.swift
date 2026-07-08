@@ -128,4 +128,18 @@ struct SegmentCacheTests {
         #expect(c.highestStoredIndex == -1)
         #expect(c.peek(index: 0) == nil)
     }
+
+    @Test("contiguousForwardFrontier stops at the first gap ahead of target")
+    func contiguousForwardFrontierStopsAtGap() {
+        let c = SegmentCache(forwardWindow: 200, backwardWindow: 20)
+        defer { c.close() }
+        // Resident: 5,6,7,8 then a hole at 9, then 10.
+        for i in [5, 6, 7, 8, 10] { c.declareTarget(i); c.store(index: i, data: makeData(10)) }
+        c.declareTarget(5)
+        #expect(c.contiguousForwardFrontier(from: 5) == 8)   // stops before the hole at 9
+        #expect(c.contiguousForwardFrontier(from: 7) == 8)
+        #expect(c.contiguousForwardFrontier(from: 8) == 8)
+        #expect(c.contiguousForwardFrontier(from: 9) == 8)   // 9 absent -> targetIdx - 1
+        #expect(c.contiguousForwardFrontier(from: 99) == 98) // fully absent -> targetIdx - 1
+    }
 }

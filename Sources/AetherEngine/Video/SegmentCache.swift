@@ -340,6 +340,17 @@ final class SegmentCache: @unchecked Sendable {
         return _highestStoredIndex
     }
 
+    /// Largest K such that every index in [targetIdx ... K] is resident, walking forward from the
+    /// playhead until the first gap. Returns targetIdx - 1 when targetIdx itself is absent (nothing
+    /// cached ahead). Used to express the disk read-ahead frontier as a segment index. Thread-safe.
+    func contiguousForwardFrontier(from targetIdx: Int) -> Int {
+        condition.lock()
+        defer { condition.unlock() }
+        var k = targetIdx
+        while entries[k] != nil { k += 1 }
+        return k - 1
+    }
+
     /// Reset before triggering a restart; previous producer's highWater would keep producerPassedAndPruned
     /// hot on every fetch, cascading a single restart into a per-segment storm.
     func resetHighWaterForRestart() {
