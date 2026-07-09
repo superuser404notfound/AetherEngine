@@ -911,6 +911,37 @@ public final class Demuxer: @unchecked Sendable {
         return ret >= 0 && !capped
     }
 
+    /// #112 round 8: single-probe byte-position seek for an index-less container. On a remote MPEG-TS with no
+    /// index, a timestamp `avformat_seek_file` binary-searches via read_timestamp: dozens of remote range reads,
+    /// each able to ride a starved connection's full timeout while the video pipeline competes for the origin
+    /// (device: the subtitle side reader sat in one seek for minutes and every later re-arm queued behind it).
+    /// This fallback costs exactly one landing read: byte target = size x (target / duration), biased early so an
+    /// over-estimate cannot land past the playhead (the read loop only walks forward; the reconstruction gate
+    /// absorbs an early landing). Returns false without touching the position when size or duration is unknown.
+    @discardableResult
+    func seekByteEstimate(to seconds: Double, knownDuration: Double) -> Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext,
+              let size = (avioProvider as? AVIOReader)?.resolvedFileSize,
+              let byteTarget = Self.byteEstimateTarget(fileSize: size, duration: knownDuration, target: seconds)
+        else { return false }
+        let ret = avformat_seek_file(ctx, -1, Int64.min, byteTarget, Int64.max, AVSEEK_FLAG_BYTE)
+        avformat_flush(ctx)
+        lastReadClipIdx = -1  // AE#105: post-seek reads may land mid-clip; require a fresh clean crossing
+        return ret >= 0
+    }
+
+    /// #112 round 8: byte offset for `seekByteEstimate`. `earlyBias` shifts the landing a fraction of the file
+    /// earlier so bitrate variance around the target biases toward landing BEFORE the playhead, never past it.
+    nonisolated static func byteEstimateTarget(
+        fileSize: Int64, duration: Double, target: Double, earlyBias: Double = 0.05
+    ) -> Int64? {
+        guard fileSize > 0, duration > 0, target >= 0 else { return nil }
+        let fraction = min(1.0, max(0.0, target / duration - earlyBias))
+        return Int64(Double(fileSize) * fraction)
+    }
+
     /// Arm a wall-clock read deadline on the AVIO reader so a stalled HTTP read
     /// (seek or readPacket) aborts instead of parking. Used by FrameExtractor still
     /// extraction so a disposable scrub thumbnail bounds its decode and never freezes

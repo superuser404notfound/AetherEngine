@@ -459,6 +459,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         set { isFullyClosedLock.withLock { $0 = newValue } }
     }
 
+    /// #112 round 8: the resolved total byte size (Content-Length / Content-Range), nil until known.
+    /// Read under winCond like every other fileSize access. Used by `Demuxer.seekByteEstimate` for the
+    /// single-probe byte-position fallback when a timestamp seek on an index-less container times out.
+    var resolvedFileSize: Int64? {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return fileSize > 0 ? fileSize : nil
+    }
+
     /// Wall-clock deadline for reads. Armed by `beginReadDeadline` to abort
     /// a `avformat_seek_file` that degrades into a linear scan when MKV Cues
     /// index is missing or past EOF (tens of minutes on remote sources).

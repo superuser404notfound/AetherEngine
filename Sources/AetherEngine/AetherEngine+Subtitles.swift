@@ -3,6 +3,7 @@ import AVFoundation
 import Libavformat
 import Libavcodec
 import Libavutil
+import os
 
 /// Which subtitle output path a reader / apply / cancel call targets.
 /// `.primary` maps to the original single-track storage and behavior;
@@ -234,10 +235,30 @@ extension AetherEngine {
         // The side demuxer serializes reads internally, but the old loop seeking / reading after the new one
         // re-seeks would mis-order cues, so we wait for it to exit rather than markClosed it (markClosed is
         // irreversible and would kill a demuxer we want to reuse) (#76 part 2).
+        //
+        // #112 round 8: the drain is BOUNDED. A predecessor wedged inside a blocking demuxer call (a timestamp
+        // seek binary-searching an index-less remote MPEG-TS, dozens of starved range reads) never observes the
+        // cancel, and the old unbounded await made every later re-arm queue behind it forever: the producer
+        // restart re-anchor fired and logged, and no reader ever started again (ijuniorfu round 8, subCues=0 for
+        // the rest of the session). On timeout, markClose the wedged demuxer (unblocks the native read at the
+        // AVIO boundary) and clear the slot so this reader opens fresh; the wedged task's exit handler sees the
+        // slot cleared and closes its demuxer. Reuse is sacrificed only on this pathological path.
         let prior: Task<Void, Never>? = (channel == .primary) ? embeddedSubtitleTask : secondaryEmbeddedSubtitleTask
         let task = Task.detached(priority: .userInitiated) { [weak self] () -> Void in
             prior?.cancel()
-            await prior?.value
+            if let prior, await Self.awaitDrain(prior, timeoutNanos: Self.subtitleDrainBudgetNanos) == false {
+                EngineLog.emit(
+                    "[AetherEngine] embedded subtitle predecessor drain timed out; abandoning its side demuxer",
+                    category: .engine)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    if let wedged = self.subtitleSideDemuxer(for: channel) {
+                        wedged.markClosed()
+                        self.setSubtitleSideDemuxer(nil, for: channel)
+                        self.setSubtitleSideDemuxerKey(nil, for: channel)
+                    }
+                }
+            }
             if Task.isCancelled { reader?.close(); return }
             // #93 residual: don't open/seek a competing origin connection while a producer restart's
             // reopen is queuing at the origin; defer until it settles (the pump tap covers the gap).
@@ -267,6 +288,41 @@ extension AetherEngine {
     nonisolated static func effectiveSubtitleStart(startAt: Double, playhead: Double?, recoveryPending: Bool) -> Double {
         guard let playhead, !recoveryPending else { return startAt }
         return max(startAt, playhead)
+    }
+
+    /// #112 round 8: bound on the predecessor drain in `startEmbeddedSubtitleTask`. A healthy reader observes
+    /// its cancel within one pacing tick (~150 ms); only a reader wedged inside a blocking native call gets here.
+    nonisolated static let subtitleDrainBudgetNanos: UInt64 = 5_000_000_000
+
+    /// #112 round 8: wall-clock budget for one side-reader positioning seek (prewarm / lead-in / reconstruct).
+    /// A timestamp seek on an index-less remote MPEG-TS binary-searches via read_timestamp and can otherwise sit
+    /// in starved range reads for minutes while the video pipeline owns the origin.
+    nonisolated static let sideReaderSeekBudgetSeconds: TimeInterval = 8.0
+
+    /// #112 round 8: await `prior`'s completion for at most `timeoutNanos`. Returns true when it drained, false
+    /// on timeout. `await prior.value` ignores cancellation, so the race is built from two unstructured tasks
+    /// resuming one continuation; the loser's resume is dropped by the flag. The observer task idles until the
+    /// predecessor eventually unblocks (markClosed makes its pending AVIO read return), then completes.
+    nonisolated static func awaitDrain(_ prior: Task<Void, Never>, timeoutNanos: UInt64) async -> Bool {
+        await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            let resumed = OSAllocatedUnfairLock(initialState: false)
+            @Sendable func resumeOnce(_ drained: Bool) {
+                let first = resumed.withLock { done -> Bool in
+                    if done { return false }
+                    done = true
+                    return true
+                }
+                if first { cont.resume(returning: drained) }
+            }
+            Task {
+                await prior.value
+                resumeOnce(true)
+            }
+            Task {
+                try? await Task.sleep(nanoseconds: timeoutNanos)
+                resumeOnce(false)
+            }
+        }
     }
 
     /// #112: how far back (seconds) the reader seeks before the playhead for a bitmap subtitle on an indexed
@@ -420,23 +476,44 @@ extension AetherEngine {
             // Skip it for disc sources (#76): a concat MPEG-TS / VOB has no EOF cue index, so the seek buys nothing and a cold mid-disc range read is expensive on a remote ISO.
             let duration = demuxer.duration
             if duration > 0, !demuxer.isDiscSource {
-                demuxer.seek(to: duration * 0.5)
+                // #112 round 8: bounded; a missing/truncated cue index degrades this optional prewarm into a
+                // remote linear scan (same class as HLSVideoEngine's cuePrewarmTimeout). On abort just proceed.
+                demuxer.seekBounded(to: duration * 0.5, timeout: Self.sideReaderSeekBudgetSeconds)
             }
         }
 
         // Re-sample the live playhead after the slow open + prewarm: startAt was captured pre-open, and unpaused playback may have advanced several seconds, causing the first cues to arrive behind the playhead (tens-of-seconds delay in issue #52). The forward catch-up only seeks forward, never behind the anchor, and is suppressed while a recovery seek is pending: during a wedge the clock is frozen stale-AHEAD of the real backward target and would otherwise anchor the reader past the producer's landing (#96, see effectiveSubtitleStart).
-        let (freshPlayhead, recoveryPending): (Double?, Bool) = await MainActor.run { [weak self] in
-            guard let self else { return (nil, false) }
-            return (self.sourceTime, self.pendingRecoverySeekClockTarget != nil)
+        let (freshPlayhead, recoveryPending, engineSourceDuration): (Double?, Bool, Double) = await MainActor.run { [weak self] in
+            guard let self else { return (nil, false, 0) }
+            return (self.sourceTime, self.pendingRecoverySeekClockTarget != nil,
+                    self.duration + self.sourcePresentationOrigin)
         }
         let effectiveStart = Self.effectiveSubtitleStart(
             startAt: startAt, playhead: freshPlayhead, recoveryPending: recoveryPending)
+
+        // #112 round 8: positioning seeks are bounded, with a single-probe byte-estimate fallback when the
+        // timestamp seek times out or fails. On an index-less remote MPEG-TS avformat_seek_file binary-searches
+        // via read_timestamp: dozens of range reads, each able to ride a starved connection's timeout while the
+        // video pipeline owns the origin. One reader sat in this seek for minutes (never reaching "started") and
+        // every later re-arm queued behind it. The fallback lands deliberately early; the read loop walks forward
+        // and the reconstruction gate absorbs an early landing. The side demuxer's own duration is unset on those
+        // sources ("no PTS found at end of file"), so the engine's source-axis duration backs it up.
+        let knownDuration = demuxer.duration > 0 ? demuxer.duration : engineSourceDuration
+        func positionSeek(_ target: Double) {
+            if !demuxer.seekBounded(to: target, timeout: AetherEngine.sideReaderSeekBudgetSeconds) {
+                let fellBack = demuxer.seekByteEstimate(to: target, knownDuration: knownDuration)
+                EngineLog.emit(
+                    "[AetherEngine] embedded subtitle seek to \(String(format: "%.2f", target))s timed out or "
+                    + "failed; byte-estimate fallback \(fellBack ? "applied" : "unavailable")",
+                    category: .engine)
+            }
+        }
 
         // -2 s lead-in: PGS/DVB/HDMV need their SETUP segments before the first END/EVENT (#52). On reuse this
         // re-seeks the already-open container to the new playhead, which is the whole point (no re-open).
         // Bitmap codecs refine this below via an epoch back-scan (#112); text codecs keep the fixed -2 s.
         var seekTo = max(0, effectiveStart - 2.0)
-        demuxer.seek(to: seekTo)
+        positionSeek(seekTo)
 
         // #87: a fresh open skips find_stream_info (codec_id comes from the container header / PMT). For the rare
         // container that does not declare the subtitle codec there, run a bounded find_stream_info before decoding.
@@ -495,7 +572,7 @@ extension AetherEngine {
         // stream survives, and before the read loop so the real decoder starts at the chosen target.
         if EmbeddedSubtitleDecoder.isBitmapCodec(decoder.codecID) {
             seekTo = max(0, effectiveStart - Self.bitmapSubtitleReconstructLeadIn(isDiscSource: demuxer.isDiscSource))
-            demuxer.seek(to: seekTo)
+            positionSeek(seekTo)
             // #112 full umbau: entering a reconstruction pass. Mark the gate so a self-contained composition
             // (acquisition point / epoch start) covering the playhead publishes immediately instead of waiting for a
             // successor trim (the "several tens of seconds" gap). The gate auto-leaves reconstruction mode once the

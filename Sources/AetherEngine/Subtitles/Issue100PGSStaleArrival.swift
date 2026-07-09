@@ -94,7 +94,14 @@ struct PGSStaleArrivalGate {
             .compactMap { $0 }.max(by: { $0.startTime < $1.startTime })
         reconstructionCandidate = nil
         if let active, active.startTime <= playhead, playhead < active.endTime {
-            out.append(active)
+            // Round 8: close the emitted line at its successor's start. The successor's pgsTrimAt ran against the
+            // store while this line was held here, so its open-ended placeholder survives; unclosed, both lines
+            // cover the playhead from the successor's start until the NEXT composition trims, and two PGS bitmaps
+            // stack on screen (ijuniorfu: "subtitles occasionally overlap"). With no published ahead cue the open
+            // window stays and the store trim owns it, as before.
+            let successorStart = out.map(\.startTime).min() ?? active.endTime
+            out.append(SubtitleCue(id: active.id, startTime: active.startTime,
+                                   endTime: min(active.endTime, successorStart), body: active.body))
         }
         return out
     }
