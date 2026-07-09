@@ -777,9 +777,25 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let pendingSeekStaleProgressSeconds: Double = 3.0
 
     /// Pure decision: where does a stall recovery anchor? The requested-but-unlanded seek target
-    /// wins over the frozen clock position.
-    nonisolated static func recoveryAnchorPosition(frozenPosition: Double, pendingSeekTarget: Double?) -> Double {
-        pendingSeekTarget ?? frozenPosition
+    /// wins over the frozen clock position. Without one, the anchor can never sit below the
+    /// current rendered frame (#115): on VOD the consumer keeps draining buffered segments
+    /// through the re-engage grace window, so a pre-grace capture lands the zero-tolerance
+    /// nudge behind the on-screen frame, a visible backward replay.
+    nonisolated static func recoveryAnchorPosition(
+        frozenPosition: Double, pendingSeekTarget: Double?, currentRendered: Double
+    ) -> Double {
+        pendingSeekTarget ?? max(frozenPosition, currentRendered)
+    }
+
+    /// Log suffix explaining why a recovery anchor diverged from the captured position.
+    nonisolated static func recoveryAnchorLogSuffix(
+        anchor: Double, position: Double, pendingSeekTarget: Double?
+    ) -> String {
+        guard anchor != position else { return "" }
+        let capture = String(format: "%.2f", position)
+        return pendingSeekTarget != nil
+            ? " (requested seek target; frozen clock \(capture)s)"
+            : " (rendered frame; stale capture \(capture)s)"
     }
 
     /// Pure decision: rendered output near the target means the seek effectively landed.
@@ -801,12 +817,15 @@ public final class AetherEngine: ObservableObject {
               let item = player.currentItem else { return }
         guard player.timeControlStatus != .paused else { return }
         let anchor = Self.recoveryAnchorPosition(
-            frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget)
+            frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget,
+            currentRendered: player.currentTime().seconds)
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
         EngineLog.emit(
             "[AetherEngine] #65 re-engaging stalled AVPlayer (\(trigger)): nudge seek to "
             + "\(String(format: "%.2f", anchor))s"
-            + (anchor != position ? " (requested seek target; frozen clock \(String(format: "%.2f", position))s)" : ""),
+            + Self.recoveryAnchorLogSuffix(
+                anchor: anchor, position: position,
+                pendingSeekTarget: pendingRecoverySeekClockTarget),
             category: .engine
         )
         item.cancelPendingSeeks()
@@ -976,12 +995,15 @@ public final class AetherEngine: ObservableObject {
             consumerIsPaused: player.timeControlStatus == .paused,
             allowPausedConsumer: allowPausedConsumer) else { return }
         let anchor = Self.recoveryAnchorPosition(
-            frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget)
+            frozenPosition: position, pendingSeekTarget: pendingRecoverySeekClockTarget,
+            currentRendered: player.currentTime().seconds)
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
         EngineLog.emit(
             "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
             + "\(String(format: "%.2f", anchor))s"
-            + (anchor != position ? " (requested seek target; frozen clock \(String(format: "%.2f", position))s)" : "")
+            + Self.recoveryAnchorLogSuffix(
+                anchor: anchor, position: position,
+                pendingSeekTarget: pendingRecoverySeekClockTarget)
             + " (same URL, same host)",
             category: .engine
         )
@@ -2011,7 +2033,8 @@ public final class AetherEngine: ObservableObject {
                     state = (host.timeControlStatus == .paused) ? .paused : .playing
                     isBuffering = host.timeControlStatus == .waitingToPlayAtSpecifiedRate
                     let recoveryAnchor = Self.recoveryAnchorPosition(
-                        frozenPosition: avpReal, pendingSeekTarget: pendingRecoverySeekClockTarget)
+                        frozenPosition: avpReal, pendingSeekTarget: pendingRecoverySeekClockTarget,
+                        currentRendered: avpReal)
                     reanchorProducerToPlaylistTime(recoveryAnchor)
                     // #96: re-anchor the overlay subtitle readers at the SAME recovery target the producer
                     // now aims at. This reconcile just snapped sourceTime to the frozen (stale-ahead) position,

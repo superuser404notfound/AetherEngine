@@ -298,7 +298,9 @@ extension AetherEngine {
                           let player = self.currentAVPlayer,
                           player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
                           player.currentItem?.status != .failed else { return }
-                    self.reloadStalledConsumerItem(position: position)
+                    // #115: read the position at reload time, same as the stall watchdog's
+                    // stage 2; the wedge-trip capture is two grace windows stale by now.
+                    self.reloadStalledConsumerItem(position: player.currentTime().seconds)
                 }
             }
         }

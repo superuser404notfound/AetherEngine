@@ -99,7 +99,8 @@ extension HLSVideoEngine {
         }
         let frozen = currentPlaybackPositionProvider?() ?? 0
         let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?())
+            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
+            currentRendered: frozen)
         let idx = segmentIndexForPlaylistTime(anchor)
         EngineLog.emit(
             "[HLSVideoEngine] #99 VOD pump died with muxerFailed; rebuilding producer + muxer at "
@@ -148,7 +149,8 @@ extension HLSVideoEngine {
         // re-anchored on the frozen clock fills a window nobody fetches (and can evict the target's
         // segments from retention). Same decision the nudge and stage-2 reload already apply.
         let anchor = AetherEngine.recoveryAnchorPosition(
-            frozenPosition: pos, pendingSeekTarget: recoverySeekTargetProvider?())
+            frozenPosition: pos, pendingSeekTarget: recoverySeekTargetProvider?(),
+            currentRendered: pos)
         let idx = segmentIndexForPlaylistTime(anchor)
         EngineLog.emit(
             "[HLSVideoEngine] #65 backpressure wedge: re-anchoring producer to "
@@ -174,13 +176,19 @@ extension HLSVideoEngine {
             let fetchesNow = self.provider?.mediaFetchCount ?? 0
             guard fetchesNow == fetchesAtReanchor,
                   self.playIntentProvider?() == true else { return }
+            // #115: re-read the position at nudge time. On VOD the consumer keeps rendering
+            // buffered segments through the grace window, so the wedge-trip capture is behind
+            // the on-screen frame and a zero-tolerance nudge to it replays visibly.
+            let freshPos = self.currentPlaybackPositionProvider?() ?? pos
             EngineLog.emit(
                 "[HLSVideoEngine] #65 consumer re-engage: no segment fetch for "
                 + "\(Int(Self.consumerReengageGraceSeconds))s after wedge re-anchor "
-                + "(pos=\(String(format: "%.2f", pos))s); asking host to nudge AVPlayer",
+                + "(pos=\(String(format: "%.2f", freshPos))s"
+                + (freshPos != pos ? ", wedge capture \(String(format: "%.2f", pos))s" : "")
+                + "); asking host to nudge AVPlayer",
                 category: .session
             )
-            self.onConsumerReengageNeeded?(pos)
+            self.onConsumerReengageNeeded?(freshPos)
         }
     }
 

@@ -13,12 +13,26 @@ struct RecoverySeekTargetTests {
 
     @Test("recovery aims at the pending seek target when one exists")
     func anchorDecision() {
-        // rrgomes shape: frozen pre-seek clock 391.9, requested target 341.9.
+        // rrgomes shape: frozen pre-seek clock 391.9, requested target 341.9. The user's
+        // backward seek intent wins even over a rendered clock that ran further ahead.
         #expect(AetherEngine.recoveryAnchorPosition(
-            frozenPosition: 391.9, pendingSeekTarget: 341.9) == 341.9)
-        // No pending seek: recover in place.
+            frozenPosition: 391.9, pendingSeekTarget: 341.9, currentRendered: 400.0) == 341.9)
+        // No pending seek, clock frozen: recover in place.
         #expect(AetherEngine.recoveryAnchorPosition(
-            frozenPosition: 391.9, pendingSeekTarget: nil) == 391.9)
+            frozenPosition: 391.9, pendingSeekTarget: nil, currentRendered: 391.9) == 391.9)
+    }
+
+    @Test("the nudge target is never below the current rendered position (#115)")
+    func nudgeNeverRewinds() {
+        // #115 shape (dlev02): wedge trips at 391.9, VOD keeps draining buffered segments
+        // through the re-engage grace window, on-screen frame is at 400.0 when the nudge
+        // fires. Seeking to the pre-grace capture replayed ~8s; the anchor must track the
+        // rendered frame instead.
+        #expect(AetherEngine.recoveryAnchorPosition(
+            frozenPosition: 391.9, pendingSeekTarget: nil, currentRendered: 400.0) == 400.0)
+        // A lagging/zero rendered read must not drag the anchor backward either.
+        #expect(AetherEngine.recoveryAnchorPosition(
+            frozenPosition: 391.9, pendingSeekTarget: nil, currentRendered: 0.0) == 391.9)
     }
 
     @Test("a pending target counts as landed once rendered output reaches its neighbourhood")
