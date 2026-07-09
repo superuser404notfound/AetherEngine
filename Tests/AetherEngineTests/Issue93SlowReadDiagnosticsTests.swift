@@ -100,4 +100,31 @@ struct Issue93SlowReadDiagnosticsTests {
             stopWaitMs: 3, reopenMs: nil, seekMs: 12, buildMs: 6)
         #expect(s == "stopWait=3ms seek=12ms build=6ms")
     }
+
+    @Test("a missed detour fetch accounts its time so it does not land in unaccounted")
+    func missedDetourFetchIsAccounted() {
+        // #93/#96 root cause hid HERE: a backward-scrub detour fetch that starved and MISSED
+        // burned 15-35s, but detour time was only recorded on a successful serve, so the failed
+        // fetch's time fell into `unaccounted` and read as an unlocalized wait. A miss (or a
+        // rate-limited attempt) must account its fetch time: it renders as a fetch with zero
+        // serves, and it is subtracted from unaccounted.
+        var diag = SlowReadDiagnostics()
+        diag.recordIteration()
+        diag.recordDetourFetchAttempt(ms: 15_000)
+        diag.recordReconnect()
+        let line = try! #require(diag.line(elapsedMs: 15_040, offset: 822_867_215, generationSpan: (10, 11)))
+        #expect(line.contains("detour=0(15000ms,1fetch)"))
+        // 15040 - 15000 detour = 40 left, not the whole 15040 as unaccounted.
+        #expect(line.contains("unaccounted=40ms"))
+    }
+
+    @Test("the interactive detour fetch budget caps a starved fetch well below the chunk budget")
+    func detourFetchBudgetIsTight() {
+        // A 4 MB detour block over a healthy remote 4K source lands in ~1s; the full chunk budget
+        // (idle 15s / total 35s) let a per-connection-starved backward-scrub fetch ride 15-35s
+        // before the rescue reconnect (which serves in ~30-190ms). The detour path uses a tight
+        // interactive budget instead, and never exceeds a caller that already asked for less.
+        #expect(AVIOReader.effectiveDetourBudget(chunkRequestTimeout: 35) == 4)
+        #expect(AVIOReader.effectiveDetourBudget(chunkRequestTimeout: 2) == 2)
+    }
 }
