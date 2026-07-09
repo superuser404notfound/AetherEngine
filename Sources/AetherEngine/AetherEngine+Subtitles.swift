@@ -1145,15 +1145,16 @@ extension AetherEngine {
     /// host's on-frame overlay. AVKit AUTO-SELECTS the legible group at readyToPlay when the user has a
     /// system caption preference (Accessibility "Closed Captions + SDH", or a preferred subtitle language),
     /// which overrides the rendition's DEFAULT=NO,AUTOSELECT=NO, and the forced system caption WINDOW (the
-    /// grey box) cannot be styled transparent via textStyleRules. So pin the group DESELECTED at load:
-    /// `appliesMediaSelectionCriteriaAutomatically = false` is set SYNCHRONOUSLY here, before the item can
-    /// reach readyToPlay, so the criteria pass never selects the rendition in the first place (iOS device:
-    /// cues flashed for up to ~0.5 s at start when the flag was only flipped inside the async loop, which
-    /// begins around readyToPlay). The loop then re-asserts `select(nil)` as a safety net against anything
-    /// that slipped a selection in. A manual deselect sticks (device-confirmed: the PiP round-trip
-    /// workaround, which ends in exactly this deselect, cleared the subtitle). Bails the instant the host
-    /// requests a native track (`setNativeSubtitleRendering` / PiP, AirPlay, or external-display entry sets
-    /// `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
+    /// grey box) cannot be styled transparent via textStyleRules. So pin the group DESELECTED at load.
+    /// `appliesMediaSelectionCriteriaAutomatically = false` alone does NOT stop it: a system caption pref
+    /// counts as the explicit user request that overrides the flag (device-tested, the reverted 0baa98d);
+    /// only a manual `select(nil)` sticks (device-confirmed: the PiP round-trip workaround, which ends in
+    /// exactly this deselect, cleared the subtitle). So `select(nil)` is asserted UNCONDITIONALLY the moment
+    /// the group loads (a manual deselect registered before AVKit's ready-time pass keeps it from engaging),
+    /// then re-asserted on a tight 40 ms cadence for the first second, where the old 250 ms cadence let
+    /// auto-selected cues flash for up to ~0.5 s at start (iOS device), and relaxes to 250 ms afterwards.
+    /// Bails the instant the host requests a native track (`setNativeSubtitleRendering` / PiP, AirPlay, or
+    /// external-display entry sets `nativeSubtitleReapplyOrdinal`), which owns selection from then on. A no-op
     /// when native subtitles are not prepared (no legible group, e.g. tvOS overlay-only).
     func forceNativeLegibleDeselectedUntilHostSelects() {
         guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
@@ -1163,16 +1164,15 @@ extension AetherEngine {
                   let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
                   !group.options.isEmpty else { return }
             var attempts = 0
-            while attempts < 6,
+            while attempts < 29,
                   self.nativeSubtitleReapplyOrdinal == nil,
                   self.currentAVPlayer?.currentItem === item {
-                self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
-                if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
+                if attempts == 0 || item.currentMediaSelection.selectedMediaOption(in: group) != nil {
                     item.select(nil, in: group)
                     EngineLog.emit("[AetherEngine] Sodalite#38 native legible force-deselected (attempt \(attempts))", category: .engine)
                 }
                 attempts += 1
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await Task.sleep(nanoseconds: attempts < 25 ? 40_000_000 : 250_000_000)
             }
         }
     }
