@@ -501,6 +501,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var subtitleTapStreamIndices: Set<Int32>
     var subtitleTapObserver: (@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational) -> Void)?
     private var subtitleTapTimeBases: [Int32: AVRational] = [:]
+
+    /// #112 rework: ALL embedded subtitle streams stay in the keep-set; their packets feed the
+    /// session's SubtitlePacketStore via this sink. Same tapped-then-dropped contract as
+    /// `subtitleTapObserver`, set at init BEFORE the discard block for the same reason.
+    var subtitlePacketStreamIndices: Set<Int32>
+    var subtitlePacketSink: (@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational) -> Void)?
     private var closedCaptionStreamTimeBase = AVRational(num: 1, den: 1)
 
     /// Set by engine live-reopen path so the fresh producer marks its first segment with #EXT-X-DISCONTINUITY.
@@ -546,6 +552,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         restartTargetVideoDts: Int64 = Int64.min,
         closedCaptionStreamIndex: Int32 = -1,
         subtitleTapStreamIndices: Set<Int32> = [],
+        subtitlePacketStreamIndices: Set<Int32> = [],
         desiredFirstVideoTfdtPts: Int64,
         desiredFirstAudioTfdtPts: Int64 = 0,
         segmentBoundaries: [Int64],
@@ -567,6 +574,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.videoStreamIndex = videoStreamIndex
         self.closedCaptionStreamIndex = closedCaptionStreamIndex   // #77: before the discard block below
         self.subtitleTapStreamIndices = subtitleTapStreamIndices   // Sodalite#32: same reason
+        self.subtitlePacketStreamIndices = subtitlePacketStreamIndices   // #112 rework: same reason
         self.videoConfig = video
         self.convertP7Active = video.convertP7ToProfile81
         self.audioConfig = audio
@@ -595,6 +603,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             var keep: Set<Int32> = [videoStreamIndex]
             if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
             keep.formUnion(subtitleTapStreamIndices)   // Sodalite#32
+            keep.formUnion(subtitlePacketStreamIndices)   // #112 rework
             demuxer.discardAllStreamsExcept(keep)
             if let audio = audio {
                 side.discardAllStreamsExcept([audio.sourceStreamIndex])
@@ -606,6 +615,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
             if closedCaptionStreamIndex >= 0 { keep.insert(closedCaptionStreamIndex) }   // #77
             keep.formUnion(subtitleTapStreamIndices)   // Sodalite#32
+            keep.formUnion(subtitlePacketStreamIndices)   // #112 rework
             demuxer.discardAllStreamsExcept(keep)
         }
         // #77: cache the CC stream's time_base for the observer's PTS conversion.
@@ -613,8 +623,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             closedCaptionStreamTimeBase = demuxer.stream(at: closedCaptionStreamIndex)?.pointee.time_base
                 ?? AVRational(num: 1, den: 1)
         }
-        // Sodalite#32: same for the tapped subtitle streams.
-        for idx in subtitleTapStreamIndices {
+        // Sodalite#32 + #112 rework: same for the tapped subtitle streams.
+        for idx in subtitleTapStreamIndices.union(subtitlePacketStreamIndices) {
             subtitleTapTimeBases[idx] = demuxer.stream(at: idx)?.pointee.time_base
                 ?? AVRational(num: 1, den: 1000)
         }
@@ -1396,6 +1406,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
                    let observe = subtitleTapObserver {
                     observe(pktStreamIdx, packet,
                             subtitleTapTimeBases[pktStreamIdx] ?? AVRational(num: 1, den: 1000))
+                }
+                // #112 rework: hand every embedded subtitle packet to the session's packet store sink,
+                // then drop it below as a foreign packet. Main demuxer only, same as the decode tap.
+                if origin == .main, subtitlePacketStreamIndices.contains(pktStreamIdx),
+                   let sink = subtitlePacketSink {
+                    sink(pktStreamIdx, packet,
+                         subtitleTapTimeBases[pktStreamIdx] ?? AVRational(num: 1, den: 1000))
                 }
 
                 if packet.pointee.dts == Int64.min {

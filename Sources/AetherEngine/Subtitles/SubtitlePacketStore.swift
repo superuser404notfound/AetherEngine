@@ -7,6 +7,9 @@ import Foundation
 struct StoredSubtitlePacket: Sendable {
     let ptsSeconds: Double
     let durationSeconds: Double
+    /// AVPacket.flags at harvest time; EmbeddedSubtitleDecoder forwards flags into its
+    /// decode packet (AV_PKT_FLAG_KEY matters for bitmap acquisition points).
+    let flags: Int32
     let payload: Data
 }
 
@@ -23,12 +26,14 @@ final class SubtitlePacketStore: @unchecked Sendable {
     private var entriesByStream: [Int32: [StoredSubtitlePacket]] = [:]
     private var bytesByStream: [Int32: Int] = [:]
 
-    func append(streamIndex: Int32, ptsSeconds: Double, durationSeconds: Double, payload: Data) {
+    func append(streamIndex: Int32, ptsSeconds: Double, durationSeconds: Double,
+                flags: Int32 = 0, payload: Data) {
         lock.lock(); defer { lock.unlock() }
         var entries = entriesByStream[streamIndex] ?? []
         var bytes = bytesByStream[streamIndex] ?? 0
         let entry = StoredSubtitlePacket(ptsSeconds: ptsSeconds,
                                          durationSeconds: durationSeconds,
+                                         flags: flags,
                                          payload: payload)
         let insertAt = entries.firstIndex { $0.ptsSeconds >= ptsSeconds } ?? entries.count
         if insertAt < entries.count, entries[insertAt].ptsSeconds == ptsSeconds {

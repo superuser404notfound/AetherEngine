@@ -74,6 +74,24 @@ final class Issue104SubtitleDiscardTests: XCTestCase {
                        "every subtitle cue must still be delivered after the discard")
     }
 
+    /// #112 rework: the producer keep-set now unions ALL embedded subtitle streams
+    /// (subtitlePacketStreamIndices), so the pump's interleave delivers subtitle packets
+    /// alongside video with no second connection. This is the keep-set contract the
+    /// SubtitlePacketStore sink relies on.
+    func test_producerKeepSetUnion_deliversSubtitlePacketsInterleavedWithVideo() throws {
+        let dem = try makeDemuxer()
+        defer { dem.close() }
+        let subtitleIndex = try XCTUnwrap(dem.subtitleTrackInfos().first).id
+        let videoIndex = dem.videoStreamIndex
+        dem.seek(to: 0)
+        dem.discardAllStreamsExcept([videoIndex, Int32(subtitleIndex)])
+        let indices = drainStreamIndices(dem)
+        XCTAssertGreaterThan(indices.filter { $0 == videoIndex }.count, 0,
+                             "video packets must flow for the A/V pipeline")
+        XCTAssertGreaterThan(indices.filter { $0 == Int32(subtitleIndex) }.count, 0,
+                             "subtitle packets must reach the pump for the packet sink")
+    }
+
     private static let fixtureBase64 = """
         AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAgfbW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAOpgAAQAAAQAA
         AAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAA

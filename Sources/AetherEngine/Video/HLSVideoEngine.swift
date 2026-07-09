@@ -150,6 +150,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var subtitleTapRoutes: [Int32: (decoder: EmbeddedSubtitleDecoder, store: NativeSubtitleCueStore)] = [:]
     private let subtitleTapLock = NSLock()
 
+    /// #112 rework: session-lifetime retention of every embedded subtitle stream's packets,
+    /// harvested by the producer pump (no second connection, no side demuxer). The MainActor
+    /// overlay drainer decodes from it near the playhead. Survives producer restarts.
+    let subtitlePacketStore = SubtitlePacketStore()
+
+    /// #112 rework: every embedded subtitle stream in the session demuxer, text AND bitmap.
+    /// These all stay in the producer keep-set so late track enables need no restart.
+    var allEmbeddedSubtitleStreamIndices: Set<Int32> {
+        Set((demuxer?.subtitleTrackInfos() ?? []).map { Int32($0.id) })
+    }
+
     /// Sodalite#32 Phase 2: tap decoders honor the host's markup preference so the overlay can render
     /// styled ASS from tap-fed cues; the WebVTT rendition strips the markup at serve time instead.
     /// Set before start() (AetherEngine+Loading).
@@ -251,6 +262,23 @@ public final class HLSVideoEngine: @unchecked Sendable {
             prod.subtitleTapObserver = { [weak self] idx, pkt, tb in
                 self?.handleSubtitleTapPacket(streamIndex: idx, packet: pkt, timeBase: tb)
             }
+        }
+        // #112 rework: harvest every embedded subtitle stream's packets into the session
+        // store. Runs on the pump thread; the store is lock-guarded. PTS axis: identical
+        // conversion to what EmbeddedSubtitleDecoder applies to tap packets (raw pts x tb,
+        // absolute source PTS, no start_time subtraction).
+        prod.subtitlePacketSink = { [subtitlePacketStore] idx, pkt, tb in
+            let pts = pkt.pointee.pts
+            guard pts != Int64.min, let data = pkt.pointee.data, pkt.pointee.size > 0,
+                  tb.den != 0 else { return }
+            let tbSeconds = Double(tb.num) / Double(tb.den)
+            subtitlePacketStore.append(
+                streamIndex: idx,
+                ptsSeconds: Double(pts) * tbSeconds,
+                durationSeconds: max(0, Double(pkt.pointee.duration) * tbSeconds),
+                flags: pkt.pointee.flags,
+                payload: Data(bytes: data, count: Int(pkt.pointee.size))
+            )
         }
     }
 
@@ -1545,6 +1573,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             restartTargetVideoDts: videoTarget,
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
+            subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework
             desiredFirstVideoTfdtPts: desiredVideoTfdt,
             desiredFirstAudioTfdtPts: desiredAudioTfdt,
             segmentBoundaries: segmentBoundaries,
