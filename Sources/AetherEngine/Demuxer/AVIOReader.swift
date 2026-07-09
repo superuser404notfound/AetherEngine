@@ -202,6 +202,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // Once detour reads turn sequential past this much, re-anchor the streaming connection
     // there so sustained playback returns to the cheap window path (e.g. after a backward scrub).
     private static let detourReanchorBytes: Int64 = 8 * 1024 * 1024
+    // Interactive per-fetch budget for a detour block (#93/#96). A backward-scrub read serves via the
+    // detour cache; a miss fetches a 4 MB block over the pooled session. On a per-connection-starved
+    // origin that fetch used to ride the full chunkRequestTimeout (idle 15s / total 35s) before falling
+    // through to the rescue reconnect, which opens a fresh connection the origin serves in ~30-190ms
+    // (rrgomes' #93/#96 traces: the whole 15-35s sat here, invisibly, in the detour fetch). A 4 MB block
+    // over a healthy remote 4K source lands in ~1s, so a tight budget aborts a starved fetch fast and
+    // lets the reconnect serve, without tripping healthy parse-time detour fetches (#69 stays intact:
+    // its fetches complete well under this, and a genuinely slow parse fetch reconnecting is bounded by
+    // the #71 rate-limit streak, far gentler than the pre-cache per-read storm).
+    private static let detourFetchBudgetSeconds: TimeInterval = 4
+
+    /// Effective per-fetch budget for a detour block: the tight interactive cap, never exceeding the
+    /// caller's chunk budget (still-extraction passes a smaller one; it never reaches this path, but
+    /// the clamp keeps the invariant). Internal so the bound is unit-tested without a live origin.
+    static func effectiveDetourBudget(chunkRequestTimeout: TimeInterval) -> TimeInterval {
+        min(detourFetchBudgetSeconds, chunkRequestTimeout)
+    }
 
     // Cap on CONSECUTIVE rate-limited (429/503) network attempts before giving up cleanly.
     // Distinct axis from unproductiveReconnects: NOT reset by seekReconnect, so parse-driven
@@ -836,6 +853,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         detourTrackSequential(at: curPosition, length: n)
                         continue
                     case .rateLimited(let retryAfter):
+                        // #93/#96: account the (throttled) fetch attempt's time so it leaves `unaccounted`.
+                        diag.recordDetourFetchAttempt(ms: msSince(detourStart))
                         // Origin is throttling the detour fetch too (#71). Back off in place and
                         // RETRY the detour fetch; do NOT open a fresh connection (that re-enters
                         // the 429 churn the cache exists to remove). Give up cleanly at the cap.
@@ -848,6 +867,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         diag.recordBackoff(ms: msSince(backoffStart))
                         continue
                     case .miss:
+                        // #93/#96: this is where the residual cold read actually lived. A starved fetch
+                        // rode its budget then missed; account that time (else it hides in `unaccounted`)
+                        // before falling through to the rescue reconnect that serves in ~30-190ms.
+                        diag.recordDetourFetchAttempt(ms: msSince(detourStart))
                         if isClosed { return totalRead > 0 ? Int32(totalRead) : -1 }
                         if isPastReadDeadline { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
                         // Hard transport failure: degrade to the OLD single-reconnect behavior.
@@ -1109,10 +1132,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let rangeEnd = offset + Int64(size) - 1
         var request = URLRequest(url: requestURL())
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
-        request.timeoutInterval = min(15, chunkRequestTimeout)
+        // #93/#96: a starved backward-scrub detour fetch must abort fast (the rescue reconnect serves
+        // instantly), so this path uses the tight interactive budget, not the full chunk timeout.
+        let budget = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout)
+        request.timeoutInterval = budget
         applyExtraHeaders(&request)
         do {
-            let (data, response) = try syncRequest(request, budget: chunkRequestTimeout)
+            let (data, response) = try syncRequest(request, budget: budget)
             if let http = response as? HTTPURLResponse {
                 let status = http.statusCode
                 if status == 429 || status == 503 {

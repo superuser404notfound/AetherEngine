@@ -47,6 +47,16 @@ struct SlowReadDiagnostics {
         detourMs += ms
     }
 
+    /// A detour block fetch that did NOT serve (a cache miss or a rate-limited attempt) still spent
+    /// time crossing the network. #93/#96 root cause hid here: only `recordDetourServe` timed the
+    /// detour path, so a starved backward-scrub fetch that rode its 15-35s budget and then MISSED
+    /// left that time in `unaccounted`, reading as an unlocalized wait. Recording the attempt keeps
+    /// the time out of `unaccounted` and renders it as a fetch with zero serves (e.g. `detour=0(15000ms,1fetch)`).
+    mutating func recordDetourFetchAttempt(ms: Double) {
+        detourFetches += 1
+        detourMs += ms
+    }
+
     mutating func recordStallWait(ms: Double, signaled: Bool) {
         stallWaits += 1
         stallWaitMs += ms
