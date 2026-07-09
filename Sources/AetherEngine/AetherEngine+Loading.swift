@@ -981,7 +981,16 @@ extension AetherEngine {
         // still valid. Snapshot the visible bitmap cues before stopInternal wipes them; they are restored after the
         // subtitle re-arm so the line stays up while the re-armed reader re-primes forward (old path reconstructed
         // from scratch and the line vanished for the reconstruct duration).
-        let preservedActiveImageCues = Self.activeImageCues(in: subtitleCues, at: sourceTime)
+        //
+        // #112 (audio-switch reanchor): capture the source-PTS playhead NOW, while the old producer's shift is still
+        // live. stopInternal below resets playlistShiftSeconds to 0, and on a disc the new producer publishes its
+        // shift asynchronously (the reload lands paused / waitingToPlay, so no clock tick has folded it back yet), so
+        // a sourceTime read during the re-arm has collapsed to the playlist axis (== resumeAt), ~shift seconds behind
+        // the true source PTS. Re-arming the PGS side demuxer there reconstructs ~shift seconds behind the line: it
+        // never covers the playhead (nothing shows) and crawls forward flooding stale open-ended cues that cycle on
+        // screen while paused. The switch does not move the playhead, so this pre-stop snapshot is the correct anchor.
+        let preSwitchSourceTime = sourceTime
+        let preservedActiveImageCues = Self.activeImageCues(in: subtitleCues, at: preSwitchSourceTime)
         let secondaryEmbeddedToResume: Int32 = activeSecondaryEmbeddedSubtitleStreamIndex
         let secondarySidecarToResume: URL? = isSecondarySubtitleActive && activeSecondaryEmbeddedSubtitleStreamIndex < 0
             ? loadedSecondarySidecarURL
@@ -1203,7 +1212,10 @@ extension AetherEngine {
         if let sidecar = sidecarToResume {
             selectSidecarSubtitle(url: sidecar)
         } else if embeddedStreamToResume >= 0 {
-            selectSubtitleTrack(index: Int(embeddedStreamToResume))
+            // #112 (audio-switch reanchor): pass the pre-stopInternal source PTS explicitly; the parameterless form
+            // reads the live sourceTime, which has collapsed to the playlist axis here (shift reset, not yet
+            // republished) and would re-arm the reader ~shift seconds behind the line.
+            selectSubtitleTrack(index: Int(embeddedStreamToResume), startAt: preSwitchSourceTime)
             // #112 full umbau: re-seed the on-screen bitmap line the switch would otherwise drop. selectSubtitleTrack
             // cleared subtitleCues and spawned a fresh reader; restore the pre-switch visible cues so the line stays
             // up until the reader's reconstruction pass republishes it (its first composition trims these cleanly).
@@ -1214,7 +1226,8 @@ extension AetherEngine {
         if let secondarySidecar = secondarySidecarToResume {
             selectSecondarySidecarSubtitle(url: secondarySidecar)
         } else if secondaryEmbeddedToResume >= 0 {
-            selectSecondarySubtitleTrack(index: Int(secondaryEmbeddedToResume))
+            // #112 (audio-switch reanchor): same collapsed-sourceTime slip on the secondary channel.
+            selectSecondarySubtitleTrack(index: Int(secondaryEmbeddedToResume), startAt: preSwitchSourceTime)
         }
     }
 

@@ -177,6 +177,14 @@ extension AetherEngine {
 
     /// Activate an embedded subtitle stream as the secondary companion track (issue #47). Text-only; bitmap codecs are rejected. Runs a second side demuxer concurrently. External ids (#88) route onto the secondary sidecar decode.
     public func selectSecondarySubtitleTrack(index: Int) {
+        selectSecondarySubtitleTrack(index: index, startAt: sourceTime)
+    }
+
+    /// `selectSecondarySubtitleTrack(index:)` with an explicit source-PTS start anchor. The public form passes the
+    /// live `sourceTime`; the audio-switch reload passes the pre-stopInternal snapshot, because a sourceTime read
+    /// mid-reload has collapsed to the playlist axis and would re-arm the side demuxer ~producer-shift seconds
+    /// behind the playhead (#112, matching the primary `selectSubtitleTrack(index:startAt:)` split).
+    func selectSecondarySubtitleTrack(index: Int, startAt: Double) {
         hostExplicitSubtitleAction = true
         if let external = externalSubtitleRegistry[index] {
             cancelSidecarTask(channel: .secondary)
@@ -204,7 +212,7 @@ extension AetherEngine {
 
         // Prior secondary reader is cancelled + drained inside startEmbeddedSubtitleTask, then its side demuxer
         // is reused for this switch (#76 part 2).
-        startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: sourceTime, channel: .secondary)
+        startEmbeddedSubtitleTask(url: url, reader: customClone, formatHint: customFormatHint, streamIndex: Int32(index), startAt: startAt, channel: .secondary)
     }
 
     /// Spawn the side-demuxer Task; cancellable at `cancel()`. Captures URL, stream index, start position, source video dims.
