@@ -97,54 +97,104 @@ final class DisplayCriteriaController {
         #endif
     }
 
-    /// Block until the panel finishes its HDR mode negotiation, or up to ~5s.
+    /// Block until the panel settles its HDR mode negotiation, bounded so an
+    /// unobservable switch can't stall the first frame.
     ///
-    /// Two-stage poll: (1) start phase 1000ms/10ms ticks -- the HDMI handshake initiates asynchronously after the preferredDisplayCriteria write, so isDisplayModeSwitchInProgress can be false for a beat (old single-check guard let asset.load race on DV8.1 -> AVPlayer -11848). AVKit-sole-writer path also fires later, so 1000ms gives headroom. Early-return if EDR headroom is already > 1.001 (panel already in HDR). (2) settle phase 50 x 100ms; sanity-checks headroom after the switch clears.
+    /// The caller only invokes this when an HDR/DV mode switch is actually expected
+    /// (it gates on `apply()`'s isHDR return), so SDR / rate-only loads and non-HDR
+    /// panels never enter here.
+    ///
+    /// `preferredDisplayCriteria` is a *hint*: when Match Content is enabled the TV
+    /// performs the switch over HDMI and reports progress via the AVDisplayManager
+    /// mode-switch notifications. We proceed the instant the OS signals the switch
+    /// is done (`AVDisplayManagerModeSwitchEndNotification`) or EDR headroom rises.
+    /// Otherwise we bound the wait, because on some panels a Dolby Vision switch is
+    /// effectively unobservable to the app — `currentEDRHeadroom` stays 1.0 and
+    /// `isDisplayModeSwitchInProgress` can stick `true` even though the panel
+    /// visibly enters DV. A blind fixed poll made every such load wait the full
+    /// timeout. Presenting slightly early on that fallback is at worst cosmetic:
+    /// the panel is mid re-sync (black) during the handshake and shows the correct
+    /// frame once it locks — the decode/color-correctness guard is Stage 1 below.
     func waitForSwitch() async {
         #if os(tvOS)
         guard let window = resolveWindow() else { return }
         let displayManager = window.avDisplayManager
         let screen = window.screen
 
-        // Stage 1: wait up to 1000ms for the handshake to start (AVKit-sole-writer path fires later than engine pre-flight).
-        var sawSwitchStart = false
-        for _ in 0..<100 {
-            if displayManager.isDisplayModeSwitchInProgress {
-                sawSwitchStart = true
-                break
-            }
-            if screen.currentEDRHeadroom > 1.001 {
-                // Panel already in HDR mode; no switch needed.
-                EngineLog.emit("[DisplayCriteria] no switch needed (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) at entry)", category: .engine)
-                return
-            }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-
-        if !sawSwitchStart {
-            // 1000ms elapsed with no switch: panel can't satisfy criteria or setter was a no-op. Don't block playback; AVPlayer will tonemap or fail with a real error.
-            EngineLog.emit("[DisplayCriteria] WARN handshake never started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after 1000ms); proceeding", category: .engine)
+        // Fast exit: panel already in HDR (headroom already raised, e.g. a prior
+        // HDR/DV session left it there).
+        if screen.currentEDRHeadroom > 1.001 {
+            EngineLog.emit("[DisplayCriteria] no switch needed (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) at entry)", category: .engine)
             return
         }
 
-        // Stage 2: wait for the handshake to complete. 50 × 100ms = 5s.
-        for tick in 0..<50 {
-            try? await Task.sleep(for: .milliseconds(100))
+        // Observe the OS mode-switch notifications. Start marks the HDMI handshake
+        // beginning — more reliable than polling `isDisplayModeSwitchInProgress`,
+        // which can read false for a beat right after the criteria write. End is
+        // the authoritative "settled" signal. Referenced by raw name to avoid Swift
+        // import-form ambiguity across SDKs.
+        let switchStarted = SwitchFlag()
+        let switchEnded = SwitchFlag()
+        let startToken = NotificationCenter.default.addObserver(
+            forName: Notification.Name("AVDisplayManagerModeSwitchStartNotification"),
+            object: displayManager, queue: nil
+        ) { _ in switchStarted.fire() }
+        let endToken = NotificationCenter.default.addObserver(
+            forName: Notification.Name("AVDisplayManagerModeSwitchEndNotification"),
+            object: displayManager, queue: nil
+        ) { _ in switchEnded.fire() }
+        defer {
+            NotificationCenter.default.removeObserver(startToken)
+            NotificationCenter.default.removeObserver(endToken)
+        }
+
+        // Stage 1: up to 1000ms for the switch to actually start. The handshake
+        // initiates asynchronously after the criteria write (and AVKit's sole-writer
+        // path fires it later than the engine pre-flight), so give it headroom
+        // before the DV asset loads — starting the decode mid-write races an
+        // AVPlayer error on DV Profile 8.1.
+        var sawSwitchStart = false
+        for _ in 0..<100 {
+            if switchEnded.fired || screen.currentEDRHeadroom > 1.001 {
+                EngineLog.emit("[DisplayCriteria] settled during start phase (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+                return
+            }
+            if switchStarted.fired || displayManager.isDisplayModeSwitchInProgress {
+                sawSwitchStart = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        if !sawSwitchStart {
+            // No switch started within 1000ms: panel already satisfies the criteria
+            // or the setter was a no-op. Don't block; AVPlayer tonemaps or errors for real.
+            EngineLog.emit("[DisplayCriteria] no switch started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after 1000ms); proceeding", category: .engine)
+            return
+        }
+
+        // Stage 2: proceed as soon as ANY reliable signal says settled — the
+        // mode-switch-end notification, EDR headroom rising (HDR10/HLG), or the
+        // in-progress flag clearing — else a bounded ~2s cap so a panel whose DV
+        // switch is unobservable to the app can't gate the first frame the way the
+        // old fixed 5s poll did.
+        let capTicks = 40  // 40 × 50ms = 2000ms
+        for tick in 0..<capTicks {
+            try? await Task.sleep(for: .milliseconds(50))
+            let elapsed = (tick + 1) * 50 + 1000
+            if switchEnded.fired {
+                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (~\(elapsed)ms)", category: .engine)
+                return
+            }
+            if screen.currentEDRHeadroom > 1.001 {
+                EngineLog.emit("[DisplayCriteria] switch settled via EDR (~\(elapsed)ms, headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+                return
+            }
             if !displayManager.isDisplayModeSwitchInProgress {
-                let totalMs = (tick + 1) * 100 + 1000  // include stage 1 budget
-                if screen.currentEDRHeadroom > 1.001 {
-                    EngineLog.emit("[DisplayCriteria] switch settled after ~\(totalMs)ms (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
-                } else if didApply && !lastCriteriaWasHDR {
-                    // SDR rate-only criteria: refresh-rate switch settled, panel correctly stayed SDR.
-                    EngineLog.emit("[DisplayCriteria] rate-only switch settled after ~\(totalMs)ms (SDR, EDR headroom 1.0 as expected)", category: .engine)
-                } else {
-                    // HDR was requested but panel ended in SDR: real dynamic-range handshake failure.
-                    EngineLog.emit("[DisplayCriteria] WARN switch ended after ~\(totalMs)ms but EDR headroom still 1.0 (panel stayed SDR despite HDR criteria)", category: .engine)
-                }
+                EngineLog.emit("[DisplayCriteria] switch in-progress cleared (~\(elapsed)ms, EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
         }
-        EngineLog.emit("[DisplayCriteria] WARN switch did not settle within 5s; proceeding anyway (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+        EngineLog.emit("[DisplayCriteria] proceed after ~\(capTicks * 50 + 1000)ms cap (switch not observable — likely DV; EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
         #endif
     }
 
@@ -187,3 +237,14 @@ final class DisplayCriteriaController {
 
     #endif
 }
+
+#if os(tvOS)
+/// Minimal thread-safe one-shot flag set from an `AVDisplayManager` mode-switch
+/// notification (delivered on an arbitrary queue) and polled from the settle loop.
+private final class SwitchFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var fired: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func fire() { lock.lock(); value = true; lock.unlock() }
+}
+#endif

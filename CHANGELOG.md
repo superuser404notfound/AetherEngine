@@ -8,6 +8,12 @@ Versioning follows [Semantic Versioning](https://semver.org). See
 [README › Stability and versioning](README.md#stability-and-versioning) for
 the public-API contract.
 
+## [Unreleased]
+
+### Fixed
+
+- **Dolby Vision first frame no longer waits out a fixed 5 s poll.** `waitForSwitch()` polled `isDisplayModeSwitchInProgress` for a fixed 5 s and never watched the OS mode-switch notifications, so on panels where a DV switch is unobservable to the app — `currentEDRHeadroom` stays 1.0 and the in-progress flag never clears even though the panel visibly enters DV — it ran the full timeout every time. It now settles the instant the panel reports done (`AVDisplayManagerModeSwitchStart` / `End` notifications, or EDR headroom rising) and otherwise caps the wait at ~2 s. Measured DV first frame ~10 s → ~2 s on an unobservable panel; observable panels (HDR10 / HLG, or DV panels that post the notification) settle immediately. SDR / rate-only loads are unaffected — the wait already early-exits for them.
+
 ## [5.0.0] - 2026-07-09
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.0))
