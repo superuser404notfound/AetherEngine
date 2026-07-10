@@ -115,7 +115,9 @@ extension AetherEngine {
     @MainActor
     private func makeRemoteHLSTapReader(controller: AudioTapController) -> AudioTapHLSReader? {
         guard let masterURL = loadedURL, let yield = controller.makeYield() else { return nil }
-        let fetcher = AudioTapHLSFetcher()
+        // Same headers the player's AVURLAsset sends (#119); header-enforcing IPTV origins 403
+        // the tap's own playlist / segment fetches without them.
+        let fetcher = AudioTapHLSFetcher(httpHeaders: loadedOptions.httpHeaders)
         let decoder = AudioTapSegmentDecoder()
         let base = AudioTapBaseBox(masterURL)
         // renderedPositionMirror is fed by loadRemoteHLS's $currentTime sink (shift 0 here, so it

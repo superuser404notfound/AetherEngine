@@ -102,7 +102,7 @@ public struct LoadOptions: Sendable, Equatable {
     public var omitCriteriaColorExtensions: Bool
     /// Skip display-criteria handshake entirely. For previews and `aetherctl` where no panel exists. Default off.
     public var suppressDisplayCriteria: Bool
-    /// Extra HTTP headers for HEAD probe, Range chunks, side-demuxer fetches. NOT forwarded to AVPlayer (it hits the loopback server). Forwarded to `selectSidecarSubtitle` by default; pass explicit headers to override (#32). Default empty.
+    /// Extra HTTP headers for HEAD probe, Range chunks, side-demuxer fetches. On the loopback paths they are NOT forwarded to AVPlayer (it hits the local server); on `nativeRemoteHLS` they ride into the AVURLAsset so header-enforcing origins (IPTV Referer / User-Agent / Authorization) work (#119). Forwarded to `selectSidecarSubtitle` by default; pass explicit headers to override (#32). Default empty.
     public var httpHeaders: [String: String]
 
     /// Diagnostic lever: force dvh1 codec tags + master playlist regardless of display capability. OFF by default: non-DV displays route DV through the media playlist (no master) so AVPlayer auto-tonemaps the HEVC base layer (only path that avoids AVFoundationErrorDomain -11868 on tvOS 26). AetherEngine#4.

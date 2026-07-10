@@ -150,7 +150,9 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
 
-        // Jellyfin HLS URL carries auth (ApiKey / PlaySessionId / LiveStreamId) as query params; no extra headers needed.
+        // Jellyfin HLS URLs carry auth (ApiKey / PlaySessionId / LiveStreamId) as query params, but
+        // generic live HLS origins (IPTV / Stremio add-on channels) enforce per-stream Referer /
+        // User-Agent / Authorization headers, so LoadOptions.httpHeaders rides into the AVURLAsset (#119).
         // forwardBufferDuration: 0 = system-adaptive; the 4 s VOD floor caused a 3-4 s black screen on live startup.
         host.load(url: url,
                   startPosition: nil,
@@ -159,7 +161,8 @@ extension AetherEngine {
                   forwardBufferDuration: 0,
                   // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
                   // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
-                  surfaceEndFailures: true)
+                  surfaceEndFailures: true,
+                  httpHeaders: options.httpHeaders)
 
         // VOD path triggers play() at the tail of load(); this lean path early-returns, so self-start here. AVKit drives match-content; automaticallyWaitsToMinimizeStalling handles play-before-ready. Without this call the item reaches readyToPlay but timeControlStatus stays .paused.
         // State stays .loading; flips to .playing only when timeControlStatus sink sees AVPlayer rendering.

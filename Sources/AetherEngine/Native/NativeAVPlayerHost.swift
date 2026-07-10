@@ -114,6 +114,14 @@ final class NativeAVPlayerHost {
 
     // MARK: - Lifecycle
 
+    /// AVURLAsset creation options for extra HTTP headers; nil when there are none, keeping the
+    /// loopback path's default asset untouched. AVFoundation applies AVURLAssetHTTPHeaderFieldsKey
+    /// to playlist and segment requests, which is what header-enforcing remote-HLS origins
+    /// (IPTV / Stremio per-stream Referer / User-Agent / Authorization) need (#119).
+    nonisolated static func assetCreationOptions(httpHeaders: [String: String]) -> [String: Any]? {
+        httpHeaders.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders]
+    }
+
     /// Load the loopback HLS-fMP4 URL into AVPlayer. DisplayCriteriaController.apply must run first so the HDR pipeline is configured before the first segment fetch.
     /// `inPlaceSwap`: atomic same-content item swap for the #93 recovery reload. The default
     /// teardown pauses and drops the current item to nil before the new one exists; during PiP
@@ -121,7 +129,7 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:]) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
@@ -131,7 +139,7 @@ final class NativeAVPlayerHost {
         let loadStart = DispatchTime.now()
         loadStartTime = loadStart
 
-        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil")", category: .engine)
+        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil") headers=\(httpHeaders.isEmpty ? "none" : "\(httpHeaders.count)")", category: .engine)
 
         // First-frame-visible diagnostic (see `layerReadyObservation`).
         layerReadyObservation = playerLayer.observe(
@@ -144,7 +152,7 @@ final class NativeAVPlayerHost {
             )
         }
 
-        let asset = AVURLAsset(url: url)
+        let asset = AVURLAsset(url: url, options: Self.assetCreationOptions(httpHeaders: httpHeaders))
         let item = AVPlayerItem(asset: asset)
         // 4s default matches loopback HLS segment cadence; raising it for live makes AVPlayer race to the edge and stall at the transcode warm-up gap.
         // Remote-HLS passes 0 (system adaptive): 4s forced a 3-4s black screen on bandwidth-limited Jellyfin live transcodes.
