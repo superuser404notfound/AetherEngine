@@ -1157,6 +1157,19 @@ public final class AetherEngine: ObservableObject {
     /// leaves the main thread. The closure captures no engine state, so it holds no reference to `self`.
     private var audioSessionCategoryTask: Task<Void, Never>?
 
+    #if os(iOS) || os(tvOS)
+    /// Route-sharing policy the engine declares with the session category. Platform-split (#116):
+    /// tvOS keeps `.longFormAudio` for HDMI route negotiation (#24); on iOS that policy marks the
+    /// process as a long-form audio client, which pins AVKit's
+    /// `AVPictureInPictureController.isPictureInPicturePossible` to false for any host-built PiP
+    /// controller around the engine's player layer, so iOS declares `.default`.
+    #if os(tvOS)
+    nonisolated static let audioSessionRouteSharingPolicy: AVAudioSession.RouteSharingPolicy = .longFormAudio
+    #else
+    nonisolated static let audioSessionRouteSharingPolicy: AVAudioSession.RouteSharingPolicy = .default
+    #endif
+    #endif
+
     public init() throws {
         // Route av_log into EngineLog before any libav* entry point so probe/load diagnostics are captured.
         FFmpegLogBridge.install()
@@ -1174,9 +1187,9 @@ public final class AetherEngine: ObservableObject {
         audioSessionCategoryTask = Task.detached(priority: .userInitiated) {
             let session = AVAudioSession.sharedInstance()
             do {
-                try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormAudio)
+                try session.setCategory(.playback, mode: .moviePlayback, policy: AetherEngine.audioSessionRouteSharingPolicy)
                 try session.setSupportsMultichannelContent(true)
-                EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+                EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) policy=\(AetherEngine.audioSessionRouteSharingPolicy.rawValue) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
             } catch {
                 EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
             }
