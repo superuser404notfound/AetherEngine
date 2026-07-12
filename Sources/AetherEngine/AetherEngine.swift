@@ -1046,6 +1046,16 @@ public final class AetherEngine: ObservableObject {
             && reasserts < maxStallRecoveryReasserts
     }
 
+    /// #122: the state a seek lands in. A seek must preserve the transport intent in effect when it
+    /// was issued: the normal finalize used to force `.playing`, which reported playing after a
+    /// paused scrub and made the #93 recovery reassert misread the seek's own paused landing as a
+    /// spurious pause (`engineStateIsPlaying` was true) and call `host.play()`. Deriving from the
+    /// durable `playIntent` (a seek never touches it) lands a paused seek paused and a playing seek
+    /// playing, and keeps `engineStateIsPlaying` honest so the reassert only fires on real stalls.
+    nonisolated static func seekFinalizeState(transportIntentIsPlaying: Bool) -> PlaybackState {
+        transportIntentIsPlaying ? .playing : .paused
+    }
+
     #if DEBUG
     /// Test-only override for the session's restart-in-flight signal (#93 residual deferral tests).
     var testHookRestartInFlightOverride: Bool? = nil
@@ -2068,8 +2078,12 @@ public final class AetherEngine: ObservableObject {
         // #100 + #96: the playhead jumped; re-anchor the overlay subtitle readers at the landed source-PTS.
         reanchorSubtitleOverlays()
 
-        // Seek has physically landed.
-        state = .playing
+        // Seek has physically landed. #122: preserve the transport intent in effect when the seek
+        // was issued: a scrub started while paused lands paused, so the engine never reports playing
+        // after a paused scrub and the #93 recovery reassert can't misread the paused landing as a
+        // spurious pause and call host.play(). A seek on any non-native host keeps the prior
+        // `.playing` default (those paths do not carry the durable intent and are not affected).
+        state = Self.seekFinalizeState(transportIntentIsPlaying: nativeHost?.transportIntentIsPlaying ?? true)
         setProgrammaticSeek(inFlight: false, target: nil)
     }
 

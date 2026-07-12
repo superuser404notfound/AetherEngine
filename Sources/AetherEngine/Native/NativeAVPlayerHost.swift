@@ -580,6 +580,12 @@ final class NativeAVPlayerHost {
 
     var isEffectivelyPlaying: Bool { avPlayer.timeControlStatus != .paused }
 
+    /// #122: durable transport intent (the last play/pause/setRate command), untouched by a seek.
+    /// Unlike `isEffectivelyPlaying` (instantaneous, momentarily `.paused`/`.waitingToPlay` right
+    /// after a landing) this survives a scrub, so the engine's seek finalize can land a paused
+    /// scrub paused instead of forcing `.playing`.
+    var transportIntentIsPlaying: Bool { playIntent }
+
     /// End of the last seekable time range (seconds); tracks the live edge for EVENT playlists.
     var seekableEnd: Double {
         guard let r = avPlayer.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return 0 }
