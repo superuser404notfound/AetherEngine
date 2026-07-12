@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.0.3] - 2026-07-12
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.3))
+
+### Fixed
+
+- **A seek issued while paused no longer re-engages playback (#122).** With playback paused by the host, a skip or scrub commit spontaneously resumed the underlying player (rate 1) with no host `play()` call. The normal seek finalize forced `state = .playing` regardless of the transport intent in effect when the seek was issued. That both reported playing after a paused scrub and weaponised the #93 stall-recovery reassert: the seek's own paused landing (`timeControlStatus == .paused`), arriving while `state == .playing` inside an open recovery window (a backward skip's rebuffer opens one), was misread as a spurious pause, so the engine called `host.play()`. The finalize now derives its state from the durable transport intent (the native host's `playIntent`, which a seek never touches), so a paused scrub lands paused, presenting the new frame, and `engineStateIsPlaying` stays honest so the reassert only fires on genuine stalls. A playing scrub is unchanged. Thanks to rrgomes for the traces isolating the three trigger points and confirming a plain pause is never affected.
+
 ## [5.0.2] - 2026-07-11
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.0.2))
