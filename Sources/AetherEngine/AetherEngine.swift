@@ -878,6 +878,16 @@ public final class AetherEngine: ObservableObject {
     static let startupGateReloadSeconds: Double = 3.0
     static let startupGateMediaSeconds: Double = 2.5
 
+    /// #124: whether a completed load runs its terminal autostart, the single decision every load
+    /// path routes through: the native/software/audio `host.play()` + `state = .playing`, and the
+    /// native VOD cold-start readiness gate (which plays to poll readiness). `false` is an honest
+    /// paused mount: skip all of it, leave `playIntent` false, and let the wired `host.$isReady`
+    /// waypoint settle `.loading -> .paused`. Pure so the gate stays greppable and a new autostart
+    /// site cannot silently bypass the flag.
+    nonisolated static func loadPerformsAutostart(_ options: LoadOptions) -> Bool {
+        options.autoplay
+    }
+
     /// #35 cold-DV-master startup-readiness gate. A DV master (P7->P8.1, or any HDR master)
     /// instantiated while the HDMI DV/HDCP decode path is still warming right after an SDR->HDR switch
     /// resolves 0 tracks (silent park) or fails -11819 "Cannot Complete Action"; neither is a
@@ -1597,8 +1607,11 @@ public final class AetherEngine: ObservableObject {
                     activeVideoDecoder = nil
                     activeAudioDecoder = "AVPlayer"
                     videoFormat = .sdr
-                    audioAVPlayerHost?.play()
-                    state = .playing
+                    // #124: a paused mount skips autostart; loadAudioNative's host.$isReady settles .paused.
+                    if Self.loadPerformsAutostart(options) {
+                        audioAVPlayerHost?.play()
+                        state = .playing
+                    }
                     startMemoryProbe()
                 } else {
                     try await loadAudio(
@@ -1617,8 +1630,11 @@ public final class AetherEngine: ObservableObject {
                         activeIndex: resolvedInitialAudio
                     )
                     videoFormat = .sdr
-                    audioHost?.play()
-                    state = .playing
+                    // #124: a paused mount skips autostart; loadAudio's host.$isReady settles .paused.
+                    if Self.loadPerformsAutostart(options) {
+                        audioHost?.play()
+                        state = .playing
+                    }
                     startMemoryProbe()
                 }
             } catch is CancellationError {
@@ -1774,8 +1790,11 @@ public final class AetherEngine: ObservableObject {
                     activeIndex: resolvedInitialAudio
                 )
                 presentCurrentLayer()
-                softwareHost?.play()
-                state = .playing
+                // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
+                if Self.loadPerformsAutostart(options) {
+                    softwareHost?.play()
+                    state = .playing
+                }
                 startMemoryProbe()
                 startLiveTelemetrySampler()
             } else {
@@ -1824,14 +1843,19 @@ public final class AetherEngine: ObservableObject {
                 // cold-start readiness gate (play -> poll -> reload master -> media fallback) instead
                 // of an unconditional play(); the gate calls play() itself. Warm/live/media paths keep
                 // the immediate play().
-                if didSwitchPanel, let session = nativeVideoSession,
-                   session.servingMasterPlaylist, !options.isLive {
-                    try await runStartupReadinessGate(
-                        session: session, position: startPosition ?? 0, gen: gen)
-                } else {
-                    nativeHost?.play()
+                // #124: a paused mount skips the terminal play() AND the cold-start readiness gate
+                // (an autostart-path recovery: it plays to poll readiness). loadNative wired
+                // host.$isReady, which settles .loading -> .paused; the host resumes later with play().
+                if Self.loadPerformsAutostart(options) {
+                    if didSwitchPanel, let session = nativeVideoSession,
+                       session.servingMasterPlaylist, !options.isLive {
+                        try await runStartupReadinessGate(
+                            session: session, position: startPosition ?? 0, gen: gen)
+                    } else {
+                        nativeHost?.play()
+                    }
+                    state = .playing
                 }
-                state = .playing
                 startMemoryProbe()
                 startLiveTelemetrySampler()
             }

@@ -133,10 +133,11 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
-        // isReady: nil deliberately: autostart already called host.play(), so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
+        // isReady: nil deliberately when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
+        // #124: a paused mount (autoplay=false) skips that play(), so wire isReady to settle .loading -> .paused at readiness.
         wireCommonHostSinks(
             duration: host.$duration,
-            isReady: nil,
+            isReady: Self.loadPerformsAutostart(options) ? nil : host.$isReady,
             failureMessage: host.$failureMessage,
             didReachEnd: host.$didReachEnd,
             storeIn: &nativeCancellables
@@ -182,7 +183,10 @@ extension AetherEngine {
 
         // VOD path triggers play() at the tail of load(); this lean path early-returns, so self-start here. AVKit drives match-content; automaticallyWaitsToMinimizeStalling handles play-before-ready. Without this call the item reaches readyToPlay but timeControlStatus stays .paused.
         // State stays .loading; flips to .playing only when timeControlStatus sink sees AVPlayer rendering.
-        host.play()
+        // #124: a paused mount skips the self-start; the wired isReady waypoint settles .loading -> .paused.
+        if Self.loadPerformsAutostart(options) {
+            host.play()
+        }
         startMemoryProbe()
         // No startLiveTelemetrySampler: all sampler counters read the loopback pipeline (demuxer / producer / cache / server), none of which exists on this bypass.
     }

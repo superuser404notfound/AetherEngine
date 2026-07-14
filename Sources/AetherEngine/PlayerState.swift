@@ -186,6 +186,16 @@ public struct LoadOptions: Sendable, Equatable {
     /// of 10 (~ 40 s). Ignored for `nativeRemoteHLS`, where AVPlayer talks to the remote server directly.
     public var forwardBufferSegments: Int?
 
+    /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a
+    /// `.playing` state (current behavior, byte-identical). Set `false` to mount PAUSED: a host that
+    /// holds a pause at mount (synchronized-start lobby that loads several devices and starts them on
+    /// a signal, or a hold-at-mount / resume prompt) no longer eats an engine-initiated resume it has
+    /// to claw back. With `false` the load skips the terminal `host.play()` (and, on the native VOD
+    /// path, the SDR->HDR cold-start readiness gate, which is an autostart-path recovery), leaves
+    /// `playIntent` false, and settles `.loading -> .paused` via the existing `host.$isReady`
+    /// waypoint; the host resumes later with `play()`. Same declared-vs-real family as #122/#123 (#124).
+    public var autoplay: Bool = true
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -210,7 +220,8 @@ public struct LoadOptions: Sendable, Equatable {
         preferredAudioLanguages: [String] = [],
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
-        forwardBufferSegments: Int? = nil
+        forwardBufferSegments: Int? = nil,
+        autoplay: Bool = true
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -233,6 +244,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
         self.forwardBufferSegments = forwardBufferSegments
+        self.autoplay = autoplay
     }
 }
 
