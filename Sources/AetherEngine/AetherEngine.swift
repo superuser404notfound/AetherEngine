@@ -214,6 +214,10 @@ public final class AetherEngine: ObservableObject {
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown.
     private var isBackgrounded = false
     #endif
+    /// Armed by an audio-session interruption that paused an intent-to-play session; fires play()
+    /// on interruption end (see the observer in setupLifecycleObservers). Disarmed by user pause()
+    /// and stopInternal().
+    private var resumeAfterInterruption = false
 
     /// Wedge-safe keepalive decision: keep the video pipeline alive on background ONLY while the app stays
     /// genuinely running (PiP active, or actively playing for background audio), never across an idle
@@ -1893,6 +1897,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
+        resumeAfterInterruption = false
         activeTransportHost?.pause()
         isBuffering = false
         if state == .playing {
@@ -2497,6 +2502,7 @@ public final class AetherEngine: ObservableObject {
     func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false) {
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
+        resumeAfterInterruption = false
         // tearDown() unloads the AVPlayer item before the loopback server is torn down to avoid noisy races.
         // keepNativeHost preserves NativeAVPlayerHost + currentAVPlayer across native->native reloads:
         // AVKit binds its MediaRemote registration to the AVPlayer instance once and never re-registers
@@ -2683,24 +2689,55 @@ public final class AetherEngine: ObservableObject {
         lifecycleObservers.append(fgObserver)
         #endif
 
-        // Diag (Sodalite device-verify 2026-07-15): playback auto-paused in a loop while another
-        // app's camera PiP held the audio session; the engine had no visibility into WHO paused.
-        // Log-only observer; handling (auto-resume on .ended, blocked-state surfacing) follows evidence.
+        // Foreign-session interruption handling (Sodalite device-verify 2026-07-15): a live-camera
+        // PiP re-claims the audio session on every play() and the system pauses AVPlayer ~10ms after
+        // .playing (interruption BEGAN reason=default). The system pause never goes through pause(),
+        // so the native host's durable playIntent (#122) survives the interruption and anchors the
+        // resume decision. Resume fires on ENDED only when the system explicitly grants .shouldResume
+        // (calls, Siri); sessions that end without it (the camera PiP closing) stay paused by design,
+        // the user resumes manually. An explicit user pause() disarms the resume.
         let interruptionObserver = nc.addObserver(
             forName: AVAudioSession.interruptionNotification,
             object: AVAudioSession.sharedInstance(), queue: .main
-        ) { note in
+        ) { [weak self] note in
             let info = note.userInfo ?? [:]
             let began = (info[AVAudioSessionInterruptionTypeKey] as? UInt)
                 .flatMap(AVAudioSession.InterruptionType.init(rawValue:)) == .began
-            let options = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            let optionsRaw = info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             #if os(iOS)
             let reason = (info[AVAudioSessionInterruptionReasonKey] as? UInt).map(String.init) ?? "n/a"
             #else
             let reason = "n/a"
             #endif
-            let session = AVAudioSession.sharedInstance()
-            EngineLog.emit("[AetherEngine] AVAudioSession interruption \(began ? "BEGAN" : "ENDED") reason=\(reason) options=\(options) otherAudio=\(session.isOtherAudioPlaying) silenceHint=\(session.secondaryAudioShouldBeSilencedHint)", category: .engine)
+            Task { @MainActor in
+                guard let self else { return }
+                let session = AVAudioSession.sharedInstance()
+                if began {
+                    let intent = self.nativeHost?.transportIntentIsPlaying ?? (self.state == .playing)
+                    let stateEligible: Bool
+                    switch self.state {
+                    case .idle, .error: stateEligible = false
+                    default: stateEligible = true
+                    }
+                    self.resumeAfterInterruption = intent && stateEligible
+                    EngineLog.emit("[AetherEngine] AVAudioSession interruption BEGAN reason=\(reason) resumeArmed=\(self.resumeAfterInterruption) otherAudio=\(session.isOtherAudioPlaying) silenceHint=\(session.secondaryAudioShouldBeSilencedHint)", category: .engine)
+                } else {
+                    let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
+                    // Background: only audio backends may resume (video is torn down / must not restart unseen).
+                    #if os(iOS)
+                    let backgroundSafe = !self.isBackgrounded
+                        || self.audioAVPlayerActive || self.audioHost != nil || self.softwareHost != nil
+                    #else
+                    let backgroundSafe = true
+                    #endif
+                    let firing = self.resumeAfterInterruption && backgroundSafe && shouldResume
+                    EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing)", category: .engine)
+                    if firing {
+                        self.resumeAfterInterruption = false
+                        self.play()
+                    }
+                }
+            }
         }
         lifecycleObservers.append(interruptionObserver)
         #endif
