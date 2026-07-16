@@ -1981,20 +1981,18 @@ final class DetourBlockCache: @unchecked Sendable {
 
 /// Preserves Range + extra headers across cross-host redirects. URLSession strips
 /// custom headers on host change; without this, CDN behind AIOStreams proxy gets a
-/// plain GET and either streams the full body or 400s.
+/// plain GET and either streams the full body or 400s. Credential headers follow
+/// RedirectHeaderPolicy (#126): same-host destinations only, never cross-origin.
 private func redirectPreservingHeaders(
     task: URLSessionTask,
     newRequest request: URLRequest,
     extraHeaders: [String: String]
 ) -> URLRequest {
-    var updated = request
-    if let originalRange = task.originalRequest?.value(forHTTPHeaderField: "Range") {
-        updated.setValue(originalRange, forHTTPHeaderField: "Range")
-    }
-    for (name, value) in extraHeaders {
-        updated.setValue(value, forHTTPHeaderField: name)
-    }
-    return updated
+    RedirectHeaderPolicy.redirectRequest(
+        request,
+        originalURL: task.originalRequest?.url,
+        originalRange: task.originalRequest?.value(forHTTPHeaderField: "Range"),
+        extraHeaders: extraHeaders)
 }
 
 // MARK: - Persistent Read Delegate
