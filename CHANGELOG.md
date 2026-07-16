@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.2.1] - 2026-07-16
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.2.1))
+
+### Changed
+
+- **Open-time size probes run concurrently (#107 follow-up).** The Range / HEAD / bounded-range fallback ladder for origins whose data connection resolves no length ran sequentially, tripling open latency on genuinely length-less sources (each probe pays the origin's full connect latency). The primary open-ended range probe still fires first and alone; the two fallbacks start 750 ms later in parallel, first positive size wins. Origins that resolve the primary inside the stagger window see identical wire traffic. Verified 17.2 s to 12.1 s against a 3 s-latency length-less origin; probe requests and budgets unchanged.
+
 ## [5.2.0] - 2026-07-16
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.2.0))
