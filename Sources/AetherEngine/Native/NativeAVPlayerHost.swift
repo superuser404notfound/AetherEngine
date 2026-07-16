@@ -56,6 +56,10 @@ final class NativeAVPlayerHost {
 
     /// Suppresses currentTime publishing while a seek is in flight; the loopback source lands seeks seconds after the call, so the observer would otherwise bounce the clock back through the pre-seek position (issue #37).
     private(set) var seekInFlight: Bool = false
+    /// Set immediately before the latest seek completion publishes renderedTime. Deadline recovery
+    /// uses this as authoritative presented-frame evidence when that publication wins the MainActor
+    /// queue race against the resumed deadline continuation.
+    private(set) var latestSeekRenderedTimePublished = false
 
     // MARK: - Output
 
@@ -579,8 +583,10 @@ final class NativeAVPlayerHost {
     // MARK: - Playback control
 
     var isEffectivelyPlaying: Bool { avPlayer.timeControlStatus != .paused }
+    var liveTimeControlStatus: AVPlayer.TimeControlStatus { avPlayer.timeControlStatus }
 
-    /// #122: durable transport intent (the last play/pause/setRate command), untouched by a seek.
+    /// #122: durable engine-routed transport intent (the last play/pause/setRate command), untouched
+    /// by a seek. External AVKit / MediaRemote commands are reflected by `timeControlStatus` instead.
     /// Unlike `isEffectivelyPlaying` (instantaneous, momentarily `.paused`/`.waitingToPlay` right
     /// after a landing) this survives a scrub, so the engine's seek finalize can land a paused
     /// scrub paused instead of forcing `.playing`.
@@ -647,6 +653,7 @@ final class NativeAVPlayerHost {
         seekGeneration &+= 1
         let gen = seekGeneration
         seekInFlight = true
+        latestSeekRenderedTimePublished = false
         let resumeGuard = SeekResumeGuard()
         return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
             if let deadlineSeconds, deadlineSeconds > 0 {
@@ -683,6 +690,7 @@ final class NativeAVPlayerHost {
                             // frame; the observer settles it to the target when playback resumes.
                             if AetherEngine.seekLandingSettlesToTarget(
                                 bufferingTowardTarget: self.isBufferingTowardSeekTarget) {
+                                self.latestSeekRenderedTimePublished = true
                                 self.renderedTime = landed
                             }
                         }

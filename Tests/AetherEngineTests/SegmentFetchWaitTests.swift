@@ -270,15 +270,23 @@ extension SegmentFetchWaitTests {
 /// #93 residual: an index the ACTIVE producer covers must never be fired or backstopped away.
 extension SegmentFetchWaitTests {
     private func makeCoverageProvider(cache: SegmentCache, recorder: Recorder,
-                                      producerBase: Int?) -> VideoSegmentProvider {
+                                      producerBase: Int?,
+                                      sparseHoleWaitSlice: TimeInterval = 2.0,
+                                      storeOnRestart: Bool = false) -> VideoSegmentProvider {
         VideoSegmentProvider(
             cache: cache, segments: segments(60), codecsString: "hvc1", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 24.0, hdcpLevel: nil,
             sourceBitrate: 8_000_000,
-            restartHandler: { idx in recorder.record(idx) },
+            restartHandler: { [weak cache] idx in
+                recorder.record(idx)
+                if storeOnRestart {
+                    cache?.store(index: idx, data: Data(repeating: 0x55, count: 8))
+                }
+            },
             restartActivity: { false },
             activeProducerBase: { producerBase },
             repositionWaitSlice: 0.05,
+            sparseHoleWaitSlice: sparseHoleWaitSlice,
             repositionRideCapSeconds: 5.0
         )
     }
@@ -334,6 +342,47 @@ extension SegmentFetchWaitTests {
         storeAbove(cache, range: 55...58)
         _ = provider.mediaSegment(at: 40)
         #expect(recorder.all == [40])
+    }
+
+    @Test("an interior sparse-cache hole restarts immediately when the producer cannot reach it")
+    func sparseHoleOutsideCoverageRestartsImmediately() {
+        let cache = SegmentCache(forwardWindow: 60, backwardWindow: 60)
+        defer { cache.close() }
+        let recorder = Recorder()
+        cache.store(index: 0, data: Data(repeating: 0x10, count: 8))
+        cache.store(index: 50, data: Data(repeating: 0x50, count: 8))
+        let provider = makeCoverageProvider(
+            cache: cache, recorder: recorder, producerBase: 55,
+            sparseHoleWaitSlice: 2.0, storeOnRestart: true)
+
+        let start = DispatchTime.now()
+        let served = provider.mediaSegment(at: 40)
+        let elapsed = Double(
+            DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+
+        #expect(served != nil)
+        #expect(recorder.all == [40])
+        #expect(elapsed < 0.5)
+    }
+
+    @Test("an interior sparse-cache hole waits when the active producer covers it")
+    func sparseHoleInsideCoverageWaits() {
+        let cache = SegmentCache(forwardWindow: 60, backwardWindow: 60)
+        defer { cache.close() }
+        let recorder = Recorder()
+        cache.store(index: 0, data: Data(repeating: 0x10, count: 8))
+        cache.store(index: 50, data: Data(repeating: 0x50, count: 8))
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.02) {
+            cache.store(index: 40, data: Data(repeating: 0x40, count: 8))
+        }
+        let provider = makeCoverageProvider(
+            cache: cache, recorder: recorder, producerBase: 38,
+            sparseHoleWaitSlice: 0.5)
+
+        let served = provider.mediaSegment(at: 40)
+
+        #expect(served != nil)
+        #expect(recorder.all.isEmpty)
     }
 }
 

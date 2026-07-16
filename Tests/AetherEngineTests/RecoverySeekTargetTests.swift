@@ -52,4 +52,93 @@ struct RecoverySeekTargetTests {
         // unrelated stall cannot teleport to a minutes-old target.
         #expect(AetherEngine.isPendingSeekStale(progressWhilePending: 3.5))
     }
+
+    @Test("deadline recovery restarts only a starved producer")
+    func deadlineRestartDecision() {
+        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(isStarved: true))
+        #expect(!AetherEngine.shouldReanchorProducerAfterSeekDeadline(isStarved: false))
+        #expect(AetherEngine.shouldReanchorSubtitlesOnLateSeekLanding(
+            alreadyReanchored: false
+        ))
+        #expect(!AetherEngine.shouldReanchorSubtitlesOnLateSeekLanding(
+            alreadyReanchored: true
+        ))
+    }
+
+    @Test("a published completion is the authoritative deadline catch-up signal")
+    func completionPublicationDecision() {
+        #expect(AetherEngine.shouldCatchUpDeadlineLanding(renderedTimePublished: true))
+        #expect(!AetherEngine.shouldCatchUpDeadlineLanding(renderedTimePublished: false))
+    }
+
+    @Test("a short seek needs rendered movement or completion evidence")
+    func shortSeekLandingEvidence() {
+        #expect(!AetherEngine.pendingSeekHasRenderedLandingEvidence(
+            rendered: 40,
+            target: 43,
+            initialRendered: 40,
+            completionRenderedTimePublished: false
+        ))
+        #expect(AetherEngine.pendingSeekHasRenderedLandingEvidence(
+            rendered: 43,
+            target: 43,
+            initialRendered: 40,
+            completionRenderedTimePublished: false
+        ))
+        #expect(AetherEngine.pendingSeekHasRenderedLandingEvidence(
+            rendered: 40,
+            target: 43,
+            initialRendered: 40,
+            completionRenderedTimePublished: true
+        ))
+    }
+
+    @MainActor
+    @Test("starting or clearing a recovery target resets deadline lifecycle state")
+    func targetLifecycleReset() throws {
+        let engine = try AetherEngine()
+        engine.setPendingRecoverySeekTarget(42)
+        engine.pendingRecoverySeekDeadlineExpired = true
+        engine.pendingRecoverySeekSubtitlesReanchored = true
+
+        // A superseding seek to the same target is still a new lifecycle.
+        engine.setPendingRecoverySeekTarget(42)
+        #expect(!engine.pendingRecoverySeekDeadlineExpired)
+        #expect(!engine.pendingRecoverySeekSubtitlesReanchored)
+
+        engine.pendingRecoverySeekDeadlineExpired = true
+        engine.pendingRecoverySeekSubtitlesReanchored = true
+        engine.setPendingRecoverySeekTarget(nil)
+        #expect(!engine.pendingRecoverySeekDeadlineExpired)
+        #expect(!engine.pendingRecoverySeekSubtitlesReanchored)
+    }
+
+    @Test("seek recovery reasserts only pauses covered by the bounded recovery policy")
+    func recoveredStateDecision() {
+        #expect(AetherEngine.seekRecoveredState(
+            transportIntentIsPlaying: false,
+            statusIsPaused: false,
+            shouldReassertPausedStatus: true
+        ) == .playing)
+        #expect(AetherEngine.seekRecoveredState(
+            transportIntentIsPlaying: false,
+            statusIsPaused: true,
+            shouldReassertPausedStatus: true
+        ) == .paused)
+        #expect(AetherEngine.seekRecoveredState(
+            transportIntentIsPlaying: true,
+            statusIsPaused: true,
+            shouldReassertPausedStatus: false
+        ) == .paused)
+        #expect(AetherEngine.seekRecoveredState(
+            transportIntentIsPlaying: true,
+            statusIsPaused: true,
+            shouldReassertPausedStatus: true
+        ) == .playing)
+        #expect(AetherEngine.seekRecoveredState(
+            transportIntentIsPlaying: true,
+            statusIsPaused: false,
+            shouldReassertPausedStatus: false
+        ) == .playing)
+    }
 }

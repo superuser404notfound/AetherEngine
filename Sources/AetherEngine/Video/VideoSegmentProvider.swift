@@ -109,6 +109,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Slice is generous enough to absorb a cold 4K-HDR first-GOP decode. Instance lets so the
     /// wait shape is testable without 8 s sleeps (#93 residual).
     private let repositionWaitSlice: TimeInterval
+    /// A cache index range can be sparse after scrubbing. Wait only when the active producer can
+    /// actually fill an interior hole; otherwise restart immediately instead of burning this slice.
+    private let sparseHoleWaitSlice: TimeInterval
     private static let repositionMaxWaits = 3
     /// Hard cap on riding an in-flight restart (#93 residual): a fetch waits past the fixed
     /// budget while a restart is genuinely executing, but never indefinitely.
@@ -150,6 +153,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         activeProducerBase: (() -> Int?)? = nil,
         initialRestartIndex: Int = 0,
         repositionWaitSlice: TimeInterval = 8.0,
+        sparseHoleWaitSlice: TimeInterval = 2.0,
         repositionRideCapSeconds: TimeInterval = 90.0,
         slowServeThresholdSeconds: TimeInterval = 2.0,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
@@ -178,6 +182,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.activeProducerBase = activeProducerBase
         self._lastRestartIndex = initialRestartIndex
         self.repositionWaitSlice = repositionWaitSlice
+        self.sparseHoleWaitSlice = sparseHoleWaitSlice
         self.repositionRideCapSeconds = repositionRideCapSeconds
         self.slowServeThresholdSeconds = slowServeThresholdSeconds
         self.nativeSubStores = nativeSubtitleStores
@@ -424,10 +429,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             } else if index > r.1 + Self.forwardWaitWindow {
                 needsRestart = true
             } else if index >= r.0 && index <= r.1 {
-                // Producer might still be writing this index forward
-                // from its current write head. Wait briefly first.
-                if let waited = cache.fetch(index: index, timeout: 2.0) {
-                    return logServed(index: index, bytes: waited, totalStart: totalStart, restarted: false)
+                // min...max is not proof of residency: retained scrub bands leave interior holes.
+                // Only wait when the active producer can actually march into this index.
+                if activeProducerCovers(index),
+                   let waited = cache.fetch(index: index, timeout: sparseHoleWaitSlice) {
+                    return logServed(
+                        index: index, bytes: waited, totalStart: totalStart, restarted: false)
                 }
                 needsRestart = true
             } else {
@@ -466,10 +473,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     // covers (base <= index <= base + forward window) never fires OR backstops:
                     // the march will deliver it, and the backstop killed a 75%-complete capture
                     // on device while a forward-march neighbor got its healthy producer restarted.
-                    let producerCovers: Bool = {
-                        guard let base = activeProducerBase?() else { return false }
-                        return base <= index && index - base <= Self.forwardWaitWindow
-                    }()
+                    let producerCovers = activeProducerCovers(index)
                     // A request superseded by a NEWER declared target is an orphan of a skip
                     // storm: AVPlayer's newest request is what it actually wants (the same
                     // newest-wins semantics the coalescer applies to immediate restarts).
@@ -522,6 +526,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             )
         }
         return bytes
+    }
+
+    private func activeProducerCovers(_ index: Int) -> Bool {
+        guard let base = activeProducerBase?() else { return false }
+        return base <= index && index - base <= Self.forwardWaitWindow
     }
 
     private var currentSegmentCount: Int {

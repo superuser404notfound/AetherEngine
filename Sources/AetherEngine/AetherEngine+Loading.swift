@@ -36,6 +36,39 @@ extension AetherEngine {
         }
     }
 
+    /// A deadline-expired seek remains alive inside AVPlayer. Its current-time publication arrives
+    /// before rendered-time; while the recovery target is pending, the first publication is held.
+    /// Settle the public clock from the rendered frame when that late landing retires the target so
+    /// a paused landing does not wait forever for another periodic clock tick.
+    @discardableResult
+    func settleRecoveryClockIfRenderedTargetLanded(
+        rendered: Double,
+        shift: Double,
+        completionRenderedTimePublished: Bool
+    ) -> Bool {
+        guard pendingRecoverySeekDeadlineExpired,
+              let pending = pendingRecoverySeekClockTarget,
+              Self.pendingSeekHasRenderedLandingEvidence(
+                  rendered: rendered,
+                  target: pending,
+                  initialRendered: pendingSeekInitialRenderedPosition,
+                  completionRenderedTimePublished: completionRenderedTimePublished
+              ) else {
+            return false
+        }
+        if Self.shouldReanchorSubtitlesOnLateSeekLanding(
+            alreadyReanchored: pendingRecoverySeekSubtitlesReanchored
+        ) {
+            reanchorSubtitleOverlays()
+        }
+        setPendingRecoverySeekTarget(nil)
+        clock.currentTime = PresentationAxis.display(
+            sourcePTS: rendered + shift,
+            origin: sourcePresentationOrigin
+        )
+        return true
+    }
+
     /// #123: publish `sourceTime` at seek finalize. `sourceTime` is the on-screen frame (#49), not the
     /// scrub target. Settle it onto the landed `target` (source PTS) only when the frame is actually
     /// presented; while the player is still buffering toward the target (a queued-burst chase on heavy
@@ -582,6 +615,8 @@ extension AetherEngine {
         host.$renderedTime
             .sink { [weak self] value in
                 guard let self = self else { return }
+                let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift
+                    ?? self.playlistShiftSeconds
                 // #93 PiP skips: AVKit-side seeks never reach the engine seek API; a far rendered-
                 // time jump is the engine-visible signal to re-anchor the subtitle readers.
                 if Self.isSubtitleReanchorJump(from: self.renderedPositionMirror.get(), to: value) {
@@ -591,9 +626,12 @@ extension AetherEngine {
                 // reaches its neighbourhood) or goes stale (organic progress far from it, i.e.
                 // AVPlayer abandoned the seek and playback runs elsewhere).
                 if let pending = self.pendingRecoverySeekClockTarget {
-                    if Self.pendingSeekLanded(rendered: value, target: pending) {
-                        self.setPendingRecoverySeekTarget(nil)
-                    } else {
+                    if !self.settleRecoveryClockIfRenderedTargetLanded(
+                        rendered: value,
+                        shift: shift,
+                        completionRenderedTimePublished:
+                            self.nativeHost?.latestSeekRenderedTimePublished ?? false
+                    ) {
                         let prev = self.lastRenderedForPendingSeek
                         if value > prev, value - prev < 1.0 {
                             self.pendingSeekProgressAccum += (value - prev)
@@ -612,8 +650,6 @@ extension AetherEngine {
                 }
                 // #65: mirror AVPlayer's rendered (playlist-axis) position for off-main wedge re-anchoring.
                 self.renderedPositionMirror.set(value)
-                let shift = self.liveShiftSeams.last(where: { value >= $0.activateAt })?.shift
-                    ?? self.playlistShiftSeconds
                 self.clock.sourceTime = value + shift
                 // bufferedPosition = the disk SegmentCache read-ahead frontier (origin -> disk), which is
                 // what the Network Buffer setting controls, expressed on the display axis as the playhead
