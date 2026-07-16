@@ -69,9 +69,13 @@ func printUsage() {
       aetherctl serve [--no-dv] [--start-position S] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>] <url>
+      aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>]
+                     [--audio-stats] [--host-calls play,extractor,setrate,reloadlive,seekback] <url>
                      (full load+play session smoke test; --subs activates the first
-                      matching embedded subtitle track and logs overlay cues)
+                      matching embedded subtitle track and logs overlay cues;
+                      --audio-stats taps decoded PCM and prints per-second audio lead
+                      plus PTS-continuity gaps; seekback rewinds 20 s at t=15 and
+                      returns to the live edge at t=30)
       aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
@@ -441,6 +445,7 @@ if first == "play" {
     let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
     let subsPick = takeStringFlag("--subs", from: &rest)
     let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
+    let audioStats = takeFlag("--audio-stats", from: &rest)
     rejectStrayFlags(rest, subcommand: "play")
     guard let urlArg = rest.first else {
         print("ERROR: play requires a <url> argument")
@@ -448,7 +453,7 @@ if first == "play" {
         printUsage()
         exit(64)
     }
-    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls))
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

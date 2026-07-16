@@ -76,9 +76,12 @@ swift run aetherctl play --seconds 60 <url>                     # longer window
 swift run aetherctl play --live --dvr-window 1800 <url>         # live path with a DVR ring
 swift run aetherctl play --subs teletext <url>                  # activate the first matching subtitle track, log every cue + trim
 swift run aetherctl play --host-calls reloadlive,play,extractor,setrate <url>   # mimic a host's post-load call sequence
+swift run aetherctl play --live --dvr-window 1800 --audio-stats <url>           # decoded-PCM continuity + per-second audio lead
 ```
 
-`--subs <codec-or-lang>` matches against the track's libavcodec name or language and logs every overlay cue and cue trim as it lands. `--host-calls` replays host post-load behavior against the fresh session: `play`, `extractor` (`makeFrameExtractor`), `setrate` (`setRate(1.0)`), and `reloadlive` (reload the URL on the live path when the probe flags it live, the AetherPlayer Open URL flow); this is how the pre-arming `setRate` wedge was isolated.
+`--subs <codec-or-lang>` matches against the track's libavcodec name or language and logs every overlay cue and cue trim as it lands. `--host-calls` replays host post-load behavior against the fresh session: `play`, `extractor` (`makeFrameExtractor`), `setrate` (`setRate(1.0)`), `reloadlive` (reload the URL on the live path when the probe flags it live, the AetherPlayer Open URL flow), and `seekback` (rewind 20 s into the DVR window at t=15, return to the live edge at t=30); this is how the pre-arming `setRate` wedge was isolated.
+
+`--audio-stats` installs the engine audio tap and watches the decoded PCM itself: an `AGAP` line for every source-PTS discontinuity > 2 ms between consecutive buffers, and per-second `alead` (last decoded audio PTS minus the synchronizer clock) plus `abufs` (buffers delivered) appended to the telemetry. `alead` is the audio renderer's safety margin: on the SW live path the look-ahead pump holds it near `AudioLookaheadPolicy.targetLeadSeconds`; a collapse toward zero means the source or the feeder cannot keep real time (this is how the #107 audio-chopping report was diagnosed).
 
 ## segverify
 
