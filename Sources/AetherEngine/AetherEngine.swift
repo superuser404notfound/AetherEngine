@@ -210,9 +210,26 @@ public final class AetherEngine: ObservableObject {
     public var backgroundPlaybackEnabled = true
     /// iOS: set by the host from the AVKit PiP delegate; the keepalive policy + pause-safety read it.
     public var pictureInPictureActive = false
+    /// #127: seconds a PAUSED session survives backgrounding (iOS) before the wedge-safe teardown runs,
+    /// held under a background-task assertion so a quick app switch resumes without a pipeline rebuild.
+    /// 0 restores the immediate teardown. Ignored on tvOS. Keep well under the ~30 s system allowance,
+    /// the teardown itself needs ~3.5 s of drain before suspension.
+    public var backgroundTeardownGraceSeconds: Double = 15
+
+    /// #127: true once the active session's transport is ready to accept seeks and report real time
+    /// (native: AVPlayerItem readyToPlay; SW/audio hosts publish readiness at session start). Hosts
+    /// gate corrective actions (restore watchdogs, position clamps) on this instead of inferring
+    /// readiness from currentTime being pinned at 0.
+    @Published public internal(set) var isSessionReady = false
+
+    /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
+    var pendingPreReadySeekSeconds: Double?
     #if os(iOS)
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown.
     private var isBackgrounded = false
+    /// #127: pending grace-window teardown (sleep task + the background-task assertion holding it).
+    private var backgroundGraceTask: Task<Void, Never>?
+    private var backgroundGraceAssertion: UIBackgroundTaskIdentifier = .invalid
     #endif
     /// Armed by an audio-session interruption that paused an intent-to-play session; fires play()
     /// on interruption end (see the observer in setupLifecycleObservers). Disarmed by user pause()
@@ -245,6 +262,41 @@ public final class AetherEngine: ObservableObject {
         if keepVideoAlive { return hasSoftwareHost ? .enterSoftwareAudioOnly : .doNothing }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
+    }
+
+    /// #127: how to execute a BackgroundAction. A PAUSED teardown on platforms with quick app switches
+    /// (iOS) is deferred by a grace window held under a background-task assertion, so a 10-30 s app
+    /// switch does not pay a full pipeline rebuild. Wedge-safety holds: the assertion keeps the app
+    /// genuinely running for the whole window and the teardown fires at expiry, so the pipeline never
+    /// crosses an idle suspension. A PLAYING teardown (background playback disabled) stays immediate,
+    /// its audio would keep sounding through the window. tvOS passes supportsGraceWindow=false.
+    enum BackgroundStep: Equatable {
+        case perform(BackgroundAction)
+        case deferTeardown(afterSeconds: Double)
+    }
+
+    nonisolated static func backgroundStep(
+        action: BackgroundAction,
+        state: PlaybackState,
+        supportsGraceWindow: Bool,
+        graceSeconds: Double
+    ) -> BackgroundStep {
+        guard action == .teardownVideo, state == .paused, supportsGraceWindow, graceSeconds > 0 else {
+            return .perform(action)
+        }
+        return .deferTeardown(afterSeconds: graceSeconds)
+    }
+
+    /// #127: a host seek forwarded into a pre-ready AVPlayer item clamps to 0 against empty seekable
+    /// ranges AND replaces load()'s own pending startPosition seek (AVPlayer holds one pending seek).
+    /// Defer such seeks and replay the latest at readiness. Live rejoin/DVR paths own their timing
+    /// (LiveReloadPolicy), SW/audio hosts resolve seeks synchronously; neither defers.
+    nonisolated static func shouldDeferHostSeek(
+        nativeSessionActive: Bool,
+        isLive: Bool,
+        nativeHostReady: Bool
+    ) -> Bool {
+        nativeSessionActive && !isLive && !nativeHostReady
     }
 
     /// 1 Hz diagnostics sampler. Separate ObservableObject for the same reason as `clock`: per-sample
@@ -1907,9 +1959,21 @@ public final class AetherEngine: ObservableObject {
         }
         #if os(iOS)
         // Paused while backgrounded with no PiP: the app will idle-suspend, so release the video pipeline
-        // now (wedge-safe, mirrors the unconditional background teardown). Audio backends are already spared.
+        // (wedge-safe, mirrors the unconditional background teardown). Audio backends are already spared.
+        // #127: same grace window as the didEnterBackground path, so pause-after-background quick switches
+        // also skip the rebuild.
         if isBackgrounded && !pictureInPictureActive && !audioAVPlayerActive && audioHost == nil && softwareHost == nil {
-            Task { @MainActor in await self.teardownVideoForBackground() }
+            switch Self.backgroundStep(
+                action: .teardownVideo,
+                state: state,
+                supportsGraceWindow: true,
+                graceSeconds: backgroundTeardownGraceSeconds
+            ) {
+            case .deferTeardown(let seconds):
+                scheduleBackgroundGraceTeardown(afterSeconds: seconds)
+            default:
+                Task { @MainActor in await self.teardownVideoForBackground() }
+            }
         }
         #endif
     }
@@ -1985,6 +2049,19 @@ public final class AetherEngine: ObservableObject {
                 EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: live, DVR disabled", category: .engine)
                 return
             }
+        }
+        // #127: pre-ready native item (background-teardown reload, cold start): forwarding the seek now
+        // would clamp to 0 against empty seekable ranges and replace load()'s pending startPosition seek.
+        // Stash the latest target (publishing it optimistically so scrub UI follows) and replay at readiness.
+        if Self.shouldDeferHostSeek(
+            nativeSessionActive: nativeHost != nil && softwareHost == nil && audioHost == nil && !audioAVPlayerActive,
+            isLive: isLive,
+            nativeHostReady: nativeHost?.isReady ?? true
+        ) {
+            pendingPreReadySeekSeconds = seconds
+            clock.currentTime = max(0, min(seconds, duration))
+            EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) deferred until item ready (#127)", category: .engine)
+            return
         }
         // VOD: clamp to [0, duration] in source PTS. Live/DVR: clamp to the
         // window's session-relative seekable range.
@@ -2533,6 +2610,10 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleRenditionsServed = false
         extractorYieldState.deactivate()
         setPendingRecoverySeekTarget(nil)
+        // #127: readiness + deferred host seeks are session-scoped; the host-side sink can't clear them
+        // once nativeCancellables are gone.
+        isSessionReady = false
+        pendingPreReadySeekSeconds = nil
 
         // Shut down cache-backed scrub-thumbnail FrameExtractors with the session.
         let scrubThumbs = scrubThumbnailExtractors
@@ -2658,21 +2739,33 @@ public final class AetherEngine: ObservableObject {
                 let keepAlive = Self.shouldKeepVideoAlive(enabled: self.backgroundPlaybackEnabled,
                                                           pipActive: self.pictureInPictureActive,
                                                           state: self.state)
+                let supportsGrace = true
                 #else
                 let keepAlive = false  // tvOS: wedge-safe unconditional teardown
+                let supportsGrace = false
                 #endif
-                switch Self.backgroundAction(
+                let action = Self.backgroundAction(
                     isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
                     hasSoftwareHost: self.softwareHost != nil,
                     keepVideoAlive: keepAlive,
                     state: self.state
+                )
+                switch Self.backgroundStep(
+                    action: action,
+                    state: self.state,
+                    supportsGraceWindow: supportsGrace,
+                    graceSeconds: self.backgroundTeardownGraceSeconds
                 ) {
-                case .doNothing:
+                case .perform(.doNothing):
                     return
-                case .enterSoftwareAudioOnly:
+                case .perform(.enterSoftwareAudioOnly):
                     self.softwareHost?.enterBackgroundAudioOnly()
-                case .teardownVideo:
+                case .perform(.teardownVideo):
                     await self.teardownVideoForBackground()
+                case .deferTeardown(let seconds):
+                    #if os(iOS)
+                    self.scheduleBackgroundGraceTeardown(afterSeconds: seconds)
+                    #endif
                 }
             }
         }
@@ -2684,6 +2777,7 @@ public final class AetherEngine: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.cancelBackgroundGraceWindow()
                 self.softwareHost?.exitBackgroundAudioOnly()
                 self.isBackgrounded = false
             }
@@ -2766,6 +2860,98 @@ public final class AetherEngine: ObservableObject {
         try? await Task.sleep(nanoseconds: 3_500_000_000)
         if bgTask != .invalid { app.endBackgroundTask(bgTask) }
     }
+
+    #if os(iOS)
+    // MARK: #127 paused-background grace window
+
+    /// Hold the paused pipeline alive under a background-task assertion for the grace window, then
+    /// re-evaluate and tear down. didBecomeActive cancels the window, making a quick app switch free.
+    private func scheduleBackgroundGraceTeardown(afterSeconds seconds: Double) {
+        guard backgroundGraceTask == nil else { return }  // window already armed
+        let app = UIApplication.shared
+        let assertion = app.beginBackgroundTask(withName: "AetherEngine.bgGraceWindow") { [weak self] in
+            // System reclaimed the window early. UIKit calls this on the main thread; the synchronous
+            // stopInternal releases the decode session, the 3.5 s socket drain is skipped (no time).
+            MainActor.assumeIsolated {
+                self?.expireBackgroundGraceNow()
+            }
+        }
+        guard assertion != .invalid else {
+            // Background execution unavailable: fall back to the immediate teardown.
+            Task { @MainActor in await self.teardownVideoForBackground() }
+            return
+        }
+        backgroundGraceAssertion = assertion
+        // Clamp: the system allowance is ~30 s; longer values would just move the work into the
+        // expiration backstop (and an unbounded host value must not overflow the ns conversion).
+        let window = min(max(0, seconds), 60)
+        EngineLog.emit("[AetherEngine] background grace window armed (\(String(format: "%.0f", window))s) before paused teardown (#127)", category: .engine)
+        backgroundGraceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(window * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            await self.fireBackgroundGraceTeardown()
+        }
+    }
+
+    /// Grace expiry: re-evaluate the background action (PiP can start and lock-screen play can resume
+    /// mid-window) and perform it without further deferral.
+    private func fireBackgroundGraceTeardown() async {
+        backgroundGraceTask = nil
+        if isBackgrounded {
+            switch currentBackgroundAction() {
+            case .teardownVideo:
+                EngineLog.emit("[AetherEngine] background grace window expired, tearing down paused pipeline (#127)", category: .engine)
+                await teardownVideoForBackground()
+            case .enterSoftwareAudioOnly:
+                softwareHost?.enterBackgroundAudioOnly()
+            case .doNothing:
+                EngineLog.emit("[AetherEngine] background grace window expired, session now kept alive (#127)", category: .engine)
+            }
+        }
+        endBackgroundGraceAssertion()
+    }
+
+    /// Expiration-handler backstop: synchronous minimal teardown before the assertion is force-ended.
+    private func expireBackgroundGraceNow() {
+        backgroundGraceTask?.cancel()
+        backgroundGraceTask = nil
+        if isBackgrounded, currentBackgroundAction() == .teardownVideo {
+            EngineLog.emit("[AetherEngine] background grace assertion expired early, synchronous teardown (#127)", category: .engine)
+            stopInternal(resetDisplayCriteria: false, keepNativeHost: true, keepCustomReader: true)
+            state = .paused
+        }
+        endBackgroundGraceAssertion()
+    }
+
+    private func cancelBackgroundGraceWindow() {
+        guard backgroundGraceTask != nil || backgroundGraceAssertion != .invalid else { return }
+        backgroundGraceTask?.cancel()
+        backgroundGraceTask = nil
+        endBackgroundGraceAssertion()
+        EngineLog.emit("[AetherEngine] background grace window cancelled, session survives the app switch (#127)", category: .engine)
+    }
+
+    private func endBackgroundGraceAssertion() {
+        guard backgroundGraceAssertion != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundGraceAssertion)
+        backgroundGraceAssertion = .invalid
+    }
+
+    /// Live recomputation of the keepalive + background action for grace-window re-evaluation.
+    private func currentBackgroundAction() -> BackgroundAction {
+        let keepAlive = Self.shouldKeepVideoAlive(
+            enabled: backgroundPlaybackEnabled,
+            pipActive: pictureInPictureActive,
+            state: state
+        )
+        return Self.backgroundAction(
+            isAudioBackend: audioAVPlayerActive || audioHost != nil,
+            hasSoftwareHost: softwareHost != nil,
+            keepVideoAlive: keepAlive,
+            state: state
+        )
+    }
+    #endif
     #endif
 }
 

@@ -52,10 +52,14 @@ extension AetherEngine {
         }
     }
 
-    /// Wire `$duration`, `$isReady`, `$failureMessage`, `$didReachEnd` into the cancellable set. Pass `isReady: nil` for paths that skip the readiness -> .paused waypoint (e.g. loadRemoteHLS).
+    /// Wire `$duration`, `$isReady`, `$failureMessage`, `$didReachEnd` into the cancellable set.
+    /// `isReady` always feeds the public `isSessionReady` mirror and replays a deferred pre-ready host
+    /// seek (#127); pass `settlePausedAtReadiness: false` for paths that skip the readiness -> .paused
+    /// waypoint (autostarting loadRemoteHLS, where the terminal play() runs and readiness is a waypoint).
     private func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
-        isReady: Published<Bool>.Publisher?,
+        isReady: Published<Bool>.Publisher,
+        settlePausedAtReadiness: Bool = true,
         failureMessage: Published<String?>.Publisher,
         didReachEnd: Published<Bool>.Publisher,
         storeIn cancellables: inout Set<AnyCancellable>
@@ -65,16 +69,21 @@ extension AetherEngine {
                 if value > 0 { self?.duration = value }
             }
             .store(in: &cancellables)
-        if let isReady {
-            isReady
-                .sink { [weak self] ready in
-                    guard let self = self else { return }
-                    if ready, self.state == .loading {
-                        self.state = .paused
-                    }
+        isReady
+            .sink { [weak self] ready in
+                guard let self = self else { return }
+                self.isSessionReady = ready
+                if ready, settlePausedAtReadiness, self.state == .loading {
+                    self.state = .paused
                 }
-                .store(in: &cancellables)
-        }
+                // #127: replay the latest host seek that arrived while the item was pre-ready.
+                if ready, let pending = self.pendingPreReadySeekSeconds {
+                    self.pendingPreReadySeekSeconds = nil
+                    EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending))s (#127)", category: .engine)
+                    Task { @MainActor in await self.seek(to: pending) }
+                }
+            }
+            .store(in: &cancellables)
         failureMessage
             .compactMap { $0 }
             .sink { [weak self] msg in self?.state = .error(msg) }
@@ -133,11 +142,12 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
-        // isReady: nil deliberately when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
-        // #124: a paused mount (autoplay=false) skips that play(), so wire isReady to settle .loading -> .paused at readiness.
+        // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
+        // #124: a paused mount (autoplay=false) skips that play(), so the readiness sink settles .loading -> .paused.
         wireCommonHostSinks(
             duration: host.$duration,
-            isReady: Self.loadPerformsAutostart(options) ? nil : host.$isReady,
+            isReady: host.$isReady,
+            settlePausedAtReadiness: !Self.loadPerformsAutostart(options),
             failureMessage: host.$failureMessage,
             didReachEnd: host.$didReachEnd,
             storeIn: &nativeCancellables
