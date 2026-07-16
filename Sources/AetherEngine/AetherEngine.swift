@@ -676,7 +676,8 @@ public final class AetherEngine: ObservableObject {
 
     /// Source PTS of the rendered frame. Equals currentTime in steady state; holds the on-screen frame while a
     /// seek is in flight or the loopback rebuffers (issue #49). Use for subtitle overlay and side-demuxer re-arm.
-    /// Equals currentTime on SW/audio (shift 0, seeks resolve synchronously). Forwarder; subscribe to `clock.$sourceTime`.
+    /// On SW it is the raw synchronizer clock in the source axis: equal to currentTime for zero-based sources,
+    /// offset by the session zero on live / mid-stream-joined sources (#107). Forwarder; subscribe to `clock.$sourceTime`.
     public var sourceTime: Double { clock.sourceTime }
 
     /// Source-axis buffer frontier ahead of the playhead (AetherEngine#54). Forwarder; subscribe to `clock.$bufferedPosition`.

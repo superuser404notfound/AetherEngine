@@ -17,6 +17,11 @@ final class EmbeddedSubtitleDecoder {
         let isPGS: Bool
         /// PTS at which the previous PGS cue should be trimmed. nil for non-PGS.
         let pgsTrimAt: Double?
+        /// #107: PTS at which earlier open text cues of this track should be trimmed. Set for
+        /// every teletext event (content and page-erase): a teletext page is full state, each
+        /// transmission replaces the previous one, and libzvbi emits content open-ended
+        /// ("until replaced"). nil for all other codecs.
+        var textTrimAt: Double? = nil
         /// #112: the emitting display set was an Acquisition Point / Epoch Start - a self-contained restatement of
         /// the line. A reconstruction pass publishes such a composition immediately (it IS the current line) rather
         /// than holding it for successor resolution. False for Normal deltas and all non-PGS events.
@@ -149,11 +154,12 @@ final class EmbeddedSubtitleDecoder {
             return nil
         }
 
+        let isTeletext = ctx.pointee.codec_id == AV_CODEC_ID_DVB_TELETEXT
         let tbSec = Double(streamTimeBase.num) / Double(streamTimeBase.den)
         let rawPTS = packet.pointee.pts
         let pktPTS = (rawPTS == Int64.min) ? 0 : Double(rawPTS) * tbSec
         let startOffset = Double(sub.start_display_time) / 1000.0
-        let endOffset: Double
+        var endOffset: Double
         if sub.end_display_time > 0 {
             endOffset = Double(sub.end_display_time) / 1000.0
         } else if packet.pointee.duration > 0 {
@@ -161,6 +167,11 @@ final class EmbeddedSubtitleDecoder {
         } else {
             endOffset = 5.0
         }
+        // #107: libzvbi emits page content open-ended (end_display_time = u32 max, "until
+        // replaced"); textTrimAt closes the window at the next page event or erase. The cap
+        // only bounds a ghost line if transmission stops without either; teletext re-transmits
+        // held pages every few seconds, so a real caption never hits it.
+        if isTeletext, endOffset > 120 { endOffset = 120 }
         let startTime = pktPTS + startOffset
         let endTime = pktPTS + endOffset
 
@@ -198,8 +209,9 @@ final class EmbeddedSubtitleDecoder {
         let isPGS = ctx.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE
         let isClearEvent = bodies.isEmpty
 
-        guard endTime > startTime else { return nil }
-        guard !isClearEvent || isPGS else { return nil }
+        // A teletext page erase carries no rects but must still trim the open page cue (#107).
+        guard endTime > startTime || (isClearEvent && isTeletext) else { return nil }
+        guard !isClearEvent || isPGS || isTeletext else { return nil }
 
         // Bound the dedupe set to prevent unbounded growth on long live sessions (DVB/PGS).
         // Reset only weakens dedupe (a re-emitted duplicate renders as an identical overlay), never correctness.
@@ -245,6 +257,7 @@ final class EmbeddedSubtitleDecoder {
             cues: cues,
             isPGS: isPGS,
             pgsTrimAt: isPGS ? startTime : nil,
+            textTrimAt: isTeletext ? startTime : nil,
             isSelfContainedPGS: selfContained
         )
     }

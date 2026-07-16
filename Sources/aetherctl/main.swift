@@ -69,6 +69,9 @@ func printUsage() {
       aetherctl serve [--no-dv] [--start-position S] <url>
       aetherctl validate [--no-dv] <url>
       aetherctl swdecode [--frames N] <url>
+      aetherctl play [--seconds N] [--live] [--dvr-window N] [--subs <codec-or-lang>] <url>
+                     (full load+play session smoke test; --subs activates the first
+                      matching embedded subtitle track and logs overlay cues)
       aetherctl segverify [--from N] [--count K] [--no-dv] [--dump <dir>] <url>
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
@@ -429,6 +432,23 @@ if first == "live" {
                  reloadTest: reloadTest,
                  forceSoftware: forceSW, dropAfter: dropAfter,
                  discontinuityAt: discontinuityAt, realtime: realtime))
+}
+
+if first == "play" {
+    var rest = Array(args.dropFirst(2))
+    let seconds = takeDoubleFlag("--seconds", from: &rest) ?? 30.0
+    let live = takeFlag("--live", from: &rest)
+    let dvrWindow = takeDoubleFlag("--dvr-window", from: &rest)
+    let subsPick = takeStringFlag("--subs", from: &rest)
+    let hostCalls = takeStringFlag("--host-calls", from: &rest).map { $0.split(separator: ",").map(String.init) } ?? []
+    rejectStrayFlags(rest, subcommand: "play")
+    guard let urlArg = rest.first else {
+        print("ERROR: play requires a <url> argument")
+        print("")
+        printUsage()
+        exit(64)
+    }
+    exit(runPlay(url: parseSourceURL(urlArg), seconds: seconds, live: live, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

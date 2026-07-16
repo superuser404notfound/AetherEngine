@@ -63,12 +63,16 @@ final class AudioOutput: @unchecked Sendable {
 
     /// Set playback speed (0.5-2.0). Hosts own rate state (lastRate/pausedByHost); this object is stateless about it.
     func setRate(_ rate: Float) {
-        synchronizer.setRate(rate, time: synchronizer.currentTime())
+        let at = synchronizer.currentTime()
+        EngineLog.emit("[AudioOutput] setRate \(rate) at t=\(String(format: "%.3f", at.seconds))", category: .swPlayback)
+        synchronizer.setRate(rate, time: at)
     }
 
     /// Pause audio (and the master clock). Hosts resume via setRate (pausedByHost pattern); deliberately no resume() here.
     func pause() {
-        synchronizer.setRate(0.0, time: synchronizer.currentTime())
+        let at = synchronizer.currentTime()
+        EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", at.seconds))", category: .swPlayback)
+        synchronizer.setRate(0.0, time: at)
     }
 
     /// Enqueue a decoded audio CMSampleBuffer. Always enqueues (renderer buffers internally); gating on
@@ -136,6 +140,7 @@ final class AudioOutput: @unchecked Sendable {
     func seekClock(to time: CMTime, rate: Float) {
         lock.lock()
         defer { lock.unlock() }
+        EngineLog.emit("[AudioOutput] seekClock to=\(String(format: "%.3f", time.seconds)) rate=\(rate)", category: .swPlayback)
         synchronizer.setRate(rate, time: time)
     }
 }

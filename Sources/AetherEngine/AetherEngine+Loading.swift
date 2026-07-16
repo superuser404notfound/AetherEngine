@@ -834,7 +834,7 @@ extension AetherEngine {
             packetStore.harvest(streamIndex: idx, packet: pkt, timeBase: tb,
                                 assembleSplitDisplaySets: assembleSplitSets)
         }
-        // SW path tracks source PTS directly; no AVPlayer-clock fold needed.
+        // SW path has no AVPlayer-clock fold; the host's synchronizer is the only clock.
         self.playlistShiftSeconds = 0
         self.liveShiftSeams.removeAll()
 
@@ -843,9 +843,16 @@ extension AetherEngine {
             .sink { [weak self] value in
                 guard let self = self else { return }
                 self.clock.currentTime = value
-                self.clock.sourceTime = value
                 // bufferedPosition = newest demuxed source PTS, clamped to never trail the playhead (#54).
                 self.clock.bufferedPosition = max(value, host.bufferedSessionTime)
+            }
+            .store(in: &softwareCancellables)
+        // #107: sourceTime rides the RAW synchronizer clock (source axis) so subtitle cues
+        // and the overlay drainer's packet-store scans line up on live / mid-stream-joined
+        // sources. Identical to currentTime for zero-based sources (the historical SW behavior).
+        host.$sourceClockSeconds
+            .sink { [weak self] value in
+                self?.clock.sourceTime = value
             }
             .store(in: &softwareCancellables)
         wireCommonHostSinks(

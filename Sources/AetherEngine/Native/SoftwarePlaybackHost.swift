@@ -32,6 +32,12 @@ final class SoftwarePlaybackHost {
 
     @Published private(set) var isReady: Bool = false
     @Published private(set) var currentTime: Double = 0
+    /// Raw synchronizer clock in the SOURCE axis (same axis as demuxed packet PTS and
+    /// subtitle cues). Equals `currentTime` for zero-based sources; diverges by the
+    /// session-zero offset on live and mid-stream-joined sources (#107). The engine
+    /// publishes this as `clock.sourceTime` so the subtitle overlay drainer scans the
+    /// packet store on the right axis.
+    @Published private(set) var sourceClockSeconds: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var rate: Float = 0
     @Published private(set) var failureMessage: String?
@@ -155,6 +161,7 @@ final class SoftwarePlaybackHost {
         _feedCursor = 0
         _sourceEnded = false
         _clockArmed = false
+        _clockSessionZero = 0
         feedLock.unlock()
     }
 
@@ -163,6 +170,16 @@ final class SoftwarePlaybackHost {
     nonisolated private var clockArmed: Bool {
         get { feedLock.lock(); defer { feedLock.unlock() }; return _clockArmed }
         set { feedLock.lock(); _clockArmed = newValue; feedLock.unlock() }
+    }
+
+    /// Session-zero offset for non-live sources whose first decoded sample deviated from
+    /// the load anchor (mid-stream-joined TS, #107): raw clock minus this is the published
+    /// position. 0 for zero-based sources and aligned resumes. Written once by the demux
+    /// thread at clock arming, read by the main-actor time tick.
+    nonisolated(unsafe) private var _clockSessionZero: Double = 0
+    nonisolated private var clockSessionZero: Double {
+        get { feedLock.lock(); defer { feedLock.unlock() }; return _clockSessionZero }
+        set { feedLock.lock(); _clockSessionZero = newValue; feedLock.unlock() }
     }
 
     /// Bumped at every seek; demux loop re-checks around blocking readPacket to discard stale pre-seek packets that would clear the skip threshold (visible fast-forward burst).
@@ -193,9 +210,14 @@ final class SoftwarePlaybackHost {
 
     private var timeTimer: AnyCancellable?
 
-    /// Caching the chosen rate so resume() restores the right speed
-    /// after a pause without the host needing to know its history.
-    private var lastRate: Float = 1.0
+    /// Caching the chosen rate so resume() restores the right speed after a pause without the
+    /// host needing to know its history. Lock-guarded: the demux/feeder threads read it at clock
+    /// arming so a host rate change between load and arm is not lost (#107).
+    nonisolated(unsafe) private var _lastRate: Float = 1.0
+    nonisolated private var lastRate: Float {
+        get { flagsLock.lock(); defer { flagsLock.unlock() }; return _lastRate }
+        set { flagsLock.lock(); _lastRate = newValue; flagsLock.unlock() }
+    }
 
     /// Start position captured so the demux loop aligns the synchronizer clock to the first sample's PTS; non-zero resume without this would cause "frozen frame, no audio".
     private var initialClockTime: CMTime = .zero
@@ -392,10 +414,12 @@ final class SoftwarePlaybackHost {
     // MARK: - Transport
 
     func play() {
-        // Resume after pause() BEFORE the demuxLoopStarted flip: distinguishes real resume (clock armed) from pause-before-first-play (un-anchored clock must not tick forward via eager setRate).
+        // Resume after pause(): gate on clockArmed, not demuxLoopStarted. A rate change on the
+        // un-anchored synchronizer (no media at its clock time yet) wedges the delayed-rate-change
+        // machinery permanently frozen; the arming seekClock applies the current lastRate (#107).
         if pausedByHost {
             pausedByHost = false
-            if demuxLoopStarted {
+            if clockArmed {
                 audioOutput?.setRate(lastRate)
             }
         }
@@ -451,7 +475,10 @@ final class SoftwarePlaybackHost {
     }
 
     func pause() {
-        audioOutput?.pause()
+        // Un-anchored clock: only latch the pause; the loops park on isPlaying (#107).
+        if clockArmed {
+            audioOutput?.pause()
+        }
         pausedByHost = true
         rate = 0
         isPlaying = false
@@ -475,8 +502,14 @@ final class SoftwarePlaybackHost {
 
     func setRate(_ newRate: Float) {
         lastRate = newRate
-        audioOutput?.setRate(newRate)
         rate = newRate
+        // Same rule as play(): never rate-change the un-anchored synchronizer. A host setRate
+        // right after load(), before the demux/feeder loop armed the clock, wedged the
+        // delayed-rate-change machinery and froze live sessions on the first frame; the arming
+        // seekClock picks up lastRate instead (#107).
+        if clockArmed {
+            audioOutput?.setRate(newRate)
+        }
     }
 
     func seek(to seconds: Double) async {
@@ -653,7 +686,9 @@ final class SoftwarePlaybackHost {
         let rndr = renderer
         let condition = demuxCondition
         let initialClock = initialClockTime
-        let initialRate = lastRate
+        // Read at arm time, not captured: a host setRate between load and arming must reach
+        // the anchor (the eager synchronizer call it replaced is gated on clockArmed, #107).
+        let currentRate: @Sendable () -> Float = { [weak self] in self?.lastRate ?? 1.0 }
         let ring = dvrRing
         let vTbSec = videoTimeBaseSeconds
         let aTbSec = audioTimeBaseSeconds
@@ -703,6 +738,11 @@ final class SoftwarePlaybackHost {
         let getBackgroundAudioOnly: @Sendable () -> Bool = { [weak self] in
             self?.backgroundAudioOnly ?? false
         }
+        // #107: the demux loop reports the resolved session-zero offset when it re-anchors
+        // the clock at a deviating first-sample PTS (mid-stream-joined source).
+        let onClockAnchored: @Sendable (Double) -> Void = { [weak self] zero in
+            self?.clockSessionZero = zero
+        }
 
         if liveSession, let ring {
             let readCursor: @Sendable () -> Int = { [weak self] in
@@ -732,7 +772,11 @@ final class SoftwarePlaybackHost {
                     noteEdge: noteEdge,
                     stopRequested: getStopRequested,
                     onError: onError,
-                    onSourceEnded: setSourceEnded
+                    onSourceEnded: setSourceEnded,
+                    subtitleStreamIndices: subIndices,
+                    subtitleTimeBases: subTimeBases,
+                    splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
+                    subtitleTapSink: getSubtitleTapSink
                 )
             }
             feedQueue.async {
@@ -750,7 +794,7 @@ final class SoftwarePlaybackHost {
                     readCursor: readCursor,
                     advanceCursor: advanceCursor,
                     clampCursor: clampCursor,
-                    initialRate: initialRate,
+                    currentRate: currentRate,
                     isPlaying: getIsPlaying,
                     stopRequested: getStopRequested,
                     sourceEnded: getSourceEnded,
@@ -774,7 +818,7 @@ final class SoftwarePlaybackHost {
                 renderer: rndr,
                 condition: condition,
                 initialClockTime: initialClock,
-                initialRate: initialRate,
+                currentRate: currentRate,
                 ring: ring,
                 videoTimeBaseSeconds: vTbSec,
                 audioTimeBaseSeconds: aTbSec,
@@ -784,6 +828,7 @@ final class SoftwarePlaybackHost {
                 stopRequested: getStopRequested,
                 clockArmed: getClockArmed,
                 markClockArmed: setClockArmed,
+                onClockAnchored: onClockAnchored,
                 seekGeneration: getSeekGeneration,
                 backgroundAudioOnly: getBackgroundAudioOnly,
                 onError: onError,
@@ -811,7 +856,11 @@ final class SoftwarePlaybackHost {
         noteEdge: @Sendable (Double) -> Void,
         stopRequested: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
-        onSourceEnded: @Sendable () -> Void
+        onSourceEnded: @Sendable () -> Void,
+        subtitleStreamIndices: Set<Int32> = [],
+        subtitleTimeBases: [Int32: AVRational] = [:],
+        splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
+        subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil }
     ) {
         let discontinuityThresholdSeconds = 10.0
         var prevRawVideoPtsSec = Double.nan
@@ -931,6 +980,13 @@ final class SoftwarePlaybackHost {
                         condition.unlock()
                     }
                 }
+            } else if subtitleStreamIndices.contains(streamIdx), let sink = subtitleTapSink() {
+                // #107: the ring holds only A/V; subtitle packets tap into the session packet
+                // store here, mirroring the combined demux loop (the playhead-paced drainer
+                // decodes them on selection).
+                sink(streamIdx, packet,
+                     subtitleTimeBases[streamIdx] ?? AVRational(num: 1, den: 1000),
+                     splitDisplaySetSubtitleStreamIndices.contains(streamIdx))
             }
 
             av_packet_unref(packet)
@@ -955,7 +1011,7 @@ final class SoftwarePlaybackHost {
         readCursor: @Sendable () -> Int,
         advanceCursor: @Sendable (Int) -> Void,
         clampCursor: @Sendable (Int, Int) -> Void,
-        initialRate: Float,
+        currentRate: @Sendable () -> Float,
         isPlaying: @Sendable () -> Bool,
         stopRequested: @Sendable () -> Bool,
         sourceEnded: @Sendable () -> Bool,
@@ -1041,13 +1097,38 @@ final class SoftwarePlaybackHost {
                 let shouldArm = (audioDecoder == nil) ? pkt.isVideo : producedAudio
                 if shouldArm {
                     let armTime = CMTime(seconds: pkt.pts, preferredTimescale: 90000)
-                    // Use initialRate (not 1.0) to preserve any rate set before arming.
-                    aOut.seekClock(to: armTime, rate: initialRate)
+                    // Latest host rate, read at arm time (a setRate before arming is deferred here, #107).
+                    aOut.seekClock(to: armTime, rate: currentRate())
                     markClockArmed()
                 }
             }
 
             advanceCursor(cursor)
+        }
+    }
+
+    /// Apply a resolved clock anchor: seek the synchronizer, report a non-zero session
+    /// zero to the host, and log a re-anchor (release-visible; a mid-stream join is
+    /// otherwise indistinguishable from a frozen-frame wedge, #107).
+    nonisolated private static func armClock(
+        _ aOut: AudioOutput,
+        resolution: SWClockAnchorPolicy.Resolution,
+        initialClockTime: CMTime,
+        rate: Float,
+        onClockAnchored: @Sendable (Double) -> Void
+    ) {
+        let anchorTime = resolution.anchorSeconds == initialClockTime.seconds
+            ? initialClockTime
+            : CMTime(seconds: resolution.anchorSeconds, preferredTimescale: 90000)
+        aOut.seekClock(to: anchorTime, rate: rate)
+        if resolution.anchorSeconds != initialClockTime.seconds {
+            EngineLog.emit(
+                "[SWHost] clock re-anchored to first sample: anchor=\(String(format: "%.3f", resolution.anchorSeconds))s "
+                + "(load anchor \(String(format: "%.3f", initialClockTime.seconds))s, "
+                + "sessionZero=\(String(format: "%.3f", resolution.sessionZeroSeconds))s)",
+                category: .swPlayback
+            )
+            onClockAnchored(resolution.sessionZeroSeconds)
         }
     }
 
@@ -1062,7 +1143,7 @@ final class SoftwarePlaybackHost {
         renderer: SampleBufferRenderer,
         condition: NSCondition,
         initialClockTime: CMTime,
-        initialRate: Float,
+        currentRate: @Sendable () -> Float,
         ring: PacketRingBuffer?,
         videoTimeBaseSeconds: Double,
         audioTimeBaseSeconds: Double,
@@ -1072,6 +1153,7 @@ final class SoftwarePlaybackHost {
         stopRequested: @Sendable () -> Bool,
         clockArmed: @Sendable () -> Bool,
         markClockArmed: @Sendable () -> Void,
+        onClockAnchored: @Sendable (Double) -> Void,
         seekGeneration: @Sendable () -> UInt64,
         backgroundAudioOnly: @Sendable () -> Bool,
         onError: @Sendable (String) -> Void,
@@ -1244,7 +1326,14 @@ final class SoftwarePlaybackHost {
                 // Video-only / undecodable audio fallback: arm clock off first video packet (50+ audio packets with zero buffers = decoder not recovering).
                 if !clockArmed(), let aOut = audioOutput,
                    audioDecoder == nil || (audioPacketsSeen >= 50 && !audioBuffersProduced) {
-                    aOut.seekClock(to: initialClockTime, rate: initialRate)
+                    // #107: a mid-stream-joined source delivers first samples far past the load
+                    // anchor; anchor at the packet PTS so they ever present (see SWClockAnchorPolicy).
+                    let pktPtsSec = (packet.pointee.pts != Int64.min && videoTimeBaseSeconds > 0)
+                        ? Double(packet.pointee.pts) * videoTimeBaseSeconds : Double.nan
+                    let resolution = SWClockAnchorPolicy.resolve(
+                        initialSeconds: initialClockTime.seconds, firstSampleSeconds: pktPtsSec)
+                    armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
+                             rate: currentRate(), onClockAnchored: onClockAnchored)
                     markClockArmed()
                 }
             } else if streamIdx == audioStreamIndex, let aDec = audioDecoder, let aOut = audioOutput {
@@ -1278,7 +1367,14 @@ final class SoftwarePlaybackHost {
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
                 if !clockArmed(), !buffers.isEmpty {
-                    aOut.seekClock(to: initialClockTime, rate: initialRate)
+                    // #107: anchor at the buffer PTS when it deviates from the load anchor
+                    // (mid-stream-joined source); aligned sources keep the anchor verbatim.
+                    let firstPts = CMSampleBufferGetPresentationTimeStamp(buffers[0])
+                    let resolution = SWClockAnchorPolicy.resolve(
+                        initialSeconds: initialClockTime.seconds,
+                        firstSampleSeconds: firstPts.isValid ? firstPts.seconds : Double.nan)
+                    armClock(aOut, resolution: resolution, initialClockTime: initialClockTime,
+                             rate: currentRate(), onClockAnchored: onClockAnchored)
                     markClockArmed()
                 }
             } else if subtitleStreamIndices.contains(streamIdx), let sink = subtitleTapSink() {
@@ -1304,7 +1400,10 @@ final class SoftwarePlaybackHost {
                 guard let self, let aOut = self.audioOutput else { return }
                 let raw = aOut.currentTimeSeconds
                 if raw.isFinite, raw >= 0 {
-                    // Live: subtract sessionStartPts to convert to "seconds since first frame"; VOD keeps the raw clock.
+                    // Raw clock = source/subtitle axis; published alongside the mapped position (#107).
+                    self.sourceClockSeconds = raw
+                    // Live: subtract sessionStartPts to convert to "seconds since first frame"; VOD
+                    // subtracts the anchor's session zero (0 for zero-based sources, #107).
                     if self.isLive {
                         let start: Double = {
                             self.liveEdgeLock.lock(); defer { self.liveEdgeLock.unlock() }
@@ -1312,7 +1411,8 @@ final class SoftwarePlaybackHost {
                         }()
                         self.currentTime = max(0, raw - start)
                     } else {
-                        self.currentTime = raw
+                        let zero = self.clockSessionZero
+                        self.currentTime = zero > 0 ? max(0, raw - zero) : raw
                     }
                 }
                 // Feed the live edge; publishLiveWindow in the engine reads currentTime for the playhead.

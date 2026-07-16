@@ -357,6 +357,11 @@ extension AetherEngine {
                 insertSorted(cue, into: &cues)
             }
         }
+        // #107: teletext page-state semantics; every event (content or erase) closes earlier
+        // open text cues at its start, since libzvbi emits pages open-ended ("until replaced").
+        if let trimAt = event.textTrimAt {
+            Self.trimTextCues(&cues, at: trimAt)
+        }
         // #100: a PGS event whose cues start well behind the playhead is a catch-up replay; its
         // open-ended placeholder window would cover the playhead the instant it inserts and flash
         // stale history through the overlay until the successor trims it. Hold it instead.
@@ -377,6 +382,24 @@ extension AetherEngine {
         Self.insertCueSorted(cue, into: &cues, nextID: &nextRetainedSubtitleCueID)
     }
 
+    /// #107: close every text cue whose window covers `trimAt` (teletext page-state semantics:
+    /// each page transmission or erase replaces what came before it). Image cues are untouched;
+    /// they have their own PGS trim. Static and pure for unit tests.
+    nonisolated static func trimTextCues(_ cues: inout [SubtitleCue], at trimAt: Double) {
+        for i in 0..<cues.count {
+            guard case .text = cues[i].body else { continue }
+            let cue = cues[i]
+            if cue.startTime < trimAt && cue.endTime > trimAt {
+                cues[i] = SubtitleCue(
+                    id: cue.id,
+                    startTime: cue.startTime,
+                    endTime: trimAt,
+                    body: cue.body
+                )
+            }
+        }
+    }
+
     /// #112 full umbau: sorted insert of a decoded cue into the retained store, keeping ascending start order. An
     /// image cue sharing a start with an existing image cue REPLACES it: a PGS composition has a unique start PTS, so
     /// a same-start image cue is the same line re-decoded (the audio-switch preserved placeholder vs its
@@ -390,14 +413,14 @@ extension AetherEngine {
     /// ids (`ForEach(id:)` "occurs multiple times"). The retained store is the session-wide source of truth, so the
     /// invariant lives here, not on the ephemeral decoder.
     nonisolated static func insertCueSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue], nextID: inout Int) {
-        // A text cue already present with the same window and content is a re-decode of a retained line, not a new
+        // A text cue already present with the same start and content is a re-decode of a retained line, not a new
         // one. Content (not id) is compared: two simultaneous speakers differ in text and both survive; a genuine
-        // repeat at a new time has a different window and is inserted. Deduped cues consume no id (no gap).
+        // repeat at a new time has a different start and is inserted. endTime is deliberately NOT part of the key:
+        // a retained teletext cue may have been trimmed by its successor (#107) while the re-decode emits the
+        // original open-ended window; the retained (trimmed) cue stays authoritative. Deduped cues consume no id.
         if case .text(let text) = cue.body,
            cues.contains(where: { other in
-               other.startTime == cue.startTime
-                   && other.endTime == cue.endTime
-                   && other.text == text
+               other.startTime == cue.startTime && other.text == text
            }) {
             return
         }
