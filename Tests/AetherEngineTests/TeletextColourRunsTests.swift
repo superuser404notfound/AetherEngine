@@ -55,4 +55,18 @@ struct TeletextColourRunsTests {
         let runs = SubtitleRectText.coloredRuns(fromASSEventLine: "plain, with, commas")
         #expect(runs == [SubtitleTextRun(text: "plain, with, commas", color: nil)])
     }
+
+    @Test("adjacent same-colour runs collapse into one")
+    func collapseSameColour() {
+        let line = "0,0,Default,,0,0,0,,{\\c&H0000FF&}A{\\c&H0000FF&}B"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "AB", color: SubtitleColor(r: 255, g: 0, b: 0))])
+    }
+
+    @Test("non-colour override tags like \\clip are ignored, not treated as a reset")
+    func clipTagIgnored() {
+        let line = "0,0,Default,,0,0,0,,{\\c&H0000FF&}Red{\\clip(1,2,3,4)}still"
+        let runs = SubtitleRectText.coloredRuns(fromASSEventLine: line)
+        #expect(runs == [SubtitleTextRun(text: "Redstill", color: SubtitleColor(r: 255, g: 0, b: 0))])
+    }
 }

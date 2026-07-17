@@ -108,10 +108,9 @@ enum SubtitleRectText {
         }
         flush()
 
-        let cleaned = runs
-            .map { SubtitleTextRun(text: $0.text, color: $0.color) }
-            .filter { !$0.text.isEmpty }
-        // Trim leading/trailing whitespace across the whole cue without losing interior runs.
+        let cleaned = runs.filter { !$0.text.isEmpty }
+        // Drop empty runs; a cue that is only whitespace yields nil (real trimming of the
+        // flattened text happens in teletextBody's .text branch).
         guard cleaned.contains(where: { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return nil }
         return cleaned
     }
@@ -136,7 +135,7 @@ enum SubtitleRectText {
     /// Behaviour (three-way nil / reset / color) is unchanged.
     private static func parseColorTag(_ tag: String) -> SubtitleColor?? {
         // Accept a block that contains \c or \1c (teletext libzvbi emits one tag per block).
-        guard let range = tag.range(of: #"\\1?c"#, options: .regularExpression) else { return nil }
+        guard let range = tag.range(of: #"\\1?c(?![a-zA-Z])"#, options: .regularExpression) else { return nil }
         let after = tag[range.upperBound...]
         guard let hexRange = after.range(of: #"&H[0-9A-Fa-f]{1,6}&"#, options: .regularExpression) else {
             return .some(nil)   // bare \c => reset
