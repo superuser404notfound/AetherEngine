@@ -1395,7 +1395,11 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
-        stopInternal(keepNativeHost: priorBackendWasNative)
+        // #128 follow-up: preserve the previous session's display criteria across the load seam. Nil-ing it
+        // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
+        // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
+        // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: priorBackendWasNative)
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)
@@ -1642,6 +1646,12 @@ public final class AetherEngine: ObservableObject {
         //     (required for custom sources).
         let hasVideoStream = probeOpened && probe.videoStreamIndex >= 0
         if Self.shouldUseAudioOnlyPath(audioOnlyRequested: options.audioOnly, probeOpened: probeOpened, hasVideoStream: hasVideoStream) {
+            // The load seam preserves display criteria (#128 follow-up); an audio-only session never calls
+            // apply(), so clear a criteria the previous video session left applied. The engine is a
+            // process-wide singleton; without this, music playback keeps the panel in DV/HDR.
+            if Self.loadDisplayCriteriaAction(suppressDisplayCriteria: options.suppressDisplayCriteria, audioOnlyPath: true) == .clearStale {
+                displayCriteria.reset()
+            }
             // Read codec before closing the probe; custom sources always use FFmpeg (AVPlayer can't consume a custom demuxer).
             let audioCodecID: AVCodecID = (probeOpened && resolvedInitialAudio >= 0)
                 ? (probe.stream(at: resolvedInitialAudio)?.pointee.codecpar.pointee.codec_id ?? AV_CODEC_ID_NONE)
@@ -1719,7 +1729,8 @@ public final class AetherEngine: ObservableObject {
         // warming and the served master resolves 0 tracks / fails -11819; a warm start (no switch) keeps
         // the unchanged immediate-play path.
         var didSwitchPanel = false
-        if !options.suppressDisplayCriteria {
+        switch Self.loadDisplayCriteriaAction(suppressDisplayCriteria: options.suppressDisplayCriteria, audioOnlyPath: false) {
+        case .applyFresh:
             let codecTag: FourCharCode? = detectedDVProfile ? 0x64766831 : nil
             let willSwitch = displayCriteria.apply(
                 format: effectiveFormat,
@@ -1739,6 +1750,11 @@ public final class AetherEngine: ObservableObject {
                     try checkLoadCurrent(gen)
                 }
             }
+        case .clearStale:
+            // Suppressed host: the load seam preserved the criteria (#128 follow-up), and AVKit writes its
+            // own from the AVPlayerItem formatDescription later. Clear a leftover engine criteria now
+            // (didApply-gated no-op for hosts that always suppress) so the two writers can't fight.
+            displayCriteria.reset()
         }
 
         // 2.5. Post-handshake panel-mode snapshot.
@@ -2253,6 +2269,14 @@ public final class AetherEngine: ObservableObject {
         await seek(to: seconds)
     }
 
+    /// Stop playback and tear the session down.
+    ///
+    /// - Parameter resetDisplayCriteria: `true` (default) returns the panel to its default HDMI mode
+    ///   (tvOS). Pass `false` for a stop that hands off to another load(): the current criteria stays on
+    ///   AVDisplayManager, so a same-mode follow-up overwrites it in place instead of bouncing the panel
+    ///   through SDR (#128). The caller owns the follow-up; if no load() happens after all, the app UI
+    ///   stays in the playback mode until a plain stop() clears it. Note that back-to-back load() calls
+    ///   preserve the criteria on their own; the flag only matters when stop() is called between items.
     public func stop(resetDisplayCriteria: Bool = true) {
         stopInternal(resetDisplayCriteria: resetDisplayCriteria)
         state = .idle

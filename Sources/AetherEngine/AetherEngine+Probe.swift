@@ -242,6 +242,24 @@ extension AetherEngine {
         return probeOpened && !hasVideoStream
     }
 
+    /// What load() does about the previous session's display criteria once routing is known.
+    ///
+    /// The load seam preserves the criteria through stopInternal (a nil write bounces the panel through
+    /// SDR before apply() re-negotiates the same mode, #128). That moves the cleanup decision here:
+    enum LoadDisplayCriteriaAction {
+        /// Engine-writer video path: apply() overwrites the preserved criteria in place, single handshake.
+        case applyFresh
+        /// No engine apply() this session (audio-only, or an AVKit-sole-writer host): clear a criteria a
+        /// previous session left applied, so it can't keep the panel in DV/HDR under music playback or
+        /// fight AVKit's own write. `DisplayCriteriaController.reset()` stays didApply-gated, so this is
+        /// a no-op for hosts that never route criteria through the engine.
+        case clearStale
+    }
+
+    nonisolated static func loadDisplayCriteriaAction(suppressDisplayCriteria: Bool, audioOnlyPath: Bool) -> LoadDisplayCriteriaAction {
+        (suppressDisplayCriteria || audioOnlyPath) ? .clearStale : .applyFresh
+    }
+
     /// Whitelist (not blacklist) of AVPlayer-native audio codecs: AAC, MP3, MP2, ALAC, AC-3/E-AC-3, LPCM, FLAC (native since iOS/tvOS 11). Anything else falls back to `AudioPlaybackHost` (FFmpeg).
     nonisolated static func avPlayerCanDecodeAudio(_ codecID: AVCodecID) -> Bool {
         switch codecID {
