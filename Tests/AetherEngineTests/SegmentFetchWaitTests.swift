@@ -372,7 +372,11 @@ extension SegmentFetchWaitTests {
         let recorder = Recorder()
         cache.store(index: 0, data: Data(repeating: 0x10, count: 8))
         cache.store(index: 50, data: Data(repeating: 0x50, count: 8))
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.02) {
+        // Use a kernel-scheduled thread rather than a GCD timer: the macOS CI runner
+        // can starve global-queue timers past this test's 500 ms wait slice when the
+        // Swift Testing suites run concurrently.
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.05)
             cache.store(index: 40, data: Data(repeating: 0x40, count: 8))
         }
         let provider = makeCoverageProvider(
