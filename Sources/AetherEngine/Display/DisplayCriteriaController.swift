@@ -24,23 +24,52 @@ final class DisplayCriteriaController {
     /// True when the last apply() set HDR color extensions. waitForSwitch uses this to distinguish a legitimate SDR rate-only settle (headroom 1.0 expected) from an HDR handshake failure (headroom 1.0 is wrong).
     private var lastCriteriaWasHDR: Bool = false
 
+    /// #133: the criteria last written to the panel (nil until the first apply, cleared by reset()). Lets a
+    /// same-format zap detect that the mode is already active and skip the redundant write + settle wait,
+    /// which on unobservable-DV panels otherwise burns the full ~3s waitForSwitch cap on every channel change.
+    private var lastApplied: AppliedCriteria?
+
+    /// The identifying inputs of an apply(): equal signatures mean the panel is already in the target mode.
+    struct AppliedCriteria: Equatable {
+        let isHDR: Bool
+        let effectiveRate: Float
+        let codecType: CMVideoCodecType
+        let hasExtensions: Bool
+    }
+
+    enum ApplyResult {
+        /// HDR/DV criteria written; a dynamic-range switch is expected (caller should pre-flight waitForSwitch).
+        case willSwitch
+        /// SDR rate-only criteria written; sub-second, no pre-flight wait needed.
+        case applied
+        /// Criteria identical to what is already active; nothing written, no switch pending (#133).
+        case unchanged
+    }
+
+    /// #133 pure decision: skip only when we previously applied (`didApply`) exactly these criteria and have
+    /// not reset since. Otherwise write, returning whether a dynamic-range switch is expected (HDR) or not (SDR).
+    nonisolated static func applyOutcome(didApply: Bool, last: AppliedCriteria?, target: AppliedCriteria) -> ApplyResult {
+        if didApply, last == target { return .unchanged }
+        return target.isHDR ? .willSwitch : .applied
+    }
+
     init() {}
 
-    /// Program AVDisplayCriteria before the session starts. `.sdr` programs a rate-only criteria so Match Frame Rate still engages. `codecTag` nil derives from format (`'dvh1'` for DV, `'hvc1'` otherwise). `omitColorExtensions` skips BT.2020 extensions for diagnostic builds. Returns true when a dynamic-range switch is expected (caller should call waitForSwitch).
+    /// Program AVDisplayCriteria before the session starts. `.sdr` programs a rate-only criteria so Match Frame Rate still engages. `codecTag` nil derives from format (`'dvh1'` for DV, `'hvc1'` otherwise). `omitColorExtensions` skips BT.2020 extensions for diagnostic builds. Returns `.willSwitch` when a dynamic-range switch is expected (caller should call waitForSwitch), `.applied` for an SDR rate-only write, or `.unchanged` when the criteria are already active and nothing was written (#133).
     @discardableResult
-    func apply(format: VideoFormat, frameRate: Double?, codecTag: FourCharCode?, omitColorExtensions: Bool) -> Bool {
+    func apply(format: VideoFormat, frameRate: Double?, codecTag: FourCharCode?, omitColorExtensions: Bool) -> ApplyResult {
         #if os(tvOS)
         // Reset up front so a skipped apply (Match Content off, no window)
         // can't leave a prior HDR session's flag for waitForSwitch to read.
         lastCriteriaWasHDR = false
         guard #available(tvOS 17.0, *) else {
             EngineLog.emit("[DisplayCriteria] skipped: tvOS < 17", category: .engine)
-            return false
+            return .applied
         }
 
         guard let window = resolveWindow() else {
             EngineLog.emit("[DisplayCriteria] skipped: no window", category: .engine)
-            return false
+            return .applied
         }
 
         let displayManager = window.avDisplayManager
@@ -48,24 +77,42 @@ final class DisplayCriteriaController {
         // isDisplayCriteriaMatchingEnabled covers both Match Dynamic Range and Match Frame Rate; tvOS picks the applicable dimension internally.
         guard displayManager.isDisplayCriteriaMatchingEnabled else {
             EngineLog.emit("[DisplayCriteria] skipped: Match Content disabled (both Dynamic Range AND Frame Rate off)", category: .engine)
-            return false
+            return .applied
         }
 
         // HDR sources attach BT.2020 + transfer + matrix extensions; SDR carries only codec + rate so Match Frame Rate can engage without Match Dynamic Range (DrHurt #4: previously early-returned for SDR and Match Frame Rate never fired).
         let isHDR = (format != .sdr)
+        // Codec FourCC drives the HDMI mode: 'hvc1' -> HDR10/HLG, 'dvh1' -> Dolby Vision. Using HEVC for a DV source kept DrHurt's Philips panel in HDR10 instead of DV (P8 MKV). ref: Jellyfin #16179, KSPlayer #633.
+        let dvh1: FourCharCode = 0x64766831
+        let codecType: CMVideoCodecType = codecTag ?? (format == .dolbyVision ? dvh1 : kCMVideoCodecType_HEVC)
+        let effectiveRate = Float(frameRate ?? 24.0)
+        let hasExtensions = isHDR && !omitColorExtensions
+
+        // #133: skip the panel write when these criteria are already active. Re-writing identical criteria
+        // triggers a redundant mode switch that, on unobservable-DV panels, sticks isDisplayModeSwitchInProgress
+        // true and makes the following waitForSwitch burn its full ~3s cap on every same-format zap.
+        let target = AppliedCriteria(isHDR: isHDR, effectiveRate: effectiveRate,
+                                     codecType: codecType, hasExtensions: hasExtensions)
+        if case .unchanged = Self.applyOutcome(didApply: didApply, last: lastApplied, target: target) {
+            // Keep lastCriteriaWasHDR consistent with the still-active criteria for any waitForSwitch classification.
+            lastCriteriaWasHDR = isHDR
+            EngineLog.emit(
+                "[DisplayCriteria] skipped SET reason=unchanged (format=\(format) codec=\(fourccString(codecType)) "
+                + "rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)"))",
+                category: .engine
+            )
+            return .unchanged
+        }
+
         let transferFunction: CFString = switch format {
         case .hlg: kCVImageBufferTransferFunction_ITU_R_2100_HLG
         default:   kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ
         }
-        let extensions: NSDictionary? = (isHDR && !omitColorExtensions) ? [
+        let extensions: NSDictionary? = hasExtensions ? [
             kCMFormatDescriptionExtension_ColorPrimaries: kCVImageBufferColorPrimaries_ITU_R_2020,
             kCMFormatDescriptionExtension_TransferFunction: transferFunction,
             kCMFormatDescriptionExtension_YCbCrMatrix: kCVImageBufferYCbCrMatrix_ITU_R_2020,
         ] : nil
-
-        // Codec FourCC drives the HDMI mode: 'hvc1' -> HDR10/HLG, 'dvh1' -> Dolby Vision. Using HEVC for a DV source kept DrHurt's Philips panel in HDR10 instead of DV (P8 MKV). ref: Jellyfin #16179, KSPlayer #633.
-        let dvh1: FourCharCode = 0x64766831
-        let codecType: CMVideoCodecType = codecTag ?? (format == .dolbyVision ? dvh1 : kCMVideoCodecType_HEVC)
 
         var formatDesc: CMVideoFormatDescription?
         CMVideoFormatDescriptionCreate(
@@ -75,14 +122,14 @@ final class DisplayCriteriaController {
             extensions: extensions,
             formatDescriptionOut: &formatDesc
         )
-        guard let desc = formatDesc else { return false }
+        guard let desc = formatDesc else { return .applied }
 
         // Always pass the real rate; tvOS uses it when Match Frame Rate is on, ignores it otherwise (dynamic-range switch still fires).
-        let effectiveRate = Float(frameRate ?? 24.0)
         let criteria = AVDisplayCriteria(refreshRate: effectiveRate, formatDescription: desc)
         displayManager.preferredDisplayCriteria = criteria
         didApply = true
         lastCriteriaWasHDR = isHDR
+        lastApplied = target
 
         EngineLog.emit(
             "[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) "
@@ -91,9 +138,9 @@ final class DisplayCriteriaController {
             category: .engine
         )
         // SDR rate-only switches are sub-second; only HDR criteria need the waitForSwitch delay.
-        return isHDR
+        return isHDR ? .willSwitch : .applied
         #else
-        return false
+        return .applied
         #endif
     }
 
@@ -220,10 +267,12 @@ final class DisplayCriteriaController {
         guard didApply else { return }
         guard let window = resolveWindow() else {
             didApply = false
+            lastApplied = nil
             return
         }
         window.avDisplayManager.preferredDisplayCriteria = nil
         didApply = false
+        lastApplied = nil   // #133: a RESET returns the panel to default; the next apply must re-establish it.
         EngineLog.emit("[DisplayCriteria] RESET", category: .engine)
         #endif
     }
