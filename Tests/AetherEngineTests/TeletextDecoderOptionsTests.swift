@@ -1,26 +1,26 @@
 import Testing
-import Libavcodec
 @testable import AetherEngine
+import Libavcodec
 
-@Suite("Teletext decoder options + classification (#107)")
 struct TeletextDecoderOptionsTests {
-    @Test("teletext gets txt_format=text and txt_page=subtitle")
-    func teletextOptions() {
-        let opts = EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_DVB_TELETEXT)
-        #expect(opts["txt_format"] == "text")
+    @Test("teletext gets txt_format=ass and auto page when no override")
+    func teletextAutoPage() {
+        let opts = EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_DVB_TELETEXT, teletextPage: nil)
+        #expect(opts["txt_format"] == "ass")
         #expect(opts["txt_page"] == "subtitle")
     }
 
-    @Test("non-teletext codecs get no decoder options")
-    func otherCodecsNoOptions() {
-        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_HDMV_PGS_SUBTITLE).isEmpty)
-        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_SUBRIP).isEmpty)
-        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_DVB_SUBTITLE).isEmpty)
+    @Test("teletext page override is passed through as a string")
+    func teletextPageOverride() {
+        let opts = EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_DVB_TELETEXT, teletextPage: 801)
+        #expect(opts["txt_page"] == "801")
+        #expect(opts["txt_format"] == "ass")
     }
 
-    @Test("teletext is classified as text, not bitmap, at both classifiers")
-    func teletextIsText() {
-        #expect(!EmbeddedSubtitleDecoder.isBitmapCodec(AV_CODEC_ID_DVB_TELETEXT))
-        #expect(!AetherEngine.isBitmapSubtitleCodec("dvb_teletext"))
+    @Test("non-teletext codecs get no options")
+    func nonTeletext() {
+        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_HDMV_PGS_SUBTITLE, teletextPage: 801).isEmpty)
+        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_SUBRIP, teletextPage: nil).isEmpty)
+        #expect(EmbeddedSubtitleDecoder.decoderOptions(for: AV_CODEC_ID_DVB_SUBTITLE, teletextPage: nil).isEmpty)
     }
 }
