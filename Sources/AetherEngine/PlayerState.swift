@@ -196,6 +196,11 @@ public struct LoadOptions: Sendable, Equatable {
     /// waypoint; the host resumes later with `play()`. Same declared-vs-real family as #122/#123 (#124).
     public var autoplay: Bool = true
 
+    /// Teletext caption page for `dvb_teletext` subtitle decode. nil (default) = libzvbi auto-detect
+    /// (`txt_page=subtitle`); an explicit page (e.g. 801 for AU) targets channels whose caption page
+    /// libzvbi does not flag as a subtitle page. Only affects teletext streams (#107).
+    public var teletextPage: Int? = nil
+
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
@@ -221,7 +226,8 @@ public struct LoadOptions: Sendable, Equatable {
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
         forwardBufferSegments: Int? = nil,
-        autoplay: Bool = true
+        autoplay: Bool = true,
+        teletextPage: Int? = nil
     ) {
         self.omitCriteriaColorExtensions = omitCriteriaColorExtensions
         self.suppressDisplayCriteria = suppressDisplayCriteria
@@ -245,6 +251,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.externalSubtitles = externalSubtitles
         self.forwardBufferSegments = forwardBufferSegments
         self.autoplay = autoplay
+        self.teletextPage = teletextPage
     }
 }
 
