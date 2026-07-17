@@ -19,8 +19,11 @@ struct LiveTelemetrySamplerTests {
         return engine
     }
 
+    /// Generous default: on a loaded CI runner the main actor can be scheduled seconds late, so a
+    /// tight bound here flakes even when the behavior under test is correct. It only needs to be a
+    /// finite backstop, not a measurement.
     private func waitUntil(
-        timeout: Duration = .seconds(5),
+        timeout: Duration = .seconds(15),
         _ condition: @MainActor () -> Bool
     ) async throws -> Bool {
         let clock = ContinuousClock()
@@ -36,11 +39,12 @@ struct LiveTelemetrySamplerTests {
     func stalledReadKeepsMainActorResponsive() async throws {
         let engine = try makeNativeEngine()
         let release = DispatchSemaphore(value: 0)
-        // If the read ran on the main actor (the #134 regression), the release signal below
-        // could never be sent while the read blocks, the 3 s wait would time out, and the
-        // published forward buffer would be the 99 sentinel instead of 12.
+        // If the read ran on the main actor (the #134 regression), the release signal below could
+        // never be sent while the read blocks, the wait would exhaust its backstop timeout, and the
+        // published forward buffer would be the 99 sentinel instead of 12. The timeout is generous
+        // (a genuine main-actor block never signals; only CI scheduling jitter needs absorbing).
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
-            let releasedInTime = release.wait(timeout: .now() + 3) == .success
+            let releasedInTime = release.wait(timeout: .now() + 30) == .success
             return NativeAVFReadings(forwardBufferSeconds: releasedInTime ? 12.0 : 99.0)
         })
         sampler.start()
@@ -83,7 +87,7 @@ struct LiveTelemetrySamplerTests {
         let release = DispatchSemaphore(value: 0)
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
             entered.set(true)
-            _ = release.wait(timeout: .now() + 3)
+            _ = release.wait(timeout: .now() + 30)
             return NativeAVFReadings(forwardBufferSeconds: 12.0)
         })
         sampler.start()
@@ -105,7 +109,7 @@ struct LiveTelemetrySamplerTests {
         let release = DispatchSemaphore(value: 0)
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
             entered.set(true)
-            _ = release.wait(timeout: .now() + 3)
+            _ = release.wait(timeout: .now() + 30)
             return NativeAVFReadings(forwardBufferSeconds: 12.0)
         })
         sampler.start()

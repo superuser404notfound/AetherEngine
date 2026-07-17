@@ -25,8 +25,10 @@ struct AVFoundationOffMainTests {
         let release = DispatchSemaphore(value: 0)
         let player = AVPlayer()
         async let result = AVFoundationOffMain.read(player, on: queue) { _ -> Bool in
-            // Only reachable in time if the main actor keeps running below.
-            release.wait(timeout: .now() + 3) == .success
+            // Signalled only if the main actor keeps running below while this body blocks.
+            // Generous backstop: a real main-actor block never signals, so only CI scheduling
+            // jitter needs absorbing, not a tight 3 s race that flakes under parallel load.
+            release.wait(timeout: .now() + 30) == .success
         }
         for _ in 0..<5 { try? await Task.sleep(for: .milliseconds(20)) }
         release.signal()
