@@ -36,12 +36,47 @@ struct RollingWindow<T: AdditiveArithmetic> {
     }
 }
 
+/// Value snapshot of every AVFoundation property the native-path tick consumes. Each getter is a
+/// synchronous XPC round-trip to mediaserverd; a busy media server (display-mode change on an HDR
+/// start) turns any main-actor read into a fully blocked main thread and, past the watchdog
+/// threshold, a process kill (#134). The whole set is therefore read as one coalesced batch on
+/// `LiveTelemetrySampler.readQueue`, never on the main actor.
+struct NativeAVFReadings: Sendable {
+    var droppedFrameCount: Int? = nil
+    var networkThroughputMbps: Double? = nil
+    var networkTransferredBytes: Int64? = nil
+    var forwardBufferSeconds: Double? = nil
+    /// Sum over all access-log events, for the [LagDiag] tick-over-tick drop delta.
+    var droppedFramesLifetimeSum: Int = 0
+    var currentTimeSeconds: Double = .nan
+    var timeControlStatus: AVPlayer.TimeControlStatus = .paused
+    var rate: Float = 0
+    var reasonForWaitingToPlay: String? = nil
+    var isPlaybackLikelyToKeepUp: Bool = false
+    var isPlaybackBufferEmpty: Bool = false
+}
+
 /// Drives engine.diagnostics.liveTelemetry at 1 Hz. Reads existing engine counters; owns no playback state.
 /// Started with the memprobe task; stopped in stopInternal.
 @MainActor
 final class LiveTelemetrySampler {
+    typealias NativeRead = @Sendable (AVPlayer, AVPlayerItem) -> NativeAVFReadings
+
     private weak var engine: AetherEngine?
     private var task: Task<Void, Never>?
+    private let nativeRead: NativeRead
+
+    /// Dedicated + serial: the sync XPC reads may block for seconds, which must not tie up the
+    /// shared cooperative pool, and serial means a stalled tick back-pressures the next one
+    /// instead of piling up concurrent reads against an already busy media server.
+    private nonisolated static let readQueue = DispatchQueue(label: "engine.telemetry.avfread", qos: .utility)
+
+    /// AVPlayer/AVPlayerItem are not Sendable; the properties the batch reads are documented
+    /// thread-safe, so the refs ride to the read queue in an unchecked box.
+    private struct PlayerRefs: @unchecked Sendable {
+        let player: AVPlayer
+        let item: AVPlayerItem
+    }
 
     private var byteWindow = RollingWindow<Int64>(capacity: 10, zero: 0)   // 10-second rolling window
     private var frameWindow = RollingWindow<Int>(capacity: 10, zero: 0)
@@ -57,8 +92,9 @@ final class LiveTelemetrySampler {
     private var lagLastClock: Double?
     private var lagLastDroppedSum: Int = 0
 
-    init(engine: AetherEngine) {
+    init(engine: AetherEngine, nativeRead: @escaping NativeRead = LiveTelemetrySampler.batchReadNativeAVF) {
         self.engine = engine
+        self.nativeRead = nativeRead
     }
 
     func start() {
@@ -76,7 +112,7 @@ final class LiveTelemetrySampler {
         lagLastDroppedSum = 0
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.tick()
+                await self?.tick()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -87,7 +123,7 @@ final class LiveTelemetrySampler {
         task = nil
     }
 
-    private func tick() {
+    private func tick() async {
         guard let engine = engine else { return }
 
         // Instant + average bitrate from demuxer byte counters (both native and SW paths)
@@ -135,26 +171,28 @@ final class LiveTelemetrySampler {
         let networkTransferredBytes: Int64?
         let avSyncGapMs: Double?
         let forwardBufferSeconds: Double?
+        var nativeReadings: NativeAVFReadings?
 
         switch engine.playbackBackend {
         case .native:
             observedFps = nil
-            if let item = engine.currentAVPlayer?.currentItem,
-               let event = item.accessLog()?.events.last {
-                droppedFrameCount = event.numberOfDroppedVideoFrames >= 0
-                    ? event.numberOfDroppedVideoFrames : nil
-                let observed = event.observedBitrate
-                networkThroughputMbps = observed.isFinite && observed > 0
-                    ? observed / 1_000_000.0 : nil
-                networkTransferredBytes = event.numberOfBytesTransferred >= 0
-                    ? Int64(event.numberOfBytesTransferred) : nil
+            avSyncGapMs = engine.lastAVGapMs  // HLSSegmentProducer audio-gate-open vs video-gate-open (native path only)
+            if let player = engine.currentAVPlayer, let item = player.currentItem {
+                let readings = await readNativeOffMain(player: player, item: item)
+                // stop() may have cancelled this tick while the read was in flight; publishing
+                // now would leak a stale snapshot and yield-gate tick into the next session.
+                guard !Task.isCancelled else { return }
+                nativeReadings = readings
+                droppedFrameCount = readings.droppedFrameCount
+                networkThroughputMbps = readings.networkThroughputMbps
+                networkTransferredBytes = readings.networkTransferredBytes
+                forwardBufferSeconds = readings.forwardBufferSeconds
             } else {
                 droppedFrameCount = nil
                 networkThroughputMbps = nil
                 networkTransferredBytes = nil
+                forwardBufferSeconds = nil
             }
-            avSyncGapMs = engine.lastAVGapMs  // HLSSegmentProducer audio-gate-open vs video-gate-open (native path only)
-            forwardBufferSeconds = Self.computeNativeForwardBuffer(engine: engine)
 
         case .software:
             let frames = engine.softwareHostFramesEnqueued
@@ -187,8 +225,8 @@ final class LiveTelemetrySampler {
         // gate conservative there, but those paths have no active session to gate anyway.
         engine.extractorYieldState.setForwardBuffer(forwardBufferSeconds)
 
-        if engine.playbackBackend == .native {
-            emitLagDiag(engine: engine, forwardBuffer: forwardBufferSeconds, netMbps: instantBitrateMbps)
+        if let readings = nativeReadings {
+            emitLagDiag(engine: engine, readings: readings, netMbps: instantBitrateMbps)
         }
 
         let snapshot = LiveTelemetry(
@@ -216,18 +254,19 @@ final class LiveTelemetrySampler {
     /// One line per tick on the native path (#93 post-recovery lag diagnosis). Discriminates
     /// buffer starvation (fwd/keepUp/empty + dclk pauses) from render-side stutter (drop
     /// climbing while tcs=playing and dclk~1.0) from thermal throttling (thermal field).
-    private func emitLagDiag(engine: AetherEngine, forwardBuffer: Double?, netMbps: Double?) {
-        guard let player = engine.currentAVPlayer, let item = player.currentItem else { return }
-        let clock = player.currentTime().seconds
+    /// All AVFoundation inputs arrive pre-read from the off-main batch (#134); only engine
+    /// state and the tick-over-tick lag counters are touched here.
+    private func emitLagDiag(engine: AetherEngine, readings: NativeAVFReadings, netMbps: Double?) {
+        let clock = readings.currentTimeSeconds
         let dclk = (clock.isFinite && lagLastClock != nil) ? clock - lagLastClock! : nil
         if clock.isFinite { lagLastClock = clock }
 
-        let droppedSum = item.accessLog()?.events.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) } ?? 0
+        let droppedSum = readings.droppedFramesLifetimeSum
         let dDrop = droppedSum - lagLastDroppedSum
         lagLastDroppedSum = droppedSum
 
         let tcs: String
-        switch player.timeControlStatus {
+        switch readings.timeControlStatus {
         case .paused:                       tcs = "paused"
         case .waitingToPlayAtSpecifiedRate: tcs = "waiting"
         case .playing:                      tcs = "playing"
@@ -244,9 +283,9 @@ final class LiveTelemetrySampler {
         let fmt2 = { (v: Double) in String(format: "%.2f", v) }
         EngineLog.emit(
             "[LagDiag] clk=\(clock.isFinite ? fmt2(clock) : "-") dclk=\(dclk.map(fmt2) ?? "-") "
-            + "tcs=\(tcs) rate=\(fmt2(Double(player.rate))) wait=\(player.reasonForWaitingToPlay?.rawValue ?? "-") "
-            + "fwd=\(forwardBuffer.map { String(format: "%.1f", $0) } ?? "-") "
-            + "keepUp=\(item.isPlaybackLikelyToKeepUp ? "y" : "n") empty=\(item.isPlaybackBufferEmpty ? "y" : "n") "
+            + "tcs=\(tcs) rate=\(fmt2(Double(readings.rate))) wait=\(readings.reasonForWaitingToPlay ?? "-") "
+            + "fwd=\(readings.forwardBufferSeconds.map { String(format: "%.1f", $0) } ?? "-") "
+            + "keepUp=\(readings.isPlaybackLikelyToKeepUp ? "y" : "n") empty=\(readings.isPlaybackBufferEmpty ? "y" : "n") "
             + "drop=\(droppedSum)+\(dDrop) stall=\(engine.nativeHost?.stallCount ?? 0) "
             + "ready=\((engine.nativeHost?.playerLayer.isReadyForDisplay ?? false) ? "y" : "n") "
             + "thermal=\(thermal) net=\(netMbps.map { String(format: "%.1f", $0) } ?? "-") "
@@ -255,14 +294,49 @@ final class LiveTelemetrySampler {
         )
     }
 
-    private static func computeNativeForwardBuffer(engine: AetherEngine) -> Double? {
-        guard let player = engine.currentAVPlayer,
-              let item = player.currentItem else { return nil }
-        let ranges = item.loadedTimeRanges
-        guard let last = ranges.last?.timeRangeValue else { return nil }
-        let end = CMTimeGetSeconds(CMTimeAdd(last.start, last.duration))
-        let now = CMTimeGetSeconds(player.currentTime())
-        guard end.isFinite, now.isFinite else { return nil }
-        return max(0, end - now)
+    /// Hops the AVFoundation batch onto the dedicated read queue and back. The main actor only
+    /// suspends here; a stalled mediaserverd reply parks a GCD thread, not the main thread.
+    private func readNativeOffMain(player: AVPlayer, item: AVPlayerItem) async -> NativeAVFReadings {
+        let refs = PlayerRefs(player: player, item: item)
+        let read = nativeRead
+        return await withCheckedContinuation { continuation in
+            Self.readQueue.async {
+                continuation.resume(returning: read(refs.player, refs.item))
+            }
+        }
+    }
+
+    /// The real batch, run on `readQueue`: one accessLog() shared by the snapshot fields and the
+    /// LagDiag lifetime drop sum, one currentTime() shared by the forward-buffer math and the
+    /// LagDiag clock (previously two of each per tick, all on the main actor).
+    private nonisolated static func batchReadNativeAVF(player: AVPlayer, item: AVPlayerItem) -> NativeAVFReadings {
+        var readings = NativeAVFReadings()
+        let events = item.accessLog()?.events
+        if let event = events?.last {
+            readings.droppedFrameCount = event.numberOfDroppedVideoFrames >= 0
+                ? event.numberOfDroppedVideoFrames : nil
+            let observed = event.observedBitrate
+            readings.networkThroughputMbps = observed.isFinite && observed > 0
+                ? observed / 1_000_000.0 : nil
+            readings.networkTransferredBytes = event.numberOfBytesTransferred >= 0
+                ? Int64(event.numberOfBytesTransferred) : nil
+        }
+        readings.droppedFramesLifetimeSum = events?.reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) } ?? 0
+
+        let now = player.currentTime().seconds
+        readings.currentTimeSeconds = now
+        if let last = item.loadedTimeRanges.last?.timeRangeValue {
+            let end = CMTimeGetSeconds(CMTimeAdd(last.start, last.duration))
+            if end.isFinite, now.isFinite {
+                readings.forwardBufferSeconds = max(0, end - now)
+            }
+        }
+
+        readings.timeControlStatus = player.timeControlStatus
+        readings.rate = player.rate
+        readings.reasonForWaitingToPlay = player.reasonForWaitingToPlay?.rawValue
+        readings.isPlaybackLikelyToKeepUp = item.isPlaybackLikelyToKeepUp
+        readings.isPlaybackBufferEmpty = item.isPlaybackBufferEmpty
+        return readings
     }
 }
