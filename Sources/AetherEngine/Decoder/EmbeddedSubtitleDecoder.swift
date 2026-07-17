@@ -228,7 +228,10 @@ final class EmbeddedSubtitleDecoder {
                 case .text(let t):
                     return "t:\(t)"
                 case .richText(let runs):
-                    return "t:\(runs.map(\.text).joined())"
+                    return "t:" + runs.map { run in
+                        let c = run.color.map { "\($0.r),\($0.g),\($0.b)" } ?? "-"
+                        return "\(run.text)#\(c)"
+                    }.joined(separator: "\u{1E}")
                 case .image(let img):
                     // Dimensions + position discriminate cheaply; identical-rect repeats are the target case.
                     return "i:\(img.cgImage.width)x\(img.cgImage.height)@\(img.position)"
