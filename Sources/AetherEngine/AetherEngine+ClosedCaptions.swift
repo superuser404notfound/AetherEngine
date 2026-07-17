@@ -253,25 +253,36 @@ extension AetherEngine {
     /// Create the CC tap and wire it onto the video session before `start()` so the first producer keeps
     /// the CC stream. The tap runs for the whole session (CC packets are sparse, negligible cost) and
     /// maintains the cue buffer; cues are mirrored into `subtitleCues` only while CC is the active subtitle.
-    /// No-op when the source has no in-band CC track.
+    /// #131: when the source has NO demuxable CC track, arm an A53-mode tap instead: the producer scans
+    /// video-packet SEI for GA94 cc_data (H.264/HEVC only; the producer self-gates on codec) and the
+    /// synthetic eia_608 track surfaces lazily on first real caption data (`notifyA53CaptionsDetected`).
+    /// The tap buffers from packet 1, so no cues are lost before the menu entry exists.
     func setupClosedCaptionTapIfNeeded(session: HLSVideoEngine) {
-        guard let ccTrack = subtitleTracks.first(where: { Self.isEmbeddedClosedCaptionCodec($0.codec) }) else {
-            closedCaptionTap = nil
-            ccCueSnapshot = []
-            ccLastSnapshotSeq = 0
-            ccNativeStore = nil
+        closedCaptionTap = nil
+        ccCueSnapshot = []
+        ccLastSnapshotSeq = 0
+        ccNativeStore = nil
+        if let ccTrack = subtitleTracks.first(where: { Self.isEmbeddedClosedCaptionCodec($0.codec) }) {
+            let idx = Int32(ccTrack.id)
+            let tap = ClosedCaptionTap(engine: self, ccStreamIndex: idx)
+            closedCaptionTap = tap
+            session.closedCaptionStreamIndexForSession = idx
+            session.closedCaptionObserverForSession = { [weak tap] packet, tb in
+                tap?.ingest(packet, timeBase: tb)
+            }
+            EngineLog.emit("[AetherEngine] CC tap armed on source stream=\(idx)", category: .engine)
             return
         }
-        let idx = Int32(ccTrack.id)
-        let tap = ClosedCaptionTap(engine: self, ccStreamIndex: idx)
+        let tap = ClosedCaptionTap(engine: self, ccStreamIndex: Int32(Self.a53ClosedCaptionTrackID))
         closedCaptionTap = tap
-        ccCueSnapshot = []
-        ccLastSnapshotSeq = 0   // fresh tap's publishSeq restarts at 1
-        session.closedCaptionStreamIndexForSession = idx
-        session.closedCaptionObserverForSession = { [weak tap] packet, tb in
-            tap?.ingest(packet, timeBase: tb)
+        session.a53CaptionObserverForSession = { [weak tap] triplets, pts, dts, tb in
+            guard pts != Int64.min, tb.num > 0, tb.den > 0 else { return }
+            let scale = Double(tb.num) / Double(tb.den)
+            tap?.ingestA53(triplets, ptsSeconds: Double(pts) * scale,
+                           dtsSeconds: dts != Int64.min ? Double(dts) * scale : nil)
         }
-        EngineLog.emit("[AetherEngine] CC tap armed on source stream=\(idx)", category: .engine)
+        EngineLog.emit("[AetherEngine] A53 SEI caption tap armed (synthetic id \(Self.a53ClosedCaptionTrackID))",
+                       category: .engine)
     }
 
     /// Receive the tap's latest cue snapshot (off the pump thread). Drops out-of-order snapshots (the

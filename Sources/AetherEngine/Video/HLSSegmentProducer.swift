@@ -490,6 +490,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     var closedCaptionStreamIndex: Int32 = -1
     var closedCaptionObserver: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
 
+    /// #131: A53/SEI caption extraction. When set (the session has no demuxable CC stream) and the
+    /// video codec is H.264/HEVC, every muxed video packet is scanned (GA94 prefilter, see
+    /// `A53SEIParser`) and extracted cc_data triplets are handed over with the packet's
+    /// source-timebase pts/dts, in decode order. Same lifecycle as `closedCaptionObserver`:
+    /// attached after init, re-threaded onto every restart producer.
+    var a53CaptionObserver: (@Sendable ([CCDataParser.CCTriplet], Int64, Int64, AVRational) -> Void)?
+    private let a53CodecKind: A53SEIParser.CodecKind?
+    private let a53NALFraming: A53SEIParser.NALFraming
+
     /// Sodalite#32: text-subtitle tap, generalizing the #77 CC tap. Streams in this set are kept by the
     /// pump (not discarded) and each of their packets is handed to `subtitleTapObserver` (with the
     /// stream's time_base), then dropped below as a foreign packet, never muxed. The pump already reads
@@ -576,6 +585,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.subtitleTapStreamIndices = subtitleTapStreamIndices   // Sodalite#32: same reason
         self.subtitlePacketStreamIndices = subtitlePacketStreamIndices   // #112 rework: same reason
         self.videoConfig = video
+        switch video.codecpar.pointee.codec_id {
+        case AV_CODEC_ID_H264: a53CodecKind = .h264
+        case AV_CODEC_ID_HEVC: a53CodecKind = .hevc
+        default: a53CodecKind = nil
+        }
+        a53NALFraming = A53SEIParser.nalFraming(
+            codec: a53CodecKind ?? .h264,
+            extradata: video.codecpar.pointee.extradata.map { UnsafePointer($0) },
+            size: Int(video.codecpar.pointee.extradata_size))
         self.convertP7Active = video.convertP7ToProfile81
         self.audioConfig = audio
         self.cache = cache
@@ -2337,6 +2355,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if found {
                     hdr10PlusDetected = true
                     onFirstHDR10PlusDetected?()
+                }
+            }
+        }
+
+        // #131: A53 caption extraction rides the same per-packet spot as the HDR10+ scan: decode
+        // order, repaired DTS, timestamps still in the source time base (the rescale below).
+        if let kind = a53CodecKind, let observe = a53CaptionObserver,
+           let data = packet.pointee.data, packet.pointee.pts != Int64.min {
+            let size = Int(packet.pointee.size)
+            if A53SEIParser.mayContainA53(data, size) {
+                let extracted = A53SEIParser.triplets(in: data, size: size, codec: kind, framing: a53NALFraming)
+                if !extracted.isEmpty {
+                    observe(extracted, packet.pointee.pts, packet.pointee.dts, sourceVideoTimeBase)
                 }
             }
         }

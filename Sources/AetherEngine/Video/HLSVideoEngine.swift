@@ -137,6 +137,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var closedCaptionStreamIndexForSession: Int32 = -1
     var closedCaptionObserverForSession: (@Sendable (UnsafePointer<AVPacket>, AVRational) -> Void)?
 
+    /// #131: A53/SEI caption observer, re-threaded onto every producer like the #77 CC observer.
+    /// Set before start() when the source has no demuxable CC stream.
+    var a53CaptionObserverForSession: (@Sendable ([CCDataParser.CCTriplet], Int64, Int64, AVRational) -> Void)?
+
     /// Sodalite#32: ordinal-aligned source stream indices for the native subtitle cue stores (nil entry =
     /// no demuxable stream, e.g. a sidecar). Drives the producer's subtitle tap: the pump keeps these
     /// streams and hands their packets to the session tap, which decodes into the ordinal's store. Set
@@ -1622,6 +1626,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // slow high-bitrate DV master must not be misread as a wedge). Threaded onto every producer.
         prod.hasStartedRenderingProvider = hasStartedRenderingProvider
         prod.closedCaptionObserver = closedCaptionObserverForSession   // #77
+        prod.a53CaptionObserver = a53CaptionObserverForSession   // #131
         // Sodalite#32: build the tap routes lazily on the first producer that has stores + stream
         // indices (the host sets both before start()), then wire the tap onto every producer.
         subtitleTapLock.lock()
