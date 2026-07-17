@@ -196,6 +196,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Ad creative's video config from in-band SPS/PPS (mid-stream demuxer codecpar has width/height == 0).
     private var pendingAdVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])?
 
+    /// #133: initial live-join video config reconstructed from the gating IDR's in-band SPS/PPS. Set when a
+    /// mid-stream MPEG-TS join left the probed codecpar at 0x0 (probe joined before any SPS); consumed by the
+    /// FIRST allocateMuxer so avformat_write_header gets real dimensions instead of failing -22 (dead channel).
+    private var pendingJoinVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])?
+
     /// Cross-stream rebase pairing. Video rebase is master; audio derives its shift from its OWN boundary
     /// srcDts and the shared seam OUTPUT position (not the video shift) so differing audio source bases
     /// (amux ads: video dts 0, audio near 2^33) are absorbed. Delta-based handoff accumulated per-pod A/V
@@ -499,6 +504,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private let a53CodecKind: A53SEIParser.CodecKind?
     private let a53NALFraming: A53SEIParser.NALFraming
 
+    /// #133: latched at init. When true, the video gate withholds until a decodable IDR access unit
+    /// (in-band SPS+PPS+IDR) arrives, rather than opening on any AV_PKT_FLAG_KEY packet.
+    private let liveH264AnnexBJoin: Bool
+
     /// Sodalite#32: text-subtitle tap, generalizing the #77 CC tap. Streams in this set are kept by the
     /// pump (not discarded) and each of their packets is handed to `subtitleTapObserver` (with the
     /// stream's time_base), then dropped below as a foreign packet, never muxed. The pump already reads
@@ -594,6 +603,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             codec: a53CodecKind ?? .h264,
             extradata: video.codecpar.pointee.extradata.map { UnsafePointer($0) },
             size: Int(video.codecpar.pointee.extradata_size))
+        self.liveH264AnnexBJoin = Self.liveH264JoinRequiresParameterSets(
+            isLive: isLive,
+            codecIsH264: a53CodecKind == .h264,
+            framingIsAnnexB: a53NALFraming == .annexB)
         self.convertP7Active = video.convertP7ToProfile81
         self.audioConfig = audio
         self.cache = cache
@@ -735,7 +748,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
 
         if currentMuxer == nil {
-            return allocateMuxer(initialSegmentIndex: effectiveIdx)
+            // #133: pendingJoinVideoConfig is non-nil only when a live H.264 join reconstructed dimensions
+            // from in-band SPS/PPS because the probe left codecpar at 0x0. Consumed once, here.
+            let joinConfig = pendingJoinVideoConfig
+            pendingJoinVideoConfig = nil
+            return allocateMuxer(initialSegmentIndex: effectiveIdx, reconstructedVideoConfig: joinConfig)
         }
         // SSAI program switch: new video codec params need a fresh muxer (versioned EXT-X-MAP).
         if pendingVideoProgramSwitch, effectiveIdx > currentMuxerSegmentIndex {
@@ -763,7 +780,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             + "(\(adConfig.width)x\(adConfig.height))",
             category: .session
         )
-        return allocateMuxer(initialSegmentIndex: newIdx, adVideoConfig: adConfig)
+        return allocateMuxer(initialSegmentIndex: newIdx,
+                             reconstructedVideoConfig: adConfig,
+                             isProgramSwitchReinit: true)
     }
 
     /// Extract H.264 ad video config from in-band Annex-B SPS/PPS. nil on mid-GOP join (no parameter sets).
@@ -771,6 +790,27 @@ final class HLSSegmentProducer: @unchecked Sendable {
         guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
         let buf = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
         guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
+              let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
+        return (Int32(dim.width), Int32(dim.height),
+                H264SPS.annexBExtradata(sps: sps, pps: pps))
+    }
+
+    /// #133: whether the stricter live-join gate engages (withhold the video gate until a decodable IDR
+    /// access unit arrives). Only for live H.264 with Annex-B framing, i.e. MPEG-TS ingest joining
+    /// mid-broadcast: fMP4 live carries valid out-of-band avcC so its keyframes are already decodable, and
+    /// VOD probes the full file up front. HEVC keeps the existing AV_PKT_FLAG_KEY gate.
+    static func liveH264JoinRequiresParameterSets(isLive: Bool, codecIsH264: Bool, framingIsAnnexB: Bool) -> Bool {
+        isLive && codecIsH264 && framingIsAnnexB
+    }
+
+    /// #133 join gate: a decodable H.264 access unit at a mid-stream join needs in-band SPS + PPS and a true
+    /// IDR slice (not an open-GOP recovery point). Returns the reconstructed (width, height, Annex-B extradata)
+    /// so a zero-dimension probe codecpar can be backfilled into the first muxer. nil until such an AU arrives.
+    private func extractJoinVideoConfig(_ packet: UnsafeMutablePointer<AVPacket>) -> (width: Int32, height: Int32, extradata: [UInt8])? {
+        guard let data = packet.pointee.data, packet.pointee.size > 0 else { return nil }
+        let buf = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+        guard let (sps, pps) = H264SPS.extractSPSandPPS(fromAnnexB: buf),
+              H264SPS.containsIDR(fromAnnexB: buf),
               let dim = H264SPS.dimensions(fromNAL: sps) else { return nil }
         return (Int32(dim.width), Int32(dim.height),
                 H264SPS.annexBExtradata(sps: sps, pps: pps))
@@ -859,9 +899,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return _backpressureWedgeBroken
     }
 
-    /// Allocate (or re-allocate at SSAI program switch) the session's mp4 muxer.
+    /// Allocate the session's mp4 muxer. `reconstructedVideoConfig` overrides the probed codecpar with
+    /// dimensions+extradata parsed from in-band SPS/PPS: at an SSAI program switch (H.264 ad creative, a
+    /// versioned re-init, `isProgramSwitchReinit: true`) or at a live H.264 join whose probe left codecpar
+    /// at 0x0 (#133, the primary init, `isProgramSwitchReinit: false`). `isProgramSwitchReinit` alone drives
+    /// versioned-init capture and dropping the program's DV/color overrides (an ad carries its own signaling;
+    /// a same-program join keeps them).
     private func allocateMuxer(initialSegmentIndex: Int,
-                               adVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])? = nil) -> MP4SegmentMuxer? {
+                               reconstructedVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])? = nil,
+                               isProgramSwitchReinit: Bool = false) -> MP4SegmentMuxer? {
         // #93 residual: the FIRST alloc of a producer (its base segment) must not gate on the
         // consumer's fetch high water. An anchored initial producer (resume start) runs before ANY
         // segment fetch exists, because AVPlayer is still waiting on init.mp4, which is captured by
@@ -875,17 +921,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         if checkShouldStop() { return nil }
 
-        let isReinit = adVideoConfig != nil
+        let isReinit = isProgramSwitchReinit
         var adPar: UnsafeMutablePointer<AVCodecParameters>?
         defer { if adPar != nil { avcodec_parameters_free(&adPar) } }
         let videoCodecpar: UnsafePointer<AVCodecParameters>
-        if let adVideoConfig {
+        if let reconstructedVideoConfig {
             guard let par = avcodec_parameters_alloc() else { return nil }
             par.pointee.codec_type = AVMEDIA_TYPE_VIDEO
             par.pointee.codec_id = AV_CODEC_ID_H264
-            par.pointee.width = adVideoConfig.width
-            par.pointee.height = adVideoConfig.height
-            let ed = adVideoConfig.extradata
+            par.pointee.width = reconstructedVideoConfig.width
+            par.pointee.height = reconstructedVideoConfig.height
+            let ed = reconstructedVideoConfig.extradata
             let pad = Int(AV_INPUT_BUFFER_PADDING_SIZE)
             if let raw = av_malloc(ed.count + pad) {
                 let bytes = raw.assumingMemoryBound(to: UInt8.self)
@@ -1796,15 +1842,26 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
                         let targetSatisfied = restartTargetVideoDts == Int64.min
                             || (packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts)
-                        guard isKey, targetSatisfied else {
+                        // #133: on a live H.264 Annex-B mid-stream join, opening on a bare keyframe flag is not
+                        // enough. A join packet must carry a decodable IDR access unit (in-band SPS+PPS+IDR);
+                        // otherwise the decoder renders references it never received (green frames) or, when the
+                        // probe joined before any SPS and left codecpar at 0x0, the first muxer alloc gets 0x0
+                        // dimensions and avformat_write_header fails -22, dead-ending the channel. The bounded
+                        // live timeout below covers the miss (keyframeStarvation -> reopen), unlike muxerFailed.
+                        let joinConfig = (liveH264AnnexBJoin && isKey && targetSatisfied)
+                            ? extractJoinVideoConfig(packet) : nil
+                        let joinGateSatisfied = !liveH264AnnexBJoin || joinConfig != nil
+                        guard isKey, targetSatisfied, joinGateSatisfied else {
                             pregateVideoDropCount += 1
                             if pregateVideoDropCount == 1 {
                                 pregateWaitStart = Date()
                             }
                             if pregateVideoDropCount - lastPregateVideoLog >= Self.pregateLogInterval {
                                 lastPregateVideoLog = pregateVideoDropCount
+                                let awaiting = (isKey && targetSatisfied && liveH264AnnexBJoin)
+                                    ? "SPS/PPS/IDR access unit" : "video keyframe"
                                 EngineLog.emit(
-                                    "[HLSSegmentProducer] still waiting for video keyframe: "
+                                    "[HLSSegmentProducer] still waiting for \(awaiting): "
                                     + "dropped=\(pregateVideoDropCount) "
                                     + "lastDts=\(packet.pointee.dts) isKey=\(isKey) "
                                     + "target=\(restartTargetVideoDts) "
@@ -1825,6 +1882,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 break readLoop
                             }
                             continue
+                        }
+                        // #133: probe joined before any SPS (codecpar 0x0). Backfill the first muxer's video
+                        // config from the gating IDR's in-band SPS/PPS so avformat_write_header gets real
+                        // dimensions instead of failing -22.
+                        if let joinConfig,
+                           videoConfig.codecpar.pointee.width == 0 || videoConfig.codecpar.pointee.height == 0 {
+                            pendingJoinVideoConfig = joinConfig
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] live join: reconstructed video config "
+                                + "\(joinConfig.width)x\(joinConfig.height) from in-band SPS/PPS "
+                                + "(probe codecpar was 0x0)",
+                                category: .session
+                            )
                         }
                         firstActualVideoDts = packet.pointee.dts
                         firstActualVideoPts = packet.pointee.pts != Int64.min

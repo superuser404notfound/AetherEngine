@@ -106,6 +106,28 @@ enum H264SPS {
         return nil
     }
 
+    /// Scan Annex-B for a coded IDR slice NAL (type 5). #133: a mid-stream live join must open on a true
+    /// IDR, not an open-GOP recovery-point I-slice (type 1) whose references precede the join point; starting
+    /// there renders garbage (green frames) until the next real IDR. Cheap NAL-header walk, no RBSP parse.
+    static func containsIDR(fromAnnexB data: UnsafeBufferPointer<UInt8>) -> Bool {
+        var i = 0
+        let n = data.count
+        func startCode(at p: Int) -> Int {
+            if p + 3 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 0, data[p+3] == 1 { return 4 }
+            if p + 2 < n, data[p] == 0, data[p+1] == 0, data[p+2] == 1 { return 3 }
+            return 0
+        }
+        while i < n {
+            let sc = startCode(at: i)
+            if sc == 0 { i += 1; continue }
+            let start = i + sc
+            guard start < n else { break }
+            if (data[start] & 0x1f) == 5 { return true }
+            i = start
+        }
+        return false
+    }
+
     /// Build Annex-B extradata the mov muxer accepts directly; ff_isom_write_avcc sniffs the start code and packs avcC.
     static func annexBExtradata(sps: [UInt8], pps: [UInt8]) -> [UInt8] {
         let sc: [UInt8] = [0, 0, 0, 1]
