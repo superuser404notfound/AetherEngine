@@ -54,7 +54,7 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
 
     private func appendLocked(_ extra: [SubtitleCue]) {
         for c in extra {
-            guard case .text(let t) = c.body else { continue }
+            guard let t = c.text else { continue }
             guard seenKeys.insert(Self.key(start: c.startTime, end: c.endTime, text: t)).inserted else { continue }
             cues.append(c)
             if c.endTime > maxCueEndSeconds { maxCueEndSeconds = c.endTime }
@@ -89,7 +89,7 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
         lock.unlock()
         var out: [(start: Double, end: Double, text: String)] = []
         for c in snapshot {
-            guard case .text(let t) = c.body else { continue }
+            guard let t = c.text else { continue }
             let s = c.startTime - shift
             let e = c.endTime - shift
             if e > start && s < end { out.append((max(0, s), max(0, e), t)) }

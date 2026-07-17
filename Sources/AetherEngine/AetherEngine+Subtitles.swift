@@ -382,12 +382,12 @@ extension AetherEngine {
         Self.insertCueSorted(cue, into: &cues, nextID: &nextRetainedSubtitleCueID)
     }
 
-    /// #107: close every text cue whose window covers `trimAt` (teletext page-state semantics:
-    /// each page transmission or erase replaces what came before it). Image cues are untouched;
-    /// they have their own PGS trim. Static and pure for unit tests.
+    /// #107: close every non-image cue (text or rich text) whose window covers `trimAt` (teletext
+    /// page-state semantics: each page transmission or erase replaces what came before it). Image
+    /// cues are untouched; they have their own PGS trim. Static and pure for unit tests.
     nonisolated static func trimTextCues(_ cues: inout [SubtitleCue], at trimAt: Double) {
         for i in 0..<cues.count {
-            guard case .text = cues[i].body else { continue }
+            if case .image = cues[i].body { continue }
             let cue = cues[i]
             if cue.startTime < trimAt && cue.endTime > trimAt {
                 cues[i] = SubtitleCue(
@@ -406,19 +406,22 @@ extension AetherEngine {
     /// reconstruction), and a duplicate would render the bitmap twice until the next composition trims it. Text cues
     /// at the same start are distinct simultaneous speakers and are both kept.
     ///
-    /// #121: `nextID` stamps every materialized cue with a session-monotonic id and de-dupes a text cue already
-    /// present with the same window + content. On a seek the overlay decoder is rebuilt (`.resetAndDecode`) with an
-    /// empty `seenKeys` and a `nextCueID` reset to zero, so its backscan re-decodes cues still retained here; without
-    /// a store-level guard the text cues accumulate (report: 4 -> 7 -> 11) and the reset ids collide with retained
-    /// ids (`ForEach(id:)` "occurs multiple times"). The retained store is the session-wide source of truth, so the
-    /// invariant lives here, not on the ephemeral decoder.
+    /// #121: `nextID` stamps every materialized cue with a session-monotonic id and de-dupes a non-image cue
+    /// (text or rich text) already present with the same window + content. On a seek the overlay decoder is
+    /// rebuilt (`.resetAndDecode`) with an empty `seenKeys` and a `nextCueID` reset to zero, so its backscan
+    /// re-decodes cues still retained here; without a store-level guard the cues accumulate (report: 4 -> 7 -> 11)
+    /// and the reset ids collide with retained ids (`ForEach(id:)` "occurs multiple times"). The retained store
+    /// is the session-wide source of truth, so the invariant lives here, not on the ephemeral decoder.
     nonisolated static func insertCueSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue], nextID: inout Int) {
-        // A text cue already present with the same start and content is a re-decode of a retained line, not a new
-        // one. Content (not id) is compared: two simultaneous speakers differ in text and both survive; a genuine
-        // repeat at a new time has a different start and is inserted. endTime is deliberately NOT part of the key:
-        // a retained teletext cue may have been trimmed by its successor (#107) while the re-decode emits the
-        // original open-ended window; the retained (trimmed) cue stays authoritative. Deduped cues consume no id.
-        if case .text(let text) = cue.body,
+        // A non-image cue already present with the same start and flattened text is a re-decode of a retained
+        // line, not a new one. `cue.text` flattens both `.text` and `.richText` (#107 coloured teletext pages)
+        // and is nil for `.image`, so image cues correctly skip this guard and use their own same-start replace
+        // below. Content (not id) is compared: two simultaneous speakers differ in text and both survive; a
+        // genuine repeat at a new time has a different start and is inserted. endTime is deliberately NOT part
+        // of the key: a retained teletext cue may have been trimmed by its successor (#107) while the re-decode
+        // emits the original open-ended window; the retained (trimmed) cue stays authoritative. Deduped cues
+        // consume no id.
+        if let text = cue.text,
            cues.contains(where: { other in
                other.startTime == cue.startTime && other.text == text
            }) {
