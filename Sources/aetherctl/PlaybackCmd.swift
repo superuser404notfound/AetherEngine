@@ -88,6 +88,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, dvrWindow: Dou
             let body: String
             switch cue.body {
             case .text(let text): body = "'\(text.replacingOccurrences(of: "\n", with: " | "))'"
+            case .richText(let runs):
+                let flat = runs.map(\.text).joined().replacingOccurrences(of: "\n", with: " | ")
+                let colours = runs.filter { $0.color != nil }.count
+                body = "'\(flat)' [\(colours) colour run(s)]"
             case .image: body = "[bitmap]"
             }
             print(String(format: "  CUE #%d %.2f-%.2f %@", cue.id, cue.startTime, cue.endTime, body))
