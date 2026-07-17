@@ -1818,16 +1818,20 @@ public final class AetherEngine: ObservableObject {
         // warming and the served master resolves 0 tracks / fails -11819; a warm start (no switch) keeps
         // the unchanged immediate-play path.
         var didSwitchPanel = false
+        // #133: when apply() reports the criteria are already active (same-format zap), the panel never
+        // starts a switch, so the post-load play-gate waitForSwitch() below has nothing to settle and would
+        // otherwise burn its full ~3s cap on unobservable-DV panels. Skip it in exactly that case.
+        var criteriaUnchanged = false
         switch Self.loadDisplayCriteriaAction(suppressDisplayCriteria: options.suppressDisplayCriteria, audioOnlyPath: false) {
         case .applyFresh:
             let codecTag: FourCharCode? = detectedDVProfile ? 0x64766831 : nil
-            let willSwitch = displayCriteria.apply(
+            switch displayCriteria.apply(
                 format: effectiveFormat,
                 frameRate: snappedRate,
                 codecTag: codecTag,
                 omitColorExtensions: options.omitCriteriaColorExtensions
-            )
-            if willSwitch {
+            ) {
+            case .willSwitch:
                 didSwitchPanel = true
                 await displayCriteria.waitForSwitch()
                 // Superseded during panel handshake: close local probe and unwind.
@@ -1838,6 +1842,10 @@ public final class AetherEngine: ObservableObject {
                     }
                     try checkLoadCurrent(gen)
                 }
+            case .applied:
+                break
+            case .unchanged:
+                criteriaUnchanged = true
             }
         case .clearStale:
             // Suppressed host: the load seam preserved the criteria (#128 follow-up), and AVKit writes its
@@ -2000,7 +2008,12 @@ public final class AetherEngine: ObservableObject {
                 // via private CoreMedia hooks). waitForSwitch Stage 1 gives AVKit time to fire that write;
                 // Stage 2 waits for the panel to settle so the first frame doesn't hit a mid-transition panel.
                 // Critical for DV P5 (no HDR10 base, requires immediate DV mode).
-                await displayCriteria.waitForSwitch()
+                // #133: unchanged criteria (same-format zap) mean the panel is already in the target mode and
+                // neither the engine nor AVKit will switch it, so there is nothing to settle here. Skipping
+                // avoids Stage 1's blind 1s (and, on unobservable-DV panels, the full ~3s cap) on every zap.
+                if !criteriaUnchanged {
+                    await displayCriteria.waitForSwitch()
+                }
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
                 // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded
