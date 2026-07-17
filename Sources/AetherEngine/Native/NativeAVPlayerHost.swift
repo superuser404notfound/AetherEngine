@@ -513,9 +513,9 @@ final class NativeAVPlayerHost {
                     category: .engine)
                 return
             }
-            if let code, MasterFallbackDecision.isDisplayRejectionCode(code) {
+            if let code, MasterFallbackDecision.isMasterRejectionCode(code) {
                 EngineLog.emit(
-                    "[NativeAVPlayerHost] #\(sessionID) startup .failed is a display rejection "
+                    "[NativeAVPlayerHost] #\(sessionID) startup .failed is a master rejection "
                     + "(code=\(code)); signalling engine for media fallback instead of surfacing",
                     category: .engine)
                 pendingDisplayRejection = DisplayRejection(code: code, message: desc)

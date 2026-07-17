@@ -937,8 +937,8 @@ public final class AetherEngine: ObservableObject {
     /// the AVPlayer instance alive); segments are in retention so the reload serves instantly.
     /// Native subtitle rendition selection is per-item, so the host's last request is replayed
     /// onto the fresh item below (an active PiP rendition otherwise silently disappeared).
-    /// React to a display rejecting the served master (#98): if eligible, reload the media playlist
-    /// in place (single-variant, SDR-tone-mappable); otherwise surface the failure normally.
+    /// React to AVPlayer rejecting the served master (#98, #130): if eligible, reload the media
+    /// playlist in place (single-variant); otherwise surface the failure normally.
     @MainActor
     func fallBackToMediaPlaylist(_ rejection: DisplayRejection) {
         guard let host = nativeHost, let session = nativeVideoSession else {
@@ -956,13 +956,20 @@ public final class AetherEngine: ObservableObject {
         masterFallbackUsed = true
         session.markServingMediaAfterFallback()
         nativeSubtitleRenditionsServed = false
+        // #130: a live fallback is a REJOIN of the running ingest (the window may have slid since
+        // the failed master attempt); a stale explicit position can wedge AVPlayer against the
+        // backlog, so skip the initial seek and let it pick edge-minus-holdback (LiveReloadPolicy).
+        // VOD keeps the explicit pre-failure position.
         let position = lastNativeVideoStartPosition
         EngineLog.emit(
-            "[AetherEngine] display rejected the master (code=\(rejection.code)); falling back to "
-            + "media playlist (SDR tone-mapping, no CC/subtitle renditions) at "
-            + "\(String(format: "%.2f", position))s",
+            "[AetherEngine] AVPlayer rejected the master (code=\(rejection.code)); falling back to "
+            + "media playlist (no CC/subtitle renditions) at "
+            + (isLive ? "the live edge" : "\(String(format: "%.2f", position))s"),
             category: .session)
-        host.load(url: mediaURL, startPosition: position, inPlaceSwap: true)
+        host.load(url: mediaURL,
+                  startPosition: isLive ? nil : position,
+                  skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
+                  inPlaceSwap: true)
         host.play()
     }
 

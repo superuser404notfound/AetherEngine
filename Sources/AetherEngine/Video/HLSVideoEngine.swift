@@ -769,10 +769,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         let resolution = (Int(codecpar.pointee.width), Int(codecpar.pointee.height))
 
-        let avgFR = videoStream.pointee.avg_frame_rate
-        let frameRate: Double? = (avgFR.den > 0 && avgFR.num > 0)
-            ? Double(avgFR.num) / Double(avgFR.den)
-            : nil
+        // #130: same avg -> r_frame_rate chain the host probe uses. A live MPEG-TS probe often
+        // leaves avg_frame_rate unset while the parser still fills r_frame_rate; the master's
+        // FRAME-RATE attribute is load-bearing for PQ/HLG variants (AVPlayer filters a
+        // VIDEO-RANGE=PQ/HLG EXT-X-STREAM-INF without FRAME-RATE and fails -1002).
+        let frameRate: Double? = AetherEngine.detectFrameRate(stream: videoStream)
         // HDCP-LEVEL omitted: local loopback has no DRM scope, and emitting TYPE-1 caused
         // AVFoundationErrorDomain -11868 / tracks count=0 when the HDMI link's HDCP 2.2
         // negotiation state didn't match (Vincent test 2026-05-26, HDR10 panel).
@@ -880,6 +881,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // (HandBrake/web-rip pipelines). Without it, trun.last.duration=0 and AVPlayer parks on
         // WaitingToMinimizeStallsReason. 25 fps / 1 ms TB = 40 ticks; 23.976 fps = 41 ticks.
         let videoFallbackDuration: Int64 = {
+            let avgFR = videoStream.pointee.avg_frame_rate
             guard avgFR.num > 0 && avgFR.den > 0,
                   videoTimeBase.num > 0, videoTimeBase.den > 0 else {
                 return 40 // 25 fps / 1 ms TB defensive default
@@ -1235,7 +1237,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelIsInHDRMode, displaySupportsHDR: displaySupportsHDR,
             hasNativeSubs: hasNativeSubs,
-            builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand)
+            builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand,
+            frameRateKnown: frameRate != nil)
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
             : srv.mediaPlaylistURL
@@ -1278,17 +1281,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// gate: master on a ready HDR panel, media-direct on an SDR route (also the graceful path for
     /// DrHurt's external SDR monitor, #98). Do not reinstate an OS-version gate: the fault was the
     /// engine's own master, not a stricter platform codec filter.
+    ///
+    /// #130: `frameRateKnown` gates PQ/HLG masters. AVPlayer filters a VIDEO-RANGE=PQ/HLG
+    /// EXT-X-STREAM-INF that has no FRAME-RATE attribute out of the master at parse time and fails
+    /// the item with NSURLErrorDomain -1002 without ever fetching media.m3u8 (byte-exact local
+    /// repro; SDR variants are accepted without FRAME-RATE). Live MPEG-TS probes can leave the
+    /// frame rate unknown even after the r_frame_rate fallback, so a frame-rate-less HDR source
+    /// routes media-direct instead of serving a master AVPlayer provably rejects.
     static func resolveUseMasterPlaylist(
         videoRange: HLSVideoRange,
         effectiveDvMode: Bool,
         panelIsInHDRMode: Bool,
         displaySupportsHDR: Bool,
         hasNativeSubs: Bool,
-        builtInPanelEngagesOnDemand: Bool
+        builtInPanelEngagesOnDemand: Bool,
+        frameRateKnown: Bool
     ) -> Bool {
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
             || (builtInPanelEngagesOnDemand && displaySupportsHDR)
+        // #130: a PQ/HLG master without FRAME-RATE is unloadable regardless of panel state.
+        let masterManifestViable = (videoRange == .sdr) || frameRateKnown
+        guard masterManifestViable else { return false }
         // Gate on the ACTUAL videoRange, not sourceIsHDR: sourceIsHDR is inflated by
         // effectiveDvMode (a device DV capability) even for SDR content, which wrongly sent SDR
         // sources on DV-capable devices to media-direct, so the WebVTT rendition never appeared (#15).

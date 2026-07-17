@@ -14,11 +14,13 @@ struct MasterRoutingTests {
     private func route(videoRange: HLSVideoRange,
                        effectiveDvMode: Bool = false, panelHDR: Bool = false,
                        displayHDR: Bool = false, nativeSubs: Bool = false,
-                       panelEngagesOnDemand: Bool = false) -> Bool {
+                       panelEngagesOnDemand: Bool = false,
+                       frameRateKnown: Bool = true) -> Bool {
         HLSVideoEngine.resolveUseMasterPlaylist(
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelHDR, displaySupportsHDR: displayHDR,
-            hasNativeSubs: nativeSubs, builtInPanelEngagesOnDemand: panelEngagesOnDemand)
+            hasNativeSubs: nativeSubs, builtInPanelEngagesOnDemand: panelEngagesOnDemand,
+            frameRateKnown: frameRateKnown)
     }
 
     @Test("tvOS: HDR source on an SDR-parked panel stays media-direct (-11848 guard)")
@@ -75,6 +77,32 @@ struct MasterRoutingTests {
         #expect(route(videoRange: .pq, effectiveDvMode: true, panelHDR: true))
         #expect(route(videoRange: .pq, effectiveDvMode: true,
                       displayHDR: true, panelEngagesOnDemand: true))
+    }
+
+    // #130: AVPlayer hard-rejects a VIDEO-RANGE=PQ/HLG EXT-X-STREAM-INF that carries no
+    // FRAME-RATE attribute with NSURLErrorDomain -1002 (variant filtered at master parse,
+    // media.m3u8 never fetched; byte-exact repro against the served 213-byte master). A live
+    // MPEG-TS probe can leave avg/r_frame_rate unset, so an HDR master without a known frame
+    // rate must route media-direct instead of serving a master AVPlayer provably rejects.
+    // SDR masters (VIDEO-RANGE=SDR) are accepted without FRAME-RATE, so the subs-forced SDR
+    // master keeps working for frame-rate-less sources.
+
+    @Test("#130: HDR master requires a known frame rate; unknown routes media-direct")
+    func hdrMasterRequiresFrameRate() {
+        #expect(!route(videoRange: .pq, panelHDR: true, displayHDR: true, frameRateKnown: false))
+        #expect(!route(videoRange: .hlg, panelHDR: true, displayHDR: true, frameRateKnown: false))
+        #expect(!route(videoRange: .pq, displayHDR: true, panelEngagesOnDemand: true,
+                       frameRateKnown: false))
+        #expect(!route(videoRange: .pq, effectiveDvMode: true, panelHDR: true,
+                       frameRateKnown: false))
+    }
+
+    @Test("#130: subs-forced master obeys the same frame-rate invariant on HDR sources")
+    func subsMasterObeysFrameRateInvariant() {
+        #expect(!route(videoRange: .pq, panelHDR: true, displayHDR: true, nativeSubs: true,
+                       frameRateKnown: false))
+        // SDR master carries VIDEO-RANGE=SDR, which AVPlayer accepts without FRAME-RATE.
+        #expect(route(videoRange: .sdr, nativeSubs: true, frameRateKnown: false))
     }
 
     @Test("macOS built-in panels count as engage-on-demand (#98); tvOS keeps the handshake path")

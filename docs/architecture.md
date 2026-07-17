@@ -227,7 +227,7 @@ Sources/AetherEngine/
 ├── Native/
 │   ├── AudioLookahead.swift                 SW live feeder audio look-ahead pump policy + cursor state: audio lead decoupled from video decode pace, live-edge underrun rebuffer (#107)
 │   ├── Issue93ItemDeathRevive.swift         Bounded revive budget (`ItemDeathReviveGate`) for items killed by accumulated -12889 media timeouts (`failedToPlayToEndTime`, #93 round 3)
-│   ├── MasterFallbackDecision.swift         Pure master → media playlist fallback decision (#98): maps a display-incompatibility item failure (-11868 external-SDR, -11848 HDR-on-SDR) to a reactive re-serve
+│   ├── MasterFallbackDecision.swift         Pure master → media playlist fallback decision (#98, #130): maps a master-rejection item failure (-11868 external-SDR, -11848 HDR-on-SDR, -1002 all variants filtered at parse) to a reactive re-serve
 │   ├── NativeAVPlayerHost.swift             Native path: AVPlayer host bound to the loopback HLS-fMP4 URL; awaits real seek landing (deadline-bounded, first resume wins, #129), suppresses stale clock during in-flight seek
 │   └── SoftwarePlaybackHost.swift           SW path: demux loop + decoders + renderer + synchronizer orchestration
 ├── Network/
