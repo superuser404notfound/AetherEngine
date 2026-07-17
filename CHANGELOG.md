@@ -10,6 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.4.1] - 2026-07-17
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.4.1))
+
+### Fixed
+
+- **A native seek can no longer suspend the caller past its 8 s budget (#129).** The old deadline path retried the seek with an unbounded await, so repeated source stalls could leave `seek(to:)` suspended for 40+ s. The deadline now reconciles the public clock to the rendered frame and returns; the original AVPlayer seek stays alive as the recovery intent, and a late landing settles clock, transport state, and subtitle re-anchoring after the fact (both orderings of the completion/deadline race on the MainActor are handled). The producer is restarted only when it is genuinely starved; a healthy-but-slow producer keeps its progress. Thanks to thatcube.
+- **Interior sparse-cache holes no longer burn a 2 s wait the producer can never fill (#129).** A cache index inside the stored min/max range is not proof of residency after scrubbing leaves retained bands. The fetch path now waits only when the active producer's forward march actually covers the requested index, and restarts immediately otherwise. Thanks to thatcube.
+- **A starved seek landing with a paused `timeControlStatus` and playing intent no longer latches paused.** The seek finalize now reconciles transport from live AVPlayer status: external AVKit / MediaRemote play or pause issued during a seek wins, while the bounded stall-recovery window reasserts play over a spurious pause (the #122 guarantee is unchanged: a paused scrub still lands paused).
+
 ## [5.4.0] - 2026-07-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.4.0))
