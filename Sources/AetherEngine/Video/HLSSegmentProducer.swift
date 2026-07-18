@@ -193,8 +193,24 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Set when SSAI program switch moves videoStreamIndex to a new video PID; triggers a fresh muxer (versioned-init EXT-X-MAP).
     private var pendingVideoProgramSwitch: Bool = false
 
+    /// #133 follow-up: whether the pending versioned-init rotation is an SSAI ad creative (new PID, carries its
+    /// own DV/color signaling so the program's overrides are dropped) or a same-PID in-band parameter-set change
+    /// (encoder restart / regional splice on the same program, whose overrides must be kept). Read by rotateMuxer.
+    private var pendingReinitIsAdCreative: Bool = false
+
     /// Ad creative's video config from in-band SPS/PPS (mid-stream demuxer codecpar has width/height == 0).
     private var pendingAdVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])?
+
+    /// #133 follow-up: Annex-B SPS+PPS backing the CURRENT muxer's avcC box. The fMP4 avcC is frozen at
+    /// avformat_write_header, so an in-band parameter-set change on the SAME video PID (encoder restart / regional
+    /// opt-out splice, common on UK DVB via Xtream) leaves the panel decoding new slices against a stale avcC ->
+    /// green frames + libav "non-existing PPS/SPS" bursts, recurring mid-stream long after the join. Comparing each
+    /// keyframe's in-band sets against this triggers a versioned-init muxer rotation (the same EXT-X-MAP path SSAI
+    /// uses), independent of whether the demuxer emits AV_PKT_DATA_NEW_EXTRADATA. Set at gate-open and each rotation.
+    private var activeMuxerVideoExtradata: [UInt8]?
+
+    /// #133 follow-up diag: count of same-PID in-band parameter-set changes rotated in place, surfaced in the log.
+    private var samePIDReinitCount = 0
 
     /// #133: initial live-join video config reconstructed from the gating IDR's in-band SPS/PPS. Set when a
     /// mid-stream MPEG-TS join left the probed codecpar at 0x0 (probe joined before any SPS); consumed by the
@@ -257,6 +273,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var vodCutter: VODSegmentCutter
 
     private var loggedFirstVideoPktInfo = false
+    /// #133 follow-up diag: one-shot confirmation that the demuxer surfaces avcC changes as AV_PKT_DATA_NEW_EXTRADATA.
+    private var loggedFirstVideoNewExtradata = false
     private var loggedP7ConversionFailure = false
     private var loggedEnhancementLayerType = false
     /// Latched false at SSAI program switch (ad creatives are H.264; mirrors muxer's isReinit ? false : videoConfig.convertP7ToProfile81).
@@ -766,6 +784,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let finishedIdx = currentMuxerSegmentIndex
         finalizeSessionMuxerAndAdopt() // adopts finishedIdx, nils currentMuxer
         pendingVideoProgramSwitch = false
+        let isAdCreative = pendingReinitIsAdCreative
+        pendingReinitIsAdCreative = false
         guard let adConfig = pendingAdVideoConfig else {
             EngineLog.emit(
                 "[HLSSegmentProducer] program switch: no parsed ad video config; "
@@ -775,15 +795,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return nil
         }
         pendingAdVideoConfig = nil
+        // #133 follow-up: same trigger and versioned-init path, two origins. SSAI = new video PID (ad creative,
+        // its own signaling). Same-PID = in-band SPS/PPS change on the running program (encoder restart / splice),
+        // whose DV/color overrides must be kept, so only versionedInit is set, not isAdCreative.
         EngineLog.emit(
-            "[HLSSegmentProducer] muxer rotation at SSAI program switch: "
-            + "seg-\(finishedIdx) finalized on old init, fresh init for seg-\(newIdx) "
+            "[HLSSegmentProducer] muxer rotation (\(isAdCreative ? "SSAI program switch" : "same-PID parameter-set change")): "
+            + "seg-\(finishedIdx) finalized on old init, fresh versioned init for seg-\(newIdx) "
             + "(\(adConfig.width)x\(adConfig.height))",
             category: .session
         )
         return allocateMuxer(initialSegmentIndex: newIdx,
                              reconstructedVideoConfig: adConfig,
-                             isProgramSwitchReinit: true)
+                             versionedInit: true,
+                             isAdCreative: isAdCreative)
     }
 
     /// Extract H.264 ad video config from in-band Annex-B SPS/PPS. nil on mid-GOP join (no parameter sets).
@@ -802,6 +826,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// VOD probes the full file up front. HEVC keeps the existing AV_PKT_FLAG_KEY gate.
     static func liveH264JoinRequiresParameterSets(isLive: Bool, codecIsH264: Bool, framingIsAnnexB: Bool) -> Bool {
         isLive && codecIsH264 && framingIsAnnexB
+    }
+
+    /// #133 follow-up pure decision: a mid-stream keyframe's in-band SPS/PPS diverge from the sets backing the
+    /// current muxer's avcC, so the frozen avcC no longer describes the incoming slices (stale-avcC green frames).
+    /// Returns false when there is no active baseline yet (`active == nil`, first keyframe of the epoch establishes
+    /// it) or the sets are byte-identical (the routine SPS/PPS repetition MPEG-TS carries before every IDR).
+    static func parameterSetsDiverged(active: [UInt8]?, incoming: [UInt8]) -> Bool {
+        guard let active else { return false }
+        return active != incoming
     }
 
     /// #133 join gate: a decodable H.264 access unit at a mid-stream join needs in-band SPS + PPS and a true
@@ -901,14 +934,18 @@ final class HLSSegmentProducer: @unchecked Sendable {
     }
 
     /// Allocate the session's mp4 muxer. `reconstructedVideoConfig` overrides the probed codecpar with
-    /// dimensions+extradata parsed from in-band SPS/PPS: at an SSAI program switch (H.264 ad creative, a
-    /// versioned re-init, `isProgramSwitchReinit: true`) or at a live H.264 join whose probe left codecpar
-    /// at 0x0 (#133, the primary init, `isProgramSwitchReinit: false`). `isProgramSwitchReinit` alone drives
-    /// versioned-init capture and dropping the program's DV/color overrides (an ad carries its own signaling;
-    /// a same-program join keeps them).
+    /// dimensions+extradata parsed from in-band SPS/PPS. Two orthogonal flags (#133 follow-up split the old
+    /// single `isProgramSwitchReinit`):
+    /// - `versionedInit`: capture the init segment as a versioned EXT-X-MAP (a mid-session avcC change: SSAI ad
+    ///   creative OR a same-PID in-band SPS/PPS change). false = the primary init (session start or a #133 live
+    ///   join whose probe left codecpar at 0x0).
+    /// - `isAdCreative`: drop the program's DV/color overrides because the new content carries its own signaling.
+    ///   True only for an SSAI ad creative on a new PID; a same-PID parameter-set change stays in the same program
+    ///   and KEEPS the overrides (an HDR-live encoder restart must not lose its color signaling).
     private func allocateMuxer(initialSegmentIndex: Int,
                                reconstructedVideoConfig: (width: Int32, height: Int32, extradata: [UInt8])? = nil,
-                               isProgramSwitchReinit: Bool = false) -> MP4SegmentMuxer? {
+                               versionedInit: Bool = false,
+                               isAdCreative: Bool = false) -> MP4SegmentMuxer? {
         // #93 residual: the FIRST alloc of a producer (its base segment) must not gate on the
         // consumer's fetch high water. An anchored initial producer (resume start) runs before ANY
         // segment fetch exists, because AVPlayer is still waiting on init.mp4, which is captured by
@@ -922,7 +959,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         if checkShouldStop() { return nil }
 
-        let isReinit = isProgramSwitchReinit
         var adPar: UnsafeMutablePointer<AVCodecParameters>?
         defer { if adPar != nil { avcodec_parameters_free(&adPar) } }
         let videoCodecpar: UnsafePointer<AVCodecParameters>
@@ -951,11 +987,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             codecpar: videoCodecpar,
             timeBase: videoConfig.timeBase,
             codecTagOverride: videoConfig.codecTagOverride,
-            // Re-init: ad carries its own signaling; don't force program's overrides onto it.
-            stripDolbyVisionMetadata: isReinit ? false : videoConfig.stripDolbyVisionMetadata,
-            rewriteDoviConfigTo81: isReinit ? false : videoConfig.rewriteDoviConfigTo81,
-            colorOverride: isReinit ? nil : videoConfig.colorOverride,
-            extradataOverride: isReinit ? nil : videoConfig.extradataOverride
+            // Ad creative carries its own signaling; don't force the program's overrides onto it. A same-PID
+            // parameter-set change is still the same program, so it keeps them (isAdCreative false).
+            stripDolbyVisionMetadata: isAdCreative ? false : videoConfig.stripDolbyVisionMetadata,
+            rewriteDoviConfigTo81: isAdCreative ? false : videoConfig.rewriteDoviConfigTo81,
+            colorOverride: isAdCreative ? nil : videoConfig.colorOverride,
+            extradataOverride: isAdCreative ? nil : videoConfig.extradataOverride
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
             MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase)
@@ -975,11 +1012,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 maxBufferedFragmentSeconds: 2 * targetSegmentDurationSeconds,
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
-                    if isReinit {
+                    if versionedInit {
                         self.cache.addInitVersion(initBytes, fromSegment: initialSegmentIndex)
                         EngineLog.emit(
                             "[HLSSegmentProducer] versioned init captured for seg-\(initialSegmentIndex) "
-                            + "(\(initBytes.count) B, SSAI program switch)",
+                            + "(\(initBytes.count) B, \(isAdCreative ? "SSAI program switch" : "same-PID parameter-set change"))",
                             category: .session
                         )
                     } else if !self.initCaptured {
@@ -1405,17 +1442,30 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     var sdSize: Int = 0
                     if let sd = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &sdSize),
                        sdSize > 0 {
+                        // #133 follow-up diag: confirm ONCE whether the demuxer surfaces avcC changes as side data at
+                        // all. On MPEG-TS it often does not (the sets are only in-band), which is why the actual
+                        // rotation trigger is the keyframe SPS/PPS compare below, not this path.
+                        if !loggedFirstVideoNewExtradata {
+                            loggedFirstVideoNewExtradata = true
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] diag: demuxer emitted AV_PKT_DATA_NEW_EXTRADATA (\(sdSize) B) "
+                                + "on video PID stream=\(videoStreamIndex)",
+                                category: .session
+                            )
+                        }
                         let newExtra = Data(bytes: sd, count: sdSize)
                         if newExtra != lastSeenVideoExtradata {
                             lastSeenVideoExtradata = newExtra
                             codecParamChangeCount += 1
+                            // Force an early discontinuity cut; the versioned-init muxer rotation is driven by the
+                            // keyframe SPS/PPS compare below (which also covers the common case where no side data is
+                            // emitted at all). This side-data hit just brings the cut forward by up to one keyframe.
                             pendingDiscontinuityFlag = true
                             pendingForceCutFlag = true
                             EngineLog.emit(
-                                "[HLSSegmentProducer] WARNING: in-band video extradata change #\(codecParamChangeCount) "
-                                + "(\(sdSize) bytes) at a live boundary. The init segment is from session "
-                                + "start; if this is a real SPS/resolution change, expect decode artifacts "
-                                + "until the versioned-init (EXT-X-MAP) path exists. Forcing a discontinuity cut.",
+                                "[HLSSegmentProducer] in-band video extradata change #\(codecParamChangeCount) "
+                                + "(\(sdSize) B) signaled via side data; forcing a discontinuity cut "
+                                + "(rotation handled by the keyframe parameter-set compare)",
                                 category: .session
                             )
                         }
@@ -1442,7 +1492,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // Do NOT nil lastVideoSourceDts: timeline rebase (below) needs it to fire on the big backward jump.
                     lastSeenVideoExtradata = nil
                     pendingVideoProgramSwitch = true
+                    pendingReinitIsAdCreative = true  // new PID carries its own DV/color signaling; drop program overrides
                     pendingAdVideoConfig = adConfig
+                    activeMuxerVideoExtradata = adConfig.extradata  // #133 follow-up: rebaseline for same-PID PS-change detection
                     convertP7Active = false  // ad creatives are H.264
                     if lastLiveSegmentFinalizeAt != nil { lastLiveSegmentFinalizeAt = Date() }
                     // pendingDiscontinuityFlag / pendingForceCutFlag set by the rebase below.
@@ -1921,10 +1973,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + "anchorPts=\(firstActualVideoPts) "
                             + "target=\(restartTargetVideoDts) "
                             + "desired=\(desiredFirstVideoTfdtPts) "
-                            + "shift=\(videoShiftPts)",
+                            + "shift=\(videoShiftPts) "
+                            // #133 follow-up diag: PID + reconstruct state per epoch, so retest logs separate a
+                            // same-PID mid-stream parameter-set change from a reopen storm (each reopen is a fresh
+                            // gate-open here; a same-PID change is NOT, it stays in one epoch and rotates in place).
+                            + "videoPID=\(videoStreamIndex) reconstructed=\(pendingJoinVideoConfig != nil)",
                             category: .session
                         )
                         onVideoShiftKnown?(videoShiftPts)
+                        // #133 follow-up: the gating IDR's in-band SPS/PPS back this epoch's muxer avcC. Establish
+                        // the baseline so a later same-PID parameter-set change (encoder restart / regional splice)
+                        // is detected against it. joinConfig is non-nil only in the liveH264AnnexBJoin scope.
+                        if let joinConfig {
+                            activeMuxerVideoExtradata = joinConfig.extradata
+                        }
                     } else {
                         // Drop HEVC RASL leading B-frames: open-GOP CRA emits B-frames with pts before CRA.pts
                         // that reference pre-CRA frames not in our stream (AVPlayer stalls in waitingToPlay forever).
@@ -1943,6 +2005,32 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 )
                             }
                             continue
+                        }
+                        // #133 follow-up: gate is open; watch mid-stream keyframes for an in-band SPS/PPS change on
+                        // the SAME video PID. The fMP4 avcC froze at write_header, so without a versioned re-init the
+                        // new slices decode against a stale avcC (recurring green frames + "non-existing PPS" bursts,
+                        // exactly the UK-DVB-via-Xtream report). Route it through the same EXT-X-MAP rotation SSAI uses,
+                        // parsing the sets ourselves so it fires whether or not the demuxer emits NEW_EXTRADATA.
+                        if liveH264AnnexBJoin,
+                           (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0,
+                           !pendingVideoProgramSwitch,
+                           let incoming = extractAdVideoConfig(packet),
+                           Self.parameterSetsDiverged(active: activeMuxerVideoExtradata, incoming: incoming.extradata) {
+                            samePIDReinitCount += 1
+                            EngineLog.emit(
+                                "[HLSSegmentProducer] same-PID in-band parameter-set change #\(samePIDReinitCount) "
+                                + "on video PID stream=\(videoStreamIndex) "
+                                + "(\(incoming.width)x\(incoming.height), "
+                                + "\(activeMuxerVideoExtradata?.count ?? 0)->\(incoming.extradata.count) B SPS/PPS); "
+                                + "forcing a discontinuity cut + versioned init so the new avcC matches the slices",
+                                category: .session
+                            )
+                            pendingDiscontinuityFlag = true
+                            pendingForceCutFlag = true
+                            pendingVideoProgramSwitch = true
+                            pendingReinitIsAdCreative = false
+                            pendingAdVideoConfig = incoming
+                            activeMuxerVideoExtradata = incoming.extradata
                         }
                     }
                 }

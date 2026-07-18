@@ -93,6 +93,25 @@ final class DisplayCriteriaController {
         // true and makes the following waitForSwitch burn its full ~3s cap on every same-format zap.
         let target = AppliedCriteria(isHDR: isHDR, effectiveRate: effectiveRate,
                                      codecType: codecType, hasExtensions: hasExtensions)
+        // #133 follow-up diag: the unchanged-skip only fires for ~1/3-1/2 of eligible same-format zaps. When we have
+        // a prior applied signature and still don't skip, log the exact field that diverged (rate/codec/HDR/ext or
+        // didApply cleared) so the retest pinpoints why last != target instead of guessing.
+        if didApply, let last = lastApplied, last != target {
+            EngineLog.emit(
+                "[DisplayCriteria] diag no-skip: signature diverged"
+                + " rate \(last.effectiveRate)->\(target.effectiveRate)"
+                + " codec \(fourccString(last.codecType))->\(fourccString(target.codecType))"
+                + " hdr \(last.isHDR)->\(target.isHDR)"
+                + " ext \(last.hasExtensions)->\(target.hasExtensions)",
+                category: .engine
+            )
+        } else if !didApply, lastApplied == nil {
+            EngineLog.emit(
+                "[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) "
+                + "-> first apply this controller instance (a RESET or a fresh controller cleared it)",
+                category: .engine
+            )
+        }
         if case .unchanged = Self.applyOutcome(didApply: didApply, last: lastApplied, target: target) {
             // Keep lastCriteriaWasHDR consistent with the still-active criteria for any waitForSwitch classification.
             lastCriteriaWasHDR = isHDR
