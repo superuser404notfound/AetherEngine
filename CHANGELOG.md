@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.2] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.2))
+
+### Fixed
+
+- **H.264 / HEVC formats VideoToolbox cannot hardware-decode now fall back to software instead of a black screen (#2).** H.264 High 4:2:2 / 4:4:4 / High-10 and HEVC Rext are accepted by AVPlayer at the HLS CODECS level (the item reaches `readyToPlay`), but on hardware without a VideoToolbox decoder for the profile (Intel Macs, older Apple TV chips) the native path then renders nothing, while QuickTime plays the same file via its own software decoder. A per-format `VTDecompressionSession` probe at load (`VTCapabilityProbe.canHardwareDecode`) now routes these sources to the `SoftwarePlaybackHost` (libavcodec), which decodes them. Apple Silicon has hardware decoders for all of these and keeps them on the native path unchanged. Reported by DrHurt.
+
 ## [5.8.1] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.1))

@@ -30,4 +30,22 @@ enum VideoRoutingPolicy {
             return false
         }
     }
+
+    /// Second-stage gate (#2): a codec that passed `requiresSoftwarePath` as native (H.264 / HEVC) but whose
+    /// specific format VideoToolbox cannot HARDWARE-decode must still fall back to software, or the native
+    /// AVPlayer path reaches readyToPlay and then renders nothing (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext
+    /// on Intel Macs / older Apple TV). Pure so it is unit-testable; the impure VT probe result
+    /// (`VTCapabilityProbe.canHardwareDecode`) is injected as `canHardwareDecode`. Only H.264 / HEVC consult
+    /// this gate; AV1 / VP9 / etc. already have their own routing above and must not be reclassified here.
+    static func forcesSoftwareForUndecodableFormat(
+        codecID: AVCodecID,
+        canHardwareDecode: Bool
+    ) -> Bool {
+        switch codecID {
+        case AV_CODEC_ID_H264, AV_CODEC_ID_HEVC:
+            return !canHardwareDecode
+        default:
+            return false
+        }
+    }
 }

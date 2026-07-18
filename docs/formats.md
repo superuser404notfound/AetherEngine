@@ -6,7 +6,7 @@ Depth behind the README's "What it handles" matrix: codec routing, HDR signaling
 
 **Containers (demux side):** MKV, MP4, WebM, MPEG-TS, AVI, OGG, FLV.
 
-**Hardware decode** (native AVPlayer path, VideoToolbox): H.264 (progressive), HEVC, HEVC Main10. AV1 on devices with HW AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips) also routes natively.
+**Hardware decode** (native AVPlayer path, VideoToolbox): H.264 (progressive), HEVC, HEVC Main10, on hardware whose VideoToolbox has a decoder for the specific profile. AV1 on devices with HW AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips) also routes natively.
 
 **Software decode** (`SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`):
 
@@ -14,6 +14,7 @@ Depth behind the README's "What it handles" matrix: codec routing, HDR signaling
 - VP9 and VP8 (libavcodec native) unconditionally, since AVPlayer's HLS pipeline rejects the `vp09` / `vp08` CODECS attributes even where VideoToolbox can HW-decode them.
 - MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1, none of which AVPlayer's HLS-fMP4 pipeline accepts; libavcodec ships native decoders for all three.
 - Interlaced H.264 (declared field order TT / BB / TB / BT), so the deinterlacer below can run; tvOS AVPlayer does not deinterlace, so 1080i / 576i broadcast combs on the native path (#107).
+- H.264 High 4:2:2 / 4:4:4 / High-10 and HEVC Rext (4:2:2 / 4:4:4 / 12-bit) on hardware whose VideoToolbox has no decoder for the profile (Intel Macs, older Apple TV chips). AVPlayer accepts these at the HLS CODECS level and the item reaches `readyToPlay`, but the native path then renders nothing, so a per-format `VTDecompressionSession` probe at load (`VTCapabilityProbe.canHardwareDecode`) routes them to libavcodec, which decodes them (#2). Apple Silicon has HW decoders for all of these and keeps them native.
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`), gated per source on `VTCapabilityProbe`, codec id, and declared field order.
 

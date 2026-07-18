@@ -1901,6 +1901,25 @@ public final class AetherEngine: ObservableObject {
             fieldOrder: detectedFieldOrder,
             av1Available: VTCapabilityProbe.av1Available
         )
+        // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
+        // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
+        // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
+        // there is no analogous fallback on the native route, so route it to the SoftwarePlaybackHost
+        // (libavcodec), which decodes these profiles. VOD only: forced-native live keeps its verified path, and
+        // broadcast H.264 / HEVC is HW-decodable. Apple Silicon HW-decodes these, so the probe keeps them native.
+        if !useSoftwarePath, !options.isLive, probeOpened,
+           let vStream = probe.stream(at: probe.videoStreamIndex),
+           let codecpar = vStream.pointee.codecpar,
+           VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+               codecID: detectedCodecID,
+               canHardwareDecode: VTCapabilityProbe.canHardwareDecode(codecpar: codecpar)) {
+            useSoftwarePath = true
+            EngineLog.emit(
+                "[AetherEngine] codec=\(detectedCodecID.rawValue) not hardware-decodable by "
+                + "VideoToolbox; routing to the software path so it plays instead of a black screen (#2)",
+                category: .engine
+            )
+        }
         // Forward-only sources can't serve the native path's seeks (cue prewarm, segment seeks).
         // Covers custom readers AND URL sources whose AVIOReader resolved no size and degraded to
         // the forward-only streaming reader (#126: unknown-length HTTP MP4 produced zero segments).

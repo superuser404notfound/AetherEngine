@@ -323,9 +323,15 @@ final class SoftwarePlaybackHost {
             category: .swPlayback
         )
 
-        // HEVC -> VTDecompressionSession (HW); everything else -> libavcodec. Replace wholesale to prevent state bleed.
+        // HEVC -> VTDecompressionSession (HW) when VideoToolbox can HW-decode this exact format; everything
+        // else -> libavcodec. Replace wholesale to prevent state bleed. #2: HardwareVideoDecoder requires a
+        // HW decoder and has no software fallback, so an HEVC Rext (4:2:2/4:4:4/12-bit) stream routed here on
+        // hardware without a HW decoder (Intel Macs / older Apple TV) would fail VT session creation and show a
+        // black screen. Route those to libavcodec instead, which decodes them. Apple Silicon HW-decodes them,
+        // so the probe keeps HardwareVideoDecoder there.
         if let codecpar = vStream.pointee.codecpar,
-           codecpar.pointee.codec_id == AV_CODEC_ID_HEVC {
+           codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
+           VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) {
             videoDecoder.close()
             videoDecoder = HardwareVideoDecoder()
             EngineLog.emit(
@@ -335,6 +341,11 @@ final class SoftwarePlaybackHost {
         } else if !(videoDecoder is SoftwareVideoDecoder) {
             videoDecoder.close()
             videoDecoder = SoftwareVideoDecoder()
+            EngineLog.emit(
+                "[SWHost] selected SoftwareVideoDecoder (libavcodec) for codec_id="
+                + "\(vStream.pointee.codecpar?.pointee.codec_id.rawValue ?? 0)",
+                category: .swPlayback
+            )
         }
 
         // Flip display layer into HDR mode before frames arrive; without this preferredDynamicRange stays .standard and PQ/HLG renders desaturated.
