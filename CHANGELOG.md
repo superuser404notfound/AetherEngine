@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.7.0] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.7.0))
+
+### Added
+
+- **Coloured DVB teletext captions (#107).** Teletext subtitles now decode through libzvbi as ASS (`txt_format=ass`) so the per-character colour broadcasters use to distinguish speakers survives to the overlay. A new `SubtitleCue.Body.richText([SubtitleTextRun])` carries the coloured runs (each run an RGB `SubtitleColor?`, nil meaning "use the host default"); `cue.text` still flattens rich cues to plain text so existing text consumers are unchanged, and an all-white page keeps emitting plain `.text`. Both reference hosts render the coloured runs. Thanks to tresby and nathanpiper.
+- **Teletext caption-page override (#107).** `LoadOptions.teletextPage` selects the teletext page libzvbi decodes (default nil = auto-detect the flagged subtitle page). Channels whose captions ride a page libzvbi does not flag as a subtitle page (for example Australian free-to-air on page 801) can now be targeted explicitly; the option threads through every subtitle tap site.
+
+### Fixed
+
+- **Coloured teletext cues are trimmed and de-duplicated in the retained store like plain ones (#107).** The teletext successor-trim and the live-DVR re-decode de-dupe were text-cue-only; coloured pages (now rich-text cues) are handled by both, so a coloured caption is closed by its successor instead of lingering to the page-hold cap, and does not duplicate across a live-DVR seek.
+
 ## [5.6.2] - 2026-07-17
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.6.2))
