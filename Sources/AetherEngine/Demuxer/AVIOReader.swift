@@ -1652,6 +1652,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// fallback request (identical wire behavior to the old sequential ladder).
     static let sizeProbeStaggerSeconds: TimeInterval = 0.75
 
+    /// Shared, condition-guarded state for the staggered-concurrent size probes. Every field is
+    /// touched only while `cond` is held, so the box is safe to capture in the @Sendable probe closures.
+    private final class ProbeSizeState: @unchecked Sendable {
+        let cond = NSCondition()
+        var resolvedSize: Int64 = -1
+        var outstanding = 0
+    }
+
     private func probeFileSize() -> Int64 {
         // Staggered-concurrent ladder (#107 follow-up). The probes themselves are unchanged:
         // Range bytes=0- primary (AetherEngine#8: HEAD breaks on Cloudflare-fronted origins
@@ -1661,26 +1669,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // pays its ~4 s tune-in on EVERY connection, so the ladder tripled the open latency
         // of every genuinely length-less source. The fallbacks now start after a short
         // stagger and run in parallel; the first positive size wins.
-        let cond = NSCondition()
-        var resolvedSize: Int64 = -1
-        var outstanding = 0
+        // All mutable probe state lives inside ProbeSizeState, guarded entirely by its own
+        // NSCondition, so the box is a safe capture for the @Sendable asyncAfter closures below
+        // (Swift 6 SendableClosureCaptures otherwise flags the raw local vars and the run thunk).
+        let state = ProbeSizeState()
 
-        func launch(after delay: TimeInterval, name: String, _ run: @escaping () -> Int64) {
-            cond.lock(); outstanding += 1; cond.unlock()
+        func launch(after delay: TimeInterval, name: String, _ run: @escaping @Sendable () -> Int64) {
+            state.cond.lock(); state.outstanding += 1; state.cond.unlock()
             Self.sizeProbeQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                cond.lock()
-                let alreadyResolved = resolvedSize > 0
-                cond.unlock()
+                state.cond.lock()
+                let alreadyResolved = state.resolvedSize > 0
+                state.cond.unlock()
                 let closed = self?.isClosed ?? true
                 let size = (alreadyResolved || closed) ? -1 : run()
-                cond.lock()
-                if size > 0, resolvedSize <= 0 {
-                    resolvedSize = size
+                state.cond.lock()
+                if size > 0, state.resolvedSize <= 0 {
+                    state.resolvedSize = size
                     EngineLog.emit("[AVIOReader] File size: \(size) bytes (\(name))", category: .demux)
                 }
-                outstanding -= 1
-                cond.broadcast()
-                cond.unlock()
+                state.outstanding -= 1
+                state.cond.broadcast()
+                state.cond.unlock()
             }
         }
 
@@ -1697,12 +1706,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // Budget mirrors a single sequential probe (its own 20-25 s ceiling) plus the stagger;
         // isClosed teardown breaks the individual probes, which then signal outstanding down.
         let deadline = Date(timeIntervalSinceNow: Self.sizeProbeStaggerSeconds + min(25, chunkRequestTimeout) + 2)
-        cond.lock()
-        while resolvedSize <= 0 && outstanding > 0 {
-            if !cond.wait(until: deadline) { break }
+        state.cond.lock()
+        while state.resolvedSize <= 0 && state.outstanding > 0 {
+            if !state.cond.wait(until: deadline) { break }
         }
-        let size = resolvedSize
-        cond.unlock()
+        let size = state.resolvedSize
+        state.cond.unlock()
         if size <= 0 {
             EngineLog.emit("[AVIOReader] no probe resolved a size, streaming mode (forward-only)", category: .demux)
         }
