@@ -26,7 +26,7 @@ func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil,
     )
     // Resume anchor exactly like AetherEngine.loadNative's load(startPosition:) (#99 repro).
     engine.initialStartSeconds = startPosition
-    // Request native mov_text track before start() so the muxer's init moov declares it (#55). Must precede start().
+    // Enable native WebVTT subtitle renditions before start() so the master declares the SUBTITLES group (#55). Must precede start().
     if nativeSubsIndex != nil {
         engine.requestNativeSubtitleTrack()
     }
@@ -40,7 +40,7 @@ func runServe(url: URL, dvModeAvailable: Bool, nativeSubsIndex: Int? = nil,
     // Attach cue stores for all declared text tracks after start (#55 all-tracks). Legacy --native-subs N kept for CLI compat; ALL non-bitmap tracks are now declared.
     if nativeSubsIndex != nil {
         let languages = engine.attachAllNativeSubtitleStores()
-        print("[native-subs] \(languages.count) mov_text track(s) declared in init moov, cue stores attached")
+        print("[native-subs] \(languages.count) WebVTT SUBTITLES rendition(s) declared in the master, cue stores attached")
         print("[native-subs] languages: \(languages.map { $0 ?? "und" })")
         print("[native-subs] use a full AetherEngine session to feed cues via the native multi-decode reader")
     }

@@ -1,7 +1,8 @@
 // aetherctl: standalone reproduction harness for AetherEngine on macOS.
 //
-// Three subcommands, all operating on a media source URL (file:// or
-// http(s)://):
+// Twenty-one subcommands, most operating on a media source URL (file://
+// or http(s)://), a few on built-in synthetic fixtures. The full list
+// with flags and examples lives in docs/cli.md; the three original modes:
 //
 //   probe <url>     - Open the demuxer, print container + stream
 //                     metadata, exit. No HLS server, no decoders.

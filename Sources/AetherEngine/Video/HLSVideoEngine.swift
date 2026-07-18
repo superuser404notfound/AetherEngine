@@ -194,8 +194,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return subtitleTapRoutes[idx] != nil
     }
 
-    /// Request the native mov_text track in the init moov (#55). Call before `start()`.
-    /// `aetherctl serve --native-subs N` uses this; a full session wires it automatically.
+    /// Enable the native WebVTT subtitle renditions for the session (#55). Call before `start()`
+    /// so the master playlist declares the SUBTITLES group. `aetherctl serve --native-subs` uses
+    /// this; a full session wires it via `LoadOptions.prepareNativeSubtitles`.
     public func requestNativeSubtitleTrack() {
         enableNativeSubtitleTrackForSession = true
     }
@@ -225,7 +226,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     @discardableResult
     public func attachAllNativeSubtitleStores() -> [String?] {
         // Decoder-name classifier: an exact-match Set of descriptor names here never matched TrackInfo.codec
-        // (the libavcodec decoder name), so bitmap tracks leaked into the native mov_text store set.
+        // (the libavcodec decoder name), so bitmap tracks leaked into the native subtitle store set.
         let text = (demuxer?.subtitleTrackInfos() ?? []).filter { !AetherEngine.isBitmapSubtitleCodec($0.codec) }
         let languages = text.map { $0.language }
         attachNativeSubtitleStores(count: text.count, languages: languages,
