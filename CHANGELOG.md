@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.5] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.5))
+
+### Fixed
+
+- **Recurring green flicker mid-stream on live MPEG-TS channels whose encoder restarts or splices in place (#133 follow-up).** The #133 join gate covered joining a broadcast mid-stream, but the same "non-existing PPS/SPS referenced" decode condition recurred later in the same session on some UK terrestrial channels via Xtream, showing as green frames that came back throughout playback rather than only at tune-in. The fMP4 `avcC` (SPS/PPS) freezes at `avformat_write_header`, and the versioned-init rotation that re-establishes it only fired for an SSAI program switch on a new video PID. An in-band parameter-set change on the *same* PID (encoder restart or regional opt-out splice) forced only a discontinuity cut, so the panel kept decoding the new slices against the stale `avcC`. Each mid-stream keyframe now compares its in-band SPS/PPS against the sets backing the current `avcC` and, on a divergence, rotates the muxer through the same versioned EXT-X-MAP path, parsing the sets directly so it works whether or not the demuxer surfaces the change as side data. A same-PID change keeps the program's Dolby Vision / colour signaling; only an ad creative on a new PID drops it. Reported with precise logs by digilearn-dev. This build also adds diagnostics (per-epoch video PID, parameter-set-change counter, and DisplayCriteria skip-signature logging) to confirm the path on retest.
+
 ## [5.8.4] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.4))
