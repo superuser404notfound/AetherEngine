@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.6] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.6))
+
+### Changed
+
+- **Cleared five Swift 6 `SendableClosureCaptures` warnings in the AVIO size-probe.** The staggered-concurrent open-time size probe (#107 follow-up) kept its `resolvedSize` / `outstanding` counters as mutable locals and passed each probe as a plain `() -> Int64` thunk, so Swift 6 flagged the `asyncAfter` `@Sendable` closures. The synchronisation was already correct (every touch guarded by one `NSCondition`); the shared state now lives in a condition-guarded `@unchecked Sendable` box and the probe thunk is `@Sendable`. No behaviour change; the package builds warning-free under Swift 6. Surfaced while sweeping build warnings for the Sodalite 1.0 release.
+
 ## [5.8.5] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.5))
