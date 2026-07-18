@@ -67,10 +67,15 @@ enum VTCapabilityProbe {
         guard fdStatus == noErr, let formatDesc = formatDescription else { return true }
 
         // Require hardware, matching HardwareVideoDecoder's session spec: a format VT can only software-decode
-        // is exactly what we want to hand to libavcodec instead (predictable path, no black screen).
-        let decoderSpec: NSDictionary = [
-            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true,
-        ]
+        // is exactly what we want to hand to libavcodec instead (predictable path, no black screen). The
+        // require-hardware key is iOS 17 / tvOS 17+ (the symbol did not exist on iOS before then), so guard it
+        // the same way HardwareVideoDecoder does; on the rare pre-17 build the probe just skips the constraint.
+        var decoderSpec: NSDictionary?
+        if #available(tvOS 17.0, iOS 17.0, *) {
+            decoderSpec = [
+                kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true,
+            ]
+        }
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault,

@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.3] - 2026-07-18
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.3))
+
+### Fixed
+
+- **iOS / tvOS build fix for the #2 decodability probe.** `VTCapabilityProbe.canHardwareDecode` used `kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder` without the iOS 17 / tvOS 17 availability guard (the symbol did not exist on iOS before 17), so 5.8.2 compiled on macOS but failed the iOS / tvOS simulator build. Guarded the same way `HardwareVideoDecoder` does. No behavior change on shipping deployment targets. macOS (AetherPlayer) was unaffected in 5.8.2.
+
 ## [5.8.2] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.2))
