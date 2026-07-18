@@ -29,7 +29,7 @@ let package = Package(
         // No network stack, we use custom AVIO + URLSession for HTTP streams.
         // Resolved over Git rather than a local path so consumers (and
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.
-        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "2.0.0"),  // 2.0.0: dynamic frameworks (LGPL-compliant App Store shape), zvbi GPL excision
+        .package(url: "https://github.com/superuser404notfound/FFmpegBuild", from: "2.1.0"),  // 2.1.0: yadif_videotoolbox + hwupload (Metal GPU deinterlace); 2.0.0: dynamic frameworks (LGPL), zvbi GPL excision
         // Pure-Swift SMB2 client (MIT) that speaks the protocol over
         // NWConnection. Replaces AMSMB2/libsmb2, which EPERMs on tvOS/iOS.
         // Pinned to the 0.3.x minor: SMBClient is pre-1.0 with an actively
