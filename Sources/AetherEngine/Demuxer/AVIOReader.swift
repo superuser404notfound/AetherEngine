@@ -363,6 +363,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // probeFileSize() round-trip (and its HEAD fallback, the request some origins 429).
             startPersistentConnection(at: 0, boundedTo: boundedInitialFetch)
             let gotData = awaitFirstPersistentData()
+            // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. A live origin serves the
+            // finite #EXTM3U body at HTTP 200 and closes the connection; the endless-feed reader then
+            // re-fetches that body forever. Those reconnects look PRODUCTIVE (a full body at 200, and every
+            // find_stream_info probe seek resets the unproductive streak via seekReconnect), so the #71
+            // give-up counters never trip, avformat_open_input never returns, and load() hangs with no
+            // terminal state. Fail closed here, before the reconnect loop is ever entered: a raw media
+            // container never begins with '#' (TS syncs on 0x47; MP4/MKV open with binary box/EBML markers),
+            // so an #EXTM3U prefix is an unambiguous misroute. The host is pointed at the HLS entry points.
+            if isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(firstWindowPrefix()) {
+                EngineLog.emit("[AVIOReader] HLS playlist body on the raw live path (AE#140); failing closed. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.", category: .demux)
+                markClosed()
+                close()
+                throw AVIOReaderError.hlsPlaylistOnRawLivePath
+            }
             var tookFallback = false
             if !isLive {
                 // Atomically decide, under winCond, whether the optimistic connection resolved
@@ -434,6 +448,31 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let gotData = !window.isEmpty
         winCond.unlock()
         return gotData
+    }
+
+    /// Snapshot up to `max` leading bytes of the first window (open-time, before any read has consumed
+    /// it, so `winStart == 0`). winCond-guarded like every other window access. Used only by the AE#140
+    /// misroute check; returns [] if no data has arrived.
+    private func firstWindowPrefix(max: Int = 16) -> [UInt8] {
+        winCond.lock()
+        defer { winCond.unlock() }
+        let n = Swift.min(max, window.count)
+        return n > 0 ? Array(window.prefix(n)) : []
+    }
+
+    /// True when a body's leading bytes are the HLS playlist tag `#EXTM3U`, tolerating a UTF-8 BOM and
+    /// leading ASCII whitespace. A raw media container never opens with '#', so this is an unambiguous
+    /// signal that an m3u8 playlist was handed to the raw-byte reader (AE#140). Static + internal so the
+    /// classifier is unit-tested without a live origin.
+    static func bodyBeginsWithHLSPlaylistTag(_ bytes: [UInt8]) -> Bool {
+        var i = 0
+        if bytes.count >= 3, bytes[0] == 0xEF, bytes[1] == 0xBB, bytes[2] == 0xBF { i = 3 }
+        while i < bytes.count, bytes[i] == 0x20 || bytes[i] == 0x09 || bytes[i] == 0x0A || bytes[i] == 0x0D {
+            i += 1
+        }
+        let tag = Array("#EXTM3U".utf8)
+        guard bytes.count - i >= tag.count else { return false }
+        return Array(bytes[i..<(i + tag.count)]) == tag
     }
 
     /// Under a single winCond critical section: snapshot whether the optimistic open-time
@@ -2249,12 +2288,16 @@ enum AVIOReaderError: Error, CustomStringConvertible {
     case allocationFailed
     case noResponse
     case requestTimeout
+    /// AE#140: an HLS playlist body arrived on the raw-byte live reader (misroute). Surfaced to load()
+    /// so it can fail closed with a typed rejection instead of looping the endless-feed reconnect.
+    case hlsPlaylistOnRawLivePath
 
     var description: String {
         switch self {
         case .allocationFailed: return "Failed to allocate AVIO buffer"
         case .noResponse: return "No response from server"
         case .requestTimeout: return "Request timed out"
+        case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
         }
     }
 }
