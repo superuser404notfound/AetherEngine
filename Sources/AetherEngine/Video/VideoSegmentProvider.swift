@@ -116,6 +116,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Hard cap on riding an in-flight restart (#93 residual): a fetch waits past the fixed
     /// budget while a restart is genuinely executing, but never indefinitely.
     private let repositionRideCapSeconds: TimeInterval
+    /// Blocking wait for a forward request the active producer is about to write (test-injectable;
+    /// production stays at 30 s, matching AVPlayer's serve patience before it retries).
+    private let forwardBackpressureWaitSeconds: TimeInterval
     /// #93 round 3: a VOD serve still running at this age signals `onSlow` so the server can emit
     /// an early chunked header, keeping time-to-first-byte under AVPlayer's ~3.5 s -12889 window.
     private let slowServeThresholdSeconds: TimeInterval
@@ -155,6 +158,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         repositionWaitSlice: TimeInterval = 8.0,
         sparseHoleWaitSlice: TimeInterval = 2.0,
         repositionRideCapSeconds: TimeInterval = 90.0,
+        forwardBackpressureWaitSeconds: TimeInterval = 30.0,
         slowServeThresholdSeconds: TimeInterval = 2.0,
         nativeSubtitleStores: [NativeSubtitleCueStore] = [],
         nativeSubtitleLanguages: [String?] = [],
@@ -184,6 +188,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.repositionWaitSlice = repositionWaitSlice
         self.sparseHoleWaitSlice = sparseHoleWaitSlice
         self.repositionRideCapSeconds = repositionRideCapSeconds
+        self.forwardBackpressureWaitSeconds = forwardBackpressureWaitSeconds
         self.slowServeThresholdSeconds = slowServeThresholdSeconds
         self.nativeSubStores = nativeSubtitleStores
         self.nativeSubLanguages = nativeSubtitleLanguages
@@ -438,8 +443,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 }
                 needsRestart = true
             } else {
-                // r.1 < index <= r.1 + forwardWaitWindow: producer about to write; backpressure-wait.
-                needsRestart = false
+                // r.1 < index <= r.1 + forwardWaitWindow: only backpressure-wait when the ACTIVE
+                // producer's march front is actually near. The resident max alone is not that
+                // signal: retained scrub bands (#93 budget) from a dead producer can sit far above
+                // the active march (AE#141: band 150-158 from a 600 s scrub, producer re-anchored
+                // at 75; the request for seg159 parked 3x30 s into -1017 item death while the
+                // march was ~2 minutes away). highWater is reset per provider-fired restart, so
+                // max(highWater, lastRestartIndex) tracks the active producer's front.
+                needsRestart = index > activeMarchFront + Self.forwardWaitWindow
             }
         } else {
             // Empty cache: cold start (producer at lastRestartIndex, hasn't written yet) vs. big scrub
@@ -508,7 +519,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             return logServed(index: index, bytes: nil, totalStart: totalStart, restarted: true)
         }
 
-        let bytes = cache.fetch(index: index, timeout: 30.0)
+        let bytes = cache.fetch(index: index, timeout: forwardBackpressureWaitSeconds)
         return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: needsRestart)
     }
 
@@ -531,6 +542,20 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private func activeProducerCovers(_ index: Int) -> Bool {
         guard let base = activeProducerBase?() else { return false }
         return base <= index && index - base <= Self.forwardWaitWindow
+    }
+
+    /// The active producer's write front: the highest index written since its restart (highWater
+    /// is reset per provider-fired restart) or its restart anchor before the first write (AE#141).
+    private var activeMarchFront: Int {
+        max(cache.highestStoredIndex, lastRestartIndex)
+    }
+
+    /// AE#141: whether the active producer's march can plausibly deliver `index` without a
+    /// re-anchor — at or behind its anchor-to-front span, or within the forward-wait window
+    /// ahead of the front. The engine's seek-deadline backstop asks this before preserving a
+    /// "progressing" producer whose march would never reach the pending seek target.
+    func activeMarchCovers(_ index: Int) -> Bool {
+        index >= lastRestartIndex && index <= activeMarchFront + Self.forwardWaitWindow
     }
 
     private var currentSegmentCount: Int {

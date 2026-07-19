@@ -1777,6 +1777,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return min(max(lo - 1, 0), segmentPlan.count - 1)
     }
 
+    /// AE#141: whether the active producer's march can plausibly deliver the segment covering
+    /// playlist time `seconds` without a re-anchor. The seek-deadline path asks this before
+    /// preserving a "progressing" producer: progress toward a region the pending target is not
+    /// in is not worth preserving (640 s target, march at ~316 s: 3x30 s serve timeouts ride to
+    /// item death long before the march arrives). `true` with no provider (nothing to judge).
+    func producerCoversPlaylistTime(_ seconds: Double) -> Bool {
+        guard let prov = provider else { return true }
+        return prov.activeMarchCovers(segmentIndexForPlaylistTime(seconds))
+    }
+
     /// #93 restart latency: phase split for the "restart took" line, so a slow restart names the
     /// phase that ate the time (old-pump stop wait, wedged-reopen, demuxer seek, producer build).
     nonisolated static func restartPhaseSummary(
