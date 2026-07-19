@@ -10,9 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.9] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.9))
+
 ### Fixed
 
-- **Output audio channels set based on source (SoftwarePlaybackHost).** `AVAudioSession.setPreferredOutputNumberOfChannels` is now set based on active audio track's actual channels, defaulting to max channels when it can't be determined. 
+- **Stereo sources now reach the AVR as stereo so its upmixer engages (software renderer path).** The renderer paths (`SoftwarePlaybackHost`, `AudioPlaybackHost`) activated `AVAudioSession` with `setPreferredOutputNumberOfChannels` pinned to the route maximum regardless of the source. A stereo track (live TV, interlaced VOD) was therefore presented to a 7.1 AVR as an 8-channel PCM stream, so the receiver saw native surround and never engaged its Dolby Pro Logic II / DTS Neural:X upmixer; stereo played flat across the front channels. The preferred output count now matches the active audio track's own channel count (resolved from the published track list), clamped to the route maximum, and falls back to the route maximum only when the source count cannot be determined. Genuine multichannel sources still get every channel. Reported and fixed by Nathan Piper (nathanpiper).
 
 ## [5.8.8] - 2026-07-19
 
