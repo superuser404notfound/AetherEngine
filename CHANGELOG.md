@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.8.7] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.7))
+
+### Fixed
+
+- **Resuming near the end of a file with a keyframe cluster could load forever instead of playing.** When a VOD's keyframe index carried a burst of IRAPs within a few frames (a hard cut / scene change near the resume point), the keyframe-aligned segment plan emitted sub-frame (~40 ms) segments: once the absolute `(segIdx+1) * targetDuration` cut threshold lagged the actual position, each clustered keyframe became its own boundary. The plan and the producer share one boundary list, and the producer only cuts a segment index when a demuxed keyframe's PTS maps into its `[start, end)` window, so a ~40 ms window could catch none of the actually-demuxed keyframes and that index was never produced while its neighbours were. The playlist still advertised the missing index, so AVPlayer requested it, the serve path waited out a 30 s cache miss, and it surfaced as CoreMedia `-15628` loader poison; the stall watchdog then reloaded and every fresh item re-hit the identical skipped hole, spinning the item-reload loop forever. The plan now folds any segment shorter than 1 s into a neighbour (`collapseShortSegments`), so every advertised segment has a window wide enough to contain a demuxed keyframe and the plan and producer agree; kept boundaries are still real keyframes and total duration is conserved. Reported and device-verified by Vincent.
+
 ## [5.8.6] - 2026-07-18
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.6))
