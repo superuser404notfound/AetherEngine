@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.0] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.0))
+
+### Fixed
+
+- **Handing an HLS playlist (`.m3u8`) URL to `load(isLive:)` on the generic path no longer hangs forever with no error.** The documented HLS entry points (`LoadOptions.nativeRemoteHLS` and `HLSLiveIngestReader`) were bypassed, so the playlist URL routed onto the raw-byte live reader. A live origin serves the finite `#EXTM3U` body at HTTP 200 and closes the connection, which the endless-feed reader read as a dropped live stream and reconnected, re-fetching the same body forever. Those reconnects looked productive (a full body at 200, and every `find_stream_info` probe seek reset the unproductive-reconnect streak), so the reconnect give-up counters (#71) never tripped, `avformat_open_input` never returned, and `load()` sat at `.loading` with no terminal state (reporter saw 262 reconnect cycles over 5.75 minutes). The raw-byte reader now inspects the first bytes of a live source and fails closed when they are an HLS playlist tag (a raw media container never opens with `#`; TS syncs on `0x47`), before the reconnect loop is ever entered. Reported by cmcpherson274 (#140).
+
+### Added
+
+- **`AetherEngineError.hlsPlaylistOnRawLivePath`.** `load()` now throws this typed, catchable error (with an actionable `LocalizedError` description) when an `.m3u8` playlist is misrouted onto the raw live path, pointing the caller at `LoadOptions.nativeRemoteHLS` / `HLSLiveIngestReader` instead of looping silently.
+
 ## [5.8.9] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.9))

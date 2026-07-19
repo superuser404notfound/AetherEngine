@@ -1611,6 +1611,7 @@ public final class AetherEngine: ObservableObject {
         // would strip the successor's abort handle.
         defer { if inFlightProbeDemuxer === probe { inFlightProbeDemuxer = nil } }
         var probeOpened = false
+        var probeFailure: Error?
         do {
             // Detach avformat_open_input + find_stream_info off @MainActor (~6 s on a slow CDN).
             // AetherEngine#10: a @MainActor async body without a suspension point blocks the main thread
@@ -1655,6 +1656,7 @@ public final class AetherEngine: ObservableObject {
             // Ownership transfers to loadNative/loadSoftware, which adopt the probe for reuse
             // or open fresh if the probe failed.
         } catch {
+            probeFailure = error
             EngineLog.emit("[AetherEngine] probe failed (\(error)); proceeding without criteria", category: .engine)
         }
 
@@ -1671,6 +1673,15 @@ public final class AetherEngine: ObservableObject {
         if case .custom = source, !probeOpened {
             state = .error("Failed to load: custom source probe failed")
             throw DemuxerError.openFailed(code: -1)
+        }
+
+        // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. The AVIOReader detected the
+        // #EXTM3U body and failed closed instead of looping its endless-feed reconnect forever. Surface a
+        // typed, actionable rejection so the host routes m3u8 through LoadOptions.nativeRemoteHLS or
+        // HLSLiveIngestReader, not the generic isLive raw path.
+        if let readerError = probeFailure as? AVIOReaderError, case .hlsPlaylistOnRawLivePath = readerError {
+            state = .error("HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.")
+            throw AetherEngineError.hlsPlaylistOnRawLivePath
         }
 
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
@@ -3146,7 +3157,19 @@ public final class AetherEngine: ObservableObject {
 
 // MARK: - Errors
 
-public enum AetherEngineError: Error {
+public enum AetherEngineError: Error, LocalizedError {
     case noVideoStream
     case noAudioStream
+    /// AE#140: an HLS playlist URL (m3u8) was handed to `load(isLive:)` on the generic raw-byte path.
+    /// Route m3u8 sources through `LoadOptions.nativeRemoteHLS` or `HLSLiveIngestReader` instead.
+    case hlsPlaylistOnRawLivePath
+
+    public var errorDescription: String? {
+        switch self {
+        case .noVideoStream: return "No video stream in source"
+        case .noAudioStream: return "No audio stream in source"
+        case .hlsPlaylistOnRawLivePath:
+            return "HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources."
+        }
+    }
 }
