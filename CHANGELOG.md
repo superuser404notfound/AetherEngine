@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.1] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.1))
+
 ### Fixed
 
 - **A far-forward VOD seek above a retained scrub band no longer parks in 30 s serve timeouts into item death; the producer re-anchors at the target immediately.** Reported geometry: a scripted 600 s scrub left its segment band resident under the retention budget, the producer was later re-anchored at ~302 s, and a fourth seek targeted 640 s, just above the dead band's top. Two layers misread that. The segment server's forward-wait branch trusted the resident maximum as "the producer is about to write this" and parked the request for the target segment (three 30 s cache-miss timeouts; the third tore the connection into `-1017` / `failedToPlayToEndTime` item death and a stage-2 reload, correct target state only ~108 s after the seek command). And the 8 s seek-deadline path (#129) preserved the "progressing" producer because the old position still had forward buffer, blind to the target sitting ~330 s beyond what the march could reach inside the consumer's timeout budget. The forward-wait branch now keys on the active producer's write front (its high water since restart, or its anchor before the first write) instead of the resident maximum, so a request beyond the reachable window re-anchors the producer at once; and the seek-deadline backstop now also re-anchors a progressing producer whose march cannot reach the pending seek target (starvation is no longer the only trigger). Reported by cmcpherson274 (#141).
