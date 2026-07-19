@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.7] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.7))
+
+### Fixed
+
+- **`subtitleCues` now holds embedded cues up to the drainer's full 60 s lead window ahead of the playhead on VOD sessions, so a host-applied ADVANCE sync offset finds them, text and bitmap alike.** The #112 pump tap harvests subtitle packets only as far as the segment producer's forward park (#102), which on direct play sits a few seconds past AVPlayer's fetch position; the drainer's 60 s lead was an empty promise beyond that, a delay offset worked (300 s trailing retention) but an advance showed nothing or flashed cues in late. A VOD-only subtitle forward prefetcher (a subtitle-only side reader, all other streams discarded per #104) now fills the session `SubtitlePacketStore` to `playhead + 60 s` independent of the producer: parked on the subtitle PTS axis, re-anchored on seeks via the drain tick's jump detection, open deferred while a producer restart is in flight (#93), positioned under the shared bounded-seek + byte-estimate rules (#112 round 10). Split-PES PGS display sets assemble under a per-writer key so the pump's in-flight set is never corrupted; overlapping completed packets dedupe by PTS. Live sessions skip it (content past the edge does not exist), and it is best-effort: on open failure or wedge, behavior is exactly the tap-fed status quo. Covered by `Issue151SubtitleForwardPrefetchTests`. Reported by rrgomes (#151).
+
 ## [5.9.6] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.6))
