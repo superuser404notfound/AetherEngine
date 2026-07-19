@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.5] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.5))
+
+### Fixed
+
+- **A PGS display set carrying multiple composition objects at one start PTS (a forced sign plus dialogue, a common real-disc shape) now renders ALL its objects instead of collapsing to the last one; each object's forced flag is surfaced per cue.** The decoder already fanned N objects into N same-start image cues, but the retained store's same-start image replacement (#112) assumed "a PGS composition has a unique start PTS", true per composition, false per composition object, so each sibling replaced the previous before publish and only the last object survived (deterministic, no error; the only host-visible fingerprint was a gap in the session-monotonic cue ids). The replacement key now includes object geometry (normalized position + pixel size, deterministic across re-decodes via the alpha-bounding-box crop): a re-decode still replaces its placeholder twin, sibling objects are all kept, mirroring the text path's distinct-simultaneous-speakers rule. Same collapse one level up: the #112 reconstruction pass held a single candidate cue, so a multi-object landing set lost all but one object at seek time; the candidate is now the whole same-start group, with the #143 clear-trim applied per member.
+
+### Added
+
+- **Per-cue forced flag.** `AVSubtitleRect`'s `AV_SUBTITLE_FLAG_FORCED` (set by pgssubdec/dvdsubdec for forced captions) was never read; hosts could not distinguish a forced sign from dialogue. It now lands in `SubtitleImage.isForced` and surfaces per cue as `SubtitleCue.isForced` (source-compatible additions; track-level forcedness stays on `TrackInfo.isForced`). Covered by `Issue146PGSMultiObjectTests`. Reported by cmcpherson274 (#146).
+
 ## [5.9.4] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.4))
