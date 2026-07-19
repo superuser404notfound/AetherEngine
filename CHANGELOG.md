@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.4] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.4))
+
+### Fixed
+
+- **An MKV track carrying `TrackTimestampScale != 1` now demuxes on the coherent, unscaled segment axis (cluster + rel) instead of a silently wrong hybrid axis (cluster + rel x scale).** Inherited FFmpeg behavior (present in n8.1.2 and current master): `matroskadec` bakes the track's TrackTimestampScale into the stream time base but divides only the cluster component of each block timestamp by it. On the reporter's TTS=2.0 fixture, cue starts shifted by `relTs x (TTS - 1)` per cluster (12->14 s, 24.5->29 s), packets arrived non-monotonic in storage order (the 29 s cue before the 25 s clear), a stale fade outlived its authored clear, and packet durations ran at twice their authored length, all without any warning. Fixed at the FFmpeg layer: FFmpegBuild 2.1.2 (`patch_ffmpeg_matroska_tts`) clamps any non-1.0 scale to 1.0 with a warning carrying the ignored value, extending upstream's own `< 0.01` clamp. The element is deprecated (RFC 9559 caps it at Matroska v3) and most readers ignore it; full spec scaling would desync the track from its siblings, so the clamp keeps every track on the storage axis, in sync and monotonic, and a strict no-op for the TTS=1.0 world. Covered by `Issue145MatroskaTrackTimestampScaleTests` demuxing a synthetic in-memory Matroska through the engine. Reported by cmcpherson274 (#145).
+
 ## [5.9.3] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.3))
