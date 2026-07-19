@@ -45,6 +45,11 @@ extension AetherEngine {
             selectExternalSubtitleTrack(id: index, track: external)
             return
         }
+        // AE#154: remote-HLS bypass ids drive AVMediaSelection; AVPlayer renders the cues itself.
+        if RemoteHLSMediaSelection.ordinal(forTrackID: index) != nil {
+            selectRemoteHLSSubtitleTrack(id: index)
+            return
+        }
         guard index < Self.externalSubtitleTrackIDBase else { return }  // unknown external id: no-op
         guard loadedURL != nil else { return }
 
@@ -851,6 +856,18 @@ extension AetherEngine {
     /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader, clear native mov_text stores (#55, all-tracks). `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
     public func clearSubtitle() {
         hostExplicitSubtitleAction = true
+        // AE#154: a remote-HLS legible selection lives in AVMediaSelection, not the overlay
+        // pipeline; deselect it on the item (criteria pinned manual so system caption prefs
+        // don't immediately re-select).
+        if let active = activeSubtitleTrackIndex,
+           RemoteHLSMediaSelection.ordinal(forTrackID: active) != nil,
+           let item = currentAVPlayer?.currentItem {
+            Task { @MainActor in
+                self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
+                guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
+                item.select(nil, in: group)
+            }
+        }
         cancelSidecarTask()
         clearSubtitleDrainTarget(channel: .primary)   // #112 rework
         activeEmbeddedSubtitleStreamIndex = -1
@@ -1423,6 +1440,72 @@ extension AetherEngine {
                 attempts += 1
                 try? await Task.sleep(nanoseconds: attempts < 25 ? 40_000_000 : 250_000_000)
             }
+        }
+    }
+
+    // MARK: - Remote-HLS bypass legible selection (AE#154)
+
+    /// Surface the bypass item's legible AVMediaSelectionGroup as `subtitleTracks` (synthetic ids,
+    /// see `RemoteHLSMediaSelection`). Runs once per load; after readiness it mirrors a selection
+    /// AVKit or system caption preferences already made so host pickers start truthful. Deliberately
+    /// no force-deselect here (unlike Sodalite#38 on the loopback path): this bypass has no on-frame
+    /// overlay, AVPlayer's own legible renderer IS the subtitle output, so system prefs stay honored.
+    func publishRemoteHLSSubtitleTracks(host: NativeAVPlayerHost) {
+        remoteHLSSubtitleDiscoveryTask?.cancel()
+        guard let item = host.avPlayer.currentItem else { return }
+        remoteHLSSubtitleDiscoveryTask = Task { @MainActor [weak self] in
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+                  !group.options.isEmpty else { return }
+            guard let self, !Task.isCancelled,
+                  self.currentAVPlayer?.currentItem === item else { return }
+            let snapshots = group.options.map { option in
+                RemoteHLSMediaSelection.LegibleOption(
+                    displayName: option.displayName,
+                    extendedLanguageTag: option.extendedLanguageTag,
+                    isDefault: group.defaultOption == option,
+                    isForced: option.hasMediaCharacteristic(.containsOnlyForcedSubtitles),
+                    isSDH: option.hasMediaCharacteristic(.transcribesSpokenDialogForAccessibility)
+                        && option.hasMediaCharacteristic(.describesMusicAndSoundForAccessibility))
+            }
+            self.subtitleTracks = RemoteHLSMediaSelection.subtitleTrackInfos(from: snapshots)
+            EngineLog.emit(
+                "[AetherEngine] AE#154: remote-HLS legible group surfaced \(group.options.count) subtitle rendition(s)",
+                category: .engine)
+            // Selection mirror after readiness: AVKit / caption-pref auto-select runs at readyToPlay,
+            // later than the group load above.
+            for await ready in host.$isReady.values where ready { break }
+            guard !Task.isCancelled, self.currentAVPlayer?.currentItem === item,
+                  !self.hostExplicitSubtitleAction else { return }
+            if let selected = item.currentMediaSelection.selectedMediaOption(in: group),
+               let ordinal = group.options.firstIndex(of: selected) {
+                self.activeSubtitleTrackIndex = RemoteHLSMediaSelection.subtitleTrackIDBase + ordinal
+                self.isSubtitleActive = true
+                EngineLog.emit(
+                    "[AetherEngine] AE#154: mirrored auto-selected legible option ordinal=\(ordinal)",
+                    category: .engine)
+            }
+        }
+    }
+
+    /// Select a remote-HLS legible option by synthetic track id (AE#154). AVPlayer renders the cues
+    /// itself on this bypass; there is no overlay pipeline, so activation only drives
+    /// AVMediaSelection (criteria pinned manual so the explicit choice sticks, #15).
+    func selectRemoteHLSSubtitleTrack(id: Int) {
+        guard let ordinal = RemoteHLSMediaSelection.ordinal(forTrackID: id),
+              let item = currentAVPlayer?.currentItem else { return }
+        cancelSidecarTask()
+        subtitleCues = []
+        isSubtitleActive = true
+        activeSubtitleTrackIndex = id
+        isLoadingSubtitles = false
+        Task { @MainActor in
+            self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+                  ordinal < group.options.count else { return }
+            item.select(group.options[ordinal], in: group)
+            EngineLog.emit(
+                "[AetherEngine] AE#154: remote-HLS legible select ordinal=\(ordinal) (\(group.options[ordinal].displayName))",
+                category: .engine)
         }
     }
 }

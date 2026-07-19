@@ -377,6 +377,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 close()
                 throw AVIOReaderError.hlsPlaylistOnRawLivePath
             }
+            // AE#154: same classification on the non-live path. FFmpeg (--disable-network) can
+            // neither probe an m3u8 behind a custom pb (no extension / MIME hint reaches the hls
+            // probe) nor fetch a variant, so avformat_open_input dies with AVERROR_INVALIDDATA.
+            // Fail typed instead; load() reroutes the URL onto the native remote-HLS bypass.
+            if !isLive, gotData, Self.bodyBeginsWithHLSPlaylistTag(firstWindowPrefix()) {
+                EngineLog.emit("[AVIOReader] HLS playlist body on the VOD loopback path (AE#154); rerouting to the native remote-HLS bypass.", category: .demux)
+                markClosed()
+                close()
+                throw AVIOReaderError.hlsPlaylistOnVODPath
+            }
             var tookFallback = false
             if !isLive {
                 // Atomically decide, under winCond, whether the optimistic connection resolved
@@ -2291,6 +2301,10 @@ enum AVIOReaderError: Error, CustomStringConvertible {
     /// AE#140: an HLS playlist body arrived on the raw-byte live reader (misroute). Surfaced to load()
     /// so it can fail closed with a typed rejection instead of looping the endless-feed reconnect.
     case hlsPlaylistOnRawLivePath
+    /// AE#154: an HLS playlist body arrived on the non-live loopback reader. FFmpeg (built with
+    /// --disable-network) can never demux it; surfaced to load() so it reroutes the source onto the
+    /// native remote-HLS bypass instead of dying with a bare AVERROR_INVALIDDATA.
+    case hlsPlaylistOnVODPath
 
     var description: String {
         switch self {
@@ -2298,6 +2312,7 @@ enum AVIOReaderError: Error, CustomStringConvertible {
         case .noResponse: return "No response from server"
         case .requestTimeout: return "Request timed out"
         case .hlsPlaylistOnRawLivePath: return "HLS playlist supplied to the raw live path"
+        case .hlsPlaylistOnVODPath: return "HLS playlist supplied to the VOD loopback path"
         }
     }
 }

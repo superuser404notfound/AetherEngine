@@ -231,6 +231,7 @@ Sources/AetherEngine/
 │   ├── Issue93ItemDeathRevive.swift         Bounded revive budget (`ItemDeathReviveGate`) for items killed by accumulated -12889 media timeouts (`failedToPlayToEndTime`, #93 round 3)
 │   ├── MasterFallbackDecision.swift         Pure master → media playlist fallback decision (#98, #130): maps a master-rejection item failure (-11868 external-SDR, -11848 HDR-on-SDR, -1002 all variants filtered at parse) to a reactive re-serve
 │   ├── NativeAVPlayerHost.swift             Native path: AVPlayer host bound to the loopback HLS-fMP4 URL; awaits real seek landing (deadline-bounded, first resume wins, #129), suppresses stale clock during in-flight seek
+│   ├── RemoteHLSMediaSelection.swift        Remote-HLS bypass (#154): pure loopback→bypass reroute decision for non-live m3u8 sources (FFmpeg has no network) + legible AVMediaSelectionGroup → `subtitleTracks` mapping (synthetic ids from 200000)
 │   └── SoftwarePlaybackHost.swift           SW path: demux loop + decoders + renderer + synchronizer orchestration
 ├── Network/
 │   └── HLSLocalServer.swift                 Native path: local HTTP server (127.0.0.1) serving playlist + segments

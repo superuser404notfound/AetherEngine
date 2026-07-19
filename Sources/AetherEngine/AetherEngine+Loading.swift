@@ -128,7 +128,9 @@ extension AetherEngine {
     }
 
     /// Lean native-HLS live path: AVPlayerItem from the remote URL on the reused NativeAVPlayerHost. No Demuxer, no HLSVideoEngine, no loopback, no display-criteria handshake (AVKit drives match-content). Live-window surfaces come from `host.seekableEnd`.
-    func loadRemoteHLS(url: URL, options: LoadOptions) async throws {
+    /// `startPosition` (AE#154): resume anchor for VOD playlists on the loopback reroute; nil keeps
+    /// the historical no-initial-seek behavior every live caller relies on.
+    func loadRemoteHLS(url: URL, options: LoadOptions, startPosition: Double? = nil) async throws {
         playbackBackend = .native
 
         let host: NativeAVPlayerHost
@@ -215,14 +217,20 @@ extension AetherEngine {
         // User-Agent / Authorization headers, so LoadOptions.httpHeaders rides into the AVURLAsset (#119).
         // forwardBufferDuration: 0 = system-adaptive; the 4 s VOD floor caused a 3-4 s black screen on live startup.
         host.load(url: url,
-                  startPosition: nil,
+                  startPosition: startPosition,
                   perFrameHDR: true,
-                  skipInitialSeek: true,
+                  // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
+                  skipInitialSeek: startPosition == nil,
                   forwardBufferDuration: 0,
                   // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
                   // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
                   surfaceEndFailures: true,
                   httpHeaders: options.httpHeaders)
+
+        // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
+        // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
+        // Selection routes back through `selectSubtitleTrack(index:)` / `clearSubtitle()`.
+        publishRemoteHLSSubtitleTracks(host: host)
 
         // VOD path triggers play() at the tail of load(); this lean path early-returns, so self-start here. AVKit drives match-content; automaticallyWaitsToMinimizeStalling handles play-before-ready. Without this call the item reaches readyToPlay but timeControlStatus stays .paused.
         // State stays .loading; flips to .playing only when timeControlStatus sink sees AVPlayer rendering.
