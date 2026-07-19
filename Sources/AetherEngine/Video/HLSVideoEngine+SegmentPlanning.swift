@@ -155,6 +155,54 @@ extension HLSVideoEngine {
         return plan
     }
 
+    /// Segments shorter than this are folded into a neighbour by `collapseShortSegments`. A keyframe
+    /// cluster (several IRAPs within a few frames) otherwise makes `buildKeyframeSegmentPlan` emit
+    /// sub-frame segments whose narrow [start,end) window can miss every demuxed keyframe, so the producer
+    /// never cuts that index and the advertised-but-unproduced segment wedges playback. Well above a single
+    /// frame (~40 ms) and well below a normal ~`targetSegmentDuration` segment, so only degenerate cluster
+    /// segments are affected.
+    static let minSegmentDurationSeconds: Double = 1.0
+
+    /// Fold every plan segment shorter than `minDurationSeconds` into a neighbour so no advertised segment
+    /// has a window too narrow to contain a demuxed keyframe. Plan and producer share one boundary list
+    /// (`segmentBoundaries = plan.map(startPts)`), and the producer only emits a segment index when a
+    /// keyframe's PTS maps into its window (`segmentOffset`); a sub-frame window from a keyframe cluster can
+    /// catch none, so that index is skipped and its later fetch wedges AVPlayer (CoreMedia -15628 ->
+    /// endless item reload; Sodalite near-EOF resume hang, device-confirmed). Merging widens the window so
+    /// a resident keyframe is guaranteed and the two agree. Interior/final short segments fold into the
+    /// PRECEDING kept segment; a too-short first segment (no predecessor) folds forward into its successor.
+    /// Every kept boundary is still an original plan boundary (a real keyframe), and total duration is
+    /// conserved. Pure for offline testing.
+    static func collapseShortSegments(_ plan: [Segment], minDurationSeconds: Double) -> [Segment] {
+        guard plan.count > 1, minDurationSeconds > 0 else { return plan }
+        var out: [Segment] = []
+        out.reserveCapacity(plan.count)
+        for seg in plan {
+            if seg.durationSeconds < minDurationSeconds, let last = out.last {
+                out[out.count - 1] = Segment(
+                    startPts: last.startPts,
+                    endPts: seg.endPts,
+                    startSeconds: last.startSeconds,
+                    durationSeconds: last.durationSeconds + seg.durationSeconds,
+                    discontinuous: last.discontinuous)
+            } else {
+                out.append(seg)
+            }
+        }
+        // A too-short FIRST segment has no predecessor to swallow it; fold it forward into its successor.
+        if out.count > 1, out[0].durationSeconds < minDurationSeconds {
+            let a = out[0], b = out[1]
+            out[1] = Segment(
+                startPts: a.startPts,
+                endPts: b.endPts,
+                startSeconds: a.startSeconds,
+                durationSeconds: a.durationSeconds + b.durationSeconds,
+                discontinuous: a.discontinuous)
+            out.removeFirst()
+        }
+        return out
+    }
+
     /// Scan packets for in-band VPS/SPS/PPS when hvcC `numOfArrays=0` (DV P5 MP4 encoders, e.g. Wandering Earth 2 WEB-DL, issue #19). AVPlayer symptom: `item.tracks count=2`, `fourCC=<no fdesc>`, `CoreMediaErrorDomain -4`. Caller must seek back after this consumes packets.
     func rebuildHEVCExtradataWithInBandParameterSets(
         demuxer: Demuxer,
