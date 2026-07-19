@@ -365,8 +365,9 @@ extension AetherEngine {
         // #100: a PGS event whose cues start well behind the playhead is a catch-up replay; its
         // open-ended placeholder window would cover the playhead the instant it inserts and flash
         // stale history through the overlay until the successor trims it. Hold it instead.
-        // #112: a self-contained composition (acquisition point / epoch start) during a reconstruction pass is
-        // the current line and publishes immediately (see PGSStaleArrivalGate.admit).
+        // #112/#143: during a reconstruction pass any decoded composition at/behind the playhead becomes the
+        // held active-line candidate, emitted once when the decode reaches the playhead (see
+        // PGSStaleArrivalGate.admitDuringReconstruction).
         let admitted = pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()]
             .admit(cues: event.cues, isPGS: event.isPGS,
                    isSelfContained: event.isSelfContainedPGS, playhead: sourceTime)

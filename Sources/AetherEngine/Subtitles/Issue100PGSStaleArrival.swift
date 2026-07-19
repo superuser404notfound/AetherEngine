@@ -31,7 +31,8 @@ struct PGSStaleArrivalGate {
     /// candidate active line. Held, not published. Publishing every self-contained composition in the lead-in as
     /// it decoded scrolled ~24 s of history through the frozen overlay (ijuniorfu: "the subtitles keep changing
     /// while paused"). Emitted as the single active line when the decode reaches the playhead (a composition at or
-    /// after it arrives), or dropped/superseded by a newer one first.
+    /// after it arrives), or dropped/superseded by a newer one first. #143: seeded from ANY decoded composition,
+    /// not only self-contained ones; see `admitDuringReconstruction`.
     private(set) var reconstructionCandidate: SubtitleCue?
 
     init(staleEpsilonSeconds: Double = 5.0) {
@@ -43,7 +44,17 @@ struct PGSStaleArrivalGate {
     /// Resolve the held event against its successor's trim point. Returns the cues to publish
     /// NOW: the held cues trimmed to `trimAt`, filtered to those whose true window covers the
     /// playhead. History that ended before the playhead is dropped.
+    ///
+    /// #143: the trim also closes the reconstruction candidate's open window. Every PGS composition
+    /// AND clear broadcasts its start as `pgsTrimAt`, but a clear carries no cues and never reaches
+    /// `admit`; without this trim a line the author cleared before the playhead keeps its open
+    /// placeholder window and resurrects as the "active" line at pass end.
     mutating func resolveHeld(trimAt: Double, playhead: Double) -> [SubtitleCue] {
+        if let candidate = reconstructionCandidate,
+           candidate.startTime < trimAt, candidate.endTime > trimAt {
+            reconstructionCandidate = SubtitleCue(id: candidate.id, startTime: candidate.startTime,
+                                                  endTime: trimAt, body: candidate.body)
+        }
         guard !heldCues.isEmpty else { return [] }
         let resolved = heldCues.map { cue in
             SubtitleCue(id: cue.id, startTime: cue.startTime,
@@ -77,11 +88,19 @@ struct PGSStaleArrivalGate {
     /// active line and publish nothing, so the lead-in's earlier lines never scroll through the frozen overlay.
     /// The first composition at or after the playhead ends the pass: the active line (the candidate, or a
     /// just-decoded composition at the playhead) is emitted once, together with any cues ahead of the playhead
-    /// (future, stored but not yet shown). The candidate is seeded only from a self-contained composition (one the
-    /// decoder can render standalone); once seeded, any later composition at/behind the playhead refines it.
+    /// (future, stored but not yet shown).
+    ///
+    /// #143: the candidate is seeded from ANY decoded composition behind the playhead. Requiring a self-contained
+    /// composition (Acquisition Point / Epoch Start) for the FIRST seed dropped the seek-landing line on AP-less/
+    /// sparse-authored streams: every lead-in composition is Normal there, so no candidate was ever seeded and the
+    /// landing-span line, forced cues included, stayed dark until the next authored composition. A composition
+    /// that decoded at all is renderable (the drain decoder is rebuilt fresh at the backscan start, so a set whose
+    /// references are missing fails decode and never gets here), and the steady-state path outside reconstruction
+    /// already publishes Normal compositions unconditionally. `isSelfContained` stays on the signature: callers
+    /// keep reporting the PCS classification, which the epoch-start-aware backscan direction would need.
     private mutating func admitDuringReconstruction(cues: [SubtitleCue], isSelfContained: Bool, playhead: Double) -> [SubtitleCue] {
         let newestBehind = cues.filter { $0.startTime <= playhead }.max(by: { $0.startTime < $1.startTime })
-        if let newestBehind, isSelfContained || reconstructionCandidate != nil,
+        if let newestBehind,
            reconstructionCandidate.map({ newestBehind.startTime >= $0.startTime }) ?? true {
             reconstructionCandidate = newestBehind
         }
