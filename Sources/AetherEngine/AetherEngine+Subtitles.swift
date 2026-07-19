@@ -78,6 +78,7 @@ extension AetherEngine {
         subtitleDrainDecoders[.primary] = nil
         subtitleDrainCursors[.primary] = nil
         startSubtitleDrainer()
+        startSubtitleForwardPrefetcher(startAt: startAt)   // #151
         isLoadingSubtitles = false
         EngineLog.emit(
             "[AetherEngine] overlay fed by packet-store drainer for stream=\(index) "
@@ -147,6 +148,7 @@ extension AetherEngine {
         subtitleDrainDecoders[.secondary] = nil
         subtitleDrainCursors[.secondary] = nil
         startSubtitleDrainer()
+        startSubtitleForwardPrefetcher(startAt: startAt)   // #151
         isLoadingSecondarySubtitles = false
     }
 
@@ -207,6 +209,7 @@ extension AetherEngine {
         subtitleDrainerTask = nil
         subtitleDrainDecoders.removeAll()
         subtitleDrainCursors.removeAll()
+        cancelSubtitleForwardPrefetcher()   // #151
     }
 
     /// Clear one channel's drain target; stops the loop when no channel remains active.
@@ -220,13 +223,18 @@ extension AetherEngine {
     func subtitleDrainTick() {
         guard !subtitleDrainTargets.isEmpty, let store = activeSubtitlePacketStore else { return }
         let playhead = sourceTime
+        var prefetchNeedsReanchor = false
         for (channel, streamIndex) in subtitleDrainTargets {
+            let hadCursor = subtitleDrainCursors[channel] != nil
             let plan = SubtitleOverlayDrainer.drainPlan(
                 cursor: subtitleDrainCursors[channel],
                 playhead: playhead,
                 lead: Self.subtitleDrainLeadSeconds,
                 backscan: Self.subtitleDrainBackscanSeconds,
                 jumpThreshold: Self.subtitleDrainJumpThresholdSeconds)
+            if Self.subtitleForwardPrefetchNeedsReanchor(plan: plan, hadCursor: hadCursor) {
+                prefetchNeedsReanchor = true
+            }
             let window: (from: Double, through: Double)
             switch plan {
             case .idle:
@@ -272,6 +280,10 @@ extension AetherEngine {
                 lastDecodedPts: lastDecoded ?? window.from,
                 lastPlayhead: playhead)
         }
+        // #151: a jump (seek / producer re-anchor) moves the drain window out from under the
+        // prefetcher's read position; restart it at the new playhead. Once per tick, not per
+        // channel: both channels ride the same playhead and the same side demuxer.
+        if prefetchNeedsReanchor { startSubtitleForwardPrefetcher() }
         // #125: the packet store is NOT time-pruned here. A trailing playhead-relative prune
         // (was: playhead - retentionSeconds) evicted packets a backward seek could still land on:
         // a backward jump into segment-cache-resident content is served without a producer restart,
@@ -281,6 +293,172 @@ extension AetherEngine {
         // SubtitlePacketStore.perStreamByteCap (evict-oldest per stream): text tracks keep the whole
         // session, bitmap tracks keep a wide trailing window. Mirrors the segment cache retaining
         // history for backward seeks rather than clamping to a time window ahead of the playhead.
+    }
+
+    // MARK: - #151: subtitle forward prefetch
+
+    /// #151: forward prefetch runs for VOD sessions only (live content past the edge does not
+    /// exist and the pump already rides it), needs an embedded drain target (external/sidecar
+    /// tracks hold whole files, CC is tap-fed) and a loaded source to open a side demuxer on.
+    nonisolated static func shouldRunSubtitleForwardPrefetch(
+        isLive: Bool, hasEmbeddedDrainTargets: Bool, hasSource: Bool
+    ) -> Bool {
+        !isLive && hasEmbeddedDrainTargets && hasSource
+    }
+
+    /// #151: a drain-tick jump with an existing cursor (seek / producer re-anchor) restarts the
+    /// prefetcher at the new playhead. A fresh selection (nil cursor) does not: the selection
+    /// path starts it itself, with the #73 resume anchor the tick cannot know.
+    nonisolated static func subtitleForwardPrefetchNeedsReanchor(
+        plan: SubtitleDrainPlan, hadCursor: Bool
+    ) -> Bool {
+        if case .resetAndDecode = plan { return hadCursor }
+        return false
+    }
+
+    /// Start (or re-anchor) the forward prefetcher: a subtitle-only side demuxer that fills the
+    /// session packet store up to playhead + subtitleDrainLeadSeconds independent of the
+    /// producer's forward park (#102), so `$subtitleCues` holds cues a host-applied ADVANCE sync
+    /// offset can find, text and bitmap alike. Best effort: if it wedges or fails to open, the
+    /// drainer keeps working off the pump's harvest exactly as before.
+    func startSubtitleForwardPrefetcher(startAt: Double? = nil) {
+        cancelSubtitleForwardPrefetcher()
+        guard Self.shouldRunSubtitleForwardPrefetch(
+            isLive: isLive,
+            hasEmbeddedDrainTargets: !subtitleDrainTargets.isEmpty,
+            hasSource: loadedURL != nil),
+            let store = activeSubtitlePacketStore,
+            let url = loadedURL else { return }
+        var customClone: IOReader? = nil
+        if isCustomSource {
+            guard let clone = customReader?.makeIndependentReader() else { return }
+            customClone = clone
+        }
+        let headers = loadedOptions.httpHeaders
+        let formatHint = customFormatHint
+        let probesize = loadedOptions.probesize
+        let maxAnalyzeDuration = loadedOptions.maxAnalyzeDuration
+        let titleID = activeDiscTitleID
+        let anchor = max(0, startAt ?? sourceTime)
+        let reader = customClone
+        subtitleForwardPrefetchTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.runSubtitleForwardPrefetchSession(
+                url: url, reader: reader, formatHint: formatHint, headers: headers,
+                startAt: anchor, callerProbesize: probesize,
+                callerMaxAnalyzeDuration: maxAnalyzeDuration,
+                selectTitleID: titleID, store: store)
+        }
+    }
+
+    /// Cancel the prefetcher + markClosed its side demuxer so a parked AVIO read cannot survive
+    /// teardown (same rule as the native readers).
+    func cancelSubtitleForwardPrefetcher() {
+        subtitleForwardPrefetchTask?.cancel()
+        subtitleForwardPrefetchTask = nil
+        subtitleForwardPrefetchDemuxer?.markClosed()
+        subtitleForwardPrefetchDemuxer = nil
+    }
+
+    /// Open + position the prefetch side demuxer, then hand off to the packet loop. Mirrors
+    /// `runNativeSubtitleReaders`' open/registration/positioning (memory rule: all side readers
+    /// share every positioning fix); differs in routing bitmap streams too and writing compressed
+    /// packets to the SubtitlePacketStore instead of decoded cues to native stores.
+    nonisolated private func runSubtitleForwardPrefetchSession(
+        url: URL, reader: IOReader?, formatHint: String?, headers: [String: String],
+        startAt: Double, callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?,
+        selectTitleID: Int?, store: SubtitlePacketStore
+    ) async {
+        let demuxer = Demuxer()
+        let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
+            callerProbesize: callerProbesize, callerMaxAnalyzeDuration: callerMaxAnalyzeDuration)
+        let registered = await MainActor.run { [weak self] () -> Bool in
+            guard !Task.isCancelled, let self else { return false }
+            self.subtitleForwardPrefetchDemuxer = demuxer
+            return true
+        }
+        guard registered else {
+            reader?.close()
+            return
+        }
+        defer {
+            Task { @MainActor [weak self, weak demuxer] in
+                if let self, let demuxer, self.subtitleForwardPrefetchDemuxer === demuxer {
+                    self.subtitleForwardPrefetchDemuxer = nil
+                }
+            }
+        }
+        // #93: a second WAN demuxer opened during a producer restart competes with the restart for
+        // a starved link. Poll until the restart settles (bounded), same rule as the lazy native
+        // readers; the jump-respawn path lands here exactly when a seek restart is likely in flight.
+        let restartDeadline = DispatchTime.now() + 30.0
+        while !Task.isCancelled, DispatchTime.now() < restartDeadline {
+            let busy = await MainActor.run { [weak self] in
+                self?.nativeVideoSession?.restartInFlight == true
+            }
+            if !busy { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        guard !Task.isCancelled else {
+            reader?.close()
+            return
+        }
+        do {
+            if let reader {
+                try demuxer.open(reader: reader, formatHint: formatHint, profile: openProfile,
+                                 selectTitleID: selectTitleID, discCacheKey: url.absoluteString)
+            } else {
+                try demuxer.open(url: url, extraHeaders: headers, profile: openProfile,
+                                 selectTitleID: selectTitleID)
+            }
+        } catch {
+            EngineLog.emit("[AetherEngine] #151 forward prefetch open failed: \(error)", category: .engine)
+            reader?.close()
+            return
+        }
+        defer {
+            demuxer.close()
+            reader?.close()
+        }
+
+        let streams = demuxer.subtitleStreamIndices()
+        guard !streams.isEmpty else { return }
+        let assembly = demuxer.splitDisplaySetSubtitleStreamIndices()
+        demuxer.discardAllStreamsExcept(streams)
+
+        // Prewarm MKV cue index (lives at EOF), then bounded positioning with the verified
+        // byte-estimate fallback, both budgeted (#112 round 10). Skip prewarm for disc (#76).
+        let duration = demuxer.duration
+        if duration > 0, !demuxer.isDiscSource {
+            demuxer.seekBounded(to: duration * 0.5, timeout: Self.sideReaderSeekBudgetSeconds)
+        }
+        let seekTo = max(0, startAt - 2.0)
+        if !demuxer.seekBounded(to: seekTo, timeout: Self.sideReaderSeekBudgetSeconds) {
+            demuxer.markTimestampSeekUnreliable()
+            let engineDisplayDuration = await MainActor.run { [weak self] in self?.duration ?? 0 }
+            let fellBack = demuxer.seekByteEstimate(
+                to: seekTo, knownDuration: duration > 0 ? duration : engineDisplayDuration,
+                timeout: Self.sideReaderSeekBudgetSeconds)
+            EngineLog.emit(
+                "[AetherEngine] #151 forward prefetch seek to \(String(format: "%.2f", seekTo))s timed out "
+                + "or failed; byte-estimate fallback \(fellBack ? "applied" : "unavailable")",
+                category: .engine)
+        }
+
+        EngineLog.emit(
+            "[AetherEngine] #151 forward prefetch started: streams=\(streams.sorted()) "
+            + "startAt=\(String(format: "%.2f", startAt))s lead=\(Self.subtitleDrainLeadSeconds)s",
+            category: .engine)
+        let harvested = await SubtitleForwardPrefetcher.run(
+            demuxer: demuxer, store: store,
+            streamIndices: streams, assemblyIndices: assembly,
+            leadSeconds: Self.subtitleDrainLeadSeconds,
+            parkPollNanoseconds: Self.subtitleForwardPrefetchParkPollNanoseconds,
+            playhead: { [weak self] in
+                await MainActor.run(body: { [weak self] in self?.sourceTime })
+            })
+        EngineLog.emit(
+            "[AetherEngine] #151 forward prefetch exited (cancelled=\(Task.isCancelled)) harvested=\(harvested)",
+            category: .engine)
     }
 
     /// Rebuild an AVPacket from a stored entry and decode it. PTS/duration ride a 1/1000

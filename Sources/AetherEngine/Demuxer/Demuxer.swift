@@ -605,6 +605,19 @@ public final class Demuxer: @unchecked Sendable {
     /// authoring: PCS|WDS|PDS|ODS|END as separate PES packets, some without a PTS); Matroska
     /// carries one complete set per packet and must NOT be assembled (converters there strip
     /// the trailing END, which the decoder's synthetic-END flush rescues per packet).
+    /// #151: every AVMEDIA_TYPE_SUBTITLE stream index; the forward prefetcher's route + keep set.
+    func subtitleStreamIndices() -> Set<Int32> {
+        guard let ctx = formatContext else { return [] }
+        var indices: Set<Int32> = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i],
+                  let codecpar = stream.pointee.codecpar,
+                  codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE else { continue }
+            indices.insert(Int32(i))
+        }
+        return indices
+    }
+
     func splitDisplaySetSubtitleStreamIndices() -> Set<Int32> {
         guard let ctx = formatContext,
               let formatName = ctx.pointee.iformat?.pointee.name,

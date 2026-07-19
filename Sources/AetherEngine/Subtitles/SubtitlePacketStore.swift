@@ -22,12 +22,21 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// cues starved permanently). Oldest entries evict first when a stream exceeds the cap: text
     /// tracks stay far below it and keep the whole session; a bitmap track keeps a wide trailing
     /// window. A backward seek past a bitmap stream's evicted edge is the deferred windowed-re-read
-    /// case (#125). Forward exposure is still naturally bounded by the producer's forward park (#102).
+    /// case (#125). Forward exposure from the pump is bounded by the producer's forward park (#102);
+    /// on VOD sessions the forward prefetcher (#151) extends it to the drainer's lead window.
     static let perStreamByteCap: Int = 32 * 1024 * 1024
 
     /// Ceiling for one in-assembly PGS display set (a 4K set stays far below this); a pending
     /// buffer past it is malformed or mis-parsed and gets dropped rather than grown unbounded.
     static let maxPendingDisplaySetBytes: Int = 16 * 1024 * 1024
+
+    /// #151: which reader is writing. The pump and the forward prefetcher can both feed the same
+    /// stream; completed entries dedupe by PTS in appendLocked, but an in-assembly display set
+    /// must stay private to its writer or the two would interleave chunks into one corrupt set.
+    enum Writer: Hashable, Sendable {
+        case pump
+        case prefetch
+    }
 
     /// One PGS display set being reassembled from split MPEG-TS PES chunks (see harvestChunk).
     private struct PendingDisplaySet {
@@ -37,10 +46,15 @@ final class SubtitlePacketStore: @unchecked Sendable {
         var payload: Data
     }
 
+    private struct PendingKey: Hashable {
+        let streamIndex: Int32
+        let writer: Writer
+    }
+
     private let lock = NSLock()
     private var entriesByStream: [Int32: [StoredSubtitlePacket]] = [:]
     private var bytesByStream: [Int32: Int] = [:]
-    private var pendingSetByStream: [Int32: PendingDisplaySet] = [:]
+    private var pendingSetByStream: [PendingKey: PendingDisplaySet] = [:]
 
     func append(streamIndex: Int32, ptsSeconds: Double, durationSeconds: Double,
                 flags: Int32 = 0, payload: Data) {
@@ -82,7 +96,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
     /// storage would drop or collapse the palette/object segments and every set would fail
     /// with "Invalid palette id" at its END. Armed streams route through the reassembler.
     func harvest(streamIndex: Int32, packet: UnsafeMutablePointer<AVPacket>, timeBase: AVRational,
-                 assembleSplitDisplaySets: Bool = false) {
+                 assembleSplitDisplaySets: Bool = false, writer: Writer = .pump) {
         let pts = packet.pointee.pts
         guard let data = packet.pointee.data, packet.pointee.size > 0,
               timeBase.den != 0 else { return }
@@ -92,13 +106,15 @@ final class SubtitlePacketStore: @unchecked Sendable {
                      durationSeconds: max(0, Double(packet.pointee.duration) * tbSeconds),
                      flags: packet.pointee.flags,
                      payload: Data(bytes: data, count: Int(packet.pointee.size)),
-                     assembleSplitDisplaySets: assembleSplitDisplaySets)
+                     assembleSplitDisplaySets: assembleSplitDisplaySets,
+                     writer: writer)
     }
 
     /// Testable core of `harvest`. ptsSeconds nil = packet carried no PTS (AV_NOPTS_VALUE):
     /// dropped on the per-packet path, folded into the pending set on the assembly path.
     func harvestChunk(streamIndex: Int32, ptsSeconds: Double?, durationSeconds: Double,
-                      flags: Int32, payload: Data, assembleSplitDisplaySets: Bool) {
+                      flags: Int32, payload: Data, assembleSplitDisplaySets: Bool,
+                      writer: Writer = .pump) {
         lock.lock(); defer { lock.unlock() }
         guard assembleSplitDisplaySets else {
             guard let ptsSeconds else { return }
@@ -112,8 +128,9 @@ final class SubtitlePacketStore: @unchecked Sendable {
         if chunk.count > 10, chunk[chunk.startIndex] == 0x50, chunk[chunk.startIndex + 1] == 0x47 {
             chunk = chunk.dropFirst(10)
         }
+        let key = PendingKey(streamIndex: streamIndex, writer: writer)
         while !chunk.isEmpty {
-            var pending = pendingSetByStream[streamIndex]
+            var pending = pendingSetByStream[key]
             // A backward pts jump under an open set means the pump re-anchored mid-set;
             // the stale partial buffer must not swallow the fresh set's segments.
             if let pts = ptsSeconds, let open = pending, pts < open.ptsSeconds - 1.0 {
@@ -125,7 +142,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
                 // restart overlap above) is undecodable on its own and gets dropped.
                 pending = nil
                 guard let pts = ptsSeconds else {
-                    pendingSetByStream[streamIndex] = nil
+                    pendingSetByStream[key] = nil
                     return   // No anchor for this set; skip its chunks until the next PCS.
                 }
                 pending = PendingDisplaySet(ptsSeconds: pts, durationSeconds: durationSeconds,
@@ -133,7 +150,7 @@ final class SubtitlePacketStore: @unchecked Sendable {
             }
             guard var open = pending else {
                 // Mid-set start (backfill landed between PCS and END): not decodable, drop.
-                pendingSetByStream[streamIndex] = nil
+                pendingSetByStream[key] = nil
                 return
             }
             let endBoundary = Self.pgsEndBoundary(in: chunk)
@@ -148,16 +165,16 @@ final class SubtitlePacketStore: @unchecked Sendable {
             open.payload.append(consumed)
             open.flags |= flags
             if open.payload.count > Self.maxPendingDisplaySetBytes {
-                pendingSetByStream[streamIndex] = nil
+                pendingSetByStream[key] = nil
                 return
             }
             if endBoundary != nil {
                 appendLocked(streamIndex: streamIndex, ptsSeconds: open.ptsSeconds,
                              durationSeconds: open.durationSeconds, flags: open.flags,
                              payload: open.payload)
-                pendingSetByStream[streamIndex] = nil
+                pendingSetByStream[key] = nil
             } else {
-                pendingSetByStream[streamIndex] = open
+                pendingSetByStream[key] = open
             }
         }
     }
