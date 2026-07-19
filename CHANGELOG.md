@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.2] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.2))
+
+### Fixed
+
+- **A bare PGS Epoch-Continue display set (PCS+WDS+END, palette and objects referenced from retained decoder state, no PDS/ODS retransmit) now renders instead of being dropped whole with "Invalid palette id 0"; the predecessor cue no longer overstays.** Inherited FFmpeg behavior (present in n8.1.2 and current master): `pgssubdec` releases retained palettes/objects for ANY `composition_state != Normal`, including `0xC0` Epoch Continue, although Epoch Continue by definition continues the previous epoch across a connection point and a bare set legitimately references that state. The failed palette lookup discarded the set, and since PGS end times are closed by the successor cue, the prior cue's clear was delayed to the next cue (reporter's 90 s cue ran to the 100 s clear instead of the authored 95 s). Fixed at the FFmpeg layer: FFmpegBuild 2.1.1 (`patch_ffmpeg_pgssub`) skips the flush for Epoch Continue only; Acquisition Point and Epoch Start, self-contained restatements by spec, keep flushing. Covered by `Issue142PGSEpochContinueTests` driving the shipped decoder with synthetic display sets. Reported by cmcpherson274 (#142).
+
 ## [5.9.1] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.1))
