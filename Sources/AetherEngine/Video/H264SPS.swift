@@ -5,6 +5,33 @@ enum H264SPS {
 
     /// Parse cropped dimensions from a raw SPS NAL (with 1-byte NAL header, e.g. 0x67). Returns nil on malformed input.
     static func dimensions(fromNAL nal: [UInt8]) -> (width: Int, height: Int)? {
+        parse(fromNAL: nal).map { ($0.width, $0.height) }
+    }
+
+    /// frame_mbs_only_flag from a raw SPS NAL. false = the stream may code interlaced pictures (PAFF or
+    /// MBAFF). #150: consulted as routing fallback when the demuxer's field_order probe stays UNKNOWN.
+    static func frameMbsOnly(fromNAL nal: [UInt8]) -> Bool? {
+        parse(fromNAL: nal)?.frameMbsOnly
+    }
+
+    /// First SPS NAL (incl. 1-byte header) from codecpar extradata, accepting both layouts: Annex-B
+    /// (MPEG-TS, start-code delimited) and avcC (MP4/MKV, configurationVersion byte 0x01 then
+    /// length-prefixed parameter sets). Returns nil when neither layout yields an SPS.
+    static func spsNAL(fromExtradata extradata: [UInt8]) -> [UInt8]? {
+        guard extradata.count > 1 else { return nil }
+        if extradata[0] == 0x01 {
+            // avcC: version, profile, compat, level, lengthSizeMinusOne, numSPS (low 5 bits), then
+            // per-SPS 2-byte length + NAL.
+            guard extradata.count > 8, (extradata[5] & 0x1f) >= 1 else { return nil }
+            let len = (Int(extradata[6]) << 8) | Int(extradata[7])
+            guard len > 0, extradata.count >= 8 + len else { return nil }
+            let nal = Array(extradata[8..<(8 + len)])
+            return (nal[0] & 0x1f) == 7 ? nal : nil
+        }
+        return extradata.withUnsafeBufferPointer { extractSPSandPPS(fromAnnexB: $0)?.sps }
+    }
+
+    private static func parse(fromNAL nal: [UInt8]) -> (width: Int, height: Int, frameMbsOnly: Bool)? {
         guard nal.count > 1, (nal[0] & 0x1f) == 7 else { return nil }
         let rbsp = unescape(Array(nal[1...]))  // strip NAL header + emulation-prevention (00 00 03 -> 00 00)
         var r = BitReader(rbsp)
@@ -75,7 +102,7 @@ enum H264SPS {
         }
 
         guard width > 0, height > 0 else { return nil }
-        return (width, height)
+        return (width, height, frameMbsOnly)
     }
 
     /// Scan Annex-B for the first SPS (NAL type 7) and PPS (NAL type 8), returned with their 1-byte NAL header.
