@@ -53,10 +53,19 @@ struct RecoverySeekTargetTests {
         #expect(AetherEngine.isPendingSeekStale(progressWhilePending: 3.5))
     }
 
-    @Test("deadline recovery restarts only a starved producer")
+    @Test("deadline recovery restarts a starved producer or one that cannot reach the target")
     func deadlineRestartDecision() {
-        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(isStarved: true))
-        #expect(!AetherEngine.shouldReanchorProducerAfterSeekDeadline(isStarved: false))
+        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(
+            isStarved: true, targetBeyondProducerCoverage: false))
+        // AE#141: a progressing producer whose march cannot reach the pending target must be
+        // re-anchored; "healthy at the old position" rode 3x30 s serve timeouts into item death.
+        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(
+            isStarved: false, targetBeyondProducerCoverage: true))
+        #expect(AetherEngine.shouldReanchorProducerAfterSeekDeadline(
+            isStarved: true, targetBeyondProducerCoverage: true))
+        // #129: a healthy march filling toward a reachable target keeps its progress.
+        #expect(!AetherEngine.shouldReanchorProducerAfterSeekDeadline(
+            isStarved: false, targetBeyondProducerCoverage: false))
         #expect(AetherEngine.shouldReanchorSubtitlesOnLateSeekLanding(
             alreadyReanchored: false
         ))

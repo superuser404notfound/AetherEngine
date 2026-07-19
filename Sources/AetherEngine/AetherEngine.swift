@@ -2336,17 +2336,28 @@ public final class AetherEngine: ObservableObject {
                 }
                 let wasStarved = seekIsWedged(
                     renderedTime: avpReal, bufferedEnd: host.bufferedEnd)
+                // AE#141: a progressing producer is only worth preserving when its march can
+                // actually deliver the pending target. A far-forward target beyond coverage
+                // (640 s target, march at ~316 s) rides 3x30 s serve timeouts into item death
+                // if left to "land late"; the old-position buffer health cannot see that.
+                let targetBeyondCoverage: Bool = {
+                    guard let target = pendingRecoverySeekClockTarget,
+                          let session = nativeVideoSession else { return false }
+                    return !session.producerCoversPlaylistTime(target)
+                }()
+                let needsReanchor = Self.shouldReanchorProducerAfterSeekDeadline(
+                    isStarved: wasStarved, targetBeyondProducerCoverage: targetBeyondCoverage)
                 nativeClockSeconds = avpReal
                 // currentTime on the 0-based display axis (AE#105 origin); sourceTime stays source PTS for subs.
                 clock.currentTime = PresentationAxis.display(sourcePTS: avpReal + playlistShiftSeconds,
                                                              origin: sourcePresentationOrigin)
                 clock.sourceTime = avpReal + playlistShiftSeconds
                 setProgrammaticSeek(inFlight: false, target: nil)
-                reconcileNativeSeekTransport(host: host, isStarved: wasStarved)
+                reconcileNativeSeekTransport(host: host, isStarved: needsReanchor)
                 let recoveryAnchor = Self.recoveryAnchorPosition(
                     frozenPosition: avpReal, pendingSeekTarget: pendingRecoverySeekClockTarget,
                     currentRendered: avpReal)
-                if Self.shouldReanchorProducerAfterSeekDeadline(isStarved: wasStarved) {
+                if needsReanchor {
                     reanchorProducerToPlaylistTime(recoveryAnchor)
                     // The playhead will jump when the restarted producer lets the pending seek land.
                     reanchorSubtitleOverlays()
@@ -2355,12 +2366,17 @@ public final class AetherEngine: ObservableObject {
                 // pendingRecoverySeekClockTarget deliberately survives this reconcile: the UI
                 // clock gives up the phantom target, but recovery keeps aiming there until rendered
                 // output reaches it or organic playback proves AVPlayer abandoned the seek.
+                let reason = wasStarved
+                    ? "starved"
+                    : (targetBeyondCoverage
+                        ? "old position still buffered, target beyond producer coverage"
+                        : "old position still buffered")
                 EngineLog.emit(
                     "[AetherEngine] seek did not land within \(Self.nativeSeekReconcileBudgetSeconds)s "
-                    + "(\(wasStarved ? "starved" : "old position still buffered"), "
+                    + "(\(reason), "
                     + "rendered=\(String(format: "%.2f", avpReal))s "
                     + "buffered=\(String(format: "%.2f", host.bufferedEnd))s); reconciled clock"
-                    + (wasStarved
+                    + (needsReanchor
                         ? " and re-anchored producer at \(String(format: "%.2f", recoveryAnchor))s"
                         : " without restarting the progressing producer"),
                     category: .engine
@@ -2428,8 +2444,12 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    nonisolated static func shouldReanchorProducerAfterSeekDeadline(isStarved: Bool) -> Bool {
-        isStarved
+    /// #129 kept a progressing producer at the seek deadline (restarting discards useful fill);
+    /// AE#141 narrows that: preservation only pays when the march can reach the pending target.
+    nonisolated static func shouldReanchorProducerAfterSeekDeadline(
+        isStarved: Bool, targetBeyondProducerCoverage: Bool
+    ) -> Bool {
+        isStarved || targetBeyondProducerCoverage
     }
 
     nonisolated static func shouldCatchUpDeadlineLanding(
