@@ -332,6 +332,12 @@ public final class AetherEngine: ObservableObject {
     var softwareSubtitlePacketStore: SubtitlePacketStore?
     var subtitleDrainDecoders: [SubtitleChannel: EmbeddedSubtitleDecoder] = [:]
     var subtitleDrainCursors: [SubtitleChannel: SubtitleDrainCursor] = [:]
+    /// #151: subtitle-only forward side reader filling the session packet store up to
+    /// playhead + subtitleDrainLeadSeconds independent of the producer's forward park, so the
+    /// drainer's lead window holds cues for host-applied ADVANCE sync offsets (text and bitmap).
+    /// nil while idle (subs off, live session, EOF reached).
+    var subtitleForwardPrefetchTask: Task<Void, Never>?
+    var subtitleForwardPrefetchDemuxer: Demuxer?
     /// #121: session-monotonic id source for cues entering the retained overlay stores
     /// (`subtitleCues` / `secondarySubtitleCues`). The overlay decoder is rebuilt on every seek
     /// (`.resetAndDecode`), restarting its own `nextCueID` at zero, so decoder-local ids cannot stay
@@ -344,6 +350,7 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000
+    nonisolated static let subtitleForwardPrefetchParkPollNanoseconds: UInt64 = 500_000_000
 
     @Published public internal(set) var isLoadingSubtitles: Bool = false
     @Published public internal(set) var isSubtitleActive: Bool = false
