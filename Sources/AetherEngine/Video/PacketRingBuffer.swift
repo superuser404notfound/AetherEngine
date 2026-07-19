@@ -36,6 +36,7 @@ final class PacketRingBuffer: @unchecked Sendable {
     private var firstSeq: Int = 0
     private var counter: Int = 0
     private var edge: Double = -.infinity
+    private var closed: Bool = false
 
     // MARK: - Init / close
 
@@ -44,19 +45,22 @@ final class PacketRingBuffer: @unchecked Sendable {
         self.scratch = scratch
     }
 
+    /// Idempotent teardown. State is cleared synchronously so the ring is immediately
+    /// unusable; the scratch-directory removal is dispatched to a background queue so
+    /// filesystem I/O never blocks the caller.
     func close() {
         lock.lock()
-        let toDelete = entries.map(\.fileURL)
+        guard !closed else { lock.unlock(); return }
+        closed = true
         entries.removeAll(keepingCapacity: false)
         edge = -.infinity
         counter = 0
         firstSeq = 0
         lock.unlock()
 
-        for url in toDelete {
-            try? FileManager.default.removeItem(at: url)
+        DispatchQueue.global(qos: .userInitiated).async { [scratch] in
+            try? FileManager.default.removeItem(at: scratch)
         }
-        try? FileManager.default.removeItem(at: scratch)  // best-effort; may have stale files from a previous partial write
     }
 
     // MARK: - Writer

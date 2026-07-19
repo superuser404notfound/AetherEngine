@@ -52,6 +52,42 @@ final class PacketRingBufferTests: XCTestCase {
         XCTAssertEqual(replay.map { $0.bytes.first }, [1, 2, 3, 4, 5])
     }
 
+    /// #136: close() clears the in-RAM index synchronously (ring immediately unusable) and is
+    /// idempotent, so a second teardown from a racing thread is a no-op rather than a crash.
+    func testCloseClearsStateSynchronouslyAndIsIdempotent() throws {
+        let ring = try PacketRingBuffer(windowSeconds: 10, scratch: tmpDir())
+        try ring.append(pts: 0, isKeyframe: true,  isVideo: true, bytes: Data([0]))
+        try ring.append(pts: 1, isKeyframe: false, isVideo: true, bytes: Data([1]))
+        XCTAssertNotNil(ring.oldestPts)
+
+        ring.close()
+        XCTAssertNil(ring.oldestPts)
+        XCTAssertNil(try ring.keyframePts(atOrBefore: .infinity))
+        XCTAssertTrue(try ring.packets(fromPts: 0).isEmpty)
+        XCTAssertEqual(ring.seqBounds.first, ring.seqBounds.end)
+
+        ring.close()  // second teardown must be a harmless no-op
+    }
+
+    /// #136: scratch-directory removal is dispatched to a background queue so close() never blocks the
+    /// caller; the directory (and every spooled packet file under it) is gone shortly after.
+    func testCloseRemovesScratchDirectoryOffCaller() throws {
+        let scratch = tmpDir()
+        let ring = try PacketRingBuffer(windowSeconds: 10, scratch: scratch)
+        try ring.append(pts: 0, isKeyframe: true, isVideo: true, bytes: Data([0]))
+        try ring.append(pts: 1, isKeyframe: true, isVideo: true, bytes: Data([1]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: scratch.path))
+
+        ring.close()
+
+        let deadline = Date().addingTimeInterval(5)
+        while FileManager.default.fileExists(atPath: scratch.path), Date() < deadline {
+            usleep(20_000)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: scratch.path),
+                       "scratch dir should be removed by the background teardown")
+    }
+
     /// Target predating the window: host clamps to `oldestPts`, which the ring guarantees is a keyframe.
     func testTargetBeforeWindowClampsToKeyframeOldest() throws {
         let ring = try PacketRingBuffer(windowSeconds: 5, scratch: tmpDir())

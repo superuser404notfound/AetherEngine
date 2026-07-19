@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **PacketRingBuffer.close() now deletes on a background queue.** PacketRingBuffer.close() is now idempotent and dispatches scratch-directory removal to a background queue so filesystem I/O never blocks the caller. This was causing 5–30 s stalls on long live TV streams on close.
+
 ## [5.8.7] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.7))
