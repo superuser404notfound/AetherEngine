@@ -768,6 +768,10 @@ public final class AetherEngine: ObservableObject {
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
     var externalNativeStoreFillTask: Task<Void, Never>? = nil
 
+    /// AE#154: publishes the remote-HLS bypass item's legible options as `subtitleTracks`.
+    /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
+    var remoteHLSSubtitleDiscoveryTask: Task<Void, Never>? = nil
+
     /// Deferred lazy-reader start while a producer restart is in flight (#93 residual): the
     /// readers' side demuxer competed with the restart for the starved link. Cancelled by
     /// cancelNativeSubtitleReaders (deselect / clear / stop / load).
@@ -1544,6 +1548,8 @@ public final class AetherEngine: ObservableObject {
         activeSecondaryExternalSubtitleTrackID = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
+        remoteHLSSubtitleDiscoveryTask?.cancel()
+        remoteHLSSubtitleDiscoveryTask = nil
         stallRecoveryWindowUntil = .distantPast
         stallRecoveryReasserts = 0
         stallReengageTask?.cancel()
@@ -1689,6 +1695,26 @@ public final class AetherEngine: ObservableObject {
         if let readerError = probeFailure as? AVIOReaderError, case .hlsPlaylistOnRawLivePath = readerError {
             state = .error("HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources.")
             throw AetherEngineError.hlsPlaylistOnRawLivePath
+        }
+
+        // AE#154: a non-live HLS playlist on the loopback path. FFmpeg (--disable-network) can never
+        // demux it (see AVIOReaderError.hlsPlaylistOnVODPath); remote HLS is AVPlayer's native
+        // domain, so reroute this load onto the nativeRemoteHLS bypass instead of surfacing the
+        // former bare AVERROR_INVALIDDATA. loadedOptions flips so every downstream consumer
+        // (audio-tap reader selection, seek paths) sees a genuine remote-HLS session.
+        if RemoteHLSMediaSelection.shouldReroute(probeFailure: probeFailure, isCustomSource: isCustomSource),
+           case .url(let hlsURL) = source {
+            EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
+            loadedOptions.nativeRemoteHLS = true
+            do {
+                try await loadRemoteHLS(url: hlsURL, options: loadedOptions, startPosition: startPosition)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                state = .error("Failed to load: \(error.localizedDescription)")
+                throw error
+            }
+            return nil
         }
 
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
@@ -2518,6 +2544,8 @@ public final class AetherEngine: ObservableObject {
         activeSecondaryExternalSubtitleTrackID = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
+        remoteHLSSubtitleDiscoveryTask?.cancel()
+        remoteHLSSubtitleDiscoveryTask = nil
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []
