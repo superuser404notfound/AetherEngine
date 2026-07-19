@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.3] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.3))
+
+### Fixed
+
+- **A seek landing mid-cue (or exactly on a display-set start boundary) on a PGS stream without acquisition points now re-shows the landing line, forced cues included, instead of leaving the overlay dark until the next authored composition.** The #112 reconstruction pass seeded its active-line candidate only from a self-contained composition (Acquisition Point / Epoch Start); on AP-less/sparse-authored streams every lead-in composition is Normal, so no candidate was ever seeded and the landing-span line was silently discarded, while successor cues re-emitted normally (on sparse dialogue the blackout ran tens of seconds). The candidate is now seeded from any successfully decoded composition behind the playhead; the drain decoder is rebuilt fresh at the backscan start, so a set with missing references fails decode and never reaches the gate, and the steady-state path already publishes Normal compositions unconditionally. Companion fix: `pgsTrimAt` (broadcast by every composition and clear) now also closes the reconstruction candidate's open placeholder window, so a line the author cleared before the playhead can no longer resurrect as the active line at pass end (a hole latent since #112 for acquisition-point content too). Covered by `Issue143PGSLandingLineTests`. Reported by cmcpherson274 (#143).
+
 ## [5.9.2] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.2))
