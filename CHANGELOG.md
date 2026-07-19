@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.10.0] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.10.0))
+
+### Added
+
+- **A non-live remote HLS playlist handed to the default (loopback) path now plays, and its external WebVTT subtitle renditions surface as `subtitleTracks`.** The bundled FFmpeg is built with `--disable-network`, so its hls demuxer could never engage behind the custom I/O context (no extension / MIME hint reaches the probe) let alone fetch a variant; a remote VOD m3u8 died with a bare `AVERROR_INVALIDDATA`. The AVIOReader now classifies the `#EXTM3U` body on the non-live path too (typed `hlsPlaylistOnVODPath`, the #140 sibling) and `load()` reroutes the URL onto the `nativeRemoteHLS` bypass, where AVPlayer plays remote HLS natively; a VOD `startPosition` rides into the bypass as a resume seek (live callers keep the no-initial-seek contract). On the bypass the engine maps the item's legible `AVMediaSelectionGroup` onto `subtitleTracks` (synthetic ids, forced / SDH dispositions carried), `selectSubtitleTrack(index:)` / `clearSubtitle()` drive AVPlayer's media selection with the manual-criteria pin, AVPlayer renders the cues itself, and an AVKit / caption-preference auto-select is mirrored into `activeSubtitleTrackIndex` after readiness. Verified end-to-end against the reported WWDC CMAF stream (7 renditions surfaced, explicit select lands). Covered by `RemoteHLSMediaSelectionTests`. Reported by jihongboo (#154).
+
 ## [5.9.7] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.7))
