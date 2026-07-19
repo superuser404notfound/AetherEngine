@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Output audio channels set based on source (SoftwarePlaybackHost).** `AVAudioSession.setPreferredOutputNumberOfChannels` is now set based on active audio track's actual channels, defaulting to max channels when it can't be determined. 
+
 ## [5.8.8] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.8.8))

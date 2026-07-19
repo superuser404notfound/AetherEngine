@@ -831,16 +831,30 @@ extension AetherEngine {
     }
 
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
-    private func activateRendererAudioSession() {
+    private func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) {
         #if os(iOS) || os(tvOS)
         let session = AVAudioSession.sharedInstance()
         do { try session.setActive(true) }
         catch {
             EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
         }
+        
+        // Resolve the active audio track's channel count from the already-published track list.
+        // so the HDMI / AirPlay link negotiates at the correct channel count.
+        // Accept an explicit stream index parameter because during a reload (track change)
+        // `activeAudioTrackIndex` is temporarily nil (cleared by stopInternal), so the
+        // published property cannot be relied on here.
+        let lookupIndex = audioSourceStreamIndex.flatMap { Int(exactly: $0) } ?? activeAudioTrackIndex
+        let sourceChannels: Int? = if let index = lookupIndex, let track = audioTracks.first(where: { $0.id == index }), track.channels > 0 {
+            track.channels
+        } else {
+            nil
+        }
+        
         let maxCh = session.maximumOutputNumberOfChannels
-        if maxCh > 2 { try? session.setPreferredOutputNumberOfChannels(maxCh) }
-        EngineLog.emit("[AetherEngine] renderer audio session active: maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+        let prefCh = min(sourceChannels ?? maxCh, maxCh)
+        try? session.setPreferredOutputNumberOfChannels(prefCh) 
+        EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
         #endif
     }
 
@@ -854,7 +868,7 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
-        activateRendererAudioSession()
+        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         let host = SoftwarePlaybackHost()
         host.deinterlaceConfig = DeinterlaceConfig(
             mode: loadedOptions.deinterlaceMode,
@@ -969,7 +983,7 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
-        activateRendererAudioSession()
+        activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         let host = AudioPlaybackHost()
         self.audioHost = host
         applyDesiredVolume(to: host)
