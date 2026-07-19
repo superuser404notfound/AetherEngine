@@ -578,6 +578,14 @@ public struct SubtitleCue: Identifiable, Sendable {
         case .image: return nil
         }
     }
+
+    /// True for a bitmap cue the disc flags as forced (PGS/DVD forced captions: signs, foreign
+    /// dialogue). Per cue, so a display set mixing a forced sign with regular dialogue is
+    /// distinguishable (#146); track-level forcedness stays on `TrackInfo.isForced`.
+    public var isForced: Bool {
+        if case .image(let image) = body { return image.isForced }
+        return false
+    }
 }
 
 extension SubtitleCue: Equatable {
@@ -599,11 +607,15 @@ public struct SubtitleImage: @unchecked Sendable {
     /// the video rect so cues land where the disc authored them (incl. the lower bar).
     /// .zero when unknown (pre-canvas cues): hosts fall back to treating canvas == video.
     public let canvasSize: CGSize
+    /// AV_SUBTITLE_FLAG_FORCED from the decoded rect (#146): the disc authored this object as a
+    /// forced caption (sign / foreign-dialogue overlay shown even with subtitles off).
+    public let isForced: Bool
 
-    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero) {
+    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero, isForced: Bool = false) {
         self.cgImage = cgImage
         self.position = position
         self.canvasSize = canvasSize
+        self.isForced = isForced
     }
 }
 

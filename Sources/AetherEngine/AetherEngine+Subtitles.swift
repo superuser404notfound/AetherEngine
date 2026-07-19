@@ -402,10 +402,14 @@ extension AetherEngine {
     }
 
     /// #112 full umbau: sorted insert of a decoded cue into the retained store, keeping ascending start order. An
-    /// image cue sharing a start with an existing image cue REPLACES it: a PGS composition has a unique start PTS, so
-    /// a same-start image cue is the same line re-decoded (the audio-switch preserved placeholder vs its
-    /// reconstruction), and a duplicate would render the bitmap twice until the next composition trims it. Text cues
-    /// at the same start are distinct simultaneous speakers and are both kept.
+    /// image cue sharing a start AND geometry with an existing image cue REPLACES it: a PGS composition has a
+    /// unique start PTS, so a same-start same-geometry image cue is the same object re-decoded (the audio-switch
+    /// preserved placeholder vs its reconstruction), and a duplicate would render the bitmap twice until the next
+    /// composition trims it. #146: the start PTS is unique per COMPOSITION, not per composition OBJECT; N objects
+    /// of one display set (forced sign + dialogue) legitimately share a start and differ in geometry (position and
+    /// pixel size, both deterministic across re-decodes via the alpha-bounding-box crop), so geometry is part of
+    /// the replacement key and sibling objects are all kept. Text cues at the same start are distinct simultaneous
+    /// speakers and are both kept.
     ///
     /// #121: `nextID` stamps every materialized cue with a session-monotonic id and de-dupes a non-image cue
     /// (text or rich text) already present with the same window + content. On a seek the overlay decoder is
@@ -432,10 +436,13 @@ extension AetherEngine {
         let stamped = SubtitleCue(id: nextID, startTime: cue.startTime, endTime: cue.endTime, body: cue.body)
         nextID += 1
 
-        if case .image = stamped.body,
+        if case .image(let stampedImage) = stamped.body,
            let existing = cues.firstIndex(where: { other in
-               if case .image = other.body { return other.startTime == stamped.startTime }
-               return false
+               guard case .image(let otherImage) = other.body,
+                     other.startTime == stamped.startTime else { return false }
+               return otherImage.position == stampedImage.position
+                   && otherImage.cgImage.width == stampedImage.cgImage.width
+                   && otherImage.cgImage.height == stampedImage.cgImage.height
            }) {
             cues[existing] = stamped
             return
