@@ -1907,10 +1907,30 @@ public final class AetherEngine: ObservableObject {
         // can deinterlace it; tvOS AVPlayer does not. Decision is pure and unit-tested in
         // VideoRoutingPolicyTests. deint=interlaced passes progressive frames through untouched, so a
         // mis-signalled progressive stream only pays an unnecessary SW decode, never a wrong deinterlace.
+        // #150: some live TS channels are interlaced at the SPS level (frame_mbs_only_flag=0) but the
+        // demuxer's field_order probe stays UNKNOWN, silently defeating the #107 rule; consult the SPS
+        // from codecpar extradata as the tie-breaker.
+        var spsIndicatesInterlaced = false
+        if detectedCodecID == AV_CODEC_ID_H264, detectedFieldOrder == AV_FIELD_UNKNOWN,
+           probeOpened,
+           let vStream = probe.stream(at: probe.videoStreamIndex),
+           let codecpar = vStream.pointee.codecpar,
+           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+            let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
+            spsIndicatesInterlaced = VideoRoutingPolicy.spsIndicatesInterlaced(extradata: bytes)
+            if spsIndicatesInterlaced {
+                EngineLog.emit(
+                    "[AetherEngine] fieldOrder=UNKNOWN but SPS frame_mbs_only_flag=0; "
+                    + "treating as interlaced for routing (#150)",
+                    category: .engine
+                )
+            }
+        }
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
-            av1Available: VTCapabilityProbe.av1Available
+            av1Available: VTCapabilityProbe.av1Available,
+            spsIndicatesInterlaced: spsIndicatesInterlaced
         )
         // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches

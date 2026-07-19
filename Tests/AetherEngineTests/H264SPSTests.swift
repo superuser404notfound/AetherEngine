@@ -84,4 +84,48 @@ final class H264SPSTests: XCTestCase {
         XCTAssertEqual(H264SPS.dimensions(fromNAL: got!.sps)?.width, 1280)
         XCTAssertFalse(withBuf(au) { H264SPS.containsIDR(fromAnnexB: $0) }) // but no IDR -> gate stays closed
     }
+
+    // MARK: - #150 frame_mbs_only_flag fallback
+
+    // Main profile 4.0, 1920x1080, frame_mbs_only=0, mb_adaptive=0 (PAFF) - the reporter's channel shape.
+    private var spsInterlaced1080i: [UInt8] { hex("674d4028eca03c0223ed") }
+
+    func testInterlacedSPSParsesDimensionsAndFrameMbsOnlyFalse() {
+        let dim = H264SPS.dimensions(fromNAL: spsInterlaced1080i)
+        XCTAssertEqual(dim?.width, 1920)
+        XCTAssertEqual(dim?.height, 1080)
+        XCTAssertEqual(H264SPS.frameMbsOnly(fromNAL: spsInterlaced1080i), false)
+    }
+
+    func testProgressiveSPSFrameMbsOnlyTrue() {
+        XCTAssertEqual(H264SPS.frameMbsOnly(fromNAL: sps720), true)
+    }
+
+    func testFrameMbsOnlyRejectsNonSPS() {
+        XCTAssertNil(H264SPS.frameMbsOnly(fromNAL: hex("68efbcb0"))) // PPS
+        XCTAssertNil(H264SPS.frameMbsOnly(fromNAL: []))
+    }
+
+    func testSPSNALFromAnnexBExtradata() {
+        let extradata = annexB([spsInterlaced1080i, pps])
+        let sps = H264SPS.spsNAL(fromExtradata: extradata)
+        XCTAssertEqual(sps, spsInterlaced1080i)
+    }
+
+    func testSPSNALFromAvcCExtradata() {
+        var avcc: [UInt8] = [0x01, 0x4d, 0x40, 0x28, 0xff, 0xe1]
+        avcc += [UInt8(spsInterlaced1080i.count >> 8), UInt8(spsInterlaced1080i.count & 0xff)]
+        avcc += spsInterlaced1080i
+        avcc += [0x01, UInt8(pps.count >> 8), UInt8(pps.count & 0xff)]
+        avcc += pps
+        let sps = H264SPS.spsNAL(fromExtradata: avcc)
+        XCTAssertEqual(sps, spsInterlaced1080i)
+    }
+
+    func testSPSNALRejectsGarbageOrEmpty() {
+        XCTAssertNil(H264SPS.spsNAL(fromExtradata: []))
+        XCTAssertNil(H264SPS.spsNAL(fromExtradata: [0xde, 0xad, 0xbe, 0xef]))
+        XCTAssertNil(H264SPS.spsNAL(fromExtradata: [0x01, 0x4d])) // truncated avcC header
+        XCTAssertNil(H264SPS.spsNAL(fromExtradata: annexB([pps]))) // params without SPS
+    }
 }

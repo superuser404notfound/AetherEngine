@@ -42,6 +42,69 @@ struct VideoRoutingPolicyTests {
             codecID: AV_CODEC_ID_AV1, fieldOrder: AV_FIELD_PROGRESSIVE, av1Available: true))
     }
 
+    // MARK: - #150 SPS frame_mbs_only fallback for UNKNOWN field order
+
+    @Test("UNKNOWN field order + SPS frame_mbs_only=0 routes to software")
+    func unknownFieldOrderSPSInterlacedSoftware() {
+        #expect(VideoRoutingPolicy.requiresSoftwarePath(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_UNKNOWN, av1Available: true,
+            spsIndicatesInterlaced: true))
+    }
+
+    @Test("UNKNOWN field order without SPS interlace signal stays native")
+    func unknownFieldOrderNoSPSSignalNative() {
+        #expect(!VideoRoutingPolicy.requiresSoftwarePath(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_UNKNOWN, av1Available: true,
+            spsIndicatesInterlaced: false))
+    }
+
+    @Test("concrete PROGRESSIVE probe wins over SPS interlaced-capable flag")
+    func progressiveProbeWinsOverSPS() {
+        // frame_mbs_only=0 only means the stream MAY code interlaced pictures; a demuxer probe that
+        // analyzed actual frames and concluded progressive is the stronger signal.
+        #expect(!VideoRoutingPolicy.requiresSoftwarePath(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_PROGRESSIVE, av1Available: true,
+            spsIndicatesInterlaced: true))
+    }
+
+    @Test("concrete interlaced field orders ignore the SPS parameter")
+    func concreteInterlacedIgnoresSPSParameter() {
+        #expect(VideoRoutingPolicy.requiresSoftwarePath(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_TT, av1Available: true,
+            spsIndicatesInterlaced: false))
+    }
+
+    @Test("non-H.264 codecs ignore the SPS parameter")
+    func otherCodecsIgnoreSPSParameter() {
+        #expect(!VideoRoutingPolicy.requiresSoftwarePath(
+            codecID: AV_CODEC_ID_HEVC, fieldOrder: AV_FIELD_UNKNOWN, av1Available: true,
+            spsIndicatesInterlaced: true))
+    }
+
+    @Test("spsIndicatesInterlaced classifies Annex-B and avcC extradata")
+    func spsIndicatesInterlacedFromExtradata() {
+        let sc: [UInt8] = [0, 0, 0, 1]
+        let spsInterlaced: [UInt8] = [0x67, 0x4d, 0x40, 0x28, 0xec, 0xa0, 0x3c, 0x02, 0x23, 0xed]
+        let spsProgressive: [UInt8] = [
+            0x67, 0x64, 0x00, 0x1f, 0xac, 0xd9, 0x40, 0x50, 0x05, 0xbb, 0x01, 0x6a, 0x02, 0x04,
+            0x02, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x1e, 0x07, 0x8c, 0x18, 0xcb,
+        ]
+        let pps: [UInt8] = [0x68, 0xef, 0xbc, 0xb0]
+
+        #expect(VideoRoutingPolicy.spsIndicatesInterlaced(extradata: sc + spsInterlaced + sc + pps))
+        #expect(!VideoRoutingPolicy.spsIndicatesInterlaced(extradata: sc + spsProgressive + sc + pps))
+
+        var avcc: [UInt8] = [0x01, 0x4d, 0x40, 0x28, 0xff, 0xe1]
+        avcc += [0x00, UInt8(spsInterlaced.count)]
+        avcc += spsInterlaced
+        avcc += [0x01, 0x00, UInt8(pps.count)]
+        avcc += pps
+        #expect(VideoRoutingPolicy.spsIndicatesInterlaced(extradata: avcc))
+
+        #expect(!VideoRoutingPolicy.spsIndicatesInterlaced(extradata: []))
+        #expect(!VideoRoutingPolicy.spsIndicatesInterlaced(extradata: [0xde, 0xad]))
+    }
+
     // MARK: - #2 undecodable-format second-stage gate
 
     @Test("H.264 / HEVC that VideoToolbox can't HW-decode falls back to software")
