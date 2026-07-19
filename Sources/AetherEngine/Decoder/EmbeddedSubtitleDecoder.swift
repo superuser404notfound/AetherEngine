@@ -570,8 +570,8 @@ final class EmbeddedSubtitleDecoder {
 
     /// Render a PGS/DVB/HDMV bitmap rect into a CGImage with normalised position.
     /// Palette from libavcodec is 32-bit with alpha in the high byte and BGR below ([B,G,R,A] on little-endian);
-    /// rewritten to RGBA for CGImage's premultipliedLast.
-    private static func imageForSubtitleRect(
+    /// rewritten to RGBA for CGImage's premultipliedLast. Internal for unit tests (#146).
+    static func imageForSubtitleRect(
         _ rect: UnsafeMutablePointer<AVSubtitleRect>,
         videoWidth: Int,
         videoHeight: Int
@@ -666,6 +666,7 @@ final class EmbeddedSubtitleDecoder {
         }
 
         return SubtitleImage(cgImage: cgImage, position: position,
-                             canvasSize: CGSize(width: Int(videoWidth), height: Int(videoHeight)))
+                             canvasSize: CGSize(width: Int(videoWidth), height: Int(videoHeight)),
+                             isForced: (r.flags & AV_SUBTITLE_FLAG_FORCED) != 0)
     }
 }
