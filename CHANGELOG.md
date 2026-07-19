@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.9.6] - 2026-07-19
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.6))
+
+### Fixed
+
+- **Interlaced live H.264 whose demuxer field-order probe stays UNKNOWN now routes to the software deinterlace path instead of staying on native VideoToolbox decode with a persistent colour cast.** The #107 rule (interlaced H.264 goes software so bwdif can deinterlace; tvOS AVPlayer does not) keyed only off the demuxer's `field_order` probe, so a channel that is unambiguously interlaced at the bitstream level (SPS `frame_mbs_only_flag=0`) but probes `AV_FIELD_UNKNOWN` silently defeated the routing and rendered with a sustained green cast from the first frame. When the probe is inconclusive, the routing decision now parses the SPS from codecpar extradata (both Annex-B/MPEG-TS and avcC/MP4/MKV layouts) and treats `frame_mbs_only_flag=0` as interlaced. A concrete PROGRESSIVE probe (which analyzed actual frames) still wins over the SPS capability flag, and a false positive only pays an unnecessary software decode: the software decoder engages bwdif per frame from `AV_FRAME_FLAG_INTERLACED`, so progressive frames pass through untouched. The fallback logs `fieldOrder=UNKNOWN but SPS frame_mbs_only_flag=0; treating as interlaced for routing (#150)` when it fires. Covered by `VideoRoutingPolicyTests` and `H264SPSTests`. Reported by digilearn-dev (#150).
+
 ## [5.9.5] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.9.5))
