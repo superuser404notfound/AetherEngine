@@ -1320,6 +1320,42 @@ public final class AetherEngine: ObservableObject {
         !bufferingTowardTarget
     }
 
+    /// Tolerance for "the playhead has reached the end of a VOD" (AetherEngine#164). Absorbs the
+    /// frame-granular gap between a scrub-to-end target and the exact declared duration, plus the
+    /// loopback playlist-shift float error, without tripping on a deliberate pause a second or two
+    /// before the credits.
+    nonisolated static let endOfMediaEpsilonSeconds: Double = 0.5
+
+    /// True when a non-live source's playhead sits at (or past) its final frame (AetherEngine#164).
+    /// Live sources have no fixed end, and an unknown (zero) duration cannot be "reached".
+    nonisolated static func isAtEndOfMedia(currentTime: Double, duration: Double, isLive: Bool) -> Bool {
+        guard !isLive, duration > 0 else { return false }
+        return currentTime >= duration - endOfMediaEpsilonSeconds
+    }
+
+    /// A VOD seek whose target lands at end-of-media parks at the final frame (AetherEngine#164): it is
+    /// not playing, but it is NOT the terminal `.ended` state either. `.ended` (organic completion, #63)
+    /// fires the host's end-of-playback handling (mark-watched / autoplay-next / dismiss) and is reserved
+    /// for playback finishing on its own; forcing it on a manual scrub would misfire those side effects
+    /// and, being terminal, would strand the playhead with no way to scrub back. Settle to `.paused`
+    /// instead so the scrubber stays live and the park replays via `play()`. Returns nil to keep the
+    /// normal seek-landing reconcile for a mid-stream target.
+    nonisolated static func seekEndParkState(target: Double, duration: Double, isLive: Bool) -> PlaybackState? {
+        isAtEndOfMedia(currentTime: target, duration: duration, isLive: isLive) ? .paused : nil
+    }
+
+    /// Whether `play()` / `togglePlayPause()` must rewind to the start before resuming (AetherEngine#164).
+    /// A VOD parked at its final frame (scrubbed to the end, or paused there) cannot advance;
+    /// `AVPlayer.play()` at end-of-media is a no-op, freezing the button. `.ended` is deliberately
+    /// excluded: it is terminal (#63), the host revives it by reloading, and a play press racing the end
+    /// card must not silently restart the finished session.
+    nonisolated static func shouldRewindBeforePlay(
+        state: PlaybackState, currentTime: Double, duration: Double, isLive: Bool
+    ) -> Bool {
+        guard state != .ended else { return false }
+        return isAtEndOfMedia(currentTime: currentTime, duration: duration, isLive: isLive)
+    }
+
     #if DEBUG
     /// Test-only override for the session's restart-in-flight signal (#93 residual deferral tests).
     var testHookRestartInFlightOverride: Bool? = nil
@@ -2232,6 +2268,19 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func play() {
+        // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
+        // cannot advance; AVPlayer.play() would no-op and leave the button frozen. Rewind to the start
+        // first, then resume. `.ended` is excluded (see shouldRewindBeforePlay): it stays terminal so a
+        // play press racing the host end card does not silently revive a finished session (#63).
+        if Self.shouldRewindBeforePlay(
+            state: state, currentTime: currentTime, duration: duration, isLive: isLive
+        ) {
+            Task { @MainActor in
+                await self.seek(to: 0)
+                self.play()
+            }
+            return
+        }
         activeTransportHost?.play()
         if state == .paused || state == .loading {
             state = .playing
@@ -2551,6 +2600,12 @@ public final class AetherEngine: ObservableObject {
             reconcileNativeSeekTransport(host: nativeHost, isStarved: false)
         } else {
             state = .playing
+        }
+        // AetherEngine#164: a VOD scrubbed to its final frame is parked, not playing. Override the
+        // reconcile's `.playing` with an honest `.paused` (non-terminal, so the scrubber stays live and
+        // `play()` can rewind + replay). `.ended` stays reserved for organic completion (#63).
+        if let parked = Self.seekEndParkState(target: target, duration: duration, isLive: isLive) {
+            state = parked
         }
         setProgrammaticSeek(inFlight: false, target: nil)
     }
