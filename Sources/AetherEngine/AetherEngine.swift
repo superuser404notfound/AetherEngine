@@ -284,15 +284,21 @@ public final class AetherEngine: ObservableObject {
         case teardownVideo           // release the video pipeline before idle suspension
     }
 
-    /// - keepVideoAlive: result of shouldKeepVideoAlive. Pass false on tvOS (the wedge-safe unconditional teardown).
+    /// - keepVideoAlive: result of shouldKeepVideoAlive / shouldKeepVideoAliveTV.
+    /// - pipActive: a live PiP window renders the SW layer's frames, so the SW host must keep
+    ///   decoding video in background instead of dropping to audio-only (SW-PiP Phase A).
     nonisolated static func backgroundAction(
         isAudioBackend: Bool,
         hasSoftwareHost: Bool,
         keepVideoAlive: Bool,
+        pipActive: Bool,
         state: PlaybackState
     ) -> BackgroundAction {
         if isAudioBackend { return .doNothing }
-        if keepVideoAlive { return hasSoftwareHost ? .enterSoftwareAudioOnly : .doNothing }
+        if keepVideoAlive {
+            if hasSoftwareHost { return pipActive ? .doNothing : .enterSoftwareAudioOnly }
+            return .doNothing
+        }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
     }
@@ -3071,6 +3077,7 @@ public final class AetherEngine: ObservableObject {
                     isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
                     hasSoftwareHost: self.softwareHost != nil,
                     keepVideoAlive: keepAlive,
+                    pipActive: self.pictureInPictureActive,
                     state: self.state
                 )
                 switch Self.backgroundStep(
@@ -3271,6 +3278,7 @@ public final class AetherEngine: ObservableObject {
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
             keepVideoAlive: keepAlive,
+            pipActive: pictureInPictureActive,
             state: state
         )
     }
