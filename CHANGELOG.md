@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.0] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.0))
+
+### Added
+
+- **Bitmap subtitles (PGS / DVB / DVD, embedded and external .sup) now survive PiP, AirPlay, and wired external displays on the native path.** Bitmap tracks join the native rendition table at load as OCR-fed renditions: while one is selected, a worker decodes its harvested compositions ahead of the playhead (packet-store source, drainer pacing, 5.14.1 end-clamp semantics) and recognizes them on-device (Vision, `.accurate`, track-language hinted) into plain-text cues for the track's WebVTT rendition; the #151 forward-prefetch lead rises to 270 s while armed so AVKit's ~240 s .vtt prefetch burst is served populated. External .sup sidecars fill their store from the selection-time sidecar decode's own image cues (no second fetch). Lossy by design: a failed or empty read drops that line from the rendition, and fullscreen keeps the pixel-accurate bitmap overlay. VOD, master-routed sessions; no API breaks, hosts need only the pin bump.
+
 ## [5.14.1] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.14.1))
