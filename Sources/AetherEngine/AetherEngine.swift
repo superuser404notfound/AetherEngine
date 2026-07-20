@@ -212,6 +212,9 @@ public final class AetherEngine: ObservableObject {
     /// the keepalive policy + pause-safety read it.
     public var pictureInPictureActive = false {
         didSet {
+            // SW-PiP Phase C: flip the frame compositor with the PiP state so subtitles appear in the
+            // window and never double-draw under the fullscreen host overlay.
+            softwareHost?.updateSubtitleCompositor(cues: subtitleCues + secondarySubtitleCues, enabled: pictureInPictureActive)
             #if os(tvOS)
             // PiP window closed while backgrounded: nothing keeps the app running anymore, so run the
             // wedge-safe teardown now, before idle suspension (mirrors the iOS pause-while-backgrounded path).

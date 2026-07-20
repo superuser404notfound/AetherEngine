@@ -898,6 +898,14 @@ extension AetherEngine {
         // SW-PiP: publish the bridge once the session owns its layer (the layer object is stable for
         // the session; the host attaches it to the view and, on PiP start, to the system window).
         softwarePiPSource = SoftwarePiPSource(layer: host.displayLayer, isLive: isLive, engine: self)
+        // SW-PiP Phase C: mirror the published cues (primary + secondary) into the renderer's frame
+        // compositor; the PiP flag gates actual drawing (fullscreen stays host-overlay-only).
+        Publishers.CombineLatest($subtitleCues, $secondarySubtitleCues)
+            .sink { [weak self, weak host] primary, secondary in
+                guard let self, let host else { return }
+                host.updateSubtitleCompositor(cues: primary + secondary, enabled: self.pictureInPictureActive)
+            }
+            .store(in: &softwareCancellables)
         // #131: no demuxable CC track on the SW path either: arm an A53 tap fed by decoded-frame
         // side data. Same lazy synthetic-track surfacing as the producer path.
         // Same synthetic-entry exclusion as setupClosedCaptionTapIfNeeded (via `demuxableClosedCaptionTrack`):
