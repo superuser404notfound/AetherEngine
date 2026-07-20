@@ -186,6 +186,8 @@ enum SubtitleDecoder {
 
         var cues: [SubtitleCue] = []
         var nextID = 0
+        /// Indices of image cues still "open" (PGS-style: ended by the next composition event).
+        var pendingImageCueIndices: [Int] = []
         var lastPktPTS: Double = 0  // PTS anchor for flush events that have no packet of their own
 
         // Under preserveASSMarkup: keep raw ASS event line (ASSScriptBuilder re-stamps timing); otherwise plain text.
@@ -229,11 +231,32 @@ enum SubtitleDecoder {
                 let startTime = pktPTS + startOffset
                 let endTime = pktPTS + endOffset
 
+                // Bitmap subtitles (external .sup / PGS sidecars, FFmpegBuild >= 2.1.3 sup demuxer):
+                // a composition usually carries end_display_time == 0 and is ended by the NEXT
+                // composition event (a new set or a clear packet), so clamp any still-open image
+                // cues to this packet's PTS before appending the new ones. The 5 s fallback above
+                // only survives for a final composition with no successor.
+                for idx in pendingImageCueIndices where cues[idx].startTime < pktPTS && cues[idx].endTime > pktPTS {
+                    let open = cues[idx]
+                    cues[idx] = SubtitleCue(id: open.id, startTime: open.startTime, endTime: pktPTS, body: open.body)
+                }
+                pendingImageCueIndices.removeAll()
+
                 var lines: [String] = []
+                var images: [SubtitleImage] = []
                 if sub.num_rects > 0, let rects = sub.rects {
                     for i in 0..<Int(sub.num_rects) {
                         guard let rect = rects[i] else { continue }
-                        if let text = lineForRect(rect) {
+                        if rect.pointee.type == SUBTITLE_BITMAP {
+                            // The composition canvas is the codec's coded size (PGS: from the PCS).
+                            if let image = EmbeddedSubtitleDecoder.imageForSubtitleRect(
+                                rect,
+                                videoWidth: Int(codecpar.pointee.width),
+                                videoHeight: Int(codecpar.pointee.height)
+                            ) {
+                                images.append(image)
+                            }
+                        } else if let text = lineForRect(rect) {
                             lines.append(text)
                         }
                     }
@@ -251,6 +274,18 @@ enum SubtitleDecoder {
                         body: .text(merged)
                     ))
                     nextID += 1
+                }
+                if endTime > startTime {
+                    for image in images {
+                        pendingImageCueIndices.append(cues.count)
+                        cues.append(SubtitleCue(
+                            id: nextID,
+                            startTime: startTime,
+                            endTime: endTime,
+                            body: .image(image)
+                        ))
+                        nextID += 1
+                    }
                 }
             }
 
