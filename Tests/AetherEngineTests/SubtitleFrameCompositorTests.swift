@@ -26,12 +26,13 @@ struct SubtitleFrameCompositorTests {
         #expect(abs(layout.maxTextWidth - 1728) < 0.5)
     }
 
-    @Test("bitmap cue maps width-aligned and center-anchored from its canvas onto the frame")
+    @Test("bitmap cue maps its NORMALIZED position via the canvas, width-aligned center-anchored")
     func bitmapCanvasMapping() {
-        // Canvas 1920x1280 (taller than video), video frame 1280x720: scale by width (1280/1920),
-        // vertical center anchored (canvas center -> frame center).
+        // SubtitleImage.position is normalized against the canvas (see PlayerState). Canvas 1920x1280
+        // (taller than video), video frame 1280x720: canvas pixels = position * canvas, then scale by
+        // width (1280/1920 = 2/3), vertical center anchored (canvas center -> frame center).
         let rect = SubtitleFrameCompositor.imageRect(
-            position: CGRect(x: 660, y: 1100, width: 600, height: 100),
+            position: CGRect(x: 660.0 / 1920.0, y: 1100.0 / 1280.0, width: 600.0 / 1920.0, height: 100.0 / 1280.0),
             canvasSize: CGSize(width: 1920, height: 1280),
             frameWidth: 1280, frameHeight: 720
         )
@@ -41,14 +42,17 @@ struct SubtitleFrameCompositorTests {
         #expect(abs(rect.minY - 666.67) < 1.0)
     }
 
-    @Test("bitmap cue with unknown canvas treats canvas as the frame")
+    @Test("bitmap cue with unknown canvas is normalized against the frame itself")
     func bitmapUnknownCanvas() {
         let rect = SubtitleFrameCompositor.imageRect(
-            position: CGRect(x: 100, y: 200, width: 300, height: 50),
+            position: CGRect(x: 0.1, y: 0.8, width: 0.8, height: 0.15),
             canvasSize: .zero,
             frameWidth: 1920, frameHeight: 1080
         )
-        #expect(rect == CGRect(x: 100, y: 200, width: 300, height: 50))
+        #expect(abs(rect.minX - 192) < 0.5)
+        #expect(abs(rect.minY - 864) < 0.5)
+        #expect(abs(rect.width - 1536) < 0.5)
+        #expect(abs(rect.height - 162) < 0.5)
     }
 
     @Test("composite draws into the cue region and passthrough returns the input instance")
