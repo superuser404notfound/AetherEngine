@@ -237,6 +237,9 @@ public final class AetherEngine: ObservableObject {
 
     /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
     var pendingPreReadySeekSeconds: Double?
+    /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
+    /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
+    var pendingInPlaceItemHandover = false
     #if os(iOS) || os(tvOS)
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
@@ -264,6 +267,13 @@ public final class AetherEngine: ObservableObject {
     /// unconditional teardown that protects mediaserverd across multi-hour suspensions.
     nonisolated static func shouldKeepVideoAliveTV(enabled: Bool, pipActive: Bool) -> Bool {
         enabled && pipActive
+    }
+
+    /// AE#158: a system PiP window closes the moment its source layer's player drops its item (the #93
+    /// in-PiP recovery reload hit the same nil-item gap), so a native->native load while PiP is active
+    /// keeps the old item attached through the load gap and swaps in place once the new master is ready.
+    nonisolated static func shouldHandOverItemInPlace(pipActive: Bool, priorBackendWasNative: Bool) -> Bool {
+        pipActive && priorBackendWasNative
     }
 
     /// What to do with the active video pipeline when the app enters the background. Pure so the lifecycle
@@ -1518,11 +1528,16 @@ public final class AetherEngine: ObservableObject {
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.
         let priorBackendWasNative = (playbackBackend == .native)
+        // AE#158: while a PiP window is live, the running item must survive this load's teardown or the
+        // system closes the window; the loopback host.load callsite finishes the handover (inPlaceSwap).
+        let handOverInPlace = Self.shouldHandOverItemInPlace(pipActive: pictureInPictureActive,
+                                                             priorBackendWasNative: priorBackendWasNative)
+        pendingInPlaceItemHandover = handOverInPlace
         // #128 follow-up: preserve the previous session's display criteria across the load seam. Nil-ing it
         // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
         // reloads. Sessions that never reach apply() clear a stale criteria via loadDisplayCriteriaAction
         // (audio-only fast path, suppressed hosts); a load() that throws before routing leaves it for stop().
-        stopInternal(resetDisplayCriteria: false, keepNativeHost: priorBackendWasNative)
+        stopInternal(resetDisplayCriteria: false, keepNativeHost: priorBackendWasNative, keepCurrentItem: handOverInPlace)
         // #35/#93: a genuinely new item has not rendered yet; re-arm the cold-startup wedge suspension.
         // Scrub/seek/producer-restart never route through load(), so mid-stream #93 detection stays armed.
         hasRenderedFirstFrameMirror.set(false)
@@ -2876,7 +2891,7 @@ public final class AetherEngine: ObservableObject {
     ///   never settles and burns the full settle timeout (~12 s of
     ///   black-screen latency per audio switch on the old fixed 5 s
     ///   poll; capped at ~2 s since #117, but still worth skipping).
-    func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false) {
+    func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false) {
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
         resumeAfterInterruption = false
@@ -2898,7 +2913,12 @@ public final class AetherEngine: ObservableObject {
         liveTelemetrySampler = nil
         diagnostics.liveTelemetry = nil
         nativeCancellables.removeAll()
-        nativeHost?.tearDown()
+        // AE#158: keepCurrentItem defers the item detach to the next host.load(inPlaceSwap:) so a
+        // system PiP window never sees a nil-item gap across a native->native load. Only meaningful
+        // together with keepNativeHost; load() computes it via shouldHandOverItemInPlace.
+        if !keepCurrentItem {
+            nativeHost?.tearDown()
+        }
         if !keepNativeHost {
             nativeHost = nil
             currentAVPlayer = nil
