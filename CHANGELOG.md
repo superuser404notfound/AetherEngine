@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.11.0] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.11.0))
+
+### Added
+
+- **tvOS: an active PiP window now keeps the video pipeline and loopback server alive across backgrounding.** tvOS previously ran an unconditional video teardown on `didEnterBackground` (wedge-safe: a live decode session crossing a multi-hour suspension wedged mediaserverd system-wide), which killed a system PiP window the moment the user left the app. The background handler now consults the new `shouldKeepVideoAliveTV(enabled:pipActive:)` policy: only `pictureInPictureActive` (set by the host from its PiP delegate, now cross-platform) defers the teardown, and the flag's `didSet` runs the wedge-safe teardown immediately when the PiP window closes while still backgrounded, so nothing crosses an idle suspension. Without active PiP, tvOS background behavior is byte-identical to before; there is no grace window and no background-audio case on tvOS. Covered by `BackgroundKeepaliveTests`.
+
 ## [5.10.0] - 2026-07-19
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.10.0))
