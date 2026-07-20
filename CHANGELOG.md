@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.14.1] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.14.1))
+
+### Fixed
+
+- **External PGS subtitle files (raw .sup sidecars, e.g. Jellyfin serving external PGS tracks) now load and render.** Two gaps compounded into a silent no-show on every path: FFmpegBuild lacked the `sup` demuxer (fixed in 2.1.3, now pinned), so `avformat_open_input` rejected the file with `AVERROR_INVALIDDATA`; and the sidecar decode loop extracted only text rects, dropping bitmap rects. The loop now routes bitmap rects through the embedded path's `imageForSubtitleRect` into `.image` cues with PGS end semantics (an open composition ends at the next composition event's PTS instead of a flat 5 s fallback). Also fixes the frame compositor's bitmap placement: `SubtitleImage.position` is normalized against its canvas, and the compositor treated it as absolute pixels. Covered by `SidecarPGSDecodeTests` (real .sup fixture, local-only) and the updated `SubtitleFrameCompositorTests`.
+
 ## [5.14.0] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.14.0))
