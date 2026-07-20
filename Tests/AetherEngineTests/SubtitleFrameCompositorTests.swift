@@ -1,5 +1,6 @@
 import Testing
 import CoreGraphics
+import CoreVideo
 @testable import AetherEngine
 
 @Suite("Subtitle frame compositor logic")
@@ -48,5 +49,45 @@ struct SubtitleFrameCompositorTests {
             frameWidth: 1920, frameHeight: 1080
         )
         #expect(rect == CGRect(x: 100, y: 200, width: 300, height: 50))
+    }
+
+    @Test("composite draws into the cue region and passthrough returns the input instance")
+    func compositeSyntheticBuffer() throws {
+        let compositor = SubtitleFrameCompositor()
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        CVPixelBufferCreate(kCFAllocatorDefault, 640, 360, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &pb)
+        let buffer = try #require(pb)
+        // Fill luma with 0 (black) so drawn subtitle pixels are detectable.
+        CVPixelBufferLockBaseAddress(buffer, [])
+        if let luma = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) {
+            memset(luma, 0, CVPixelBufferGetBytesPerRowOfPlane(buffer, 0) * CVPixelBufferGetHeightOfPlane(buffer, 0))
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+
+        // Disabled: passthrough must be the same instance.
+        compositor.update(cues: [SubtitleCue(id: 1, startTime: 0, endTime: 10, body: .text("HELLO"))], enabled: false)
+        #expect(compositor.composite(buffer, ptsSeconds: 5) === buffer)
+
+        // Enabled with an active cue: output keeps the format and the bottom region gains bright pixels.
+        compositor.update(cues: [SubtitleCue(id: 1, startTime: 0, endTime: 10, body: .text("HELLO"))], enabled: true)
+        let out = compositor.composite(buffer, ptsSeconds: 5)
+        #expect(CVPixelBufferGetPixelFormatType(out) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        #expect(out !== buffer)
+        CVPixelBufferLockBaseAddress(out, [.readOnly])
+        var maxLuma: UInt8 = 0
+        if let luma = CVPixelBufferGetBaseAddressOfPlane(out, 0) {
+            let bpr = CVPixelBufferGetBytesPerRowOfPlane(out, 0)
+            // Scan the bottom third where the text box lands.
+            for row in 240..<360 {
+                let p = luma.advanced(by: row * bpr).assumingMemoryBound(to: UInt8.self)
+                for col in 0..<640 { maxLuma = max(maxLuma, p[col]) }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(out, [.readOnly])
+        #expect(maxLuma > 100)
+
+        // No active cue at this PTS: passthrough again.
+        #expect(compositor.composite(buffer, ptsSeconds: 20) === buffer)
     }
 }
