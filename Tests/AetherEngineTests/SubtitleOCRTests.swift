@@ -64,3 +64,44 @@ struct SubtitleOCRTests {
         #expect(text.contains("123"))
     }
 }
+
+private func imageCue(_ id: Int, _ start: Double, _ end: Double) -> SubtitleCue {
+    // Minimal 1x1 image body; only timing matters for the pending state.
+    let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 0,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let image = SubtitleImage(cgImage: ctx.makeImage()!, position: .zero, canvasSize: .zero)
+    return SubtitleCue(id: id, startTime: start, endTime: end, body: .image(image))
+}
+
+@Suite("OCR pending-composition end clamp")
+struct SubtitleOCRPendingStateTests {
+    @Test("the next event closes an open composition at its PTS; earlier real ends survive")
+    func clampSemantics() {
+        var state = SubtitleOCRPendingState()
+        // Placeholder end (start+5) still open at the next event: clamps to event PTS.
+        #expect(state.consume(eventPts: 10, cues: [imageCue(1, 10, 15)], trimAt: nil).isEmpty)
+        let closed = state.consume(eventPts: 12, cues: [imageCue(2, 12, 17)], trimAt: nil)
+        #expect(closed.map(\.id) == [1])
+        #expect(closed[0].endTime == 12)
+        // Real earlier end survives a later successor.
+        var s2 = SubtitleOCRPendingState()
+        _ = s2.consume(eventPts: 10, cues: [imageCue(3, 10, 11.5)], trimAt: nil)
+        let c2 = s2.consume(eventPts: 20, cues: [], trimAt: 20)
+        #expect(c2[0].endTime == 11.5)
+    }
+
+    @Test("a clear event closes via trimAt; expired emits with the decoder end at EOF")
+    func clearAndExpiry() {
+        var state = SubtitleOCRPendingState()
+        _ = state.consume(eventPts: 10, cues: [imageCue(1, 10, 15)], trimAt: nil)
+        let cleared = state.consume(eventPts: 13, cues: [], trimAt: 13)
+        #expect(cleared[0].endTime == 13)
+        _ = state.consume(eventPts: 30, cues: [imageCue(2, 30, 35)], trimAt: nil)
+        #expect(state.expired(asOf: 36).isEmpty)          // margin not yet passed
+        let expired = state.expired(asOf: 38)             // 35 + 2s margin crossed, no successor
+        #expect(expired.map(\.id) == [2])
+        #expect(expired[0].endTime == 35)
+        #expect(state.expired(asOf: 60).isEmpty)          // emitted only once
+    }
+}
