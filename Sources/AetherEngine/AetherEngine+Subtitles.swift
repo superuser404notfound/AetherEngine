@@ -741,7 +741,10 @@ extension AetherEngine {
         externalNativeStoreFillTask = nil
         var jobs: [(url: URL, headers: [String: String], store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
-            guard let extID = entry.externalID,
+            // Phase D: OCR entries defer to the selection-time sidecar decode (OCR of a whole
+            // .sup at load would violate the selection gating).
+            guard !entry.needsOCR,
+                  let extID = entry.externalID,
                   let track = externalSubtitleRegistry[extID],
                   ordinal < session.nativeSubtitleCueStoresForSession.count else { continue }
             jobs.append((track.url,
@@ -824,6 +827,9 @@ extension AetherEngine {
                 self.sidecarASSHeader = result.assHeader
                 self.isLoadingSubtitles = false
                 // Native mov_text moov is declared at load; runtime sidecars drive only the host overlay (#55).
+                // Phase D: an external bitmap sidecar fills its OCR rendition store from THIS
+                // decode's image cues (no second download).
+                self.startSidecarOCRFillIfNeeded(externalTrackID: externalTrackID, cues: result.cues)
             }
         }
     }

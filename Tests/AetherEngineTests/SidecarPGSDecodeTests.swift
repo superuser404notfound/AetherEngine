@@ -34,4 +34,18 @@ struct SidecarPGSDecodeTests {
             lastStart = cue.startTime
         }
     }
+
+    @Test("OCR fill turns a .sup sidecar's image cues into non-empty text cues")
+    func supSidecarOCRFill() async throws {
+        guard FileManager.default.fileExists(atPath: fixtureURL.path) else { return }
+        let result = try await SubtitleDecoder.decodeFile(url: fixtureURL, httpHeaders: [:], preserveASSMarkup: false)
+        let store = NativeSubtitleCueStore()
+        SubtitleImageOCR.appendRecognized(cues: Array(result.cues.prefix(8)), language: "eng", to: store)
+        let recognized = store.snapshotCues()
+        #expect(!recognized.isEmpty)
+        for cue in recognized {
+            #expect(cue.text?.isEmpty == false)
+            #expect(cue.endTime > cue.startTime)
+        }
+    }
 }
