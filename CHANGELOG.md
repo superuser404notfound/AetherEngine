@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.4] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.4))
+
+### Fixed
+
+- **On an FFmpeg build without the configured bridge encoder (for example no `--enable-encoder=eac3`), a bridge-required audio codec played as silent video-only with no cascade to FLAC.** The audio route made a single `AudioBridge` attempt with the configured `audioBridgeMode` (default `.surroundCompat` = EAC3). When that mode's encoder was absent from the build, `AudioBridge.init` threw `.encoderNotFound` and the handler dropped straight to silent video-only, so every bridge-required codec (DTS, TrueHD, MP3, Opus, Vorbis, PCM, MP2, LATM-AAC) came up with no audio and the only signal was one log line. The route now cascades: it tries the configured mode and, only on a missing-encoder error, falls through to the other mode's encoder (EAC3 <-> FLAC) before any video-only fallback, and emits a loud ERROR rather than a quiet info line when no bridge encoder is available. Every other init failure is source-specific and stops immediately without a pointless retry. No behavior change when the configured encoder is present: the first attempt succeeds exactly as before. Also fixes a routing log line that hardcoded "FLAC re-encode" regardless of the configured mode, and a stale doc-comment. Reported and hardware-verified by a downstream integrator (Apple TV 4K, DTS 5.1 and TrueHD Atmos over network, audio plays via the FLAC bridge). Covered by `Issue165BridgeModeCascadeTests`.
+
 ## [5.15.3] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.3))
