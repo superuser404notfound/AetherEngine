@@ -895,6 +895,9 @@ extension AetherEngine {
             self?.publishLiveWindow(edgeSessionTime: edge)
         }
         self.softwareHost = host
+        // SW-PiP: publish the bridge once the session owns its layer (the layer object is stable for
+        // the session; the host attaches it to the view and, on PiP start, to the system window).
+        softwarePiPSource = SoftwarePiPSource(layer: host.displayLayer, isLive: isLive, engine: self)
         // #131: no demuxable CC track on the SW path either: arm an A53 tap fed by decoded-frame
         // side data. Same lazy synthetic-track surfacing as the producer path.
         // Same synthetic-entry exclusion as setupClosedCaptionTapIfNeeded (via `demuxableClosedCaptionTrack`):

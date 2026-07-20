@@ -240,6 +240,9 @@ public final class AetherEngine: ObservableObject {
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
     /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
     var pendingInPlaceItemHandover = false
+    /// SW-PiP bridge, the software-path analog of `currentAVPlayer`: set when a SW session has its
+    /// display layer, nil on teardown. Hosts build their sample-buffer PiP ContentSource from it.
+    @Published public internal(set) var softwarePiPSource: SoftwarePiPSource?
     #if os(iOS) || os(tvOS)
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
@@ -274,6 +277,20 @@ public final class AetherEngine: ObservableObject {
     /// keeps the old item attached through the load gap and swaps in place once the new master is ready.
     nonisolated static func shouldHandOverItemInPlace(pipActive: Bool, priorBackendWasNative: Bool) -> Bool {
         pipActive && priorBackendWasNative
+    }
+
+    /// SW-PiP: playable range for the sample-buffer PiP UI on the PTS axis of the enqueued frames
+    /// (the source axis; sourceTime = currentTime + container start offset). Live or unknown
+    /// duration reports indefinite so the window shows live UI instead of a bogus scrubber.
+    nonisolated static func softwarePiPTimeRange(isLive: Bool, sourceTime: Double, currentTime: Double, duration: Double) -> CMTimeRange {
+        guard !isLive, duration.isFinite, duration > 0 else {
+            return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        }
+        let sourceStart = sourceTime - currentTime
+        return CMTimeRange(
+            start: CMTime(seconds: sourceStart, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
     }
 
     /// What to do with the active video pipeline when the app enters the background. Pure so the lifecycle
@@ -2948,6 +2965,7 @@ public final class AetherEngine: ObservableObject {
 
         softwareCancellables.removeAll()
         softwareHost?.stop()
+        softwarePiPSource = nil
         softwareHost = nil
 
         // Clear audioHost so music<->video handoffs start from a clean slate; the engine is a process-wide
