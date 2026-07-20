@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.12.0] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.12.0))
+
+### Added
+
+- **A native->native load while a PiP window is active now hands the AVPlayerItem over in place, so system PiP survives next-episode transitions.** The load teardown dropped the running item to nil for the whole load gap (probe, demuxer, fresh loopback session), and the system closes a PiP window whose source layer's player loses its item; the #93 in-PiP recovery reload had already established the same failure mode and the `inPlaceSwap` fix for it. `load()` now computes `shouldHandOverItemInPlace(pipActive:priorBackendWasNative:)`, `stopInternal` defers the item detach (`keepCurrentItem`), and the loopback host.load callsite consumes the armed handover as `inPlaceSwap`: the old item keeps playing until `replaceCurrentItem` swaps in the ready master, transport intent latched. Audio-switch and recovery reloads keep their existing contracts (consume-and-reset). Covered by `PiPItemHandoverTests`. Host adoption: Sodalite re-enables next-episode auto-advance inside the tvOS PiP window. (#158)
+
 ## [5.11.0] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.11.0))
