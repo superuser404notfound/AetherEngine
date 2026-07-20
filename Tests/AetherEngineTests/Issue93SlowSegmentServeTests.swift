@@ -22,9 +22,18 @@ struct Issue93SlowSegmentServeTests {
     @Test("signal fires once after the threshold while the serve is still running")
     func signalFiresAfterThreshold() {
         let fired = Counter()
-        let signal = SlowServeSignal(thresholdSeconds: 0.05) { fired.bump() }
-        Thread.sleep(forTimeInterval: 0.3)
+        // Gate on the callback actually firing instead of asserting after a fixed sleep: on a
+        // loaded CI runner the 0.05 s timer thread can be scheduled well past a fixed 0.3 s window
+        // (it flaked there). Same semaphore-gate discipline as completeIsABarrier below; the
+        // generous backstop only elapses on a genuine no-fire, otherwise it returns on the fire.
+        let didFire = DispatchSemaphore(value: 0)
+        let signal = SlowServeSignal(thresholdSeconds: 0.05) {
+            fired.bump()
+            didFire.signal()
+        }
+        let armed = didFire.wait(timeout: .now() + 15) == .success
         signal.complete()
+        #expect(armed)
         #expect(fired.value == 1)
     }
 
