@@ -1038,7 +1038,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 EngineLog.emit(
                     isHEAAC
                         ? "[HLSVideoEngine] audio: HE-AAC (profile=\(acpForHE.profile) frameSize=\(acpForHE.frame_size)), ADTS stream-copy would mis-signal SBR, bridging instead"
-                        : "[HLSVideoEngine] audio: codec=\(compat) (bridge required), decoding + FLAC re-encode",
+                        : "[HLSVideoEngine] audio: codec=\(compat) (bridge required), decoding + \(audioBridgeMode == .surroundCompat ? "EAC3" : "FLAC") re-encode",
                     category: .session
                 )
             } else if compat != .unsupported {

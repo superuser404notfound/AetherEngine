@@ -62,6 +62,18 @@ extension HLSVideoEngine {
         }
     }
 
+    /// #165: ordered bridge-encoder cascade. The configured mode is attempted first; if its encoder is
+    /// absent from the FFmpeg build (`AudioBridgeError.encoderNotFound`), fall through to the other mode's
+    /// encoder rather than dropping to silent video-only. Both modes decode everywhere on Apple devices
+    /// (EAC3 -> HDMI bitstream, FLAC -> LPCM), so either is a valid rescue; the only loss is the configured
+    /// mode's channel/quality trade-off. Deterministic and a full permutation (each mode appears once).
+    static func bridgeModeCascade(configured: AudioBridgeMode) -> [AudioBridgeMode] {
+        switch configured {
+        case .surroundCompat: return [.surroundCompat, .lossless]
+        case .lossless:       return [.lossless, .surroundCompat]
+        }
+    }
+
     /// Guards `audioSourceStreamIndexOverride` against stale picker selections from a previous title.
     static func isAudioStream(demuxer: Demuxer, index: Int32) -> Bool {
         guard index >= 0, let stream = demuxer.stream(at: index) else {
@@ -70,7 +82,9 @@ extension HLSVideoEngine {
         return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
     }
 
-    /// Stream-copy -> FLAC-bridge -> video-only cascade. Covers EAC3-from-MKV where codecpar lacks the `dec3` extradata the mp4 muxer needs to write the audio sample-entry.
+    /// Audio routing cascade: stream-copy -> configured bridge mode -> alternate bridge mode (when the
+    /// configured encoder is absent from the build, #165) -> video-only. Covers EAC3-from-MKV where codecpar
+    /// lacks the `dec3` extradata the mp4 muxer needs to write the audio sample-entry.
     func buildProducerWithAudioCascade(
         preferBridge: Bool,
         streamCopyAudio: HLSSegmentProducer.AudioConfig?,
@@ -161,52 +175,82 @@ extension HLSVideoEngine {
         }
 
         if let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0 {
-            do {
-                let bridge = try AudioBridge(
-                    srcCodecpar: audioStream.pointee.codecpar,
-                    srcTimeBase: audioStream.pointee.time_base,
-                    mode: audioBridgeMode
-                )
-                if let cp = bridge.encoderCodecpar {
-                    let cfg = HLSSegmentProducer.AudioConfig(
-                        codecpar: cp,
-                        timeBase: bridge.encoderTimeBase,
-                        sourceStreamIndex: sourceAudioStreamIndex,
-                        inputTimeBase: bridge.encoderTimeBase,
-                        sourceTimeBase: audioStream.pointee.time_base,
-                        bridge: bridge
+            // #165: cascade across bridge modes. The configured mode's encoder can be absent from the
+            // FFmpeg build (custom builds without --enable-encoder=eac3); AudioBridge.init then throws
+            // .encoderNotFound. Rather than dropping to silent video-only after one attempt, try the other
+            // mode's encoder. Only encoder-absence cascades (retrying a different encoder can help); every
+            // other init failure is source-specific and re-attempting is pointless, so it stops immediately.
+            let cascade = Self.bridgeModeCascade(configured: audioBridgeMode)
+            attempts: for (attemptIndex, bridgeModeAttempt) in cascade.enumerated() {
+                let isLastAttempt = attemptIndex == cascade.count - 1
+                let bridge: AudioBridge
+                do {
+                    bridge = try AudioBridge(
+                        srcCodecpar: audioStream.pointee.codecpar,
+                        srcTimeBase: audioStream.pointee.time_base,
+                        mode: bridgeModeAttempt
                     )
-                    self.savedAudioConfig = cfg
-                    self.audioBridge = bridge
-                    do {
-                        let prod = try makeProducer(baseIndex: initialProducerBaseIndex)
-                        let (hlsCodec, pipelineLabel): (String, String)
-                        switch audioBridgeMode {
-                        case .surroundCompat:
-                            hlsCodec = "ec-3"
-                            pipelineLabel = "\(sourceCodecLabel) → EAC3 5.1 bridge"
-                        case .lossless:
-                            hlsCodec = "fLaC"
-                            pipelineLabel = "\(sourceCodecLabel) → FLAC bridge"
-                        }
-                        audioHLSCodecs = hlsCodec
-                        self.audioPipelineDescription = pipelineLabel
-                        return prod
-                    } catch {
+                } catch AudioBridge.AudioBridgeError.encoderNotFound where !isLastAttempt {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] \(bridgeModeAttempt.rawValue) bridge encoder absent from this FFmpeg build, "
+                        + "cascading to \(cascade[attemptIndex + 1].rawValue)",
+                        category: .session
+                    )
+                    continue attempts
+                } catch {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] ERROR: AudioBridge init failed (\(error)), no working bridge encoder, "
+                        + "falling back to SILENT video-only",
+                        category: .session
+                    )
+                    break attempts
+                }
+
+                guard let cp = bridge.encoderCodecpar else {
+                    bridge.close()
+                    break attempts
+                }
+                let cfg = HLSSegmentProducer.AudioConfig(
+                    codecpar: cp,
+                    timeBase: bridge.encoderTimeBase,
+                    sourceStreamIndex: sourceAudioStreamIndex,
+                    inputTimeBase: bridge.encoderTimeBase,
+                    sourceTimeBase: audioStream.pointee.time_base,
+                    bridge: bridge
+                )
+                self.savedAudioConfig = cfg
+                self.audioBridge = bridge
+                do {
+                    let prod = try makeProducer(baseIndex: initialProducerBaseIndex)
+                    let (hlsCodec, pipelineLabel): (String, String)
+                    switch bridgeModeAttempt {
+                    case .surroundCompat:
+                        hlsCodec = "ec-3"
+                        pipelineLabel = "\(sourceCodecLabel) → EAC3 5.1 bridge"
+                    case .lossless:
+                        hlsCodec = "fLaC"
+                        pipelineLabel = "\(sourceCodecLabel) → FLAC bridge"
+                    }
+                    audioHLSCodecs = hlsCodec
+                    self.audioPipelineDescription = pipelineLabel
+                    if bridgeModeAttempt != audioBridgeMode {
                         EngineLog.emit(
-                            "[HLSVideoEngine] \(audioBridgeMode.rawValue) bridge header write failed (\(error)), falling back to video-only",
+                            "[HLSVideoEngine] audio bridge cascaded \(audioBridgeMode.rawValue) → "
+                            + "\(bridgeModeAttempt.rawValue) (configured encoder absent); \(pipelineLabel)",
                             category: .session
                         )
-                        self.savedAudioConfig = nil
-                        self.audioBridge = nil
-                        bridge.close()
                     }
+                    return prod
+                } catch {
+                    EngineLog.emit(
+                        "[HLSVideoEngine] \(bridgeModeAttempt.rawValue) bridge header write failed (\(error)), falling back to video-only",
+                        category: .session
+                    )
+                    self.savedAudioConfig = nil
+                    self.audioBridge = nil
+                    bridge.close()
+                    break attempts
                 }
-            } catch {
-                EngineLog.emit(
-                    "[HLSVideoEngine] AudioBridge init failed (\(error)), falling back to video-only",
-                    category: .session
-                )
             }
         }
 
