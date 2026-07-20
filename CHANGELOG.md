@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.3] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.3))
+
+### Fixed
+
+- **Scrubbing or seeking a VOD to the very end left the engine reporting `.playing` while AVPlayer sat frozen on the final frame, and `play()` / `togglePlayPause()` could not resume.** A programmatic `seek(to: duration)` never fires `AVPlayerItem.didPlayToEndTime` (that notification is for playback reaching the end on its own), so the seek settled to a phantom `.playing` and, because `AVPlayer.play()` at end-of-media is a no-op, the transport controls stalled with no way to restart. A VOD scrubbed to its final frame now parks at `.paused` (honest, non-terminal, so the scrubber stays live and can scrub back), and `play()` / `togglePlayPause()` rewind to the start before resuming when the playhead is parked at the end. The terminal `.ended` state (organic completion, #63) is deliberately unchanged: it drives the host's end-of-playback handling (mark-watched / autoplay-next / dismiss), so a manual scrub to the end must not trigger it, and a play press racing an end card must not silently restart a finished session. Reported by jihongboo. Covered by `SeekToEndOfMediaTests`.
+
 ## [5.15.2] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.2))
