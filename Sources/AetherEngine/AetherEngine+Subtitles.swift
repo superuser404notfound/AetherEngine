@@ -1349,6 +1349,22 @@ extension AetherEngine {
         table.firstIndex { $0.sourceStreamIndex == id || $0.externalID == id }
     }
 
+    /// Phase D: bitmap tracks eligible for an OCR-fed rendition. VOD only; embedded entries carry
+    /// their source stream index (the worker's packet-store key), external .sup entries their
+    /// synthetic id (the sidecar OCR fill key).
+    nonisolated static func bitmapOCRSubtitleEntries(
+        from tracks: [TrackInfo], isLive: Bool
+    ) -> [NativeSubtitleTrackEntry] {
+        guard !isLive else { return [] }
+        return tracks.filter { isBitmapSubtitleCodec($0.codec) }.map { track in
+            NativeSubtitleTrackEntry(sourceStreamIndex: track.isExternal ? nil : track.id,
+                                     externalID: track.isExternal ? track.id : nil,
+                                     language: track.language,
+                                     isForced: track.isForced,
+                                     needsOCR: true)
+        }
+    }
+
     /// Rendition metadata for the master's EXT-X-MEDIA tags. HLS requires NAME to be unique within
     /// a group; duplicate names made AVFoundation collapse same-language renditions into ONE
     /// legible option (device: three declared, groupOpts=2, and the second German track ended up

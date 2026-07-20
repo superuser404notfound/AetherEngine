@@ -809,6 +809,9 @@ public final class AetherEngine: ObservableObject {
         /// Container FORCED disposition; declared as FORCED=YES on the WebVTT rendition so
         /// AVFoundation distinguishes same-language forced/full pairs.
         var isForced: Bool = false
+        /// Phase D: bitmap (PGS/DVB/DVD) entry whose store is filled by the OCR worker /
+        /// sidecar OCR fill, not by the pump tap or the side readers.
+        var needsOCR: Bool = false
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 

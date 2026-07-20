@@ -462,7 +462,14 @@ extension AetherEngine {
         // Rendition metadata built ONCE (unique NAMEs + FORCED); the published track list and the
         // master's EXT-X-MEDIA tags must agree, and duplicate names collapse AVFoundation's
         // legible options (device: 3 declared renditions, 2 options, wrong-language selection).
-        let renditionInfos = Self.nativeSubtitleRenditionInfos(for: nativeSubtitleTrackTable)
+        // Phase D: bitmap tracks (PGS/DVB/DVD) become OCR-fed renditions, appended AFTER the
+        // text and CC entries so existing ordinals stay byte-stable. Unique NAMEs are computed
+        // over text+bitmap together: a same-language pair must get the numbered suffix, or
+        // AVFoundation collapses the legible options.
+        let bitmapEntries = Self.bitmapOCRSubtitleEntries(from: subtitleTracks, isLive: loadedOptions.isLive)
+        let combinedInfos = Self.nativeSubtitleRenditionInfos(for: nativeSubtitleTrackTable + bitmapEntries)
+        let renditionInfos = Array(combinedInfos.prefix(nativeSubtitleTrackTable.count))
+        let bitmapInfos = Array(combinedInfos.suffix(bitmapEntries.count))
         nativeSubtitleTracks = renditionInfos.enumerated().map { ordinal, info in
             NativeSubtitleTrack(ordinal: ordinal, language: info.language, displayName: info.name)
         }
@@ -473,13 +480,15 @@ extension AetherEngine {
         // after a no-reprobe reload (e.g. an audio switch), a plain codec match here would flip
         // this true and arm a #98 rendition bound to nonexistent stream 99608.
         let hasCC608 = demuxableClosedCaptionTrack != nil
-        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles && (hasTextSubtitleTrack || hasCC608)
+        let hasBitmapOCRTrack = !bitmapEntries.isEmpty
+        session.enableNativeSubtitleTrackForSession = loadedOptions.prepareNativeSubtitles
+            && (hasTextSubtitleTrack || hasCC608 || hasBitmapOCRTrack)
         // Sodalite#32 Phase 2: tap decoders honor the host's markup preference (overlay renders styled
         // ASS; the WebVTT rendition strips at serve). #112 rework: the overlay itself is fed by the
         // packet-store drainer, not by tap-event forwarding.
         session.preserveASSMarkupForSubtitleTap = loadedOptions.preserveASSMarkup
         session.teletextPageForSubtitleTap = loadedOptions.teletextPage
-        EngineLog.emit("[AetherEngine] native subtitles: prepare=\(loadedOptions.prepareNativeSubtitles) eager=\(loadedOptions.eagerNativeSubtitleReaders) textTracks=\(nativeSubtitleTrackTable.count) enable=\(session.enableNativeSubtitleTrackForSession)", category: .engine)
+        EngineLog.emit("[AetherEngine] native subtitles: prepare=\(loadedOptions.prepareNativeSubtitles) eager=\(loadedOptions.eagerNativeSubtitleReaders) textTracks=\(nativeSubtitleTrackTable.count) bitmapOCR=\(bitmapEntries.count) enable=\(session.enableNativeSubtitleTrackForSession)", category: .engine)
 
         // #77: arm the in-band CC tap before start() so the first producer keeps the CC stream.
         setupClosedCaptionTapIfNeeded(session: session)
@@ -487,7 +496,8 @@ extension AetherEngine {
         // #15: create the native subtitle cue stores BEFORE start() so the VideoSegmentProvider receives the
         // references at init (the WebVTT rendition master tags + /subs endpoints read them; readers fill them
         // lazily on selection). The shift is applied after start() once the playlist shift is known.
-        if session.enableNativeSubtitleTrackForSession, (!nativeSubtitleTrackTable.isEmpty || hasCC608) {
+        if session.enableNativeSubtitleTrackForSession,
+           (!nativeSubtitleTrackTable.isEmpty || hasCC608 || hasBitmapOCRTrack) {
             session.nativeSubtitleCueStoresForSession = nativeSubtitleTrackTable.map { _ in NativeSubtitleCueStore() }
             session.nativeSubtitleLanguagesForSession = nativeSubtitleTrackTable.map { $0.language }
             session.nativeSubtitleRenditionInfosForSession = renditionInfos
@@ -525,6 +535,20 @@ extension AetherEngine {
                     NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
                 nativeSubtitleTracks.append(
                     NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName))
+            }
+            // Phase D: append the bitmap OCR renditions last. Stores stay empty until the OCR
+            // worker (embedded) or the sidecar OCR fill (external .sup) recognizes cues. The tap
+            // index is nil ON PURPOSE: the pump tap decodes inline on the pump thread, where
+            // bitmap decode + OCR must never run; the worker reads the packet store instead.
+            for (i, entry) in bitmapEntries.enumerated() {
+                let ordinal = session.nativeSubtitleCueStoresForSession.count
+                session.nativeSubtitleCueStoresForSession.append(NativeSubtitleCueStore())
+                session.nativeSubtitleLanguagesForSession.append(entry.language)
+                session.nativeSubtitleRenditionInfosForSession.append(bitmapInfos[i])
+                session.nativeSubtitleSourceStreamIndicesForSession.append(nil)
+                nativeSubtitleTrackTable.append(entry)
+                nativeSubtitleTracks.append(NativeSubtitleTrack(
+                    ordinal: ordinal, language: entry.language, displayName: bitmapInfos[i].name))
             }
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
