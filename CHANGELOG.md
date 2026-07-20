@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.14.0] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.14.0))
+
+### Added
+
+- **Subtitles render inside sample-buffer PiP windows: the software path composites active cues into decoded frames while `pictureInPictureActive`.** The system PiP window renders only the display layer, so host-drawn overlays never reach it; a new `SubtitleFrameCompositor` caches one overlay per cue-set change (text cues in a readable default look via CoreText, bitmap cues width-aligned center-anchored per their PGS/DVB canvas) and GPU-composites it into a pooled buffer of the source pixel format inside the renderer's flush path. Outside PiP nothing changes (fullscreen subtitle drawing stays with the host); any compositing failure passes the original frame through. Covered by `SubtitleFrameCompositorTests` including a synthetic-buffer integration test.
+
 ## [5.13.0] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.13.0))

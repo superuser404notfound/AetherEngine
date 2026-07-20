@@ -31,6 +31,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     private(set) var displayLayer: AVSampleBufferDisplayLayer
 
+    /// SW-PiP Phase C: composites active subtitle cues into frames while PiP is active (the system
+    /// window renders only this layer, the host overlay cannot reach it).
+    let subtitleCompositor = SubtitleFrameCompositor()
+
     /// B-frame reorder buffer (4 frames): collects decoder output, flushes to display layer in ascending PTS order. Third tuple slot carries per-frame HDR10+ T.35 SEI bytes, paired through the reorder to kCMSampleAttachmentKey_HDR10PlusPerFrameData.
     private let reorderLock = NSLock()
     private var reorderBuffer: [(CVPixelBuffer, CMTime, Data?)] = []
@@ -194,7 +198,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
     // MARK: - Internal
 
     private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?) {
-        guard let sampleBuffer = createSampleBuffer(from: pixelBuffer, pts: pts) else {
+        let outputBuffer = subtitleCompositor.composite(pixelBuffer, ptsSeconds: pts.seconds)
+        guard let sampleBuffer = createSampleBuffer(from: outputBuffer, pts: pts) else {
             return
         }
         // HDR10+ attachment overrides any payload baked into the bitstream (VT may strip per-frame SEI on decode).

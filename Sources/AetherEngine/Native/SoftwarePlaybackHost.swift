@@ -59,6 +59,11 @@ final class SoftwarePlaybackHost {
     /// point it uses for `AVPlayerLayer`.
     var displayLayer: AVSampleBufferDisplayLayer { renderer.displayLayer }
 
+    /// SW-PiP Phase C: engine-fed cue mirror + PiP gate for the renderer's frame compositor.
+    func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool) {
+        renderer.subtitleCompositor.update(cues: cues, enabled: enabled)
+    }
+
     // MARK: - Internals
 
     private let renderer: SampleBufferRenderer
@@ -674,6 +679,7 @@ final class SoftwarePlaybackHost {
         isPlaying = false
         timeTimer?.cancel()
         timeTimer = nil
+        renderer.subtitleCompositor.reset()
 
         dvrRing?.close()
         dvrRing = nil
