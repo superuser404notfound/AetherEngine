@@ -57,4 +57,33 @@ struct NativeSubtitleRenditionTests {
         #expect(AetherEngine.nativeOptionIndex(forLanguage: "jpn", rank: 0, optionLanguageTags: tags) == nil)
         #expect(AetherEngine.nativeOptionIndex(forLanguage: nil, rank: 0, optionLanguageTags: tags) == nil)
     }
+
+    // MARK: - Phase D: bitmap OCR renditions
+
+    @Test("bitmap tracks become needsOCR entries; text tracks and live sessions are excluded")
+    func bitmapOCREntries() {
+        let tracks = [
+            TrackInfo(id: 2, name: "English", codec: "subrip", language: "en", isDefault: false),
+            TrackInfo(id: 3, name: "German (PGS)", codec: "pgssub", language: "de", isDefault: false, isForced: true),
+            TrackInfo(id: 900_001, name: "External PGS", codec: "pgssub", language: "en", isDefault: false, isExternal: true),
+        ]
+        let entries = AetherEngine.bitmapOCRSubtitleEntries(from: tracks, isLive: false)
+        #expect(entries.count == 2)
+        #expect(entries[0].sourceStreamIndex == 3)
+        #expect(entries[0].externalID == nil)
+        #expect(entries[0].needsOCR)
+        #expect(entries[0].isForced)
+        #expect(entries[1].sourceStreamIndex == nil)
+        #expect(entries[1].externalID == 900_001)
+        #expect(AetherEngine.bitmapOCRSubtitleEntries(from: tracks, isLive: true).isEmpty)
+    }
+
+    @Test("combined rendition names keep text names stable and suffix same-language bitmap entries")
+    func combinedRenditionNames() {
+        let text = AetherEngine.NativeSubtitleTrackEntry(sourceStreamIndex: 2, language: "de")
+        let bitmap = AetherEngine.NativeSubtitleTrackEntry(sourceStreamIndex: 3, language: "de", needsOCR: true)
+        let infos = AetherEngine.nativeSubtitleRenditionInfos(for: [text, bitmap])
+        #expect(infos[0].name != infos[1].name)
+        #expect(infos[1].name.hasPrefix(infos[0].name))
+    }
 }

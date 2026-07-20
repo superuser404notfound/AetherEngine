@@ -40,6 +40,9 @@ extension AetherEngine {
     /// `sourceTime`; the preferred-subtitle-language auto-select at load passes the resume position so the side
     /// demuxer seeks to the playhead instead of burst-reading from byte 0 on a resumed mid-file load (#73).
     func selectSubtitleTrack(index: Int, startAt: Double) {
+        // Phase D: every selection change disarms the OCR worker first; the embedded bitmap
+        // branch below re-arms it (cursors persist, so a reselect resumes coverage).
+        cancelSubtitleOCRWorker()
         // #88: external ids route onto the sidecar decode path; no side demuxer, no loadedURL needed.
         if let external = externalSubtitleRegistry[index] {
             selectExternalSubtitleTrack(id: index, track: external)
@@ -82,6 +85,12 @@ extension AetherEngine {
         subtitleDrainTargets[.primary] = Int32(index)
         subtitleDrainDecoders[.primary] = nil
         subtitleDrainCursors[.primary] = nil
+        // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition.
+        // Armed BEFORE the prefetcher start so the raised lead is picked up.
+        if let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
+           nativeSubtitleTrackTable[ordinal].needsOCR {
+            startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(index))
+        }
         startSubtitleDrainer()
         startSubtitleForwardPrefetcher(startAt: startAt)   // #151
         isLoadingSubtitles = false
@@ -190,7 +199,7 @@ extension AetherEngine {
     }
 
     /// Build a fresh overlay decoder for the stream on whichever host owns the session demuxer.
-    private func makeSubtitleDrainDecoder(streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
+    func makeSubtitleDrainDecoder(streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
         nativeVideoSession?.makeOverlayDecoder(streamIndex: streamIndex)
             ?? softwareHost?.makeOverlayDecoder(streamIndex: streamIndex)
     }
@@ -346,12 +355,16 @@ extension AetherEngine {
         let titleID = activeDiscTitleID
         let anchor = max(0, startAt ?? sourceTime)
         let reader = customClone
+        // Phase D: while the OCR worker is armed the prefetcher must out-run the worker's
+        // 240 s window, or the packet store never holds what the worker wants to decode.
+        let lead = subtitleOCRArmedOrdinal != nil
+            ? Self.subtitleOCRPrefetchLeadSeconds : Self.subtitleDrainLeadSeconds
         subtitleForwardPrefetchTask = Task.detached(priority: .utility) { [weak self] in
             await self?.runSubtitleForwardPrefetchSession(
                 url: url, reader: reader, formatHint: formatHint, headers: headers,
                 startAt: anchor, callerProbesize: probesize,
                 callerMaxAnalyzeDuration: maxAnalyzeDuration,
-                selectTitleID: titleID, store: store)
+                selectTitleID: titleID, store: store, leadSeconds: lead)
         }
     }
 
@@ -371,7 +384,7 @@ extension AetherEngine {
     nonisolated private func runSubtitleForwardPrefetchSession(
         url: URL, reader: IOReader?, formatHint: String?, headers: [String: String],
         startAt: Double, callerProbesize: Int64?, callerMaxAnalyzeDuration: Int64?,
-        selectTitleID: Int?, store: SubtitlePacketStore
+        selectTitleID: Int?, store: SubtitlePacketStore, leadSeconds: Double
     ) async {
         let demuxer = Demuxer()
         let openProfile = DemuxerOpenProfile.subtitleSideDemuxer(
@@ -451,12 +464,12 @@ extension AetherEngine {
 
         EngineLog.emit(
             "[AetherEngine] #151 forward prefetch started: streams=\(streams.sorted()) "
-            + "startAt=\(String(format: "%.2f", startAt))s lead=\(Self.subtitleDrainLeadSeconds)s",
+            + "startAt=\(String(format: "%.2f", startAt))s lead=\(leadSeconds)s",
             category: .engine)
         let harvested = await SubtitleForwardPrefetcher.run(
             demuxer: demuxer, store: store,
             streamIndices: streams, assemblyIndices: assembly,
-            leadSeconds: Self.subtitleDrainLeadSeconds,
+            leadSeconds: leadSeconds,
             parkPollNanoseconds: Self.subtitleForwardPrefetchParkPollNanoseconds,
             playhead: { [weak self] in
                 await MainActor.run(body: { [weak self] in self?.sourceTime })
@@ -470,7 +483,7 @@ extension AetherEngine {
     /// time base carrying the harvested seconds; flags are restored for bitmap acquisition
     /// points. Runs on the MainActor tick; subtitle decode is a parse plus, for bitmap, a
     /// bounded blit, the same work the side reader did per packet.
-    nonisolated private static func decodeStoredSubtitlePacket(
+    nonisolated static func decodeStoredSubtitlePacket(
         _ entry: StoredSubtitlePacket,
         with decoder: EmbeddedSubtitleDecoder
     ) -> EmbeddedSubtitleDecoder.SubtitleEvent? {
@@ -690,6 +703,9 @@ extension AetherEngine {
         let wantsStyledASS = loadedOptions.preserveASSMarkup && codec == "ass"
         if !wantsStyledASS,
            let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: id, in: nativeSubtitleTrackTable),
+           // Phase D: an OCR store holds recognized TEXT; the bitmap overlay must re-decode
+           // the sidecar for its images, never backfill from that store.
+           !nativeSubtitleTrackTable[ordinal].needsOCR,
            let store = nativeStore(atOrdinal: ordinal),
            store.isFinished, store.cueCount > 0 {
             cancelSidecarTask()
@@ -708,7 +724,7 @@ extension AetherEngine {
     }
 
     /// Store lookup for the external backfill: test-hook override first, else the live session's stores.
-    private func nativeStore(atOrdinal ordinal: Int) -> NativeSubtitleCueStore? {
+    func nativeStore(atOrdinal ordinal: Int) -> NativeSubtitleCueStore? {
         #if DEBUG
         if let hooked = testHookNativeStores, ordinal < hooked.count { return hooked[ordinal] }
         #endif
@@ -725,7 +741,10 @@ extension AetherEngine {
         externalNativeStoreFillTask = nil
         var jobs: [(url: URL, headers: [String: String], store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
-            guard let extID = entry.externalID,
+            // Phase D: OCR entries defer to the selection-time sidecar decode (OCR of a whole
+            // .sup at load would violate the selection gating).
+            guard !entry.needsOCR,
+                  let extID = entry.externalID,
                   let track = externalSubtitleRegistry[extID],
                   ordinal < session.nativeSubtitleCueStoresForSession.count else { continue }
             jobs.append((track.url,
@@ -808,6 +827,9 @@ extension AetherEngine {
                 self.sidecarASSHeader = result.assHeader
                 self.isLoadingSubtitles = false
                 // Native mov_text moov is declared at load; runtime sidecars drive only the host overlay (#55).
+                // Phase D: an external bitmap sidecar fills its OCR rendition store from THIS
+                // decode's image cues (no second download).
+                self.startSidecarOCRFillIfNeeded(externalTrackID: externalTrackID, cues: result.cues)
             }
         }
     }
@@ -869,6 +891,7 @@ extension AetherEngine {
             }
         }
         cancelSidecarTask()
+        cancelSubtitleOCRWorker()   // Phase D: subtitles off = worker off (cursors persist)
         clearSubtitleDrainTarget(channel: .primary)   // #112 rework
         activeEmbeddedSubtitleStreamIndex = -1
         activeSubtitleTrackIndex = nil
@@ -930,7 +953,9 @@ extension AetherEngine {
         nativeSubtitleReadersRunToEOF = readToEOF
         var pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
-            guard ordinal < stores.count, let src = entry.sourceStreamIndex else { continue }
+            // Phase D: OCR ordinals are worker-fed; the reader would open a demuxer only to
+            // skip their bitmap routes.
+            guard ordinal < stores.count, let src = entry.sourceStreamIndex, !entry.needsOCR else { continue }
             pairs.append((Int32(src), stores[ordinal]))
         }
         guard !pairs.isEmpty else { return }
@@ -1347,6 +1372,22 @@ extension AetherEngine {
     /// sourceStreamIndex, external ids match externalID.
     static func nativeSubtitleOrdinal(forActiveTrack id: Int, in table: [NativeSubtitleTrackEntry]) -> Int? {
         table.firstIndex { $0.sourceStreamIndex == id || $0.externalID == id }
+    }
+
+    /// Phase D: bitmap tracks eligible for an OCR-fed rendition. VOD only; embedded entries carry
+    /// their source stream index (the worker's packet-store key), external .sup entries their
+    /// synthetic id (the sidecar OCR fill key).
+    nonisolated static func bitmapOCRSubtitleEntries(
+        from tracks: [TrackInfo], isLive: Bool
+    ) -> [NativeSubtitleTrackEntry] {
+        guard !isLive else { return [] }
+        return tracks.filter { isBitmapSubtitleCodec($0.codec) }.map { track in
+            NativeSubtitleTrackEntry(sourceStreamIndex: track.isExternal ? nil : track.id,
+                                     externalID: track.isExternal ? track.id : nil,
+                                     language: track.language,
+                                     isForced: track.isForced,
+                                     needsOCR: true)
+        }
     }
 
     /// Rendition metadata for the master's EXT-X-MEDIA tags. HLS requires NAME to be unique within
