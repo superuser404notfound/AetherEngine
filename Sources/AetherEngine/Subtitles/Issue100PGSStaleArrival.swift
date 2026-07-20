@@ -43,6 +43,12 @@ struct PGSStaleArrivalGate {
 
     var hasHeld: Bool { !heldCues.isEmpty || !reconstructionCandidates.isEmpty }
 
+    /// #143 follow-up: a reconstruction pass has seeded an active-line candidate that has not yet
+    /// been emitted. The drain uses this to decide the pass can be finalized when no successor is
+    /// stored ahead; without a candidate a true gap (nothing decoded behind the playhead) must be
+    /// left alone, not finalized into an empty emit.
+    var hasReconstructionCandidate: Bool { !reconstructionCandidates.isEmpty }
+
     /// Resolve the held event against its successor's trim point. Returns the cues to publish
     /// NOW: the held cues trimmed to `trimAt`, filtered to those whose true window covers the
     /// playhead. History that ended before the playhead is dropped.
@@ -127,6 +133,24 @@ struct PGSStaleArrivalGate {
                                    endTime: min(line.endTime, successorStart ?? line.endTime), body: line.body))
         }
         return out
+    }
+
+    /// #143 follow-up: end a reconstruction pass that never saw a composition at/after the playhead.
+    /// `admitDuringReconstruction` flushes the candidate only when an at/after-playhead composition
+    /// decodes (the pass-end trigger). A seek landing whose set is the newest composition in the drain
+    /// window - the file's last line, or sparse/forced dialogue with the next line beyond the lead -
+    /// has no such trigger, so the candidate would stay held and the overlay dark (tens of seconds, or
+    /// forever at EOF). The drain calls this once it has confirmed a candidate is seeded and no
+    /// successor is stored ahead in the lead window: the candidate active-line group (all same-start
+    /// objects covering the playhead, #146) is emitted once and the pass ends. A candidate an author
+    /// cleared before the playhead (trimmed by `resolveHeld`) no longer covers it and is not emitted,
+    /// preserving the #143 no-resurrection invariant.
+    mutating func finalizeReconstruction(playhead: Double) -> [SubtitleCue] {
+        guard reconstructing else { return [] }
+        reconstructing = false
+        let active = reconstructionCandidates.filter { $0.startTime <= playhead && playhead < $0.endTime }
+        reconstructionCandidates = []
+        return active
     }
 
     /// Drop the hold without publishing (seek re-anchor, track switch, clear, stop).

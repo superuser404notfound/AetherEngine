@@ -134,4 +134,72 @@ struct Issue143PGSLandingLineTests {
                              isSelfContained: false, playhead: 100)
         #expect(out.map(\.id).sorted() == [2, 3])
     }
+
+    // MARK: - #143 follow-up: isolated landing line with no successor to end the pass
+    //
+    // cmcpherson274's 5.9.7 retest: the fix works for every landing shape that has a successor
+    // composition within the drain window, but when the landing set is the newest decodable
+    // composition and NO further composition exists within the ~60 s lead window, the line decodes
+    // (the candidate seeds) yet never publishes. admitDuringReconstruction only flushes on an
+    // at/after-playhead composition (the pass-end trigger); an isolated landing has none, so the
+    // candidate hangs held and the overlay stays dark (tens of seconds on sparse dialogue, forever
+    // at EOF, forced cues included). The drain now finalizes the pass once it confirms no successor
+    // is stored ahead.
+
+    @Test("isolated landing line (file's last composition) is emitted when the drain finalizes the pass")
+    func isolatedLandingFinalizes() {
+        var gate = PGSStaleArrivalGate()
+        gate.reconstructing = true
+        // Seek 165 into a 160->170 line that is the file's last composition. No successor ever
+        // decodes, so admitDuringReconstruction returns nothing; the candidate is seeded and held.
+        #expect(gate.admit(cues: [imageCue(id: 1, start: 160)], isPGS: true,
+                           isSelfContained: false, playhead: 165).isEmpty)
+        #expect(gate.hasReconstructionCandidate)
+        let out = gate.finalizeReconstruction(playhead: 165)
+        #expect(out.map(\.id) == [1])
+        #expect(gate.reconstructing == false)
+        #expect(!gate.hasHeld)
+    }
+
+    @Test("isolated exact-boundary landing (next composition beyond the lead window) still paints")
+    func isolatedBoundaryLandingFinalizes() {
+        var gate = PGSStaleArrivalGate()
+        gate.reconstructing = true
+        // Seek 30.0 exactly onto a 30->33 line whose next composition is 90 s away, outside the lead.
+        #expect(gate.admit(cues: [imageCue(id: 1, start: 30)], isPGS: true,
+                           isSelfContained: false, playhead: 30.3).isEmpty)
+        let out = gate.finalizeReconstruction(playhead: 30.3)
+        #expect(out.map(\.id) == [1])
+    }
+
+    @Test("finalize emits the whole same-start group of an isolated forced landing")
+    func isolatedForcedGroupFinalizes() {
+        var gate = PGSStaleArrivalGate()
+        gate.reconstructing = true
+        // #146 shape: a forced sign + dialogue share the landing start; both must paint, not one.
+        #expect(gate.admit(cues: [imageCue(id: 1, start: 300), imageCue(id: 2, start: 300)],
+                           isPGS: true, isSelfContained: false, playhead: 302.3).isEmpty)
+        let out = gate.finalizeReconstruction(playhead: 302.3)
+        #expect(out.map(\.id).sorted() == [1, 2])
+    }
+
+    @Test("finalize does not resurrect a candidate the author cleared before the playhead")
+    func finalizeDoesNotResurrectClearedCandidate() {
+        var gate = PGSStaleArrivalGate()
+        gate.reconstructing = true
+        _ = gate.admit(cues: [imageCue(id: 1, start: 90)], isPGS: true,
+                       isSelfContained: false, playhead: 100)
+        // Authored clear at 95, before the playhead: the candidate's window closes at 95.
+        #expect(gate.resolveHeld(trimAt: 95, playhead: 100).isEmpty)
+        // With no successor ever arriving, finalize must still emit nothing (the line was gone by 100).
+        #expect(gate.finalizeReconstruction(playhead: 100).isEmpty)
+        #expect(gate.reconstructing == false)
+    }
+
+    @Test("finalize is a no-op outside a reconstruction pass")
+    func finalizeNoopWhenNotReconstructing() {
+        var gate = PGSStaleArrivalGate()
+        #expect(gate.finalizeReconstruction(playhead: 100).isEmpty)
+        #expect(gate.reconstructing == false)
+    }
 }

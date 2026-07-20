@@ -43,4 +43,18 @@ enum SubtitleOverlayDrainer {
         }
         return .decode(from: cursor.lastDecodedPts.nextUp, through: through)
     }
+
+    /// #143 follow-up: whether a reconstruction pass should be finalized this tick because no
+    /// successor composition can end it. `admitDuringReconstruction` flushes the seeded active-line
+    /// candidate only when a composition at/after the playhead decodes; a landing set that is the
+    /// newest composition in the file (or whose next line is beyond the forward lead window) has no
+    /// such trigger, so the candidate hangs and the overlay stays dark. Finalize only inside a
+    /// reconstruction pass, only with a seeded candidate (a true gap with nothing decoded behind the
+    /// playhead is left alone), and only when nothing is stored ahead in the lead window (a stored
+    /// successor ends the pass the normal way).
+    static func shouldFinalizeReconstruction(reconstructing: Bool,
+                                             hasCandidate: Bool,
+                                             hasSuccessorAhead: Bool) -> Bool {
+        reconstructing && hasCandidate && !hasSuccessorAhead
+    }
 }

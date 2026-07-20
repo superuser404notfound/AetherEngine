@@ -55,4 +55,33 @@ struct SubtitleOverlayDrainerTests {
                                                     lead: 60, backscan: 15, jumpThreshold: 2.5)
         #expect(plan == .idle)
     }
+
+    // #143 follow-up: a reconstruction pass whose landing line is the newest composition in the
+    // drain window has no successor to trigger admitDuringReconstruction's flush. The drain
+    // finalizes it once it confirms a candidate is seeded and no composition is stored ahead in the
+    // lead window.
+
+    @Test("reconstruction with a seeded candidate and no successor ahead should finalize")
+    func finalizeWhenNoSuccessorAhead() {
+        #expect(SubtitleOverlayDrainer.shouldFinalizeReconstruction(
+            reconstructing: true, hasCandidate: true, hasSuccessorAhead: false))
+    }
+
+    @Test("a stored successor in the lead window ends the pass the normal way, not by finalize")
+    func noFinalizeWhenSuccessorAhead() {
+        #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
+            reconstructing: true, hasCandidate: true, hasSuccessorAhead: true))
+    }
+
+    @Test("finalize needs a seeded candidate: a true gap with nothing behind ends nothing")
+    func noFinalizeWithoutCandidate() {
+        #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
+            reconstructing: true, hasCandidate: false, hasSuccessorAhead: false))
+    }
+
+    @Test("finalize only applies inside a reconstruction pass")
+    func noFinalizeOutsideReconstruction() {
+        #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
+            reconstructing: false, hasCandidate: true, hasSuccessorAhead: false))
+    }
 }

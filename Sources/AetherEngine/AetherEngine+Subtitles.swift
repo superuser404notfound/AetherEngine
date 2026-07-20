@@ -293,6 +293,25 @@ extension AetherEngine {
             subtitleDrainCursors[channel] = SubtitleDrainCursor(
                 lastDecodedPts: lastDecoded ?? window.from,
                 lastPlayhead: playhead)
+            // #143 follow-up (cmcpherson274 5.9.7 retest): admitDuringReconstruction flushes the
+            // seeded active-line candidate only when a composition at/after the playhead decodes. A
+            // landing set that is the newest composition in the file, or whose next line is beyond the
+            // forward lead window (sparse dialogue, forced cues), has no such trigger, so the candidate
+            // hangs held and the overlay stays dark. Once the backscan has seeded a candidate and no
+            // successor is stored ahead in the lead window, finalize the pass so the landing line paints.
+            let hasSuccessorAhead = !store.entries(
+                streamIndex: streamIndex,
+                from: playhead.nextUp,
+                through: playhead + Self.subtitleDrainLeadSeconds).isEmpty
+            if SubtitleOverlayDrainer.shouldFinalizeReconstruction(
+                reconstructing: pgsStaleArrivalGates[channel]?.reconstructing ?? false,
+                hasCandidate: pgsStaleArrivalGates[channel]?.hasReconstructionCandidate ?? false,
+                hasSuccessorAhead: hasSuccessorAhead) {
+                for cue in pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()]
+                    .finalizeReconstruction(playhead: playhead) {
+                    insertFinalizedReconstructionCue(cue, channel: channel)
+                }
+            }
         }
         // #151: a jump (seek / producer re-anchor) moves the drain window out from under the
         // prefetcher's read position; restart it at the new playhead. Once per tick, not per
@@ -577,6 +596,18 @@ extension AetherEngine {
     @MainActor
     private func insertSorted(_ cue: SubtitleCue, into cues: inout [SubtitleCue]) {
         Self.insertCueSorted(cue, into: &cues, nextID: &nextRetainedSubtitleCueID)
+    }
+
+    /// #143 follow-up: insert a finalized reconstruction candidate straight into the channel's store.
+    /// The candidate is the genuinely active line at the seek target, so it bypasses `admit`, whose
+    /// steady-state stale check would re-hold a landing line sitting more than the epsilon behind the
+    /// playhead and re-dark the overlay this fix exists to light.
+    @MainActor
+    private func insertFinalizedReconstructionCue(_ cue: SubtitleCue, channel: SubtitleChannel) {
+        switch channel {
+        case .primary: insertSorted(cue, into: &subtitleCues)
+        case .secondary: insertSorted(cue, into: &secondarySubtitleCues)
+        }
     }
 
     /// #107: close every non-image cue (text or rich text) whose window covers `trimAt` (teletext
