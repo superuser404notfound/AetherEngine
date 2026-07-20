@@ -231,11 +231,20 @@ extension AetherEngine {
         subtitleDrainTargets[channel] = nil
         subtitleDrainDecoders[channel] = nil
         subtitleDrainCursors[channel] = nil
+        refreshSubtitleStoreProtection()   // #166
         if subtitleDrainTargets.isEmpty { stopSubtitleDrainer() }
+    }
+
+    /// #166: keep the store's aggregate-eviction protected set in sync with the active drain
+    /// targets, so the coldest non-selected streams evict first and the window the drainer reads
+    /// is never dropped. Called on every drain-target change and re-asserted each drain tick.
+    func refreshSubtitleStoreProtection() {
+        activeSubtitlePacketStore?.setProtectedStreams(Set(subtitleDrainTargets.values))
     }
 
     func subtitleDrainTick() {
         guard !subtitleDrainTargets.isEmpty, let store = activeSubtitlePacketStore else { return }
+        store.setProtectedStreams(Set(subtitleDrainTargets.values))   // #166: re-assert protection
         let playhead = sourceTime
         var prefetchNeedsReanchor = false
         for (channel, streamIndex) in subtitleDrainTargets {
