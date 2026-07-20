@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.1] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.1))
+
+### Fixed
+
+- **Live MPEG-TS channels routed to the software decoder (interlaced H.264 via #150) played silent.** Once #150 began correctly routing interlaced live streams to the software path, those sessions came up with no audio. The software host resolved its audio track only through `av_find_best_stream`, which returns -1 for a live MPEG-TS AAC stream whose codec parameters the probe left empty (sample rate and channel count zero, because stream analysis stops before the first audio frame is decoded), so no decoder opened and audio packets were dropped (`audioCodecID=none` at session start). The native path already handled this; the software path now mirrors it, falling back to the first audio-type stream on live sources when `av_find_best_stream` finds none, and repairing the AAC parameters to 48 kHz stereo AAC-LC so the decoder opens and channel negotiation is correct (the decoder otherwise recovers rate and channels from the first decoded frame, but not before the session reports zero). VOD keeps its existing stream selection. Reported by digilearn-dev (#133). Covered by `SoftwareLiveAudioResolutionTests`.
+
 ## [5.15.0] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.0))
