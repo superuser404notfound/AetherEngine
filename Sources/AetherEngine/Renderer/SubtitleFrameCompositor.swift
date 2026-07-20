@@ -30,17 +30,30 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         )
     }
 
-    /// Canvas -> frame mapping per the SubtitleImage contract: width-aligned, center-anchored
-    /// vertically (a cropped rip's canvas can be taller than the coded video); .zero canvas means
-    /// canvas == frame.
+    /// Canvas -> frame mapping per the SubtitleImage contract: `position` is NORMALIZED against the
+    /// canvas; go to canvas pixels first, then map width-aligned and center-anchored vertically (a
+    /// cropped rip's canvas can be taller than the coded video). A .zero canvas means the position is
+    /// normalized against the video frame itself.
     nonisolated static func imageRect(position: CGRect, canvasSize: CGSize, frameWidth: CGFloat, frameHeight: CGFloat) -> CGRect {
-        guard canvasSize != .zero, canvasSize.width > 0 else { return position }
+        guard canvasSize != .zero, canvasSize.width > 0 else {
+            return CGRect(
+                x: position.minX * frameWidth,
+                y: position.minY * frameHeight,
+                width: position.width * frameWidth,
+                height: position.height * frameHeight
+            )
+        }
+        let px = position.minX * canvasSize.width
+        let py = position.minY * canvasSize.height
         let scale = frameWidth / canvasSize.width
         let frameCenterY = frameHeight / 2
         let canvasCenterY = canvasSize.height / 2
-        let x = position.minX * scale
-        let y = frameCenterY + (position.minY - canvasCenterY) * scale
-        return CGRect(x: x, y: y, width: position.width * scale, height: position.height * scale)
+        return CGRect(
+            x: px * scale,
+            y: frameCenterY + (py - canvasCenterY) * scale,
+            width: position.width * canvasSize.width * scale,
+            height: position.height * canvasSize.height * scale
+        )
     }
 
     // MARK: - State
