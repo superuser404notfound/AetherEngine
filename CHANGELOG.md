@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.5] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.5))
+
+### Fixed
+
+- **Unbounded aggregate memory growth in `SubtitlePacketStore` on sources with many embedded subtitle tracks, up to an iOS jetsam kill.** The store capped retained compressed subtitle packets at 32MB *per stream* (`perStreamByteCap`), but the pump tap and the forward prefetcher both harvest *every* embedded subtitle stream into the session store (so a track switch backfills instantly without a side demuxer, #112). Nothing bounded the sum across streams, so a source with many tracks (99 in the field repro, mostly bitmap/PGS, each independently climbing toward its own 32MB ceiling) grew heap allocations toward N x 32MB (~3.2GB); the host's `memprobe` showed `mallocMB` tracking `subTracks` rather than playback time or bytes downloaded, and the process eventually hit the iOS jetsam limit and was killed. The store now enforces an aggregate byte budget (`aggregateByteCap`, 96MB) across all streams in addition to the per-stream cap: the active drain targets (primary + secondary) are protected so a switch back to them still backfills from a full window, and the coldest (least-recently-touched) non-protected streams evict oldest-first once the aggregate budget is exceeded. Total retained bytes are tracked incrementally (O(1) per append) and a monotonic touch counter orders eviction; the engine keeps the protected set in sync with the active subtitle selection on every change and re-asserts it each drain tick. Reported by Enoch Abiodun (iPhone 16 Pro Max / iPad 10th generation, 99-track source). Covered by `Issue166AggregateByteCapTests`.
+
 ## [5.15.4] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.4))
