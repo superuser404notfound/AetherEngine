@@ -240,6 +240,9 @@ public final class AetherEngine: ObservableObject {
     /// AE#158: set by load() when the running item must survive until the new master attaches (PiP
     /// next-episode handover); consumed and reset by the loopback host.load callsite (inPlaceSwap).
     var pendingInPlaceItemHandover = false
+    /// SW-PiP bridge, the software-path analog of `currentAVPlayer`: set when a SW session has its
+    /// display layer, nil on teardown. Hosts build their sample-buffer PiP ContentSource from it.
+    @Published public internal(set) var softwarePiPSource: SoftwarePiPSource?
     #if os(iOS) || os(tvOS)
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
@@ -276,6 +279,20 @@ public final class AetherEngine: ObservableObject {
         pipActive && priorBackendWasNative
     }
 
+    /// SW-PiP: playable range for the sample-buffer PiP UI on the PTS axis of the enqueued frames
+    /// (the source axis; sourceTime = currentTime + container start offset). Live or unknown
+    /// duration reports indefinite so the window shows live UI instead of a bogus scrubber.
+    nonisolated static func softwarePiPTimeRange(isLive: Bool, sourceTime: Double, currentTime: Double, duration: Double) -> CMTimeRange {
+        guard !isLive, duration.isFinite, duration > 0 else {
+            return CMTimeRange(start: .negativeInfinity, duration: .positiveInfinity)
+        }
+        let sourceStart = sourceTime - currentTime
+        return CMTimeRange(
+            start: CMTime(seconds: sourceStart, preferredTimescale: 600),
+            duration: CMTime(seconds: duration, preferredTimescale: 600)
+        )
+    }
+
     /// What to do with the active video pipeline when the app enters the background. Pure so the lifecycle
     /// policy is unit-testable. Mirrors the spirit of the native keepalive onto the software path.
     enum BackgroundAction: Equatable {
@@ -284,15 +301,21 @@ public final class AetherEngine: ObservableObject {
         case teardownVideo           // release the video pipeline before idle suspension
     }
 
-    /// - keepVideoAlive: result of shouldKeepVideoAlive. Pass false on tvOS (the wedge-safe unconditional teardown).
+    /// - keepVideoAlive: result of shouldKeepVideoAlive / shouldKeepVideoAliveTV.
+    /// - pipActive: a live PiP window renders the SW layer's frames, so the SW host must keep
+    ///   decoding video in background instead of dropping to audio-only (SW-PiP Phase A).
     nonisolated static func backgroundAction(
         isAudioBackend: Bool,
         hasSoftwareHost: Bool,
         keepVideoAlive: Bool,
+        pipActive: Bool,
         state: PlaybackState
     ) -> BackgroundAction {
         if isAudioBackend { return .doNothing }
-        if keepVideoAlive { return hasSoftwareHost ? .enterSoftwareAudioOnly : .doNothing }
+        if keepVideoAlive {
+            if hasSoftwareHost { return pipActive ? .doNothing : .enterSoftwareAudioOnly }
+            return .doNothing
+        }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
     }
@@ -2942,6 +2965,7 @@ public final class AetherEngine: ObservableObject {
 
         softwareCancellables.removeAll()
         softwareHost?.stop()
+        softwarePiPSource = nil
         softwareHost = nil
 
         // Clear audioHost so music<->video handoffs start from a clean slate; the engine is a process-wide
@@ -3071,6 +3095,7 @@ public final class AetherEngine: ObservableObject {
                     isAudioBackend: self.audioAVPlayerActive || self.audioHost != nil,
                     hasSoftwareHost: self.softwareHost != nil,
                     keepVideoAlive: keepAlive,
+                    pipActive: self.pictureInPictureActive,
                     state: self.state
                 )
                 switch Self.backgroundStep(
@@ -3271,6 +3296,7 @@ public final class AetherEngine: ObservableObject {
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
             keepVideoAlive: keepAlive,
+            pipActive: pictureInPictureActive,
             state: state
         )
     }
