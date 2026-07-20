@@ -32,7 +32,13 @@ jobs:
         run: swift build
 
       - name: swift test
-        run: swift test
+        # Serial execution: the macos-15 runner over-subscribes its cores under Swift
+        # Testing's default in-process parallelism, and the CPU-heavy Vision OCR suite
+        # starves the main-actor responsiveness tests (LiveTelemetrySampler /
+        # AVFoundationOffMain, #134) past their scheduling backstops. --no-parallel is the
+        # only knob that bounds Swift Testing concurrency (--num-workers governs XCTest
+        # only); it gives those tests the whole machine. Cost is ~4s -> ~18s of test time.
+        run: swift test --no-parallel
 
   build-tvos:
     name: xcodebuild (tvOS Simulator)
