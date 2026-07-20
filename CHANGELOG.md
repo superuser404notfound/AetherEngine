@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.15.2] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.2))
+
+### Fixed
+
+- **A seek landing on a PGS line with no following subtitle within a minute stayed dark, forced cues included.** The #143 reconstruction pass reshows the seek-landing line by holding it as a candidate and emitting it once the backscan decode reaches the playhead, using the next composition at/after the playhead as the pass-end trigger. A landing whose set is the newest decodable composition in the drain window (the file's last line, or sparse/forced dialogue whose next line sits beyond the 60 s forward lead) has no such trigger, so the candidate stayed held and the overlay dark: tens of seconds on sparse dialogue, forever at end of file. The drain now finalizes a reconstruction pass once it has seeded a candidate and confirmed no successor is stored ahead in the lead window, emitting the landing line (the whole same-start group) immediately. A line the author cleared before the playhead no longer covers it and is not resurrected; landings with a successor in the window are unchanged. Reported by cmcpherson274 (5.9.7 retest of #143). Covered by `Issue143PGSLandingLineTests` and `SubtitleOverlayDrainerTests`.
+
 ## [5.15.1] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.1))
