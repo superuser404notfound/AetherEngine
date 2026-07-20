@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.13.0] - 2026-07-20
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.13.0))
+
+### Added
+
+- **`SoftwarePiPSource`: a published sample-buffer PiP bridge for the software path.** Hosts building system PiP for SW-routed codecs (dav1d AV1/VP9 and friends) need the display layer plus transport answers on the enqueued frames' PTS axis (source axis); both are engine knowledge, so the engine now publishes `softwarePiPSource` (the `currentAVPlayer` analog) carrying the `AVSampleBufferDisplayLayer`, `timeRange()`, `isPaused`, `setPlaying(_:)`, and `skip(by:)`, with AVKit staying host-side. The background policy keeps SW video decoding alive while `pictureInPictureActive` (the window needs frames) instead of dropping to audio-only; without PiP, background behavior is unchanged. Covered by `SoftwarePiPSourceTests` and the extended `BackgroundKeepaliveTests`.
+
 ## [5.12.0] - 2026-07-20
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.12.0))
