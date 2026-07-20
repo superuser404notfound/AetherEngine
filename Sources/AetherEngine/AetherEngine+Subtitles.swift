@@ -190,7 +190,7 @@ extension AetherEngine {
     }
 
     /// Build a fresh overlay decoder for the stream on whichever host owns the session demuxer.
-    private func makeSubtitleDrainDecoder(streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
+    func makeSubtitleDrainDecoder(streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
         nativeVideoSession?.makeOverlayDecoder(streamIndex: streamIndex)
             ?? softwareHost?.makeOverlayDecoder(streamIndex: streamIndex)
     }
@@ -470,7 +470,7 @@ extension AetherEngine {
     /// time base carrying the harvested seconds; flags are restored for bitmap acquisition
     /// points. Runs on the MainActor tick; subtitle decode is a parse plus, for bitmap, a
     /// bounded blit, the same work the side reader did per packet.
-    nonisolated private static func decodeStoredSubtitlePacket(
+    nonisolated static func decodeStoredSubtitlePacket(
         _ entry: StoredSubtitlePacket,
         with decoder: EmbeddedSubtitleDecoder
     ) -> EmbeddedSubtitleDecoder.SubtitleEvent? {
@@ -708,7 +708,7 @@ extension AetherEngine {
     }
 
     /// Store lookup for the external backfill: test-hook override first, else the live session's stores.
-    private func nativeStore(atOrdinal ordinal: Int) -> NativeSubtitleCueStore? {
+    func nativeStore(atOrdinal ordinal: Int) -> NativeSubtitleCueStore? {
         #if DEBUG
         if let hooked = testHookNativeStores, ordinal < hooked.count { return hooked[ordinal] }
         #endif

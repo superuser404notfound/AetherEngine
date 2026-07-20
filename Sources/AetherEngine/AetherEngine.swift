@@ -409,6 +409,15 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000
+    /// Phase D: the OCR worker decodes bitmap compositions to playhead + this lead so AVKit's
+    /// ~240 s forward .vtt prefetch burst at selection is served populated, never cached empty.
+    nonisolated static let subtitleOCRLeadSeconds: Double = 240
+    /// Phase D: forward-prefetch lead while the OCR worker is armed; exceeds
+    /// subtitleOCRLeadSeconds so the packet store actually holds the worker's window.
+    nonisolated static let subtitleOCRPrefetchLeadSeconds: Double = 270
+    /// Phase D: per-tick decode cap; smooths the initial 240 s backfill over a few ticks
+    /// instead of one long MainActor pass.
+    nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48
     nonisolated static let subtitleForwardPrefetchParkPollNanoseconds: UInt64 = 500_000_000
 
     @Published public internal(set) var isLoadingSubtitles: Bool = false
@@ -829,6 +838,16 @@ public final class AetherEngine: ObservableObject {
 
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
     var externalNativeStoreFillTask: Task<Void, Never>? = nil
+
+    /// Phase D: OCR worker state. Armed while the active subtitle is a needsOCR table entry;
+    /// cursors/pending persist across deselect/reselect (no re-recognition of covered regions)
+    /// and reset only on load/stop.
+    var subtitleOCRArmedOrdinal: Int?
+    var subtitleOCRWorkerTask: Task<Void, Never>?
+    var subtitleOCRSidecarFillTask: Task<Void, Never>?
+    var subtitleOCRDecoder: EmbeddedSubtitleDecoder?
+    var subtitleOCRCursors: [Int: SubtitleDrainCursor] = [:]
+    var subtitleOCRPendingStates: [Int: SubtitleOCRPendingState] = [:]
 
     /// AE#154: publishes the remote-HLS bypass item's legible options as `subtitleTracks`.
     /// Session-scoped; cancelled on load()/stop() alongside the other subtitle tasks.
