@@ -19,11 +19,12 @@ struct LiveTelemetrySamplerTests {
         return engine
     }
 
-    /// Generous default: on a loaded CI runner the main actor can be scheduled seconds late, so a
-    /// tight bound here flakes even when the behavior under test is correct. It only needs to be a
-    /// finite backstop, not a measurement.
+    /// Generous default: on a loaded CI runner the main actor can be scheduled tens of seconds late
+    /// (a CPU-heavy Vision OCR test running in parallel starved it past a 15 s bound), so a tight
+    /// bound flakes even when the behavior under test is correct. It only needs to be a finite
+    /// backstop, not a measurement: a genuine main-actor block never signals at any size.
     private func waitUntil(
-        timeout: Duration = .seconds(15),
+        timeout: Duration = .seconds(90),
         _ condition: @MainActor () -> Bool
     ) async throws -> Bool {
         let clock = ContinuousClock()
@@ -42,9 +43,10 @@ struct LiveTelemetrySamplerTests {
         // If the read ran on the main actor (the #134 regression), the release signal below could
         // never be sent while the read blocks, the wait would exhaust its backstop timeout, and the
         // published forward buffer would be the 99 sentinel instead of 12. The timeout is generous
-        // (a genuine main-actor block never signals; only CI scheduling jitter needs absorbing).
+        // (a genuine main-actor block never signals at any size; only CI scheduling starvation from
+        // a parallel CPU-heavy test needs absorbing, which can run tens of seconds).
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
-            let releasedInTime = release.wait(timeout: .now() + 30) == .success
+            let releasedInTime = release.wait(timeout: .now() + 90) == .success
             return NativeAVFReadings(forwardBufferSeconds: releasedInTime ? 12.0 : 99.0)
         })
         sampler.start()

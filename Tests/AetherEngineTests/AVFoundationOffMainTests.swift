@@ -26,9 +26,10 @@ struct AVFoundationOffMainTests {
         let player = AVPlayer()
         async let result = AVFoundationOffMain.read(player, on: queue) { _ -> Bool in
             // Signalled only if the main actor keeps running below while this body blocks.
-            // Generous backstop: a real main-actor block never signals, so only CI scheduling
-            // jitter needs absorbing, not a tight 3 s race that flakes under parallel load.
-            release.wait(timeout: .now() + 30) == .success
+            // Generous backstop: a real main-actor block never signals at any size, so only CI
+            // scheduling starvation needs absorbing (a parallel CPU-heavy test can starve the main
+            // actor for tens of seconds), not a tight race that flakes under parallel load.
+            release.wait(timeout: .now() + 90) == .success
         }
         for _ in 0..<5 { try? await Task.sleep(for: .milliseconds(20)) }
         release.signal()
