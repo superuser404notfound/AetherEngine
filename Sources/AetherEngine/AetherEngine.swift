@@ -1634,6 +1634,7 @@ public final class AetherEngine: ObservableObject {
         activeSecondaryExternalSubtitleTrackID = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
+        resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
         stallRecoveryWindowUntil = .distantPast
@@ -2630,6 +2631,7 @@ public final class AetherEngine: ObservableObject {
         activeSecondaryExternalSubtitleTrackID = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
+        resetSubtitleOCRState()   // Phase D: new session, new axis
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
@@ -3039,6 +3041,7 @@ public final class AetherEngine: ObservableObject {
 
         cancelSidecarTask()
         stopSubtitleDrainer()                  // #112 rework: both channels
+        resetSubtitleOCRState()                // Phase D
         subtitleDrainTargets.removeAll()
         softwareSubtitlePacketStore = nil
         activeEmbeddedSubtitleStreamIndex = -1
