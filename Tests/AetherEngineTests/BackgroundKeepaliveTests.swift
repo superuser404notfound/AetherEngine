@@ -53,4 +53,19 @@ struct BackgroundKeepaliveTests {
     func doNothingWhenNotPlayable() {
         #expect(AetherEngine.backgroundAction(isAudioBackend: false, hasSoftwareHost: false, keepVideoAlive: false, state: .loading) == .doNothing)
     }
+
+    @Test("tvOS: an active PiP window keeps the video pipeline alive")
+    func tvKeepAliveWithPiP() {
+        #expect(AetherEngine.shouldKeepVideoAliveTV(enabled: true, pipActive: true) == true)
+    }
+
+    @Test("tvOS: playing without PiP still tears down (wedge-safe)")
+    func tvTeardownWithoutPiP() {
+        #expect(AetherEngine.shouldKeepVideoAliveTV(enabled: true, pipActive: false) == false)
+    }
+
+    @Test("tvOS: master disable overrides PiP")
+    func tvDisabledOverridesPiP() {
+        #expect(AetherEngine.shouldKeepVideoAliveTV(enabled: false, pipActive: true) == false)
+    }
 }

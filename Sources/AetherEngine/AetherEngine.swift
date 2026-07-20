@@ -206,10 +206,23 @@ public final class AetherEngine: ObservableObject {
     /// Exposed for diagnostic overlays; hosts should not branch on it.
     @Published public internal(set) var playbackBackend: PlaybackBackend = .none
 
-    /// iOS: master enable for background playback (PiP + background audio). Default on; no user setting yet.
+    /// Master enable for background playback (iOS: PiP + background audio; tvOS: PiP keepalive). Default on.
     public var backgroundPlaybackEnabled = true
-    /// iOS: set by the host from the AVKit PiP delegate; the keepalive policy + pause-safety read it.
-    public var pictureInPictureActive = false
+    /// Set by the host from its PiP delegate (iOS: AVKit; tvOS: host-built AVPictureInPictureController);
+    /// the keepalive policy + pause-safety read it.
+    public var pictureInPictureActive = false {
+        didSet {
+            #if os(tvOS)
+            // PiP window closed while backgrounded: nothing keeps the app running anymore, so run the
+            // wedge-safe teardown now, before idle suspension (mirrors the iOS pause-while-backgrounded path).
+            if oldValue && !pictureInPictureActive && isBackgrounded,
+               !audioAVPlayerActive, audioHost == nil, softwareHost == nil,
+               state == .playing || state == .paused {
+                Task { @MainActor in await self.teardownVideoForBackground() }
+            }
+            #endif
+        }
+    }
     /// #127: seconds a PAUSED session survives backgrounding (iOS) before the wedge-safe teardown runs,
     /// held under a background-task assertion so a quick app switch resumes without a pipeline rebuild.
     /// 0 restores the immediate teardown. Ignored on tvOS. Keep well under the ~30 s system allowance,
@@ -224,9 +237,12 @@ public final class AetherEngine: ObservableObject {
 
     /// #127: latest host seek issued while the native item was pre-ready; replayed at readiness.
     var pendingPreReadySeekSeconds: Double?
-    #if os(iOS)
-    /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown.
+    #if os(iOS) || os(tvOS)
+    /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
+    /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS).
     private var isBackgrounded = false
+    #endif
+    #if os(iOS)
     /// #127: pending grace-window teardown (sleep task + the background-task assertion holding it).
     private var backgroundGraceTask: Task<Void, Never>?
     private var backgroundGraceAssertion: UIBackgroundTaskIdentifier = .invalid
@@ -241,6 +257,13 @@ public final class AetherEngine: ObservableObject {
     /// suspension. Pure so the policy is unit-tested without the lifecycle. See setupLifecycleObservers.
     nonisolated static func shouldKeepVideoAlive(enabled: Bool, pipActive: Bool, state: PlaybackState) -> Bool {
         enabled && (pipActive || state == .playing)
+    }
+
+    /// tvOS keepalive: ONLY an active PiP window keeps the app genuinely running in the background (there
+    /// is no tvOS background-audio case for video sessions); everything else keeps the wedge-safe
+    /// unconditional teardown that protects mediaserverd across multi-hour suspensions.
+    nonisolated static func shouldKeepVideoAliveTV(enabled: Bool, pipActive: Bool) -> Bool {
+        enabled && pipActive
     }
 
     /// What to do with the active video pipeline when the app enters the background. Pure so the lifecycle
@@ -3010,13 +3033,18 @@ public final class AetherEngine: ObservableObject {
                 self.isBackgrounded = true
                 // Keep the video pipeline alive for PiP / background audio while the app stays running.
                 // Wedge-safe: a pause while backgrounded tears down via pause() below, so nothing crosses
-                // an idle suspension. tvOS keeps the unconditional teardown.
+                // an idle suspension.
                 let keepAlive = Self.shouldKeepVideoAlive(enabled: self.backgroundPlaybackEnabled,
                                                           pipActive: self.pictureInPictureActive,
                                                           state: self.state)
                 let supportsGrace = true
                 #else
-                let keepAlive = false  // tvOS: wedge-safe unconditional teardown
+                self.isBackgrounded = true
+                // tvOS: only an active PiP window defers the wedge-safe teardown (the system keeps the app
+                // running while its PiP window lives); no grace window, no background-audio case. The
+                // pictureInPictureActive didSet tears down the moment PiP ends while still backgrounded.
+                let keepAlive = Self.shouldKeepVideoAliveTV(enabled: self.backgroundPlaybackEnabled,
+                                                            pipActive: self.pictureInPictureActive)
                 let supportsGrace = false
                 #endif
                 let action = Self.backgroundAction(
@@ -3045,20 +3073,20 @@ public final class AetherEngine: ObservableObject {
             }
         }
         lifecycleObservers.append(bgObserver)
-        #if os(iOS)
         let fgObserver = nc.addObserver(
             forName: UIApplication.didBecomeActiveNotification,
             object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                #if os(iOS)
                 self.cancelBackgroundGraceWindow()
                 self.softwareHost?.exitBackgroundAudioOnly()
+                #endif
                 self.isBackgrounded = false
             }
         }
         lifecycleObservers.append(fgObserver)
-        #endif
 
         // Foreign-session interruption handling (Sodalite device-verify 2026-07-15): a live-camera
         // PiP re-claims the audio session on every play() and the system pauses AVPlayer ~10ms after
