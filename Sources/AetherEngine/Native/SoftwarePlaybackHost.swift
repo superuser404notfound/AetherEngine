@@ -279,6 +279,32 @@ final class SoftwarePlaybackHost {
         self.videoDecoder = SoftwareVideoDecoder()
     }
 
+    // MARK: - Audio stream resolution (#133)
+
+    /// Resolve the audio stream index for a SW-host session. `av_find_best_stream` (`bestStream`)
+    /// returns -1 for a live-MPEG-TS AAC stream whose codecpar the probe left empty
+    /// (sample_rate/channels=0 because find_stream_info bailed before decoding a frame). On live
+    /// sources fall back to the first audio-type stream (`firstByType`) so the AudioDecoder, which
+    /// fills rate/channels from the first decoded frame, is reachable and the session is not silent.
+    /// Mirrors HLSVideoEngine's native live-audio fallback; VOD keeps av_find_best_stream semantics.
+    nonisolated static func resolveAudioStreamIndex(
+        explicit: Int32?, bestStream: Int32, firstByType: Int32, isLive: Bool
+    ) -> Int32 {
+        if let explicit, explicit >= 0 { return explicit }
+        if bestStream >= 0 { return bestStream }
+        if isLive, firstByType >= 0 { return firstByType }
+        return -1
+    }
+
+    /// True when a live-MPEG-TS AAC stream needs codecpar repair before the decoder opens: the probe
+    /// left `sample_rate=0`. Mirrors HLSVideoEngine's native repair (fill 48 kHz stereo AAC-LC). VOD
+    /// probes the whole file, so its codecpar is trusted and never repaired.
+    nonisolated static func shouldRepairLiveAACCodecpar(
+        isLive: Bool, codecID: AVCodecID, sampleRate: Int32
+    ) -> Bool {
+        isLive && codecID == AV_CODEC_ID_AAC && sampleRate == 0
+    }
+
     // MARK: - Load
 
     func load(
@@ -315,11 +341,28 @@ final class SoftwarePlaybackHost {
             }
         }
 
+        // Resolve the audio stream up front so the session-start log and the decoder agree. #133:
+        // live-TS AAC whose codecpar the probe left empty makes av_find_best_stream return -1; the
+        // by-type fallback (live-only) is what keeps SW-routed live TS from coming up silent.
+        let bestAudioIdx = dem.audioStreamIndex
+        let resolvedAudioIdx = Self.resolveAudioStreamIndex(
+            explicit: audioSourceStreamIndex,
+            bestStream: bestAudioIdx,
+            firstByType: dem.firstAudioStreamIndexByType,
+            isLive: isLive
+        )
+        if audioSourceStreamIndex == nil, bestAudioIdx < 0, resolvedAudioIdx >= 0 {
+            EngineLog.emit(
+                "[SWHost] audio: av_find_best_stream found no usable audio "
+                + "(live probe left empty codecpar?); falling back to first audio-type stream \(resolvedAudioIdx)",
+                category: .swPlayback
+            )
+        }
+
         // Release-visible session-start log: SW-path black-screens were indistinguishable from "never dispatched" (DrHurt #4).
         let vCodecID = vStream.pointee.codecpar?.pointee.codec_id.rawValue ?? 0
-        let aIdx = audioSourceStreamIndex ?? dem.audioStreamIndex
-        let aCodecID: UInt32 = aIdx >= 0
-            ? (dem.stream(at: aIdx)?.pointee.codecpar?.pointee.codec_id.rawValue ?? 0)
+        let aCodecID: UInt32 = resolvedAudioIdx >= 0
+            ? (dem.stream(at: resolvedAudioIdx)?.pointee.codecpar?.pointee.codec_id.rawValue ?? 0)
             : 0
         EngineLog.emit(
             "[SWHost] session start: videoCodecID=\(vCodecID) "
@@ -391,8 +434,26 @@ final class SoftwarePlaybackHost {
             self?.onA53Captions?(triplets, pts)
         }
 
-        let resolvedAudioIdx: Int32 = audioSourceStreamIndex ?? dem.audioStreamIndex
-        if resolvedAudioIdx >= 0, let aStream = dem.stream(at: resolvedAudioIdx) {
+        if resolvedAudioIdx >= 0, let aStream = dem.stream(at: resolvedAudioIdx),
+           let acp = aStream.pointee.codecpar {
+            // Live AAC the probe never filled (sample_rate=0): assume 48 kHz stereo AAC-LC so channel
+            // negotiation and the published track are correct. The AudioDecoder otherwise recovers
+            // rate/channels from the first decoded frame, but not before the session reports zero.
+            if Self.shouldRepairLiveAACCodecpar(
+                isLive: isLive, codecID: acp.pointee.codec_id, sampleRate: acp.pointee.sample_rate) {
+                acp.pointee.sample_rate = 48000
+                if acp.pointee.ch_layout.nb_channels <= 0 {
+                    av_channel_layout_default(&acp.pointee.ch_layout, 2)
+                }
+                if acp.pointee.profile < 0 {
+                    acp.pointee.profile = 1  // FF_PROFILE_AAC_LOW
+                }
+                EngineLog.emit(
+                    "[SWHost] audio: live AAC had no codec parameters from the probe; "
+                    + "assuming 48 kHz stereo AAC-LC",
+                    category: .swPlayback
+                )
+            }
             let aDec = AudioDecoder()
             do {
                 try aDec.open(stream: aStream)
