@@ -15,6 +15,25 @@ extension HLSVideoEngine {
         return packetsWritten == 0 && cachedSegments == 0
     }
 
+    /// #167 follow-up pure decision: live pump exits that delegate to host retune leave a provider no
+    /// producer will ever cut into again. Its blocking-reload advert must drop and its held ?_HLS_msn=
+    /// waiters release, or the zombie session (and any item reload against it while the host retunes)
+    /// trips -15410 on a hold that cannot be satisfied. Reopenable URL exits resume cutting into the
+    /// same provider and must NOT latch; stop/muxer/backpressure exits have their own arms.
+    static func shouldHaltLiveProduction(
+        reason: HLSSegmentProducer.PumpExitReason,
+        sourceReopenableByURL: Bool
+    ) -> Bool {
+        switch reason {
+        case .segmentStall, .sourceReplay:
+            return true
+        case .eof, .readError, .keyframeStarvation:
+            return !sourceReopenableByURL
+        case .stopRequested, .muxerFailed, .backpressureWedge:
+            return false
+        }
+    }
+
     func handlePumpFinished(_ prod: HLSSegmentProducer,
                                     reason: HLSSegmentProducer.PumpExitReason) {
         // #65 (VOD only): a broken backpressure wedge means AVPlayer is stuck behind a parked producer.
@@ -53,6 +72,9 @@ extension HLSVideoEngine {
             return
         }
         guard isLiveSession else { return }
+        if Self.shouldHaltLiveProduction(reason: reason, sourceReopenableByURL: sourceReopenableByURL) {
+            provider?.markLiveProductionHalted()
+        }
         switch reason {
         case .stopRequested, .muxerFailed, .backpressureWedge:
             return

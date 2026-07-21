@@ -133,6 +133,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Set by cancelWaiters() on stop(). Without it, parked LL-HLS blocking-reload threads sleep
     /// their full timeout (18-30 s) and can write stale playlists into a recycled fd of the next session.
     private var waitersCancelled = false
+    /// Terminal latch (#167 follow-up): the live pump exited for host retune (SSAI cutter wedge,
+    /// source replay, custom-reader death), so no further segment will ever be cut into this provider.
+    /// The cadence policy cannot see this (it observes ingest arrivals, which keep flowing while the
+    /// cutter is wedged), so it is a separate, producer-level condition.
+    private var _liveProductionHalted = false
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -622,7 +627,26 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         isLive ? liveWindowSizing.targetSegmentDurationSeconds : nil
     }
     var liveBlockingReloadEnabled: Bool {
-        Self.resolveLiveBlockingReload(override: blockingReloadOverride, policy: liveCadencePolicy)
+        Self.resolveLiveBlockingReload(halted: liveProductionHalted,
+                                       override: blockingReloadOverride,
+                                       policy: liveCadencePolicy)
+    }
+
+    var liveProductionHalted: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _liveProductionHalted
+    }
+
+    /// Live pump exited for host retune: no further segment will ever be cut into this provider.
+    /// Latch blocking-reload off for every subsequent manifest render (including an item reload
+    /// against this server) and release parked ?_HLS_msn= waiters so they 503 now instead of
+    /// sleeping out their full hold against a dead producer (-15410, #167 follow-up).
+    func markLiveProductionHalted() {
+        stateLock.lock()
+        _liveProductionHalted = true
+        stateLock.unlock()
+        cancelWaiters()
     }
     var liveTargetDurationFloorSeconds: Double? {
         // The floor tracks observed cadence regardless of the gate override: patience must cover the real
@@ -630,10 +654,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         isLive ? liveCadencePolicy?.targetDurationFloorSeconds : nil
     }
 
-    /// Resolve blocking-reload eligibility: a host override wins everywhere; otherwise the observed-cadence
-    /// policy decides for ingest sources; signal-less live (plain-url Jellyfin transcode) keeps the
-    /// low-latency default. Pure so the precedence is unit-testable without a full provider (#167).
-    static func resolveLiveBlockingReload(override: Bool?, policy: LiveCadencePolicy?) -> Bool {
+    /// Resolve blocking-reload eligibility: a halted producer disables it unconditionally (no override
+    /// can conjure segments from a dead pump, #167 follow-up); otherwise a host override wins; otherwise
+    /// the observed-cadence policy decides for ingest sources; signal-less live (plain-url Jellyfin
+    /// transcode) keeps the low-latency default. Pure so the precedence is unit-testable without a full
+    /// provider (#167).
+    static func resolveLiveBlockingReload(halted: Bool = false, override: Bool?, policy: LiveCadencePolicy?) -> Bool {
+        if halted { return false }
         if let override { return override }
         if let policy { return policy.blockingReloadEnabled }
         return true

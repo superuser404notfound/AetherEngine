@@ -615,7 +615,14 @@ final class HLSLocalServer: @unchecked Sendable {
                 if let msn = Self.parseHLSMsn(query) {
                     // LL-HLS blocking reload: hold until segment msn is cut so AVPlayer receives it the instant it exists, not a reload-interval late. Gated on liveBlockingReloadEnabled: bursty ingest sources can't honor the contract and withheld it.
                     if p.liveBlockingReloadEnabled {
-                        _ = p.waitForLiveSegment(index: msn, timeout: 18.0)
+                        // Unsatisfiable hold (producer halted/stalled, or timeout): 503, never the
+                        // unchanged playlist. A 200 without the requested MSN after a hold is "Invalid
+                        // server blocking reload behavior" (-15410) to AVPlayer (#167 follow-up;
+                        // RFC 8216bis requires the 503 here).
+                        if !p.waitForLiveSegment(index: msn, timeout: 18.0) {
+                            return send503(fd: fd, path: normalizedPath,
+                                           reason: "blocking reload msn=\(msn) unsatisfiable")
+                        }
                     }
                 } else {
                     _ = p.waitForFirstLiveSegment(timeout: 30.0)
