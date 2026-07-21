@@ -667,6 +667,17 @@ final class NativeAVPlayerHost {
         avPlayer.pause()
     }
 
+    /// Synthesize organic end-of-media when the engine determines a tail park is video-exhaustion
+    /// (AetherEngine#169), not a recoverable stall. Sets the same `didReachEnd` the real
+    /// didPlayToEndTime observer sets, so the engine transitions to `.ended` and the host's
+    /// end-of-playback handling (mark-watched / autoplay-next / dismiss) fires exactly as an organic
+    /// finish. Idempotent, and cleared per load in `unloadCurrentItem`.
+    func markEndOfMediaReached() {
+        guard !didReachEnd else { return }
+        EngineLog.emit("[NativeAVPlayerHost] #\(sessionID) synthesized end-of-media (tail park, #169)", category: .engine)
+        didReachEnd = true
+    }
+
     /// Resolve only when the seek physically lands (loopback source lands seeks seconds after the call; issue #37).
     /// seekInFlight suppresses the periodic observer across the wait; only the latest seekGeneration clears it.
     func seek(to seconds: Double) async {
