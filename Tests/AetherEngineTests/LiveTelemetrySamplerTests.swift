@@ -87,9 +87,15 @@ struct LiveTelemetrySamplerTests {
         let engine = try makeNativeEngine()
         let entered = AtomicBool(false)
         let release = DispatchSemaphore(value: 0)
+        // Barrier, not a measurement: the read must stay in flight until the test performs the swap
+        // below and signals. A finite wall-clock cap here (previously 30 s) races the outer 90 s
+        // main-actor backstop: under CI starvation the read self-releases before the swap, publishes
+        // a still-valid snapshot, and the drop assertion flakes. The defer guarantees release on any
+        // early throw so an unsignalled wait can't park a read-queue thread.
+        defer { release.signal() }
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
             entered.set(true)
-            _ = release.wait(timeout: .now() + 30)
+            release.wait()
             return NativeAVFReadings(forwardBufferSeconds: 12.0)
         })
         sampler.start()
@@ -109,9 +115,13 @@ struct LiveTelemetrySamplerTests {
         let engine = try makeNativeEngine()
         let entered = AtomicBool(false)
         let release = DispatchSemaphore(value: 0)
+        // Barrier, not a measurement (see the swap test): the read must stay in flight until stop()
+        // below and the signal. A finite cap races the outer 90 s backstop and flakes under CI
+        // starvation; the defer releases on any early throw.
+        defer { release.signal() }
         let sampler = LiveTelemetrySampler(engine: engine, nativeRead: { _, _ in
             entered.set(true)
-            _ = release.wait(timeout: .now() + 30)
+            release.wait()
             return NativeAVFReadings(forwardBufferSeconds: 12.0)
         })
         sampler.start()
