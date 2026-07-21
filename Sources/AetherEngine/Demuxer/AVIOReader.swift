@@ -175,8 +175,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
-    // Backpressure: pause delivery above highWater; peak resident window ~22 MB.
+    // Backpressure: suspend the persistent task above highWater, resume below lowWater
+    // (#174). Suspend/resume is the only contractual flow control; blocking the delegate
+    // callback leaves the socket read running on TLS/H2 transports, and the undelivered
+    // body then accumulates in unbounded URLSession-internal allocations until jetsam.
+    // Peak resident window ~= highWater + transport in-flight (a few MB).
     private static let winHighWater = 16 * 1024 * 1024
+    private static let winLowWater = 8 * 1024 * 1024
     // Keep this many bytes behind the cursor for small matroska backward re-reads.
     private static let winLookback = 2 * 1024 * 1024
     // Trim in batches to avoid O(n^2) memmove storm on every 256 KB read.
@@ -245,6 +250,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var connGeneration = 0
     private var activeSession: URLSession?
     private var activeTask: URLSessionDataTask?
+    // #174: true while the persistent task is suspended for window backpressure.
+    // winCond-guarded; every suspend/resume transition goes through this flag so the
+    // task's suspend count stays balanced.
+    private var persistentTaskSuspended = false
+
+    /// #174: winCond-guarded snapshot of the suspend state, internal so the task-level
+    /// backpressure is unit-tested against a loopback origin without private state access.
+    var persistentTaskIsSuspendedForTesting: Bool {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return persistentTaskSuspended
+    }
     // #93 restart latency diagnostics (winCond-guarded): bytes dropped by the stale-generation
     // guard, plus per-generation time-to-first-data tracking.
     private var staleGenDroppedBytes: Int64 = 0
@@ -393,7 +410,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // a size; if not, abandon it (generation bump ignores a size landing in the
                 // race window). fileSize is read under the lock because the delegate thread now
                 // writes it (issue #70 review #4/#5).
-                let (haveSize, abandoned) = resolveOptimisticOpen()
+                let (haveSize, abandoned, abandonedTask, wasSuspended) = resolveOptimisticOpen()
+                if wasSuspended { abandonedTask?.resume() }
                 abandoned?.invalidateAndCancel()
                 if !haveSize {
                     // The data connection resolved no size (no-length origin, a transient 429,
@@ -492,18 +510,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the read means a size that lands in the race window is ignored rather than racing a
     /// half-done teardown (issue #70 review #4/#5). Returns the session to cancel outside
     /// the lock. Demux thread, open-time only; leaves the AVIO context intact (unlike close()).
-    private func resolveOptimisticOpen() -> (haveSize: Bool, abandoned: URLSession?) {
+    private func resolveOptimisticOpen() -> (haveSize: Bool, abandoned: URLSession?, abandonedTask: URLSessionDataTask?, wasSuspended: Bool) {
         winCond.lock()
         defer { winCond.unlock() }
-        if fileSize > 0 { return (true, nil) }
+        if fileSize > 0 { return (true, nil, nil, false) }
         connGeneration &+= 1
         let session = activeSession
+        let task = activeTask
+        let suspended = persistentTaskSuspended
+        persistentTaskSuspended = false
         activeSession = nil
         activeTask = nil
         window = Data()
         connEnded = true
         winCond.broadcast()
-        return (false, session)
+        return (false, session, task, suspended)
     }
 
     // Close flags written on the teardown thread (markClosed / fullyClose) and read on the demux
@@ -593,11 +614,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // is released. Grab under winCond, invalidate outside it (mirrors close()).
         let session = activeSession
         let task = activeTask
+        let persistentWasSuspended = persistentTaskSuspended
+        persistentTaskSuspended = false
         activeSession = nil
         activeTask = nil
         connEnded = true
         winCond.broadcast()
         winCond.unlock()
+        if persistentWasSuspended { task?.resume() }
         task?.cancel()
         session?.invalidateAndCancel()
     }
@@ -647,17 +671,23 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connGeneration &+= 1
         connEnded = true
         let session = activeSession
+        let task = activeTask
+        let persistentWasSuspended = persistentTaskSuspended
+        persistentTaskSuspended = false
         activeSession = nil
         activeTask = nil
         window = Data()
         winCond.broadcast()
         winCond.unlock()
+        if persistentWasSuspended { task?.resume() }
         session?.invalidateAndCancel()
     }
 
     // MARK: - Read (called by FFmpeg on demux thread)
 
-    fileprivate func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
+    // Internal (not fileprivate) so the #174 backpressure tests can drive the consumer
+    // side directly; production entry stays the C read callback below.
+    func read(into buf: UnsafeMutablePointer<UInt8>, size: Int32) -> Int32 {
         guard !isClosed else { return -1 }
         if readDeadlinePassedOrAborted { readDeadlineFired = true; return -1 }
         // Check usePersistentReader before isStreaming: live feeds without
@@ -883,8 +913,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if readDeadlinePassedOrAborted { readDeadlineFired = true; return totalRead > 0 ? Int32(totalRead) : -1 }
 
             // #93/#96 residual: time the loop-head lock acquisition. A delegate thread holding winCond
-            // across its copy + backpressure window blocks the read HERE with nothing to show for it, so
-            // this turns that invisible wait into `lockWait=`.
+            // across its window copy blocks the read HERE with nothing to show for it, so this turns
+            // that invisible wait into `lockWait=`.
             let lockWaitStart = DispatchTime.now()
             winCond.lock()
             diag.recordLockWait(ms: msSince(lockWaitStart))
@@ -972,8 +1002,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 unproductiveReconnects = 0      // real progress
                 rateLimitStreak = 0             // real progress clears the 429 give-up streak (#71)
                 emitNetworkPhase(.flowing)      // recovered: source delivering again (#85)
-                winCond.broadcast()              // window may have shrunk: wake backpressure
+                // #174: resume the suspended transfer once the drain crosses lowWater.
+                var toResume: URLSessionDataTask?
+                if persistentTaskSuspended,
+                   window.count - max(0, Int(position - winStart)) <= Self.winLowWater {
+                    persistentTaskSuspended = false
+                    toResume = activeTask
+                }
+                winCond.broadcast()
                 winCond.unlock()
+                toResume?.resume()
                 continue
             }
 
@@ -1016,6 +1054,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
 
             if !ended {
+                // #174: a suspended task never delivers; resume before waiting (mirrors
+                // readStreaming). Reached when a within-window forward seek lands at the
+                // frontier while the transfer is parked above lowWater.
+                if persistentTaskSuspended {
+                    persistentTaskSuspended = false
+                    let toResume = activeTask
+                    winCond.unlock()
+                    toResume?.resume()
+                    continue
+                }
                 // Wait for the live connection to fill forward. A false return
                 // means connStallTimeout elapsed with no data (socket stall).
                 let waitStart = DispatchTime.now()
@@ -1270,12 +1318,16 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
         let oldSession = activeSession
+        let oldTask = activeTask
+        let oldSuspended = persistentTaskSuspended
+        persistentTaskSuspended = false
         activeSession = nil
         activeTask = nil
-        // Wake a backpressure-blocked old-gen delegate so it sees it is stale.
         winCond.broadcast()
         winCond.unlock()
 
+        // #174: balance a pending suspend before cancel (mirrors the streaming teardown).
+        if oldSuspended { oldTask?.resume() }
         oldSession?.invalidateAndCancel()
 
         if isClosed { return }
@@ -1322,8 +1374,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     /// Force-copies `data` into the sliding window and applies backpressure by
-    /// blocking until the consumer drains below winHighWater. Force-copy releases
-    /// source dispatch_data per delivery (same leak control as the chunk path).
+    /// suspending the task once the window exceeds winHighWater (#174); readPersistent
+    /// resumes it when the consumer drains below winLowWater. Never blocks: parking this
+    /// delegate callback has no flow-control contract (TLS/H2 transports keep reading at
+    /// line rate into unbounded internal buffers, the #174 EXC_RESOURCE). Force-copy
+    /// releases source dispatch_data per delivery (same leak control as the chunk path).
     fileprivate func appendPersistentData(_ data: Data, generation: Int) {
         winCond.lock()
         guard generation == connGeneration, !isFullyClosed else {
@@ -1350,13 +1405,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         addBytesFetched(count)
         winCond.broadcast()
-        // Backpressure: 0.2s timeout is belt-and-suspenders; correctness from broadcasts.
-        while generation == connGeneration && !isClosed {
-            let ahead = window.count - max(0, Int(position - winStart))
-            if ahead <= Self.winHighWater { break }
-            _ = winCond.wait(until: Date(timeIntervalSinceNow: 0.2))
+        // Deliveries already dispatched before the suspend takes effect still land here
+        // (flag already set, no double-suspend), so the window can overshoot highWater by
+        // the transport's in-flight amount; the suspend count stays balanced via the flag.
+        var toSuspend: URLSessionDataTask?
+        let ahead = window.count - max(0, Int(position - winStart))
+        if ahead > Self.winHighWater, !persistentTaskSuspended, !isClosed {
+            persistentTaskSuspended = true
+            toSuspend = activeTask
         }
         winCond.unlock()
+        toSuspend?.suspend()
         if let firstDataMs {
             // #93/#96 residual: a slow first-data gap is release-visible so a device trace can pair it
             // with the response-header timing above. Small header gap + large first-data gap = the body
