@@ -43,18 +43,20 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// Drop frames before this PTS after a seek (prevents keyframe-to-target fast-forward). Cleared after the first passing frame.
     private var skipUntilPTS: CMTime?
 
-    /// Cached CMVideoFormatDescription keyed by dimensions + pixel format + colorimetry. CMVideoFormatDescriptionCreateForImageBuffer snapshots color attachments at creation, so a mid-stream colorimetry change at same dimensions must invalidate the cache. Guarded by reorderLock; nil'd by flush().
+    /// Cached CMVideoFormatDescription keyed by dimensions + pixel format + colorimetry + pixel aspect ratio. CMVideoFormatDescriptionCreateForImageBuffer snapshots color AND aspect attachments at creation, so a mid-stream change at same dimensions must invalidate the cache; a PAR-less first frame froze a PAR-less description for the whole stream and collapsed anamorphic content to coded dimensions (#177). Guarded by reorderLock; nil'd by flush().
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: FormatDescriptionKey?
 
     /// Cache key for cachedFormatDesc. Colorimetry fields are Strings (not CF references) so the struct stays Equatable without CF identity traps.
-    private struct FormatDescriptionKey: Equatable {
+    struct FormatDescriptionKey: Equatable {
         var width: Int
         var height: Int
         var pixelFormat: OSType
         var primaries: String?
         var transfer: String?
         var matrix: String?
+        var parH: Int?
+        var parV: Int?
     }
 
     private var loggedLayerFailed = false
@@ -246,15 +248,19 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
     }
 
-    private func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
+    /// Internal (not private) for #177 regression tests: the PAR-keyed cache behavior is the fix.
+    func createSampleBuffer(from pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
         // Cache hit avoids CMVideoFormatDescriptionCreateForImageBuffer allocation + CF refcount churn on every frame.
+        let par = CVBufferCopyAttachment(pixelBuffer, kCVImageBufferPixelAspectRatioKey, nil) as? NSDictionary
         let key = FormatDescriptionKey(
             width: CVPixelBufferGetWidth(pixelBuffer),
             height: CVPixelBufferGetHeight(pixelBuffer),
             pixelFormat: CVPixelBufferGetPixelFormatType(pixelBuffer),
             primaries: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferColorPrimariesKey, nil) as? String,
             transfer: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as? String,
-            matrix: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String
+            matrix: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String,
+            parH: (par?[kCVImageBufferPixelAspectRatioHorizontalSpacingKey] as? NSNumber)?.intValue,
+            parV: (par?[kCVImageBufferPixelAspectRatioVerticalSpacingKey] as? NSNumber)?.intValue
         )
 
         // Guarded by reorderLock: flush() nils the cache from other threads.
