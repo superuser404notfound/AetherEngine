@@ -2199,18 +2199,29 @@ public final class AetherEngine: ObservableObject {
         // there is no analogous fallback on the native route, so route it to the SoftwarePlaybackHost
         // (libavcodec), which decodes these profiles. VOD only: forced-native live keeps its verified path, and
         // broadcast H.264 / HEVC is HW-decodable. Apple Silicon HW-decodes these, so the probe keeps them native.
+        // #176: DV Profile 5 is exempt inside the policy; the raw-hvcC probe misjudges the dvh1 route and the
+        // software path decodes IPT-PQ-c2 with a green/purple cast, so P5 must stay native unconditionally.
         if !useSoftwarePath, !options.isLive, probeOpened,
            let vStream = probe.stream(at: probe.videoStreamIndex),
-           let codecpar = vStream.pointee.codecpar,
-           VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-               codecID: detectedCodecID,
-               canHardwareDecode: VTCapabilityProbe.canHardwareDecode(codecpar: codecpar)) {
-            useSoftwarePath = true
-            EngineLog.emit(
-                "[AetherEngine] codec=\(detectedCodecID.rawValue) not hardware-decodable by "
-                + "VideoToolbox; routing to the software path so it plays instead of a black screen (#2)",
-                category: .engine
-            )
+           let codecpar = vStream.pointee.codecpar {
+            let dvProfile = Self.dvProfile(stream: vStream)
+            if VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                   codecID: detectedCodecID,
+                   dvProfile: dvProfile,
+                   canHardwareDecode: { VTCapabilityProbe.canHardwareDecode(codecpar: codecpar) }) {
+                useSoftwarePath = true
+                EngineLog.emit(
+                    "[AetherEngine] codec=\(detectedCodecID.rawValue) not hardware-decodable by "
+                    + "VideoToolbox; routing to the software path so it plays instead of a black screen (#2)",
+                    category: .engine
+                )
+            } else if detectedCodecID == AV_CODEC_ID_HEVC, dvProfile == 5 {
+                EngineLog.emit(
+                    "[AetherEngine] DV Profile 5: VT probe skipped, native dvh1 path is the only "
+                    + "correct decode (#176)",
+                    category: .engine
+                )
+            }
         }
         // Forward-only sources can't serve the native path's seeks (cue prewarm, segment seeks).
         // Covers custom readers AND URL sources whose AVIOReader resolved no size and degraded to

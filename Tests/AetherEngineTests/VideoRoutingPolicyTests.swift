@@ -110,17 +110,17 @@ struct VideoRoutingPolicyTests {
     @Test("H.264 / HEVC that VideoToolbox can't HW-decode falls back to software")
     func undecodableHEVCH264Software() {
         #expect(VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-            codecID: AV_CODEC_ID_H264, canHardwareDecode: false))
+            codecID: AV_CODEC_ID_H264, dvProfile: nil, canHardwareDecode: { false }))
         #expect(VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-            codecID: AV_CODEC_ID_HEVC, canHardwareDecode: false))
+            codecID: AV_CODEC_ID_HEVC, dvProfile: nil, canHardwareDecode: { false }))
     }
 
     @Test("HW-decodable H.264 / HEVC stays native (no Apple Silicon regression)")
     func decodableHEVCH264Native() {
         #expect(!VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-            codecID: AV_CODEC_ID_H264, canHardwareDecode: true))
+            codecID: AV_CODEC_ID_H264, dvProfile: nil, canHardwareDecode: { true }))
         #expect(!VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-            codecID: AV_CODEC_ID_HEVC, canHardwareDecode: true))
+            codecID: AV_CODEC_ID_HEVC, dvProfile: nil, canHardwareDecode: { true }))
     }
 
     @Test("non-H.264/HEVC codecs ignore the undecodable gate (own policy governs them)")
@@ -129,7 +129,39 @@ struct VideoRoutingPolicyTests {
         // it, and must never reclassify VP9 / MPEG-2 / etc. off a codec they don't apply to.
         for codec in [AV_CODEC_ID_AV1, AV_CODEC_ID_VP9, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_VC1] {
             #expect(!VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
-                codecID: codec, canHardwareDecode: false))
+                codecID: codec, dvProfile: nil, canHardwareDecode: { false }))
         }
+    }
+
+    // MARK: - #176 DV Profile 5 bypasses the VT probe gate
+
+    @Test("HEVC DV P5 stays native even when the raw-hvcC probe says undecodable")
+    func dvProfile5StaysNative() {
+        #expect(!VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: 5, canHardwareDecode: { false }))
+    }
+
+    @Test("HEVC DV P5 never runs the VT probe")
+    func dvProfile5SkipsProbe() {
+        var probed = false
+        _ = VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: 5, canHardwareDecode: { probed = true; return false })
+        #expect(!probed)
+    }
+
+    @Test("HEVC DV P7 / P8 keep the gate (base layer is standard Main10)")
+    func dvProfile78KeepGate() {
+        for profile in [7, 8] {
+            #expect(VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                codecID: AV_CODEC_ID_HEVC, dvProfile: profile, canHardwareDecode: { false }))
+            #expect(!VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+                codecID: AV_CODEC_ID_HEVC, dvProfile: profile, canHardwareDecode: { true }))
+        }
+    }
+
+    @Test("H.264 with DV side-data keeps the gate (P5 is HEVC-only)")
+    func h264DVKeepsGate() {
+        #expect(VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
+            codecID: AV_CODEC_ID_H264, dvProfile: 5, canHardwareDecode: { false }))
     }
 }
