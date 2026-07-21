@@ -192,6 +192,11 @@ struct Issue177IngestPrefetchTests {
         return data
     }
 
+    /// `timeout` is a backstop against a wedged reader, not a pacing bound: the loop exits the
+    /// moment `expectedBytes` arrived (~0.5 s healthy). Keep it wide (90 s, the repo's starved-CI
+    /// backstop width): under parallel-suite starvation the tail segments can arrive tens of
+    /// seconds late while the reader is perfectly healthy, and a 15 s cap turned exactly that
+    /// into a byte-count flake (8/11 segments at deadline, CI 2026-07-21).
     private func drain(_ reader: HLSLiveIngestReader, expectedBytes: Int, timeout: TimeInterval) -> Data {
         final class Box: @unchecked Sendable {
             let lock = NSLock()
@@ -240,9 +245,13 @@ struct Issue177IngestPrefetchTests {
         let segments = (0..<segmentCount).map { makeSegment(index: $0) }
         // Segment 9 is served far slower than its successors: with concurrent fetches,
         // seg10..seg12 complete first and must wait in the reorder window, not hit the FIFO.
+        // 1500 ms (not a token 400 ms): seg9's serve window is what the overlap assertion
+        // below measures, and on a starved CI runner the successor fetches' connection
+        // threads can take hundreds of ms to get scheduled at all; a narrow window would
+        // read high-water 1 on a correctly overlapping pipeline.
         var delays = [Int](repeating: 20, count: segmentCount)
         delays[5] = 50
-        delays[9] = 400
+        delays[9] = 1500
         let origin = try #require(LoopbackHLSOrigin(
             segments: segments, delaysMs: delays, initialWindow: 8))
         defer { origin.stop() }
@@ -255,7 +264,7 @@ struct Issue177IngestPrefetchTests {
 
         // Join takes seg5..7 per the tracker's edge policy, the refresh appends seg8..15.
         let expected = segments[5...].reduce(Data(), +)
-        let got = drain(reader, expectedBytes: expected.count, timeout: 15)
+        let got = drain(reader, expectedBytes: expected.count, timeout: 90)
 
         #expect(reader.terminalError == nil)
         #expect(got == expected, "FIFO bytes must be exact playlist order regardless of completion order")
@@ -277,7 +286,7 @@ struct Issue177IngestPrefetchTests {
         let reader = HLSLiveIngestReader(playlistURL: url)
         defer { reader.close() }
 
-        let got = drain(reader, expectedBytes: segments[0].count, timeout: 10)
+        let got = drain(reader, expectedBytes: segments[0].count, timeout: 90)
         #expect(reader.terminalError == nil)
         #expect(got == segments[0])
     }
