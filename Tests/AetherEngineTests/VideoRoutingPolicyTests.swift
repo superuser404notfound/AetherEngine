@@ -164,4 +164,46 @@ struct VideoRoutingPolicyTests {
         #expect(VideoRoutingPolicy.forcesSoftwareForUndecodableFormat(
             codecID: AV_CODEC_ID_H264, dvProfile: 5, canHardwareDecode: { false }))
     }
+
+    // MARK: - #176 follow-up: IPT-only DV is unrepresentable on the software path
+
+    @Test("AV1 DV P10.0 (no base layer) is unrepresentable in software")
+    func av1Profile100Unrepresentable() {
+        #expect(VideoRoutingPolicy.softwarePathCannotRepresent(
+            codecID: AV_CODEC_ID_AV1, dvProfile: 10, dvBlCompatID: 0))
+    }
+
+    @Test("AV1 DV P10.1 / P10.2 / P10.4 stay software-eligible (compatible base layer)")
+    func av1Profile10CompatBaseEligible() {
+        for compat in [1, 2, 4] {
+            #expect(!VideoRoutingPolicy.softwarePathCannotRepresent(
+                codecID: AV_CODEC_ID_AV1, dvProfile: 10, dvBlCompatID: compat))
+        }
+    }
+
+    @Test("HEVC DV P5 is unrepresentable in software (forward-only escape hatch)")
+    func hevcProfile5Unrepresentable() {
+        #expect(VideoRoutingPolicy.softwarePathCannotRepresent(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: 5, dvBlCompatID: 0))
+    }
+
+    @Test("HEVC DV P7 / P8 and non-DV streams stay software-eligible")
+    func hevcOtherProfilesEligible() {
+        for profile in [7, 8] {
+            #expect(!VideoRoutingPolicy.softwarePathCannotRepresent(
+                codecID: AV_CODEC_ID_HEVC, dvProfile: profile, dvBlCompatID: 1))
+        }
+        #expect(!VideoRoutingPolicy.softwarePathCannotRepresent(
+            codecID: AV_CODEC_ID_HEVC, dvProfile: nil, dvBlCompatID: nil))
+        #expect(!VideoRoutingPolicy.softwarePathCannotRepresent(
+            codecID: AV_CODEC_ID_AV1, dvProfile: nil, dvBlCompatID: nil))
+    }
+
+    @Test("non-DV-capable codecs never trip the unrepresentable check")
+    func otherCodecsNeverUnrepresentable() {
+        for codec in [AV_CODEC_ID_H264, AV_CODEC_ID_VP9, AV_CODEC_ID_MPEG2VIDEO] {
+            #expect(!VideoRoutingPolicy.softwarePathCannotRepresent(
+                codecID: codec, dvProfile: 10, dvBlCompatID: 0))
+        }
+    }
 }

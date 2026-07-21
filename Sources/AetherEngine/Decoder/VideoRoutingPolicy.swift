@@ -73,4 +73,26 @@ enum VideoRoutingPolicy {
             return false
         }
     }
+
+    /// #176 follow-up: DV variants whose only signal is IPT-PQ-c2 (no compatible base layer) cannot be
+    /// color-correctly decoded by the software path: libavcodec / dav1d hand the IPT signal on as YCbCr,
+    /// which renders with a green/purple cast. That is HEVC P5 and AV1 P10.0 (compat 0). P7 / P8.x /
+    /// P10.1 / P10.2 / P10.4 base layers are self-contained HDR10 / SDR / HLG and stay software-eligible.
+    /// Consulted after the final routing decision; a true here fails the load instead of playing wrong color
+    /// (AV1 P10.0 without HW AV1 has no native fallback, HEVC P5 reaches software only off forward-only
+    /// sources the native path cannot serve).
+    static func softwarePathCannotRepresent(
+        codecID: AVCodecID,
+        dvProfile: Int?,
+        dvBlCompatID: Int?
+    ) -> Bool {
+        switch codecID {
+        case AV_CODEC_ID_HEVC:
+            return dvProfile == 5
+        case AV_CODEC_ID_AV1:
+            return dvProfile == 10 && dvBlCompatID == 0
+        default:
+            return false
+        }
+    }
 }
