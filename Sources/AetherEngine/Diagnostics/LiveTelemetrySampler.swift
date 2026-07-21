@@ -46,6 +46,10 @@ struct NativeAVFReadings: Sendable {
     var networkThroughputMbps: Double? = nil
     var networkTransferredBytes: Int64? = nil
     var forwardBufferSeconds: Double? = nil
+    /// Raw (unclamped) loaded-range end, for the #169 tail-park loadedEnd guard. On a resume/seek into
+    /// the tail the playhead jumps ahead of loaded media, so the clamped `forwardBufferSeconds` (>= 0)
+    /// hides that the final segment has not arrived; the decision needs the true loaded end vs duration.
+    var loadedRangeEndSeconds: Double? = nil
     /// Sum over all access-log events, for the [LagDiag] tick-over-tick drop delta.
     var droppedFramesLifetimeSum: Int = 0
     var currentTimeSeconds: Double = .nan
@@ -87,6 +91,15 @@ final class LiveTelemetrySampler {
     private var lagLastClock: Double?
     private var lagLastDroppedSum: Int = 0
 
+    /// #169 tail-park end-of-media synthesis state.
+    private var eomParkFrozenTicks: Int = 0
+    private var eomParkLastPlayhead: Double?
+    private var didSynthesizeEomPark = false
+
+    /// A playhead moving less than this between 1 Hz ticks is "frozen" for #169 (well under a single
+    /// 23.976 fps frame of ~42 ms of legitimate forward progress).
+    private static let eomParkFrozenEpsilonSeconds: Double = 0.05
+
     init(engine: AetherEngine, nativeRead: @escaping NativeRead = LiveTelemetrySampler.batchReadNativeAVF) {
         self.engine = engine
         self.nativeRead = nativeRead
@@ -105,6 +118,9 @@ final class LiveTelemetrySampler {
         sessionStartBytes = 0
         lagLastClock = nil
         lagLastDroppedSum = 0
+        eomParkFrozenTicks = 0
+        eomParkLastPlayhead = nil
+        didSynthesizeEomPark = false
         task = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.tick()
@@ -225,6 +241,7 @@ final class LiveTelemetrySampler {
 
         if let readings = nativeReadings {
             emitLagDiag(engine: engine, readings: readings, netMbps: instantBitrateMbps)
+            evaluateEndOfMediaPark(engine: engine, readings: readings)
         }
 
         let snapshot = LiveTelemetry(
@@ -292,6 +309,37 @@ final class LiveTelemetrySampler {
         )
     }
 
+    /// Grace-thresholded synthesis of organic end-of-media when a native VOD parks a hair short of its
+    /// advertised duration with the final segment loaded (AetherEngine#169: the final segment's EXTINF,
+    /// derived from the container duration, overshoots the last real video sample, so AVPlayer sits in
+    /// WaitingToMinimizeStalls a few frames from the end and never fires didPlayToEndTime). Reuses the
+    /// already-read native batch; owns no AVFoundation reads of its own. Fires at most once per session.
+    private func evaluateEndOfMediaPark(engine: AetherEngine, readings: NativeAVFReadings) {
+        guard !didSynthesizeEomPark else { return }
+        let playhead = readings.currentTimeSeconds
+        guard playhead.isFinite else { eomParkFrozenTicks = 0; return }
+        let waitingToPlay = readings.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        let minimizingStalls = readings.reasonForWaitingToPlay == AVPlayer.WaitingReason.toMinimizeStalls.rawValue
+        // Raw loaded end; on a resume/seek into the tail the playhead runs ahead of loaded media, so
+        // default to the playhead (loadedEnd == playhead) which fails the final-segment-loaded guard.
+        let loadedEnd = readings.loadedRangeEndSeconds ?? playhead
+        let qualifies = AetherEngine.endOfMediaParkTickQualifies(
+            isLive: engine.isLive,
+            duration: engine.duration,
+            playhead: playhead,
+            loadedEnd: loadedEnd,
+            waitingToPlay: waitingToPlay,
+            minimizingStalls: minimizingStalls)
+        let frozen = eomParkLastPlayhead.map { abs(playhead - $0) < Self.eomParkFrozenEpsilonSeconds } ?? false
+        eomParkLastPlayhead = playhead
+        eomParkFrozenTicks = AetherEngine.endOfMediaParkFrozenTicks(
+            previous: eomParkFrozenTicks, tickQualifies: qualifies, playheadFrozen: frozen)
+        if AetherEngine.shouldSynthesizeEndOfMediaFromPark(frozenTicks: eomParkFrozenTicks) {
+            didSynthesizeEomPark = true
+            engine.synthesizeEndOfMediaFromTailPark(playhead: playhead, loadedEnd: loadedEnd)
+        }
+    }
+
     /// Hops the AVFoundation batch onto the dedicated read queue and back. The main actor only
     /// suspends here; a stalled mediaserverd reply parks a GCD thread, not the main thread.
     private func readNativeOffMain(player: AVPlayer, item: AVPlayerItem) async -> NativeAVFReadings {
@@ -322,8 +370,11 @@ final class LiveTelemetrySampler {
         readings.currentTimeSeconds = now
         if let last = item.loadedTimeRanges.last?.timeRangeValue {
             let end = CMTimeGetSeconds(CMTimeAdd(last.start, last.duration))
-            if end.isFinite, now.isFinite {
-                readings.forwardBufferSeconds = max(0, end - now)
+            if end.isFinite {
+                readings.loadedRangeEndSeconds = end
+                if now.isFinite {
+                    readings.forwardBufferSeconds = max(0, end - now)
+                }
             }
         }
 

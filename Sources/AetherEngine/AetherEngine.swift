@@ -1333,6 +1333,73 @@ public final class AetherEngine: ObservableObject {
         return currentTime >= duration - endOfMediaEpsilonSeconds
     }
 
+    /// True when a native VOD tick shows the tail-park signature of AetherEngine#169: the final segment
+    /// is loaded to (approximately) the advertised end, yet the playhead sits a hair short of `duration`
+    /// waiting to minimize stalls. The final segment's advertised EXTINF is derived from the container
+    /// duration (`sourceDurationSeconds`), which overshoots the last real video sample whenever the audio
+    /// track runs a few frames longer or the container duration is rounded up; the video renderer then
+    /// has no frame for the last fraction of a second, AVPlayer parks in WaitingToMinimizeStalls, never
+    /// fires didPlayToEndTime, and after ~43 s dies with CoreMediaErrorDomain -12889.
+    ///
+    /// The `loadedEnd` guard is the discriminator against a still-downloading final segment: a playhead
+    /// within the end epsilon but with the media loaded well short of `duration` is a recoverable network
+    /// stall, NOT exhausted video, and must be left to the stall/reload recovery. A live source, an
+    /// actually-playing item, a deliberate pause (not waiting-to-play), and a mid-stream position all fail
+    /// the guards above.
+    nonisolated static func endOfMediaParkTickQualifies(
+        isLive: Bool,
+        duration: Double,
+        playhead: Double,
+        loadedEnd: Double,
+        waitingToPlay: Bool,
+        minimizingStalls: Bool
+    ) -> Bool {
+        guard !isLive, duration > 0 else { return false }
+        guard waitingToPlay, minimizingStalls else { return false }
+        guard isAtEndOfMedia(currentTime: playhead, duration: duration, isLive: isLive) else { return false }
+        return loadedEnd >= duration - endOfMediaEpsilonSeconds
+    }
+
+    /// Rolling count of consecutive 1 Hz native ticks whose tail-park conditions held with a frozen
+    /// playhead. Resets to zero the instant a tick stops qualifying or the playhead advances, so a
+    /// momentary near-end buffering blip that then resumes never accumulates toward completion.
+    nonisolated static func endOfMediaParkFrozenTicks(
+        previous: Int,
+        tickQualifies: Bool,
+        playheadFrozen: Bool
+    ) -> Int {
+        (tickQualifies && playheadFrozen) ? previous + 1 : 0
+    }
+
+    /// Grace before synthesizing end-of-media from a tail park (AetherEngine#169): the park must persist
+    /// this many consecutive 1 Hz ticks so a transient near-end stall that self-recovers is never cut
+    /// short. Three ticks (~3 s) still finishes far faster than the ~43 s AVPlayer takes to surface -12889.
+    nonisolated static let endOfMediaParkGraceTicks: Int = 3
+
+    /// Synthesize organic end-of-media once the tail park has persisted past the grace window.
+    nonisolated static func shouldSynthesizeEndOfMediaFromPark(frozenTicks: Int) -> Bool {
+        frozenTicks >= endOfMediaParkGraceTicks
+    }
+
+    /// Complete a native VOD that parked a hair short of its advertised duration because the final
+    /// segment's video is exhausted (AetherEngine#169): the final segment's EXTINF, derived from the
+    /// container duration, overshoots the last real video sample, so AVPlayer sits in
+    /// WaitingToMinimizeStalls a few frames from the end, never fires didPlayToEndTime, and after ~43 s
+    /// dies with -12889. Fires organic end-of-media through the host's `didReachEnd` so the session
+    /// finishes cleanly (`.ended` -> mark-watched / autoplay-next / dismiss) instead of hanging then
+    /// erroring. The tail numbers are logged so a field trace confirms the mechanism (video ends short
+    /// of the container duration the final EXTINF was built from). Driven from the 1 Hz native tick.
+    @MainActor
+    func synthesizeEndOfMediaFromTailPark(playhead: Double, loadedEnd: Double) {
+        EngineLog.emit(
+            "[AetherEngine] #169 tail park: playhead=\(String(format: "%.3f", playhead))s "
+            + "duration=\(String(format: "%.3f", duration))s loadedEnd=\(String(format: "%.3f", loadedEnd))s; "
+            + "final-segment video exhausted within \(String(format: "%.2f", Self.endOfMediaEpsilonSeconds))s "
+            + "of duration, synthesizing end-of-media",
+            category: .engine)
+        nativeHost?.markEndOfMediaReached()
+    }
+
     /// A VOD seek whose target lands at end-of-media parks at the final frame (AetherEngine#164): it is
     /// not playing, but it is NOT the terminal `.ended` state either. `.ended` (organic completion, #63)
     /// fires the host's end-of-playback handling (mark-watched / autoplay-next / dismiss) and is reserved
