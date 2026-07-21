@@ -3,40 +3,43 @@ import Testing
 import Libavcodec
 @testable import AetherEngine
 
-/// #145 (cmcpherson274): an MKV whose subtitle track carries TrackTimestampScale != 1 came out on a
-/// HYBRID timestamp axis: cue pts = cluster timestamp + (in-cluster relative timestamp x TTS),
-/// which is neither the unscaled (cluster + rel) nor the fully scaled ((cluster + rel) x TTS) axis.
-/// Consequences on a TTS=2.0 fixture: cue starts shifted by relTs x (TTS - 1) per cluster (12->14 s,
-/// 24.5->29 s), packets arrived non-monotonic in storage order (a late-rel cue in cluster N landing
-/// past an early-rel clear in cluster N+1), and a stale fade outlived its authored clear. All of it
-/// silent: right pixels, wrong times, no warning.
+/// #145 (cmcpherson274), premise corrected after upstream review (FFmpeg PR 23852, jamrial):
+/// RFC 9559 (11.1.3, 11.2, 5.1.3.5.3) puts Block/SimpleBlock relative timestamps AND BlockDuration
+/// in Track Ticks, so a block's absolute time is (cluster + rel x TTS) x TimestampScale. FFmpeg's
+/// matroska demuxer implements exactly that (stream time_base = TimestampScale x TTS, cluster
+/// component divided by TTS once); the "hybrid axis" this suite originally locked in does not
+/// exist. The reporter's fixture (control mux with TrackTimestampScale set to 2.0 and nothing
+/// rescaled) was an invalid file: its blocks were authored in Segment Ticks.
 ///
-/// Root cause is inherited from FFmpeg's matroska demuxer (n8.1.2 and master): read_header bakes the
-/// track's TrackTimestampScale into the stream time_base (segment scale x TTS) but the block parser
-/// divides only the CLUSTER component by TTS (`cluster_time / track->time_scale + block_time`), so
-/// the relative component ends up scaled and the cluster component does not.
+/// The earlier FFmpegBuild clamp (any TTS != 1 forced to 1.0) made that invalid fixture land on
+/// its authored times but would mistime a conformant TTS != 1 file. It is replaced by a warn-only
+/// patch: RFC behavior is preserved verbatim and a warning surfaces TTS != 1, since many readers
+/// ignore the element and files carrying it may have been authored against such readers. The
+/// reporter's core defect (the silence) stays fixed; the axis follows the spec.
 ///
-/// The fix (FFmpegBuild patch_ffmpeg_matroska_tts) clamps any TrackTimestampScale != 1.0 to 1.0 at
-/// read_header with a warning, extending FFmpeg's own existing `< 0.01` clamp. That lands every
-/// track on the coherent, unscaled segment axis (cluster + rel): the axis the file's clusters are
-/// stored on, monotonic in storage order, and in sync with the file's other tracks. Full spec
-/// scaling was rejected deliberately: RFC 9559 deprecates the element (maxver 3), matroska.org
-/// documents that most readers ignore it, and a real-world TTS != 1 is almost always muxer damage
-/// where full scaling would desync the track from its siblings instead of playing it correctly.
+/// This suite locks the RFC semantics: a conformant Track Ticks file demuxes at its authored
+/// times (the clamp would have broken exactly this case), and a segment-axis-authored file
+/// (invalid per RFC) demuxes on the RFC-scaled axis, documenting inherited upstream behavior.
 struct Issue145MatroskaTrackTimestampScaleTests {
 
-    /// One authored subtitle event: absolute time = cluster + rel (both ms on the segment axis).
+    private static let tts = 2.0
+
+    /// One authored subtitle event: intended absolute time = cluster + rel (both ms).
     fileprivate struct Event {
         let clusterMs: Int
         let relMs: Int
         let durationMs: Int
         var authoredSeconds: Double { Double(clusterMs + relMs) / 1000.0 }
         var authoredDurationSeconds: Double { Double(durationMs) / 1000.0 }
+        /// RFC rendering of a file whose block fields carry these ms values verbatim (Segment
+        /// Ticks authoring, invalid for TTS != 1): rel and duration are read as Track Ticks.
+        func rfcSeconds(tts: Double) -> Double { (Double(clusterMs) + Double(relMs) * tts) / 1000.0 }
+        func rfcDurationSeconds(tts: Double) -> Double { Double(durationMs) * tts / 1000.0 }
     }
 
     /// Mirrors the reporter's fixture shape: 5 s clusters, a late-rel cue in the 20 s cluster
-    /// (authored 24.5 s) followed by an early-rel event in the 25 s cluster. On the hybrid axis with
-    /// TTS=2 those emit as 29 s then 25 s: shifted AND non-monotonic.
+    /// (authored 24.5 s) followed by an early-rel event in the 25 s cluster. All rel/duration
+    /// values divide evenly by TTS=2 so the conformant variant needs no rounding.
     private static let events: [Event] = [
         Event(clusterMs: 0, relMs: 2000, durationMs: 1000),
         Event(clusterMs: 5000, relMs: 2000, durationMs: 1000),
@@ -65,10 +68,11 @@ struct Issue145MatroskaTrackTimestampScaleTests {
         return out
     }
 
-    @Test("TTS=2.0 track demuxes on the authored segment axis, not the hybrid axis")
-    func scaledTrackKeepsAuthoredTimes() throws {
-        let packets = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: 2.0,
-                                                                     events: Self.events))
+    @Test("conformant TTS=2.0 file (Track Ticks authoring) demuxes at its authored times")
+    func conformantScaledTrackKeepsAuthoredTimes() throws {
+        let packets = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: Self.tts,
+                                                                     events: Self.events,
+                                                                     authoring: .trackTicks))
         #expect(packets.count == Self.events.count)
         for (packet, event) in zip(packets, Self.events) {
             #expect(abs(packet.pts - event.authoredSeconds) < 0.0005,
@@ -78,25 +82,42 @@ struct Issue145MatroskaTrackTimestampScaleTests {
         }
     }
 
-    @Test("TTS=2.0 track emits monotonic pts in storage order")
-    func scaledTrackStaysMonotonic() throws {
-        let packets = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: 2.0,
-                                                                     events: Self.events))
-        let times = packets.map(\.pts)
-        #expect(times == times.sorted(),
-                "storage order must stay monotonic on a coherent axis, got \(times)")
-    }
-
-    @Test("TTS=2.0 file demuxes identically to the TTS-less control")
-    func scaledTrackMatchesControl() throws {
+    @Test("conformant TTS=2.0 file demuxes identically to the TTS-less control")
+    func conformantScaledTrackMatchesControl() throws {
         let control = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: nil,
-                                                                     events: Self.events))
-        let scaled = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: 2.0,
-                                                                    events: Self.events))
+                                                                     events: Self.events,
+                                                                     authoring: .segmentTicks))
+        let scaled = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: Self.tts,
+                                                                    events: Self.events,
+                                                                    authoring: .trackTicks))
         #expect(control.count == scaled.count)
         for (c, s) in zip(control, scaled) {
             #expect(abs(c.pts - s.pts) < 0.0005, "control \(c.pts)s vs scaled \(s.pts)s")
             #expect(abs(c.duration - s.duration) < 0.0005)
+        }
+    }
+
+    @Test("conformant TTS=2.0 file emits monotonic pts in storage order")
+    func conformantScaledTrackStaysMonotonic() throws {
+        let packets = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: Self.tts,
+                                                                     events: Self.events,
+                                                                     authoring: .trackTicks))
+        let times = packets.map(\.pts)
+        #expect(times == times.sorted(),
+                "conformant authoring must stay monotonic in storage order, got \(times)")
+    }
+
+    @Test("segment-axis-authored TTS file (invalid per RFC 9559) demuxes on the RFC-scaled axis")
+    func segmentAxisAuthoredFileFollowsRFCScaledAxis() throws {
+        let packets = try demuxSubtitleTimes(MatroskaTTSFixture.make(trackTimestampScale: Self.tts,
+                                                                     events: Self.events,
+                                                                     authoring: .segmentTicks))
+        #expect(packets.count == Self.events.count)
+        for (packet, event) in zip(packets, Self.events) {
+            #expect(abs(packet.pts - event.rfcSeconds(tts: Self.tts)) < 0.0005,
+                    "invalid file: RFC renders \(event.rfcSeconds(tts: Self.tts))s, got \(packet.pts)s")
+            #expect(abs(packet.duration - event.rfcDurationSeconds(tts: Self.tts)) < 0.0005,
+                    "invalid file: RFC duration \(event.rfcDurationSeconds(tts: Self.tts))s, got \(packet.duration)s")
         }
     }
 }
@@ -104,7 +125,17 @@ struct Issue145MatroskaTrackTimestampScaleTests {
 /// Minimal in-memory Matroska writer: one S_TEXT/UTF8 subtitle track, one BlockGroup (Block +
 /// BlockDuration) per event, one Cluster per distinct cluster timestamp. Sizes are always encoded
 /// as 8-byte EBML vints so nesting needs no length backpatching.
+///
+/// `authoring` selects the axis the block fields are written on. `.trackTicks` divides rel and
+/// duration by TrackTimestampScale (conformant per RFC 9559; requires even division).
+/// `.segmentTicks` writes the ms values verbatim (the reporter's fixture shape; invalid for
+/// TTS != 1, since readers scale these fields by TTS).
 private enum MatroskaTTSFixture {
+
+    enum Authoring {
+        case trackTicks
+        case segmentTicks
+    }
 
     private static func vintSize(_ n: Int) -> [UInt8] {
         var bytes: [UInt8] = [0x01]
@@ -135,7 +166,7 @@ private enum MatroskaTTSFixture {
 
     private static func string(_ s: String) -> [UInt8] { Array(s.utf8) }
 
-    static func make(trackTimestampScale: Double?, events: [Event]) -> Data {
+    static func make(trackTimestampScale: Double?, events: [Event], authoring: Authoring) -> Data {
         let header = element([0x1A, 0x45, 0xDF, 0xA3],
                              element([0x42, 0x86], uint(1)) +          // EBMLVersion
                              element([0x42, 0xF7], uint(1)) +          // EBMLReadVersion
@@ -162,19 +193,35 @@ private enum MatroskaTTSFixture {
         }
         let tracks = element([0x16, 0x54, 0xAE, 0x6B], element([0xAE], trackFields))
 
+        // Track Ticks authoring divides the ms fields by TTS (conformant); Segment Ticks writes
+        // them verbatim (reporter-shaped, invalid for TTS != 1).
+        let divisor: Int
+        switch authoring {
+        case .trackTicks:
+            let tts = trackTimestampScale ?? 1.0
+            precondition(tts == tts.rounded() && tts >= 1.0, "integer TTS required for tick math")
+            divisor = Int(tts)
+        case .segmentTicks:
+            divisor = 1
+        }
+
         var clusters: [UInt8] = []
         let grouped = Dictionary(grouping: events, by: \.clusterMs).sorted { $0.key < $1.key }
         for (clusterMs, clusterEvents) in grouped {
             var body = element([0xE7], uint(clusterMs))  // Cluster Timestamp
             for event in clusterEvents.sorted(by: { $0.relMs < $1.relMs }) {
+                precondition(event.relMs % divisor == 0 && event.durationMs % divisor == 0,
+                             "event values must divide evenly by TTS")
+                let rel = event.relMs / divisor
+                let duration = event.durationMs / divisor
                 let block: [UInt8] = [0x81,                             // track number vint
-                                      UInt8((event.relMs >> 8) & 0xFF),
-                                      UInt8(event.relMs & 0xFF),        // int16 relative timestamp
+                                      UInt8((rel >> 8) & 0xFF),
+                                      UInt8(rel & 0xFF),                // int16 relative timestamp
                                       0x00]                             // flags
                                      + string("line @\(clusterMs + event.relMs)ms")
                 body += element([0xA0],                                 // BlockGroup
                                 element([0xA1], block) +                // Block
-                                element([0x9B], uint(event.durationMs)))  // BlockDuration
+                                element([0x9B], uint(duration)))        // BlockDuration
             }
             clusters += element([0x1F, 0x43, 0xB6, 0x75], body)
         }

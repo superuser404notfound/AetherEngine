@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.2] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.2))
+
+### Fixed
+
+- **Matroska `TrackTimestampScale != 1` follows RFC 9559 again (FFmpegBuild 2.2.0): the 5.9.4 clamp is dropped, the warning stays.** Upstream review of our proposed FFmpeg patch ([FFmpeg PR 23852](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/23852)) corrected the #145 premise: RFC 9559 (11.1.3, 11.2, 5.1.3.5.3) puts Block/SimpleBlock relative timestamps and BlockDuration in Track Ticks, absolute time is `(cluster + rel x TTS) x TimestampScale`, and upstream `matroskadec` implements exactly that. The "hybrid axis" described in the 5.9.4 entry does not exist; the file that motivated it was authored on the segment axis and is invalid per RFC, and the clamp would have mistimed a conformant `TTS != 1` file. Timestamp behavior is now exactly upstream's RFC behavior; the demuxer still warns whenever a track carries `TTS != 1` (the element is deprecated and widely ignored, so such files may be authored against readers that ignore it), which keeps the actual defect reported in #145, the silence, fixed. `Issue145MatroskaTrackTimestampScaleTests` now locks the RFC semantics: a conformant Track Ticks file demuxes at its authored times (the clamp broke exactly this case), and a segment-axis-authored file documents the RFC-scaled rendering as invalid-file behavior.
+
 ## [5.17.1] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.1))
