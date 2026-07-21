@@ -263,8 +263,6 @@ final class NativeAVPlayerHost {
                 Task { @MainActor in
                     await Self.dumpPlayerItemTracks(item, sid: sid)
                     Self.dumpAudioRoute(sid: sid, phase: "readyToPlay, route may still be negotiating")
-                    // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
-                    await self?.publishDetectedVideoFormat(from: item)
                 }
             }
 
@@ -283,6 +281,8 @@ final class NativeAVPlayerHost {
                         )
                         self.avPlayer.play()
                     }
+                    // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
+                    await self.publishDetectedVideoFormat(from: item)
                 case .failed:
                     let desc = item.error?.localizedDescription ?? "AVPlayerItem failed (no description)"
                     self.handleItemFailed(desc, item: item)
