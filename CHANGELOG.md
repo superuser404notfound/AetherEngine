@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.16.2] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.2))
+
+### Fixed
+
+- **A long 4K Dolby Vision loopback-HLS VOD failed to finish at end-of-media: AVPlayer parked a fraction of a second from the end (`WaitingToMinimizeStalls`), never fired `didPlayToEndTime`, and after ~43s died with `CoreMediaErrorDomain -12889`.** The final segment is produced and served fine, but its advertised `#EXTINF` is derived from the container duration (`sourceDurationSeconds`), while the muxer writes the final video sample at EOF with only its one-frame duration. When the container duration overshoots the last real video sample (audio a few frames longer, or a rounded-up MKV `Duration`), the video track underfills the advertised segment by ~0.1s, so the video renderer parks waiting for frames that never existed while `loadedTimeRanges` (audio plus the segment map) reports full buffering. The engine now detects this tail park from its 1 Hz native tick and synthesizes organic end-of-media (playhead within `endOfMediaEpsilonSeconds` of duration, final segment loaded to the end, `WaitingToMinimizeStalls`, playhead frozen for a 3-tick grace), so the session finishes cleanly (`.ended` -> mark-watched / autoplay-next) after ~3s instead of hanging then erroring at ~43s. Reported by rrgomes (Apple TV 4K, tvOS 26, 48-min HEVC Main10 DV Profile 8.1). Covered by `NearEndOfMediaParkTests`.
+- **Resuming into the last few seconds of a Dolby Vision title dropped DV: the #35 readiness gate reported "master never produced tracks", reloaded, timed out again, and fell back through the reduced master to the media playlist (HDR10 base, DV dropped).** A tail resume anchors the readiness-gate master on the final segment, still being produced over a slow link, so `awaitStartupReadiness` times out with 0 tracks and no media loaded. The gate (written for the cold DV/HDCP decode failure) misread unstarted production as a decode failure and burned the master fallback chain before it had any segment data to decode. The gate now splits a settle-window timeout by whether any media has loaded: no media means the first segment has not been served yet, so it keeps the DV master and re-awaits, bounded by `maxDataWaitRounds` (~24s of patience, comfortably longer than a slow-link final-segment production); media loaded but still 0 tracks stays the cold-decode park with the reload/fallback chain unchanged. A genuinely wedged producer still falls through once the data-wait budget is spent. Reported by rrgomes. Covered by `StartupReadinessGateTests`.
+
 ## [5.16.1] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.1))
