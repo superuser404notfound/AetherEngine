@@ -55,7 +55,10 @@ public final class AetherEngine: ObservableObject {
     // MARK: - Public State
 
     @Published public internal(set) var state: PlaybackState = .idle {
-        didSet { recomputePlaybackPhase() }
+        didSet {
+            recomputePlaybackPhase()
+            resolveLoadingStashedSeek(from: oldValue)
+        }
     }
 
     /// Mid-playback rebuffer flag. `state` stays `.playing` across a rebuffer to avoid icon flicker;
@@ -356,6 +359,40 @@ public final class AetherEngine: ObservableObject {
         nativeHostReady: Bool
     ) -> Bool {
         nativeSessionActive && !isLive && !nativeHostReady
+    }
+
+    /// #178: what to do with a seek stashed while `state == .loading` when `state` changes.
+    /// Only transitions OUT of `.loading` resolve the stash; every other transition holds it
+    /// (non-loading stashes belong to the #127 readiness sink). `.seeking` cannot follow
+    /// `.loading` (the `.loading` guard stashes instead of seeking) but holds defensively.
+    enum LoadingStashResolution { case replay, discard, hold }
+
+    nonisolated static func loadingStashResolution(
+        oldState: PlaybackState, newState: PlaybackState
+    ) -> LoadingStashResolution {
+        guard oldState == .loading else { return .hold }
+        switch newState {
+        case .playing, .paused: return .replay
+        case .idle, .ended, .error: return .discard
+        case .loading, .seeking: return .hold
+        }
+    }
+
+    /// #178: `state` didSet hook. Replays the loading-window seek once the session settles into a
+    /// playable state (covers autostart paths where readiness fires while `state` is still
+    /// `.loading` and the #127 sink must not replay yet), discards it when the load dies.
+    private func resolveLoadingStashedSeek(from oldState: PlaybackState) {
+        guard let pending = pendingPreReadySeekSeconds else { return }
+        switch Self.loadingStashResolution(oldState: oldState, newState: state) {
+        case .hold:
+            return
+        case .discard:
+            pendingPreReadySeekSeconds = nil
+        case .replay:
+            pendingPreReadySeekSeconds = nil
+            EngineLog.emit("[AetherEngine] replaying seek stashed during load to \(String(format: "%.2f", pending))s (#178)", category: .engine)
+            Task { @MainActor in await self.seek(to: pending) }
+        }
     }
 
     /// 1 Hz diagnostics sampler. Separate ObservableObject for the same reason as `clock`: per-sample
@@ -2524,8 +2561,14 @@ public final class AetherEngine: ObservableObject {
             EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: no active session (state=\(state))", category: .engine)
             return
         case .loading:
-            // No hosts yet; body would no-op but still flip state to .playing, dropping the host's spinner early.
-            EngineLog.emit("[AetherEngine] seek(to:\(seconds)) ignored: load in progress", category: .engine)
+            // #178: don't drop a seek raced against load(). No hosts exist yet (forwarding would
+            // no-op and flip state early, dropping the host's spinner), so stash the latest target
+            // in the #127 slot and resolve it on the transition out of .loading (state didSet):
+            // replay into a playable state, discard into a terminal one. Clamp/live guards re-run
+            // at replay when the session is actually known; duration may still be unprobed here.
+            pendingPreReadySeekSeconds = seconds
+            clock.currentTime = duration > 0 ? max(0, min(seconds, duration)) : max(0, seconds)
+            EngineLog.emit("[AetherEngine] seek(to:\(String(format: "%.2f", seconds))) stashed during load; will replay when the session settles (#178)", category: .engine)
             return
         default:
             break
@@ -2599,6 +2642,11 @@ public final class AetherEngine: ObservableObject {
             setProgrammaticSeek(inFlight: false, target: nil)
             return
         }
+        // #178: this seek supersedes any recovery re-anchor still holding the restart coalescer's
+        // authoritative slot (it was computed for the seek being superseded). Released before the
+        // host seek below so the new target's segment-driven restart cannot be dropped against a
+        // locked slot. Live never reaches here (returned above); LiveReopen's anchors are safe.
+        nativeVideoSession?.releaseSupersededAuthoritativeRestart()
         // Convert the (display-axis) target to AVPlayer's HLS clock. The origin re-adds a disc title's clip-0
         // STC base so `target` (0-based, matching duration) lands on the source-PTS shift the producer subtracts,
         // i.e. clockTarget == the 0-based playlist time (AE#105). Origin 0 off disc, so this stays

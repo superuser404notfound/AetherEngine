@@ -110,7 +110,9 @@ extension AetherEngine {
                     self.state = .paused
                 }
                 // #127: replay the latest host seek that arrived while the item was pre-ready.
-                if ready, let pending = self.pendingPreReadySeekSeconds {
+                // #178: not while still .loading (autostart paths hold .loading past readiness);
+                // replaying now would just re-stash. The state didSet resolves that case.
+                if ready, self.state != .loading, let pending = self.pendingPreReadySeekSeconds {
                     self.pendingPreReadySeekSeconds = nil
                     EngineLog.emit("[AetherEngine] replaying deferred pre-ready seek to \(String(format: "%.2f", pending))s (#127)", category: .engine)
                     Task { @MainActor in await self.seek(to: pending) }

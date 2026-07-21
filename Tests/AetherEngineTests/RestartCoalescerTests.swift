@@ -65,6 +65,52 @@ struct RestartCoalescerTests {
         #expect(c.next(justRan: 978) == nil)
     }
 
+    // MARK: - Superseded authoritative pending (#178)
+
+    @Test("A superseding user seek releases the authoritative slot so the next scrub is not dropped")
+    func supersedeReleasesAuthoritativeSlot() {
+        // #178 repro: seek #1's deadline reconcile parks an authoritative re-anchor in the pending
+        // slot; the user then issues seek #2. Without the release, seek #2's segment-driven restart
+        // is dropped and the producer lands on the stale recovery position (~13 s off in the report).
+        var c = RestartCoalescer()
+        #expect(c.begin(618) == true)                        // worker in-flight
+        #expect(c.begin(978, authoritative: true) == false)  // recovery re-anchor for seek #1
+        c.clearSupersededAuthoritativePending()              // user issued seek #2
+        #expect(c.begin(1120) == false)                      // seek #2's segment GET must take the slot
+        #expect(c.next(justRan: 618) == 1120)                // not dropped, not 978
+        #expect(c.next(justRan: 1120) == nil)
+    }
+
+    @Test("Superseding drops an obsolete recovery target that has no follow-up scrub")
+    func supersedeDropsObsoleteRecoveryTarget() {
+        // The recovery anchor served the SUPERSEDED seek; if the new seek's segments are already
+        // resident (no restart fires), running the stale re-anchor would move the producer away
+        // from where AVPlayer is now playing.
+        var c = RestartCoalescer()
+        #expect(c.begin(618) == true)
+        #expect(c.begin(978, authoritative: true) == false)
+        c.clearSupersededAuthoritativePending()
+        #expect(c.next(justRan: 618) == nil)
+        #expect(c.begin(700) == true)                        // coalescer idle again
+    }
+
+    @Test("Superseding leaves an ordinary pending untouched")
+    func supersedeLeavesOrdinaryPending() {
+        var c = RestartCoalescer()
+        #expect(c.begin(10) == true)
+        #expect(c.begin(20) == false)
+        c.clearSupersededAuthoritativePending()
+        #expect(c.next(justRan: 10) == 20)
+    }
+
+    @Test("Superseding when idle is a no-op")
+    func supersedeIdleNoOp() {
+        var c = RestartCoalescer()
+        c.clearSupersededAuthoritativePending()
+        #expect(c.begin(5) == true)
+        #expect(c.next(justRan: 5) == nil)
+    }
+
     @Test("After an authoritative target is consumed, ordinary scrubs coalesce normally again")
     func scrubResumesAfterAuthoritativeConsumed() {
         var c = RestartCoalescer()
