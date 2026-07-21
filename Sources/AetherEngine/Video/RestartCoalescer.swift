@@ -25,8 +25,10 @@ struct RestartCoalescer {
             } else if !pendingAuthoritative {
                 pending = idx
             }
-            // else: an authoritative pending owns the slot; drop this scrub (AVPlayer re-requests on the next
-            // segment GET if the user really moved, so nothing is lost).
+            // else: an authoritative pending owns the slot; drop this scrub. Since #178 a NEW user
+            // seek releases the slot (clearSupersededAuthoritativePending) before its segment GETs
+            // can fire a restart, so what lands here is a stale burst-tail fetch from an abandoned
+            // position, exactly what the #79 lock exists to block.
             return false
         }
         inFlight = true
@@ -36,6 +38,17 @@ struct RestartCoalescer {
     /// True while a coalesced restart run is executing (#93 residual: segment fetches ride this
     /// instead of burning fixed retry budgets against a progressing restart).
     var isInFlight: Bool { inFlight }
+
+    /// #178: a NEW user seek makes a pending authoritative recovery re-anchor obsolete; it was
+    /// computed for the seek being superseded. Dropping it releases the slot lock so the new seek's
+    /// segment-driven restart is not discarded (the #79 lock exists to block STALE burst-tail
+    /// scrubs, not fresher user intent), and removes a target that would otherwise re-anchor the
+    /// producer away from where AVPlayer plays next. Ordinary pendings keep their newest-wins flow.
+    mutating func clearSupersededAuthoritativePending() {
+        guard pendingAuthoritative else { return }
+        pending = nil
+        pendingAuthoritative = false
+    }
 
     /// Returns next pending target, or `nil` when the burst has settled (clears in-flight flag).
     mutating func next(justRan idx: Int) -> Int? {

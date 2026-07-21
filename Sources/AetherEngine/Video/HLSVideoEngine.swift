@@ -1726,6 +1726,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return provider?.mediaFetchCount ?? 0
     }
 
+    /// #178: called by the engine when a NEW user seek is dispatched. A recovery re-anchor still
+    /// holding the coalescer's authoritative slot belongs to the superseded seek; left in place it
+    /// would drop the new seek's segment-driven restart and land the producer on the stale
+    /// recovery position. Runs before the host seek so AVPlayer's new segment GETs never race a
+    /// locked slot.
+    func releaseSupersededAuthoritativeRestart() {
+        restartLock.lock()
+        restartCoalescer.clearSupersededAuthoritativePending()
+        restartLock.unlock()
+    }
+
     func requestRestart(at idx: Int, authoritative: Bool = false) {
         restartLock.lock()
         let shouldRun = restartCoalescer.begin(idx, authoritative: authoritative)

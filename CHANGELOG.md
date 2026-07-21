@@ -10,6 +10,11 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Seeks issued while the initial load is still in progress are no longer silently dropped.** `seek(to:)` no-oped for the whole `state == .loading` window (probe, native load, readiness gate, several seconds on slow sources), so hosts rendering the target optimistically watched playback snap back to the pre-seek position. The latest loading-window seek is now stashed in the #127 pre-ready slot, published optimistically to the scrub clock, and replayed when the session settles into a playable state (including autostart paths, where readiness fires while `state` is still `.loading`); a load that dies discards it. Reported by YangHanqing (#178, mechanism 1). Covered by `Issue178LoadingSeekStashTests`.
+- **An ordinary seek issued while a recovery re-anchor was pending no longer lands on the recovery position instead of its own target.** Once a seek-deadline reconcile parked an authoritative restart in the coalescer's pending slot (#79), a subsequent user seek's segment-driven restart was dropped outright, and the producer stayed anchored ~10 s+ away from the requested target while the provider's re-fire bookkeeping believed the restart had run. A new user seek now releases the superseded authoritative claim before dispatching the host seek, so its restart takes the pending slot normally; the #79 lock still blocks stale burst-tail scrubs that arrive without a fresh user seek. Reported by YangHanqing (#178, mechanism 2). Covered by `RestartCoalescerTests`.
+
 ## [5.18.1] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.1))
