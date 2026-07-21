@@ -28,6 +28,9 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private var _terminalError: HLSIngestError?
     /// Written before any segment byte reaches the FIFO; first write wins.
     private var _upstreamTargetDuration: Double?
+    /// Tracks observed segment-arrival cadence for LL-HLS shaping (AetherEngine#167). Updated whenever new
+    /// upstream segments appear; read via `observedLiveCadenceSeconds`.
+    private var _cadenceMeter = LiveArrivalCadenceMeter()
     /// Installed by the resolver before the first FIFO byte; nil = muxed audio.
     private var _companionAudioReader: HLSLiveIngestReader?
     /// "mpegts" or "aac", classified from the first segment's leading bytes, written before that segment's first FIFO byte.
@@ -48,6 +51,16 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
 
     public var upstreamTargetDuration: Double? {
         startLock.withLock { _upstreamTargetDuration }
+    }
+
+    public var observedLiveCadenceSeconds: Double? {
+        let now = Self.monotonicNow()
+        return startLock.withLock { _cadenceMeter.observedCadence(at: now) }
+    }
+
+    /// Monotonic seconds (uptime); immune to wall-clock jumps that would corrupt interval measurement.
+    private static func monotonicNow() -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
     }
 
     public var companionAudioReader: IOReader? {
@@ -190,6 +203,12 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 let isJoin = !sniffedFirstSegment
                 let fresh = tracker.newSegments(in: media)
                 if tracker.stallCount > 6 { throw HLSIngestError.ingestStalled }
+                if !fresh.isEmpty {
+                    // Real arrival of new content: the interval since the previous arrival is the observed
+                    // cadence the engine shapes the local playlist around (AetherEngine#167).
+                    let now = Self.monotonicNow()
+                    startLock.withLock { _cadenceMeter.recordArrival(at: now) }
+                }
                 if isJoin, !fresh.isEmpty {
                     let backlog = fresh.reduce(0.0) { $0 + $1.duration }
                     EngineLog.emit(

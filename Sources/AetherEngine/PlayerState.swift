@@ -153,6 +153,16 @@ public struct LoadOptions: Sendable, Equatable {
     /// DVR rewind window in seconds; nil = live-only (seek is a no-op). Engine retains roughly this much past content disk-backed. Suggested default: 1800. Ignored when `isLive == false`. Default nil.
     public var dvrWindowSeconds: Double?
 
+    /// LL-HLS blocking-reload (`#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD`) override for live loopback sessions.
+    /// nil (default) = auto: for a `LiveIngestSourceInfo` custom reader the engine derives eligibility from
+    /// the OBSERVED upstream arrival cadence (off until sustained discipline is proven, permanently off once
+    /// a burst is seen), so a relay/IPTV origin that advertises a normal TARGETDURATION but delivers segments
+    /// in irregular batches no longer loops on `-15410`; for a plain-`url:` live source with no cadence signal
+    /// (e.g. a Jellyfin real-time transcode) it stays on. `true`/`false` force it regardless of cadence. The
+    /// TARGETDURATION floor still tracks observed cadence either way. Ignored for `nativeRemoteHLS` and VOD.
+    /// Default nil (AetherEngine#167).
+    public var liveBlockingReload: Bool? = nil
+
     /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
 
@@ -249,6 +259,7 @@ public struct LoadOptions: Sendable, Equatable {
         isLive: Bool = false,
         audioOnly: Bool = false,
         dvrWindowSeconds: Double? = nil,
+        liveBlockingReload: Bool? = nil,
         nativeRemoteHLS: Bool = false,
         preserveASSMarkup: Bool = false,
         prepareNativeSubtitles: Bool = false,
@@ -275,6 +286,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.isLive = isLive
         self.audioOnly = audioOnly
         self.dvrWindowSeconds = dvrWindowSeconds
+        self.liveBlockingReload = liveBlockingReload
         self.nativeRemoteHLS = nativeRemoteHLS
         self.preserveASSMarkup = preserveASSMarkup
         self.prepareNativeSubtitles = prepareNativeSubtitles

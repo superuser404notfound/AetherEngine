@@ -516,7 +516,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
-        liveSourceCadenceHint: Double? = nil,
+        blockingReloadOverride: Bool? = nil,
+        liveCadenceObservation: (@Sendable () -> Double?)? = nil,
+        initialTargetDurationFloor: Double? = nil,
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
         companionAudioReader: IOReader? = nil,
@@ -539,13 +541,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.audioBridgeMode = audioBridgeMode
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds
-        self.liveSourceCadenceHint = liveSourceCadenceHint
-        // Bursty ingest sources whose upstream cadence exceeds 1.5x our cut target can't honor
-        // LL-HLS blocking reload (-15410, device repro 2026-06-11). For those, disable blocking
-        // reload and raise TARGETDURATION to cadence so plain 1.5x-TD patience covers the gap.
-        self.liveBlockingReloadEnabled = liveSourceCadenceHint
-            .map { $0 <= Self.targetSegmentDuration * 1.5 } ?? true
-        self.liveTargetDurationFloorSeconds = liveSourceCadenceHint.map { ceil($0) }
+        self.blockingReloadOverride = blockingReloadOverride
+        // Trust OBSERVED arrival cadence, not the upstream's self-reported TARGETDURATION, for blocking-reload
+        // eligibility and the TARGETDURATION floor (-15410, AetherEngine#167). Built only for live ingest
+        // sources that expose a cadence observation; URL live and VOD leave it nil and fall back to the
+        // signal-less default (blocking-reload on, server's own 1.5x-cut-target floor).
+        self.liveCadencePolicy = liveCadenceObservation.map { observe in
+            LiveCadencePolicy(
+                observe: observe,
+                cutTargetSeconds: Self.targetSegmentDuration,
+                initialFloorSeconds: initialTargetDurationFloor
+            )
+        }
         self.preopenedDemuxer = preopenedDemuxer
         self.sourceReopenableByURL = sourceReopenableByURL
         self.companionAudioReader = companionAudioReader
@@ -574,20 +581,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// surfaces loss via `onLiveSourceReset` immediately instead of burning 6 reopen attempts.
     let sourceReopenableByURL: Bool
 
-    /// Upstream segment cadence for custom-ingest live sessions (`LiveIngestSourceInfo`). nil for URL
-    /// live sources and VOD.
-    private let liveSourceCadenceHint: Double?
-
     /// Demuxed audio rendition reader for live HLS ingest. When the main demuxer finds no audio and
     /// this is non-nil, `start()` opens `sideAudioDemuxer` over it. Engine owns the side demuxer, not
     /// this reader (owned by the host's main reader). nil for muxed-audio sessions.
     private let companionAudioReader: IOReader?
 
-    /// Whether the local live playlist may advertise LL-HLS CAN-BLOCK-RELOAD (derived from cadence hint).
-    private let liveBlockingReloadEnabled: Bool
+    /// Host override for LL-HLS blocking-reload (`LoadOptions.liveBlockingReload`); nil = auto (#167).
+    private let blockingReloadOverride: Bool?
 
-    /// TARGETDURATION floor = ceil(upstream cadence) for bursty ingest; nil when no cadence hint.
-    private let liveTargetDurationFloorSeconds: Double?
+    /// Observed-cadence policy driving blocking-reload eligibility and the TARGETDURATION floor for live
+    /// ingest sources; nil for URL live and VOD (#167).
+    private let liveCadencePolicy: LiveCadencePolicy?
 
     /// DVR window in seconds; nil = live-only (window still bounded to `liveOnlyFloorSeconds`).
     private let dvrWindowSeconds: Double?
@@ -1170,8 +1174,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 targetSegmentDurationSeconds: Self.targetSegmentDuration,
                 dvrWindowSeconds: dvrWindowSeconds
             ),
-            blockingReloadEnabled: liveBlockingReloadEnabled,
-            targetDurationFloorSeconds: liveTargetDurationFloorSeconds,
+            blockingReloadOverride: blockingReloadOverride,
+            liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
                 self?.requestRestart(at: idx)
             },

@@ -50,10 +50,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let isLive: Bool
     /// Drives both playlist firstVisible and cache eviction cutoff so they never drift.
     private let liveWindowSizing: LiveWindowSizing
-    /// false for bursty upstreams that cannot honor the blocking-reload contract.
-    private let blockingReloadEnabled: Bool
-    /// #EXT-X-TARGETDURATION floor for bursty ingest sources; nil for URL live and VOD.
-    private let targetDurationFloorSeconds: Double?
+    /// Host override for blocking-reload (`LoadOptions.liveBlockingReload`): nil = auto (observed policy for
+    /// ingest, on by default for signal-less live), true/false = force. Wins over the policy (#167).
+    private let blockingReloadOverride: Bool?
+    /// Observed-cadence policy for live ingest sources; drives blocking-reload eligibility and the
+    /// TARGETDURATION floor from real arrival cadence. nil for URL live (no cadence signal) and VOD (#167).
+    private let liveCadencePolicy: LiveCadencePolicy?
 
     private let codecsString: String
     private let supplementalCodecsString: String?
@@ -149,8 +151,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         sourceBitrate: Int64,
         isLive: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
-        blockingReloadEnabled: Bool = true,
-        targetDurationFloorSeconds: Double? = nil,
+        blockingReloadOverride: Bool? = nil,
+        liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
         restartActivity: (() -> Bool)? = nil,
         activeProducerBase: (() -> Int?)? = nil,
@@ -172,8 +174,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.segments = segments
         self.isLive = isLive
         self.liveWindowSizing = liveWindowSizing
-        self.blockingReloadEnabled = blockingReloadEnabled
-        self.targetDurationFloorSeconds = targetDurationFloorSeconds
+        self.blockingReloadOverride = blockingReloadOverride
+        self.liveCadencePolicy = liveCadencePolicy
         self.codecsString = codecsString
         self.supplementalCodecsString = supplementalCodecs
         self.resolution = resolution
@@ -619,9 +621,22 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var liveTargetSegmentDuration: Double? {
         isLive ? liveWindowSizing.targetSegmentDurationSeconds : nil
     }
-    var liveBlockingReloadEnabled: Bool { blockingReloadEnabled }
+    var liveBlockingReloadEnabled: Bool {
+        Self.resolveLiveBlockingReload(override: blockingReloadOverride, policy: liveCadencePolicy)
+    }
     var liveTargetDurationFloorSeconds: Double? {
-        isLive ? targetDurationFloorSeconds : nil
+        // The floor tracks observed cadence regardless of the gate override: patience must cover the real
+        // inter-batch gap even when a host forces blocking-reload on/off (#167).
+        isLive ? liveCadencePolicy?.targetDurationFloorSeconds : nil
+    }
+
+    /// Resolve blocking-reload eligibility: a host override wins everywhere; otherwise the observed-cadence
+    /// policy decides for ingest sources; signal-less live (plain-url Jellyfin transcode) keeps the
+    /// low-latency default. Pure so the precedence is unit-testable without a full provider (#167).
+    static func resolveLiveBlockingReload(override: Bool?, policy: LiveCadencePolicy?) -> Bool {
+        if let override { return override }
+        if let policy { return policy.blockingReloadEnabled }
+        return true
     }
     /// 2 = one segment (~4 s) of startup cushion absorbing transcode jitter that caused -16832
     /// "restarting from end of live playlist". 1 disables. Distinct from the reverted hold-back

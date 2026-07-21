@@ -257,11 +257,21 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer? = nil,
         generation: UInt64
     ) async throws {
-        // Both values are set by the reader's resolver before any main-stream byte flows, so they are final by the time loadNative runs.
-        // HLSVideoEngine uses liveSourceCadenceHint for playlist shaping (TARGETDURATION floor, blocking-reload eligibility).
-        // companionAudioReader: side demuxer for demuxed-audio ingest; nil means muxed audio.
-        let liveSourceCadenceHint = (customReader as? LiveIngestSourceInfo)?.upstreamTargetDuration
-        let companionAudioReader = (customReader as? LiveIngestSourceInfo)?.companionAudioReader
+        // companionAudioReader is set by the reader's resolver before any main-stream byte flows, so it is
+        // final by the time loadNative runs; nil means muxed audio.
+        let liveIngest = customReader as? LiveIngestSourceInfo
+        let companionAudioReader = liveIngest?.companionAudioReader
+        // Observed-cadence closure for live-ingest LL-HLS shaping (AetherEngine#167): read per manifest
+        // render, so the engine reacts to how the origin ACTUALLY delivers segments rather than trusting its
+        // self-reported TARGETDURATION. weak so it never retains the host-owned reader past teardown. The
+        // self-reported TARGETDURATION rides along only as a valid lower bound on the floor.
+        let liveCadenceObservation: (@Sendable () -> Double?)?
+        if let liveIngest {
+            liveCadenceObservation = { [weak liveIngest] in liveIngest?.observedLiveCadenceSeconds }
+        } else {
+            liveCadenceObservation = nil
+        }
+        let initialTargetDurationFloor = liveIngest?.upstreamTargetDuration
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
@@ -274,7 +284,9 @@ extension AetherEngine {
             audioBridgeMode: audioBridgeMode,
             isLiveSession: isLive,
             dvrWindowSeconds: dvrWindowSeconds,
-            liveSourceCadenceHint: liveSourceCadenceHint,
+            blockingReloadOverride: loadedOptions.liveBlockingReload,
+            liveCadenceObservation: liveCadenceObservation,
+            initialTargetDurationFloor: initialTargetDurationFloor,
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
             companionAudioReader: companionAudioReader,
