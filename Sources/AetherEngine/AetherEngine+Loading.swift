@@ -1271,6 +1271,13 @@ extension AetherEngine {
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
             : nil
+        // #170: stopInternal wipes the native-rendition pick; snapshot it for a post-reload
+        // replay (mirroring the #65 recovery), or an audio switch during PiP/AirPlay strands
+        // the receiver without subtitles. The active track id also routes an external (#88)
+        // selection back through its synthetic id (the registry survives stopInternal here).
+        let activeTrackToResume = activeSubtitleTrackIndex
+        let reapplyOrdinalToRestore = nativeSubtitleReapplyOrdinal
+        let reapplyMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
         // #112 full umbau: an audio-track switch does not move the playhead, so the PGS line already on screen is
         // still valid. Snapshot the visible bitmap cues before stopInternal wipes them; they are restored after the
         // subtitle re-arm so the line stays up while the re-armed reader re-primes forward (old path reconstructed
@@ -1507,7 +1514,14 @@ extension AetherEngine {
 
         // Re-arm subtitle: sidecar branch wins because loadedSidecarURL is set only for sidecar sources.
         if let sidecar = sidecarToResume {
-            selectSidecarSubtitle(url: sidecar)
+            // #170: an active external track (#88) re-arms through its synthetic id so the
+            // published selection stays on the track (the registry survives stopInternal on this
+            // path); one-shot sidecar selections keep the URL-only route.
+            if let active = activeTrackToResume, externalSubtitleRegistry[active] != nil {
+                selectSubtitleTrack(index: active, startAt: preSwitchSourceTime)
+            } else {
+                selectSidecarSubtitle(url: sidecar)
+            }
         } else if embeddedStreamToResume >= 0 {
             // #112 (audio-switch reanchor): pass the pre-stopInternal source PTS explicitly; the parameterless form
             // reads the live sourceTime, which has collapsed to the playlist axis here (shift reset, not yet
@@ -1525,6 +1539,22 @@ extension AetherEngine {
         } else if secondaryEmbeddedToResume >= 0 {
             // #112 (audio-switch reanchor): same collapsed-sourceTime slip on the secondary channel.
             selectSecondarySubtitleTrack(index: Int(secondaryEmbeddedToResume), startAt: preSwitchSourceTime)
+        }
+        // #170: replay the native-rendition pick onto the rebuilt item, the way the #65 recovery
+        // does; the table was rebuilt from the preserved track list, so a rendering-derived
+        // ordinal recomputes to the same rendition and a host-positional one replays as-is.
+        if let ordinal = Self.nativeOrdinalToReplay(
+            previousOrdinal: reapplyOrdinalToRestore,
+            matchesActiveTrack: reapplyMatchesActiveTrack,
+            previousActiveTrack: activeTrackToResume,
+            currentOrdinal: nativeSubtitleReapplyOrdinal,
+            table: nativeSubtitleTrackTable
+        ) {
+            EngineLog.emit(
+                "[AetherEngine] #170 re-applying native subtitle ordinal=\(ordinal) after audio-switch reload",
+                category: .engine
+            )
+            setNativeSubtitleSelected(track: ordinal)
         }
     }
 

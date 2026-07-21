@@ -256,6 +256,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// ENGINE-INTERNAL: marks this load as a live REJOIN (`reloadAtCurrentPosition`). Not settable from the public initializer. When true, the native load path skips its explicit initial seek so AVPlayer picks edge-minus-holdback (see `LiveReloadPolicy`); without it the reloaded item can wedge in `waitingToPlay` against Jellyfin's re-served backlog. Meaningful only when `isLive` is true.
     var isLiveRejoin: Bool = false
 
+    /// ENGINE-INTERNAL (#170): subtitle session state a session-preserving reload
+    /// (`reloadAtCurrentPosition`) carries into this load. Not settable from the public
+    /// initializer. When present, the #88 registration point seeds the previous session's
+    /// external registry id-exactly instead of re-registering `externalSubtitles`, and the
+    /// host's subtitle authority flag carries over. Consumed by the load; never persisted.
+    var subtitleSessionCarryover: SubtitleSessionCarryover? = nil
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,

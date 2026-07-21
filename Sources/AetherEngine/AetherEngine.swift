@@ -1464,6 +1464,12 @@ public final class AetherEngine: ObservableObject {
     var activeSecondaryExternalSubtitleTrackID: Int? = nil
     /// Base for synthetic external-subtitle TrackInfo ids; far above any real AVStream index.
     public static let externalSubtitleTrackIDBase = 100_000
+    /// #170: true while `reloadAtCurrentPosition` runs a session-preserving reload. Host
+    /// `setNativeSubtitleRendering` calls landing in this window are latched into
+    /// `pendingNativeRenderingRequest` (the mid-reload active track is transiently nil and would
+    /// misread as deselect) and applied by `restoreSubtitleSelection`.
+    var sessionPreservingReloadInFlight = false
+    var pendingNativeRenderingRequest: Bool? = nil
 
     /// Detached reader that decodes ALL embedded text subtitle streams in one side-demuxer pass into their
     /// ordinal's NativeSubtitleCueStore (#55, all-tracks). Parallel to the packet-store drainer (which drives
@@ -1731,6 +1737,10 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
+        // #170: the carryover is consumed by THIS load only (registration site below, or never on
+        // the branches that return before it); it must not persist into loadedOptions where a later
+        // host-initiated reload would resurrect a stale session snapshot.
+        loadedOptions.subtitleSessionCarryover = nil
         isLive = options.isLive
         // nativeRemoteHLS: DVR window is unbounded (AVPlayer clamps seeks to its real seekable range);
         // an over-wide published bound only affects range width, not seek landing.
@@ -1751,6 +1761,10 @@ public final class AetherEngine: ObservableObject {
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
         activeSecondaryExternalSubtitleTrackID = nil
+        // #170: a stale latched rendering request from a superseded session-preserving reload
+        // must not leak into this session; requests for the in-flight reload can only land at
+        // suspension points after this prologue, so they survive.
+        pendingNativeRenderingRequest = nil
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis
@@ -1943,7 +1957,15 @@ public final class AetherEngine: ObservableObject {
         subtitleTracks = probedSubtitleTracks
         // #88: load-declared external tracks join the list now, BEFORE preferred-language selection
         // and the native rendition table are built from it.
-        for track in options.externalSubtitles { registerExternalSubtitleTrack(track) }
+        // #170: a session-preserving reload seeds the previous session's registry verbatim
+        // instead: mid-session adds survive with their ids (and, registered pre-table, become
+        // rendition-eligible on the reloaded item); mid-session removals stay removed; the host's
+        // subtitle authority carries over so the load-end auto-selection cannot override it.
+        if let carryover = options.subtitleSessionCarryover {
+            applySubtitleSessionCarryoverRegistrations(carryover)
+        } else {
+            for track in options.externalSubtitles { registerExternalSubtitleTrack(track) }
+        }
         metadata = probeOpened ? probe.mediaMetadata() : nil
         fontAttachments = probeOpened ? probe.fontAttachmentInfos() : []
         // Disc titles/chapters off the probe demuxer (post-detach, on MainActor) so the host can populate
@@ -2435,6 +2457,14 @@ public final class AetherEngine: ObservableObject {
         // Snapshot the disc title before load()'s stopInternal wipes it, so a background-resumed disc image
         // keeps the title the user selected instead of reverting to the main title (#67).
         let titleID = activeDiscTitleID
+        // #170: session state the from-scratch load() would wipe and re-derive by auto-selection
+        // (AirPlay LAN-swap reload, background-return reopen). The explicit audio pick rides the
+        // load's own override contract (matching the custom-source branch above); the subtitle
+        // session state is seeded into the load and the selection restored after it.
+        let audioToRestore = activeAudioTrackIndex
+        let carryover = captureSubtitleSessionCarryover()
+        sessionPreservingReloadInFlight = true
+        defer { sessionPreservingReloadInFlight = false }
         // Live: rejoin at the live edge; pre-suspend playhead is stale and may have slid out of the window.
         let resume: Double? = LiveReloadPolicy.resumePosition(
             isLive: loadedOptions.isLive, currentTime: pos)
@@ -2442,7 +2472,10 @@ public final class AetherEngine: ObservableObject {
         // backlog where the fresh-join contract (seg0 == live edge) no longer holds.
         var options = loadedOptions
         options.isLiveRejoin = options.isLive
-        try await load(url: url, startPosition: resume, options: options, discTitleID: titleID)
+        options.subtitleSessionCarryover = carryover
+        try await load(url: url, startPosition: resume, options: options,
+                       audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
+        restoreSubtitleSelection(from: carryover, resumeAnchor: resume)
         // Arm the watchdog so a live reopen whose AVPlayer never becomes ready fails visibly instead of freezing.
         if options.isLive, !options.nativeRemoteHLS, playbackBackend == .native {
             armLiveReloadWatchdog(generation: loadGeneration)
@@ -2767,6 +2800,7 @@ public final class AetherEngine: ObservableObject {
         nextExternalSubtitleOrdinal = 0
         hostExplicitSubtitleAction = false
         activeSecondaryExternalSubtitleTrackID = nil
+        pendingNativeRenderingRequest = nil   // #170: the session the latched request targeted is gone
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis

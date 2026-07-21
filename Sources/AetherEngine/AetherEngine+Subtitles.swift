@@ -1410,7 +1410,7 @@ extension AetherEngine {
 
     /// #88: ordinal of the table entry backing an active track id: embedded ids match
     /// sourceStreamIndex, external ids match externalID.
-    static func nativeSubtitleOrdinal(forActiveTrack id: Int, in table: [NativeSubtitleTrackEntry]) -> Int? {
+    nonisolated static func nativeSubtitleOrdinal(forActiveTrack id: Int, in table: [NativeSubtitleTrackEntry]) -> Int? {
         table.firstIndex { $0.sourceStreamIndex == id || $0.externalID == id }
     }
 
@@ -1479,6 +1479,14 @@ extension AetherEngine {
     /// active subtitle has no native text equivalent: a bitmap (PGS/DVB), CEA-708 (608 now rides a native
     /// rendition, #98), or a track added after load (dynamic external / one-shot sidecar).
     public func setNativeSubtitleRendering(_ active: Bool) {
+        // #170: the AirPlay flip triggers both the engine's LAN-swap reload and the host's
+        // documented rendering call; landing mid-reload the active track is transiently nil and
+        // this call would be misread as a deselect. Latch the newest request instead;
+        // restoreSubtitleSelection applies it once the reload has re-established the selection.
+        if sessionPreservingReloadInFlight {
+            pendingNativeRenderingRequest = active
+            return
+        }
         guard active, let activeIdx = activeSubtitleTrackIndex,
               let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: activeIdx, in: nativeSubtitleTrackTable)
         else {
@@ -1486,6 +1494,106 @@ extension AetherEngine {
             return
         }
         setNativeSubtitleSelected(track: ordinal)
+    }
+
+    // MARK: - Session-preserving reload carryover (#170)
+
+    /// True when `nativeSubtitleReapplyOrdinal` equals the active track's mapping through the
+    /// current rendition table, i.e. the ordinal came from `setNativeSubtitleRendering` rather
+    /// than a host-positional `setNativeSubtitleSelected`. Decides recompute-vs-positional replay.
+    func currentReapplyOrdinalMatchesActiveTrack() -> Bool {
+        guard let ordinal = nativeSubtitleReapplyOrdinal,
+              let active = activeSubtitleTrackIndex else { return false }
+        return Self.nativeSubtitleOrdinal(forActiveTrack: active, in: nativeSubtitleTrackTable) == ordinal
+    }
+
+    /// #170: snapshot the subtitle session state a from-scratch `load()` would wipe. Taken by
+    /// `reloadAtCurrentPosition` before the reload; seeded back via
+    /// `LoadOptions.subtitleSessionCarryover` and `restoreSubtitleSelection`.
+    func captureSubtitleSessionCarryover() -> SubtitleSessionCarryover {
+        var carryover = SubtitleSessionCarryover()
+        carryover.externalTracks = externalSubtitleRegistry
+            .sorted { $0.key < $1.key }
+            .map { .init(id: $0.key, track: $0.value) }
+        carryover.nextExternalOrdinal = nextExternalSubtitleOrdinal
+        carryover.hostExplicitSubtitleAction = hostExplicitSubtitleAction
+        carryover.activeSubtitleTrackIndex = activeSubtitleTrackIndex
+        carryover.primarySidecarURL = (isSubtitleActive && activeSubtitleTrackIndex == nil
+            && activeEmbeddedSubtitleStreamIndex < 0) ? loadedSidecarURL : nil
+        carryover.secondaryTrackIndex = activeSecondaryExternalSubtitleTrackID
+            ?? (activeSecondaryEmbeddedSubtitleStreamIndex >= 0
+                ? Int(activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
+        carryover.secondarySidecarURL = (isSecondarySubtitleActive && carryover.secondaryTrackIndex == nil)
+            ? loadedSecondarySidecarURL : nil
+        carryover.nativeReapplyOrdinal = nativeSubtitleReapplyOrdinal
+        carryover.reapplyOrdinalMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
+        return carryover
+    }
+
+    /// #170: seed the fresh session's external registry from the carryover, id-exactly (removal
+    /// gaps preserved), and restore the host's subtitle authority so the load-end
+    /// preferred-language auto-selection cannot override an explicit pick. Called by `load()` at
+    /// the #88 registration point, BEFORE the native rendition table is built, so mid-session
+    /// tracks become rendition-eligible on the reloaded item.
+    func applySubtitleSessionCarryoverRegistrations(_ carryover: SubtitleSessionCarryover) {
+        for entry in carryover.externalTracks {
+            externalSubtitleRegistry[entry.id] = entry.track
+            subtitleTracks.append(entry.track.makeTrackInfo(
+                id: entry.id,
+                fallbackNumber: entry.id - Self.externalSubtitleTrackIDBase + 1))
+        }
+        nextExternalSubtitleOrdinal = max(nextExternalSubtitleOrdinal, carryover.nextExternalOrdinal)
+        if carryover.hostExplicitSubtitleAction { hostExplicitSubtitleAction = true }
+    }
+
+    /// #170: re-establish the pre-reload subtitle selection on the reloaded session instead of
+    /// leaving the re-run auto-selection in charge, then replay the native-rendition pick the way
+    /// the #65 recovery does (a latched mid-reload `setNativeSubtitleRendering` is newer intent
+    /// and wins over the snapshot).
+    func restoreSubtitleSelection(from carryover: SubtitleSessionCarryover, resumeAnchor: Double?) {
+        // Anchor mirrors applyPreferredSubtitleSelection: the reload's resume position (clamped
+        // when the duration is already known) so the drainer/prefetcher arm at the playhead, else
+        // the live sourceTime.
+        var anchor = max(0, resumeAnchor ?? 0)
+        if duration > 0 { anchor = min(anchor, duration) }
+        let startAt = anchor > 0 ? anchor : sourceTime
+        switch Self.subtitleSelectionRestoreAction(
+            previousActiveIndex: carryover.activeSubtitleTrackIndex,
+            previousSidecarURL: carryover.primarySidecarURL,
+            hostHadExplicitAction: carryover.hostExplicitSubtitleAction,
+            postLoadActiveIndex: activeSubtitleTrackIndex,
+            postLoadSubtitleActive: isSubtitleActive
+        ) {
+        case .reselect(let index):
+            selectSubtitleTrack(index: index, startAt: startAt)
+        case .sidecar(let url):
+            startSidecarDecode(url: url, httpHeaders: nil, externalTrackID: nil)
+        case .clear:
+            clearSubtitle()
+        case .none:
+            break
+        }
+        if let secondary = carryover.secondaryTrackIndex {
+            selectSecondarySubtitleTrack(index: secondary, startAt: startAt)
+        } else if let url = carryover.secondarySidecarURL {
+            selectSecondarySidecarSubtitle(url: url)
+        }
+        if let pending = pendingNativeRenderingRequest {
+            pendingNativeRenderingRequest = nil
+            setNativeSubtitleRendering(pending)
+        } else if let ordinal = Self.nativeOrdinalToReplay(
+            previousOrdinal: carryover.nativeReapplyOrdinal,
+            matchesActiveTrack: carryover.reapplyOrdinalMatchesActiveTrack,
+            previousActiveTrack: carryover.activeSubtitleTrackIndex,
+            currentOrdinal: nativeSubtitleReapplyOrdinal,
+            table: nativeSubtitleTrackTable
+        ) {
+            EngineLog.emit(
+                "[AetherEngine] #170 re-applying native subtitle ordinal=\(ordinal) after session-preserving reload",
+                category: .engine
+            )
+            setNativeSubtitleSelected(track: ordinal)
+        }
     }
 
     /// Sodalite#38: the native WebVTT legible rendition exists only for PiP / AirPlay; fullscreen uses the
