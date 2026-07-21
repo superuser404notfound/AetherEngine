@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.1] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.1))
+
 ### Fixed
 
 - **High-bitrate live HLS on the ingest path could rebuffer because the reader could not get ahead of the playhead.** The ingest segment loop awaited each fetch fully before starting the next, so every segment paid a connection + TTFB round-trip with no bytes flowing; on a 4K50 HEVC/TS stream (~13 Mbps) the producer ran below real time (cache stuck at ~5 segments) even on links that can pull much faster. Segment fetches now run through a bounded prefetch pipeline: up to 4 fetches (and AES-128 decrypts) in flight, committed to the FIFO strictly in playlist order, so classification, discontinuity handling, and demuxer pacing are unchanged while the link is saturated. Reported with a field-verified design by kskchaitanya1993 (#177). Covered by `Issue177IngestPrefetchTests`.
