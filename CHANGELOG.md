@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.2] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.2))
+
 ### Fixed
 
 - **Seeks issued while the initial load is still in progress are no longer silently dropped.** `seek(to:)` no-oped for the whole `state == .loading` window (probe, native load, readiness gate, several seconds on slow sources), so hosts rendering the target optimistically watched playback snap back to the pre-seek position. The latest loading-window seek is now stashed in the #127 pre-ready slot, published optimistically to the scrub clock, and replayed when the session settles into a playable state (including autostart paths, where readiness fires while `state` is still `.loading`); a load that dies discards it. Reported by YangHanqing (#178, mechanism 1). Covered by `Issue178LoadingSeekStashTests`.
