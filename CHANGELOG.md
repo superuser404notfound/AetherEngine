@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.1] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.1))
+
+### Fixed
+
+- **The wireless-AirPlay LAN-swap reload (and the background-return reopen) destroyed host subtitle session state: mid-session `addExternalSubtitleTrack` registrations vanished (the host's menu kept listing ids that no longer existed), the user's explicit audio/subtitle picks (including subtitles explicitly OFF) were overridden by a re-run of preferred-language auto-selection, and `nativeSubtitleReapplyOrdinal` was wiped, so the AirPlay receiver rendered no subtitles at all.** `reloadAtCurrentPosition` now captures a session carryover before the reload: the fresh `load()` seeds the external-track registry from it id-exactly (removal gaps preserved, no id collisions) and before the native rendition table is built, so mid-session external tracks also become WebVTT-rendition-eligible on the reloaded item, exactly the AirPlay/PiP window where the host overlay cannot draw; the explicit audio pick rides `load()`'s existing `audioSourceStreamIndex` override; the previous subtitle selection is re-selected instead of auto-derived; and the native-rendition pick is replayed the way the #65 recovery already does, recomputed against the rebuilt table. A host `setNativeSubtitleRendering` call landing mid-reload (the AirPlay flip triggers the engine reload and the host reaction from the same KVO change) is latched and applied after the restore instead of being misread as a deselect. The audio-switch reload gets the same native-ordinal replay, and an active external track re-arms through its synthetic id there. Reported by dlev02 (#170). Covered by `Issue170SessionCarryoverTests`.
+
 ## [5.17.0] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.0))
