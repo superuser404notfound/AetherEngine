@@ -1099,6 +1099,7 @@ public final class AetherEngine: ObservableObject {
         defer { host.startupReadinessGateActive = false }
 
         var attempt = 1
+        var dataWaitRounds = 0
         while true {
             // Attempt 1 plays the item the load path already created; later attempts replay it fresh.
             host.play()
@@ -1112,10 +1113,25 @@ public final class AetherEngine: ObservableObject {
                 outcome: outcome,
                 attempt: attempt,
                 masterAlreadyFellBack: masterFallbackUsed,
-                hasMediaFallbackURL: session.mediaPlaylistURL != nil
+                hasMediaFallbackURL: session.mediaPlaylistURL != nil,
+                dataWaitRounds: dataWaitRounds
             ) {
             case .proceed:
                 return
+
+            case .keepAwaitingData:
+                // #169: the master's first segment (a tail resume anchors it on the final segment) has
+                // not been served yet because it is still being produced over a slow link. That is not a
+                // cold DV/HDCP decode failure; keep the DV master and re-await the SAME item rather than
+                // reloading and falling back to the media playlist (which would needlessly drop DV).
+                dataWaitRounds += 1
+                EngineLog.emit(
+                    "[AetherEngine] #35/#169 readiness gate: master's first segment not served yet "
+                    + "(still producing over a slow link); keeping the DV master and waiting "
+                    + "(data-wait \(dataWaitRounds)/\(StartupReadinessGate.maxDataWaitRounds)) at "
+                    + "\(String(format: "%.2f", position))s",
+                    category: .session)
+                continue
 
             case .reloadMaster:
                 guard let masterURL = session.masterPlaylistURL else {

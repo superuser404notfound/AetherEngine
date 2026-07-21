@@ -608,7 +608,20 @@ final class NativeAVPlayerHost {
             try? await Task.sleep(nanoseconds: tickMs * 1_000_000)
         }
         if let item = playerItem, hasEverPlayed || item.presentationSize != .zero { return .ready }
-        return .timedOut
+        // #169: distinguish an unserved first segment (no media loaded -> still producing over a slow
+        // link, keep waiting) from a served-but-0-tracks master (the cold DV/HDCP decode park).
+        let loaded = playerItem.map { Self.hasLoadedMedia($0.loadedTimeRanges) } ?? false
+        return StartupReadinessGate.timeoutOutcome(hasLoadedMedia: loaded)
+    }
+
+    /// True when the item has any positive-duration loaded range: real media has been served (vs a fresh
+    /// item whose first segment is still being produced). Drives the #169 awaitingData split.
+    nonisolated static func hasLoadedMedia(_ loadedTimeRanges: [NSValue]) -> Bool {
+        for value in loadedTimeRanges {
+            let d = value.timeRangeValue.duration.seconds
+            if d.isFinite && d > 0 { return true }
+        }
+        return false
     }
 
     // MARK: - Playback control

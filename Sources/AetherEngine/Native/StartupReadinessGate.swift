@@ -7,9 +7,16 @@ enum StartupReadiness: Sendable, Equatable {
     case ready
     /// `item.status == .failed` (e.g. -11819 "Cannot Complete Action" / -11868 cold DV handshake).
     case dead
-    /// The settle window elapsed with the item neither ready nor failed: the silent 0-track park
-    /// (`AVPlayerWaitingWithNoItemToPlayReason`, `asset.tracks` empty).
+    /// The settle window elapsed with the item neither ready nor failed, but with media already loaded:
+    /// the silent 0-track park (`AVPlayerWaitingWithNoItemToPlayReason`, `asset.tracks` empty), i.e. the
+    /// cold DV/HDCP decode failure the gate was written for.
     case timedOut
+    /// The settle window elapsed with 0 tracks AND no media loaded yet: the master's first segment has
+    /// not been served, not a decode failure. Resuming into the tail (AetherEngine#169) anchors the
+    /// master on the final segment, still being produced over a slow link; treating this as a cold
+    /// failure would reload and fall back to the media playlist, needlessly dropping DV. The gate waits
+    /// for the first segment's data (bounded) before judging the master dead.
+    case awaitingData
 }
 
 /// Terminal failure thrown when the readiness gate exhausts the master budget and has no media
@@ -28,6 +35,9 @@ enum StartupGateAction: Sendable, Equatable {
     case reloadMaster
     /// Master is not recovering; reload the media playlist once (HDR10 base, no DV upgrade).
     case fallBackToMedia
+    /// The first segment has not been served yet (slow production over a slow link); keep the current
+    /// master and keep waiting rather than misreading unstarted production as a decode failure.
+    case keepAwaitingData
     /// Nothing left to try (no media URL, or already fell back); surface a terminal failure.
     case giveUp
 }
@@ -49,15 +59,36 @@ enum StartupReadinessGate {
     /// created; the remainder are fresh reloads that re-probe the warming link. Two total.
     static let masterAttempts = 2
 
+    /// How many consecutive `awaitingData` settle windows the gate rides while the first segment is still
+    /// being produced, before giving up and treating it as a cold failure. At `startupGateReloadSeconds`
+    /// (3 s) per round this is ~24 s of patience: comfortably longer than a slow-link final-segment
+    /// production (reopen + a ~4 s / ~12 MB fetch), yet bounded so a genuinely wedged producer still
+    /// falls through to reload/fallback instead of waiting forever.
+    static let maxDataWaitRounds = 8
+
+    /// Classify a settle-window timeout: no media loaded means the first segment has not been served
+    /// (slow production, `awaitingData`); media loaded but still 0 tracks is the cold decode park
+    /// (`timedOut`).
+    static func timeoutOutcome(hasLoadedMedia: Bool) -> StartupReadiness {
+        hasLoadedMedia ? .timedOut : .awaitingData
+    }
+
     /// Decide the next action after `attempt` master attempts (1-based) produced `outcome`.
+    /// `dataWaitRounds` counts the consecutive `awaitingData` windows already ridden this gate run.
     static func nextAction(
         outcome: StartupReadiness,
         attempt: Int,
         masterAttempts: Int = masterAttempts,
         masterAlreadyFellBack: Bool,
-        hasMediaFallbackURL: Bool
+        hasMediaFallbackURL: Bool,
+        dataWaitRounds: Int = 0,
+        maxDataWaitRounds: Int = maxDataWaitRounds
     ) -> StartupGateAction {
         if outcome == .ready { return .proceed }
+        // First segment not served yet: keep the current master (DV preserved) and keep waiting, bounded
+        // by the data-wait budget. Only once the budget is spent does an unstarted first segment fall
+        // through to the cold-failure reload/fallback below (a genuinely wedged producer still terminates).
+        if outcome == .awaitingData && dataWaitRounds < maxDataWaitRounds { return .keepAwaitingData }
         if attempt < masterAttempts { return .reloadMaster }
         if !masterAlreadyFellBack && hasMediaFallbackURL { return .fallBackToMedia }
         return .giveUp
