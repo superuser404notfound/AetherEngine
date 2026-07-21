@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.0] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.0))
+
+### Fixed
+
+- **IPT-only Dolby Vision (HEVC P5, AV1 P10.0) now fails the load with a clear error when it would start on the software path, instead of playing with a green/purple cast.** Follow-up to 5.17.5: AV1 Profile 10.0 (compat 0) has the same IPT-PQ-c2-only signal as HEVC P5, but on devices without hardware AV1 decode (all Apple TVs, M1/M2 Macs, pre-A17 iPhones) it routes to dav1d, and there is no native fallback to prefer (AVPlayer HLS requires HW AV1), so no route can render it color-correctly. The dispatch now consults `VideoRoutingPolicy.softwarePathCannotRepresent` after the final routing decision and fails fast; this also closes HEVC P5's remaining doors into the software path (forward-only sources, test override). P7 / P8.x and AV1 P10.1 / P10.2 / P10.4 stay software-eligible since their base layer decodes with correct color. Part of the #176 cleanup. Covered by `VideoRoutingPolicyTests`.
+
+### Added
+
+- New public error case `AetherEngineError.dolbyVisionUnplayableOnSoftwarePath(profile:)` (hence the minor bump).
+
 ## [5.17.5] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.5))
