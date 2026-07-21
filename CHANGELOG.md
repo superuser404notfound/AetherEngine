@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.5] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.5))
+
+### Fixed
+
+- **Dolby Vision Profile 5 misrouted to the software path with a green/purple color shift, even on Apple Silicon.** The #2 second-stage gate probes VideoToolbox with a plain-HEVC format description built from the raw hvcC; for P5 that is not what the native route plays (dvh1 + dvcC, decoded by Apple's DV decoder, #98), and VT rejects the bare P5 hvcC with -12906/-4, so the probe returned a false negative and the fallback routed P5 to the SoftwarePlaybackHost, where libavcodec decodes the IPT-PQ-c2 base layer as YCbCr (the reported cast). P5 has no HDR10/HLG/SDR-compatible base layer, so software is never a correct fallback for it: HEVC streams whose DOVI config says profile 5 now bypass the gate and stay native unconditionally (the VT probe is not even invoked); P7 / P8.x keep the gate since their base layer is standard Main10 that the software path decodes with correct color. Reported by ijuniorfu, triaged by DrHurt (#176). Covered by `VideoRoutingPolicyTests`.
+
 ## [5.17.4] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.4))
