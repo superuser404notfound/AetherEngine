@@ -2,6 +2,9 @@ import Foundation
 import AVFoundation
 import AVKit
 import Combine
+#if os(tvOS) || os(iOS)
+import MediaPlayer
+#endif
 
 /// NativeAVPlayerHost: AVPlayer + AVPlayerLayer wrapper for the HLS-fMP4 loopback path.
 /// tvOS exposes the HDMI DV/HDR handshake only through AVPlayer-rooted playback, not AVSampleBufferDisplayLayer.
@@ -128,12 +131,48 @@ final class NativeAVPlayerHost {
 
     // MARK: - Init
 
+    #if os(tvOS) || os(iOS)
+    /// Now-Playing session bound to THIS player (same rationale as
+    /// AudioAVPlayerHost): the shared MPRemoteCommandCenter /
+    /// MPNowPlayingInfoCenter aren't reliably bound to a bare AVPlayer — a
+    /// background pause (rate 0) drops the app as active Now-Playing and the
+    /// shared center stops receiving commands. Owning the session keeps
+    /// ownership across pause; it also persists with the host across
+    /// native->native reloads (issue #15), so MediaRemote registration
+    /// survives the seam. Hosts register transport commands on
+    /// `nowPlayingSession.remoteCommandCenter` and stage per-item metadata
+    /// via `setNowPlayingInfo`; auto-publish merges the player-derived
+    /// elapsed/rate/duration, so nobody writes the shared info center.
+    let nowPlayingSession: MPNowPlayingSession
+    #endif
+
+    /// Per-item Now-Playing dictionary (identity keys + a force-decoded,
+    /// @Sendable-wrapped MPMediaItemArtwork) replayed onto every new item so
+    /// readiness-gate master reloads, media fallbacks, and in-place swaps
+    /// keep the system card.
+    private var pendingNowPlayingInfo: [String: Any] = [:]
+
     init() {
         let player = AVPlayer()
         // Keep automaticallyWaitsToMinimizeStalling at default true: false caused permanent startup stall on 4K HEVC (rate dropped to 0 after asset.load and never resumed).
         self.avPlayer = player
         self.playerLayer = AVPlayerLayer(player: player)
         self.playerLayer.videoGravity = .resizeAspect
+        #if os(tvOS) || os(iOS)
+        nowPlayingSession = MPNowPlayingSession(players: [player])
+        nowPlayingSession.automaticallyPublishesNowPlayingInfo = true
+        nowPlayingSession.becomeActiveIfPossible(completion: { _ in })
+        #endif
+    }
+
+    /// Stage (and immediately apply) the per-item system Now-Playing
+    /// dictionary. Identity keys only — the auto-publishing session owns
+    /// elapsed/rate/duration. Empty clears.
+    func setNowPlayingInfo(_ info: [String: Any]) {
+        pendingNowPlayingInfo = info
+        #if os(tvOS) || os(iOS)
+        playerItem?.nowPlayingInfo = info.isEmpty ? nil : info
+        #endif
     }
 
     // No deinit cleanup: under Swift 6 strict concurrency the deinit
@@ -197,6 +236,11 @@ final class NativeAVPlayerHost {
         if !pendingExternalMetadata.isEmpty {
             item.externalMetadata = pendingExternalMetadata
         }
+        #endif
+        #if os(tvOS) || os(iOS)
+        // Replay staged Now-Playing identity onto the fresh item (gate
+        // reloads / media fallback / in-place swaps keep the system card).
+        item.nowPlayingInfo = pendingNowPlayingInfo.isEmpty ? nil : pendingNowPlayingInfo
         #endif
         playerItem = item
         accessLogCount = 0
