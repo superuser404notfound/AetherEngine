@@ -648,6 +648,47 @@ public final class Demuxer: @unchecked Sendable {
         )
     }
 
+    /// Container (Matroska/MP4) chapters mapped to the public model, sorted by start and re-ided
+    /// sequentially so ids stay stable list indices for hosts. Empty when the container declares none.
+    /// Disc sources keep their playlist/IFO chapters via `discChapterInfos`; both can coexist and the
+    /// engine picks. Untitled entries fall back to "Chapter N" (matching the disc naming). A chapter's
+    /// declared end is trusted only for the duration of the LAST entry; earlier durations run to the
+    /// next chapter's start, because real-world MKV muxes routinely write end == start.
+    func mediaChapterInfos() -> [ChapterInfo] {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext,
+              ctx.pointee.nb_chapters > 0,
+              let chapterList = ctx.pointee.chapters else { return [] }
+
+        struct RawChapter { let start: Double; let end: Double; let title: String? }
+        var raw: [RawChapter] = []
+        raw.reserveCapacity(Int(ctx.pointee.nb_chapters))
+        for i in 0..<Int(ctx.pointee.nb_chapters) {
+            guard let chapter = chapterList[i]?.pointee else { continue }
+            let tb = chapter.time_base
+            guard tb.den > 0, tb.num >= 0, chapter.start != Int64.min else { continue }
+            let scale = Double(tb.num) / Double(tb.den)
+            let start = Swift.max(0, Double(chapter.start) * scale)
+            let end = chapter.end != Int64.min ? Double(chapter.end) * scale : start
+            raw.append(RawChapter(
+                start: start,
+                end: end,
+                title: metadataValue(chapter.metadata, key: "title")
+            ))
+        }
+        raw.sort { $0.start < $1.start }
+
+        return raw.enumerated().map { i, ch in
+            let end = i + 1 < raw.count ? raw[i + 1].start : Swift.max(ch.end, ch.start)
+            let trimmed = ch.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = (trimmed?.isEmpty == false) ? trimmed! : "Chapter \(i + 1)"
+            return ChapterInfo(id: i, name: name,
+                               startSeconds: ch.start,
+                               durationSeconds: Swift.max(0, end - ch.start))
+        }
+    }
+
     private func attachedPictureData() -> Data? {
         guard let ctx = formatContext else { return nil }
         for i in 0..<Int(ctx.pointee.nb_streams) {
