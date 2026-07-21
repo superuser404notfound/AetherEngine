@@ -56,6 +56,15 @@ final class NativeAVPlayerHost {
     /// Match Frame Rate (the reporter's 4K item is 50 fps). nil when no video track / rate resolves.
     @Published private(set) var detectedVideoFrameRate: Double?
 
+    /// AetherEngine#168 follow-up: fires once when the armed carriage watchdog concludes the master
+    /// advertises a video rendition but AVPlayer never built a video track past the grace window
+    /// (HEVC-in-MPEG-TS carriage, which AVFoundation's HLS demuxer does not support). The engine's
+    /// remote-HLS load subscribes and reroutes the session onto the loopback live-ingest path.
+    @Published private(set) var remoteHLSVideoCarriageRejected = false
+    /// Set per load; the watchdog itself starts at readyToPlay (a dead origin never reaches it).
+    private var carriageWatchdogArmed = false
+    private var carriageWatchdogTask: Task<Void, Never>?
+
     /// #35 (Sodalite) cold-DV-master startup-readiness gate. While the engine drives the bounded
     /// retry loop this is true, so a startup failure (`.failed` with any code, including a
     /// display-rejection) is NOT published: the gate polls `awaitStartupReadiness` and decides to
@@ -150,10 +159,11 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:]) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armVideoCarriageWatchdog: Bool = false) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
+        self.carriageWatchdogArmed = armVideoCarriageWatchdog
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
         let sid = sessionID
@@ -283,6 +293,11 @@ final class NativeAVPlayerHost {
                     }
                     // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
                     await self.publishDetectedVideoFormat(from: item)
+                    // #168 follow-up: watch for an advertised video rendition that never builds a track
+                    // (HEVC-in-MPEG-TS carriage); anchored at readyToPlay so dead origins never arm it.
+                    if self.carriageWatchdogArmed, self.carriageWatchdogTask == nil {
+                        self.startVideoCarriageWatchdog(item: item)
+                    }
                 case .failed:
                     let desc = item.error?.localizedDescription ?? "AVPlayerItem failed (no description)"
                     self.handleItemFailed(desc, item: item)
@@ -804,6 +819,11 @@ final class NativeAVPlayerHost {
         // #168: a reused host must not report the prior session's dynamic range before the new item resolves.
         detectedVideoFormat = nil
         detectedVideoFrameRate = nil
+        // #168 follow-up: the carriage verdict belongs to the outgoing item.
+        carriageWatchdogTask?.cancel()
+        carriageWatchdogTask = nil
+        carriageWatchdogArmed = false
+        remoteHLSVideoCarriageRejected = false
         // Re-arm #50 hasEverPlayed: reused host must not inherit prior session's established state.
         hasEverPlayed = false
         // #93 recovery reload: same content, same position, playback must continue. Skip the
@@ -891,6 +911,52 @@ final class NativeAVPlayerHost {
                 + "enabled=\(itemTrack.isEnabled)\(extra) (readyToPlay)",
                 category: .engine
             )
+        }
+    }
+
+    /// AetherEngine#168 follow-up: after readyToPlay, poll `item.tracks` at a 0.5 s cadence against the
+    /// pure `RemoteHLSIngestFallback.Watchdog`. Advertisement evidence comes from `AVURLAsset.variants`,
+    /// AVFoundation's own already-fetched master-playlist parse, so this adds no origin connect (IPTV
+    /// tokens / WAFs). Publishes `remoteHLSVideoCarriageRejected` once when an advertised video rendition
+    /// never builds an item track (HEVC-in-MPEG-TS carriage); every healthy or judgeless outcome disarms.
+    @MainActor
+    private func startVideoCarriageWatchdog(item: AVPlayerItem) {
+        let sid = sessionID
+        carriageWatchdogTask = Task { @MainActor [weak self] in
+            var watchdog = RemoteHLSIngestFallback.Watchdog()
+            let variants: [AVAssetVariant]
+            if let urlAsset = item.asset as? AVURLAsset {
+                variants = (try? await urlAsset.load(.variants)) ?? []
+            } else {
+                variants = []
+            }
+            let advertises = RemoteHLSIngestFallback.advertisesVideo(
+                variantHasVideoAttributes: variants.map { $0.videoAttributes != nil })
+            while !Task.isCancelled {
+                guard let self, self.playerItem === item else { return }
+                let videoTrackCount = item.tracks.filter { $0.assetTrack?.mediaType == .video }.count
+                switch watchdog.tick(videoTrackCount: videoTrackCount, variantsAdvertiseVideo: advertises) {
+                case .keepWaiting:
+                    break
+                case .disarm:
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) carriage watchdog disarmed "
+                        + "(videoTracks=\(videoTrackCount) advertised=\(advertises.map { "\($0)" } ?? "unknown"))",
+                        category: .engine
+                    )
+                    return
+                case .fire:
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) master advertises video "
+                        + "(\(variants.count) variant(s)) but AVPlayer built no video track after grace; "
+                        + "HEVC-in-MPEG-TS carriage suspected (#168)",
+                        category: .engine
+                    )
+                    self.remoteHLSVideoCarriageRejected = true
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
     }
 

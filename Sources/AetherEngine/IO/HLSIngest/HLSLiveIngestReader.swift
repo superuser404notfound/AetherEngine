@@ -17,6 +17,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     }
 
     private let playlistURL: URL
+    private let httpHeaders: [String: String]
     private let role: Role
     private let fifo = ByteFIFO(capacity: 16 * 1024 * 1024)
     private let session: URLSession
@@ -96,11 +97,19 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     }
 
     public convenience init(playlistURL: URL) {
-        self.init(playlistURL: playlistURL, role: .mainVideo)
+        self.init(playlistURL: playlistURL, httpHeaders: [:], role: .mainVideo)
     }
 
-    init(playlistURL: URL, role: Role) {
+    /// `httpHeaders` ride on every fetch (playlist, segment, AES key) and inherit to the companion audio
+    /// reader, so header-enforcing IPTV origins (Referer / User-Agent / Authorization, #119) accept the
+    /// ingest the same way they accept the AVPlayer bypass (AetherEngine#168).
+    public convenience init(playlistURL: URL, httpHeaders: [String: String]) {
+        self.init(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo)
+    }
+
+    init(playlistURL: URL, httpHeaders: [String: String] = [:], role: Role) {
         self.playlistURL = playlistURL
+        self.httpHeaders = httpHeaders
         self.role = role
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
@@ -356,7 +365,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                     + "starting companion reader on \(audioURL.lastPathComponent)",
                     category: .engine
                 )
-                installCompanion(HLSLiveIngestReader(playlistURL: audioURL, role: .companionAudio))
+                installCompanion(HLSLiveIngestReader(playlistURL: audioURL, httpHeaders: httpHeaders, role: .companionAudio))
             }
             EngineLog.emit("[HLSIngest] master playlist: picked variant bandwidth=\(best.bandwidth)", category: .engine)
             return (url, nil)
@@ -400,9 +409,18 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
     }
 
+    /// Applies the configured origin headers to every ingest fetch. Internal for the header-contract tests.
+    func makeRequest(_ url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        for (field, value) in httpHeaders {
+            request.setValue(value, forHTTPHeaderField: field)
+        }
+        return request
+    }
+
     /// Fetch + parse a playlist. Returns parsed playlist and final URL after redirects (relative segment URIs resolve against it).
     private func fetchPlaylist(_ url: URL) async throws -> (HLSPlaylist, URL) {
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await session.data(for: makeRequest(url))
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.playlistUnreachable(status: status)
@@ -418,7 +436,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         for attempt in 0..<3 {
             if Task.isCancelled { throw CancellationError() }
             do {
-                let (data, response) = try await session.data(from: url)
+                let (data, response) = try await session.data(for: makeRequest(url))
                 lastStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
                 if (200..<300).contains(lastStatus) { return data }
                 if lastStatus == 404 { return Data() } // slid out of provider window; tracker advances regardless
@@ -451,7 +469,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         let cacheKey = url.absoluteString
         if let cached = keyCacheLock.withLock({ keyCache[cacheKey] }) { return cached }
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await session.data(for: makeRequest(url))
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
             throw HLSIngestError.segmentDecryptFailed(reason: "key fetch HTTP \(status)")
