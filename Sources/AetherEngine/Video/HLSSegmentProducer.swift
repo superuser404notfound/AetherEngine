@@ -355,6 +355,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// Read rate (pkt/s) threshold classifying a no-cut stall as cutter-wedge vs. source-starvation.
     /// Healthy 1080p25: ~60 pkt/s. Rate-based to avoid misreading a trickle that accumulated a high count (Alex Berlin: 137 pkts/13 s = 10.5 pkt/s).
     private static let liveWedgeProgressRateThreshold: Double = 40
+    /// #177: minimum video PTS advance (seconds) within a no-cut window for the stall to be
+    /// reclassified as slow-but-healthy delivery (hold + re-arm) instead of a cutter wedge (retune).
+    private static let liveSlowDeliveryPtsAdvanceSeconds: Double = 2
+    /// #177: consecutive holds before a slow-delivery stall escalates to the host retune anyway.
+    static let liveSlowDeliveryMaxHolds = 6
+
+    /// #177 outcome of one no-cut watchdog evaluation.
+    enum NoCutStallAction: Equatable {
+        case keepReading
+        case holdForSlowDelivery
+        case exitForRetune
+    }
+
+    /// #177 pure decision: a wedge-classified no-cut stall whose video PTS is still advancing is a
+    /// source delivering just below real-time (a 6 s segment simply has not fully arrived inside the
+    /// 10 s timeout), not a stuck cutter. Retuning it re-joins behind the live edge, drains the buffer,
+    /// and loops. Hold and re-arm instead, bounded by `liveSlowDeliveryMaxHolds`. A genuine SSAI wedge
+    /// reads at full rate with frozen video PTS and still exits immediately; the source-starvation
+    /// classification is untouched (its 35 s window with barely-advancing PTS is a dead source).
+    static func noCutStallAction(
+        stalledFor: TimeInterval,
+        readRate: Double,
+        videoPtsAdvanceSeconds: Double,
+        consecutiveHolds: Int
+    ) -> NoCutStallAction {
+        let isWedge = readRate >= liveWedgeProgressRateThreshold
+        let timeout = isWedge ? liveSegmentStallTimeoutSeconds : liveSourceStarvationTimeoutSeconds
+        guard stalledFor > timeout else { return .keepReading }
+        if isWedge,
+           videoPtsAdvanceSeconds >= liveSlowDeliveryPtsAdvanceSeconds,
+           consecutiveHolds < liveSlowDeliveryMaxHolds {
+            return .holdForSlowDelivery
+        }
+        return .exitForRetune
+    }
     private var lastPregateVideoLog: Int = 0
     private var lastPregateAudioLog: Int = 0
     private static let pregateLogInterval = 200
@@ -1355,6 +1390,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         var lastForeignStreamIndexSinceFinalize: Int32 = -1
         var firstVideoPtsSinceFinalize: Int64 = Int64.min
         var lastVideoPtsSinceFinalize: Int64 = Int64.min
+        // #177 slow-delivery holds: a hold re-arms the watchdog window without a finalize.
+        var noCutHoldRearmedAt: Date? = nil
+        var consecutiveNoCutHolds = 0
         var vodLedgerLastRoutedSeg = Int.min  // #65 ledger: last VOD segment index logged at the routing site
 
         do {
@@ -1377,20 +1415,47 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     lastForeignStreamIndexSinceFinalize = -1
                     firstVideoPtsSinceFinalize = Int64.min
                     lastVideoPtsSinceFinalize = Int64.min
+                    noCutHoldRearmedAt = nil
+                    consecutiveNoCutHolds = 0
                 }
                 if isLive, let lastFinalize = lastLiveSegmentFinalizeAt {
-                    let stalledFor = Date().timeIntervalSince(lastFinalize)
+                    // #177: a hold re-arms the window; the watchdog measures from the later anchor.
+                    let stalledFor = Date().timeIntervalSince(noCutHoldRearmedAt ?? lastFinalize)
                     let progress = packetsRead - packetsReadAtLastFinalize
                     let readRate = stalledFor > 0 ? Double(progress) / stalledFor : 0
-                    let isWedge = readRate >= Self.liveWedgeProgressRateThreshold
-                    let timeout = isWedge
-                        ? Self.liveSegmentStallTimeoutSeconds
-                        : Self.liveSourceStarvationTimeoutSeconds
-                    if stalledFor > timeout {
-                        let ptsAdvance = (lastVideoPtsSinceFinalize != Int64.min
-                            && firstVideoPtsSinceFinalize != Int64.min && sourceVideoTbSeconds > 0)
-                            ? Double(lastVideoPtsSinceFinalize - firstVideoPtsSinceFinalize) * sourceVideoTbSeconds
-                            : -1
+                    let ptsAdvance = (lastVideoPtsSinceFinalize != Int64.min
+                        && firstVideoPtsSinceFinalize != Int64.min && sourceVideoTbSeconds > 0)
+                        ? Double(lastVideoPtsSinceFinalize - firstVideoPtsSinceFinalize) * sourceVideoTbSeconds
+                        : -1
+                    switch Self.noCutStallAction(
+                        stalledFor: stalledFor,
+                        readRate: readRate,
+                        videoPtsAdvanceSeconds: ptsAdvance,
+                        consecutiveHolds: consecutiveNoCutHolds
+                    ) {
+                    case .keepReading:
+                        break
+                    case .holdForSlowDelivery:
+                        consecutiveNoCutHolds += 1
+                        EngineLog.emit(
+                            "[HLSSegmentProducer] slow live delivery hold "
+                            + "\(consecutiveNoCutHolds)/\(Self.liveSlowDeliveryMaxHolds): video PTS "
+                            + "+\(String(format: "%.1f", ptsAdvance))s in \(Int(stalledFor))s "
+                            + "(rate=\(String(format: "%.1f", readRate))pkt/s); not a wedge, "
+                            + "re-arming watchdog instead of retuning",
+                            category: .session
+                        )
+                        noCutHoldRearmedAt = Date()
+                        packetsReadAtLastFinalize = packetsRead
+                        videoPktsSinceFinalize = 0
+                        audioPktsSinceFinalize = 0
+                        videoKeyframesSinceFinalize = 0
+                        foreignPktsSinceFinalize = 0
+                        lastForeignStreamIndexSinceFinalize = -1
+                        firstVideoPtsSinceFinalize = Int64.min
+                        lastVideoPtsSinceFinalize = Int64.min
+                    case .exitForRetune:
+                        let isWedge = readRate >= Self.liveWedgeProgressRateThreshold
                         EngineLog.emit(
                             "[HLSSegmentProducer] no-cut stall: no segment finalized for "
                             + "\(Int(stalledFor))s (packetsRead=\(packetsRead), "
@@ -1403,6 +1468,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 ? " lastForeignIdx=\(lastForeignStreamIndexSinceFinalize)" : "")
                             + (ptsAdvance >= 0
                                 ? " videoPtsAdvance=\(String(format: "%.1f", ptsAdvance))s" : "")
+                            + (consecutiveNoCutHolds > 0
+                                ? " holdsExhausted=\(consecutiveNoCutHolds)" : "")
                             + "; exiting for host retune",
                             category: .session
                         )

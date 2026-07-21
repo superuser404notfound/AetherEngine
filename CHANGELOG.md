@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **High-bitrate live HLS on the ingest path could rebuffer because the reader could not get ahead of the playhead.** The ingest segment loop awaited each fetch fully before starting the next, so every segment paid a connection + TTFB round-trip with no bytes flowing; on a 4K50 HEVC/TS stream (~13 Mbps) the producer ran below real time (cache stuck at ~5 segments) even on links that can pull much faster. Segment fetches now run through a bounded prefetch pipeline: up to 4 fetches (and AES-128 decrypts) in flight, committed to the FIFO strictly in playlist order, so classification, discontinuity handling, and demuxer pacing are unchanged while the link is saturated. Reported with a field-verified design by kskchaitanya1993 (#177). Covered by `Issue177IngestPrefetchTests`.
+- **Live streams delivering just below real time were force-retuned every ~10 s, re-joining behind the live edge and draining the buffer each cycle.** The no-cut watchdog retuned on wall-clock since the last finalized segment alone; a source whose 6 s segment simply has not fully arrived inside the 10 s timeout was classified a cutter wedge although video PTS was still advancing. The wedge classification is now gated on PTS advance: when video advanced at least 2 s in the window, the watchdog holds and re-arms (bounded to 6 consecutive holds) instead of exiting for host retune. A genuine SSAI ad-pod wedge reads at full rate with frozen video PTS and still retunes immediately; the source-starvation classification is unchanged. Reported with a field-verified design by kskchaitanya1993 (#177). Covered by `Issue177NoCutHoldTests`.
+- **Anamorphic (SAR != 1:1) content on the software decode path rendered at coded dimensions, collapsing to a thin strip.** The renderer's cached `CMVideoFormatDescription` snapshots the pixel-aspect attachment at creation but its cache key omitted PAR, so whatever the first frame carried was frozen for the whole stream; garbage `AVCodecContext` SARs (1088:1 seen in the field) and per-field oscillation on interlaced content had no gate. The decoder now resolves SAR frame -> codec context -> stream (first sane value wins, both axes gated to 1...256), latches the first non-square SAR per stream, and the renderer keys its format-description cache on PAR. Reported with a field-verified design by kskchaitanya1993 (#177). Covered by `Issue177SARLatchTests`.
+
 ## [5.18.0] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.0))
