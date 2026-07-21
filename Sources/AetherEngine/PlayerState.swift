@@ -166,6 +166,14 @@ public struct LoadOptions: Sendable, Equatable {
     /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
 
+    /// Reroute a live `nativeRemoteHLS` session onto the loopback live-ingest path when AVPlayer reaches
+    /// readyToPlay but never builds a video track for a master that advertises one. That signature means
+    /// the master delivers HEVC in MPEG-TS segments, which AVFoundation's HLS demuxer does not support
+    /// (the HLS Authoring Spec sanctions HEVC only in fMP4); the ingest path remuxes TS to fMP4 and plays
+    /// the same stream. Live-only (VOD remote HLS is the AE#154 reroute target). `httpHeaders` ride along
+    /// onto the ingest fetches. Default `true` (AetherEngine#168).
+    public var nativeRemoteHLSIngestFallback: Bool
+
     /// Emit raw ASS event lines (`ReadOrder,Layer,Style,...,Text` including override tags) instead of plain-text extraction. Opt-in for hosts that render ASS styling themselves; pair with `TrackInfo.assHeader`. Only affects ASS / SSA codecs. Default `false` (AetherEngine#30).
     public var preserveASSMarkup: Bool
 
@@ -261,6 +269,7 @@ public struct LoadOptions: Sendable, Equatable {
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
         nativeRemoteHLS: Bool = false,
+        nativeRemoteHLSIngestFallback: Bool = true,
         preserveASSMarkup: Bool = false,
         prepareNativeSubtitles: Bool = false,
         eagerNativeSubtitleReaders: Bool = false,
@@ -288,6 +297,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveBlockingReload = liveBlockingReload
         self.nativeRemoteHLS = nativeRemoteHLS
+        self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
         self.preserveASSMarkup = preserveASSMarkup
         self.prepareNativeSubtitles = prepareNativeSubtitles
         self.eagerNativeSubtitleReaders = eagerNativeSubtitleReaders

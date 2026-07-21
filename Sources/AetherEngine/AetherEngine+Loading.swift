@@ -132,6 +132,8 @@ extension AetherEngine {
     /// the historical no-initial-seek behavior every live caller relies on.
     func loadRemoteHLS(url: URL, options: LoadOptions, startPosition: Double? = nil) async throws {
         playbackBackend = .native
+        // #168 follow-up: detect a superseding load()/stop() between the carriage verdict and the reroute.
+        let bypassGeneration = loadGeneration
 
         let host: NativeAVPlayerHost
         if let existing = nativeHost {
@@ -192,6 +194,19 @@ extension AetherEngine {
                 self.applyRemoteHLSDisplayCriteria(format: fmt, options: options)
             }
             .store(in: &nativeCancellables)
+        // #168 follow-up: an advertised video rendition that never builds an item track means HEVC carried
+        // in MPEG-TS segments, which AVFoundation's HLS demuxer does not support (audio-only, black). The
+        // loopback ingest remuxes TS to fMP4 and plays the same stream, so reroute there transparently.
+        host.$remoteHLSVideoCarriageRejected
+            .filter { $0 }
+            .prefix(1)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.rerouteRemoteHLSOntoLiveIngest(url: url, expectedGeneration: bypassGeneration)
+                }
+            }
+            .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
         // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
         // #124: a paused mount (autoplay=false) skips that play(), so the readiness sink settles .loading -> .paused.
@@ -241,7 +256,11 @@ extension AetherEngine {
                   // This lean path has no live-reopen / readiness watchdog; let AVPlayer's "gave up"
                   // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
                   surfaceEndFailures: true,
-                  httpHeaders: options.httpHeaders)
+                  httpHeaders: options.httpHeaders,
+                  // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting it
+                  // back would ping-pong), and hosts can opt out via LoadOptions.
+                  armVideoCarriageWatchdog: RemoteHLSIngestFallback.shouldArm(
+                      isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback))
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with
         // their own picker see the external WebVTT renditions AVPlayer renders on this bypass.
@@ -274,6 +293,35 @@ extension AetherEngine {
             codecTag: nil,
             omitColorExtensions: options.omitCriteriaColorExtensions
         )
+    }
+
+    /// AetherEngine#168 follow-up: reload the current live remote-HLS source through the loopback ingest
+    /// path (`HLSLiveIngestReader` remuxes TS to fMP4), because AVPlayer reached readyToPlay without ever
+    /// building a video track for a master that advertises one (HEVC-in-MPEG-TS carriage). The rerouted
+    /// session runs the full loopback pipeline, including the probe-time display-criteria handshake the
+    /// bypass lacks. `LoadOptions.httpHeaders` ride onto the ingest fetches so header-enforcing origins
+    /// keep working (#119). The generation guard drops a verdict that a newer load()/stop() has outrun.
+    @MainActor
+    private func rerouteRemoteHLSOntoLiveIngest(url: URL, expectedGeneration: UInt64) async {
+        guard loadGeneration == expectedGeneration else {
+            EngineLog.emit("[AetherEngine] #168: ingest reroute dropped (session superseded)", category: .engine)
+            return
+        }
+        EngineLog.emit(
+            "[AetherEngine] #168: nativeRemoteHLS built no video track for a master that advertises video; "
+            + "rerouting onto the live-ingest loopback path (TS -> fMP4 remux)",
+            category: .engine
+        )
+        var options = loadedOptions
+        options.nativeRemoteHLS = false
+        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders)
+        do {
+            _ = try await load(source: .custom(reader, formatHint: "mpegts"), options: options)
+        } catch is CancellationError {
+        } catch {
+            // load() has already surfaced .error state on its failure paths; nothing to add here.
+            EngineLog.emit("[AetherEngine] #168: ingest reroute load failed: \(error)", category: .engine)
+        }
     }
 
     func loadNative(
