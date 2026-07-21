@@ -10,6 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.0] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.0))
+
+### Added
+
+- **`LoadOptions.nativeRemoteHLSIngestFallback: Bool`** (default `true`) to opt out of the new live remote-HLS ingest reroute described below.
+- **`HLSLiveIngestReader(playlistURL:httpHeaders:)`**: the ingest reader now carries custom HTTP headers on every playlist, segment, and AES-key fetch (the companion audio reader inherits them), so header-enforcing IPTV origins (Referer / User-Agent / Authorization, #119) accept the ingest the same way they accept the AVPlayer bypass.
+
+### Fixed
+
+- **A live channel whose master advertises HEVC (`CODECS="hvc1..."`) but delivers MPEG-TS segments stayed black (audio-only) on `nativeRemoteHLS`: AVPlayer never built a video track at all.** Per the HLS Authoring Spec, AVFoundation supports HEVC only in fMP4 carriage; for HEVC-in-TS it reaches `readyToPlay`, builds the audio track, and silently never creates the video track, so there is also no `CMFormatDescription` for the 5.16.1 range detection to read and nothing to program display criteria for. The engine now arms a carriage watchdog at `readyToPlay` on live bypass sessions: it polls `item.tracks` at a 0.5 s cadence for 4 s, takes advertisement evidence from `AVURLAsset.variants` (AVFoundation's already-fetched master parse, so no second origin connect past IPTV tokens / WAFs), and when an advertised video rendition never builds an item track it reroutes the session onto the loopback ingest path, where `HLSLiveIngestReader` remuxes TS to fMP4 and the full display-criteria handshake runs. Audio-only masters (radio channels) and masters without variant evidence disarm without firing; VOD is excluded (the AE#154 reroute target, so no ping-pong); dead origins never reach `readyToPlay` and so never trigger it. Follow-up to #168 after the reporter's 5.16.1 retest log proved the track-build rejection branch. Covered by `RemoteHLSIngestFallbackTests` and `HLSLiveIngestHeaderTests`.
+
 ## [5.16.2] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.2))
