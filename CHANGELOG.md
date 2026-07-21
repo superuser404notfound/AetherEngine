@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.16.1] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.1))
+
+### Fixed
+
+- **HDR10 / Dolby Vision over `nativeRemoteHLS` presented no video (audio-only, black), and the reported dynamic range was always SDR.** The `nativeRemoteHLS` bypass hands the m3u8 straight to AVPlayer and runs no demux probe, so it never programmed `AVDisplayManager.preferredDisplayCriteria` and never learned the item's dynamic range. On a bare `AVPlayerLayer` an HDR item with the panel in SDR reaches `readyToPlay` and plays audio but presents no video; `videoFormat` also stayed at the `.sdr` default (`appliesPreferredDisplayCriteriaAutomatically` is `AVPlayerViewController`-only and does not exist on the bare `AVPlayer` this path uses). The engine now reads the range back from AVPlayer's parsed video-track `CMFormatDescription` (transfer function plus `dvh1` / `dvhe` sample type) at `readyToPlay` and again at first frame, publishes it into `sourceVideoFormat` / `videoFormat`, and for an HDR range programs the display criteria (Match Dynamic Range plus Match Frame Rate) the same way the loopback path does, with no second connection to the origin. SDR and sole-writer (`suppressDisplayCriteria`) hosts are untouched. Reported on a 4K50 HDR10 HEVC Main10 IPTV channel (Apple TV 4K, tvOS 26). Covered by `RemoteHLSFormatDetectionTests`. Awaiting reporter device retest.
+
 ## [5.16.0] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.0))
