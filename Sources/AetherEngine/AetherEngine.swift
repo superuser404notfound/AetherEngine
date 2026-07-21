@@ -2239,6 +2239,29 @@ public final class AetherEngine: ObservableObject {
         }
         EngineLog.emit("[AetherEngine] dispatch: codec=\(detectedCodecID.rawValue) → \(useSoftwarePath ? "software" : "native")", category: .engine)
 
+        // #176 follow-up: IPT-only DV (HEVC P5, AV1 P10.0) must never start on the software path; the
+        // decoded IPT-PQ-c2 signal renders as YCbCr (green/purple cast). AV1 P10.0 without HW AV1 decode
+        // has no native fallback (AVPlayer HLS requires HW AV1), and HEVC P5 reaches here only off
+        // forward-only sources the native path cannot serve. Fail fast instead of playing wrong color.
+        if useSoftwarePath, probeOpened,
+           let vStream = probe.stream(at: probe.videoStreamIndex),
+           let dvConfig = Self.dvConfig(stream: vStream),
+           VideoRoutingPolicy.softwarePathCannotRepresent(
+               codecID: detectedCodecID,
+               dvProfile: dvConfig.profile,
+               dvBlCompatID: dvConfig.blCompatID) {
+            probe.markClosed()
+            Task.detached { [probe] in probe.close() }
+            let profileLabel = detectedCodecID == AV_CODEC_ID_AV1 ? "10.0" : "5"
+            EngineLog.emit(
+                "[AetherEngine] DV Profile \(profileLabel) routed to the software path; IPT-PQ-c2 has "
+                + "no compatible base layer and would render green/purple, failing fast (#176)",
+                category: .engine
+            )
+            state = .error("Dolby Vision Profile \(profileLabel) requires a hardware playback path on this device")
+            throw AetherEngineError.dolbyVisionUnplayableOnSoftwarePath(profile: profileLabel)
+        }
+
         // Demuxed-audio live ingest is native-path-only (side-demuxer merge lives in HLSSegmentProducer).
         // A demuxed-audio source routed SW would play silent; fail fast so the host falls back to server-muxed.
         if useSoftwarePath, options.isLive,
@@ -3523,6 +3546,10 @@ public enum AetherEngineError: Error, LocalizedError {
     /// AE#140: an HLS playlist URL (m3u8) was handed to `load(isLive:)` on the generic raw-byte path.
     /// Route m3u8 sources through `LoadOptions.nativeRemoteHLS` or `HLSLiveIngestReader` instead.
     case hlsPlaylistOnRawLivePath
+    /// #176 follow-up: HEVC P5 / AV1 P10.0 carry only an IPT-PQ-c2 signal (no compatible base layer);
+    /// the software path would decode it as YCbCr (green/purple cast), so the load fails instead.
+    /// AV1 P10.0 requires hardware AV1 decode; HEVC P5 requires a seekable source for the native path.
+    case dolbyVisionUnplayableOnSoftwarePath(profile: String)
 
     public var errorDescription: String? {
         switch self {
@@ -3530,6 +3557,8 @@ public enum AetherEngineError: Error, LocalizedError {
         case .noAudioStream: return "No audio stream in source"
         case .hlsPlaylistOnRawLivePath:
             return "HLS playlist supplied to the raw live path. Use LoadOptions.nativeRemoteHLS or HLSLiveIngestReader for m3u8 sources."
+        case .dolbyVisionUnplayableOnSoftwarePath(let profile):
+            return "Dolby Vision Profile \(profile) has no compatible base layer and cannot be color-correctly decoded on the software playback path"
         }
     }
 }

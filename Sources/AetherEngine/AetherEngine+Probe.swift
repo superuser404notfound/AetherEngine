@@ -472,6 +472,12 @@ extension AetherEngine {
 
     /// Dolby Vision profile number (5, 7, 8, 10) from the dvcC/dvvC configuration record; nil when the stream carries no DV side-data. Same record `CodecRoutePolicy` reads for routing.
     nonisolated static func dvProfile(stream: UnsafeMutablePointer<AVStream>) -> Int? {
+        dvConfig(stream: stream)?.profile
+    }
+
+    /// Profile + base-layer signal compatibility ID from the dvcC/dvvC record (compat 0 = IPT-only, no
+    /// compatible base layer). nil when the stream carries no DV side-data.
+    nonisolated static func dvConfig(stream: UnsafeMutablePointer<AVStream>) -> (profile: Int, blCompatID: Int)? {
         let nb = Int(stream.pointee.codecpar.pointee.nb_coded_side_data)
         guard nb > 0, let sideData = stream.pointee.codecpar.pointee.coded_side_data else {
             return nil
@@ -480,7 +486,7 @@ extension AetherEngine {
             let item = sideData[i]
             guard item.type == AV_PKT_DATA_DOVI_CONF, let raw = item.data, item.size >= 8 else { continue }
             let record = raw.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
-            return Int(record.dv_profile)
+            return (Int(record.dv_profile), Int(record.dv_bl_signal_compatibility_id))
         }
         return nil
     }
