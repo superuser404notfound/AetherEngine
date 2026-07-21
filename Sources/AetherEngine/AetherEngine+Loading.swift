@@ -176,6 +176,22 @@ extension AetherEngine {
                 self?.renderedPositionMirror.set(value)
             }
             .store(in: &nativeCancellables)
+        // #168: mirror the item's parsed dynamic range into the published format AND program the panel.
+        // This bypass runs no libav probe, so without this both fields stayed at the `.sdr` reset default
+        // even for HDR10 / Dolby Vision streams (the reporter's `fmt=sdr` on 4K50 HDR10), and more
+        // importantly nothing ever programmed preferredDisplayCriteria, so an HDR item was handed to a bare
+        // AVPlayerLayer with the panel in SDR and AVPlayer presented no video (audio-only, black).
+        // sourceVideoFormat = what the stream carries; videoFormat = the effective badge.
+        host.$detectedVideoFormat
+            .compactMap { $0 }
+            .sink { [weak self] fmt in
+                guard let self else { return }
+                self.sourceVideoFormat = fmt
+                self.videoFormat = fmt
+                if let rate = self.nativeHost?.detectedVideoFrameRate { self.sourceVideoFrameRate = rate }
+                self.applyRemoteHLSDisplayCriteria(format: fmt, options: options)
+            }
+            .store(in: &nativeCancellables)
         startLiveWindowTimer(host: host)
         // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
         // #124: a paused mount (autoplay=false) skips that play(), so the readiness sink settles .loading -> .paused.
@@ -240,6 +256,24 @@ extension AetherEngine {
         }
         startMemoryProbe()
         // No startLiveTelemetrySampler: all sampler counters read the loopback pipeline (demuxer / producer / cache / server), none of which exists on this bypass.
+    }
+
+    /// #168: program `preferredDisplayCriteria` for an HDR range detected on the probe-free nativeRemoteHLS
+    /// bypass. The loopback path applies criteria before item load from its libav probe; this path has no
+    /// probe, so it applies late, once AVPlayer's parsed video-track format resolves the range. Without the
+    /// panel switch a bare AVPlayerLayer presents no HDR video (audio-only, black; the reporter's symptom).
+    /// SDR needs no switch, and a sole-writer host (`suppressDisplayCriteria`) is left untouched. No-op off
+    /// tvOS (apply() returns .applied there) and where Match Content is off (apply() skips the write).
+    @MainActor
+    private func applyRemoteHLSDisplayCriteria(format: VideoFormat, options: LoadOptions) {
+        guard RemoteHLSFormatDetection.shouldApplyDisplayCriteria(
+            format: format, suppressDisplayCriteria: options.suppressDisplayCriteria) else { return }
+        _ = displayCriteria.apply(
+            format: format,
+            frameRate: nativeHost?.detectedVideoFrameRate,
+            codecTag: nil,
+            omitColorExtensions: options.omitCriteriaColorExtensions
+        )
     }
 
     func loadNative(

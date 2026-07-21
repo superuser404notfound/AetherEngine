@@ -45,6 +45,17 @@ final class NativeAVPlayerHost {
     /// surfaces the failure. Reset on each load.
     @Published private(set) var pendingDisplayRejection: DisplayRejection?
 
+    /// AetherEngine#168: dynamic range read back from the item's parsed video-track CMFormatDescription,
+    /// so the probe-free `nativeRemoteHLS` bypass can report the real format instead of the `.sdr` default.
+    /// nil until a video track resolves (or when none does: the audio-only black-screen symptom). The
+    /// engine's remote-HLS load subscribes and mirrors it into `sourceVideoFormat` / `videoFormat` and, for
+    /// HDR, programs `preferredDisplayCriteria` (the panel switch AVPlayer needs to present HDR at all).
+    @Published private(set) var detectedVideoFormat: VideoFormat?
+
+    /// AetherEngine#168: the same-read nominal frame rate, so the engine's remote-HLS criteria also carry
+    /// Match Frame Rate (the reporter's 4K item is 50 fps). nil when no video track / rate resolves.
+    @Published private(set) var detectedVideoFrameRate: Double?
+
     /// #35 (Sodalite) cold-DV-master startup-readiness gate. While the engine drives the bounded
     /// retry loop this is true, so a startup failure (`.failed` with any code, including a
     /// display-rejection) is NOT published: the gate polls `awaitStartupReadiness` and decides to
@@ -252,6 +263,8 @@ final class NativeAVPlayerHost {
                 Task { @MainActor in
                     await Self.dumpPlayerItemTracks(item, sid: sid)
                     Self.dumpAudioRoute(sid: sid, phase: "readyToPlay, route may still be negotiating")
+                    // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
+                    await self?.publishDetectedVideoFormat(from: item)
                 }
             }
 
@@ -313,6 +326,9 @@ final class NativeAVPlayerHost {
                         Self.dumpAudioRoute(sid: sid, phase: "settled")
                         await Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
                         await Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                        // #168: the video track can be absent from item.tracks at readyToPlay for HLS;
+                        // re-read once playing so the remote-HLS badge settles on the real dynamic range.
+                        await self.publishDetectedVideoFormat(from: item)
                     }
                 }
             }
@@ -761,6 +777,9 @@ final class NativeAVPlayerHost {
         failureMessage = nil
         didReachEnd = false
         didSampleSettledRoute = false
+        // #168: a reused host must not report the prior session's dynamic range before the new item resolves.
+        detectedVideoFormat = nil
+        detectedVideoFrameRate = nil
         // Re-arm #50 hasEverPlayed: reused host must not inherit prior session's established state.
         hasEverPlayed = false
         // #93 recovery reload: same content, same position, playback must continue. Skip the
@@ -848,6 +867,38 @@ final class NativeAVPlayerHost {
                 + "enabled=\(itemTrack.isEnabled)\(extra) (readyToPlay)",
                 category: .engine
             )
+        }
+    }
+
+    /// AetherEngine#168: read the item's video-track dynamic range back from AVPlayer's parsed
+    /// CMFormatDescription and publish it, so the probe-free `nativeRemoteHLS` bypass can report the real
+    /// format instead of the `.sdr` default. Called at readyToPlay and again at first `.playing` (an HLS
+    /// video track can be absent from `item.tracks` at the readyToPlay instant). No-op for the item once it
+    /// has been replaced; leaves `detectedVideoFormat` nil while no video track resolves (audio-only black).
+    @MainActor
+    private func publishDetectedVideoFormat(from item: AVPlayerItem) async {
+        guard playerItem === item else { return }
+        for itemTrack in item.tracks {
+            guard let assetTrack = itemTrack.assetTrack, assetTrack.mediaType == .video else { continue }
+            guard let cm = try? await assetTrack.load(.formatDescriptions).first else { continue }
+            let rate = (try? await assetTrack.load(.nominalFrameRate)).map(Double.init)
+            guard playerItem === item else { return }
+            let subType = CMFormatDescriptionGetMediaSubType(cm)
+            let ext = CMFormatDescriptionGetExtensions(cm) as? [String: Any] ?? [:]
+            let transfer = ext[kCMFormatDescriptionExtension_TransferFunction as String] as? String
+            let fmt = RemoteHLSFormatDetection.videoFormat(transferFunction: transfer, videoSubType: subType)
+            // Rate before format: the engine's format sink reads detectedVideoFrameRate when it fires.
+            if let rate, rate > 0 { detectedVideoFrameRate = rate }
+            if detectedVideoFormat != fmt {
+                detectedVideoFormat = fmt
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sessionID) remote-HLS videoFormat=\(fmt) "
+                    + "subType='\(fourccString(subType))' transfer=\(transfer ?? "nil") "
+                    + "rate=\(rate.map { String(format: "%.3f", $0) } ?? "nil")",
+                    category: .engine
+                )
+            }
+            return
         }
     }
 
