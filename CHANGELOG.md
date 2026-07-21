@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.4] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.4))
+
+### Fixed
+
+- **`-15410` when the LOCAL segment producer stalls (SSAI cutter wedge) while LL-HLS blocking-reload is latched ON, including a second one right after the stall watchdog's item reload.** Follow-up to the 5.16.0 observed-cadence fix: the cadence policy observes ingest arrivals, which keep flowing while the cutter is wedged, so it cannot see this failure mode. The held `?_HLS_msn=` reload waited on a segment that will never be cut, timed out, and was answered with the unchanged playlist (no requested MSN), which AVPlayer flags as invalid blocking-reload behavior; the item reload against the same zombie server immediately re-armed a second hold. The server now answers an unsatisfiable held blocking reload with a retriable 503 (RFC 8216bis) instead of a spec-invalid unchanged 200, and every live pump exit that delegates to host retune (`segmentStall`, `sourceReplay`, non-URL-reopenable pump deaths) latches the provider production-halted: blocking-reload stops being advertised for the rest of the session (beating the host override), and parked waiters release immediately instead of sleeping out their hold. Reopenable URL exits keep cutting into the same provider and do not latch. Reported by G00380316 (#167 retest). Covered by `LiveProductionHaltTests`.
+
 ## [5.17.3] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.3))
