@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.16.0] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.16.0))
+
+### Added
+
+- **`LoadOptions.liveBlockingReload: Bool?`** to override LL-HLS blocking-reload eligibility for live loopback sessions. `nil` (default) keeps the automatic behavior; `true`/`false` force it regardless of cadence. See the fix below for the auto behavior.
+
+### Fixed
+
+- **Live HLS ingest from a bursty origin looped on `CoreMediaErrorDomain -15410` ("Invalid server blocking reload behavior for low latency"), stalling and self-recovering with a nudge-seek over and over.** LL-HLS blocking-reload eligibility and the local `#EXT-X-TARGETDURATION` floor both derived from `HLSLiveIngestReader.upstreamTargetDuration`, the upstream origin's *self-declared* `#EXT-X-TARGETDURATION`. A relay/budget IPTV origin that advertises a normal target but pushes segments in irregular batches (rather than encoding in disciplined real time) defeated that check: the advertised value looked fine, so the loopback server kept advertising `CAN-BLOCK-RELOAD=YES` and held each `?_HLS_msn=` reload until its batch landed, which AVPlayer treats as a spec violation (`-15410`). The hint was also read once at load and frozen, so it could never reflect how the origin actually behaved. The engine now measures the **observed** inter-segment arrival cadence in the ingest reader (`LiveArrivalCadenceMeter`: the recent-max closed inter-arrival interval, widened by the currently-open gap) and drives both decisions from it on every manifest render (`LiveCadencePolicy`): blocking-reload starts OFF, latches ON only after a sustained window of disciplined cadence, and latches permanently OFF the moment a burst is observed (a monotonic OFF -> ON -> OFF path, since ON/OFF flapping would itself trip `-15410`); the TARGETDURATION floor tracks the monotonic max observed cadence so AVPlayer's 1.5x-target unchanged-playlist patience always covers the real inter-batch gap (no `-12888` regression). Plain-`url:` live with no cadence signal (for example a Jellyfin real-time transcode, which is disciplined) keeps blocking-reload on by default, so mainstream live TV is unaffected; hosts can override either way with the new `LoadOptions.liveBlockingReload`. Reported by a downstream integrator (iPhone 16 Pro Max / iPad 10th generation, HDR10 4K HEVC + EAC3 5.1 bursty ingest). Covered by `LiveCadencePolicyTests`.
+
 ## [5.15.5] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.15.5))
