@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.17.3] - 2026-07-21
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.3))
+
+### Fixed
+
+- **`EXC_RESOURCE` memory-limit crash on the native loopback pipeline: the persistent source reader kept pulling from the origin while the muxer was correctly backpressure-stalled.** The persistent reader applied window backpressure by blocking the URLSession delegate callback until the consumer drained below the 16 MB high-water mark. Blocking the delegate has no flow-control contract: whether the connection stops reading from the socket is a transport implementation detail. Plain HTTP/1.1 happens to park after a few MB of internal buffering, but the TLS/H2 path keeps reading at line rate and buffers the undelivered body in unbounded URLSession-internal allocations; with a realtime consumer that grows at line rate minus playback rate, goes cold, gets compressed, and trips the jetsam limit after minutes (the reporter's memprobe: delivered bytes at playback rate, malloc growing 12x faster, `vmCmp` climbing ~500 MB per 30 s with rss flat, and the network thread the only active thread, mid `SSL_read`). The reader now uses task suspend/resume, the contractual flow control the streaming path already used: delivery never blocks, the task suspends once the window exceeds the high-water mark, and the read loop resumes it when the drain crosses the new 8 MB low-water mark (or before parking in the frontier wait, where a suspended task would never deliver). Every reconnect and teardown path balances a pending suspend before cancel. Reported by Enoch Abiodun (#174). Covered by `Issue174PersistentReadBackpressureTests` against a loopback origin that counts the bytes it actually manages to serve.
+
 ## [5.17.2] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.17.2))
