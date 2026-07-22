@@ -145,7 +145,7 @@ final class LiveCadencePolicyTests: XCTestCase {
     func testBurstyProviderOmitsBlockingReloadAndRaisesTargetDuration() {
         let provider = ScriptedManifestProvider(count: 5, blockingReload: false, floor: 20)
         let ls = lines(HLSLocalServer.buildMediaPlaylistText(provider: provider))
-        XCTAssertFalse(ls.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES"),
+        XCTAssertFalse(serverControlHasAttribute(ls, "CAN-BLOCK-RELOAD"),
                        "bursty ingest must not advertise blocking-reload (-15410)")
         XCTAssertTrue(ls.contains("#EXT-X-TARGETDURATION:20"),
                       "TARGETDURATION floor must cover the observed inter-batch gap (anti -12888)")
@@ -154,7 +154,15 @@ final class LiveCadencePolicyTests: XCTestCase {
     func testDisciplinedProviderAdvertisesBlockingReload() {
         let provider = ScriptedManifestProvider(count: 5, blockingReload: true, floor: nil)
         let ls = lines(HLSLocalServer.buildMediaPlaylistText(provider: provider))
-        XCTAssertTrue(ls.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES"))
+        // Combined SERVER-CONTROL line: CAN-BLOCK-RELOAD rides alongside HOLD-BACK (AE#189).
+        XCTAssertTrue(serverControlHasAttribute(ls, "CAN-BLOCK-RELOAD=YES"))
+        XCTAssertTrue(serverControlHasAttribute(ls, "HOLD-BACK="),
+                      "live playlists always pin the live-edge holdback")
+    }
+
+    /// True if any EXT-X-SERVER-CONTROL line carries the given attribute (order/co-attributes agnostic).
+    private func serverControlHasAttribute(_ ls: [String], _ attribute: String) -> Bool {
+        ls.contains { $0.hasPrefix("#EXT-X-SERVER-CONTROL:") && $0.contains(attribute) }
     }
 }
 
