@@ -282,6 +282,55 @@ extension HLSVideoEngine {
         return hvcC
     }
 
+    /// Rewrite an hvcC config record to keep only the VPS(32)/SPS(33)/PPS(34) parameter-set arrays, dropping
+    /// SEI_PREFIX(39)/SEI_SUFFIX(40) and any other NAL arrays. libx265 (and other encoders) embed a large
+    /// user-data SEI_PREFIX array in the hvcC; the VOD muxer forwards the source config record verbatim, so
+    /// that array reaches the fMP4 init sample description. Apple TV hardware builds the HEVC format
+    /// description straight from the hvcC parameter-set arrays and rejects a record carrying non-parameter-set
+    /// arrays: `asset.tracks count=0`, `AVFoundationErrorDomain -11829`, `CoreMediaErrorDomain -12848` (AE#187).
+    /// macOS and the tvOS Simulator tolerate it, so it only surfaces on device. The live MPEG-TS and direct
+    /// fMP4-HLS paths never hit this because their hvcC is rebuilt from parameter sets alone; canonicalizing
+    /// here aligns the VOD path with them. HDR10 static metadata is unaffected: it rides in-band per-IRAP in
+    /// the media packets (untouched) and in the muxer's `mdcv`/`clli` boxes, not the hvcC SEI array. DV is
+    /// unaffected too: the dvcC/dvvC boxes and RPU live outside the hvcC extradata. Returns nil when the record
+    /// already holds only parameter-set arrays (no rewrite needed) or cannot be parsed as an hvcC.
+    static func canonicalizeHEVCConfigRecord(_ extradata: [UInt8]) -> [UInt8]? {
+        guard extradata.count >= 23 else { return nil }
+        guard extradata[0] == 1 else { return nil }  // configurationVersion; guards against Annex-B / non-hvcC
+        let numOfArrays = Int(extradata[22])
+        guard numOfArrays > 0 else { return nil }  // numOfArrays=0 is the in-band-rebuild path, not this one
+
+        // Collect each array's [start, end) byte range and its NAL type, bounds-checked. Any inconsistency
+        // (truncated record) returns nil so a malformed source is forwarded unchanged rather than corrupted.
+        var arrays: [(type: Int, range: Range<Int>)] = []
+        var offset = 23
+        for _ in 0..<numOfArrays {
+            let arrayStart = offset
+            guard offset + 3 <= extradata.count else { return nil }
+            let nalType = Int(extradata[offset]) & 0x3F
+            let numNalus = (Int(extradata[offset + 1]) << 8) | Int(extradata[offset + 2])
+            offset += 3
+            for _ in 0..<numNalus {
+                guard offset + 2 <= extradata.count else { return nil }
+                let nalLen = (Int(extradata[offset]) << 8) | Int(extradata[offset + 1])
+                offset += 2 + nalLen
+                guard offset <= extradata.count else { return nil }
+            }
+            arrays.append((type: nalType, range: arrayStart..<offset))
+        }
+
+        let parameterSetTypes: Set<Int> = [32, 33, 34]  // VPS, SPS, PPS
+        let kept = arrays.filter { parameterSetTypes.contains($0.type) }
+        guard kept.count < arrays.count else { return nil }  // nothing to drop: already canonical
+
+        var out: [UInt8] = []
+        out.reserveCapacity(23 + kept.reduce(0) { $0 + $1.range.count })
+        out.append(contentsOf: extradata[0..<22])  // header verbatim (profile/tier/level/lengthSize)
+        out.append(UInt8(kept.count))               // rewritten numOfArrays
+        for array in kept { out.append(contentsOf: extradata[array.range]) }
+        return out
+    }
+
     /// ADTS AAC from MPEG-TS arrives without an AudioSpecificConfig in `extradata`; the fMP4 `mp4a`/`esds` sample entry can't be written. Synthesizes a 2-byte ASC, installs it, and clears the TS codec_tag the mov muxer rejects. Returns true when applied; caller strips per-frame ADTS headers.
     static func prepareAACForFMP4(
         _ codecpar: UnsafeMutablePointer<AVCodecParameters>
