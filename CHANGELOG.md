@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.5] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.5))
+
+### Fixed
+
+- **Long-GOP live played through the loopback no longer restarts inside AVPlayer's own stall-danger zone at startup.** A 4K50 HEVC-in-MPEG-TS stream routed onto the live-ingest loopback (the #168 reroute) cuts keyframe-aligned segments of ~4.8-5.76 s, so the served `EXT-X-TARGETDURATION` is 6. The media playlist advertised no explicit `EXT-X-SERVER-CONTROL:HOLD-BACK`, so AVPlayer fell back to its implicit live-edge holdback of `3 x TARGETDURATION` (~18 s) and tried to begin playback that far behind the live edge, while the fixed two-segment startup cushion built only ~9.6 s of content. AVPlayer's initial seek to edge-minus-holdback therefore landed inside the window's stall-danger region and it spammed `-16832 restarting Ns from end of live playlist; target duration Ts - stall danger`, rebuffering on every channel open until the real-time window naturally deepened past the holdback. The loopback now advertises `HOLD-BACK` explicitly at the RFC 8216bis floor (`3 x TARGETDURATION`, which is also AVPlayer's implicit default made explicit), and the startup gate holds the first manifest until the window carries at least that holdback depth (bounded above by the sliding-window size and the existing startup deadline) so AVPlayer's live-edge seek always lands inside real content. Both the served playlist and the startup cushion derive `TARGETDURATION` through one shared policy, so the depth built can never drift from the holdback advertised. Sources that arrive with a backlog (a Jellyfin transcode, or an upstream live window pulled at I/O speed) satisfy the gate almost immediately; only a strict-real-time origin pays the deepen-the-buffer latency, which is inherent to joining long-GOP live without stalling. Root-caused with field-verified diagnostics by kskchaitanya1993 (#189). Covered by `Issue189LiveEdgeHoldbackTests`.
+
 ## [5.18.4] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.4))
