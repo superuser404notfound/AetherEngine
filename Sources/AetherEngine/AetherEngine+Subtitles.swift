@@ -1639,12 +1639,25 @@ extension AetherEngine {
     /// AVKit or system caption preferences already made so host pickers start truthful. Deliberately
     /// no force-deselect here (unlike Sodalite#38 on the loopback path): this bypass has no on-frame
     /// overlay, AVPlayer's own legible renderer IS the subtitle output, so system prefs stay honored.
+    ///
+    /// AE#154 follow-up (jihongboo, macOS 27 beta): the legible group is usually populated once the
+    /// master playlist is parsed, well before readyToPlay (device: macOS 26 surfaces all renditions at
+    /// ~0.5 s). But on some OS versions `loadMediaSelectionGroup(for:)` returns an empty group until the
+    /// item reaches readyToPlay, and a one-shot load then silently dropped every rendition. Retry once
+    /// after readiness before giving up, so an early-empty group no longer leaves `subtitleTracks` empty.
     func publishRemoteHLSSubtitleTracks(host: NativeAVPlayerHost) {
         remoteHLSSubtitleDiscoveryTask?.cancel()
         guard let item = host.avPlayer.currentItem else { return }
         remoteHLSSubtitleDiscoveryTask = Task { @MainActor [weak self] in
-            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
-                  !group.options.isEmpty else { return }
+            var group = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            if group?.options.isEmpty ?? true {
+                // Early-empty group: wait for readyToPlay (AVFoundation's guarantee point for HLS
+                // media selection) and load once more. Cancelled by the next load()/stop().
+                for await ready in host.$isReady.values where ready { break }
+                guard !Task.isCancelled else { return }
+                group = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            }
+            guard let group, !group.options.isEmpty else { return }
             guard let self, !Task.isCancelled,
                   self.currentAVPlayer?.currentItem === item else { return }
             let snapshots = group.options.map { option in
