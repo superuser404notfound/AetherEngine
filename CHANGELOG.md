@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.19.1] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.19.1))
+
+### Fixed
+
+- **A VOD session whose producer dies mid-session (tail read error) now recovers instead of parking into -12889.** When the source reader stopped for good near the end of a file (reconnect churn on a slow link), the final segment was never produced and the request for it re-armed a 30 s backpressure wait forever: the forward-wait branch judged "will this arrive?" by index distance to the producer's march front alone, a dead producer freezes that front just below the request, and the restart escalation was additionally vetoed by the dead producer's still-installed base "covering" the index. On top of that, a mid-session `readError` pump exit had no recovery arm at all (only the nothing-ever-produced case surfaced as fatal, #126). Three-layer fix: a bounded event-driven revive rebuilds the producer on a fresh demuxer right at the pump exit; the forward wait is liveness-aware (a finished pump restarts immediately, a silently frozen march escalates after one fully burned wait with zero front progress, an advancing front keeps the full #141/#93 patience); and both proofs bypass the producerCovers veto. VOD only; live keeps its pump watchdogs and reopen machinery. Reported with a decisive trace by rrgomes (#169). Covered by `Issue169DeadProducerEscalationTests`.
+
 ## [5.19.0] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.19.0))
