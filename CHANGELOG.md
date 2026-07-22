@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.4] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.4))
+
+### Fixed
+
+- **`AetherPlayerSurface` now rebinds its engine on every SwiftUI update, so replacing the `AetherEngine` instance at the same structural position no longer leaves fresh video black over working audio.** The surface bound the engine to its platform view only in `makeUIView`/`makeNSView`; the update path was empty. When a host tears down and recreates its engine at the same position (a retry/reload flow), SwiftUI reuses the platform view and calls only `updateUIView`, so the new engine's `bind(view:)` never ran: its `boundView` stayed nil, the post-load `presentCurrentLayer()` no-oped on the guard, and the reused view kept displaying the previous engine's detached layer. `isReadyForDisplay` read true throughout, because the host's layer reports ready without being attached to any on-screen view. `updateUIView`/`updateNSView` now call `engine.bind(view:)`; steady-state passes are a cheap no-op (`presentCurrentLayer()` re-attaches the same layer and `attach` short-circuits on identical layer), while an engine swap points the new engine at the reused view and re-attaches its layer. Hosts that keyed the surface identity to the engine (`.id(ObjectIdentifier(engine))`) as a workaround no longer need to. Root-caused and reported by rrgomes (#188). Covered by `Issue188SurfaceRebindTests`.
+
 ## [5.18.3] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.3))
