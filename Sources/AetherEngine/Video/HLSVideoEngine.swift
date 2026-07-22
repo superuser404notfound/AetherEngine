@@ -442,6 +442,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// a persistent cause exhausts the cap instead of restart-storming.
     var muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
 
+    /// AE#169 round 2: bounded revive for a VOD pump that died on a MID-SESSION read error (under
+    /// `restartLock`). #126 only surfaced the nothing-ever-produced case as fatal and assumed the
+    /// scrub/wedge arms covered the rest; a tail request within the forward-wait window of the dead
+    /// producer's front reached neither (rrgomes: seg719 miss x11 into -12889), so the exit gets
+    /// its own event-driven arm. Same gate shape as #99.
+    var readErrorReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
+
+    /// AE#169 round 2 (under `restartLock`): the demuxer's last read threw, so the next
+    /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection
+    /// that just failed (a sticky pb error would burn the revive gate without one fresh attempt).
+    var mainDemuxerSuspectDead = false
+
     /// #93 residual: a stalled AVPlayer sometimes never resumes REQUESTING after a wedge re-anchor
     /// (device: plain playback, one -15628 errorLog, then zero segment GETs while parked in
     /// waitingToMinimizeStalls forever, item never fails). The served playlist alone cannot reach
@@ -1224,6 +1236,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             activeProducerBase: isLiveSession ? nil : { [weak self] in
                 self?.currentProducerBaseIndex
             },
+            // AE#169 round 2: a finished pump can never march; the forward-window wait must
+            // escalate to restart instead of parking on its frozen front.
+            producerFinished: isLiveSession ? nil : { [weak self] in
+                self?.currentProducerFinished ?? false
+            },
             // #93 residual: the first producer may be anchored at the resume segment; without this
             // the cold-start heuristic (abs(index - lastRestartIndex) > 2) restarts it immediately.
             initialRestartIndex: initialProducerBaseIndex,
@@ -1773,6 +1790,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return producer?.anchoredBaseIndex
     }
 
+    /// AE#169 round 2: whether the installed producer's pump has exited. nil producer (mid-restart)
+    /// reads as false; the coalescer's restartActivity covers that window.
+    var currentProducerFinished: Bool {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        return producer?.didFinish ?? false
+    }
+
     /// Total media-segment requests seen this session (#93 residual): the stall-triggered
     /// re-engage watchdog compares snapshots to detect a consumer that stopped requesting.
     var mediaFetchCountSnapshot: UInt64 {
@@ -1885,6 +1910,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let ab = audioBridge
         let targetStartPts = segmentPlan[idx].startPts
         let videoTb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+        // AE#169 round 2: consume the suspect-dead mark (the demuxer's last read threw); this
+        // restart replaces it via the #79 fresh-demuxer path instead of seeking the failed
+        // connection.
+        let demuxerSuspectDead = mainDemuxerSuspectDead
+        mainDemuxerSuspectDead = false
         restartLock.unlock()
 
         let restartStart = DispatchTime.now()
@@ -1895,56 +1925,65 @@ public final class HLSVideoEngine: @unchecked Sendable {
         var reopenMs: Double? = nil
         var seekMs: Double = 0
 
-        // The new producer reuses this demuxer unless we have to replace a wedged one (#79, below).
+        // The new producer reuses this demuxer unless we have to replace a wedged (#79) or
+        // suspect-dead (#169) one, below.
         var activeDem = dem
         var freshDemuxer: Demuxer?
+        var oldPumpExited = true
         if let old {
             old.stop()
-            let ok = old.waitForFinish(timeout: 5.0)
+            oldPumpExited = old.waitForFinish(timeout: 5.0)
             stopWaitMs = msSince(restartStart)
-            if !ok {
-                // #79: the old pump is wedged in a blocking network read on the SHARED demuxer; stop() can't
-                // unblock a socket read, so waitForFinish timed out. Reusing this demuxer makes the new
-                // producer's first post-seek read queue behind that stuck read for the full ~20s
-                // connStallTimeout (the reporter's ~25s restart), after which the abandoned reader also steals
-                // the first packet. markClosed() aborts the stuck read immediately (the existing thread-safe
-                // unblock) but dooms the demuxer, so open a FRESH one and hand it to the new producer. Open
-                // FIRST, abort only on success, so a reopen failure falls back to the prior abandon behaviour
-                // (no regression) rather than poisoning the only demuxer. Scoped to the VOD single-demuxer
-                // scrub case; the side-source / live-reopen paths keep their existing behaviour.
-                if !isLiveSession, sideAudioDemuxer == nil {
-                    let reopenStart = DispatchTime.now()
-                    let fresh = Demuxer()
-                    do {
-                        // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
-                        // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
-                        // run so video_delay resolves, else B-frame dts arrive broken (#93 judder).
-                        try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: .restartReopen, isLive: false)
-                        dem.markClosed() // abort the wedged read now that the replacement is ready
-                        freshDemuxer = fresh
-                        activeDem = fresh
-                        EngineLog.emit(
-                            "[HLSVideoEngine] restart at idx=\(idx): old producer wedged in a read past 5s; "
-                            + "aborted it and reopened a fresh demuxer (avoids the ~20s shared-read stall)",
-                            category: .session
-                        )
-                    } catch {
-                        fresh.close()
-                        EngineLog.emit(
-                            "[HLSVideoEngine] restart at idx=\(idx): old producer wedged; reopen failed (\(error)), "
-                            + "abandoning it and reusing the demuxer",
-                            category: .session
-                        )
-                    }
-                    reopenMs = msSince(reopenStart)
-                } else {
+        }
+        if !oldPumpExited || demuxerSuspectDead {
+            // #79: the old pump is wedged in a blocking network read on the SHARED demuxer; stop() can't
+            // unblock a socket read, so waitForFinish timed out. Reusing this demuxer makes the new
+            // producer's first post-seek read queue behind that stuck read for the full ~20s
+            // connStallTimeout (the reporter's ~25s restart), after which the abandoned reader also steals
+            // the first packet. markClosed() aborts the stuck read immediately (the existing thread-safe
+            // unblock) but dooms the demuxer, so open a FRESH one and hand it to the new producer. Open
+            // FIRST, abort only on success, so a reopen failure falls back to the prior abandon behaviour
+            // (no regression) rather than poisoning the only demuxer. Scoped to the VOD single-demuxer
+            // scrub case; the side-source / live-reopen paths keep their existing behaviour.
+            // AE#169 round 2 takes the same path when the pump exited BECAUSE the demuxer's read
+            // threw: the connection is known-bad, so the revive gets one fresh connection instead
+            // of seeking the demuxer that just failed.
+            if !isLiveSession, sideAudioDemuxer == nil {
+                let reopenStart = DispatchTime.now()
+                let fresh = Demuxer()
+                do {
+                    // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
+                    // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
+                    // run so video_delay resolves, else B-frame dts arrive broken (#93 judder).
+                    try fresh.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: .restartReopen, isLive: false)
+                    dem.markClosed() // abort any wedged read now that the replacement is ready
+                    freshDemuxer = fresh
+                    activeDem = fresh
                     EngineLog.emit(
-                        "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it "
-                        + "(its in-flight read shares the demuxer and may consume the first post-seek packet; "
-                        + "if the new session starts a GOP late, this is why)",
+                        "[HLSVideoEngine] restart at idx=\(idx): "
+                        + (oldPumpExited
+                            ? "#169 demuxer suspect-dead after read error; "
+                            : "old producer wedged in a read past 5s; aborted it and ")
+                        + "reopened a fresh demuxer",
+                        category: .session
+                    )
+                } catch {
+                    fresh.close()
+                    EngineLog.emit(
+                        "[HLSVideoEngine] restart at idx=\(idx): "
+                        + (oldPumpExited ? "#169 suspect-dead demuxer" : "old producer wedged")
+                        + "; reopen failed (\(error)), reusing the demuxer",
                         category: .session
                     )
                 }
+                reopenMs = msSince(reopenStart)
+            } else if !oldPumpExited {
+                EngineLog.emit(
+                    "[HLSVideoEngine] restart at idx=\(idx): old producer didn't exit within 5s, abandoning it "
+                    + "(its in-flight read shares the demuxer and may consume the first post-seek packet; "
+                    + "if the new session starts a GOP late, this is why)",
+                    category: .session
+                )
             }
         }
 

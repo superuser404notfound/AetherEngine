@@ -15,6 +15,18 @@ extension HLSVideoEngine {
         return packetsWritten == 0 && cachedSegments == 0
     }
 
+    /// AE#169 round 2 pure decision: a VOD pump read-error exit that produced media before dying
+    /// is revivable (the source worked; a reconnect-churned read failed). The complement is the
+    /// #126 dead-source fatal surface; live keeps its reopen machinery.
+    static func shouldReviveVODAfterReadError(
+        isLive: Bool,
+        packetsWritten: Int,
+        cachedSegments: Int
+    ) -> Bool {
+        guard !isLive else { return false }
+        return packetsWritten > 0 || cachedSegments > 0
+    }
+
     /// #167 follow-up pure decision: live pump exits that delegate to host retune leave a provider no
     /// producer will ever cut into again. Its blocking-reload advert must drop and its held ?_HLS_msn=
     /// waiters release, or the zombie session (and any item reload against it while the host retunes)
@@ -54,14 +66,19 @@ extension HLSVideoEngine {
         // written, empty segment cache) is a dead source: the playlist exists but no segment
         // will ever land, no restart arm covers readError, and AVPlayer parks in waitingToPlay
         // until the host's first-frame timeout. Surface it as fatal instead of dying silently.
-        // Mid-session read errors (packets/segments already produced) keep the existing
-        // behavior: AVIO absorbs transients, the scrub/wedge arms cover recovery.
+        // AE#169 round 2: a MID-SESSION read error (packets/segments already produced) gets a
+        // bounded revive. The old assumption that the scrub/wedge arms cover it was false for a
+        // request within the forward-wait window of the dead producer's front: the wedge detector
+        // died with the pump and the provider's restart escalation judged by index distance alone,
+        // so the tail request parked 30 s at a time into -12889 (rrgomes' seg719 trace).
         if case .readError(let code) = reason, !isLiveSession {
-            if Self.isFatalVODPumpExit(
-                reason: reason, isLive: isLiveSession,
+            if Self.shouldReviveVODAfterReadError(
+                isLive: isLiveSession,
                 packetsWritten: prod.packetsWrittenCount,
                 cachedSegments: cache?.count ?? 0
             ) {
+                handleVODReadErrorExit(code)
+            } else {
                 EngineLog.emit(
                     "[HLSVideoEngine] VOD pump died before producing anything "
                     + "(readError \(code)); surfacing fatal source failure",
@@ -133,6 +150,41 @@ extension HLSVideoEngine {
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.performLiveReopen(failedProducer: prod)
         }
+    }
+
+    /// AE#169 round 2: revive a VOD session whose pump died on a mid-session read error. Mirrors
+    /// the #99 muxerFailed arm: bounded by its own gate, aimed at the pending seek target or
+    /// AVPlayer's real position, authoritative so it wins the coalescer's pending slot. The
+    /// demuxer whose read just threw is marked suspect so performRestart replaces it via the #79
+    /// fresh-demuxer path instead of seeking the failed connection.
+    func handleVODReadErrorExit(_ code: Int32) {
+        restartLock.lock()
+        let admitted = readErrorReviveGate.admit()
+        let attempts = readErrorReviveGate.attempts
+        let cap = readErrorReviveGate.maxAttempts
+        if admitted { mainDemuxerSuspectDead = true }
+        restartLock.unlock()
+        guard admitted else {
+            EngineLog.emit(
+                "[HLSVideoEngine] #169 VOD readError revive cap reached "
+                + "(\(attempts) failures, cap \(cap)); giving up (source not readable in this session)",
+                category: .session
+            )
+            return
+        }
+        let frozen = currentPlaybackPositionProvider?() ?? 0
+        let anchor = AetherEngine.recoveryAnchorPosition(
+            frozenPosition: frozen, pendingSeekTarget: recoverySeekTargetProvider?(),
+            currentRendered: frozen)
+        let idx = segmentIndexForPlaylistTime(anchor)
+        EngineLog.emit(
+            "[HLSVideoEngine] #169 VOD pump died mid-session (readError \(code)); "
+            + "rebuilding producer on a fresh demuxer at "
+            + "\(String(format: "%.2f", anchor))s -> seg\(idx) "
+            + "(attempt \(attempts)/\(cap))",
+            category: .session
+        )
+        requestRestart(at: idx, authoritative: true)
     }
 
     /// #99: revive a VOD session whose pump died with muxerFailed. The restart path rebuilds the
