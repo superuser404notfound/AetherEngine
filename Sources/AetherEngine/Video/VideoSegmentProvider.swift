@@ -145,6 +145,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Base index of the active producer (#93 residual): a fetch for an index within the
     /// producer's forward march window waits for the march instead of tearing it down.
     private let activeProducerBase: (() -> Int?)?
+    /// AE#169 round 2: whether the installed producer's pump has EXITED (any reason). A finished
+    /// pump can never march, so a forward-window fetch must restart instead of backpressure-waiting
+    /// on a front that is provably frozen. nil/false during a coalesced restart (no producer
+    /// installed) keeps the normal wait+ride paths.
+    private let producerFinished: (() -> Bool)?
+
+    /// AE#169 round 2: single-slot record of the last forward-window fetch that burned its FULL
+    /// backpressure wait. Same index + unmoved march front on the next fetch is proof the march is
+    /// not coming (the wait would re-arm forever against a dead producer); a moved front overwrites
+    /// the record and keeps the patience. Guarded by stateLock.
+    private var _forwardMissIndex: Int = .min
+    private var _forwardMissFront: Int = .min
 
     /// Base index of the engine's current producer. Guards against stale-producer waits:
     /// abs(index - lastRestartIndex) <= 2 = cold start, wait; larger = restart needed.
@@ -215,6 +227,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         restartHandler: ((Int) -> Void)? = nil,
         restartActivity: (() -> Bool)? = nil,
         activeProducerBase: (() -> Int?)? = nil,
+        producerFinished: (() -> Bool)? = nil,
         initialRestartIndex: Int = 0,
         repositionWaitSlice: TimeInterval = 8.0,
         sparseHoleWaitSlice: TimeInterval = 2.0,
@@ -245,6 +258,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.restartHandler = restartHandler
         self.restartActivity = restartActivity
         self.activeProducerBase = activeProducerBase
+        self.producerFinished = producerFinished
         self._lastRestartIndex = initialRestartIndex
         self.repositionWaitSlice = repositionWaitSlice
         self.sparseHoleWaitSlice = sparseHoleWaitSlice
@@ -487,6 +501,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             producerPassedAndPruned = highWater > index
         }
         let needsRestart: Bool
+        // AE#169 round 2: set when the forward-wait branch has PROOF the active march is never
+        // arriving (pump finished, or a full backpressure wait elapsed with zero front progress
+        // for this same index). Bypasses the restart loop's producerCovers veto below, which
+        // otherwise reads the dead producer's still-installed base and suppresses the fire.
+        var marchProvenDead = false
+        // AE#169 round 2: true when the fetch takes the VOD forward-window backpressure wait, so a
+        // full-timeout miss records (index, front) for the frozen-march escalation above.
+        var tookForwardWait = false
         if staleBelowProducer || producerPassedAndPruned {
             needsRestart = true
         } else if let r = range {
@@ -511,7 +533,36 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 // at 75; the request for seg159 parked 3x30 s into -1017 item death while the
                 // march was ~2 minutes away). highWater is reset per provider-fired restart, so
                 // max(highWater, lastRestartIndex) tracks the active producer's front.
-                needsRestart = index > activeMarchFront + Self.forwardWaitWindow
+                //
+                // AE#169 round 2: index distance alone is still not proof the march will ARRIVE.
+                // A producer that died mid-session (source read error at the tail) freezes the
+                // front just below the request, and the 30 s wait re-armed forever (seg719 miss
+                // x11 into -12889). A finished pump, or a full wait already burned with zero
+                // front progress for this same index, escalates to restart instead. VOD only:
+                // live has its own pump watchdogs and reopen machinery.
+                let front = activeMarchFront
+                tookForwardWait = !isLive
+                if !isLive {
+                    stateLock.lock()
+                    let missIndex = _forwardMissIndex
+                    let missFront = _forwardMissFront
+                    stateLock.unlock()
+                    marchProvenDead = Self.forwardWaitMarchDead(
+                        index: index, marchFront: front,
+                        producerFinished: producerFinished?() ?? false,
+                        lastMissIndex: missIndex, lastMissFront: missFront)
+                    if marchProvenDead {
+                        EngineLog.emit(
+                            "[HLSVideoEngine] seg\(index): #169 forward-wait march dead "
+                            + "(front=\(front) "
+                            + (producerFinished?() ?? false
+                                ? "producer finished" : "frozen across a full wait")
+                            + "); escalating to restart",
+                            category: .session
+                        )
+                    }
+                }
+                needsRestart = index > front + Self.forwardWaitWindow || marchProvenDead
             }
         } else {
             // Empty cache: cold start (producer at lastRestartIndex, hasn't written yet) vs. big scrub
@@ -545,7 +596,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     // covers (base <= index <= base + forward window) never fires OR backstops:
                     // the march will deliver it, and the backstop killed a 75%-complete capture
                     // on device while a forward-march neighbor got its healthy producer restarted.
-                    let producerCovers = activeProducerCovers(index)
+                    // AE#169 round 2: a march proven dead (finished pump / frozen front across a
+                    // full wait) must not veto the fire; the still-installed dead producer's base
+                    // covering the index is exactly the wedge being escaped.
+                    let producerCovers = !marchProvenDead && activeProducerCovers(index)
                     // A request superseded by a NEWER declared target is an orphan of a skip
                     // storm: AVPlayer's newest request is what it actually wants (the same
                     // newest-wins semantics the coalescer applies to immediate restarts).
@@ -564,6 +618,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                             category: .session
                         )
                         lastRestartIndex = index
+                        clearForwardWaitMiss()
                         restart(index)
                         // Reset highWater AFTER restart() returns (synchronous: old producer has exited).
                         // Pre-restart reset would be clobbered by the old producer's final write re-bumping
@@ -581,7 +636,41 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         }
 
         let bytes = cache.fetch(index: index, timeout: forwardBackpressureWaitSeconds)
+        if tookForwardWait, !needsRestart {
+            if bytes == nil {
+                // Record the front as of the END of the burned wait: progress DURING the wait
+                // resets the comparison base, so only a truly frozen march escalates next time.
+                recordForwardWaitMiss(index: index, front: activeMarchFront)
+            } else {
+                clearForwardWaitMiss()
+            }
+        }
         return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: needsRestart)
+    }
+
+    /// AE#169 round 2 pure decision: whether the forward-window backpressure wait may still trust
+    /// the active march to deliver `index`. A FINISHED pump can never march. A recorded full-wait
+    /// miss for the same index with an unmoved front means the wait already failed empirically and
+    /// re-arming it would park forever (rrgomes: seg719 miss x11 into -12889). Everything else
+    /// keeps the wait: slow sources legitimately take most of the patience window for one segment.
+    static func forwardWaitMarchDead(index: Int, marchFront: Int, producerFinished: Bool,
+                                     lastMissIndex: Int, lastMissFront: Int) -> Bool {
+        if producerFinished { return true }
+        return lastMissIndex == index && lastMissFront == marchFront
+    }
+
+    private func recordForwardWaitMiss(index: Int, front: Int) {
+        stateLock.lock()
+        _forwardMissIndex = index
+        _forwardMissFront = front
+        stateLock.unlock()
+    }
+
+    private func clearForwardWaitMiss() {
+        stateLock.lock()
+        _forwardMissIndex = .min
+        _forwardMissFront = .min
+        stateLock.unlock()
     }
 
     private func logServed(index: Int, bytes: Data?, totalStart: DispatchTime, restarted: Bool) -> Data? {
