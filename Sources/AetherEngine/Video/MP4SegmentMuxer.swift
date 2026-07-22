@@ -190,7 +190,13 @@ final class MP4SegmentMuxer {
 
         self.splitter = FragmentSplitter(
             onHeaderComplete: { initBytes in
-                onInitCaptured(initBytes)
+                // AE#187 defense-in-depth: strip a zero-sample video `sdtp` from the fragmented init before
+                // forwarding it. The pinned FFmpegBuild (n8.1.2) never writes it, so this is a no-op there;
+                // it neutralizes the box only for a consumer that links an older FFmpeg (a -force_load'ed
+                // 7.1.5 shadowing the vendored build), whose init Apple TV would otherwise reject.
+                let clean = HLSVideoEngine.stripEmptyVideoSampleDependencyBox(fromInit: [UInt8](initBytes))
+                    .map { Data($0) } ?? initBytes
+                onInitCaptured(clean)
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }

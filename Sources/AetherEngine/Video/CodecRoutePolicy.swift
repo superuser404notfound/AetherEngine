@@ -134,6 +134,70 @@ extension HLSVideoEngine {
         }
     }
 
+    /// Build the RFC 6381 codecs string for a plain (non-DV) HEVC track from its hvcC config-record
+    /// header (bytes 1..12 = profile_tier_level + general_level_idc). Matches the GPAC / ffmpeg form,
+    /// e.g. 8-bit Main L3.1 -> `hvc1.1.6.L93.90`, 10-bit Main10 -> `hvc1.2.4.L<level>.<constraints>`.
+    /// Returns nil when the buffer is not a parseable hvcC (configurationVersion != 1, or too short),
+    /// so the caller can fall back.
+    ///
+    /// AE#187: the `.none` / `.profile82` branch hardcoded `hvc1.2.4.L<level>` (Main10, profile_idc=2)
+    /// for EVERY plain HEVC stream, mis-declaring an 8-bit Main source as Main10. The device path
+    /// (media-direct, no CODECS) hid it, but once HEVC is signaled through a master (below) a strict
+    /// Apple TV rejects the Main10 declaration against the Main hvcC in the init; macOS / the Simulator
+    /// tolerate the mismatch. Deriving the string from the actual hvcC keeps master and init consistent.
+    static func hevcCodecsString(
+        fromConfigRecord hvcC: [UInt8],
+        sampleEntry: String = "hvc1"
+    ) -> String? {
+        // Need the fixed header through general_level_idc (byte 12); configurationVersion must be 1.
+        guard hvcC.count >= 13, hvcC[0] == 1 else { return nil }
+        let b1 = hvcC[1]
+        let profileSpace = (b1 >> 6) & 0x3
+        let tierFlag = (b1 >> 5) & 0x1
+        let profileIDC = b1 & 0x1F
+        let compat = (UInt32(hvcC[2]) << 24) | (UInt32(hvcC[3]) << 16)
+            | (UInt32(hvcC[4]) << 8) | UInt32(hvcC[5])
+        let constraintBytes = Array(hvcC[6..<12])   // general_constraint_indicator_flags, 6 bytes
+        let levelIDC = hvcC[12]
+
+        let spacePrefix: String
+        switch profileSpace {
+        case 1: spacePrefix = "A"
+        case 2: spacePrefix = "B"
+        case 3: spacePrefix = "C"
+        default: spacePrefix = ""
+        }
+        // Compatibility flags: hex, trailing zeros trimmed, never empty (0x60000000 -> "6", 0 -> "0").
+        var compatHex = String(compat, radix: 16)
+        while compatHex.count > 1 && compatHex.hasSuffix("0") { compatHex.removeLast() }
+        // Constraint bytes: each as 2-hex, dot-joined, trailing all-zero bytes dropped (0x90,0,0,0,0,0 -> "90").
+        var trimmedConstraints = constraintBytes
+        while let last = trimmedConstraints.last, last == 0 { trimmedConstraints.removeLast() }
+        let tier = tierFlag == 1 ? "H" : "L"
+        var s = "\(sampleEntry).\(spacePrefix)\(profileIDC).\(compatHex).\(tier)\(levelIDC)"
+        if !trimmedConstraints.isEmpty {
+            s += "." + trimmedConstraints.map { String(format: "%02x", $0) }.joined(separator: ".")
+        }
+        return s
+    }
+
+    /// Derive the plain-HEVC CODECS string from the source hvcC when parseable, else fall back to the
+    /// legacy Main10 form. Used only by the non-DV `.none` / `.profile82` branch; DV variants keep their
+    /// deliberate `hvc1.2.4` (Main10 PQ base) declaration.
+    private func plainHEVCCodecs(
+        codecpar: UnsafePointer<AVCodecParameters>,
+        fallbackLevel hevcLevel: Int
+    ) -> String {
+        if let ed = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+            let bytes = Array(UnsafeBufferPointer(
+                start: ed, count: Int(codecpar.pointee.extradata_size)))
+            if let derived = Self.hevcCodecsString(fromConfigRecord: bytes) {
+                return derived
+            }
+        }
+        return "hvc1.2.4.L\(hevcLevel)"
+    }
+
     func resolveCodecRoute(
         codecpar: UnsafePointer<AVCodecParameters>
     ) throws -> CodecRoute {
@@ -406,7 +470,7 @@ extension HLSVideoEngine {
             return CodecRoute(
                 codecTagOverride: "hvc1",
                 videoRange: manifestVideoRange(codecpar),
-                primaryCodecs: "hvc1.2.4.L\(hevcLevel)",
+                primaryCodecs: plainHEVCCodecs(codecpar: codecpar, fallbackLevel: hevcLevel),
                 supplementalCodecs: nil,
                 stripDolbyVisionMetadata: dvVariant == .profile82,
                 convertP7ToProfile81: false,

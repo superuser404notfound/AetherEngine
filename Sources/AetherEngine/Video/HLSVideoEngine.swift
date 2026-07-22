@@ -1264,12 +1264,21 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // #15: a SUBTITLES rendition lives only in a master; the pure decision below forces the
         // master for routing-safe subtitled sources so PiP can show subtitles.
         let hasNativeSubs = enableNativeSubtitleTrackForSession && !nativeSubtitleCueStoresForSession.isEmpty
+        // AE#187: tvOS HW HEVC needs the codec advertised in a master's CODECS attribute; a bare media
+        // playlist (H.264 is fine media-direct) fails the item with tracks count=0 / -12848. Scope to
+        // tvOS: iOS/macOS build the HEVC track from the init hvcC media-direct and are left unperturbed.
+        #if os(tvOS)
+        let videoCodecNeedsMasterSignaling = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+        #else
+        let videoCodecNeedsMasterSignaling = false
+        #endif
         let useMasterPlaylist = Self.resolveUseMasterPlaylist(
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelIsInHDRMode, displaySupportsHDR: displaySupportsHDR,
             hasNativeSubs: hasNativeSubs,
             builtInPanelEngagesOnDemand: Self.builtInPanelEngagesOnDemand,
-            frameRateKnown: frameRate != nil)
+            frameRateKnown: frameRate != nil,
+            videoCodecNeedsMasterSignaling: videoCodecNeedsMasterSignaling)
         let resolvedURL: URL? = useMasterPlaylist
             ? srv.playlistURL
             : srv.mediaPlaylistURL
@@ -1326,7 +1335,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         displaySupportsHDR: Bool,
         hasNativeSubs: Bool,
         builtInPanelEngagesOnDemand: Bool,
-        frameRateKnown: Bool
+        frameRateKnown: Bool,
+        videoCodecNeedsMasterSignaling: Bool = false
     ) -> Bool {
         let sourceIsHDR = videoRange != .sdr || effectiveDvMode
         let panelReadyForHDR = panelIsInHDRMode
@@ -1338,7 +1348,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // effectiveDvMode (a device DV capability) even for SDR content, which wrongly sent SDR
         // sources on DV-capable devices to media-direct, so the WebVTT rendition never appeared (#15).
         let routingSafeForMaster = (videoRange == .sdr) || panelReadyForHDR
-        if hasNativeSubs && routingSafeForMaster { return true }
+        // AE#187: Apple TV HW builds an H.264 track from a bare media playlist + init, but HEVC needs
+        // the codec advertised in a master's EXT-X-STREAM-INF CODECS. SDR HEVC otherwise routed
+        // media-direct (below), leaving the device with no HEVC signaling -> tracks count=0 / -12848
+        // before any media fetch (macOS / the Simulator build the track from the init hvcC and never
+        // reproduce it). Forcing the master where it is routing-safe (SDR on any panel, HDR on a ready
+        // one) closes that gap; the caller scopes the flag to tvOS + HEVC.
+        if (hasNativeSubs || videoCodecNeedsMasterSignaling) && routingSafeForMaster { return true }
         return sourceIsHDR && panelReadyForHDR
     }
 

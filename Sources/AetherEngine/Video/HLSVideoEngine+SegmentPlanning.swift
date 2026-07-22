@@ -376,4 +376,80 @@ extension HLSVideoEngine {
             || profile == 28       // FF_PROFILE_AAC_HE_V2
             || frameSize == 2048   // SBR doubles the LC frame to 2048 samples
     }
+
+    /// AE#187 defense-in-depth: strip a zero-sample `sdtp` box from the video track's `stbl` in the captured init.
+    ///
+    /// Our init is a fragmented `empty_moov` init: the `moov` describes no samples (they live in each
+    /// `moof`), so an `sdtp` (per-sample dependency flags) covering zero samples is meaningless. Apple TV's
+    /// HEVC hardware track builder validates the box against the empty sample table and drops the video track
+    /// (item fails -11829 / -12848); macOS and the Simulator ignore the stray box, and FFmpeg's own
+    /// fragmented init omits it. movenc (n8.1.2, the pinned FFmpegBuild) cannot emit this box under
+    /// `empty_moov` (it zeroes `track->entry` before writing the `stbl`), but a consumer that links an older
+    /// FFmpeg the wrong way (AE#187: a `-force_load`ed 7.1.5 shadowing the vendored 2.2.0) still does, so the
+    /// guard runs on the emitted init bytes and neutralizes the box regardless of who wrote it. Returns nil
+    /// (init forwarded unchanged) when the init is not parseable, has no `moov`/video track, or the video
+    /// `stbl` carries no zero-sample `sdtp`.
+    static func stripEmptyVideoSampleDependencyBox(fromInit initBytes: [UInt8]) -> [UInt8]? {
+        let b = initBytes
+        let n = b.count
+        guard n >= 8 else { return nil }
+
+        func u32(_ o: Int) -> UInt32? {
+            guard o >= 0, o + 4 <= n else { return nil }
+            return (UInt32(b[o]) << 24) | (UInt32(b[o + 1]) << 16) | (UInt32(b[o + 2]) << 8) | UInt32(b[o + 3])
+        }
+        func fourcc(_ o: Int) -> String? {
+            guard o >= 0, o + 4 <= n else { return nil }
+            return String(bytes: b[o..<o + 4], encoding: .ascii)
+        }
+        func boxes(in start: Int, _ end: Int) -> [(boxStart: Int, type: String, payloadStart: Int, boxEnd: Int)] {
+            var out: [(Int, String, Int, Int)] = []
+            var o = start
+            while o + 8 <= end {
+                guard let size = u32(o), size != 1, let t = fourcc(o + 4) else { break }
+                let boxSize = size == 0 ? (end - o) : Int(size)
+                guard boxSize >= 8, o + boxSize <= end else { break }
+                out.append((o, t, o + 8, o + boxSize))
+                o += boxSize
+            }
+            return out.map { (boxStart: $0.0, type: $0.1, payloadStart: $0.2, boxEnd: $0.3) }
+        }
+
+        guard let moov = boxes(in: 0, n).first(where: { $0.type == "moov" }) else { return nil }
+        let moovChildren = boxes(in: moov.payloadStart, moov.boxEnd)
+
+        for trak in moovChildren where trak.type == "trak" {
+            let trakChildren = boxes(in: trak.payloadStart, trak.boxEnd)
+            guard let mdia = trakChildren.first(where: { $0.type == "mdia" }) else { continue }
+            let mdiaChildren = boxes(in: mdia.payloadStart, mdia.boxEnd)
+            guard let hdlr = mdiaChildren.first(where: { $0.type == "hdlr" }),
+                  fourcc(hdlr.payloadStart + 8) == "vide" else { continue }   // hdlr: v/flags(4)+pre_defined(4)+handler_type(4)
+            guard let minf = mdiaChildren.first(where: { $0.type == "minf" }) else { continue }
+            let minfChildren = boxes(in: minf.payloadStart, minf.boxEnd)
+            guard let stbl = minfChildren.first(where: { $0.type == "stbl" }) else { continue }
+            let stblChildren = boxes(in: stbl.payloadStart, stbl.boxEnd)
+            // A fragmented init's stbl holds no samples; a zero-sample sdtp (box size 12 = 8 header +
+            // 4 version/flags, no per-sample bytes) is the anomaly Apple TV rejects. Leave any sdtp that
+            // actually describes samples (a non-fragmented init) untouched.
+            guard let sdtp = stblChildren.first(where: { $0.type == "sdtp" && ($0.boxEnd - $0.boxStart) == 12 })
+            else { continue }
+
+            var out = Array(b[0..<sdtp.boxStart]) + Array(b[sdtp.boxEnd..<n])
+            let removed = sdtp.boxEnd - sdtp.boxStart
+            // sdtp is nested stbl>minf>mdia>trak>moov; every ancestor header precedes sdtp.boxStart (so its
+            // offset is unchanged in `out`), and each ancestor shrinks by the removed box's size.
+            func patchSize(at boxStart: Int, sub: Int) {
+                let old = (UInt32(out[boxStart]) << 24) | (UInt32(out[boxStart + 1]) << 16)
+                        | (UInt32(out[boxStart + 2]) << 8) | UInt32(out[boxStart + 3])
+                let new = old - UInt32(sub)
+                out[boxStart] = UInt8(new >> 24 & 0xFF); out[boxStart + 1] = UInt8(new >> 16 & 0xFF)
+                out[boxStart + 2] = UInt8(new >> 8 & 0xFF); out[boxStart + 3] = UInt8(new & 0xFF)
+            }
+            for ancestor in [stbl.boxStart, minf.boxStart, mdia.boxStart, trak.boxStart, moov.boxStart] {
+                patchSize(at: ancestor, sub: removed)
+            }
+            return out
+        }
+        return nil
+    }
 }

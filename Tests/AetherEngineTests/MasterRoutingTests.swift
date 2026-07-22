@@ -15,12 +15,14 @@ struct MasterRoutingTests {
                        effectiveDvMode: Bool = false, panelHDR: Bool = false,
                        displayHDR: Bool = false, nativeSubs: Bool = false,
                        panelEngagesOnDemand: Bool = false,
-                       frameRateKnown: Bool = true) -> Bool {
+                       frameRateKnown: Bool = true,
+                       hevcNeedsMasterSignaling: Bool = false) -> Bool {
         HLSVideoEngine.resolveUseMasterPlaylist(
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelHDR, displaySupportsHDR: displayHDR,
             hasNativeSubs: nativeSubs, builtInPanelEngagesOnDemand: panelEngagesOnDemand,
-            frameRateKnown: frameRateKnown)
+            frameRateKnown: frameRateKnown,
+            videoCodecNeedsMasterSignaling: hevcNeedsMasterSignaling)
     }
 
     @Test("tvOS: HDR source on an SDR-parked panel stays media-direct (-11848 guard)")
@@ -54,6 +56,29 @@ struct MasterRoutingTests {
     @Test("SDR without native subs stays media-direct")
     func sdrNoSubs() {
         #expect(!route(videoRange: .sdr))
+    }
+
+    // AE#187: tvOS HW HEVC needs the codec advertised in a master's CODECS attribute; a bare media
+    // playlist fails with tracks count=0 / -12848 (H.264 is fine media-direct). The caller scopes the
+    // flag to tvOS + HEVC; the pure decision forces the master wherever it is routing-safe.
+
+    @Test("AE#187: HEVC signaling forces the master for SDR on any panel")
+    func hevcSignalingForcesSDRMaster() {
+        #expect(route(videoRange: .sdr, hevcNeedsMasterSignaling: true))
+        #expect(route(videoRange: .sdr, panelEngagesOnDemand: true, hevcNeedsMasterSignaling: true))
+        // Without the flag SDR-no-subs still routes media-direct (unchanged for H.264 / other codecs).
+        #expect(!route(videoRange: .sdr))
+    }
+
+    @Test("AE#187: HEVC signaling does not force an HDR master onto an unready panel (-11848 guard)")
+    func hevcSignalingRespectsHDRPanelReadiness() {
+        // routing-unsafe (HDR source, panel not ready) must stay media-direct even with the flag.
+        #expect(!route(videoRange: .pq, displayHDR: true, hevcNeedsMasterSignaling: true))
+        // HDR HEVC on a ready panel routes master (as it already did via the HDR gate).
+        #expect(route(videoRange: .pq, panelHDR: true, displayHDR: true, hevcNeedsMasterSignaling: true))
+        // #130 invariant still holds: a frame-rate-less HDR source cannot serve a master.
+        #expect(!route(videoRange: .pq, panelHDR: true, displayHDR: true,
+                       frameRateKnown: false, hevcNeedsMasterSignaling: true))
     }
 
     // P5/P8.x route by videoRange (.pq) + panel readiness, with NO per-variant special-case. The
