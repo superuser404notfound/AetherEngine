@@ -37,6 +37,60 @@ struct LiveWindowSizing {
     }
 }
 
+// MARK: - Live-edge holdback policy
+
+/// Couples the served `#EXT-X-TARGETDURATION` / `HOLD-BACK` to the startup cushion so they can never
+/// drift. AVPlayer's default live-edge holdback (absent an explicit `HOLD-BACK`) is `3 x TARGETDURATION`:
+/// it wants to play that far behind the live edge. When the served window holds LESS than that behind the
+/// edge, AVPlayer restarts inside its own stall-danger zone and spams
+/// `-16832 restarting Ns from end of live playlist; target duration Ts - stall danger`, rebuffering until
+/// the window naturally deepens (AE#189: long-GOP HEVC-in-TS, 5.76s segments -> TD=6 -> 18s holdback, but
+/// the fixed 2-segment cushion only built ~9.6s). Both the served playlist
+/// (`HLSLocalServer.buildMediaPlaylistText`) and the startup gate (`waitForFirstLiveSegment`) derive
+/// TARGETDURATION here, so the depth the cushion builds to is exactly the depth AVPlayer enforces.
+enum LiveEdgePolicy {
+    /// Never serve an empty or single-segment live playlist (a 1-segment window is an instant -12888).
+    static let minStartupSegments = 2
+
+    /// Served `#EXT-X-TARGETDURATION`, in whole seconds: `>= ceil(max EXTINF)` (HLS requirement), floored
+    /// by `ceil(1.5 x cut target)` (widens AVPlayer's unchanged-playlist patience, anti -12888) and the
+    /// observed-cadence floor. `cutTargetSeconds` / `cadenceFloorSeconds` are nil for VOD/EVENT.
+    static func targetDurationSeconds(maxSegmentDuration: Double,
+                                      cutTargetSeconds: Double?,
+                                      cadenceFloorSeconds: Double?) -> Int {
+        var td = Int(ceil(max(1.0, maxSegmentDuration)))
+        if let cut = cutTargetSeconds { td = max(td, Int(ceil(cut * 1.5))) }
+        if let floor = cadenceFloorSeconds { td = max(td, Int(ceil(floor))) }
+        return td
+    }
+
+    /// AVPlayer's default (and our explicitly advertised) live-edge holdback: `3 x TARGETDURATION`, the
+    /// RFC 8216bis floor for `EXT-X-SERVER-CONTROL:HOLD-BACK`.
+    static func holdBackSeconds(targetDuration: Int) -> Double { Double(3 * targetDuration) }
+
+    /// First-serve gate: hold the first live manifest until the window carries at least the live-edge
+    /// holdback (`3 x TD`) of content behind the edge, so AVPlayer's initial seek-to-edge-minus-holdback
+    /// lands inside the window instead of the stall-danger zone. Bounded above by `windowSegmentCount`: a
+    /// tiny-segment source can never be made to wait for more than the sliding window will ever hold (the
+    /// wall-clock deadline in `waitForFirstLiveSegment` is the outer bound). A source that arrives with a
+    /// backlog (Jellyfin transcode, or an upstream live window pulled at I/O speed) satisfies this almost
+    /// immediately; only a strict-realtime origin pays the deepen-the-buffer latency, which is inherent to
+    /// joining long-GOP live safely.
+    static func startupCushionSatisfied(segmentCount: Int,
+                                        summedDurationSeconds: Double,
+                                        maxSegmentDuration: Double,
+                                        cutTargetSeconds: Double?,
+                                        cadenceFloorSeconds: Double?,
+                                        windowSegmentCount: Int) -> Bool {
+        guard segmentCount >= minStartupSegments else { return false }
+        if segmentCount >= windowSegmentCount { return true }
+        let td = targetDurationSeconds(maxSegmentDuration: maxSegmentDuration,
+                                       cutTargetSeconds: cutTargetSeconds,
+                                       cadenceFloorSeconds: cadenceFloorSeconds)
+        return summedDurationSeconds >= holdBackSeconds(targetDuration: td)
+    }
+}
+
 // MARK: - Cache-backed provider
 
 /// Thin HLSSegmentProvider over SegmentCache. Cache misses block the HTTP server's connection
@@ -665,45 +719,69 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         if let policy { return policy.blockingReloadEnabled }
         return true
     }
-    /// 2 = one segment (~4 s) of startup cushion absorbing transcode jitter that caused -16832
-    /// "restarting from end of live playlist". 1 disables. Distinct from the reverted hold-back
-    /// which trailed the ADVERTISED edge without building an actual buffer.
-    private static let liveStartupSegments = 2
+    /// Under stateLock: (count, summed EXTINF, max EXTINF) over the resident segments. At startup the
+    /// window has not slid yet, so this is the full first-served window (LiveEdgePolicy sizes the cushion).
+    private func liveCushionSnapshot() -> (count: Int, summed: Double, maxDuration: Double) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        var summed = 0.0
+        var maxDuration = 0.0
+        for seg in segments {
+            summed += seg.durationSeconds
+            maxDuration = max(maxDuration, seg.durationSeconds)
+        }
+        return (segments.count, summed, maxDuration)
+    }
 
-    /// Block until liveStartupSegments segments exist. Avoids -12888 on an empty playlist
-    /// and gives AVPlayer its startup cushion. Subsequent polls return instantly.
+    /// Block until the first live window holds the live-edge holdback (3 x TARGETDURATION) of content, so
+    /// AVPlayer's initial seek to edge-minus-holdback lands inside the window instead of its stall-danger
+    /// zone (-16832; AE#189). Also avoids -12888 on an empty playlist. Subsequent polls return instantly.
+    /// The gate is `LiveEdgePolicy.startupCushionSatisfied`, computed from the SAME TARGETDURATION the
+    /// served playlist advertises, so the depth built here is exactly the depth AVPlayer enforces.
     func waitForFirstLiveSegment(timeout: TimeInterval) -> Bool {
         guard isLive else { return true }
         let deadline = Date().addingTimeInterval(timeout)
+        let window = liveWindowSizing.windowSegmentCount
+        let cadenceFloor = liveCadencePolicy?.targetDurationFloorSeconds
+        let cutTarget = liveWindowSizing.targetSegmentDurationSeconds
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
         while true {
             if waitersCancelled { return false }
-            stateLock.lock()
-            let count = segments.count
-            stateLock.unlock()
-            if count >= Self.liveStartupSegments { return true }
+            let snap = liveCushionSnapshot()
+            if LiveEdgePolicy.startupCushionSatisfied(segmentCount: snap.count,
+                                                       summedDurationSeconds: snap.summed,
+                                                       maxSegmentDuration: snap.maxDuration,
+                                                       cutTargetSeconds: cutTarget,
+                                                       cadenceFloorSeconds: cadenceFloor,
+                                                       windowSegmentCount: window) {
+                return true
+            }
             if !firstSegmentCondition.wait(until: deadline) {
-                // Re-read after the timed-out wait: an append racing the
-                // deadline would otherwise be judged on the stale count
-                // (waitForLiveSegment below already does this).
-                stateLock.lock()
-                let count = segments.count
-                stateLock.unlock()
-                // Degraded start: serving the first playlist with fewer
-                // than liveStartupSegments segments loses the startup
-                // cushion that absorbs transcode jitter, so a -16832
-                // "restarting from end of live playlist" stall right
-                // after startup becomes likely. Make it observable.
-                if count > 0 && count < Self.liveStartupSegments {
+                // Re-read after the timed-out wait: an append racing the deadline would otherwise be judged
+                // on the stale snapshot (waitForLiveSegment below already does this).
+                let after = liveCushionSnapshot()
+                // Degraded start: serving before the holdback cushion is built (transcode too slow, or a
+                // strict-realtime origin that has not produced 3 x TD of content within the deadline) makes
+                // a -16832 "restarting from end of live playlist" stall right after startup likely. Observe it.
+                if after.count > 0 && !LiveEdgePolicy.startupCushionSatisfied(segmentCount: after.count,
+                                                                             summedDurationSeconds: after.summed,
+                                                                             maxSegmentDuration: after.maxDuration,
+                                                                             cutTargetSeconds: cutTarget,
+                                                                             cadenceFloorSeconds: cadenceFloor,
+                                                                             windowSegmentCount: window) {
+                    let td = LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: after.maxDuration,
+                                                                  cutTargetSeconds: cutTarget,
+                                                                  cadenceFloorSeconds: cadenceFloor)
                     EngineLog.emit(
-                        "[HLSVideoEngine] WARNING: live startup degraded, serving first "
-                        + "playlist with \(count)/\(Self.liveStartupSegments) segments after "
-                        + "\(Int(timeout))s timeout (no startup cushion)",
+                        "[HLSVideoEngine] WARNING: live startup degraded, serving first playlist with "
+                        + "\(after.count) segments / \(String(format: "%.1f", after.summed))s < "
+                        + "\(String(format: "%.1f", LiveEdgePolicy.holdBackSeconds(targetDuration: td)))s holdback "
+                        + "after \(Int(timeout))s timeout (undersized startup cushion)",
                         category: .session
                     )
                 }
-                return count > 0
+                return after.count > 0
             }
         }
     }

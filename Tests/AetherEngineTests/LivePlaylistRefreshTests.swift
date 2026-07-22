@@ -40,7 +40,10 @@ final class LivePlaylistRefreshTests: XCTestCase {
         let ls = lines(playlist)
 
         XCTAssertTrue(ls.contains("#EXT-X-MEDIA-SEQUENCE:0"))
-        XCTAssertTrue(ls.contains("#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES"))
+        // Combined SERVER-CONTROL line carries CAN-BLOCK-RELOAD alongside the live-edge HOLD-BACK (AE#189).
+        let serverControl = ls.first { $0.hasPrefix("#EXT-X-SERVER-CONTROL:") }
+        XCTAssertTrue(serverControl?.contains("CAN-BLOCK-RELOAD=YES") ?? false)
+        XCTAssertTrue(serverControl?.contains("HOLD-BACK=") ?? false)
         XCTAssertFalse(ls.contains("#EXT-X-ENDLIST"),
                        "a live playlist must stay open so AVPlayer keeps polling")
         XCTAssertFalse(ls.contains(where: { $0.hasPrefix("#EXT-X-PLAYLIST-TYPE") }),
