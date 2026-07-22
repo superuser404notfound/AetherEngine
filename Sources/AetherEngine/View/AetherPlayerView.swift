@@ -154,6 +154,12 @@ public struct AetherPlayerSurface: UIViewRepresentable {
     }
 
     public func updateUIView(_ uiView: AetherPlayerView, context: Context) {
+        // #188: when a host swaps its AetherEngine instance at the same structural
+        // position, SwiftUI reuses this platform view and only calls updateUIView,
+        // so the new engine's bind(view:) never runs from makeUIView. Rebinding here
+        // points the new engine at the reused view and re-attaches its layer; bind is
+        // idempotent for the steady-state existing === view case, so this is cheap.
+        engine.bind(view: uiView)
     }
 
     public static func dismantleUIView(_ uiView: AetherPlayerView, coordinator: ()) {
@@ -178,7 +184,11 @@ public struct AetherPlayerSurface: NSViewRepresentable {
         return view
     }
 
-    public func updateNSView(_ nsView: AetherPlayerView, context: Context) {}
+    public func updateNSView(_ nsView: AetherPlayerView, context: Context) {
+        // #188: rebind on update so an engine swap at the same structural position
+        // takes over the reused view. Idempotent for the steady-state case.
+        engine.bind(view: nsView)
+    }
 
     public static func dismantleNSView(_ nsView: AetherPlayerView, coordinator: ()) {
         Task { @MainActor in
