@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.7] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.7))
+
+### Fixed
+
+- **HEVC-in-MP4 VOD now plays on Apple TV instead of failing to build a video track.** On tvOS, AVPlayer builds no HEVC track from a bare media playlist; it needs the codec advertised in a master playlist's `EXT-X-STREAM-INF` `CODECS` attribute (H.264 builds without it, and macOS and the Simulator build HEVC media-direct from the init `hvcC`, so neither reproduced it). The loopback now serves HEVC through a master where routing-safe. The plain-HEVC `CODECS` string is also derived from the source `hvcC` per RFC 6381 (e.g. `hvc1.1.6.L93.90`) instead of a hardcoded Main10 declaration, so it matches the init and a strict device no longer rejects the item. Reported by kskchaitanya1993 (#187).
+- **Defensive strip of a zero-sample `sdtp` box from the fragmented init.** The pinned FFmpeg never writes this box, but a consumer that links an older FFmpeg the wrong way (a `-force_load`ed framework shadowing the vendored build) emits an `sdtp` describing zero samples into the `empty_moov` init, which Apple TV rejects and macOS tolerates. The engine now removes it from the captured init regardless of which FFmpeg produced the bytes.
+
 ## [5.18.6] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.6))
