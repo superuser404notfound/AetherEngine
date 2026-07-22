@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.19.0] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.19.0))
+
+### Added
+
+- **`LoadOptions.liveJoinProfile` with a `.fastZap` opt-in for low-latency live joins (IPTV channel zapping).** Raw live MPEG-TS on the native loopback path took 10-18 s to first frame on a strict-real-time origin: the 5.18.5 startup cushion gates the first manifest on `HOLD-BACK = 3 x TARGETDURATION` of content (the RFC 8216bis floor, which cannot be undercut without reintroducing the `-16832` restart loop), and with the fixed ~4 s segment cut target `TARGETDURATION` never fell below 6, so the holdback was always >= 18 s regardless of how short the source GOPs were. `.fastZap` cuts live segments at every keyframe past 0.5 s instead, so segments quantize to the source keyframe cadence, `TARGETDURATION` follows the real GOP length, and the holdback the join waits for shrinks proportionally: a short-GOP 1080p50 IPTV stream on a strict-real-time origin reaches `readyToPlay` in ~2 s instead of ~20 s. The holdback contract itself is unchanged in both profiles, so long-GOP sources degrade to `.standard` behavior automatically and bursty ingest origins keep the observed-cadence `TARGETDURATION` floor (#167). Trade-off, documented on the option: a smaller `TARGETDURATION` tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so mid-stream stalls or bursts rebuffer more readily than under `.standard` (the default, byte-identical to 5.18.7). `aetherctl live` gains `--fast-zap` and `--preroll N` (0 models a strict-real-time origin with no backlog burst) for reproducible A/B join-latency runs. Proposed with field measurements by Simpendaal (#195). Covered by `Issue195FastLiveJoinTests`.
+
 ## [5.18.7] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.7))
