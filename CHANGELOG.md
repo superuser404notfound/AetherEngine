@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.3] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.3))
+
+### Fixed
+
+- **HEVC-in-MP4 progressive VOD dispatched to the loopback remux no longer builds a fMP4 init that Apple TV hardware rejects.** libx265 (and other encoders) embed a large user-data `SEI_PREFIX` NAL array in the hvcC config record; the VOD muxer copied the source codec parameters verbatim, so that array reached the `init.mp4` sample description. Apple TV builds the HEVC format description straight from the hvcC parameter-set arrays and rejects a record carrying a non-parameter-set array (`asset.tracks count=0`, `AVFoundationErrorDomain -11829`, underlying `CoreMediaErrorDomain -12848`, before any media fetch); macOS and the tvOS Simulator both tolerate it, so it only surfaced on device. Both 8-bit Main and 10-bit Main10/HDR10 were affected. The HEVC config record is now canonicalized before write_header, keeping only the VPS/SPS/PPS arrays and dropping SEI and any other NAL arrays, so the VOD init matches the canonical form the live MPEG-TS and direct fMP4-HLS paths already emit. HDR10 static metadata (in-band per-IRAP plus the `colr`/`mdcv`/`clli` boxes) and Dolby Vision signaling (`dvcC`/`dvvC`, RPU) are outside the hvcC and unaffected. Reported by kskchaitanya1993 (#187). Covered by `HEVCConfigRecordTests`.
+
 ## [5.18.2] - 2026-07-21
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.2))
