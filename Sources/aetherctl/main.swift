@@ -86,7 +86,7 @@ func printUsage() {
       aetherctl audiotap [--duration S] [--out PATH.wav] [--remote] <url>
                          (#95: decode the loopback audio track to mono 48k WAV, print continuity stats)
       aetherctl customio [--memory] [--forward-only] [--audio-only] [--reload] [--switch-audio] [--select-subs] [--extract] <file>
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--gen-highbitrate-seed]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--fast-zap] [--preroll N] [--gen-highbitrate-seed]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
       aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N]
@@ -423,6 +423,11 @@ if first == "live" {
     let discontinuityAt = takeDoubleFlag("--discontinuity-at", from: &rest)
     // --realtime paces fixture output at ~1x wall-clock; default is as-fast-as-socket-drains.
     let realtime = takeFlag("--realtime", from: &rest)
+    // --fast-zap: LoadOptions.liveJoinProfile = .fastZap (AE#195 low-latency live join).
+    let fastZap = takeFlag("--fast-zap", from: &rest)
+    // --preroll N: backlog seconds the paced fixture bursts before 1x pacing (default 30).
+    // 0 models a strict-realtime origin with no backlog (the AE#195 slow-join case).
+    let preroll = takeDoubleFlag("--preroll", from: &rest)
     // --gen-highbitrate-seed: generate ~22 Mbps 1080p H.264 MPEG-TS seed for RSS-retention measurement.
     if takeFlag("--gen-highbitrate-seed", from: &rest) {
         let path = seed ?? "Fixtures/user/highbitrate-1080p.ts"
@@ -436,7 +441,8 @@ if first == "live" {
                  reportCacheBytes: reportCacheBytes, rewindTest: rewindTest,
                  reloadTest: reloadTest,
                  forceSoftware: forceSW, dropAfter: dropAfter,
-                 discontinuityAt: discontinuityAt, realtime: realtime))
+                 discontinuityAt: discontinuityAt, realtime: realtime,
+                 fastZap: fastZap, pacingPreroll: preroll))
 }
 
 if first == "play" {

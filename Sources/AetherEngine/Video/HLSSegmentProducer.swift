@@ -1044,7 +1044,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 audio: muxerAudio,
                 // Cap the muxer's in-RAM interleaver at ~2 segments so a long/degenerate segment or an
                 // audio stream that decodes to nothing can't buffer the whole span and fill the disk (#64).
-                maxBufferedFragmentSeconds: 2 * targetSegmentDurationSeconds,
+                // Floored at 8s (the historical 2 x 4s value): a sub-second fastZap cut target (AE#195)
+                // must not shrink the cap below typical TS A/V interleave skew.
+                maxBufferedFragmentSeconds: max(8.0, 2 * targetSegmentDurationSeconds),
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if versionedInit {

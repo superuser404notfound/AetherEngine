@@ -478,6 +478,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// latency on a 24 fps 1440p LAN source and stays within the spec's 2-6 s range.
     static let targetSegmentDuration: Double = 4.0
 
+    /// Live cut target under `LiveJoinProfile.fastZap` (AE#195): cut at every keyframe past 0.5 s, so
+    /// segments quantize to the source GOP and the served TARGETDURATION (whose 3 x holdback gates the
+    /// first live manifest, AE#189) is driven by `ceil(max EXTINF)` instead of the
+    /// `ceil(1.5 x cut target)` floor (which collapses to 1 at this value).
+    static let fastZapLiveCutTargetSeconds: Double = 0.5
+
+    /// Resolve a host `LiveJoinProfile` to the live segment cut target.
+    static func liveCutTargetSeconds(for profile: LiveJoinProfile) -> Double {
+        switch profile {
+        case .standard: return targetSegmentDuration
+        case .fastZap: return fastZapLiveCutTargetSeconds
+        }
+    }
+
     /// Cue-prewarm seek deadline. MKV Cues resolve in under 1 s; a missing/out-of-bounds index
     /// degrades into a multi-GB linear scan. Beyond this, abort and build a uniform-stride plan.
     static let cuePrewarmTimeout: TimeInterval = 10.0
@@ -516,6 +530,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
+        liveCutTargetSeconds: Double? = nil,
         blockingReloadOverride: Bool? = nil,
         liveCadenceObservation: (@Sendable () -> Double?)? = nil,
         initialTargetDurationFloor: Double? = nil,
@@ -541,6 +556,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.audioBridgeMode = audioBridgeMode
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds
+        // nil = the .standard profile's historical cut target (public init cannot default to the internal static).
+        let resolvedLiveCutTarget = liveCutTargetSeconds ?? Self.targetSegmentDuration
+        self.liveCutTargetSeconds = resolvedLiveCutTarget
         self.blockingReloadOverride = blockingReloadOverride
         // Trust OBSERVED arrival cadence, not the upstream's self-reported TARGETDURATION, for blocking-reload
         // eligibility and the TARGETDURATION floor (-15410, AetherEngine#167). Built only for live ingest
@@ -549,7 +567,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.liveCadencePolicy = liveCadenceObservation.map { observe in
             LiveCadencePolicy(
                 observe: observe,
-                cutTargetSeconds: Self.targetSegmentDuration,
+                cutTargetSeconds: resolvedLiveCutTarget,
                 initialFloorSeconds: initialTargetDurationFloor
             )
         }
@@ -576,6 +594,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// When true, `start()` skips the VOD duration guard / cue prewarm / precomputed plan and
     /// uses the forward-only live cut mode (producer cuts at each IDR past the duration target).
     let isLiveSession: Bool
+
+    /// Live segment cut target for this session, resolved from the host's `LiveJoinProfile` (AE#195).
+    /// Drives the producer's keyframe cut, `LiveWindowSizing`, and (via the served TARGETDURATION floor)
+    /// the AE#189 startup-cushion depth. VOD ignores it (cuts come from the precomputed plan).
+    let liveCutTargetSeconds: Double
 
     /// False for IOReader-backed sources (`aether-custom://source` placeholder); `handlePumpFinished`
     /// surfaces loss via `onLiveSourceReset` immediately instead of burning 6 reopen attempts.
@@ -1187,7 +1210,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceBitrate: sourceBitrate,
             isLive: isLiveSession,
             liveWindowSizing: LiveWindowSizing(
-                targetSegmentDurationSeconds: Self.targetSegmentDuration,
+                targetSegmentDurationSeconds: liveCutTargetSeconds,
                 dvrWindowSeconds: dvrWindowSeconds
             ),
             blockingReloadOverride: blockingReloadOverride,
@@ -1630,7 +1653,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sideAudioDemuxer: sideAudioDemuxer,
             cache: cache,
             baseIndex: baseIndex,
-            targetSegmentDurationSeconds: Self.targetSegmentDuration,
+            targetSegmentDurationSeconds: liveCutTargetSeconds,
             videoFallbackDurationPts: videoFallbackDurationPts,
             audioFallbackDurationPts: audioFallbackDurationPts,
             restartTargetVideoDts: videoTarget,

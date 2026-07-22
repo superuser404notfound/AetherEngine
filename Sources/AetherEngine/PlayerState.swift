@@ -120,6 +120,16 @@ public enum DeinterlaceFieldRate: String, Sendable, Equatable {
     case frame
 }
 
+/// Live-join latency profile for loopback live sessions (`LoadOptions.liveJoinProfile`, AetherEngine#195).
+public enum LiveJoinProfile: Sendable, Equatable {
+    /// Historical behavior: ~4s segment cut target, served TARGETDURATION >= 6, live-edge holdback
+    /// (and with it the first-manifest startup cushion, AE#189) >= 18s.
+    case standard
+    /// Channel-zapping profile: cut live segments at every keyframe past 0.5s, so TARGETDURATION and
+    /// the holdback the join waits for collapse to the source keyframe cadence (typically 3-6s).
+    case fastZap
+}
+
 /// Options for `AetherEngine.load(url:options:)`. All flags default to safe values.
 public struct LoadOptions: Sendable, Equatable {
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
@@ -162,6 +172,20 @@ public struct LoadOptions: Sendable, Equatable {
     /// TARGETDURATION floor still tracks observed cadence either way. Ignored for `nativeRemoteHLS` and VOD.
     /// Default nil (AetherEngine#167).
     public var liveBlockingReload: Bool? = nil
+
+    /// Live-join latency profile for loopback live sessions (raw TS over HTTP, live ingest). `.standard`
+    /// (default) cuts ~4s segments, so the served TARGETDURATION lands at >= 6 and the spec-mandated
+    /// live-edge holdback (`HOLD-BACK` >= 3 x TARGETDURATION, RFC 8216bis) the first manifest is gated on
+    /// (AE#189) becomes >= 18s, which a strict-realtime origin can only fill in wall-clock time (10-18s of
+    /// black on an IPTV zap). `.fastZap` cuts at every keyframe past 0.5s instead: segments quantize to the
+    /// source keyframe cadence, TARGETDURATION follows the real GOP length, and the holdback shrinks with
+    /// it (short-GOP 1080p50 IPTV joins in ~3-6s). The AE#189 contract is unchanged in both profiles (first
+    /// serve only once the window covers the advertised holdback), so long-GOP sources degrade to
+    /// `.standard` behavior automatically. Trade-off: a smaller TARGETDURATION also tightens AVPlayer's
+    /// unchanged-playlist patience and live-edge buffer, so an origin that stalls or bursts mid-stream is
+    /// likelier to rebuffer or error than under `.standard`; opt in for zapping UX, keep `.standard` for
+    /// lean-back viewing. Ignored for `nativeRemoteHLS` and VOD. Default `.standard` (AetherEngine#195).
+    public var liveJoinProfile: LiveJoinProfile = .standard
 
     /// AVPlayer item from the remote URL directly (Jellyfin live `master.m3u8`): no demuxer probe, no loopback. AVPlayer manages live edge / reconnect. Pair with `isLive: true`. Default `false`.
     public var nativeRemoteHLS: Bool
@@ -275,6 +299,7 @@ public struct LoadOptions: Sendable, Equatable {
         audioOnly: Bool = false,
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
+        liveJoinProfile: LiveJoinProfile = .standard,
         nativeRemoteHLS: Bool = false,
         nativeRemoteHLSIngestFallback: Bool = true,
         preserveASSMarkup: Bool = false,
@@ -303,6 +328,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.audioOnly = audioOnly
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveBlockingReload = liveBlockingReload
+        self.liveJoinProfile = liveJoinProfile
         self.nativeRemoteHLS = nativeRemoteHLS
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
         self.preserveASSMarkup = preserveASSMarkup

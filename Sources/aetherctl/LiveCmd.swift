@@ -117,9 +117,13 @@ func runLive(
     forceSoftware: Bool = false,
     dropAfter: Double? = nil,
     discontinuityAt: Double? = nil,
-    realtime: Bool = false
+    realtime: Bool = false,
+    fastZap: Bool = false,
+    pacingPreroll: Double? = nil
 ) -> Int32 {
-    EngineLog.handler = { print($0) }
+    // Relative timestamps make join latency (readyToPlay et al.) readable off the log (AE#195).
+    let logEpoch = Date()
+    EngineLog.handler = { print(String(format: "[+%6.2fs] ", Date().timeIntervalSince(logEpoch)) + $0) }
 
     // TEST-ONLY: force SoftwarePlaybackHost routing; cleared on exit to avoid in-process bleed.
     AetherEngine.setForceSoftwarePathForTesting(forceSoftware)
@@ -148,6 +152,13 @@ func runLive(
     fixture.paced = realtime
     if realtime {
         print("aetherctl live: --realtime set, pacing fixture output at ~1x")
+    }
+    if let preroll = pacingPreroll {
+        fixture.pacingPrerollSeconds = preroll
+        print("aetherctl live: --preroll \(preroll)s (0 = strict-realtime origin, no backlog burst)")
+    }
+    if fastZap {
+        print("aetherctl live: --fast-zap set, LoadOptions.liveJoinProfile = .fastZap (AE#195)")
     }
 
     let liveURL: URL
@@ -193,7 +204,7 @@ func runLive(
             CFRunLoopStop(CFRunLoopGetMain())
             return
         }
-        box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds,
+        box.value = await liveSmokeTest(url: liveURL, seconds: playSeconds, fastZap: fastZap,
                                         dvrWindow: dvrWindow, measureRSS: measureRSS,
                                         reportCacheBytes: reportCacheBytes,
                                         checkMonotonic: discontinuityAt != nil)
@@ -206,6 +217,7 @@ func runLive(
 
 @MainActor
 private func liveSmokeTest(url: URL, seconds playSeconds: Double,
+                           fastZap: Bool = false,
                            dvrWindow: Double? = nil,
                            measureRSS: Bool = false,
                            reportCacheBytes: Bool = false,
@@ -221,7 +233,11 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     var options = LoadOptions(isLive: true)
     options.suppressDisplayCriteria = true
     options.dvrWindowSeconds = dvrWindow
+    options.liveJoinProfile = fastZap ? .fastZap : .standard
 
+    // AE#195: load elapsed includes the startup-cushion gate, so this is the join-latency metric
+    // a --realtime fixture A/Bs between profiles.
+    let loadStartedAt = Date()
     do {
         try await engine.load(url: url, options: options)
     } catch {
@@ -229,9 +245,18 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
         engine.stop()
         return 1
     }
+    print(String(format: "  JOIN: load returned in %.2fs (profile=%@; live load does not await readiness)",
+                 Date().timeIntervalSince(loadStartedAt), fastZap ? "fastZap" : "standard"))
 
     print(String(format: "  post-load state=%@ isLive=%@ t=%.2fs",
                  "\(engine.state)", "\(engine.isLive)", engine.currentTime))
+    // AE#195 join metric: two consecutive advancing 1 Hz ticks = playback really rendering. A single
+    // advance is not enough (currentTime presets to the initial position before readiness and freezes
+    // there until readyToPlay). Reported with up to ~2s quantization; the timestamped readyToPlay log
+    // line is the precise signal.
+    var joinPrevT = engine.currentTime
+    var joinCandidateElapsed: Double? = nil
+    var joinReported = false
 
     if measureRSS {
         print("RSS_HEADER: elapsed_s  phys_footprint_mb  resident_mb")
@@ -259,6 +284,18 @@ private func liveSmokeTest(url: URL, seconds playSeconds: Double,
     for tick in 0..<ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         let elapsed = Date().timeIntervalSince(startTime)
+        if !joinReported {
+            let t = engine.currentTime
+            let advancing = t > joinPrevT + 0.2
+            joinPrevT = t
+            if advancing, let first = joinCandidateElapsed {
+                joinReported = true
+                print(String(format: "  JOIN: sustained clock advance from %.1fs after load start (profile=%@)",
+                             first, fastZap ? "fastZap" : "standard"))
+            } else {
+                joinCandidateElapsed = advancing ? Date().timeIntervalSince(loadStartedAt) : nil
+            }
+        }
         if checkMonotonic {
             let ct = engine.currentTime
             let et = engine.liveEdgeTime

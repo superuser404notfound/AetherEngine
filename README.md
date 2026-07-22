@@ -224,6 +224,10 @@ Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SM
 try await player.load(url: streamURL, options: LoadOptions(isLive: true))
 try await player.load(url: streamURL, options: LoadOptions(isLive: true, dvrWindowSeconds: 1800))
 
+// IPTV channel zapping: join in ~3-6s instead of 10-18s on strict-realtime origins by letting
+// TARGETDURATION (and the live-edge holdback derived from it) track the source keyframe cadence:
+try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .fastZap))
+
 // Drive a scrubber from the live-edge fields (they tick, so they live on player.clock):
 player.clock.$seekableLiveRange   // ClosedRange<Double>?, session-relative; nil when DVR off
 player.clock.$behindLiveSeconds   // seconds behind the edge; 0 at the edge
@@ -237,6 +241,8 @@ try await player.load(
     options: LoadOptions(isLive: true, dvrWindowSeconds: 600)
 )
 ```
+
+`liveJoinProfile: .fastZap` (AetherEngine#195) cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to the source GOP length and the live-edge holdback the first manifest is gated on (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. A short-GOP 1080p50 IPTV stream on a strict-realtime origin reaches first frame in ~2-4 s instead of ~20 s; long-GOP sources quantize back to standard behavior automatically, and the holdback contract itself is unchanged in both profiles. Trade-off: the smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; opt in for zapping UX, keep `.standard` for lean-back viewing.
 
 Direct ingest covers MPEG-TS with demuxed-audio and packed-audio renditions, in-line AES-128 clear-key decryption, and SSAI ad-pod direct play (versioned init segments, audio re-anchoring, no-cut watchdog). Unsupported encryption / fMP4 playlists surface a typed `HLSIngestError` so the host can fall back. Details in [docs/formats.md › Live ingest](docs/formats.md#live-ingest-aes-128-ssai).
 
