@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.18.6] - 2026-07-22
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.6))
+
+### Fixed
+
+- **Remote HLS external WebVTT subtitles now recover when the legible media selection loads after the item is ready.** On the `nativeRemoteHLS` bypass the engine surfaces the item's legible `AVMediaSelectionGroup` as `subtitleTracks`. The discovery loaded that group exactly once, and if `loadMediaSelectionGroup(for: .legible)` returned an empty group at that instant it gave up for the whole session, leaving `subtitleTracks` permanently empty. On macOS 26 the group is populated once the master playlist is parsed (before `readyToPlay`), so the single load caught every rendition; a reporter on macOS 27 beta saw a permanently empty subtitle picker, because on that OS the legible group only fills once the item reaches `readyToPlay` and the one-shot load missed it. The discovery now retries the group load once after `readyToPlay` before giving up, so a late-populating legible group no longer drops the renditions. The fast path is unchanged: a non-empty first load skips the wait. Reported by jihongboo (#154).
+
 ## [5.18.5] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.18.5))
