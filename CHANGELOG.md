@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.1] - 2026-07-23
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.1))
+
+### Fixed
+
+- **The restart scan-forward gate now opens on keyframe presentation time, so the tail of a B-frame VOD file is producible again instead of starving to EOF.** The gate compared packet dts against a plan-boundary PTS (`segmentPlan[baseIndex].startPts`, a Cues timestamp); under B-frame reorder a keyframe's dts sits a reorder delay below its own pts, so the gate dropped the exact IRAP the restart seeked for, the same defect class the #92 cutter fix removed from segment cutting. Mid-file the next IRAP rescued the miss one GOP late; at the file tail there is no next IRAP, so the unbounded VOD gate dropped every remaining packet to EOF and the pump exited with zero packets written, leaving the final segment unproducible under any anchoring (the 5.19.1 escalation restarted into the same starve). Two further layers: a VOD pump whose gate still starves to EOF (no runtime keyframe at or after the targeted boundary, e.g. tail Cues drift or a mis-flagged tail IRAP) re-anchors production on the segment of the last keyframe the gate dropped (bounded), so the tail content gets produced and end-of-media completes through the 5.16.2 tail-park instead of dying at -12889; and the #35/#169 startup readiness gate's data-wait consults pump liveness, so production that already exited with nothing served fails over immediately instead of riding 8 rounds (24 s) of false hope. Traced across three rounds with exemplary lifecycle logs by rrgomes (#169). Covered by `Issue169GateStarvationTests` and extended `StartupReadinessGateTests`.
+
 ## [5.20.0] - 2026-07-23
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.0))
