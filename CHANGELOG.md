@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.0] - 2026-07-23
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.0))
+
+### Fixed
+
+- **A #168-rerouted live session that loses its ingest now recovers in-engine instead of cycling through the doomed native mount.** When the loopback ingest died mid-session (a MEDIA-SEQUENCE reset from an encoder restart or looped test pool, a CDN gap outliving the refresh-retry budget, an upstream ENDLIST), the pump exit delegated straight to host retune, and a host that answers by re-tuning the same URL relanded on the native bypass, which deterministically builds no video track for HEVC-in-MPEG-TS carriage, so the session re-ran the whole reroute dance (native mount, ~4 s watchdog grace, reroute, rejoin) roughly every 13 s. Three-layer fix: the ingest playlist tracker treats three consecutive whole-window MEDIA-SEQUENCE regressions as an axis reset and rejoins at the new edge under a discontinuity seam instead of starving the reader into its `ingestStalled` terminal; masters whose video-carriage watchdog fired are remembered (bounded, expiring, `RerouteVerdictMemory`), so any later load of the same URL routes straight onto the live-ingest loopback and skips the doomed mount entirely; and engine-created ingest readers gained an in-session reopen transport (`HLSVideoEngine.CustomSourceReopenFactory`, new public surface, hence the minor bump), so `eof`/`readError` pump exits rebuild a fresh reader through the existing bounded live-reopen machinery and only an exhausted budget surfaces `liveSourceReset` to the host. Host-provided custom readers and demuxed-audio companion sessions keep the immediate host-retune contract. Traced end to end with deep-window field logs by kskchaitanya1993 (#199, split out of #189). Covered by `Issue199RerouteRecoveryTests` and extended `HLSPlaylistTrackerTests`.
+
 ## [5.19.1] - 2026-07-22
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.19.1))
