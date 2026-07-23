@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Mid-stream VOD resume and producer restarts now seek directly to the target segment's indexed video IRAP instead of landing at an earlier global sync point.** The segment plan already carried the exact video-stream timestamp, but the restart path converted it to seconds and asked libavformat for an unconstrained global seek. On multi-stream MP4 files that can select a much earlier sync point, forcing the producer to scan and discard a whole GOP before it can write the first segment. On a slow HTTP origin that scan took long enough for startup to fail with zero packets written. For non-disc VOD, the demuxer now seeks on the video stream's native timestamp axis with the target as the lower bound; containers that do not support the precise seek retain the previous global-time fallback. Disc sources also keep the fallback because their segment plans use folded multi-clip timestamps. Reported with decisive slow-origin diagnostics by kskchaitanya1993 (#191). Covered by `Issue191IRAPSeekTests`.
+
 ## [5.20.1] - 2026-07-23
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.1))
