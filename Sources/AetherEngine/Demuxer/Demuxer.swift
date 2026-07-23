@@ -933,6 +933,33 @@ public final class Demuxer: @unchecked Sendable {
         lastReadClipIdx = -1  // AE#105: post-seek reads may land mid-clip; require a fresh clean crossing
     }
 
+    /// Seek on one stream's native timestamp axis, never before `timestamp`.
+    @discardableResult
+    func seek(to timestamp: Int64, streamIndex: Int32) -> Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let ctx = formatContext,
+              streamIndex >= 0,
+              streamIndex < Int32(ctx.pointee.nb_streams) else { return false }
+        let ret = avformat_seek_file(
+            ctx,
+            streamIndex,
+            timestamp,
+            timestamp,
+            Int64.max,
+            0
+        )
+        if ret < 0 {
+            EngineLog.emit(
+                "[Demuxer] Seek to stream \(streamIndex) timestamp \(timestamp) failed: \(ret)",
+                category: .demux
+            )
+        }
+        avformat_flush(ctx)
+        lastReadClipIdx = -1
+        return ret >= 0
+    }
+
     /// #112 round 10: latched by the side reader once a timestamp positioning seek timed out or failed on this
     /// container (index-less MPEG-TS: read_timestamp binary search is either wedged or broken). Later re-arms on
     /// a reused demuxer skip straight to the byte estimate instead of paying the seek budget per positioning.

@@ -1294,15 +1294,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
         try srv.start()
         self.server = srv
 
-        // 8. Kick the pump. An anchored first producer (#93 residual) needs the demuxer positioned
-        // at the anchor BEFORE the pump reads, exactly like performRestart's pre-makeProducer seek:
-        // the gate only DROPS pre-target packets, so an unseeked pump would read (and discard) the
-        // whole file up to the resume point. Absolute source-PTS for the same reason as the
-        // restart path (relative playlist time lands a keyframe behind on non-zero startPts0).
+        // 8. Kick the pump. Seek on the video stream's exact plan timestamp and forbid an earlier
+        // landing. A global time seek can choose the previous sync point in a multi-stream MP4,
+        // leaving the producer to scan a whole GOP over the origin before writing anything (#191).
         if initialProducerBaseIndex > 0, initialProducerBaseIndex < plan.count {
-            let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
-            let anchorSeconds = Double(plan[initialProducerBaseIndex].startPts) * Double(tb.num) / Double(tb.den)
-            dem.seek(to: anchorSeconds)
+            let targetPts = plan[initialProducerBaseIndex].startPts
+            // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
+            if dem.isDiscSource || !dem.seek(to: targetPts, streamIndex: videoStreamIndex) {
+                let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
+                dem.seek(to: Double(targetPts) * Double(tb.num) / Double(tb.den))
+            }
         }
         prod.start()
 
@@ -2014,15 +2015,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
 
-        // Seek to ABSOLUTE source-PTS, not relative playlist time. segmentPlan[N].startSeconds is
-        // relative to startPts0; if startPts0 != 0 (B-frame head or remux), seeking the relative
-        // value lands a-keyframe-or-more behind (AVSEEK_FLAG_BACKWARD rolls back). Subtitle cue
-        // timestamps are absolute source-PTS, so a wrong seek shifts them up to one segment ahead.
-        let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
+        // Seek to the exact video-stream plan timestamp with the target as the lower bound. A
+        // global time seek can choose a much earlier sync point in a multi-stream MP4 (#191).
         // Seek outside restartLock (network-bound). Concurrent stop() calls markClosed() so the
         // seek fails fast instead of racing teardown.
         let seekStart = DispatchTime.now()
-        activeDem.seek(to: absoluteTargetSeconds)
+        // Disc plans use folded multi-clip timestamps that are not valid raw seek targets.
+        if activeDem.isDiscSource || !activeDem.seek(to: targetStartPts, streamIndex: videoStreamIndex) {
+            let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
+            activeDem.seek(to: absoluteTargetSeconds)
+        }
         // Re-arm bridge PTS rebase so the encoder timeline starts from the new demuxer cursor.
         ab?.startSegment()
         seekMs = msSince(seekStart)
@@ -2060,6 +2062,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
 
         let elapsedMs = msSince(restartStart)
+        let absoluteTargetSeconds = Double(targetStartPts) * Double(videoTb.num) / Double(videoTb.den)
         // build = everything after the seek (re-validation, muxer/producer construction, start).
         let buildMs = max(0, elapsedMs - stopWaitMs - (reopenMs ?? 0) - seekMs)
         EngineLog.emit(
