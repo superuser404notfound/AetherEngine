@@ -27,3 +27,7 @@ Fixtures/
 # Internal design specs + implementation plans (superpowers flow).
 # Local-only by design; never published to the public repo.
 docs/superpowers/
+
+# Session scratch artifacts (debug fixtures, serve logs, reply drafts).
+# Local-only by design; never published.
+scratchpad/

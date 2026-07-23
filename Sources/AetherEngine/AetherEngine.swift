@@ -1151,12 +1151,25 @@ public final class AetherEngine: ObservableObject {
             let outcome = await host.awaitStartupReadiness(timeoutSeconds: timeout)
             try checkLoadCurrent(gen)
 
+            // AE#169 round 3: the data-wait exists for a first segment still being produced. A pump
+            // that already exited with nothing served (tail resume onto an unproducible final
+            // segment) can never satisfy it; consult liveness so the gate fails over immediately
+            // instead of riding 24 s of false hope. A restart in flight reads as still-producing.
+            let productionFinished = session.currentProducerFinished && !session.restartInFlight
+            if outcome == .awaitingData, productionFinished {
+                EngineLog.emit(
+                    "[AetherEngine] #169 readiness gate: production already finished with no data "
+                    + "served; skipping the data-wait (not a slow link)",
+                    category: .session)
+            }
+
             switch StartupReadinessGate.nextAction(
                 outcome: outcome,
                 attempt: attempt,
                 masterAlreadyFellBack: masterFallbackUsed,
                 hasMediaFallbackURL: session.mediaPlaylistURL != nil,
-                dataWaitRounds: dataWaitRounds
+                dataWaitRounds: dataWaitRounds,
+                productionFinished: productionFinished
             ) {
             case .proceed:
                 return

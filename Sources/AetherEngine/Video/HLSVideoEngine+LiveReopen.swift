@@ -15,6 +15,35 @@ extension HLSVideoEngine {
         return packetsWritten == 0 && cachedSegments == 0
     }
 
+    /// AE#169 round 3 pure decision: a VOD pump that reached EOF with its scan-forward gate never
+    /// opened produced nothing; the plan boundary it targeted has no runtime keyframe at or after
+    /// it (tail Cues drift or a mis-flagged tail IRAP; the gate itself is pts-based since round 3).
+    /// If the gate saw keyframes below the target while dropping, the last of them is the true
+    /// final random-access point and production re-anchors there (bounded), so the tail content
+    /// gets produced and end-of-media completes through the tail-park instead of the forward-wait
+    /// escalation restarting into the same starve until -12889. A head-of-stream pump (no restart
+    /// target) starving means a keyframe-less source, which stays the #126 fatal surface.
+    static func shouldReanchorVODAfterGateStarvation(
+        isLive: Bool,
+        videoGateOpened: Bool,
+        hadRestartTarget: Bool,
+        lastDroppedKeyframePts: Int64
+    ) -> Bool {
+        guard !isLive, !videoGateOpened, hadRestartTarget else { return false }
+        return lastDroppedKeyframePts != Int64.min
+    }
+
+    /// AE#169 round 3 pure decision: the plan segment whose span contains a source pts (the last
+    /// index whose startPts is at or below it). nil when the plan is empty or the pts precedes
+    /// the first boundary (nowhere sane to re-anchor).
+    static func planSegmentIndex(forSourcePts pts: Int64, plan: [Segment]) -> Int? {
+        var result: Int? = nil
+        for (i, seg) in plan.enumerated() {
+            if seg.startPts <= pts { result = i } else { break }
+        }
+        return result
+    }
+
     /// AE#169 round 2 pure decision: a VOD pump read-error exit that produced media before dying
     /// is revivable (the source worked; a reconnect-churned read failed). The complement is the
     /// #126 dead-source fatal surface; live keeps its reopen machinery.
@@ -105,6 +134,20 @@ extension HLSVideoEngine {
                 )
                 onVODSourceFailed?(code)
             }
+            return
+        }
+        // AE#169 round 3: a VOD pump that reached EOF with its scan-forward gate never opened
+        // wrote nothing because the targeted plan boundary has no runtime keyframe at or after it
+        // (the unproducible tail segment of rrgomes' DV MKV). Re-anchor on the last keyframe the
+        // gate dropped instead of returning, which would leave the forward-wait escalation
+        // restarting into the same starve.
+        if case .eof = reason, Self.shouldReanchorVODAfterGateStarvation(
+            isLive: isLiveSession,
+            videoGateOpened: prod.videoGateOpened,
+            hadRestartTarget: prod.hasRestartTarget,
+            lastDroppedKeyframePts: prod.lastPregateDroppedKeyframePts
+        ) {
+            handleVODGateStarvationExit(prod)
             return
         }
         guard isLiveSession else { return }
@@ -214,6 +257,45 @@ extension HLSVideoEngine {
             + "rebuilding producer on a fresh demuxer at "
             + "\(String(format: "%.2f", anchor))s -> seg\(idx) "
             + "(attempt \(attempts)/\(cap))",
+            category: .session
+        )
+        requestRestart(at: idx, authoritative: true)
+    }
+
+    /// AE#169 round 3: re-anchor a VOD session whose pump starved its scan-forward gate to EOF.
+    /// The last keyframe the gate dropped below the target is the final real random-access point
+    /// of the file; producing from its segment folds the tail content into the cache so playback
+    /// reaches end-of-media (via the tail-park completion) instead of dying at -12889 on a
+    /// segment no anchoring can produce. Bounded by its own #99-shaped gate.
+    func handleVODGateStarvationExit(_ prod: HLSSegmentProducer) {
+        let lastKeyPts = prod.lastPregateDroppedKeyframePts
+        restartLock.lock()
+        let plan = segmentPlan
+        let admitted = gateStarvationReviveGate.admit()
+        let attempts = gateStarvationReviveGate.attempts
+        let cap = gateStarvationReviveGate.maxAttempts
+        restartLock.unlock()
+        guard admitted else {
+            EngineLog.emit(
+                "[HLSVideoEngine] #169 VOD gate-starvation re-anchor cap reached "
+                + "(\(attempts) starved pumps, cap \(cap)); giving up "
+                + "(no keyframe at/after the plan boundary in this session)",
+                category: .session
+            )
+            return
+        }
+        guard let idx = Self.planSegmentIndex(forSourcePts: lastKeyPts, plan: plan) else {
+            EngineLog.emit(
+                "[HLSVideoEngine] #169 VOD gate starved to EOF but the dropped keyframe "
+                + "(pts=\(lastKeyPts)) maps to no plan segment; not re-anchoring",
+                category: .session
+            )
+            return
+        }
+        EngineLog.emit(
+            "[HLSVideoEngine] #169 VOD gate starved to EOF at seg\(prod.anchoredBaseIndex): "
+            + "no keyframe at/after the plan boundary; re-anchoring on the last real keyframe "
+            + "(pts=\(lastKeyPts)) -> seg\(idx) (attempt \(attempts)/\(cap))",
             category: .session
         )
         requestRestart(at: idx, authoritative: true)

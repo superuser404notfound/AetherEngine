@@ -75,6 +75,9 @@ enum StartupReadinessGate {
 
     /// Decide the next action after `attempt` master attempts (1-based) produced `outcome`.
     /// `dataWaitRounds` counts the consecutive `awaitingData` windows already ridden this gate run.
+    /// `productionFinished` reports pump liveness (AE#169 round 3): the data-wait exists for a
+    /// first segment still being produced; production that already exited with nothing served can
+    /// never satisfy it, so riding the rounds is pure false hope.
     static func nextAction(
         outcome: StartupReadiness,
         attempt: Int,
@@ -82,13 +85,17 @@ enum StartupReadinessGate {
         masterAlreadyFellBack: Bool,
         hasMediaFallbackURL: Bool,
         dataWaitRounds: Int = 0,
-        maxDataWaitRounds: Int = maxDataWaitRounds
+        maxDataWaitRounds: Int = maxDataWaitRounds,
+        productionFinished: Bool = false
     ) -> StartupGateAction {
         if outcome == .ready { return .proceed }
         // First segment not served yet: keep the current master (DV preserved) and keep waiting, bounded
-        // by the data-wait budget. Only once the budget is spent does an unstarted first segment fall
-        // through to the cold-failure reload/fallback below (a genuinely wedged producer still terminates).
-        if outcome == .awaitingData && dataWaitRounds < maxDataWaitRounds { return .keepAwaitingData }
+        // by the data-wait budget. Only once the budget is spent, or production has provably exited
+        // without serving anything (AE#169 round 3), does an unstarted first segment fall through to
+        // the cold-failure reload/fallback below (a genuinely wedged producer still terminates).
+        if outcome == .awaitingData && dataWaitRounds < maxDataWaitRounds && !productionFinished {
+            return .keepAwaitingData
+        }
         if attempt < masterAttempts { return .reloadMaster }
         if !masterAlreadyFellBack && hasMediaFallbackURL { return .fallBackToMedia }
         return .giveUp

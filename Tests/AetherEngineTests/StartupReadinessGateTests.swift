@@ -89,6 +89,31 @@ struct StartupReadinessGateTests {
             dataWaitRounds: StartupReadinessGate.maxDataWaitRounds) == .fallBackToMedia)
     }
 
+    // AE#169 round 3: the data-wait assumed "still producing over a slow link", but in rrgomes'
+    // tail resume the pump had already exited with zero packets written three seconds before the
+    // first data-wait round. Riding all 8 rounds is 24 s of false hope with a message describing
+    // the opposite of reality; finished production with no data served must fail over immediately.
+
+    @Test("Finished production with no data served fails over immediately instead of riding the data-wait")
+    func finishedProductionSkipsDataWait() {
+        #expect(StartupReadinessGate.nextAction(
+            outcome: .awaitingData, attempt: 1, masterAttempts: 2,
+            masterAlreadyFellBack: false, hasMediaFallbackURL: true,
+            dataWaitRounds: 0, productionFinished: true) == .reloadMaster)
+        #expect(StartupReadinessGate.nextAction(
+            outcome: .awaitingData, attempt: 2, masterAttempts: 2,
+            masterAlreadyFellBack: false, hasMediaFallbackURL: true,
+            dataWaitRounds: 0, productionFinished: true) == .fallBackToMedia)
+    }
+
+    @Test("Production still running keeps the data-wait patience")
+    func runningProductionKeepsDataWait() {
+        #expect(StartupReadinessGate.nextAction(
+            outcome: .awaitingData, attempt: 1, masterAttempts: 2,
+            masterAlreadyFellBack: false, hasMediaFallbackURL: true,
+            dataWaitRounds: 3, productionFinished: false) == .keepAwaitingData)
+    }
+
     @Test("The timeout outcome distinguishes an unserved first segment from a served-but-dead master")
     func timeoutOutcomeSplitsOnLoadedMedia() {
         // No media loaded when the window elapses: the first segment has not been served (slow production).
