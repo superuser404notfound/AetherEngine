@@ -285,7 +285,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Gate uses AV_PKT_FLAG_KEY (not libavformat's keyframe index) because MKV SimpleBlock keyframe bit can be off.
     /// Audio gate waits for video: without this, a non-IDR-keyframe miss puts video 10+ s past audio ("asynchron").
-    private let restartTargetVideoDts: Int64
+    private let restartTargetVideoPts: Int64
     private var restartTargetAudioDts: Int64
     private var audioWaitForVideo: Bool
     private var firstActualVideoDts: Int64 = Int64.min
@@ -448,6 +448,45 @@ final class HLSSegmentProducer: @unchecked Sendable {
         packetCounterLock.lock()
         _packetsWrittenCount &+= 1
         packetCounterLock.unlock()
+    }
+
+    /// AE#169 round 3: pregate observability for the engine's starved-EOF re-anchor arm. A pump
+    /// whose scan-forward gate never opened wrote nothing; the last keyframe it dropped BELOW the
+    /// target is the true final random-access point the engine can re-anchor production on.
+    private var _videoGateOpened = false
+    private var _lastPregateDroppedKeyframePts: Int64 = Int64.min
+    var videoGateOpened: Bool {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _videoGateOpened
+    }
+    var lastPregateDroppedKeyframePts: Int64 {
+        packetCounterLock.lock()
+        defer { packetCounterLock.unlock() }
+        return _lastPregateDroppedKeyframePts
+    }
+    var hasRestartTarget: Bool { restartTargetVideoPts != Int64.min }
+    private func markVideoGateOpened() {
+        packetCounterLock.lock()
+        _videoGateOpened = true
+        packetCounterLock.unlock()
+    }
+    private func notePregateDroppedKeyframe(pts: Int64) {
+        packetCounterLock.lock()
+        if pts > _lastPregateDroppedKeyframePts { _lastPregateDroppedKeyframePts = pts }
+        packetCounterLock.unlock()
+    }
+
+    /// AE#169 round 3 pure decision: whether a video packet opens the restart scan-forward gate.
+    /// The gate target is a plan-boundary PTS (`segmentPlan[baseIndex].startPts`), so the packet
+    /// is judged by presentation time. Comparing DTS dropped the exact IRAP the restart seeked
+    /// for (a keyframe's DTS sits a reorder delay below its own PTS; same defect class as the #92
+    /// cutter fix): mid-file the next IRAP rescued the miss one GOP late, but at the file tail no
+    /// later IRAP exists, so the unbounded VOD gate starved to EOF with zero packets written.
+    static func videoGateTargetSatisfied(pts: Int64, dts: Int64, targetPts: Int64) -> Bool {
+        if targetPts == Int64.min { return true }
+        let ts = pts != Int64.min ? pts : dts
+        return ts != Int64.min && ts >= targetPts
     }
 
     var muxerLifetimeFragmentBytes: Int {
@@ -621,7 +660,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         targetSegmentDurationSeconds: Double = 6.0,
         videoFallbackDurationPts: Int64,
         audioFallbackDurationPts: Int64 = 0,
-        restartTargetVideoDts: Int64 = Int64.min,
+        restartTargetVideoPts: Int64 = Int64.min,
         closedCaptionStreamIndex: Int32 = -1,
         subtitleTapStreamIndices: Set<Int32> = [],
         subtitlePacketStreamIndices: Set<Int32> = [],
@@ -673,7 +712,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.liveCurrentSegmentIndex = baseIndex
         self.videoFallbackDurationPts = videoFallbackDurationPts
         self.audioFallbackDurationPts = audioFallbackDurationPts
-        self.restartTargetVideoDts = restartTargetVideoDts
+        self.restartTargetVideoPts = restartTargetVideoPts
         // Audio target set dynamically once video gate opens (rescaled to audio TB).
         self.restartTargetAudioDts = Int64.min
         // Audio always waits for video: some MKV remuxes (Bluey BD) have a non-IDR first packet;
@@ -1376,7 +1415,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     // MARK: - Pump
 
     private func runPumpLoop() {
-        if restartTargetVideoDts > Int64.min {
+        if restartTargetVideoPts > Int64.min {
             bumpRestartCount()
         }
         let pumpStart = DispatchTime.now()
@@ -1633,7 +1672,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 if Self.shouldBufferPregateAudio(
                     isAudioPkt: isAudioPkt,
                     audioWaitForVideo: audioWaitForVideo,
-                    isHeadOfStream: restartTargetVideoDts == Int64.min,
+                    isHeadOfStream: restartTargetVideoPts == Int64.min,
                     isLive: isLive,
                     bufferedBytes: pregateAudioBufferBytes,
                     packetSize: Int(packet.pointee.size),
@@ -1644,7 +1683,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     pktPtr = nil  // ownership moves to the buffer; freed on replay or teardown
                     continue
                 } else if isAudioPkt, audioWaitForVideo,
-                          restartTargetVideoDts == Int64.min || !isLive,
+                          restartTargetVideoPts == Int64.min || !isLive,
                           !pregateAudioOverflowLogged {
                     pregateAudioOverflowLogged = true
                     EngineLog.emit(
@@ -1958,12 +1997,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // Scan-forward gate: wait for AV_PKT_FLAG_KEY (matroska seek can land 100+ ms early and
                 // SimpleBlock keyframe bit can be off for an IDR in the Cues index). Initial-start also
                 // waits: first packet is not always a sync sample (Bluey MKV: dts=0 pts=33, no key flag,
-                // seg-0 rejected by AVPlayer with -12860 indefinite stall).
+                // seg-0 rejected by AVPlayer with -12860 indefinite stall). The target is a plan-boundary
+                // PTS, so the packet is judged by presentation time (AE#169 round 3): comparing DTS
+                // dropped the anchor IRAP itself under B-frame reorder, and at the file tail no later
+                // IRAP exists to rescue the miss, starving the unbounded VOD gate to EOF.
                 if isVideoPkt {
                     if firstActualVideoDts == Int64.min {
                         let isKey = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
-                        let targetSatisfied = restartTargetVideoDts == Int64.min
-                            || (packet.pointee.dts != Int64.min && packet.pointee.dts >= restartTargetVideoDts)
+                        let targetSatisfied = Self.videoGateTargetSatisfied(
+                            pts: packet.pointee.pts, dts: packet.pointee.dts,
+                            targetPts: restartTargetVideoPts)
                         // #133: on a live H.264 Annex-B mid-stream join, opening on a bare keyframe flag is not
                         // enough. A join packet must carry a decodable IDR access unit (in-band SPS+PPS+IDR);
                         // otherwise the decoder renders references it never received (green frames) or, when the
@@ -1974,6 +2017,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             ? extractJoinVideoConfig(packet) : nil
                         let joinGateSatisfied = !liveH264AnnexBJoin || joinConfig != nil
                         guard isKey, targetSatisfied, joinGateSatisfied else {
+                            if isKey {
+                                let ts = packet.pointee.pts != Int64.min
+                                    ? packet.pointee.pts : packet.pointee.dts
+                                if ts != Int64.min { notePregateDroppedKeyframe(pts: ts) }
+                            }
                             pregateVideoDropCount += 1
                             if pregateVideoDropCount == 1 {
                                 pregateWaitStart = Date()
@@ -1985,8 +2033,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 EngineLog.emit(
                                     "[HLSSegmentProducer] still waiting for \(awaiting): "
                                     + "dropped=\(pregateVideoDropCount) "
-                                    + "lastDts=\(packet.pointee.dts) isKey=\(isKey) "
-                                    + "target=\(restartTargetVideoDts) "
+                                    + "lastDts=\(packet.pointee.dts) lastPts=\(packet.pointee.pts) "
+                                    + "isKey=\(isKey) "
+                                    + "target=\(restartTargetVideoPts) "
                                     + "baseIndex=\(baseIndex)",
                                     category: .session
                                 )
@@ -2019,6 +2068,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                         }
                         firstActualVideoDts = packet.pointee.dts
+                        markVideoGateOpened()
                         firstActualVideoPts = packet.pointee.pts != Int64.min
                             ? packet.pointee.pts
                             : packet.pointee.dts
@@ -2040,7 +2090,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             "[HLSSegmentProducer] video gate open: "
                             + "actual=\(firstActualVideoDts) "
                             + "anchorPts=\(firstActualVideoPts) "
-                            + "target=\(restartTargetVideoDts) "
+                            + "target=\(restartTargetVideoPts) "
                             + "desired=\(desiredFirstVideoTfdtPts) "
                             + "shift=\(videoShiftPts) "
                             // #133 follow-up diag: PID + reconstruct state per epoch, so retest logs separate a
@@ -2155,7 +2205,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     if firstActualAudioDts == Int64.min {
                         firstActualAudioDts = packet.pointee.dts
                         let audioTb = audioConfig?.sourceTimeBase ?? AVRational(num: 1, den: 1000)
-                        if restartTargetVideoDts == Int64.min {
+                        if restartTargetVideoPts == Int64.min {
                             // Head-of-stream: inherit video's shift so the audio-minus-video offset survives (Cars: EAC3 +256 ms).
                             // Snapping to desired=0 would pull the entire audio track ahead of picture.
                             audioShiftPts = av_rescale_q(
@@ -2179,7 +2229,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             )
                         }
                         let gapInAudioTb: Int64
-                        if restartTargetVideoDts == Int64.min {
+                        if restartTargetVideoPts == Int64.min {
                             gapInAudioTb = 0
                         } else {
                             gapInAudioTb = restartTargetAudioDts == Int64.min

@@ -416,7 +416,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Session-long FLAC bridge for codecs illegal in fMP4. Engine-owned (not producer-owned) so
     /// encoder state survives producer restarts; `startSegment()` rebases PTS on each restart.
     var audioBridge: AudioBridge?
-    private var segmentPlan: [Segment] = []
+    var segmentPlan: [Segment] = []
 
     /// Guards subsystem refs + `sessionEpoch`. Never held across waits or network I/O so
     /// `stop()` on the main thread is never blocked behind a restart's 5 s waitForFinish.
@@ -453,6 +453,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// performRestart replaces it via the #79 fresh-demuxer path instead of seeking a connection
     /// that just failed (a sticky pb error would burn the revive gate without one fresh attempt).
     var mainDemuxerSuspectDead = false
+
+    /// AE#169 round 3 (under `restartLock`): bounded re-anchor for a VOD pump whose restart
+    /// scan-forward gate starved to EOF (no runtime keyframe at/after the targeted plan boundary,
+    /// the unproducible tail segment). Same gate shape as #99.
+    var gateStarvationReviveGate = MuxerFailureReviveGate(maxAttempts: 2)
 
     /// #93 residual: a stalled AVPlayer sometimes never resumes REQUESTING after a wedge re-anchor
     /// (device: plain playback, one -15628 errorLog, then zero segment GETs while parked in
@@ -1644,9 +1649,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             throw HLSVideoEngineError.notStarted
         }
 
-        // Scan-forward + dynamic-shift: producer scans for the first AV_PKT_FLAG_KEY packet with
-        // dts >= videoTarget, then computes shift = actualFirstDts - desiredFirstTfdt and applies
-        // it to all subsequent packets. Audio target set dynamically after video lands.
+        // Scan-forward + dynamic-shift: producer scans for the first AV_PKT_FLAG_KEY packet whose
+        // presentation time reaches videoTarget (a plan-boundary PTS; judging by DTS dropped the
+        // anchor IRAP under B-frame reorder, AE#169 round 3), then computes
+        // shift = actualFirstDts - desiredFirstTfdt and applies it to all subsequent packets.
+        // Audio target set dynamically after video lands.
         let videoTarget: Int64
         let desiredVideoTfdt: Int64
         let desiredAudioTfdt: Int64
@@ -1693,7 +1700,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             targetSegmentDurationSeconds: liveCutTargetSeconds,
             videoFallbackDurationPts: videoFallbackDurationPts,
             audioFallbackDurationPts: audioFallbackDurationPts,
-            restartTargetVideoDts: videoTarget,
+            restartTargetVideoPts: videoTarget,
             closedCaptionStreamIndex: closedCaptionStreamIndexForSession,
             subtitleTapStreamIndices: Set(nativeSubtitleSourceStreamIndicesForSession.compactMap { $0 }),
             subtitlePacketStreamIndices: allEmbeddedSubtitleStreamIndices,   // #112 rework
