@@ -8,6 +8,17 @@ struct HLSPlaylistTracker {
     private let minJoinCoverageSeconds: Double // floor for the duration-coverage target
     private(set) var nextSequence: Int?  // next media-sequence not yet returned; nil until primed
     private(set) var stallCount = 0
+    /// #199: consecutive refreshes whose whole window sits BEHIND the cursor (MEDIA-SEQUENCE went
+    /// backward: encoder restart, looped test pool). One or two can be a stale CDN edge; at the
+    /// threshold the axis is treated as reset and the tracker rejoins at the new edge. Regressions
+    /// never feed `stallCount`: they are reset evidence, not upstream silence, and must not push
+    /// the reader toward its ingestStalled terminal trip.
+    private var sequenceRegressionCount = 0
+
+    /// Third consecutive regression = reset. A stale-edge flap alternates with fresh windows and
+    /// resets the counter; a real MSN reset regresses on every refresh and crosses this in ~3
+    /// refresh intervals, well inside the reader's stall budget.
+    static let sequenceResetRejoinThreshold = 3
 
     init(edgeOffset: Int = 3, minJoinCoverageSeconds: Double = 8) {
         self.edgeOffset = edgeOffset
@@ -54,8 +65,22 @@ struct HLSPlaylistTracker {
             // Window slid past cursor: rejoin and mark the seam.
             nextSequence = windowEnd
             stallCount = 0
+            sequenceRegressionCount = 0
             return segments(from: joinStart(), markFirstDiscontinuity: true)
         }
+
+        if cursor > windowEnd {
+            // #199: the whole window is behind the cursor, MEDIA-SEQUENCE went backward. The old
+            // behavior returned empty batches forever, starving the reader into ingestStalled and
+            // tearing down the session for a condition the stream itself survives.
+            sequenceRegressionCount += 1
+            guard sequenceRegressionCount >= Self.sequenceResetRejoinThreshold else { return [] }
+            nextSequence = windowEnd
+            stallCount = 0
+            sequenceRegressionCount = 0
+            return segments(from: joinStart(), markFirstDiscontinuity: true)
+        }
+        sequenceRegressionCount = 0
 
         let fresh = segments(from: cursor, markFirstDiscontinuity: false)
         if fresh.isEmpty {

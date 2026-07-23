@@ -314,6 +314,9 @@ extension AetherEngine {
             + "rerouting onto the live-ingest loopback path (TS -> fMP4 remux)",
             category: .engine
         )
+        // #199: remember the verdict so the next load of this master (host retune after an ingest
+        // death, zap-back) skips the doomed native mount and its watchdog grace entirely.
+        rerouteVerdictMemory.record(url, now: Date())
         var options = loadedOptions
         options.nativeRemoteHLS = false
         let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders)
@@ -356,6 +359,19 @@ extension AetherEngine {
             liveCadenceObservation = nil
         }
         let initialTargetDurationFloor = liveIngest?.upstreamTargetDuration
+        // #199: in-engine reopen transport for live ingest sessions. Only HLSLiveIngestReader main
+        // readers are reconstructible blind (immutable URL + headers, hint always "mpegts"); the
+        // demuxed-audio shape is excluded because a reopen would also have to rebuild the side audio
+        // demuxer over the fresh companion. Other custom readers (disc, SMB) have no transport and
+        // keep the host-retune contract.
+        let ingestReopenFactory: HLSVideoEngine.CustomSourceReopenFactory?
+        if isLive, let ingestReader = customReader as? HLSLiveIngestReader, companionAudioReader == nil {
+            ingestReopenFactory = {
+                ingestReader.makeFreshMainReader().map { (reader: $0 as IOReader, formatHint: "mpegts") }
+            }
+        } else {
+            ingestReopenFactory = nil
+        }
         let session = HLSVideoEngine(
             url: url,
             sourceHTTPHeaders: sourceHTTPHeaders,
@@ -376,6 +392,7 @@ extension AetherEngine {
             initialTargetDurationFloor: initialTargetDurationFloor,
             preopenedDemuxer: preopenedDemuxer,
             sourceReopenableByURL: !isCustomSource,
+            customSourceReopenFactory: ingestReopenFactory,
             companionAudioReader: companionAudioReader,
             // Caller-bounded probe budget (#68) for the fallback open / live reopen; the happy path reuses preopenedDemuxer.
             probesize: loadedOptions.probesize,

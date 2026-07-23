@@ -30,20 +30,39 @@ extension HLSVideoEngine {
     /// #167 follow-up pure decision: live pump exits that delegate to host retune leave a provider no
     /// producer will ever cut into again. Its blocking-reload advert must drop and its held ?_HLS_msn=
     /// waiters release, or the zombie session (and any item reload against it while the host retunes)
-    /// trips -15410 on a hold that cannot be satisfied. Reopenable URL exits resume cutting into the
-    /// same provider and must NOT latch; stop/muxer/backpressure exits have their own arms.
+    /// trips -15410 on a hold that cannot be satisfied. Reopenable exits (URL source, or a #199
+    /// engine-created ingest reader with a fresh-reader factory) resume cutting into the same provider
+    /// and must NOT latch; stop/muxer/backpressure exits have their own arms.
     static func shouldHaltLiveProduction(
         reason: HLSSegmentProducer.PumpExitReason,
-        sourceReopenableByURL: Bool
+        sourceReopenable: Bool
     ) -> Bool {
         switch reason {
         case .segmentStall, .sourceReplay:
             return true
         case .eof, .readError, .keyframeStarvation:
-            return !sourceReopenableByURL
+            return !sourceReopenable
         case .stopRequested, .muxerFailed, .backpressureWedge:
             return false
         }
+    }
+
+    /// #199 pure decision: which transport a live pump-exit reopen uses for the fresh source
+    /// connection. URL sources reopen by URL (unchanged); an engine-created ingest reader reopens
+    /// through its fresh-reader factory; a host-provided custom reader has neither and cannot reopen
+    /// in-engine (its exit delegates to host retune as before).
+    enum LiveReopenTransport: Equatable {
+        case url
+        case customFactory
+        case none
+    }
+
+    static func liveReopenTransport(
+        sourceReopenableByURL: Bool, hasCustomSourceReopenFactory: Bool
+    ) -> LiveReopenTransport {
+        if sourceReopenableByURL { return .url }
+        if hasCustomSourceReopenFactory { return .customFactory }
+        return .none
     }
 
     func handlePumpFinished(_ prod: HLSSegmentProducer,
@@ -89,7 +108,10 @@ extension HLSVideoEngine {
             return
         }
         guard isLiveSession else { return }
-        if Self.shouldHaltLiveProduction(reason: reason, sourceReopenableByURL: sourceReopenableByURL) {
+        let reopenTransport = Self.liveReopenTransport(
+            sourceReopenableByURL: sourceReopenableByURL,
+            hasCustomSourceReopenFactory: customSourceReopenFactory != nil)
+        if Self.shouldHaltLiveProduction(reason: reason, sourceReopenable: reopenTransport != .none) {
             provider?.markLiveProductionHalted()
         }
         switch reason {
@@ -114,11 +136,14 @@ extension HLSVideoEngine {
             onLiveSourceReset?()
             return
         case .eof, .readError, .keyframeStarvation:
-            // Custom-reader sources (e.g. live HLS ingest) own their own reconnection; URL reopen burns the backoff budget on guaranteed failures.
-            if !sourceReopenableByURL {
+            // Host-provided custom readers own their own reconnection and no in-engine transport can
+            // rebuild them, so their loss surfaces to the host immediately. #199: engine-created
+            // ingest readers DO have a transport (the fresh-reader factory) and fall through into the
+            // bounded reopen flow below instead of tearing the whole player session down.
+            if reopenTransport == .none {
                 EngineLog.emit(
                     "[HLSVideoEngine] live custom-source pump exited (reason=\(reason)); "
-                    + "URL reopen not possible, requesting host retune",
+                    + "no in-engine reopen transport, requesting host retune",
                     category: .session
                 )
                 onLiveSourceReset?()
@@ -141,6 +166,13 @@ extension HLSVideoEngine {
                 + "\(barrenNow) reopen cycles; giving up (source considered dead)",
                 category: .session
             )
+            if reopenTransport == .customFactory {
+                // #199: same last-resort surface as reopen exhaustion; without it the recoverable
+                // exit reason skipped the halt above and the zombie session would hold blocking
+                // reloads it can never satisfy.
+                provider?.markLiveProductionHalted()
+                onLiveSourceReset?()
+            }
             return
         }
         EngineLog.emit(
@@ -301,6 +333,9 @@ extension HLSVideoEngine {
     }
 
     private func performLiveReopen(failedProducer: HLSSegmentProducer) async {
+        let transport = Self.liveReopenTransport(
+            sourceReopenableByURL: sourceReopenableByURL,
+            hasCustomSourceReopenFactory: customSourceReopenFactory != nil)
         for attempt in 1...Self.liveReopenMaxAttempts {
             guard currentProducerIs(failedProducer) else { return }
 
@@ -310,14 +345,34 @@ extension HLSVideoEngine {
             let dem = Demuxer()
             registerReopenDemuxer(dem)  // register before blocking open so stop() can abort via markClosed
             defer { unregisterReopenDemuxer(dem) }
+            var freshReader: IOReader?
             do {
-                try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: true)
+                switch transport {
+                case .url:
+                    try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders, profile: openProfile, isLive: true)
+                case .customFactory:
+                    // #199: fresh engine-created ingest reader over the same channel; the dead
+                    // reader's construction inputs are immutable, so this rejoins at the live edge.
+                    guard let vend = customSourceReopenFactory?() else {
+                        EngineLog.emit(
+                            "[HLSVideoEngine] #199 live reopen attempt \(attempt)/\(Self.liveReopenMaxAttempts): "
+                            + "factory vended no reader",
+                            category: .session
+                        )
+                        continue
+                    }
+                    freshReader = vend.reader
+                    try dem.open(reader: vend.reader, formatHint: vend.formatHint, profile: openProfile, isLive: true)
+                case .none:
+                    return  // handlePumpFinished already delegated this exit to host retune
+                }
             } catch {
                 EngineLog.emit(
                     "[HLSVideoEngine] live reopen attempt \(attempt)/\(Self.liveReopenMaxAttempts) failed: \(error)",
                     category: .session
                 )
                 dem.close()
+                freshReader?.close()
                 continue
             }
             // Reopened producer reuses savedVideoConfig/savedAudioConfig (stream indices + time bases from original probe); layout mismatch means server changed transcode shape.
@@ -328,10 +383,12 @@ extension HLSVideoEngine {
                     category: .session
                 )
                 dem.close()
+                freshReader?.close()
                 continue
             }
 
-            switch finishLiveReopen(failedProducer: failedProducer, dem: dem, attempt: attempt) {
+            switch finishLiveReopen(failedProducer: failedProducer, dem: dem,
+                                    freshReader: freshReader, attempt: attempt) {
             case .done, .aborted:
                 return
             case .retry:
@@ -343,6 +400,13 @@ extension HLSVideoEngine {
             + "source considered permanently lost",
             category: .session
         )
+        if transport == .customFactory {
+            // #199: the in-engine transport is exhausted; surface the loss the way a factory-less
+            // custom source would have immediately, so the host can retune instead of holding a
+            // zombie session whose blocking-reload advert can never be satisfied.
+            provider?.markLiveProductionHalted()
+            onLiveSourceReset?()
+        }
     }
 
     /// NSLock unavailable from async contexts; this synchronous helper wraps the check.
@@ -368,11 +432,13 @@ extension HLSVideoEngine {
 
     private func finishLiveReopen(failedProducer: HLSSegmentProducer,
                                   dem: Demuxer,
+                                  freshReader: IOReader?,
                                   attempt: Int) -> LiveReopenOutcome {
         restartLock.lock()
         guard producer === failedProducer, let prov = provider else {
             restartLock.unlock()
             dem.close()
+            freshReader?.close()
             return .aborted
         }
         let oldDem = demuxer
@@ -389,8 +455,13 @@ extension HLSVideoEngine {
                 self?.handleLiveTimelineRebase(shiftPts, seamOutputSeconds: outputEnd)
             }
             producer = newProd
+            // #199: the new demuxer reads from the factory-vended reader; take ownership so stop()
+            // and the next reopen close it. The initial load's reader stays engine-owned.
+            let oldReader = reopenCustomReader
+            if freshReader != nil { reopenCustomReader = freshReader }
             restartLock.unlock()
             oldDem?.close()
+            if freshReader != nil { oldReader?.close() }
             newProd.start()
             EngineLog.emit(
                 "[HLSVideoEngine] live reopen succeeded on attempt \(attempt): "
@@ -402,6 +473,7 @@ extension HLSVideoEngine {
             demuxer = oldDem
             restartLock.unlock()
             dem.close()
+            freshReader?.close()
             EngineLog.emit(
                 "[HLSVideoEngine] live reopen attempt \(attempt): producer build failed (\(error))",
                 category: .session

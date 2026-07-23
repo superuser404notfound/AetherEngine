@@ -58,4 +58,14 @@ enum RemoteHLSIngestFallback {
     static func shouldArm(isLive: Bool, fallbackEnabled: Bool) -> Bool {
         isLive && fallbackEnabled
     }
+
+    /// #199: a load whose master already fired the carriage verdict (`RerouteVerdictMemory`) routes
+    /// straight onto the live-ingest loopback, skipping the deterministically doomed native mount and
+    /// its watchdog grace. Gated exactly like the watchdog itself: the memory may only short-circuit
+    /// a reroute the watchdog would have performed anyway.
+    static func shouldRouteDirectlyToIngest(
+        isLive: Bool, fallbackEnabled: Bool, verdictRemembered: Bool
+    ) -> Bool {
+        shouldArm(isLive: isLive, fallbackEnabled: fallbackEnabled) && verdictRemembered
+    }
 }

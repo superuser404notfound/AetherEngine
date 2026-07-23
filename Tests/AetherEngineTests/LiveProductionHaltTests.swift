@@ -27,31 +27,31 @@ final class LiveProductionHaltTests: XCTestCase {
 
     func testHostRetuneExitsHaltLiveProduction() {
         XCTAssertTrue(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .segmentStall, sourceReopenableByURL: true),
+            reason: .segmentStall, sourceReopenable: true),
             "cutter wedge exits to host retune; the provider will never cut again")
         XCTAssertTrue(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .sourceReplay, sourceReopenableByURL: true))
+            reason: .sourceReplay, sourceReopenable: true))
         XCTAssertTrue(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .eof, sourceReopenableByURL: false),
-            "custom-reader pump death delegates to host retune")
+            reason: .eof, sourceReopenable: false),
+            "host-provided custom-reader pump death delegates to host retune")
         XCTAssertTrue(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .readError(code: -5), sourceReopenableByURL: false))
+            reason: .readError(code: -5), sourceReopenable: false))
     }
 
     func testRecoverableExitsDoNotHaltLiveProduction() {
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .eof, sourceReopenableByURL: true),
-            "reopenable URL exits resume cutting into the same provider")
+            reason: .eof, sourceReopenable: true),
+            "reopenable exits (URL source, or #199 engine-created ingest reader with a fresh-reader factory) resume cutting into the same provider")
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .readError(code: -5), sourceReopenableByURL: true))
+            reason: .readError(code: -5), sourceReopenable: true))
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .keyframeStarvation, sourceReopenableByURL: true))
+            reason: .keyframeStarvation, sourceReopenable: true))
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .stopRequested, sourceReopenableByURL: false))
+            reason: .stopRequested, sourceReopenable: false))
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .muxerFailed, sourceReopenableByURL: false))
+            reason: .muxerFailed, sourceReopenable: false))
         XCTAssertFalse(HLSVideoEngine.shouldHaltLiveProduction(
-            reason: .backpressureWedge, sourceReopenableByURL: false))
+            reason: .backpressureWedge, sourceReopenable: false))
     }
 
     // MARK: - Provider halt latch
