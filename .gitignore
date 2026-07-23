@@ -31,3 +31,6 @@ docs/superpowers/
 # Session scratch artifacts (debug fixtures, serve logs, reply drafts).
 # Local-only by design; never published.
 scratchpad/
+
+# Isolated feature worktrees.
+.worktrees/
