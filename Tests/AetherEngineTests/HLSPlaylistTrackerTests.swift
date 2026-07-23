@@ -76,4 +76,46 @@ final class HLSPlaylistTrackerTests: XCTestCase {
         XCTAssertEqual(new.map(\.uri), ["v", "u"])
         XCTAssertTrue(new[0].discontinuityBefore, "rejoin must be marked as a discontinuity")
     }
+
+    // MARK: - #199: MEDIA-SEQUENCE regression (encoder restart / looped test pool)
+
+    func testSequenceResetRejoinsAtEdgeWithDiscontinuityAfterThreshold() {
+        var tracker = HLSPlaylistTracker(edgeOffset: 3, minJoinCoverageSeconds: 8)
+        _ = tracker.newSegments(in: playlist(sequence: 100, uris: ["a", "b", "c"])) // cursor -> 103
+        // MSN regressed below the cursor: the old code starved here forever (empty batches
+        // until the reader's stall counter went terminal with ingestStalled).
+        XCTAssertTrue(tracker.newSegments(in: playlist(sequence: 0, uris: ["x", "y", "z"])).isEmpty)
+        XCTAssertTrue(tracker.newSegments(in: playlist(sequence: 0, uris: ["x", "y", "z"])).isEmpty)
+        let rejoined = tracker.newSegments(in: playlist(sequence: 0, uris: ["x", "y", "z"]))
+        XCTAssertEqual(rejoined.map(\.uri), ["y", "z"], "third consecutive regression rejoins at the new edge")
+        XCTAssertTrue(rejoined[0].discontinuityBefore, "reset rejoin must be marked as a discontinuity")
+        // Cursor continues normally on the new sequence axis.
+        let next = tracker.newSegments(in: playlist(sequence: 1, uris: ["y", "z", "w"]))
+        XCTAssertEqual(next.map(\.uri), ["w"])
+    }
+
+    func testSingleStaleRegressionDoesNotRejoin() {
+        var tracker = HLSPlaylistTracker(edgeOffset: 3, minJoinCoverageSeconds: 8)
+        _ = tracker.newSegments(in: playlist(sequence: 100, uris: ["a", "b", "c"])) // cursor -> 103
+        // One stale CDN edge serving an older window is not a reset.
+        XCTAssertTrue(tracker.newSegments(in: playlist(sequence: 98, uris: ["p", "q", "r"])).isEmpty)
+        // Fresh edge resumes: only the genuinely new segment comes back, no discontinuity.
+        let new = tracker.newSegments(in: playlist(sequence: 101, uris: ["b", "c", "d"]))
+        XCTAssertEqual(new.map(\.uri), ["d"])
+        XCTAssertFalse(new[0].discontinuityBefore)
+        // A later isolated regression starts counting from zero again.
+        XCTAssertTrue(tracker.newSegments(in: playlist(sequence: 99, uris: ["p", "q", "r"])).isEmpty)
+        let resumed = tracker.newSegments(in: playlist(sequence: 102, uris: ["c", "d", "e"]))
+        XCTAssertEqual(resumed.map(\.uri), ["e"])
+    }
+
+    func testSequenceRegressionDoesNotInflateStallCount() {
+        var tracker = HLSPlaylistTracker(edgeOffset: 3, minJoinCoverageSeconds: 8)
+        _ = tracker.newSegments(in: playlist(sequence: 100, uris: ["a", "b", "c"]))
+        _ = tracker.newSegments(in: playlist(sequence: 0, uris: ["x", "y", "z"]))
+        _ = tracker.newSegments(in: playlist(sequence: 0, uris: ["x", "y", "z"]))
+        // Regressions are reset evidence, not upstream silence; they must not push the
+        // reader's stall counter toward its ingestStalled terminal trip.
+        XCTAssertEqual(tracker.stallCount, 0)
+    }
 }

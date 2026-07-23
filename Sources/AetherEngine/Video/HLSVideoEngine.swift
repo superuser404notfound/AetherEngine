@@ -548,6 +548,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         initialTargetDurationFloor: Double? = nil,
         preopenedDemuxer: Demuxer? = nil,
         sourceReopenableByURL: Bool = true,
+        customSourceReopenFactory: CustomSourceReopenFactory? = nil,
         companionAudioReader: IOReader? = nil,
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
@@ -585,6 +586,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         self.preopenedDemuxer = preopenedDemuxer
         self.sourceReopenableByURL = sourceReopenableByURL
+        self.customSourceReopenFactory = customSourceReopenFactory
         self.companionAudioReader = companionAudioReader
         self.forwardWindowSegments = Self.clampedForwardWindow(forwardBufferSegments)
     }
@@ -615,6 +617,18 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// False for IOReader-backed sources (`aether-custom://source` placeholder); `handlePumpFinished`
     /// surfaces loss via `onLiveSourceReset` immediately instead of burning 6 reopen attempts.
     let sourceReopenableByURL: Bool
+
+    /// #199: vends a fresh reader (plus FFmpeg format hint) for an engine-created ingest source, so a
+    /// live pump exit reopens in-session instead of delegating to host retune. Called once per reopen
+    /// attempt; each vended reader is owned by this session (closed on replacement and on stop). nil for
+    /// URL sources and host-provided custom readers.
+    public typealias CustomSourceReopenFactory = @Sendable () -> (reader: IOReader, formatHint: String?)?
+    let customSourceReopenFactory: CustomSourceReopenFactory?
+
+    /// #199: the reader vended by `customSourceReopenFactory` that the CURRENT demuxer reads from.
+    /// Guarded by `restartLock`. The original load's reader stays engine-owned (AetherEngine closes it
+    /// in stopInternal); only factory-vended replacements are owned here.
+    var reopenCustomReader: IOReader?
 
     /// Demuxed audio rendition reader for live HLS ingest. When the main demuxer finds no audio and
     /// this is non-nil, `start()` opens `sideAudioDemuxer` over it. Engine owns the side demuxer, not
@@ -1579,9 +1593,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         ownedCodecParams = []
         let reopening = reopenDemuxer
         reopenDemuxer = nil
+        // #199: factory-vended ingest reader feeding the current demuxer; session-owned, closed here.
+        let reopenReader = reopenCustomReader
+        reopenCustomReader = nil
         segmentPlan = []
         restartLock.unlock()
         reopening?.markClosed()
+        // Close before waitForFinish: cancels the reader's FIFO so a pump parked in a blocking
+        // custom-IO read unblocks (mirrors markClosed for URL demuxers).
+        reopenReader?.close()
 
         p?.stop()
 

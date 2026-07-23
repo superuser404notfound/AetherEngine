@@ -919,6 +919,11 @@ public final class AetherEngine: ObservableObject {
     /// bounded reload budget. Cancelled on load reset; superseded by newer deaths.
     var itemDeathConfirmTask: Task<Void, Never>? = nil
     var itemDeathReviveGate = ItemDeathReviveGate(maxAttempts: 3)
+
+    /// #199: masters whose #168 carriage verdict fired; consulted at the top of `load(source:)` to
+    /// route known cases straight onto the live-ingest loopback. Engine-lifetime by design: it must
+    /// survive stop()/load() seams (zap away and back) or the discovery tax returns per retune.
+    var rerouteVerdictMemory = RerouteVerdictMemory()
     nonisolated static let itemDeathConfirmSeconds: TimeInterval = 3.0
 
     /// Single-shot latch for the reactive master->media fallback (#98): fall back at most once per
@@ -1734,6 +1739,29 @@ public final class AetherEngine: ObservableObject {
         audioSourceStreamIndex: Int32? = nil,
         discTitleID: Int? = nil
     ) async throws -> SourceProbe? {
+        var source = source
+        var options = options
+        // #199: a live master whose #168 carriage verdict already fired routes straight onto the
+        // live-ingest loopback. Remounting the native bypass would burn readyToPlay plus the watchdog
+        // grace on a deterministic no-video-track outcome; after an ingest death that discovery tax
+        // used to run once per host retune (the reporter's ~13s reroute cycle).
+        if case .url(let candidate) = source,
+           options.nativeRemoteHLS,
+           RemoteHLSIngestFallback.shouldRouteDirectlyToIngest(
+               isLive: options.isLive,
+               fallbackEnabled: options.nativeRemoteHLSIngestFallback,
+               verdictRemembered: rerouteVerdictMemory.remembers(candidate, now: Date())) {
+            EngineLog.emit(
+                "[AetherEngine] #199: master is a remembered no-video-track carriage case; "
+                + "routing directly onto the live-ingest loopback path",
+                category: .engine
+            )
+            options.nativeRemoteHLS = false
+            source = .custom(
+                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders),
+                formatHint: "mpegts"
+            )
+        }
         // Preserve the NativeAVPlayerHost across native->native reloads so AVKit's system Now-Playing
         // registration survives the seam (issue #15). Captured before stopInternal resets playbackBackend;
         // the SW dispatch branch releases it if this source routes software.

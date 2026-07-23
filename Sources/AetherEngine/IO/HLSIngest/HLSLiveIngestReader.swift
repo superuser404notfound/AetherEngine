@@ -115,6 +115,15 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         self.init(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo)
     }
 
+    /// #199: fresh reader over the same playlist URL and headers, for the in-engine live reopen of an
+    /// engine-created ingest session (the dead reader's construction inputs are immutable, so the fresh
+    /// one rejoins the same channel at its current live edge). Main-video role only: the companion
+    /// audio reader's lifetime is owned by its parent and never reopens independently.
+    func makeFreshMainReader() -> HLSLiveIngestReader? {
+        guard role == .mainVideo else { return nil }
+        return HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo)
+    }
+
     init(playlistURL: URL, httpHeaders: [String: String] = [:], role: Role) {
         self.playlistURL = playlistURL
         self.httpHeaders = httpHeaders
