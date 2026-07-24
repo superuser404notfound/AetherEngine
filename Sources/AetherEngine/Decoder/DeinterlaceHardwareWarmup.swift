@@ -7,7 +7,7 @@ final class DeinterlaceHardwareWarmup: @unchecked Sendable {
         case unavailable
     }
 
-    typealias Operation = @Sendable () -> Outcome
+    typealias Operation = @Sendable () async -> Outcome
 
     static let shared = DeinterlaceHardwareWarmup {
         DeinterlaceFilter.prewarmHardwarePipeline() ? .ready : .unavailable
@@ -22,7 +22,7 @@ final class DeinterlaceHardwareWarmup: @unchecked Sendable {
                 "[Deinterlace] hardware warm-up started",
                 category: .swPlayback
             )
-            let outcome = operation()
+            let outcome = await operation()
             let elapsed = Double(
                 DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
             ) / 1_000_000_000

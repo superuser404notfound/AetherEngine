@@ -4,13 +4,25 @@ import Testing
 
 struct Issue203SoftwareColdStartTests {
 
-    private func wait(
-        for semaphore: DispatchSemaphore,
-        timeout: DispatchTime
-    ) async -> DispatchTimeoutResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                continuation.resume(returning: semaphore.wait(timeout: timeout))
+    private actor Gate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            if isOpen {
+                return
+            }
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+
+        func open() {
+            isOpen = true
+            let pending = waiters
+            waiters.removeAll()
+            for waiter in pending {
+                waiter.resume()
             }
         }
     }
@@ -34,21 +46,21 @@ struct Issue203SoftwareColdStartTests {
 
     @Test("construction starts one process warm-up shared by concurrent auto waiters")
     func oneTaskServesConcurrentWaiters() async {
-        let started = DispatchSemaphore(value: 0)
-        let release = DispatchSemaphore(value: 0)
+        let started = Gate()
+        let release = Gate()
         let counter = Counter()
         let warmup = DeinterlaceHardwareWarmup {
             counter.increment()
-            started.signal()
-            release.wait()
+            await started.open()
+            await release.wait()
             return .ready
         }
 
-        #expect(await wait(for: started, timeout: .now() + 2) == .success)
+        await started.wait()
 
         async let first = warmup.waitIfNeeded(for: .auto)
         async let second = warmup.waitIfNeeded(for: .auto)
-        release.signal()
+        await release.open()
 
         #expect(await first == .ready)
         #expect(await second == .ready)
@@ -57,13 +69,10 @@ struct Issue203SoftwareColdStartTests {
 
     @Test("forced software mode bypasses an unfinished hardware warm-up")
     func softwareModeDoesNotWait() async {
-        let release = DispatchSemaphore(value: 0)
+        let release = Gate()
         let warmup = DeinterlaceHardwareWarmup {
-            release.wait()
+            await release.wait()
             return .ready
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
-            release.signal()
         }
 
         let started = DispatchTime.now()
@@ -72,27 +81,27 @@ struct Issue203SoftwareColdStartTests {
             DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
         ) / 1_000_000_000
 
-        release.signal()
+        await release.open()
         #expect(result == nil)
         #expect(elapsed < 1)
     }
 
     @Test("cancelling a waiter does not cancel the process warm-up")
     func cancelledWaiterDoesNotCancelWarmup() async {
-        let started = DispatchSemaphore(value: 0)
-        let release = DispatchSemaphore(value: 0)
+        let started = Gate()
+        let release = Gate()
         let warmup = DeinterlaceHardwareWarmup {
-            started.signal()
-            release.wait()
+            await started.open()
+            await release.wait()
             return .ready
         }
-        #expect(await wait(for: started, timeout: .now() + 2) == .success)
+        await started.wait()
 
         let waiter = Task {
             await warmup.waitIfNeeded(for: .auto)
         }
         waiter.cancel()
-        release.signal()
+        await release.open()
 
         #expect(await waiter.value == .ready)
         #expect(await warmup.waitIfNeeded(for: .auto) == .ready)
