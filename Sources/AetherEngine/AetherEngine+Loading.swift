@@ -1351,6 +1351,10 @@ extension AetherEngine {
         let wasOnSoftwarePath = (playbackBackend == .software)
         // Preserve codec so the decoder label can be reconstructed without re-probing.
         let preservedVideoCodec = lastDetectedVideoCodec
+        // Container chapters belong to the (unchanged) source URL, so an audio-switch / background
+        // reload republishes the load-time snapshot rather than re-probing. Disc chapters are NOT
+        // snapshot here: a title switch changes them, so they recapture from the reopened demuxer below.
+        let preservedMediaChapters = mediaChapters
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.
@@ -1551,6 +1555,8 @@ extension AetherEngine {
             }
         } else {
             activeDiscTitleID = nil
+            // Non-disc reload: restore the container chapters stopInternal wiped (same source, same chapters).
+            mediaChapters = preservedMediaChapters
         }
 
         // Re-arm subtitle: sidecar branch wins because loadedSidecarURL is set only for sidecar sources.

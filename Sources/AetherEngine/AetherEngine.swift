@@ -195,6 +195,11 @@ public final class AetherEngine: ObservableObject {
     /// Chapters of the selected title. Empty until Blu-ray chapter parsing ships (Phase 2); declared
     /// now so hosts can bind the picker against a stable API.
     @Published public internal(set) var discChapters: [ChapterInfo] = []
+    /// Container (Matroska/MP4) chapters of the loaded source, from the probe demuxer at load. Empty
+    /// when the container declares none and for disc sources (whose chapters publish on `discChapters`
+    /// with title-relative seek semantics). `startSeconds` values are content timestamps a host passes
+    /// straight to `seek(to:)`.
+    @Published public internal(set) var mediaChapters: [ChapterInfo] = []
     /// The id of the title the disc demuxer should (re)open with. Mirrors `selectedDiscTitle?.id` but
     /// kept as plain state so it survives the stopInternal inside a reload and threads into audio-switch /
     /// background-resume reopens (a URL-disc reopen with no id would silently revert to the main title).
@@ -1869,6 +1874,7 @@ public final class AetherEngine: ObservableObject {
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
+        mediaChapters = []
         subtitleCueDiagnosticCount = 0
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
@@ -2052,6 +2058,7 @@ public final class AetherEngine: ObservableObject {
         // clamped to an in-range id); non-disc sources report empty/nil (#67).
         discTitles = probeOpened ? probe.discTitleInfos() : []
         discChapters = probeOpened ? probe.discChapterInfos() : []
+        mediaChapters = (probeOpened && discTitles.isEmpty) ? probe.mediaChapterInfos() : []
         activeDiscTitleID = probeOpened ? probe.selectedDiscTitleID : nil
         selectedDiscTitle = activeDiscTitleID.flatMap { id in discTitles.first { $0.id == id } }
         // Content start PTS for the software-path chapter-seek base (see sourceStartSeconds). start_time is
@@ -3367,6 +3374,7 @@ public final class AetherEngine: ObservableObject {
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
+        mediaChapters = []
         activeDiscTitleID = nil
         sourceStartSeconds = 0
         isLive = false
