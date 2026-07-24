@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.4] - 2026-07-24
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.4))
+
+### Fixed
+
+- **VOD playback now reaches the real end of media when the final Cues-derived segment boundary has no matching runtime keyframe.** The natural forward producer correctly carried the remaining EOF media in the preceding segment, but the playlist still advertised a short final slot that no producer or restart anchor could create. AVPlayer waited forever at that impossible segment seam and eventually failed with -12889. A final plan slot shorter than the ordinary cut target now folds into its predecessor while preserving the complete duration and terminal PTS. The collapsed plan is also the single plan used by engine state, provider construction, initial seek mapping, and producer startup. Isolated across four rounds of exceptionally detailed device traces by rrgomes (#169). Covered by `PlanCollapseShortSegmentsTests`.
+
 ## [5.20.3] - 2026-07-24
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.3))
