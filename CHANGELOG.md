@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.3] - 2026-07-24
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.3))
+
+### Fixed
+
+- **The first automatically deinterlaced software session after a process launch now warms the Metal deinterlace pipeline before playback reaches its first video frame.** FFmpeg created the `yadif_videotoolbox` Metal compute pipeline synchronously while processing the first interlaced frame. On a cold process this could delay video for roughly ten seconds while audio had already started; the same-URL reload was fast because the pipeline was then cached. A process-wide detached task now builds and destroys a small real hardware-deinterlace graph when `AetherEngine` initializes. Automatic deinterlacing awaits that shared warm-up before renderer audio activation and software-host creation, while forced software deinterlacing bypasses the wait. Warm-up failure remains nonfatal, so the real session still attempts hardware and retains its CPU fallback. Reported with precise cold-vs-warm timing by Simpendaal (#203). Covered by `Issue203SoftwareColdStartTests` and `DeinterlaceHardwareTests`.
+
 ## [5.20.2] - 2026-07-23
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.2))
