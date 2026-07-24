@@ -547,6 +547,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
+        liveJoinProfile: LiveJoinProfile = .standard,
         liveCutTargetSeconds: Double? = nil,
         blockingReloadOverride: Bool? = nil,
         liveCadenceObservation: (@Sendable () -> Double?)? = nil,
@@ -574,8 +575,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.audioBridgeMode = audioBridgeMode
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds
-        // nil = the .standard profile's historical cut target (public init cannot default to the internal static).
-        let resolvedLiveCutTarget = liveCutTargetSeconds ?? Self.targetSegmentDuration
+        self.liveJoinProfile = liveJoinProfile
+        // An explicit cut target keeps precedence for direct callers. Otherwise resolve the profile.
+        let resolvedLiveCutTarget = liveCutTargetSeconds
+            ?? Self.liveCutTargetSeconds(for: liveJoinProfile)
         self.liveCutTargetSeconds = resolvedLiveCutTarget
         self.blockingReloadOverride = blockingReloadOverride
         // Trust OBSERVED arrival cadence, not the upstream's self-reported TARGETDURATION, for blocking-reload
@@ -613,6 +616,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// When true, `start()` skips the VOD duration guard / cue prewarm / precomputed plan and
     /// uses the forward-only live cut mode (producer cuts at each IDR past the duration target).
     let isLiveSession: Bool
+
+    /// Controls whether the first live manifest may take the bounded shallow-window path.
+    private let liveJoinProfile: LiveJoinProfile
 
     /// Live segment cut target for this session, resolved from the host's `LiveJoinProfile` (AE#195).
     /// Drives the producer's keyframe cut, `LiveWindowSizing`, and (via the served TARGETDURATION floor)
@@ -1245,6 +1251,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 targetSegmentDurationSeconds: liveCutTargetSeconds,
                 dvrWindowSeconds: dvrWindowSeconds
             ),
+            allowsBoundedDegradedStart: liveJoinProfile == .fastZap,
             blockingReloadOverride: blockingReloadOverride,
             liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in

@@ -384,9 +384,9 @@ extension AetherEngine {
             audioBridgeMode: audioBridgeMode,
             isLiveSession: isLive,
             dvrWindowSeconds: dvrWindowSeconds,
-            // AE#195: resolve the host's live-join profile to the live segment cut target; TARGETDURATION
-            // and the AE#189 startup-cushion holdback shrink with it on short-GOP sources.
-            liveCutTargetSeconds: HLSVideoEngine.liveCutTargetSeconds(for: loadedOptions.liveJoinProfile),
+            // AE#195/#208: the session resolves the cut target and enables the bounded first-manifest
+            // path only for the host's explicit fastZap profile.
+            liveJoinProfile: loadedOptions.liveJoinProfile,
             blockingReloadOverride: loadedOptions.liveBlockingReload,
             liveCadenceObservation: liveCadenceObservation,
             initialTargetDurationFloor: initialTargetDurationFloor,

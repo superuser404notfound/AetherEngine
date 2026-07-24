@@ -68,6 +68,14 @@ enum LiveEdgePolicy {
     /// RFC 8216bis floor for `EXT-X-SERVER-CONTROL:HOLD-BACK`.
     static func holdBackSeconds(targetDuration: Int) -> Double { Double(3 * targetDuration) }
 
+    /// One observed segment duration gives a strict-realtime fastZap source one more chance to fill
+    /// naturally, while the clamp keeps the startup bound useful for unusually short or long GOPs.
+    static func fastZapDegradedGraceSeconds(
+        maxSegmentDuration: Double
+    ) -> TimeInterval {
+        min(2.0, max(0.5, maxSegmentDuration))
+    }
+
     /// First-serve gate: hold the first live manifest until the window carries at least the live-edge
     /// holdback (`3 x TD`) of content behind the edge, so AVPlayer's initial seek-to-edge-minus-holdback
     /// lands inside the window instead of the stall-danger zone. Bounded above by `windowSegmentCount`: a
@@ -133,6 +141,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let isLive: Bool
     /// Drives both playlist firstVisible and cache eviction cutoff so they never drift.
     private let liveWindowSizing: LiveWindowSizing
+    /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
+    private let allowsBoundedDegradedStart: Bool
     /// Host override for blocking-reload (`LoadOptions.liveBlockingReload`): nil = auto (observed policy for
     /// ingest, on by default for signal-less live), true/false = force. Wins over the policy (#167).
     private let blockingReloadOverride: Bool?
@@ -254,6 +264,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         sourceBitrate: Int64,
         isLive: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
+        allowsBoundedDegradedStart: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
         restartHandler: ((Int) -> Void)? = nil,
@@ -278,6 +289,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.segments = segments
         self.isLive = isLive
         self.liveWindowSizing = liveWindowSizing
+        self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
         self.blockingReloadOverride = blockingReloadOverride
         self.liveCadencePolicy = liveCadencePolicy
         self.codecsString = codecsString
@@ -897,13 +909,16 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// Block until the first live window holds the live-edge holdback (3 x TARGETDURATION) of content, so
     /// AVPlayer's initial seek to edge-minus-holdback lands inside the window instead of its stall-danger
-    /// zone (-16832; AE#189). Also avoids -12888 on an empty playlist. Subsequent polls return instantly.
-    /// The gate is `LiveEdgePolicy.startupCushionSatisfied`, computed from the SAME TARGETDURATION the
-    /// served playlist advertises, so the depth built here is exactly the depth AVPlayer enforces.
+    /// zone (-16832; AE#189). A `.fastZap` session may take the explicitly bounded shallow-window path
+    /// after two segments and one clamped segment-duration grace (AE#208). `.standard` never takes it.
+    /// Both paths avoid -12888 on an empty or single-segment playlist. The gate and served playlist use
+    /// the same sealed TARGETDURATION.
     func waitForFirstLiveSegment(timeout: TimeInterval) -> Bool {
         guard isLive else { return true }
         let deadline = Date().addingTimeInterval(timeout)
         let window = liveWindowSizing.windowSegmentCount
+        var degradedDeadline: Date?
+        var degradedGrace: TimeInterval?
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
         while true {
@@ -917,11 +932,43 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 _ = sealLiveTargetDuration(candidate: target.value)
                 return true
             }
-            if !firstSegmentCondition.wait(until: deadline) {
+            if allowsBoundedDegradedStart,
+               snap.count >= LiveEdgePolicy.minStartupSegments,
+               degradedDeadline == nil {
+                let grace = LiveEdgePolicy.fastZapDegradedGraceSeconds(
+                    maxSegmentDuration: snap.maxDuration
+                )
+                degradedGrace = grace
+                degradedDeadline = Date().addingTimeInterval(grace)
+            }
+            let effectiveDeadline = degradedDeadline.map { min(deadline, $0) } ?? deadline
+            if !firstSegmentCondition.wait(until: effectiveDeadline) {
                 // Re-read after the timed-out wait: an append racing the deadline would otherwise be judged
                 // on the stale snapshot (waitForLiveSegment below already does this).
                 let after = liveCushionSnapshot()
                 let afterTarget = currentLiveTargetDuration(maxSegmentDuration: after.maxDuration)
+                if LiveEdgePolicy.startupCushionSatisfied(segmentCount: after.count,
+                                                          summedDurationSeconds: after.summed,
+                                                          targetDuration: afterTarget.value,
+                                                          windowSegmentCount: window) {
+                    _ = sealLiveTargetDuration(candidate: afterTarget.value)
+                    return true
+                }
+                if let degradedDeadline,
+                   Date() >= degradedDeadline,
+                   after.count >= LiveEdgePolicy.minStartupSegments {
+                    let sealed = sealLiveTargetDuration(candidate: afterTarget.value)
+                    let holdBack = LiveEdgePolicy.holdBackSeconds(targetDuration: sealed)
+                    EngineLog.emit(
+                        "[HLSVideoEngine] fastZap startup degraded, serving first playlist with "
+                        + "\(after.count) segments / \(String(format: "%.3f", after.summed))s "
+                        + "before \(String(format: "%.3f", holdBack))s holdback after "
+                        + "\(String(format: "%.3f", degradedGrace ?? 0))s grace",
+                        category: .session
+                    )
+                    return true
+                }
+                guard Date() >= deadline else { continue }
                 // Degraded start: serving before the holdback cushion is built (transcode too slow, or a
                 // strict-realtime origin that has not produced 3 x TD of content within the deadline) makes
                 // a -16832 "restarting from end of live playlist" stall right after startup likely. Observe it.
