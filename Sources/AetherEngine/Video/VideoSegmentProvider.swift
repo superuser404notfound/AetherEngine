@@ -82,12 +82,41 @@ enum LiveEdgePolicy {
                                         cutTargetSeconds: Double?,
                                         cadenceFloorSeconds: Double?,
                                         windowSegmentCount: Int) -> Bool {
-        guard segmentCount >= minStartupSegments else { return false }
-        if segmentCount >= windowSegmentCount { return true }
         let td = targetDurationSeconds(maxSegmentDuration: maxSegmentDuration,
                                        cutTargetSeconds: cutTargetSeconds,
                                        cadenceFloorSeconds: cadenceFloorSeconds)
-        return summedDurationSeconds >= holdBackSeconds(targetDuration: td)
+        return startupCushionSatisfied(
+            segmentCount: segmentCount,
+            summedDurationSeconds: summedDurationSeconds,
+            targetDuration: td,
+            windowSegmentCount: windowSegmentCount
+        )
+    }
+
+    static func startupCushionSatisfied(segmentCount: Int,
+                                        summedDurationSeconds: Double,
+                                        targetDuration: Int,
+                                        windowSegmentCount: Int) -> Bool {
+        guard segmentCount >= minStartupSegments else { return false }
+        if segmentCount >= windowSegmentCount { return true }
+        return summedDurationSeconds >= holdBackSeconds(targetDuration: targetDuration)
+    }
+}
+
+struct LiveTargetDurationSeal {
+    private(set) var value: Int?
+    private var didLogUpwardDrift = false
+
+    mutating func resolve(candidate: Int) -> (value: Int, shouldLogDrift: Bool) {
+        guard let sealed = value else {
+            value = candidate
+            return (candidate, false)
+        }
+        guard candidate > sealed, !didLogUpwardDrift else {
+            return (sealed, false)
+        }
+        didLogUpwardDrift = true
+        return (sealed, true)
     }
 }
 
@@ -204,6 +233,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// The cadence policy cannot see this (it observes ingest arrivals, which keep flowing while the
     /// cutter is wedged), so it is a separate, producer-level condition.
     private var _liveProductionHalted = false
+    /// RFC 8216 requires TARGETDURATION to stay constant for the lifetime of a media playlist.
+    /// Guarded by stateLock and preserved across in-provider producer reopens.
+    private var liveTargetDurationSeal = LiveTargetDurationSeal()
     private var refreshCounter: Int = 0
     /// EXT-X-MEDIA-SEQUENCE first index; monotonically advancing, stays 0 for VOD.
     private var _liveFirstVisible: Int = 0
@@ -797,6 +829,47 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         isLive ? liveCadencePolicy?.targetDurationFloorSeconds : nil
     }
 
+    func currentLiveTargetDuration(
+        maxSegmentDuration: Double
+    ) -> (value: Int, cadenceFloor: Double?) {
+        let floor = liveCadencePolicy?.targetDurationFloorSeconds
+        return (
+            LiveEdgePolicy.targetDurationSeconds(
+                maxSegmentDuration: maxSegmentDuration,
+                cutTargetSeconds: liveWindowSizing.targetSegmentDurationSeconds,
+                cadenceFloorSeconds: floor
+            ),
+            floor
+        )
+    }
+
+    private func sealLiveTargetDuration(candidate: Int) -> Int {
+        stateLock.lock()
+        let resolved = liveTargetDurationSeal.resolve(candidate: candidate).value
+        stateLock.unlock()
+        return resolved
+    }
+
+    func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int {
+        let candidate = currentLiveTargetDuration(maxSegmentDuration: maxSegmentDuration)
+        stateLock.lock()
+        let resolved = liveTargetDurationSeal.resolve(candidate: candidate.value)
+        stateLock.unlock()
+
+        if resolved.shouldLogDrift {
+            EngineLog.emit(
+                "[HLSVideoEngine] live TARGETDURATION remains sealed at "
+                + "\(resolved.value)s, later candidate \(candidate.value)s "
+                + "(max segment \(String(format: "%.3f", maxSegmentDuration))s, "
+                + "cadence floor "
+                + (candidate.cadenceFloor.map { String(format: "%.3f", $0) } ?? "nil")
+                + ")",
+                category: .session
+            )
+        }
+        return resolved.value
+    }
+
     /// Resolve blocking-reload eligibility: a halted producer disables it unconditionally (no override
     /// can conjure segments from a dead pump, #167 follow-up); otherwise a host override wins; otherwise
     /// the observed-cadence policy decides for ingest sources; signal-less live (plain-url Jellyfin
@@ -831,44 +904,41 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         guard isLive else { return true }
         let deadline = Date().addingTimeInterval(timeout)
         let window = liveWindowSizing.windowSegmentCount
-        let cadenceFloor = liveCadencePolicy?.targetDurationFloorSeconds
-        let cutTarget = liveWindowSizing.targetSegmentDurationSeconds
         firstSegmentCondition.lock()
         defer { firstSegmentCondition.unlock() }
         while true {
             if waitersCancelled { return false }
             let snap = liveCushionSnapshot()
+            let target = currentLiveTargetDuration(maxSegmentDuration: snap.maxDuration)
             if LiveEdgePolicy.startupCushionSatisfied(segmentCount: snap.count,
                                                        summedDurationSeconds: snap.summed,
-                                                       maxSegmentDuration: snap.maxDuration,
-                                                       cutTargetSeconds: cutTarget,
-                                                       cadenceFloorSeconds: cadenceFloor,
+                                                       targetDuration: target.value,
                                                        windowSegmentCount: window) {
+                _ = sealLiveTargetDuration(candidate: target.value)
                 return true
             }
             if !firstSegmentCondition.wait(until: deadline) {
                 // Re-read after the timed-out wait: an append racing the deadline would otherwise be judged
                 // on the stale snapshot (waitForLiveSegment below already does this).
                 let after = liveCushionSnapshot()
+                let afterTarget = currentLiveTargetDuration(maxSegmentDuration: after.maxDuration)
                 // Degraded start: serving before the holdback cushion is built (transcode too slow, or a
                 // strict-realtime origin that has not produced 3 x TD of content within the deadline) makes
                 // a -16832 "restarting from end of live playlist" stall right after startup likely. Observe it.
                 if after.count > 0 && !LiveEdgePolicy.startupCushionSatisfied(segmentCount: after.count,
                                                                              summedDurationSeconds: after.summed,
-                                                                             maxSegmentDuration: after.maxDuration,
-                                                                             cutTargetSeconds: cutTarget,
-                                                                             cadenceFloorSeconds: cadenceFloor,
+                                                                             targetDuration: afterTarget.value,
                                                                              windowSegmentCount: window) {
-                    let td = LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: after.maxDuration,
-                                                                  cutTargetSeconds: cutTarget,
-                                                                  cadenceFloorSeconds: cadenceFloor)
                     EngineLog.emit(
                         "[HLSVideoEngine] WARNING: live startup degraded, serving first playlist with "
                         + "\(after.count) segments / \(String(format: "%.1f", after.summed))s < "
-                        + "\(String(format: "%.1f", LiveEdgePolicy.holdBackSeconds(targetDuration: td)))s holdback "
+                        + "\(String(format: "%.1f", LiveEdgePolicy.holdBackSeconds(targetDuration: afterTarget.value)))s holdback "
                         + "after \(Int(timeout))s timeout (undersized startup cushion)",
                         category: .session
                     )
+                }
+                if after.count > 0 {
+                    _ = sealLiveTargetDuration(candidate: afterTarget.value)
                 }
                 return after.count > 0
             }
