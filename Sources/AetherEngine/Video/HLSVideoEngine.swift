@@ -725,7 +725,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceVideoTbSeconds = Double(videoTimeBase.num) / Double(videoTimeBase.den)
         }
         let durationSeconds = dem.duration
-        let plan: [Segment]
+        var plan: [Segment]
         if isLiveSession {
             sourceBitrate = dem.bitRate
             self.firstKeyframePts = 0
@@ -946,7 +946,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // Fold degenerate sub-frame segments (keyframe clusters make buildKeyframeSegmentPlan emit
         // ~40 ms segments the producer cannot cut, wedging the near-EOF resume; the plan and producer
         // share these boundaries, so the merge fixes both at once).
-        self.segmentPlan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
+        plan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
+        self.segmentPlan = plan
 
         // #93 residual: anchor the FIRST producer at the session's start position instead of seg0.
         // A resume start otherwise produces seg0 (torn down and discarded seconds later when

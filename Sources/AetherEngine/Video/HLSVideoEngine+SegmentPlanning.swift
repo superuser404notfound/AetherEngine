@@ -171,8 +171,15 @@ extension HLSVideoEngine {
     /// endless item reload; Sodalite near-EOF resume hang, device-confirmed). Merging widens the window so
     /// a resident keyframe is guaranteed and the two agree. Interior/final short segments fold into the
     /// PRECEDING kept segment; a too-short first segment (no predecessor) folds forward into its successor.
-    /// Every kept boundary is still an original plan boundary (a real keyframe), and total duration is
-    /// conserved. Pure for offline testing.
+    /// Every kept boundary is still an original plan boundary, and total duration is conserved.
+    ///
+    /// AE#169: also fold a final slot shorter than the normal cut target into its predecessor. The final
+    /// boundary has no later IRAP that can rescue a Cues/runtime keyframe disagreement. Advertising that
+    /// terminal slot left seg719 structurally unproducible while the producer correctly carried its tail
+    /// in seg718. Folding only sub-target tails adds less than one ordinary segment span to the existing
+    /// final segment while removing the unrecoverable boundary.
+    ///
+    /// Pure for offline testing.
     static func collapseShortSegments(_ plan: [Segment], minDurationSeconds: Double) -> [Segment] {
         guard plan.count > 1, minDurationSeconds > 0 else { return plan }
         var out: [Segment] = []
@@ -199,6 +206,17 @@ extension HLSVideoEngine {
                 durationSeconds: a.durationSeconds + b.durationSeconds,
                 discontinuous: a.discontinuous)
             out.removeFirst()
+        }
+        if out.count > 1, let tail = out.last,
+           tail.durationSeconds < Self.targetSegmentDuration {
+            let previous = out[out.count - 2]
+            out[out.count - 2] = Segment(
+                startPts: previous.startPts,
+                endPts: tail.endPts,
+                startSeconds: previous.startSeconds,
+                durationSeconds: previous.durationSeconds + tail.durationSeconds,
+                discontinuous: previous.discontinuous)
+            out.removeLast()
         }
         return out
     }
