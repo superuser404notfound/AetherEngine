@@ -302,20 +302,13 @@ extension AetherEngine {
             subtitleDrainCursors[channel] = SubtitleDrainCursor(
                 lastDecodedPts: lastDecoded ?? window.from,
                 lastPlayhead: playhead)
-            // #143 follow-up (cmcpherson274 5.9.7 retest): admitDuringReconstruction flushes the
-            // seeded active-line candidate only when a composition at/after the playhead decodes. A
-            // landing set that is the newest composition in the file, or whose next line is beyond the
-            // forward lead window (sparse dialogue, forced cues), has no such trigger, so the candidate
-            // hangs held and the overlay stays dark. Once the backscan has seeded a candidate and no
-            // successor is stored ahead in the lead window, finalize the pass so the landing line paints.
-            let hasSuccessorAhead = !store.entries(
-                streamIndex: streamIndex,
-                from: playhead.nextUp,
-                through: playhead + Self.subtitleDrainLeadSeconds).isEmpty
+            // #143/#204: a renderable composition at/after the playhead ends reconstruction while
+            // decoding above. If the pass remains active with a candidate after the whole window,
+            // finalize it. Raw packet presence cannot answer this: the landing line's own zero-object
+            // CLEAR is stored ahead and trims the candidate, but carries no cues that can end the pass.
             if SubtitleOverlayDrainer.shouldFinalizeReconstruction(
                 reconstructing: pgsStaleArrivalGates[channel]?.reconstructing ?? false,
-                hasCandidate: pgsStaleArrivalGates[channel]?.hasReconstructionCandidate ?? false,
-                hasSuccessorAhead: hasSuccessorAhead) {
+                hasCandidate: pgsStaleArrivalGates[channel]?.hasReconstructionCandidate ?? false) {
                 for cue in pgsStaleArrivalGates[channel, default: PGSStaleArrivalGate()]
                     .finalizeReconstruction(playhead: playhead) {
                     insertFinalizedReconstructionCue(cue, channel: channel)
