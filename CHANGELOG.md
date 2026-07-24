@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.6] - 2026-07-24
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.6))
+
+### Fixed
+
+- **PGS seek landings now publish when the landing line's own zero-object `CLEAR` is the only stored successor in the drain lead window.** The 5.15.2 reconstruction finalizer correctly handled open-ended and far-clear landings, but treated every stored packet after the playhead as a pass-ending successor. A normal authored `CLEAR` trimmed the held landing candidate to its correct end while carrying no cues that could end `admitDuringReconstruction`, so the bounded candidate remained silently withheld. Reconstruction finalization now uses the decoded gate state: a renderable successor already ends the pass while decoding, while a clear-only successor leaves the correctly trimmed candidate ready to publish. Forced cues and end-of-file landings follow the same path. Reported with a controlled clear-position matrix by cmcpherson274 (#204, residual from #143). Covered by `Issue204PGSClearLandingTests` and the existing #143/#146 reconstruction suites.
+
 ## [5.20.5] - 2026-07-24
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.5))
