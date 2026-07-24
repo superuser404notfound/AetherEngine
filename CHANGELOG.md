@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+## [5.20.5] - 2026-07-24
+
+([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.5))
+
+### Fixed
+
+- **Live loopback playlists now keep one stable `TARGETDURATION` and matching `HOLD-BACK` for the complete provider lifetime.** The first-manifest gate captured the observed cadence floor once before waiting, while each playlist refresh independently recomputed timing from the latest cadence and visible segment duration. A session could therefore begin with `TARGETDURATION:1` and `HOLD-BACK=3`, then change to `TARGETDURATION:2` and `HOLD-BACK=6` after AVPlayer was already ready with buffered segments, violating the HLS requirement that `TARGETDURATION` remain constant. The provider now owns one timing seal shared by the startup gate and every playlist build. The gate re-reads cadence after each wake until it releases, then seals that decision; later cadence still controls blocking-reload eligibility but cannot mutate the timing tags. Reported with first-versus-later playlist captures by Simpendaal (#209). Covered by `Issue209LiveTargetDurationStabilityTests`.
+- **Explicit `.fastZap` sessions now have a bounded first-manifest wait on strict-realtime origins.** The low-latency profile shortened segments and holdback, but the first playlist still waited for the complete `3 x TARGETDURATION` cushion or the 30-second outer fallback. A source arriving at wall-clock speed could therefore exceed the host's video-presence watchdog before AVPlayer received any media playlist. Full holdback remains preferred. Once at least two finalized segments exist, `.fastZap` waits one observed-segment grace clamped to 0.5...2.0 seconds, then may serve a shallow first window. `.standard` retains the full-holdback guarantee. The bounded trade-off can produce one early `-16832` or a short rebuffer while the window deepens. Reported with strict-realtime startup measurements by kskchaitanya1993 (#208). Covered by `Issue208FastZapDegradedStartTests`.
+
 ## [5.20.4] - 2026-07-24
 
 ([release notes](https://github.com/superuser404notfound/AetherEngine/releases/tag/5.20.4))
