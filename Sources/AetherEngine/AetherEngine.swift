@@ -3038,6 +3038,30 @@ public final class AetherEngine: ObservableObject {
         audioAVPlayerHost?.setExternalMetadata(items)
     }
 
+    #if os(tvOS) || os(iOS)
+    /// MPNowPlayingSession for the native VIDEO path, or nil (software path / no host). Same contract
+    /// as `audioNowPlayingSession`: the host app registers transport commands on
+    /// `remoteCommandCenter` and stages identity metadata via `setVideoNowPlayingInfo`; the session
+    /// auto-publishes elapsed/rate/duration from the AVPlayer and survives native->native reloads
+    /// with the host (issue #15), so system Now-Playing ownership holds across a background pause.
+    public var videoNowPlayingSession: MPNowPlayingSession? {
+        nativeHost?.nowPlayingSession
+    }
+    #endif
+
+    /// Staged per-item Now-Playing dictionary for the native video path. Replayed at host creation
+    /// and onto every fresh AVPlayerItem (gate reloads, media fallback, in-place swaps). Caller-managed
+    /// like the audio variant: pass an empty dict to clear.
+    var pendingVideoNowPlayingInfo: [String: Any] = [:]
+
+    /// Stage the system Now-Playing identity dictionary for the native video path (MPMediaItemProperty
+    /// keys + a force-decoded, @Sendable-wrapped MPMediaItemArtwork). Elapsed/rate/duration keys are
+    /// unnecessary — the session merges the player truth. Safe before load(); replayed at host creation.
+    public func setVideoNowPlayingInfo(_ info: [String: Any]) {
+        pendingVideoNowPlayingInfo = info
+        nativeHost?.setNowPlayingInfo(info)
+    }
+
     #if os(iOS) || os(tvOS)
     /// Staged per-item Now-Playing dictionary for the audio AVPlayer path. Replayed at host creation.
     var pendingAudioNowPlayingInfo: [String: Any] = [:]

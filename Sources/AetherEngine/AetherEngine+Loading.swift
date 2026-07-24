@@ -147,6 +147,9 @@ extension AetherEngine {
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
         }
+        if !pendingVideoNowPlayingInfo.isEmpty {
+            host.setNowPlayingInfo(pendingVideoNowPlayingInfo)
+        }
         self.nativeHost = host
         // A surface bound BEFORE load ran presentCurrentLayer() while nativeHost was still nil
         // (no-op); without this re-present nothing ever attaches host.playerLayer and AVPlayer
@@ -749,6 +752,9 @@ extension AetherEngine {
         // Forward pre-load externalMetadata so the AVPlayerItem picks it up before AVPlayer assigns it.
         if !pendingExternalMetadata.isEmpty {
             host.setExternalMetadata(pendingExternalMetadata)
+        }
+        if !pendingVideoNowPlayingInfo.isEmpty {
+            host.setNowPlayingInfo(pendingVideoNowPlayingInfo)
         }
         self.nativeHost = host
         applyDesiredVolume(to: host)
