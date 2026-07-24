@@ -143,8 +143,8 @@ struct Issue143PGSLandingLineTests {
     // (the candidate seeds) yet never publishes. admitDuringReconstruction only flushes on an
     // at/after-playhead composition (the pass-end trigger); an isolated landing has none, so the
     // candidate hangs held and the overlay stays dark (tens of seconds on sparse dialogue, forever
-    // at EOF, forced cues included). The drain now finalizes the pass once it confirms no successor
-    // is stored ahead.
+    // at EOF, forced cues included). The drain now finalizes the pass when the decoded window
+    // leaves reconstruction active with a seeded candidate.
 
     @Test("isolated landing line (file's last composition) is emitted when the drain finalizes the pass")
     func isolatedLandingFinalizes() {

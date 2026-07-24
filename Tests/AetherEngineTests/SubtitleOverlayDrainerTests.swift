@@ -56,32 +56,24 @@ struct SubtitleOverlayDrainerTests {
         #expect(plan == .idle)
     }
 
-    // #143 follow-up: a reconstruction pass whose landing line is the newest composition in the
-    // drain window has no successor to trigger admitDuringReconstruction's flush. The drain
-    // finalizes it once it confirms a candidate is seeded and no composition is stored ahead in the
-    // lead window.
+    // #143/#204: after the drain window decodes, a still-active reconstruction pass with a seeded
+    // candidate has no renderable successor to end it. Raw packets ahead may be zero-object clears.
 
-    @Test("reconstruction with a seeded candidate and no successor ahead should finalize")
-    func finalizeWhenNoSuccessorAhead() {
+    @Test("reconstruction with a seeded candidate should finalize after the window decodes")
+    func finalizeWithCandidate() {
         #expect(SubtitleOverlayDrainer.shouldFinalizeReconstruction(
-            reconstructing: true, hasCandidate: true, hasSuccessorAhead: false))
-    }
-
-    @Test("a stored successor in the lead window ends the pass the normal way, not by finalize")
-    func noFinalizeWhenSuccessorAhead() {
-        #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
-            reconstructing: true, hasCandidate: true, hasSuccessorAhead: true))
+            reconstructing: true, hasCandidate: true))
     }
 
     @Test("finalize needs a seeded candidate: a true gap with nothing behind ends nothing")
     func noFinalizeWithoutCandidate() {
         #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
-            reconstructing: true, hasCandidate: false, hasSuccessorAhead: false))
+            reconstructing: true, hasCandidate: false))
     }
 
     @Test("finalize only applies inside a reconstruction pass")
     func noFinalizeOutsideReconstruction() {
         #expect(!SubtitleOverlayDrainer.shouldFinalizeReconstruction(
-            reconstructing: false, hasCandidate: true, hasSuccessorAhead: false))
+            reconstructing: false, hasCandidate: true))
     }
 }
