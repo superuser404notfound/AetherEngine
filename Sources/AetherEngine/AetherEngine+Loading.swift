@@ -1021,6 +1021,25 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
+        let deinterlaceMode = loadedOptions.deinterlaceMode
+        let waitStarted = DispatchTime.now()
+        if let outcome = await DeinterlaceHardwareWarmup.shared.waitIfNeeded(
+            for: deinterlaceMode
+        ) {
+            try checkLoadCurrent(generation)
+            let elapsed = Double(
+                DispatchTime.now().uptimeNanoseconds - waitStarted.uptimeNanoseconds
+            ) / 1_000_000_000
+            if elapsed >= 0.05 {
+                EngineLog.emit(
+                    "[AetherEngine] software load waited "
+                    + "\(String(format: "%.3f", elapsed))s for hardware "
+                    + "deinterlace warm-up (\(outcome.rawValue))",
+                    category: .swPlayback
+                )
+            }
+        }
+
         activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         let host = SoftwarePlaybackHost()
         host.deinterlaceConfig = DeinterlaceConfig(

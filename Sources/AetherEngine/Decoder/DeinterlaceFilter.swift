@@ -64,6 +64,41 @@ final class DeinterlaceFilter {
 
     var isActive: Bool { graph != nil }
 
+    static func prewarmHardwarePipeline() -> Bool {
+        guard avfilter_get_by_name("yadif_videotoolbox") != nil,
+              let frame = av_frame_alloc() else {
+            return false
+        }
+        var ownedFrame: UnsafeMutablePointer<AVFrame>? = frame
+        defer {
+            av_frame_free(&ownedFrame)
+        }
+
+        frame.pointee.width = 64
+        frame.pointee.height = 64
+        frame.pointee.format = AV_PIX_FMT_YUV420P.rawValue
+        frame.pointee.pts = 0
+        frame.pointee.flags |= (1 << 3)
+        frame.pointee.sample_aspect_ratio = AVRational(num: 1, den: 1)
+        guard av_frame_get_buffer(frame, 0) >= 0 else {
+            return false
+        }
+
+        let filter = DeinterlaceFilter()
+        filter.config = DeinterlaceConfig(mode: .auto, fieldRate: .field)
+        defer {
+            filter.teardown()
+        }
+
+        guard filter.ensureGraph(
+            frame: frame,
+            timeBase: AVRational(num: 1, den: 30)
+        ) else {
+            return false
+        }
+        return filter.engine == .hardware
+    }
+
     /// Build (or rebuild after a parameter change) the graph for the given frame's geometry.
     /// Returns false when no deinterlacer is compiled into the linked FFmpeg build or graph setup
     /// fails; the caller then renders the frame directly (combing, but playing).

@@ -128,4 +128,15 @@ struct DeinterlaceHardwareTests {
                     "output PTS \(s)s exceeds source range (\(maxInput)s)")
         }
     }
+
+    @Test("warm-up releases its temporary graph and a fresh hardware graph remains usable")
+    func warmupLeavesFreshGraphUsable() {
+        guard DeinterlaceFilter.prewarmHardwarePipeline() else {
+            return
+        }
+
+        let (seconds, hardware) = run(fieldRate: .field, count: 8)
+        #expect(hardware)
+        #expect(!seconds.isEmpty)
+    }
 }
