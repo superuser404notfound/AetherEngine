@@ -42,6 +42,10 @@ protocol HLSSegmentProvider: AnyObject {
     /// Real upstream arrival cadence for bursty sources; raises TARGETDURATION so AVPlayer's 1.5x patience covers the inter-batch gap.
     var liveTargetDurationFloorSeconds: Double? { get }
 
+    /// Session-stable TARGETDURATION for a live playlist. Production providers seal the first resolved
+    /// value so later cadence or visible-segment growth cannot mutate RFC 8216 playlist timing.
+    func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int
+
     /// Master-playlist metadata. When masterCodecs is non-nil the server publishes master.m3u8; nil means media-playlist-only.
     var masterCodecs: String? { get }
     var masterResolution: (width: Int, height: Int)? { get }
@@ -107,6 +111,13 @@ extension HLSSegmentProvider {
     var liveTargetSegmentDuration: Double? { nil }
     var liveBlockingReloadEnabled: Bool { true }
     var liveTargetDurationFloorSeconds: Double? { nil }
+    func liveTargetDurationSeconds(maxSegmentDuration: Double) -> Int {
+        LiveEdgePolicy.targetDurationSeconds(
+            maxSegmentDuration: maxSegmentDuration,
+            cutTargetSeconds: liveTargetSegmentDuration,
+            cadenceFloorSeconds: liveTargetDurationFloorSeconds
+        )
+    }
     func waitForFirstLiveSegment(timeout: TimeInterval) -> Bool { true }
     func waitForLiveSegment(index: Int, timeout: TimeInterval) -> Bool { true }
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
@@ -1198,10 +1209,13 @@ final class HLSLocalServer: @unchecked Sendable {
         for i in firstVisible..<count {
             maxDuration = max(maxDuration, provider.segmentDuration(at: i))
         }
-        let targetDuration = LiveEdgePolicy.targetDurationSeconds(
-            maxSegmentDuration: maxDuration,
-            cutTargetSeconds: typeIsLive ? provider.liveTargetSegmentDuration : nil,
-            cadenceFloorSeconds: typeIsLive ? provider.liveTargetDurationFloorSeconds : nil)
+        let targetDuration = typeIsLive
+            ? provider.liveTargetDurationSeconds(maxSegmentDuration: maxDuration)
+            : LiveEdgePolicy.targetDurationSeconds(
+                maxSegmentDuration: maxDuration,
+                cutTargetSeconds: nil,
+                cadenceFloorSeconds: nil
+            )
 
         var lines: [String] = []
         lines.append("#EXTM3U")
@@ -1291,4 +1305,3 @@ enum HLSLocalServerError: Error, CustomStringConvertible {
         }
     }
 }
-
