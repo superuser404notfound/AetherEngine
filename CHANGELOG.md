@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Display-criteria settle times in the log are measured now, instead of
+  having the Stage 1 budget added back in.** Stage 2 reported
+  `startGrace.ticks * 10 + stage2Ticks * 50`, which counts Stage 1's entire
+  blind-poll budget whether or not it was spent, so a rate switch that settled
+  one 50 ms tick after a start the gate saw immediately logged `~1050ms`. Every
+  settle time in every log collected so far reads up to a full second slow,
+  including the ones the `.brief` play-gate budget (#274) was reasoned about.
+  The line now carries the real numbers plus how Stage 1 learned of the switch:
+  `start pre-gate after 0ms, total 90ms`, where `pre-gate` means the panel was
+  already switching when the gate opened (so the switch began during the load
+  that built the AVPlayerItem) and `in-gate` means it started inside the gate.
+  That distinction is the ordering question these logs were added for and could
+  not answer. The Stage 2 cap also stops attributing every unobservable switch
+  to an unobservable DV panel: it reads the same attribution the settle branch
+  got in #274, so an engine rate-only write that never reports an end says so
+  rather than claiming DV. Measured from the logs on Sodalite#49.
 
 ## [6.4.4] - 2026-08-02
 

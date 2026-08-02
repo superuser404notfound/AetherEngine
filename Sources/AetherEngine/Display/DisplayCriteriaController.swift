@@ -61,7 +61,10 @@ final class DisplayCriteriaController {
         /// Nothing can be pending; return before touching the display manager.
         case skip
         /// 200 ms: only a rate-only switch could still start (the pre-#274 budget, sized for a synchronous
-        /// engine write). Rate switches are sub-second and the engine already declines to gate its own.
+        /// engine write). The engine already declines to pre-flight its own rate-only writes on the premise
+        /// that they are sub-second, which is an assumption from d87b54d that no log has ever measured: the
+        /// settle times it would have been read off were inflated by the whole Stage 1 budget (Sodalite#49).
+        /// `timingSuffix` now reports the real number, so this budget can be confirmed or corrected.
         case brief
         /// 1000 ms: a dynamic-range switch may still be inbound from a writer whose timing we don't control
         /// (AVKit's auto-criteria path fires from the AVPlayerItem formatDescription). DV P5 cold start
@@ -77,23 +80,59 @@ final class DisplayCriteriaController {
         }
     }
 
-    /// What a mode switch that ended with EDR headroom still at 1.0 means. Only the engine's own HDR write
-    /// makes that a failure; a switch the engine never initiated carries no target range it could check
-    /// against, so attributing one produced a false "panel stayed SDR despite HDR criteria" WARN on
-    /// sole-writer hosts (#274).
-    enum SwitchEndOutcome: Equatable {
-        /// Engine wrote SDR rate-only criteria: the panel staying SDR is the expected end state.
-        case rateOnlySettled
-        /// Engine wrote HDR criteria and the panel ended SDR: a real dynamic-range handshake failure.
-        case hdrHandshakeFailed
+    /// Who wrote the criteria a switch belongs to, and what range they asked for. Only the engine's own HDR
+    /// write makes a switch that ends with EDR headroom still at 1.0 a failure; a switch the engine never
+    /// initiated carries no target range it could check against, so attributing one produced a false "panel
+    /// stayed SDR despite HDR criteria" WARN on sole-writer hosts (#274). The Stage 2 cap reads the same
+    /// attribution: an engine rate-only write that never reports an end is not the unobservable-DV case its
+    /// log line claimed for every session alike (Sodalite#49).
+    enum CriteriaAttribution: Equatable {
+        /// Engine wrote SDR rate-only criteria: a settle at headroom 1.0 is the expected end state.
+        case engineRateOnly
+        /// Engine wrote HDR criteria: a settle at headroom 1.0 is a real dynamic-range handshake failure.
+        case engineHDR
         /// Engine never wrote this session (sole-writer host): the switch was somebody else's, its target
         /// range is not knowable here.
-        case hostDrivenUnattributable
+        case hostDriven
     }
 
-    nonisolated static func switchEndOutcome(didApply: Bool, lastCriteriaWasHDR: Bool) -> SwitchEndOutcome {
-        guard didApply else { return .hostDrivenUnattributable }
-        return lastCriteriaWasHDR ? .hdrHandshakeFailed : .rateOnlySettled
+    nonisolated static func criteriaAttribution(didApply: Bool, lastCriteriaWasHDR: Bool) -> CriteriaAttribution {
+        guard didApply else { return .hostDriven }
+        return lastCriteriaWasHDR ? .engineHDR : .engineRateOnly
+    }
+
+    /// How Stage 1 learned a switch was running. This is the one bit that separates "the panel was already
+    /// switching while the AVPlayerItem was built" from "the switch started after the gate opened", the
+    /// ordering question Sodalite#49 was filed on and which no log line could answer. The observers are
+    /// registered on entry, so a switch that began earlier is only visible through the in-progress flag;
+    /// a start notification means it began inside the gate.
+    enum StartSignal: String, Equatable {
+        /// In-progress flag already set when polling began: the switch started before the gate, i.e. during
+        /// the load that built the item.
+        case preGate = "pre-gate"
+        /// Mode-switch-start notification arrived while the gate was polling.
+        case inGate = "in-gate"
+        /// Nothing observed within the budget.
+        case none = "none"
+    }
+
+    /// The two numbers a settle log needs to be usable: when Stage 1 saw the switch start, and how long the
+    /// whole gate took. Both used to be reported as `startGrace.ticks * 10 + stage2Ticks * 50`, which counts
+    /// the Stage 1 *budget* rather than the time actually spent in it, so every settle in every log read up
+    /// to a full second slower than it was and no measurement of real switch latency was possible (#49).
+    nonisolated static func timingSuffix(startSignal: StartSignal, stage1Ms: Int, totalMs: Int) -> String {
+        "start \(startSignal.rawValue) after \(stage1Ms)ms, total \(totalMs)ms"
+    }
+
+    /// Guarded against reversed arguments: unsigned uptime subtraction traps, and a diagnostic helper is a
+    /// poor reason to crash playback.
+    nonisolated static func elapsedMs(fromNanos start: UInt64, toNanos end: UInt64) -> Int {
+        guard end > start else { return 0 }
+        return Int(Double(end - start) / 1_000_000)
+    }
+
+    nonisolated static func elapsedMs(since start: DispatchTime) -> Int {
+        elapsedMs(fromNanos: start.uptimeNanoseconds, toNanos: DispatchTime.now().uptimeNanoseconds)
     }
 
     init() {}
@@ -231,6 +270,7 @@ final class DisplayCriteriaController {
         guard let window = resolveWindow() else { return }
         let displayManager = window.avDisplayManager
         let screen = window.screen
+        let entry = DispatchTime.now()
 
         // Fast exit: panel already in HDR (headroom already raised, e.g. a prior
         // HDR/DV session left it there).
@@ -263,23 +303,29 @@ final class DisplayCriteriaController {
         // path fires it later than the engine pre-flight), so give it headroom
         // before the DV asset loads; starting the decode mid-write races an
         // AVPlayer error on DV Profile 8.1.
-        var sawSwitchStart = false
+        //
+        // Which of the two signals ends this stage is recorded, not just that one did: the in-progress flag
+        // being set on the first poll means the panel was already switching while the item was built, which
+        // is the ordering Sodalite#49 suspected and which nothing in the log used to distinguish from a
+        // switch that started inside the gate.
+        var startSignal = StartSignal.none
         for _ in 0..<startGrace.ticks {
             if switchEnded.fired || screen.currentEDRHeadroom > 1.001 {
-                EngineLog.emit("[DisplayCriteria] settled during start phase (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+                EngineLog.emit("[DisplayCriteria] settled during start phase (after \(Self.elapsedMs(since: entry))ms, EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
-            if switchStarted.fired || displayManager.isDisplayModeSwitchInProgress {
-                sawSwitchStart = true
-                break
-            }
+            if switchStarted.fired { startSignal = .inGate; break }
+            if displayManager.isDisplayModeSwitchInProgress { startSignal = .preGate; break }
             try? await Task.sleep(for: .milliseconds(10))
         }
+        // Time spent, not the budget: the polls carry scheduler overhead, and everything downstream is
+        // reported relative to this (#49).
+        let stage1Ms = Self.elapsedMs(since: entry)
         let startBudgetMs = startGrace.ticks * 10
-        if !sawSwitchStart {
+        if startSignal == .none {
             // No switch started within the grace: panel already satisfies the criteria
             // or the setter was a no-op. Don't block; AVPlayer tonemaps or errors for real.
-            EngineLog.emit("[DisplayCriteria] no switch started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after \(startBudgetMs)ms); proceeding", category: .engine)
+            EngineLog.emit("[DisplayCriteria] no switch started (EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)) after \(stage1Ms)ms, budget \(startBudgetMs)ms); proceeding", category: .engine)
             return
         }
 
@@ -289,36 +335,51 @@ final class DisplayCriteriaController {
         // switch is unobservable to the app can't gate the first frame the way the
         // old fixed 5s poll did.
         let capTicks = 40  // 40 x 50ms = 2000ms
-        for tick in 0..<capTicks {
+        func timing() -> String {
+            Self.timingSuffix(startSignal: startSignal, stage1Ms: stage1Ms,
+                              totalMs: Self.elapsedMs(since: entry))
+        }
+        for _ in 0..<capTicks {
             try? await Task.sleep(for: .milliseconds(50))
-            let elapsed = (tick + 1) * 50 + startBudgetMs
             if switchEnded.fired {
-                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (~\(elapsed)ms)", category: .engine)
+                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()))", category: .engine)
                 return
             }
             if screen.currentEDRHeadroom > 1.001 {
-                EngineLog.emit("[DisplayCriteria] switch settled via EDR (~\(elapsed)ms, headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+                EngineLog.emit("[DisplayCriteria] switch settled via EDR (\(timing()), headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
                 return
             }
             if !displayManager.isDisplayModeSwitchInProgress {
                 // Headroom is still 1.0 here (the EDR check above runs first each tick).
-                switch Self.switchEndOutcome(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
-                case .rateOnlySettled:
+                switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
+                case .engineRateOnly:
                     // SDR rate-only criteria: refresh-rate switch settled, panel correctly stayed SDR.
-                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (~\(elapsed)ms, SDR, EDR headroom 1.0 as expected)", category: .engine)
-                case .hdrHandshakeFailed:
+                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, EDR headroom 1.0 as expected)", category: .engine)
+                case .engineHDR:
                     // HDR was requested but panel ended in SDR: real dynamic-range handshake failure.
-                    EngineLog.emit("[DisplayCriteria] WARN switch ended (~\(elapsed)ms) but EDR headroom still 1.0 (panel stayed SDR despite HDR criteria)", category: .engine)
-                case .hostDrivenUnattributable:
+                    EngineLog.emit("[DisplayCriteria] WARN switch ended (\(timing())) but EDR headroom still 1.0 (panel stayed SDR despite HDR criteria)", category: .engine)
+                case .hostDriven:
                     // #274: sole-writer host. The engine wrote nothing, so it has no target range to compare
                     // the SDR end state against; a host SDR rate write ending SDR is correct and used to be
                     // logged as an HDR handshake failure.
-                    EngineLog.emit("[DisplayCriteria] host switch ended (~\(elapsed)ms, EDR headroom 1.0; engine wrote no criteria this session, target range unknown)", category: .engine)
+                    EngineLog.emit("[DisplayCriteria] host switch ended (\(timing()), EDR headroom 1.0; engine wrote no criteria this session, target range unknown)", category: .engine)
                 }
                 return
             }
         }
-        EngineLog.emit("[DisplayCriteria] proceed after ~\(capTicks * 50 + startBudgetMs)ms cap (switch not observable, likely DV; EDR headroom \(String(format: "%.2f", screen.currentEDRHeadroom)))", category: .engine)
+        // Cap reached: the in-progress flag never cleared. "Unobservable DV panel" was the blanket
+        // explanation, but it only fits an HDR write; an engine rate-only write sitting here for two
+        // seconds contradicts the sub-second premise the .brief budget rests on and is worth reading as
+        // its own event (Sodalite#49).
+        let headroom = String(format: "%.2f", screen.currentEDRHeadroom)
+        switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
+        case .engineRateOnly:
+            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine rate-only criteria, switch never reported end, panel may still be mid-switch; EDR headroom \(headroom))", category: .engine)
+        case .engineHDR:
+            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine HDR criteria, switch not observable, likely DV; EDR headroom \(headroom))", category: .engine)
+        case .hostDriven:
+            EngineLog.emit("[DisplayCriteria] proceed after cap (\(timing()); engine wrote no criteria this session, switch not observable; EDR headroom \(headroom))", category: .engine)
+        }
         #endif
     }
 

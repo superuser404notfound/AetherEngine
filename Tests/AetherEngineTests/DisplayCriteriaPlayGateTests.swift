@@ -6,7 +6,11 @@ import Testing
 // auto path, DV P5 cold start). Sessions no dynamic-range switch can reach paid it as dead startup time,
 // and the Stage 2 classification attributed a host-driven switch that ended SDR to a failed HDR handshake.
 // Both are pure decisions; this suite covers them.
-@Suite("DisplayCriteria play-gate grace and switch-end attribution")
+//
+// Sodalite#49: the settle log those decisions would be verified against was reporting Stage 1's whole
+// budget as time spent, so no run ever showed how long a switch really took. The timing helpers are pure
+// too, and covered here alongside.
+@Suite("DisplayCriteria play-gate grace, switch attribution and settle timing")
 struct DisplayCriteriaPlayGateTests {
 
     // MARK: - Stage 1 budget
@@ -61,29 +65,62 @@ struct DisplayCriteriaPlayGateTests {
         #expect(DisplayCriteriaController.StartGrace.full.ticks == 100)   // 100 x 10ms = 1000ms
     }
 
-    // MARK: - Stage 2 attribution
+    // MARK: - Criteria attribution
 
     @Test("Engine HDR criteria ending with headroom 1.0 stays a real handshake failure")
     func engineHDRFailureStillWarns() {
-        #expect(DisplayCriteriaController.switchEndOutcome(
-            didApply: true, lastCriteriaWasHDR: true) == .hdrHandshakeFailed)
+        #expect(DisplayCriteriaController.criteriaAttribution(
+            didApply: true, lastCriteriaWasHDR: true) == .engineHDR)
     }
 
     @Test("Engine SDR rate-only criteria ending SDR is the expected outcome")
     func engineRateOnlySettles() {
-        #expect(DisplayCriteriaController.switchEndOutcome(
-            didApply: true, lastCriteriaWasHDR: false) == .rateOnlySettled)
+        #expect(DisplayCriteriaController.criteriaAttribution(
+            didApply: true, lastCriteriaWasHDR: false) == .engineRateOnly)
     }
 
     @Test("A switch the engine never wrote is unattributable, not an HDR failure")
     func hostDrivenSwitchIsUnattributable() {
         // The reporter's symptom: a host SDR rate write, mid-load, logged as
         // "panel stayed SDR despite HDR criteria" because didApply was false.
-        #expect(DisplayCriteriaController.switchEndOutcome(
-            didApply: false, lastCriteriaWasHDR: false) == .hostDrivenUnattributable)
+        #expect(DisplayCriteriaController.criteriaAttribution(
+            didApply: false, lastCriteriaWasHDR: false) == .hostDriven)
         // lastCriteriaWasHDR is stale state from a previous session once didApply is false; it must not
         // resurrect the HDR verdict.
-        #expect(DisplayCriteriaController.switchEndOutcome(
-            didApply: false, lastCriteriaWasHDR: true) == .hostDrivenUnattributable)
+        #expect(DisplayCriteriaController.criteriaAttribution(
+            didApply: false, lastCriteriaWasHDR: true) == .hostDriven)
+    }
+
+    // MARK: - Settle timing (Sodalite#49)
+
+    @Test("Reported timings are the measured ones, not the Stage 1 budget added back in")
+    func timingSuffixReportsMeasuredValues() {
+        let suffix = DisplayCriteriaController.timingSuffix(
+            startSignal: .preGate, stage1Ms: 5, totalMs: 55)
+        #expect(suffix == "start pre-gate after 5ms, total 55ms")
+        // The line this replaces read "~1050ms" for exactly this switch: Stage 1's full 1000 ms budget,
+        // which it never spent, plus one 50 ms Stage 2 tick.
+        #expect(!suffix.contains("1050"))
+        #expect(!suffix.contains("1000"))
+    }
+
+    @Test("Start signal distinguishes a switch already running from one that began inside the gate")
+    func startSignalNamesTheOrdering() {
+        // The whole point of #49: a pre-gate start means the panel was switching while the item was built.
+        #expect(DisplayCriteriaController.StartSignal.preGate.rawValue == "pre-gate")
+        #expect(DisplayCriteriaController.StartSignal.inGate.rawValue == "in-gate")
+        #expect(DisplayCriteriaController.timingSuffix(
+            startSignal: .inGate, stage1Ms: 120, totalMs: 300)
+            == "start in-gate after 120ms, total 300ms")
+    }
+
+    @Test("Elapsed conversion is nanoseconds to whole milliseconds, truncating")
+    func elapsedMsConvertsNanoseconds() {
+        let base: UInt64 = 1_000_000_000
+        #expect(DisplayCriteriaController.elapsedMs(fromNanos: base, toNanos: 1_050_000_000) == 50)
+        #expect(DisplayCriteriaController.elapsedMs(fromNanos: base, toNanos: base) == 0)
+        #expect(DisplayCriteriaController.elapsedMs(fromNanos: base, toNanos: 1_000_999_000) == 0)
+        // Reversed arguments must not trap on the unsigned subtraction.
+        #expect(DisplayCriteriaController.elapsedMs(fromNanos: base, toNanos: 0) == 0)
     }
 }
