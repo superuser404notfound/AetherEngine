@@ -86,6 +86,12 @@ protocol HLSSegmentProvider: AnyObject {
 
     /// LL-HLS blocking reload: block until segment at absolute index exists. Holds AVPlayer's ?_HLS_msn= reload open so it receives the new segment the instant it is cut, not a poll-interval late.
     func waitForLiveSegment(index: Int, timeout: TimeInterval) -> Bool
+
+    /// Upper bound on how long a blocking reload may hold before the 503. Production providers derive
+    /// it from the sealed TARGETDURATION (3 x TD, the HOLD-BACK depth) so a fastZap session (TD=2)
+    /// times out in 6 s instead of 18 s — a hold that outlives AVPlayer's forward buffer guarantees
+    /// the stall it was meant to prevent.
+    var liveBlockingReloadHoldSeconds: TimeInterval { get }
 }
 
 extension HLSSegmentProvider {
@@ -120,6 +126,7 @@ extension HLSSegmentProvider {
     }
     func waitForFirstLiveSegment(timeout: TimeInterval) -> Bool { true }
     func waitForLiveSegment(index: Int, timeout: TimeInterval) -> Bool { true }
+    var liveBlockingReloadHoldSeconds: TimeInterval { 18.0 }
     func notePlaylistBuild() -> (visibleCount: Int, firstVisible: Int, refreshCounter: Int, endlistAdded: Bool, discontinuitySequence: Int) {
         return (visibleCount: segmentCount, firstVisible: 0, refreshCounter: 0, endlistAdded: false, discontinuitySequence: 0)
     }
@@ -675,7 +682,7 @@ final class HLSLocalServer: @unchecked Sendable {
                         // unchanged playlist. A 200 without the requested MSN after a hold is "Invalid
                         // server blocking reload behavior" (-15410) to AVPlayer (#167 follow-up;
                         // RFC 8216bis requires the 503 here).
-                        if !p.waitForLiveSegment(index: msn, timeout: 18.0) {
+                        if !p.waitForLiveSegment(index: msn, timeout: p.liveBlockingReloadHoldSeconds) {
                             return send503(fd: fd, path: normalizedPath,
                                            reason: "blocking reload msn=\(msn) unsatisfiable")
                         }

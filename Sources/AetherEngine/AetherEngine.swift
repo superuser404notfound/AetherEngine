@@ -1679,14 +1679,20 @@ public final class AetherEngine: ObservableObject {
         stallRecoveryWindowUntil = Date().addingTimeInterval(Self.stallRecoveryWindowSeconds)
         EngineLog.emit(
             "[AetherEngine] #65 nudge did not revive the consumer; reloading item at "
-            + "\(String(format: "%.2f", anchor))s"
+            + (isLive ? "the live edge (rejoin)" : "\(String(format: "%.2f", anchor))s")
             + Self.recoveryAnchorLogSuffix(
                 anchor: anchor, position: position,
                 pendingSeekTarget: pendingRecoverySeekClockTarget)
             + " (same URL, same host)",
             category: .engine
         )
-        host.load(url: url, startPosition: anchor, inPlaceSwap: true)
+        // Live reload = live REJOIN: no stale-clock resume, no explicit start seek — the
+        // zero-tolerance seek into a possibly-slid window wedges the fresh item in waitingToPlay.
+        // Same contract as the #98 media fallback above; see LiveReloadPolicy.
+        host.load(url: url,
+                  startPosition: isLive ? nil : anchor,
+                  skipInitialSeek: LiveReloadPolicy.skipInitialSeek(isLive: isLive, isRejoin: true),
+                  inPlaceSwap: true)
         host.play()
         if let ordinal = nativeSubtitleReapplyOrdinal {
             EngineLog.emit(
