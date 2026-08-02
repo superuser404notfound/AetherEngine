@@ -28,6 +28,24 @@ the public-API contract.
   to an unobservable DV panel: it reads the same attribution the settle branch
   got in #274, so an engine rate-only write that never reports an end says so
   rather than claiming DV. Measured from the logs on Sodalite#49.
+- **Live sessions no longer freeze 6-8 s at a time when the producer's
+  backpressure park meets an LL-HLS blocking reload.** The advance park
+  released only on a client segment GET, while the client's held
+  `?_HLS_msn=` reload was only satisfiable by a producer cut — and the held
+  reload occupies the serialized keep-alive connection, starving the very
+  segment GET that would release the park. The 18 s hold then expired into
+  `503 unsatisfiable` long after AVPlayer's ~4 s forward buffer had drained
+  into `playbackStalled`. Live production is source-paced now: the advance
+  and versioned-init parks are VOD-only, replaced on live by a logged
+  resident-segment runaway guard that releases on window eviction instead of
+  consumer fetches. Three aggravators fixed alongside: the sliding window is
+  sized by the observed segment cadence instead of the cut target (fastZap's
+  0.5 s target vs ~2 s GOPs inflated the window 4x, pinning MEDIA-SEQUENCE
+  at 0 and deferring `evictBelow` for minutes), the stall-recovery item
+  reload now honors `LiveReloadPolicy` (live rejoin: no stale-clock resume,
+  no zero-tolerance initial seek), and the blocking-reload hold is bounded
+  by `3 x` the sealed TARGETDURATION (= the advertised HOLD-BACK) instead of
+  a hardcoded 18 s. VOD paths are byte-identical.
 
 ## [6.4.4] - 2026-08-02
 
