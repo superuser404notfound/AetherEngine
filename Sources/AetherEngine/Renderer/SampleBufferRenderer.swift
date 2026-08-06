@@ -101,6 +101,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     /// nil where the metrics cannot be asked for: an OS predating the API, or the pre-tvOS-18 path
     /// where the queue target is the display layer itself rather than an `AVSampleBufferVideoRenderer`.
+    @MainActor
     func loadRenderMetrics() async -> RenderMetrics? {
         guard #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) else { return nil }
         guard let m = await displayLayer.sampleBufferRenderer.videoPerformanceMetrics else { return nil }
