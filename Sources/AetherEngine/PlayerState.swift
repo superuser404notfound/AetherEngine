@@ -31,6 +31,45 @@ public enum PlaybackBackend: String, Sendable, Equatable {
     case audio
 }
 
+/// Which pipeline is actually serving the session (#321). `LoadOptions.nativeRemoteHLS` records what the
+/// host asked for; the engine can change the effective route after that, and until now only a log line
+/// said so. Observe `$videoRoute` for decisions that differ per pipeline, above all who owns subtitle
+/// drawing: on `.remoteBypass` AVPlayer renders the origin's own legible renditions, on `.loopback` and
+/// `.software` the host's renderer does.
+///
+/// Derived from `playbackBackend` + the session's effective options, never assigned on its own, so it
+/// cannot drift from the running session (the `playbackPhase` arrangement, #85).
+///
+/// Route changes the host does not request:
+/// - `.remoteBypass` -> `.loopback` when the #168 carriage watchdog finds no video track on a master
+///   that advertises one, when the #199 memory routes a known such master straight onto the ingest, and
+///   when the AE#268 probe classifies a VOD playlist as HEVC-in-MPEG-TS;
+/// - `.loopback` -> `.remoteBypass` when AE#154 / AE#246 find an HLS playlist on the loopback path.
+public enum VideoRoute: String, Sendable, Equatable {
+    /// Nothing loaded, or the session was torn down.
+    case none
+    /// AVPlayer plays the origin URL directly (`LoadOptions.nativeRemoteHLS`). No demuxer, no local
+    /// server: media selection, subtitle drawing and buffering all belong to AVFoundation.
+    case remoteBypass
+    /// Demuxer plus local HLS-fMP4 server feeding AVPlayer. The engine owns the source connection and
+    /// the subtitle pipeline; this is the default video route.
+    case loopback
+    /// FFmpeg / dav1d into AVSampleBufferDisplayLayer.
+    case software
+    /// An audio-only session. There is no video pipeline to route.
+    case audio
+
+    /// Single point where a backend and the session's effective remote-HLS bit become a route.
+    static func derive(backend: PlaybackBackend, nativeRemoteHLS: Bool) -> VideoRoute {
+        switch backend {
+        case .none, .aether: return .none
+        case .native: return nativeRemoteHLS ? .remoteBypass : .loopback
+        case .software: return .software
+        case .audio: return .audio
+        }
+    }
+}
+
 /// What playback is doing right now, as one observable (#85). Derived from `state`, `isBuffering`,
 /// `isSeeking`, and the reader network phase, so it can never desync from them. Observe `$playbackPhase`
 /// instead of stitching `state == .loading` + `$isBuffering` + `$isSeeking` together, and instead of

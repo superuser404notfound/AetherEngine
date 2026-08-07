@@ -328,7 +328,10 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, nativeHLS: Boo
     }
 
     print("")
-    print("backend=\(engine.playbackBackend.rawValue) duration=\(String(format: "%.1f", engine.duration))s isLive=\(engine.isLive)")
+    // #321: route, not just backend. `.native` covers both the loopback and the remote bypass, and an
+    // internal reroute can have moved this run off the route the flags asked for.
+    print("backend=\(engine.playbackBackend.rawValue) route=\(engine.videoRoute.rawValue) "
+          + "duration=\(String(format: "%.1f", engine.duration))s isLive=\(engine.isLive)")
     if frameTimes {
         if let timebase = engine.softwarePresentationTimebase {
             print(String(format: "  timebase: present, time=%.3fs rate=%.2f", timebase.time.seconds, timebase.rate))

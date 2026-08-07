@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`AetherEngine.videoRoute`: the pipeline actually serving the session (#321).** `LoadOptions
+  .nativeRemoteHLS` is the request, not the outcome. The #168 carriage watchdog reroutes onto the
+  ingest loopback mid-session, #199 takes it straight away for a remembered master, AE#268 does the
+  same for a HEVC-in-MPEG-TS VOD, and AE#154 / AE#246 move the other way onto the bypass; none of it
+  was observable, because `loadedOptions` is internal and `playbackBackend` is `.native` for both
+  native pipelines. The new `@Published` value publishes `.remoteBypass` / `.loopback` / `.software`
+  / `.audio` / `.none` and is derived from `playbackBackend` plus the session's effective options,
+  so it cannot desync from them. Hosts can now decide who draws subtitles, and react to a reroute
+  instead of inferring it. `aetherctl play` prints `route=` next to `backend=`.
 
 ## [6.14.0] - 2026-08-07
 

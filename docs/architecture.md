@@ -103,6 +103,25 @@ Precedence (highest first): `error > ended > idle > loading > seeking > stalled 
 
 Hosts should observe `$playbackPhase` instead of combining `state == .loading`, `$isBuffering`, and `$isSeeking`, and instead of regex-matching `EngineLog` for stall / reconnect, which is no longer needed.
 
+### Effective video route (`videoRoute`)
+
+`LoadOptions.nativeRemoteHLS` records what the host asked for. It is not what ends up serving the session: the engine reroutes on its own findings, and `playbackBackend` cannot tell the two native pipelines apart because both are `.native`. `AetherEngine.videoRoute` publishes the pipeline actually running, derived the same way `playbackPhase` is (a pure fold over `playbackBackend` and the session's effective options, recomputed from each one's `didSet`, re-emitted only on a real change), so it cannot become a second opinion about the session.
+
+- `.remoteBypass` is AVPlayer on the origin URL: no demuxer, no local server. AVFoundation owns media selection, buffering, and subtitle drawing.
+- `.loopback` is the demuxer plus the local HLS-fMP4 server, the default video route. The engine owns the source connection and the subtitle pipeline.
+- `.software`, `.audio` and `.none` mirror the corresponding backends.
+
+Routes the host did not ask for:
+
+| Transition | Trigger |
+| --- | --- |
+| `.remoteBypass` -> `.loopback` | #168 carriage watchdog: readyToPlay, but no video track for a master that advertises one (HEVC in MPEG-TS). Mid-session. |
+| `.remoteBypass` -> `.loopback` | #199: the same master's verdict is remembered, so the next load skips the doomed mount entirely. At load time. |
+| `.remoteBypass` -> `.loopback` | AE#268: the playlist plus the first segment's PMT identify a finite HEVC-in-MPEG-TS VOD. At load time. |
+| `.loopback` -> `.remoteBypass` | AE#154 / AE#246: an HLS playlist reached the loopback path, which cannot demux it. At load time. |
+
+Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
+
 ## SwiftUI `Menu` in custom player chrome
 
 On tvOS 26, the focused row of an open SwiftUI `Menu` blinks whenever any SwiftUI render transaction runs in the hosting tree, even one fully contained in an unrelated leaf view (a `TimelineView(.periodic)` wall clock, a playbar observing `engine.clock`, a subtitle overlay). Minimal repro: a `Menu` next to a `TimelineView(.periodic(from: .now, by: 1))`, open the menu, the focused item blinks once per second. This is a SwiftUI issue, not an engine one; reported to Apple by an AetherEngine adopter (see [AetherEngine#29](https://github.com/superuser404notfound/AetherEngine/issues/29)).

@@ -134,6 +134,13 @@ player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.reb
                        // .stalled(reconnecting:)/.ended/.error. One source of truth for a status
                        // spinner; derived from state + isBuffering + isSeeking + source reconnect.
                        // Prefer this over stitching the raw signals or matching EngineLog text.
+player.$videoRoute     // pipeline actually serving the session: .remoteBypass (AVPlayer on the
+                       // origin URL) / .loopback / .software / .audio / .none. LoadOptions
+                       // .nativeRemoteHLS is only the request: the carriage watchdog, the
+                       // remembered verdict and the HLS reroutes move a session between the
+                       // bypass and the loopback, mid-session too. Branch on this where behaviour
+                       // differs per pipeline, above all who draws subtitles: on .remoteBypass
+                       // AVPlayer renders the origin's renditions, elsewhere the host renders.
 player.$hasFirstFrameReadyForDisplay
                        // the running path has a first frame ready for display, for the media THIS
                        // load opened: the edge a black cover comes off on. readyToPlay is not that

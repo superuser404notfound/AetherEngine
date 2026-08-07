@@ -485,8 +485,29 @@ public final class AetherEngine: ObservableObject {
     var sourceStartSeconds: Double = 0
 
     /// Active playback backend: `.native` (AVPlayer) or `.software` (SoftwarePlaybackHost/dav1d/libavcodec).
-    /// Exposed for diagnostic overlays; hosts should not branch on it.
-    @Published public internal(set) var playbackBackend: PlaybackBackend = .none
+    /// Exposed for diagnostic overlays; hosts should not branch on it. Branch on `videoRoute` instead,
+    /// which also separates the two native pipelines (#321).
+    @Published public internal(set) var playbackBackend: PlaybackBackend = .none {
+        didSet { recomputeVideoRoute() }
+    }
+
+    /// Pipeline actually serving this session (#321), including the reroutes the host never asked for.
+    /// Derived from `playbackBackend` + `loadedOptions.nativeRemoteHLS`, the two properties every reroute
+    /// site already writes, so it cannot desync from them. See `VideoRoute` for the transitions.
+    @Published public internal(set) var videoRoute: VideoRoute = .none
+
+    /// Idempotent: assigns only on a real change, so options writes that leave the route alone (the
+    /// per-reopen replay) do not flap the publisher. Logs every route the session takes; the drop to
+    /// `.none` is teardown, which carries no route information and is already loud in the log.
+    private func recomputeVideoRoute() {
+        let next = VideoRoute.derive(backend: playbackBackend,
+                                     nativeRemoteHLS: loadedOptions.nativeRemoteHLS)
+        guard videoRoute != next else { return }
+        videoRoute = next
+        if next != .none {
+            EngineLog.emit("[AetherEngine] #321: effective video route = \(next.rawValue)", category: .engine)
+        }
+    }
 
     /// Master enable for background playback (iOS: PiP + background audio; tvOS: PiP keepalive). Default on.
     public var backgroundPlaybackEnabled = true
@@ -1223,8 +1244,11 @@ public final class AetherEngine: ObservableObject {
     /// subtitle side-demuxer, background reload) so auth, matchContentEnabled, and dvh1 tag survive pipeline
     /// rebuilds. Without replay, audio-switch was silently reverting matchContentEnabled=true to false, causing
     /// HDR HEVC to route via the master playlist on a non-DV panel and surface "Öffnen fehlgeschlagen".
-    /// Read by AetherEngine+FrameExtractor.
-    private(set) var loadedOptions: LoadOptions = .init()
+    /// Read by AetherEngine+FrameExtractor. Every internal reroute (#154, #168, #199, #246, #268) reaches
+    /// the published route through this property, so its writes feed `recomputeVideoRoute` (#321).
+    private(set) var loadedOptions: LoadOptions = .init() {
+        didSet { recomputeVideoRoute() }
+    }
 
     #if DEBUG
     /// Test-only: install LoadOptions without a load (#88 unit tests exercise selection gating).
