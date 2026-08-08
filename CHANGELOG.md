@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A `nativeRemoteHLS` session that never reached `readyToPlay` had no terminal state (#334).** An
+  origin that answers every request while AVFoundation can build no track from what it serves leaves
+  AVPlayer neither failing nor becoming ready, so `state` stayed `.loading` indefinitely: no error,
+  no timeout, and a host with nothing to retune on. The carriage machinery could not help, because
+  all of it is anchored at `readyToPlay`: the #293 probe settled `hevcInMPEGTS` and the verdict was
+  then only ever read by a loop that had not started, and the deferred segment-head probe waited 20 s
+  for a readiness that was not coming and gave up without reading. Three changes: a settled carriage
+  verdict now reroutes on its own (it is read off the source and needs no grace), the deferred probe
+  reads the segment head when the readiness ceiling expires instead of abandoning the case, and the
+  bypass has a 45 s ceiling on silence that publishes a real error when nothing became ready, nothing
+  rerouted and nothing failed. Readiness at any point, a reroute, or an AVPlayer failure all disarm
+  it, so slow origins and transcode spin-ups never meet it.
 
 ## [6.15.0] - 2026-08-08
 

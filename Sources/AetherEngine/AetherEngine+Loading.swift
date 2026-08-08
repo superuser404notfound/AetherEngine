@@ -325,6 +325,10 @@ extension AetherEngine {
                   // back would ping-pong), and hosts can opt out via LoadOptions.
                   armVideoCarriageWatchdog: RemoteHLSIngestFallback.shouldArm(
                       isLive: options.isLive, fallbackEnabled: options.nativeRemoteHLSIngestFallback),
+                  // #334: the ceiling on silence this path never had. AVPlayer's "gave up" covers an
+                  // origin that stops answering; it does not cover one that answers everything while
+                  // AVFoundation builds no track, where nothing terminal is ever published.
+                  readinessDeadline: RemoteHLSReadinessDeadline.defaultBudgetSeconds,
                   isLive: options.isLive)
 
         // AE#154: surface the item's legible AVMediaSelectionGroup as `subtitleTracks` so hosts with

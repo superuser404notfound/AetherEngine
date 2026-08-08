@@ -104,6 +104,11 @@ final class NativeAVPlayerHost {
     static let carriageProbeReadinessTickSeconds = 0.05
     static let carriageProbeReadinessTicks = 400
 
+    /// #334: budget for the bypass's readiness deadline, nil on every path that has its own terminal
+    /// state (the loopback's live-reload watchdog, VOD). Set per load from `load(readinessDeadline:)`.
+    private var readinessDeadlineSeconds: Double?
+    private var readinessDeadlineTask: Task<Void, Never>?
+
     /// #35 (Sodalite) cold-DV-master startup-readiness gate. While the engine drives the bounded
     /// retry loop this is true, so a startup failure (`.failed` with any code, including a
     /// display-rejection) is NOT published: the gate polls `awaitStartupReadiness` and decides to
@@ -263,11 +268,12 @@ final class NativeAVPlayerHost {
     /// after an in-PiP recovery reload) and the pause bounces transport for nothing. The swap
     /// keeps transport intent, clocks and the old item alive until replaceCurrentItem hands
     /// AVPlayer the fresh one.
-    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armVideoCarriageWatchdog: Bool = false, isLive: Bool = false) {
+    func load(url: URL, startPosition: Double?, perFrameHDR: Bool = true, skipInitialSeek: Bool = false, forwardBufferDuration: Double = 4.0, surfaceEndFailures: Bool = false, inPlaceSwap: Bool = false, httpHeaders: [String: String] = [:], armVideoCarriageWatchdog: Bool = false, readinessDeadline: Double? = nil, isLive: Bool = false) {
         unloadCurrentItem(inPlaceSwap: inPlaceSwap)
 
         self.surfaceEndFailures = surfaceEndFailures
         self.carriageWatchdogArmed = armVideoCarriageWatchdog
+        self.readinessDeadlineSeconds = readinessDeadline
         self.isLiveSession = isLive
         Self.nextSessionID += 1
         sessionID = Self.nextSessionID
@@ -337,6 +343,11 @@ final class NativeAVPlayerHost {
         lastSuppressedStartupFailure = nil
         isReady = false
         seekableEnd = 0
+        // #334: the bypass's ceiling on silence. Started with the mount rather than at readyToPlay,
+        // because the session it exists for is exactly the one that never gets there.
+        if let budget = readinessDeadline {
+            startReadinessDeadline(item: item, budgetSeconds: budget)
+        }
 
         // #134: mirror seekableTimeRanges instead of reading it per call. The callback runs on
         // the item's queue where the re-read is a harmless off-main XPC; live playlist refreshes
@@ -1183,6 +1194,10 @@ final class NativeAVPlayerHost {
         carriageProbeTask?.cancel()
         carriageProbeTask = nil
         carriageProbeEvidence = .pending
+        // #334: the deadline belongs to the outgoing item too.
+        readinessDeadlineTask?.cancel()
+        readinessDeadlineTask = nil
+        readinessDeadlineSeconds = nil
         // Re-arm #50 hasEverPlayed: reused host must not inherit prior session's established state.
         hasEverPlayed = false
         // #93 recovery reload: same content, same position, playback must continue. Skip the
@@ -1312,7 +1327,21 @@ final class NativeAVPlayerHost {
                     + "so the segment head waits for readyToPlay rather than compete with the mount (#296)",
                     category: .engine
                 )
-                guard await self.awaitReadyForDeferredProbe(sid: sid) else { return }
+                switch await self.awaitReadyForDeferredProbe(sid: sid) {
+                case .abandoned:
+                    return
+                case .ceilingExpired:
+                    // #334: readiness is not coming. Deferring existed so the read would not compete
+                    // with the mount, and a mount that has not settled in 20 s is not competing for
+                    // anything; giving up here is what left the source unjudged and the session silent.
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) carriage probe: readyToPlay never arrived, "
+                        + "reading the segment head anyway rather than leaving the source unjudged (#334)",
+                        category: .engine
+                    )
+                case .ready:
+                    break
+                }
                 let verdict = await HLSCarriageProbe.classifyDeferredSegmentHead(
                     url: segmentURL, httpHeaders: httpHeaders)
                 guard !Task.isCancelled, self.sessionID == sid else { return }
@@ -1326,30 +1355,97 @@ final class NativeAVPlayerHost {
         _ verdict: MPEGTransportStreamCodecProbe.Verdict, sid: Int, from source: String
     ) {
         carriageProbeEvidence = verdict == .hevcInMPEGTS ? .transportStreamHEVC : .nativeCapable
+        // #334: a settled verdict is conclusive without the grace, so it must not wait for the timing
+        // loop that arms at readyToPlay. A source with no audio track either never reaches readiness at
+        // all, and that is precisely the session this verdict is the only fix for.
+        if RemoteHLSIngestFallback.shouldRerouteOnSettledEvidence(
+            carriageEvidence: carriageProbeEvidence,
+            videoTrackCount: currentVideoTrackCount(),
+            armed: carriageWatchdogArmed,
+            alreadyRejected: remoteHLSVideoCarriageRejected
+        ) {
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) carriage probe: \(verdict) from \(source) evidence; "
+                + "rerouting without waiting for readyToPlay (#334)",
+                category: .engine
+            )
+            carriageWatchdogTask?.cancel()
+            carriageWatchdogTask = nil
+            remoteHLSVideoCarriageRejected = true
+            return
+        }
         EngineLog.emit(
             "[NativeAVPlayerHost] #\(sid) carriage probe: \(verdict) from \(source) evidence (#293)",
             category: .engine
         )
     }
 
-    /// AE#296: hold the deferred segment-head read until the item is ready. The verdict cannot be acted on
-    /// before then anyway (the watchdog arms at readyToPlay), so waiting costs nothing and removes the one
-    /// window where the read is expensive: a connection lost while the mount is establishing its own can
-    /// cost the mount, one lost here can only cost the verdict, on a session that is already black. A
-    /// session that never reaches readyToPlay, or whose watchdog disarms first, spends no media byte at
-    /// all. Returns false when the wait was overtaken by cancellation, a new session or the ceiling.
+    /// #334: the wait has three outcomes, because "readiness never came" and "this session is gone" no
+    /// longer lead to the same place. Only the second abandons the probe.
+    private enum DeferredProbeWait { case ready, ceilingExpired, abandoned }
+
+    /// AE#296: hold the deferred segment-head read until the item is ready. It removes the one window
+    /// where the read is expensive: a connection lost while the mount is establishing its own can cost
+    /// the mount, one lost afterwards can only cost the verdict, on a session that is already black. A
+    /// session whose watchdog disarms first spends no media byte at all.
+    ///
+    /// #334 corrected the other half of that rationale. Waiting was said to cost nothing because the
+    /// verdict could not be acted on before readyToPlay anyway; it can now, and a source AVFoundation
+    /// builds no track at all for never reaches readiness, so the ceiling reports itself rather than
+    /// silently ending the probe.
     @MainActor
-    private func awaitReadyForDeferredProbe(sid: Int) async -> Bool {
+    private func awaitReadyForDeferredProbe(sid: Int) async -> DeferredProbeWait {
         var ticksWaited = 0
         while !isReady {
-            guard !Task.isCancelled,
-                  sessionID == sid,
-                  ticksWaited < Self.carriageProbeReadinessTicks else { return false }
+            guard !Task.isCancelled, sessionID == sid else { return .abandoned }
+            guard ticksWaited < Self.carriageProbeReadinessTicks else { return .ceilingExpired }
             ticksWaited += 1
             try? await Task.sleep(
                 nanoseconds: UInt64(Self.carriageProbeReadinessTickSeconds * 1_000_000_000))
         }
-        return !Task.isCancelled && sessionID == sid
+        return (!Task.isCancelled && sessionID == sid) ? .ready : .abandoned
+    }
+
+    /// Video tracks AVPlayer has actually built for the current item. Shared by the watchdog tick and
+    /// the #334 pre-readiness reroute so both judge the same thing.
+    @MainActor
+    private func currentVideoTrackCount() -> Int {
+        playerItem?.tracks.filter { $0.assetTrack?.mediaType == .video }.count ?? 0
+    }
+
+    /// #334: fail a bypass session that neither becomes ready nor fails. Runs from the mount rather than
+    /// from readyToPlay for the obvious reason. Everything that resolves the session disarms it, so the
+    /// budget is only ever spent by a session that was going to sit in `.loading` indefinitely.
+    @MainActor
+    private func startReadinessDeadline(item: AVPlayerItem, budgetSeconds: Double) {
+        let sid = sessionID
+        readinessDeadlineTask = Task { @MainActor [weak self] in
+            var deadline = RemoteHLSReadinessDeadline(
+                budgetSeconds: budgetSeconds, tickSeconds: Self.carriageWatchdogTickSeconds)
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.carriageWatchdogTickSeconds * 1_000_000_000))
+                guard let self, !Task.isCancelled, self.sessionID == sid,
+                      self.playerItem === item else { return }
+                switch deadline.tick(isReady: self.isReady,
+                                     carriageRerouted: self.remoteHLSVideoCarriageRejected,
+                                     hasFailed: self.failureMessage != nil) {
+                case .keepWaiting:
+                    continue
+                case .disarm:
+                    return
+                case .fail:
+                    let message = RemoteHLSReadinessDeadline.failureMessage(budgetSeconds: budgetSeconds)
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) readiness deadline: no track, no readiness and no "
+                        + "failure in \(Int(budgetSeconds.rounded()))s; surfacing a terminal state (#334)",
+                        category: .engine
+                    )
+                    self.failureMessage = message
+                    return
+                }
+            }
+        }
     }
 
     /// AetherEngine#168 follow-up: after readyToPlay, poll `item.tracks` at the tick cadence against the
@@ -1373,7 +1469,7 @@ final class NativeAVPlayerHost {
                 variantHasVideoAttributes: variants.map { $0.videoAttributes != nil })
             while !Task.isCancelled {
                 guard let self, self.playerItem === item else { return }
-                let videoTrackCount = item.tracks.filter { $0.assetTrack?.mediaType == .video }.count
+                let videoTrackCount = self.currentVideoTrackCount()
                 let evidence = self.carriageProbeEvidence
                 switch watchdog.tick(
                     videoTrackCount: videoTrackCount,

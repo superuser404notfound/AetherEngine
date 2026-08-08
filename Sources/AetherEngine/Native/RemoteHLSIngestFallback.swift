@@ -72,6 +72,24 @@ enum RemoteHLSIngestFallback {
         }
     }
 
+    /// #334: whether a carriage verdict that has just settled may reroute on its own, without the
+    /// readiness anchor the timing loop is armed at. The anchor exists for the grace-based verdict, where
+    /// "no track yet" is only meaningful once the item is otherwise healthy; a settled verdict is read off
+    /// the source's own playlists or PMT and needs no grace, and waiting for readiness loses the case it
+    /// was built for: a source with no audio either, where AVFoundation builds no track at all and
+    /// `readyToPlay` therefore never arrives. `videoTrackCount` is still consulted so a source that
+    /// contradicts the probe by building a track keeps its native session.
+    static func shouldRerouteOnSettledEvidence(
+        carriageEvidence: CarriageEvidence,
+        videoTrackCount: Int,
+        armed: Bool,
+        alreadyRejected: Bool
+    ) -> Bool {
+        guard armed, !alreadyRejected else { return false }
+        guard carriageEvidence == .transportStreamHEVC else { return false }
+        return videoTrackCount == 0
+    }
+
     /// Maps `AVAssetVariant.videoAttributes` presence per variant to the watchdog's evidence input:
     /// no variants at all = unknown (nil), any variant with video attributes = advertised, an all-audio
     /// variant set = a radio-style master where zero video tracks is the correct steady state.
