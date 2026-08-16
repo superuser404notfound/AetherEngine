@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The first live manifest now reports the interval it was held for.** A loopback live session's whole
+  join latency is one withheld `/media.m3u8` response: the first serve waits until the window carries
+  the live-edge holdback (`3 x TARGETDURATION`, AetherEngine#189) of content behind the edge, while
+  everything else the engine does for that session finishes before the gate is even entered. Only a
+  FAILED gate used to log, so a successful hold of eighteen seconds left no trace and a host had to
+  measure it from the outside. Every exit now names what it held, the window it served and the holdback
+  it was measured against, including the exit where no segment was ever cut, which used to return in
+  silence. The bounded `.fastZap` start reported its grace alone, which is the last leg of the wait
+  rather than the wait: a start measured here at 10.284 s reported itself as 2.000 s. `docs/api.md`
+  gains the paragraph that says where a live start's seconds go, and how `startupProgress` separates
+  this wait from the probe and the display handshake. Raised by ksktech-dev (AetherEngine#374).
 
 ## [6.27.0] - 2026-08-16
 

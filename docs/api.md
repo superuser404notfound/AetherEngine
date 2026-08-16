@@ -266,6 +266,28 @@ Time lives on `player.clock`, a separate `ObservableObject`, so ~10 Hz ticks nev
 | `$playlistShiftSeconds` | Seconds the producer subtracted from source PTS. Published values already fold it back; exposed for hosts pairing their own samples against AVPlayer's raw clock. |
 | `HLSLiveIngestReader(playlistURL:)`, `HLSLiveIngestReader(playlistURL:httpHeaders:)` | The ready-made `IOReader` for ingesting an upstream HLS playlist directly, with AES-128 clear-key and SSAI handling. The headers ride the playlist, every segment and every AES key, which is what a tokenized IPTV origin enforces per request. Unsupported shapes surface a typed `HLSIngestError`. |
 
+### Where a live start's seconds go
+
+On the loopback live path (a raw stream, or an HLS source the engine ingests itself) the join cost is
+not probe or decode work, it is one withheld response. The engine serves AVPlayer a playlist of its own,
+and AVPlayer starts a live session at the edge minus a holdback of `3 x TARGETDURATION`, the RFC 8216bis
+floor that the served playlist advertises. So the first `/media.m3u8` is held until the window carries
+that much content behind the edge: serving earlier puts AVPlayer's opening seek inside its own
+stall-danger zone, where it restarts in a loop instead of playing (#189). An origin that hands over a
+backlog satisfies it at I/O speed, and a strict-realtime origin pays it in wall clock. The native bypass
+has no such gate, which is why a host measuring both sees it only on the paths that ingest.
+
+Two things report it, and both are worth reading before a slow live start is treated as a decode
+problem. `startupProgress` stalls at `sessionConstructed` for the whole wait, so the checkpoint at the
+slow moment tells this apart from the demux probe (`streamsProbed`) and the display handshake
+(`routed`). And the first serve logs the interval it held, the window it served, and the holdback it was
+measured against, whether it waited or was satisfied immediately.
+
+`LoadOptions.liveJoinProfile` is the lever. `.fastZap` collapses `TARGETDURATION` to the source keyframe
+cadence and the holdback follows it down, so the win belongs to the source GOP rather than to the flag:
+`TARGETDURATION` can never fall below `ceil(max EXTINF)`, and a long-GOP source therefore keeps most of
+its runway under either profile.
+
 ## Picture, layers and PiP
 
 | Symbol | Notes |
