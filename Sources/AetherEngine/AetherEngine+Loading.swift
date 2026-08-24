@@ -1430,6 +1430,7 @@ extension AetherEngine {
             mode: loadedOptions.deinterlaceMode,
             fieldRate: loadedOptions.deinterlaceFieldRate
         )
+        host.frameTimestampPolicy = softwareFrameTimestampPolicy
         host.onFirstHDR10PlusDetected = { [weak self] in
             Task { @MainActor in self?.handleHDR10PlusDetected() }
         }
@@ -1711,7 +1712,9 @@ extension AetherEngine {
         audioStreamIndex: Int32?,
         expectedGeneration: UInt64,
         discTitleIDOverride: Int? = nil,
-        resumeOverride: Double? = nil
+        resumeOverride: Double? = nil,
+        playbackBackendOverride: PlaybackBackend? = nil,
+        videoCodecOverride: AVCodecID? = nil
     ) async {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
         guard loadGeneration == expectedGeneration, loadedURL != nil else {
@@ -1763,9 +1766,9 @@ extension AetherEngine {
         state = .loading
         let previousAudioIndex = activeAudioTrackIndex
         // Snapshot before stopInternal wipes state. Must reload on the same backend: loadNative on a SW-routed AV1 source throws unsupportedCodec (HLSVideoEngine only accepts HEVC / H.264 / VP9 / probed-AV1).
-        let wasOnSoftwarePath = (playbackBackend == .software)
+        let wasOnSoftwarePath = (playbackBackendOverride ?? playbackBackend) == .software
         // Preserve codec so the decoder label can be reconstructed without re-probing.
-        let preservedVideoCodec = lastDetectedVideoCodec
+        let preservedVideoCodec = videoCodecOverride ?? lastDetectedVideoCodec
         let reloadStart = DispatchTime.now()
         EngineLog.emit("[AetherEngine] reload: stopInternal start", category: .engine)
         // resetDisplayCriteria: false: video format is unchanged; resetting triggers a full waitForSwitch Stage 2 timeout (5 s at the 2026-05-26 device test, ~2 s cap since #117; Bose SLIII A2DP + 4K HDR10 PQ: each switch added ~12 s black-screen). On the same route a panel SDR drop during the reset window failed the PQ variant with AVFoundationErrorDomain -11868 / CoreMediaErrorDomain -17223.

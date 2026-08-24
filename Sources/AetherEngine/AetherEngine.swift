@@ -1445,6 +1445,11 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputeVideoRoute() }
     }
 
+    /// #409: resolved per session by the bounded H.264 composition-offset probe. Kept outside
+    /// public LoadOptions: recovery is an engine integrity decision, not a host policy. Audio-track
+    /// reloads reuse it; every new public load resets it before probing its own source.
+    var softwareFrameTimestampPolicy: SoftwareFrameTimestampPolicy = .decodedPTS
+
     /// #364: the one narrow write into `loadedOptions` outside a load, so a mid-session teletext page
     /// change survives the internal reopens that replay these options (audio switch, background
     /// reload). Without it the page would silently revert to the load-time value on the next reopen,
@@ -2761,6 +2766,7 @@ public final class AetherEngine: ObservableObject {
         }
         loadedURL = url
         loadedOptions = options
+        softwareFrameTimestampPolicy = .decodedPTS
         // #377: register the host's concurrency ceiling for this origin before anything fetches
         // from it. Keyed on the origin rather than the load, so the subtitle side reader and any
         // later reopen of the same source are bound by it too.
@@ -3373,6 +3379,72 @@ public final class AetherEngine: ObservableObject {
                 )
             }
         }
+        // #409: some MP4 writers omit ctts/composition offsets even though the H.264 bitstream
+        // contains reordered pictures. Every packet then has PTS == DTS, and stream-copy carries
+        // decode order into fMP4 as presentation order: AVPlayer visibly steps forward and backward
+        // through each B-frame group. The bounded probe below leaves healthy sources after the first
+        // observed offset, and only a decoded raw-PTS regression beside a monotonic best-effort clock
+        // is strong enough to trade the native path for software decode. The same preopened demuxer
+        // is rewound before either backend adopts it.
+        let containerNames = probe.containerFormatName?.split(separator: ",") ?? []
+        if !options.isLive, probeOpened, probe.isSourceSeekable,
+           (containerNames.contains("mov") || containerNames.contains("mp4")),
+           detectedCodecID == AV_CODEC_ID_H264, probe.videoStreamIndex >= 0 {
+            let videoIndex = probe.videoStreamIndex
+            let timestampProbe = await Task.detached(priority: .userInitiated) { [probe] in
+                let result = H264CompositionTimestampProbe.run(
+                    demuxer: probe, streamIndex: videoIndex)
+                let rewindSucceeded = !result.requiresRewind || probe.seekBounded(
+                    to: 0, timeout: H264CompositionTimestampProbe.rewindBudget)
+                return (result, rewindSucceeded)
+            }.value
+            if loadGeneration != gen {
+                probe.markClosed()
+                Task.detached { [probe] in probe.close() }
+                try checkLoadCurrent(gen)
+            }
+            EngineLog.emit(
+                "[AetherEngine] H.264 composition timestamp probe: \(timestampProbe.0.summary) "
+                + "rewound=\(timestampProbe.1)",
+                category: .engine
+            )
+            if !timestampProbe.1 {
+                // Never hand a sampled demuxer to a backend at packet 65. URL sources can reopen;
+                // a custom source cannot be recreated, so fail rather than start in the middle.
+                probe.markClosed()
+                await Task.detached(priority: .utility) { [probe] in probe.close() }.value
+                // close() suspends while a blocked read unwinds. A newer load may have claimed the
+                // engine in that window; the old task must not publish its failure or timestamp mode
+                // into the successor session.
+                try checkLoadCurrent(gen)
+                probeOpened = false
+                if isCustomSource {
+                    publishError(
+                        .customSourceProbeFailed,
+                        "Failed to rewind custom source after H.264 timestamp integrity probe"
+                    )
+                    throw DemuxerError.openFailed(code: -1)
+                }
+                EngineLog.emit(
+                    "[AetherEngine] timestamp-probe rewind failed; discarded sampled demuxer "
+                    + "and will reopen the URL for playback",
+                    category: .engine
+                )
+            }
+            let timestampRouting = H264CompositionTimestampProbe.routingDecision(
+                for: timestampProbe.0.verdict,
+                preservingSoftwarePath: useSoftwarePath
+            )
+            useSoftwarePath = timestampRouting.useSoftwarePath
+            softwareFrameTimestampPolicy = timestampRouting.frameTimestampPolicy
+            if timestampRouting.appliesTimestampRepair {
+                EngineLog.emit(
+                    "[AetherEngine] confirmed missing H.264 composition timestamps; "
+                    + "routing software with frame timestamp mode=best_effort (#409)",
+                    category: .engine
+                )
+            }
+        }
         // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
         // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
@@ -3746,7 +3818,9 @@ public final class AetherEngine: ObservableObject {
                 url: placeholderURL,
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
-                discTitleIDOverride: selection.discTitleID
+                discTitleIDOverride: selection.discTitleID,
+                playbackBackendOverride: selection.playbackBackend,
+                videoCodecOverride: selection.videoCodecID
             )
             // The reload restores from its own pre-stopInternal snapshot, which a torn-down session
             // no longer had anything in; replay the parked subtitle pick on top of it.

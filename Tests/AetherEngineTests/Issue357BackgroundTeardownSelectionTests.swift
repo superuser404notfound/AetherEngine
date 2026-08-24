@@ -1,4 +1,5 @@
 import Foundation
+import Libavcodec
 import Testing
 @testable import AetherEngine
 
@@ -47,6 +48,21 @@ struct Issue357BackgroundTeardownSelectionTests {
         #expect(selection.subtitles.hostExplicitSubtitleAction)
         #expect(selection.audioTrackIndex == 2)
         #expect(selection.discTitleID == 7)
+    }
+
+    @Test("the torn-down custom session keeps its software backend and codec for foreground reload")
+    func teardownHandsVideoRouteToReload() throws {
+        let engine = try AetherEngine()
+        engine.playbackBackend = .software
+        engine.lastDetectedVideoCodec = AV_CODEC_ID_H264
+
+        backgroundTeardown(engine)
+        #expect(engine.playbackBackend == .none)
+        #expect(engine.lastDetectedVideoCodec == AV_CODEC_ID_NONE)
+
+        let selection = engine.consumeReloadSelection()
+        #expect(selection.playbackBackend == .software)
+        #expect(selection.videoCodecID == AV_CODEC_ID_H264)
     }
 
     @Test("restoring the carried selection re-arms the drain target, which is what went silent")

@@ -8,6 +8,14 @@ import Libavcodec
 /// (kCMSampleAttachmentKey_HDR10PlusPerFrameData format); nil for non-HDR10+ streams.
 typealias DecodedFrameHandler = @Sendable (CVPixelBuffer, CMTime, Data?) -> Void
 
+/// Which decoded timestamp axis the software renderer consumes. Normal sessions trust
+/// `AVFrame.pts`; #409 opts one confirmed malformed MP4 session into libavcodec's reconstructed
+/// presentation axis. Internal because hosts should not need container-repair knowledge.
+enum SoftwareFrameTimestampPolicy: Sendable, Equatable {
+    case decodedPTS
+    case bestEffort
+}
+
 /// Common video decoder protocol. SoftwareVideoDecoder (libavcodec, AV1/VP9) and
 /// HardwareVideoDecoder (VTDecompressionSession, HEVC) both conform; the host swaps per codec without rewiring the demux loop.
 // Sendable: both conformers (SoftwareVideoDecoder, HardwareVideoDecoder) are @unchecked Sendable

@@ -72,6 +72,11 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// applied to the filter there (mutating it mid-stream would need a graph rebuild).
     var deinterlaceConfig = DeinterlaceConfig()
 
+    /// #409: normal decoded PTS, or libavcodec's best-effort presentation axis after the bounded
+    /// MP4/H.264 integrity probe proves the raw axis regresses. Applied before captions,
+    /// deinterlacing, seek filtering, and rendering so every consumer shares one clock.
+    var frameTimestampPolicy: SoftwareFrameTimestampPolicy = .decodedPTS
+
     /// Deinterlaced frames dropped for carrying no PTS (see the drop site in decode()). Guarded by `lock`.
     private var droppedUntimestampedFields = 0
 
@@ -161,8 +166,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     /// #407: the timestamp to put on a decoded frame that carries none, or nil when the frame is
-    /// already timed (the common case, and the one that must stay untouched: a decoder-set PTS is
-    /// always at least as good as the reconstruction, and `best_effort_timestamp` can trail it).
+    /// already timed. The common `.decodedPTS` policy leaves a present PTS untouched; #409's
+    /// separately-proven malformed-container policy is applied by `resolvedFramePTS` below.
     ///
     /// `AV_NOPTS_VALUE` is `Int64.min`. `best_effort_timestamp` is libavcodec's own
     /// `guess_correct_pts(pts, pkt_dts)`, so a frame with neither cannot be timed by any means the
@@ -170,6 +175,23 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     static func repairedPTS(pts: Int64, bestEffort: Int64) -> Int64? {
         guard pts == Int64.min, bestEffort != Int64.min else { return nil }
         return bestEffort
+    }
+
+    /// Preserve #407's NOPTS fallback for every software session. #409 extends it only for a
+    /// probe-confirmed malformed MP4: a present-but-decode-ordered PTS yields to the monotonic
+    /// best-effort timestamp. If best-effort is absent, the raw value remains the least-wrong axis.
+    nonisolated static func resolvedFramePTS(
+        decodedPTS: Int64,
+        bestEffortPTS: Int64,
+        policy: SoftwareFrameTimestampPolicy
+    ) -> Int64 {
+        if let repaired = repairedPTS(pts: decodedPTS, bestEffort: bestEffortPTS) {
+            return repaired
+        }
+        if policy == .bestEffort, bestEffortPTS != Int64.min {
+            return bestEffortPTS
+        }
+        return decodedPTS
     }
 
     /// What to do with a packet after `avcodec_send_packet` returned `ret` (#220).
@@ -235,7 +257,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             let ret = avcodec_receive_frame(ctx, f)
             guard ret >= 0 else { lock.unlock(); break }
 
-            // #407: repair the frame's own timestamp BEFORE anything reads it. A frame that reaches
+            // #407/#409: resolve the frame's own timestamp BEFORE anything reads it. A frame that reaches
             // the renderer with no PTS is unschedulable and gets dropped there, so every consumer
             // below (captions, the deinterlace graph, emit) has to see the repaired value, not just
             // the one that happens to be looked at last. `best_effort_timestamp` is libavcodec's
@@ -245,14 +267,19 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // block time in DTS, and live MPEG-TS delivers untimed pictures outright. The demuxer's
             // `+genpts` normally fills those in a packet earlier; this is the layer that has to hold
             // when it cannot (an open that never got the flag, a frame the reconstruction skipped).
-            if let repaired = Self.repairedPTS(
-                pts: f.pointee.pts, bestEffort: f.pointee.best_effort_timestamp
-            ) {
-                f.pointee.pts = repaired
+            let decodedPTS = f.pointee.pts
+            let resolvedPTS = Self.resolvedFramePTS(
+                decodedPTS: decodedPTS,
+                bestEffortPTS: f.pointee.best_effort_timestamp,
+                policy: frameTimestampPolicy
+            )
+            if resolvedPTS != decodedPTS {
+                f.pointee.pts = resolvedPTS
                 repairedTimestamps += 1
                 if repairedTimestamps == 1 || repairedTimestamps % 250 == 0 {
                     EngineLog.emit(
-                        "[SWDecoder] repaired \(repairedTimestamps) frame timestamp(s) from best_effort_timestamp",
+                        "[SWDecoder] repaired \(repairedTimestamps) frame timestamp(s) from "
+                        + "best_effort_timestamp (mode=\(frameTimestampPolicy))",
                         category: .swPlayback
                     )
                 }

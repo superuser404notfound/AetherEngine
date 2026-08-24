@@ -212,12 +212,13 @@ Sources/AetherEngine/
 │   ├── CEA608Decoder.swift                  In-house CEA-608 line-21 decoder (field-1 / CC1), validated against FFmpeg ccaption_dec.c (#77)
 │   ├── DeinterlaceFilter.swift              SW path: persistent bwdif / yadif libavfilter graph, engages on the first interlaced frame
 │   ├── EmbeddedSubtitleDecoder.swift        Inline subtitle decode from demuxed packets; opens DVB teletext with libzvbi_teletextdec text-format options (#107)
+│   ├── H264CompositionTimestampProbe.swift  Bounded fail-closed check for progressive H.264 MP4 whose missing composition offsets make raw decoded PTS regress; routes only a confirmed session to best-effort software timestamps (#409)
 │   ├── InterlaceProbe.swift                 Decodes a sample and applies the deinterlacer's own engagement predicate, so a declared field order that no frame backs up (PsF) stops costing a SW decode (#232)
 │   ├── VideoRoutingPolicy.swift             Pure codec-and-field-order dispatch rule: AV1 gated on HW, VP9/VP8/MPEG4/MPEG2/VC1 always SW, interlaced H.264 SW so bwdif can deinterlace (#107, verified against decoded frames on VOD, #232), plus a second-stage gate routing H.264 High 4:2:2/4:4:4/10 + HEVC Rext to SW where VideoToolbox has no HW decoder (#2)
 │   ├── HardwareVideoDecoder.swift           SW path: VideoToolbox HW HEVC / AV1 decoder for sources routed away from AVPlayer
 │   ├── SoftwareVideoDecoder.swift           SW path: libavcodec/dav1d → CVPixelBuffer (NV12 / P010), HDR10+ side data
 │   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode (text only); decodes several streams of one container in a single pass (#266)
-│   ├── VideoDecoderTypes.swift              DecodedFrameHandler typealias + VideoDecoderError
+│   ├── VideoDecoderTypes.swift              DecodedFrameHandler, internal software timestamp policy, and VideoDecoderError
 │   ├── DeinterlaceHardwareWarmup.swift      Process-wide one-shot prewarm of the deinterlace filter's hardware pipeline, awaited only by `.auto` mode, so the first interlaced frame does not pay for it
 │   └── PixelAspectPolicy.swift              Whether a declared sample aspect ratio deserves to be believed: an absurd-component gate (#177, live TS carrying 1088:1) plus a display-aspect gate judged against the frame the SAR applies to, since 2:1 is right on 960x1080 and wrong on 1920x1080 (#290)
 ├── Demuxer/

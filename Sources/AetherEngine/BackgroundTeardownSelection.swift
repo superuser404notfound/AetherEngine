@@ -1,4 +1,5 @@
 import Foundation
+import Libavcodec
 
 /// AetherEngine#357: the session selection a teardown hands to the reload that follows it.
 ///
@@ -13,6 +14,8 @@ struct BackgroundTeardownSelection: Sendable, Equatable {
     var subtitles = SubtitleSessionCarryover()
     var audioTrackIndex: Int?
     var discTitleID: Int?
+    var playbackBackend: PlaybackBackend = .none
+    var videoCodecID: AVCodecID = AV_CODEC_ID_NONE
 }
 
 extension AetherEngine {
@@ -23,7 +26,9 @@ extension AetherEngine {
         backgroundTeardownSelection = BackgroundTeardownSelection(
             subtitles: captureSubtitleSessionCarryover(),
             audioTrackIndex: activeAudioTrackIndex,
-            discTitleID: activeDiscTitleID
+            discTitleID: activeDiscTitleID,
+            playbackBackend: playbackBackend,
+            videoCodecID: lastDetectedVideoCodec
         )
     }
 
@@ -36,7 +41,11 @@ extension AetherEngine {
             subtitles: Self.mergedSubtitleCarryover(
                 live: captureSubtitleSessionCarryover(), snapshot: parked?.subtitles),
             audioTrackIndex: activeAudioTrackIndex ?? parked?.audioTrackIndex,
-            discTitleID: activeDiscTitleID ?? parked?.discTitleID
+            discTitleID: activeDiscTitleID ?? parked?.discTitleID,
+            playbackBackend: playbackBackend != .none
+                ? playbackBackend : parked?.playbackBackend ?? .none,
+            videoCodecID: lastDetectedVideoCodec != AV_CODEC_ID_NONE
+                ? lastDetectedVideoCodec : parked?.videoCodecID ?? AV_CODEC_ID_NONE
         )
     }
 

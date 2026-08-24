@@ -10,7 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Progressive H.264 MP4 with reordered pictures no longer judders when its sample table omitted
+  composition offsets (AE#409).** The malformed shape carries a PTS for every packet, so `+genpts`
+  and the #407 NOPTS fallback correctly leave it alone, but every PTS equals DTS despite a non-zero
+  reorder delay. Stream-copy therefore writes decode order as the fMP4 presentation order, and
+  AVPlayer displays future reference pictures before the B pictures that precede them: continuous
+  small forward/backward motion from the first frame, unaffected by seeking. A bounded, fail-closed
+  head probe now requires packet PTS/DTS equality, non-key evidence, a regressing decoded raw PTS,
+  and a monotonic advancing `best_effort_timestamp` before routing that session through software
+  decode. Healthy MP4 exits on its first real composition offset without forcing a software detour;
+  short or contradictory evidence likewise preserves the existing routing decision. The confirmed
+  software session installs best-effort PTS before captions, deinterlacing, seek filtering and
+  rendering. On the reporting source the
+  sample contained 64 valid packet pairs, 16 raw-PTS regressions and zero best-effort regressions;
+  the repaired build played and sought smoothly on an Apple TV 4K (3rd generation), tvOS 26.6.
+  Reported and fixed by @orut34iop.
 
 ## [6.39.0] - 2026-08-24
 
