@@ -1059,7 +1059,7 @@ public final class Demuxer: @unchecked Sendable {
     func indexedKeyframes(streamIndex: Int32) -> [Int64] {
         accessLock.lock()
         defer { accessLock.unlock() }
-        let compositionOffset = compositionRepair?.decodeTimestampOffset
+        let activeCompositionRepair = compositionRepair?.isRepairing == true ? compositionRepair : nil
         guard let ctx = formatContext,
               streamIndex >= 0,
               streamIndex < Int32(ctx.pointee.nb_streams),
@@ -1080,7 +1080,15 @@ public final class Demuxer: @unchecked Sendable {
                 // built from these IRAP positions matches the normalized packets (AE#105), then onto
                 // the repaired decode ladder if #409 moved it.
                 let folded = normalizedTimestamp(entry.pointee.timestamp, pos: entry.pointee.pos, timeBase: tb)
-                result.append(compositionOffset.map { folded &+ $0 } ?? folded)
+                if let activeCompositionRepair {
+                    // An unplaceable index entry is safer omitted: mixing one raw timestamp into a
+                    // repaired rational ladder can cut a segment one picture away from its keyframe.
+                    if let repaired = activeCompositionRepair.repairedDecodeTimestamp(folded) {
+                        result.append(repaired)
+                    }
+                } else {
+                    result.append(folded)
+                }
             }
         }
         return result
