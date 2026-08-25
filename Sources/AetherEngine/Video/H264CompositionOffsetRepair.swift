@@ -76,14 +76,58 @@ enum H264CompositionOffsetRepair {
         var period: Int64 { denominator }
 
         /// Stream rates are advisory here: `r_frame_rate` is commonly a rounded nominal rate and
-        /// `avg_frame_rate` is duration-derived. The STTS cycle remains the exact authority, but at
-        /// least one declared rate must agree to within one thousandth of a stream tick per frame.
-        /// Double is used only for this bounded consistency check, never to construct timestamps.
-        func isConsistent(with metadata: Cadence) -> Bool {
+        /// `avg_frame_rate` is duration-derived. The STTS cycle remains the exact authority. An
+        /// approximate declared rate is accepted only when its exact rational error cannot add up
+        /// to more than half a tick across the known stream span; without that span it fails closed.
+        func isConsistent(with metadata: Cadence, maximumFrameSpan: Int64?) -> Bool {
             if self == metadata { return true }
-            let observed = Double(numerator) / Double(denominator)
-            let declared = Double(metadata.numerator) / Double(metadata.denominator)
-            return observed.isFinite && declared.isFinite && abs(observed - declared) <= 0.001
+            guard let maximumFrameSpan, maximumFrameSpan > 0 else { return false }
+
+            // 2 * frames * |a/b - c/d| <= 1, evaluated with fixed-width limbs so neither
+            // cross-multiplication nor the accumulated error can overflow or round toward a pass.
+            let observedProduct = UInt64(numerator)
+                .multipliedFullWidth(by: UInt64(metadata.denominator))
+            let metadataProduct = UInt64(metadata.numerator)
+                .multipliedFullWidth(by: UInt64(denominator))
+            let difference = Self.absoluteDifference(observedProduct, metadataProduct)
+            let denominatorProduct = UInt64(denominator)
+                .multipliedFullWidth(by: UInt64(metadata.denominator))
+            let (scale, scaleOverflow) = UInt64(maximumFrameSpan)
+                .multipliedReportingOverflow(by: 2)
+            guard !scaleOverflow else { return false }
+
+            let lowProduct = difference.low.multipliedFullWidth(by: scale)
+            let highProduct = difference.high.multipliedFullWidth(by: scale)
+            let (middle, middleCarry) = lowProduct.high
+                .addingReportingOverflow(highProduct.low)
+            let (top, topOverflow) = highProduct.high
+                .addingReportingOverflow(middleCarry ? 1 : 0)
+            guard !topOverflow, top == 0 else { return false }
+            return Self.isLessThanOrEqual(
+                (high: middle, low: lowProduct.low),
+                denominatorProduct
+            )
+        }
+
+        private static func absoluteDifference(
+            _ lhs: (high: UInt64, low: UInt64),
+            _ rhs: (high: UInt64, low: UInt64)
+        ) -> (high: UInt64, low: UInt64) {
+            let (larger, smaller) = isLessThanOrEqual(lhs, rhs) ? (rhs, lhs) : (lhs, rhs)
+            let (low, borrow) = larger.low.subtractingReportingOverflow(smaller.low)
+            let (partialHigh, highUnderflow) = larger.high
+                .subtractingReportingOverflow(smaller.high)
+            let (high, borrowUnderflow) = partialHigh
+                .subtractingReportingOverflow(borrow ? 1 : 0)
+            precondition(!highUnderflow && !borrowUnderflow)
+            return (high, low)
+        }
+
+        private static func isLessThanOrEqual(
+            _ lhs: (high: UInt64, low: UInt64),
+            _ rhs: (high: UInt64, low: UInt64)
+        ) -> Bool {
+            lhs.high < rhs.high || (lhs.high == rhs.high && lhs.low <= rhs.low)
         }
 
         /// `round_near_away(frameOrdinal * numerator / denominator)`, without overflowing an Int64
@@ -205,7 +249,11 @@ enum H264CompositionOffsetRepair {
             videoDelay: Int64,
             pocStep: Int64
         ) {
-            guard rawPhase >= 0, rawPhase < cadence.period,
+            // With fewer than two ticks per frame, a tolerated one-tick container defect can be the
+            // exact timestamp of an adjacent ordinal. Packets and indexes cannot distinguish those
+            // meanings, so this cadence is not safe to repair at all.
+            guard cadence.floorStep >= 2,
+                  rawPhase >= 0, rawPhase < cadence.period,
                   rawFrameOffset == 0 || rawFrameOffset == -videoDelay,
                   videoDelay > 0,
                   let oneFrame = cadence.timestamp(at: 1),
@@ -379,7 +427,9 @@ enum H264CompositionOffsetRepair {
         videoDelay: Int,
         streamStartTime: Int64,
         ladderStart: Int64,
-        cadenceCandidates: [Cadence] = []
+        streamFrameCount: Int64 = 0,
+        averageCadence: Cadence? = nil,
+        nominalCadence: Cadence? = nil
     ) -> Verdict {
         guard videoDelay > 0, videoDelay <= 16 else {
             return .inconclusive("reorder delay \(videoDelay) outside 1...16")
@@ -431,7 +481,13 @@ enum H264CompositionOffsetRepair {
 
             guard let observed = observedCadence(
                 decodeSteps: decodeSteps,
-                metadataCandidates: cadenceCandidates
+                maximumFrameSpan: maximumFrameSpan(
+                    streamFrameCount: streamFrameCount,
+                    videoDelay: videoDelay
+                ),
+                // avg_frame_rate reflects the complete stream and must veto a short sampled alias.
+                // r_frame_rate is only a fallback when that stronger evidence is absent.
+                metadataCadence: averageCadence ?? nominalCadence
             ), let firstDTS = samples.first?.dts else {
                 return .inconclusive("decode ladder is not uniform")
             }
@@ -547,9 +603,25 @@ enum H264CompositionOffsetRepair {
         return remainder >= 0 ? remainder : remainder + modulus
     }
 
+    private static func maximumFrameSpan(
+        streamFrameCount: Int64,
+        videoDelay: Int
+    ) -> Int64? {
+        // AVStream.duration may be estimated, and converting it with a step sampled only from the
+        // head would assume the very full-stream CFR property this gate is meant to prove. Only the
+        // container's explicit frame count is strong enough to bound accumulated cadence error.
+        guard streamFrameCount > 0 else { return nil }
+        let (withReorderHead, headOverflow) = streamFrameCount
+            .addingReportingOverflow(Int64(videoDelay))
+        let (conservativeSpan, safetyOverflow) = withReorderHead.addingReportingOverflow(2)
+        guard !headOverflow, !safetyOverflow, conservativeSpan > 0 else { return nil }
+        return conservativeSpan
+    }
+
     private static func observedCadence(
         decodeSteps: [Int64],
-        metadataCandidates: [Cadence]
+        maximumFrameSpan: Int64?,
+        metadataCadence: Cadence?
     ) -> (cadence: Cadence, phase: Int64)? {
         let maximumPeriod = decodeSteps.count / 2
         guard maximumPeriod >= 2 else { return nil }
@@ -571,7 +643,11 @@ enum H264CompositionOffsetRepair {
                     numerator: periodTicks,
                     denominator: Int64(period)
                   ), cadence.period == Int64(period),
-                  metadataCandidates.contains(where: { cadence.isConsistent(with: $0) }) else {
+                  let metadataCadence,
+                  cadence.isConsistent(
+                    with: metadataCadence,
+                    maximumFrameSpan: maximumFrameSpan
+                  ) else {
                 continue
             }
 
@@ -705,7 +781,21 @@ enum H264CompositionOffsetRepair {
                     unrepairedPictures += 1
                     return nil
                 }
-                if let exactDecodeOrdinal {
+                guard let expectedTimestamp = plan.rawTimestamp(decodeOrdinal: expected) else {
+                    unrepairedPictures += 1
+                    return nil
+                }
+                if Self.isWithinOneTick(dts, of: expectedTimestamp) {
+                    // Near the expected point, tolerance is safe only when the entire +/-1 window
+                    // identifies that one ordinal. A dense cadence may place an adjacent exact
+                    // lattice point in the same window, in which case choosing either would be a
+                    // silent one-frame jump.
+                    guard plan.decodeOrdinal(forRawTimestampWithinOneTick: dts) == expected else {
+                        unrepairedPictures += 1
+                        return nil
+                    }
+                    decodeOrdinal = expected
+                } else if let exactDecodeOrdinal {
                     // An exact forward ordinal is stronger than packet counting: it preserves a
                     // legitimate gap and resynchronizes after a preceding parser miss. A backward
                     // exact timestamp is a discontinuity this session was not told about.
@@ -715,19 +805,12 @@ enum H264CompositionOffsetRepair {
                     }
                     decodeOrdinal = exactDecodeOrdinal
                 } else {
-                    // The sampled stream proved a CFR lattice. A later one-tick timestamp defect is
-                    // therefore rectified to the next decode position instead of being emitted raw.
-                    guard let expectedTimestamp = plan.rawTimestamp(decodeOrdinal: expected),
-                          Self.isWithinOneTick(dts, of: expectedTimestamp) else {
-                        unrepairedPictures += 1
-                        return nil
-                    }
-                    decodeOrdinal = expected
+                    unrepairedPictures += 1
+                    return nil
                 }
                 mayAdvanceAfterUnplacedPicture = decodeOrdinal == expected
             } else {
-                let landingOrdinal = exactDecodeOrdinal
-                    ?? plan.decodeOrdinal(forRawTimestampWithinOneTick: dts)
+                let landingOrdinal = plan.decodeOrdinal(forRawTimestampWithinOneTick: dts)
                 guard awaitingReanchor, isKeyframe, let landingOrdinal else {
                     unrepairedPictures += 1
                     return nil
@@ -867,7 +950,9 @@ final class H264CompositionOffsetRepairSession {
     private let videoDelay: Int
     private let streamStartTime: Int64
     private let ladderStart: Int64
-    private let cadenceCandidates: [H264CompositionOffsetRepair.Cadence]
+    private let streamFrameCount: Int64
+    private let averageCadence: H264CompositionOffsetRepair.Cadence?
+    private let nominalCadence: H264CompositionOffsetRepair.Cadence?
     private var reader: H264PictureOrderReader?
     private var rewriter: H264CompositionOffsetRepair.Rewriter?
     private var samples: [H264CompositionOffsetRepair.Sample] = []
@@ -895,18 +980,18 @@ final class H264CompositionOffsetRepairSession {
         self.videoDelay = Int(codecpar.pointee.video_delay)
         self.streamStartTime = stream.pointee.start_time
         self.ladderStart = ladderStart
-        var cadences: [H264CompositionOffsetRepair.Cadence] = []
-        // r_frame_rate is the coded cadence. avg_frame_rate is duration-derived and may be perturbed
-        // by head/tail quantization, but remains a bounded fallback for containers that omit r_frame_rate;
-        // classification still requires an exact two-period match before either candidate is trusted.
-        for frameRate in [stream.pointee.r_frame_rate, stream.pointee.avg_frame_rate] {
-            guard let cadence = H264CompositionOffsetRepair.Cadence(
-                timeBase: stream.pointee.time_base,
-                frameRate: frameRate
-            ), !cadences.contains(cadence) else { continue }
-            cadences.append(cadence)
-        }
-        cadenceCandidates = cadences
+        self.streamFrameCount = stream.pointee.nb_frames
+        // avg_frame_rate summarizes the complete stream and can expose a long-period cadence that a
+        // short STTS prefix aliases. r_frame_rate is a nominal coded rate, so it is only a fallback
+        // when the average is unavailable; classification still requires two exact sampled periods.
+        averageCadence = H264CompositionOffsetRepair.Cadence(
+            timeBase: stream.pointee.time_base,
+            frameRate: stream.pointee.avg_frame_rate
+        )
+        nominalCadence = H264CompositionOffsetRepair.Cadence(
+            timeBase: stream.pointee.time_base,
+            frameRate: stream.pointee.r_frame_rate
+        )
         self.reader = reader
     }
 
@@ -1034,7 +1119,9 @@ final class H264CompositionOffsetRepairSession {
             videoDelay: videoDelay,
             streamStartTime: streamStartTime,
             ladderStart: ladderStart,
-            cadenceCandidates: cadenceCandidates
+            streamFrameCount: streamFrameCount,
+            averageCadence: averageCadence,
+            nominalCadence: nominalCadence
         )
         switch verdict {
         case .repair(let plan):

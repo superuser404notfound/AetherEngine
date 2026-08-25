@@ -67,6 +67,10 @@ struct H264CompositionOffsetRepairTests {
         )!
     }
 
+    /// A conservative, identity-free upper bound for the affected source. Even across this many
+    /// frames, the duration-derived rate and the recovered five-frame cadence differ by < 0.5 tick.
+    private var physicalValidationFrameCount: Int64 { 600_000 }
+
     private func verdict(
         _ samples: [H264CompositionOffsetRepair.Sample],
         videoDelay: Int = 2,
@@ -128,7 +132,7 @@ struct H264CompositionOffsetRepairTests {
         let result = H264CompositionOffsetRepair.classify(
             samples: samples, videoDelay: 2,
             streamStartTime: 0, ladderStart: samples[0].dts,
-            cadenceCandidates: [quantizedCadence])
+            averageCadence: quantizedCadence)
         if case .repair(let plan) = result {
             #expect(plan.cadence == quantizedCadence)
             #expect(plan.rawFrameOffset == -2)
@@ -156,7 +160,7 @@ struct H264CompositionOffsetRepairTests {
         #expect(H264CompositionOffsetRepair.classify(
             samples: samples, videoDelay: 2,
             streamStartTime: 0, ladderStart: samples[0].dts,
-            cadenceCandidates: [quantizedCadence])
+            averageCadence: quantizedCadence)
             == .inconclusive("decode ladder is not uniform"))
     }
 
@@ -177,10 +181,12 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [
-                H264CompositionOffsetRepair.Cadence(numerator: 40040, denominator: 1)!,
-                physicalAverageCadence,
-            ]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence,
+            nominalCadence: H264CompositionOffsetRepair.Cadence(
+                numerator: 40040,
+                denominator: 1
+            )!
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "the repeated physical STTS phase must be repairable")
@@ -208,6 +214,72 @@ struct H264CompositionOffsetRepairTests {
         #expect(rewriter.unrepairedPictures == 0)
     }
 
+    @Test("a long-period cadence prefix cannot masquerade as a shorter repeated cycle")
+    func rejectsLongPeriodCadenceAlias() {
+        let declaredCadence = H264CompositionOffsetRepair.Cadence(
+            numerator: 335_344_009,
+            denominator: 10_000
+        )!
+        let phase: Int64 = 2
+        let phaseTimestamp = declaredCadence.timestamp(at: phase)!
+        let pocs: [Int64] = [0, 4, 2, 6, 8, 12, 10, 14, 16, 20, 18, 22]
+        let samples = pocs.enumerated().map { index, poc in
+            let timestamp = declaredCadence.timestamp(at: phase + Int64(index))! - phaseTimestamp
+            return H264CompositionOffsetRepair.Sample(
+                dts: timestamp,
+                pts: timestamp,
+                pictureOrderCount: poc,
+                isKeyframe: index == 0
+            )
+        }
+        let observedSteps = zip(samples, samples.dropFirst()).map { $1.dts - $0.dts }
+        #expect(Array(observedSteps.prefix(10)) == [
+            33534, 33535, 33534, 33534, 33535,
+            33534, 33535, 33534, 33534, 33535,
+        ])
+        let aliasedNominalCadence = H264CompositionOffsetRepair.Cadence(
+            numerator: 167_672,
+            denominator: 5
+        )!
+        #expect(H264CompositionOffsetRepair.classify(
+            samples: samples,
+            videoDelay: 1,
+            streamStartTime: 0,
+            ladderStart: 0,
+            streamFrameCount: 2_000,
+            averageCadence: declaredCadence,
+            nominalCadence: aliasedNominalCadence
+        ) == .inconclusive("decode ladder is not uniform"))
+    }
+
+    @Test("cadence corroboration uses an exact half-tick full-stream drift bound")
+    func cadenceConsistencyUsesCumulativeBound() {
+        let shortAlias = H264CompositionOffsetRepair.Cadence(
+            numerator: 167_672,
+            denominator: 5
+        )!
+        let longPeriodRate = H264CompositionOffsetRepair.Cadence(
+            numerator: 335_344_009,
+            denominator: 10_000
+        )!
+        #expect(shortAlias.isConsistent(with: longPeriodRate, maximumFrameSpan: 555))
+        #expect(!shortAlias.isConsistent(with: longPeriodRate, maximumFrameSpan: 556))
+        #expect(!shortAlias.isConsistent(with: longPeriodRate, maximumFrameSpan: nil))
+        #expect(shortAlias.isConsistent(with: shortAlias, maximumFrameSpan: nil))
+    }
+
+    @Test("an approximate cadence without a reliable stream span fails closed")
+    func approximateCadenceRequiresStreamSpan() {
+        let samples = physicalQuantizedSamples()
+        #expect(H264CompositionOffsetRepair.classify(
+            samples: samples,
+            videoDelay: 1,
+            streamStartTime: 0,
+            ladderStart: -40040,
+            averageCadence: physicalAverageCadence
+        ) == .inconclusive("decode ladder is not uniform"))
+    }
+
     @Test("classification refuses a POC depth that the declared reorder delay cannot rewrite")
     func rejectsUnsafePhysicalPlanBeforeRepairStarts() {
         var samples = physicalQuantizedSamples()
@@ -220,7 +292,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         ) == .inconclusive("sample cannot be rewritten safely"))
     }
 
@@ -235,7 +308,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "expected the physical rational plan")
@@ -270,7 +344,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "expected the physical rational plan")
@@ -307,7 +382,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "expected the physical rational plan")
@@ -347,7 +423,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "expected the physical rational plan")
@@ -388,7 +465,8 @@ struct H264CompositionOffsetRepairTests {
             videoDelay: 1,
             streamStartTime: 0,
             ladderStart: -40040,
-            cadenceCandidates: [physicalAverageCadence]
+            streamFrameCount: physicalValidationFrameCount,
+            averageCadence: physicalAverageCadence
         )
         guard case .repair(let physicalPlan) = result else {
             #expect(Bool(false), "expected the physical rational plan")
@@ -527,7 +605,7 @@ struct H264CompositionOffsetRepairTests {
         let result = H264CompositionOffsetRepair.classify(
             samples: samples, videoDelay: 2,
             streamStartTime: 0, ladderStart: samples[0].dts,
-            cadenceCandidates: [quantizedCadence])
+            averageCadence: quantizedCadence)
         guard case .repair(let rationalPlan) = result else {
             #expect(Bool(false), "expected a rational repair plan")
             return
@@ -543,6 +621,37 @@ struct H264CompositionOffsetRepairTests {
         #expect(landing?.pts == quantizedCadence.timestamp(at: 7))
         #expect(landing?.dts == quantizedCadence.timestamp(at: 5))
         #expect(rewriter.unrepairedPictures == 0)
+    }
+
+    @Test("a dense cadence whose adjacent ordinals overlap one-tick tolerance is not repairable")
+    func denseCadenceAmbiguityFailsClosed() {
+        let denseCadence = H264CompositionOffsetRepair.Cadence(numerator: 3, denominator: 2)!
+        #expect(H264CompositionOffsetRepair.Plan(
+            cadence: denseCadence,
+            rawTimestampAnchor: 0,
+            rawPhase: 0,
+            rawFrameOffset: 0,
+            videoDelay: 1,
+            pocStep: 2
+        ) == nil)
+
+        let pocs: [Int64] = [0, 4, 2, 6, 8, 12, 10, 14, 16, 20, 18, 22]
+        let samples = pocs.enumerated().map { index, poc in
+            let timestamp = denseCadence.timestamp(at: Int64(index))!
+            return H264CompositionOffsetRepair.Sample(
+                dts: timestamp,
+                pts: timestamp,
+                pictureOrderCount: poc,
+                isKeyframe: index == 0
+            )
+        }
+        #expect(H264CompositionOffsetRepair.classify(
+            samples: samples,
+            videoDelay: 1,
+            streamStartTime: 0,
+            ladderStart: 0,
+            averageCadence: denseCadence
+        ) == .inconclusive("decode ladder is not uniform"))
     }
 
     @Test("a rational presentation-axis ladder maps indexes with the same phase as packets")

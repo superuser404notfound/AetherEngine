@@ -18,10 +18,12 @@ the public-API contract.
   five-picture step cycle `40040,40041,40040,40040,40041`. The first repair required every decode
   step to be identical, classified that ladder as nonuniform and repaired no packets. The demuxer
   now derives an exact rational cadence and unique sampling phase from two repeated STTS periods;
-  declared and average frame rates only corroborate the observation and never construct timestamps.
-  A complete dry run must safely place the sampled packets before repair is armed, while ambiguous,
+  declared and average frame rates only corroborate the observation and never construct timestamps,
+  and any approximate rate must remain within half a tick across the known full-stream span. A
+  complete dry run must safely place the sampled packets before repair is armed, while ambiguous,
   non-repeating and genuinely variable timing remains untouched. Packet and container-index mapping
-  share the same rational lattice across IDRs and seeks, including bounded one-tick resynchronization.
+  share the same rational lattice across IDRs and seeks, including unambiguous one-tick
+  resynchronization.
 
 ## [6.42.0] - 2026-08-25
 
