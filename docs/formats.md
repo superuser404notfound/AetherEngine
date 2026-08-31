@@ -13,6 +13,11 @@ That list is the supported set, not the compiled set. The FFmpeg build also carr
 **Software decode** (`SoftwareVideoDecoder` + `AVSampleBufferDisplayLayer`):
 
 - AV1 (libavcodec / dav1d) on devices without HW AV1 (currently all Apple TVs, M1 / M2 Macs, pre-A17-Pro iPhones).
+
+  For AV1's common planar 4:2:0 outputs, the software decoder uses Metal to write NV12/P010 into
+  the existing CVPixelBuffer pool instead of performing a second full-frame CPU conversion after
+  dav1d. Unsupported pixel layouts and any Metal failure fall back to `sws_scale`; hosts keep the
+  same sample-buffer rendering, subtitle, seek, and PiP contracts on either path.
 - VP9 and VP8 (libavcodec native) unconditionally, since AVPlayer's HLS pipeline rejects the `vp09` / `vp08` CODECS attributes even where VideoToolbox can HW-decode them.
 - MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1, none of which AVPlayer's HLS-fMP4 pipeline accepts; libavcodec ships native decoders for all three.
 - The legacy Microsoft tail (FFmpegBuild 2.4.3): MS-MPEG4 v1 / v2 / v3, the DivX 3.x that pre-2005 AVI rips carry, and WMV1 / WMV2 / WMV3 (WMV9). The routing was already correct before that release, so these reached `SoftwareVideoDecoder` and failed the load with `unsupportedCodec` for want of a compiled-in decoder. WMV3 covers WMV9 inside Matroska and MPEG-TS, where the container's own demuxer supplies the stream; a native `.wmv` / `.asf` file still fails at `avformat_open_input`, because the `asf` demuxer and the WMA decoders such a file also needs stay out of the build deliberately (with the demuxer but no WMA decoder, `AudioCodecCompat` maps the unrecognised id to `.unsupported` and the session drops to video-only, so the file would play silently, which is a worse failure than an honest one). None of the six supports frame threading, so they decode single-threaded; the content that carries them is SD. Reported by cmcpherson274 (FFmpegBuild#3).

@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **4K AV1 software playback no longer spends CPU converting every decoded frame to NV12/P010.**
+  On Apple TV, dav1d outputs planar 4:2:0 and the software decoder previously followed it with a
+  full-frame `sws_scale` conversion before enqueueing the frame. A 3840x2160/23.976 source measured
+  roughly 464% process CPU and could not maintain a display cushion, while a native-Metal player
+  handled the same file. AV1 `YUV420P`, `YUVJ420P`, and `YUV420P10LE` frames now upload their planes
+  to reused Metal textures and write NV12/P010 directly into the existing IOSurface-backed pixel
+  buffer pool. The sample-buffer renderer, subtitles, seeking, PiP, colour/SAR attachments, and
+  frame pacing are unchanged. Missing Metal, unsupported layouts, invalid strides, texture/shader
+  failures, or GPU command failures disable the fast path for that session and fall back to
+  `sws_scale`. Exact GPU readback tests cover NV12, low-aligned 10-bit to high-aligned P010 packing,
+  and the negative-stride fallback; pure range tests cover the P010 full-range mapping.
 
 ## [6.57.1] - 2026-08-31
 

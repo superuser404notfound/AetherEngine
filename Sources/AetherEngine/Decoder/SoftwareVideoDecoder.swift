@@ -8,10 +8,13 @@ import AetherLibavutil
 import AetherLibswscale
 
 /// libavcodec software video decoder for codecs without VideoToolbox support (e.g. AV1/dav1d on Apple TV).
-/// Uses sws_scale (SIMD/NEON-optimized) for YUV→NV12/P010 conversion; required to hit 24fps at 1080p for AV1.
+/// AV1's common planar output uses the Metal YUV converter when available; sws_scale remains the
+/// failure-safe conversion path for every other codec, format, or runtime configuration.
 final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
+    /// Latched at open so the AV1-only Metal policy cannot accidentally affect another codec.
+    private var codecID: AVCodecID = AV_CODEC_ID_NONE
     // FFmpeg 8.x exposes SwsContext as a real struct (7.x was OpaquePointer); pointer type must match or call sites miscompile.
     private var swsContext: UnsafeMutablePointer<SwsContext>?
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
@@ -41,6 +44,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth = 0
     private var poolHeight = 0
+    private var poolIs10Bit = false
+
+    /// A converter and its diagnostics live for one decoder session. A failed command/pipeline
+    /// disables further attempts for that session, preventing a per-frame fallback storm.
+    private var metalConverter: MetalYUVConverter?
+    private var metalDisabledForSession = false
+    private var loggedMetalPath = false
+    private var loggedMetalFallback = false
 
     /// Skip pre-seek frames; decoded for reference but not converted.
     /// Guarded by `skipLock` not `lock`: emit() runs with `lock` held, so a same-lock accessor would deadlock.
@@ -98,6 +109,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
 
         timeBase = stream.pointee.time_base
+        codecID = codecpar.pointee.codec_id
 
         // Container SAR fallback; see streamSAR. Frames usually carry their own (MPEG-2 seq header, from frame 1).
         //
@@ -155,6 +167,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
         use10Bit = bitsPerSample > 8 || isHDRTransfer
+        metalConverter = codecID == AV_CODEC_ID_AV1 ? MetalYUVConverter() : nil
+        metalDisabledForSession = false
+        loggedMetalPath = false
+        loggedMetalFallback = false
 
         // Release-visible log (no #if DEBUG): needed for TestFlight users and DrHurt #4 black-screen reports.
         EngineLog.emit("[SWDecoder] Opened: \(codecpar.pointee.width)x\(codecpar.pointee.height), codec=\(String(cString: codec.pointee.name)), threads=\(ctx.pointee.thread_count), \(use10Bit ? "10-bit" : "8-bit")", category: .swPlayback)
@@ -448,6 +464,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         pixelBufferPool = nil
         poolWidth = 0
         poolHeight = 0
+        poolIs10Bit = false
+        metalConverter = nil
+        metalDisabledForSession = false
         if let session = transferSession {
             VTPixelTransferSessionInvalidate(session)
             transferSession = nil
@@ -471,7 +490,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
 
-        if pixelBufferPool == nil || poolWidth != width || poolHeight != height {
+        if pixelBufferPool == nil || poolWidth != width || poolHeight != height || poolIs10Bit != use10Bit {
             pixelBufferPool = nil
             let poolAttrs: NSDictionary = [kCVPixelBufferPoolMinimumBufferCountKey: 6]
             let pbAttrs: NSDictionary = [
@@ -484,6 +503,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             CVPixelBufferPoolCreate(kCFAllocatorDefault, poolAttrs, pbAttrs, &pixelBufferPool)
             poolWidth = width
             poolHeight = height
+            poolIs10Bit = use10Bit
         }
         return pixelBufferPool
     }
@@ -519,6 +539,13 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
         let srcFmt = AVPixelFormat(rawValue: frame.pointee.format)
 
+        // A decoder can report 10-bit output through the frame even when codecpar did not carry
+        // bits_per_raw_sample. Latch the destination format before obtaining the first pool
+        // buffer, otherwise a valid P010 frame would be silently truncated to NV12.
+        if srcFmt == AV_PIX_FMT_YUV420P10LE {
+            use10Bit = true
+        }
+
         let dstFmt = use10Bit ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12
 
         swsContext = sws_getCachedContext(
@@ -538,6 +565,43 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
         attachColorSpace(from: frame, to: pb)
         attachPixelAspectRatio(from: frame, to: pb)
+
+        let metalFormatSupported = MetalYUVConverter.supports(codecID: codecID, pixelFormat: srcFmt)
+        let metalBitDepthMatchesPool = (srcFmt == AV_PIX_FMT_YUV420P10LE) == use10Bit
+        if !metalDisabledForSession,
+           codecID == AV_CODEC_ID_AV1,
+           metalFormatSupported,
+           metalBitDepthMatchesPool,
+           let converter = metalConverter {
+            let fullRange = srcFmt == AV_PIX_FMT_YUVJ420P || frame.pointee.color_range == AVCOL_RANGE_JPEG
+            switch converter.convert(
+                frame: frame, destination: pb, pixelFormat: srcFmt, fullRange: fullRange
+            ) {
+            case .converted:
+                if !loggedMetalPath {
+                    loggedMetalPath = true
+                    EngineLog.emit("[SWDecoder] AV1 Metal YUV conversion enabled (GPU-complete)", category: .swPlayback)
+                }
+                return pb
+            case let .unavailable(reason), let .failed(reason):
+                metalDisabledForSession = true
+                if !loggedMetalFallback {
+                    loggedMetalFallback = true
+                    EngineLog.emit(
+                        "[SWDecoder] AV1 Metal YUV conversion unavailable (\(reason)); falling back to sws_scale",
+                        category: .swPlayback
+                    )
+                }
+            }
+        } else if codecID == AV_CODEC_ID_AV1,
+                  (!metalFormatSupported || !metalBitDepthMatchesPool || metalConverter == nil),
+                  !loggedMetalFallback {
+            loggedMetalFallback = true
+            EngineLog.emit(
+                "[SWDecoder] AV1 Metal YUV conversion unsupported for pixel format/bit depth (format=\(srcFmt.rawValue), pool10=\(use10Bit)); falling back to sws_scale",
+                category: .swPlayback
+            )
+        }
 
         CVPixelBufferLockBaseAddress(pb, [])
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
