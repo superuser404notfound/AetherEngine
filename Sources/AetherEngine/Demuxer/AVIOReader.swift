@@ -52,6 +52,55 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// deadlocks this one. See `makeSessionConfig`.
     static let longLivedConnectionsPerHost = 64
 
+    struct HopTiming {
+        let host: String
+        let port: Int
+        let status: Int?
+        let ttfbMs: Double
+        let totalMs: Double
+    }
+
+    /// #377 follow-up: two atlas.2 launches spent 5.3 and 9.5 seconds waiting for the first byte,
+    /// but the old whole-chain line could not identify which redirect hop owned that time.
+    static func slowFirstByteLine(taskSeconds: TimeInterval, hops: [HopTiming]) -> String? {
+        guard taskSeconds > 1 else { return nil }
+        let taskMs = Int((taskSeconds * 1_000).rounded())
+        let summary = hops.map { hop in
+            var fields = ["\(hop.host):\(hop.port)"]
+            if let status = hop.status { fields.append("status=\(status)") }
+            fields.append("ttfb=\(Int(hop.ttfbMs.rounded()))ms")
+            fields.append("total=\(Int(hop.totalMs.rounded()))ms")
+            return fields.joined(separator: " ")
+        }.joined(separator: " -> ")
+        return "[AVIOReader] slow first byte: \(taskMs)ms over \(hops.count) hops: \(summary)"
+    }
+
+    /// Signed redirect paths and queries carry tokens, so only host and port cross this adapter.
+    static func hopTiming(_ transaction: URLSessionTaskTransactionMetrics) -> HopTiming? {
+        guard let url = transaction.request.url,
+              let host = url.host,
+              let fetchStart = transaction.fetchStartDate,
+              let responseStart = transaction.responseStartDate,
+              let responseEnd = transaction.responseEndDate else { return nil }
+        let port: Int
+        if let explicitPort = url.port {
+            port = explicitPort
+        } else if url.scheme?.lowercased() == "https" {
+            port = 443
+        } else if url.scheme?.lowercased() == "http" {
+            port = 80
+        } else {
+            return nil
+        }
+        return HopTiming(
+            host: host,
+            port: port,
+            status: (transaction.response as? HTTPURLResponse)?.statusCode,
+            ttfbMs: responseStart.timeIntervalSince(fetchStart) * 1_000,
+            totalMs: responseEnd.timeIntervalSince(fetchStart) * 1_000
+        )
+    }
+
     /// Session config factory. Short-lived probes/chunks get a 60s resource timeout;
     /// long-lived persistent/streaming connections omit it (fires mid-stream, NSURLError
     /// -1001; stall detection is handled by `connStallTimeout`). `urlCache = nil` avoids
@@ -3829,6 +3878,13 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
         didFinishCollecting metrics: URLSessionTaskMetrics
     ) {
         ReaderTransportLog.note(metrics, for: originURL)
+        let hops = metrics.transactionMetrics.compactMap(AVIOReader.hopTiming)
+        if let line = AVIOReader.slowFirstByteLine(
+            taskSeconds: metrics.taskInterval.duration,
+            hops: hops
+        ) {
+            EngineLog.emit(line, category: .engine)
+        }
     }
 }
 
