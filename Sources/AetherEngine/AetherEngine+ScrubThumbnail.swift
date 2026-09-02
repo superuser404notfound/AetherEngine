@@ -3,6 +3,11 @@ import CoreGraphics
 
 extension AetherEngine {
 
+    /// The 2026-09-02 Whole Title trace opened 30 software decoders in 20 seconds while
+    /// scrubbing three resident 100 MB segments and back. Six keeps that small working set
+    /// warm; the segment bytes are already disk-backed and the bound remains fixed.
+    nonisolated static let scrubThumbnailExtractorLimit = 6
+
     /// Cache-backed scrub still for the active native session (live or VOD). Decodes from
     /// already-produced SegmentCache bytes, so it never opens a second connection and works
     /// on single-connection sources (debrid/torrent HTTP links, #106) where the
@@ -42,12 +47,18 @@ extension AetherEngine {
         } else {
             extractor = FrameExtractor(reader: DataIOReader(data: source.data), formatHint: "mp4")
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
-            while scrubThumbnailExtractors.count > 2 {
-                let evicted = scrubThumbnailExtractors.removeFirst()
-                Task { await evicted.extractor.shutdown() }
-            }
+            trimScrubThumbnailExtractors()
         }
         return await extractor.thumbnail(at: 0, maxWidth: maxWidth)
+    }
+
+    /// Enforce the cache-backed still LRU after a miss. Kept internal so the exact six-entry
+    /// eviction boundary can be pinned without opening a playback session.
+    func trimScrubThumbnailExtractors() {
+        while scrubThumbnailExtractors.count > Self.scrubThumbnailExtractorLimit {
+            let evicted = scrubThumbnailExtractors.removeFirst()
+            Task { await evicted.extractor.shutdown() }
+        }
     }
 
     /// True when a native session (live or VOD) is active, so `scrubThumbnail` can serve
