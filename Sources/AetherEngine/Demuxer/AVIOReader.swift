@@ -2213,12 +2213,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Single Range fetch for a detour block over the pooled chunkSession. Surfaces rate limiting with
     /// its Retry-After so the caller can back off in place rather than churn the connection (#71).
     private func detourFetchBlock(from offset: Int64, size: Int) -> DetourFetch {
+        let budget = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout)
+        let ticket = OriginRequestBudget.shared.acquire(
+            for: requestURL(), label: "\(label) detour", timeout: budget)
+        defer { OriginRequestBudget.shared.release(ticket) }
         let rangeEnd = offset + Int64(size) - 1
         var request = URLRequest(url: requestURL())
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
         // #93/#96: a starved backward-scrub detour fetch must abort fast (the rescue reconnect serves
         // instantly), so this path uses the tight interactive budget, not the full chunk timeout.
-        let budget = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout)
         request.timeoutInterval = budget
         applyExtraHeaders(&request)
         do {
