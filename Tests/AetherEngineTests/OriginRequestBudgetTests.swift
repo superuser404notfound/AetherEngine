@@ -188,8 +188,8 @@ struct OriginRequestBudgetTests {
         budget.noteRefusal(for: url, status: 429)
         #expect(budget.isPaced(url), "the first refusal arms pacing inside its quiet period")
 
-        clock.advance(by: 2)
-        for _ in 0..<4 {
+        clock.advance(by: 4)
+        for _ in 0..<2 {
             let ticket = budget.tryAcquire(for: url, label: "pump")
             #expect(ticket?.granted == true)
             budget.release(ticket)
@@ -312,60 +312,62 @@ struct OriginRequestBudgetTests {
         #expect(budget.snapshot(for: url)?.inflight == 0)
     }
 
-    @Test("tokens refill at three per second and cap at four")
+    @Test("tokens refill at one every two seconds and cap at two")
     func tokensRefillAndCap() {
         let clock = ManualDispatchClock()
         let budget = freshBudget(now: clock.now)
         budget.noteRefusal(for: url, status: 429)
-        clock.advance(by: 2)
+        clock.advance(by: 4)
 
-        for _ in 0..<4 {
+        for _ in 0..<2 {
             let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
             #expect(ticket?.granted == true)
             budget.release(ticket)
         }
         #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
-                "the burst capacity is four")
+                "the burst capacity is two")
 
-        clock.advance(by: 0.334)
+        clock.advance(by: 1.99)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
+                "less than two seconds does not refill one token")
+        clock.advance(by: 0.02)
         let refilled = budget.tryAcquire(for: url, label: "tail prefetch")
-        #expect(refilled?.granted == true, "one third of a second refills one token")
+        #expect(refilled?.granted == true, "two seconds refill one token")
         budget.release(refilled)
         #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
 
         clock.advance(by: 10)
-        for _ in 0..<4 {
+        for _ in 0..<2 {
             let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
             #expect(ticket?.granted == true)
             budget.release(ticket)
         }
         #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
-                "a long refill must still cap the bucket at four")
+                "a long refill must still cap the bucket at two")
     }
 
-    @Test("twenty clean grants disarm pacing without changing the learned concurrency limit")
-    func cleanGrantsDisarmPacing() {
+    @Test("twenty clean grants do not disarm pacing before sixty quiet seconds")
+    func cleanGrantsDoNotDisarmPacing() {
         let clock = ManualDispatchClock()
         let budget = freshBudget(now: clock.now)
         budget.noteRefusal(for: url, status: 429)
         clock.advance(by: 2)
 
-        for _ in 0..<19 {
-            clock.advance(by: 1)
+        for grant in 0..<20 {
             let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
             #expect(ticket?.granted == true)
             budget.release(ticket)
+            if grant < 19 {
+                clock.advance(by: 2)
+            }
         }
+        #expect(budget.isPaced(url), "clean grants cannot disarm a recently refused warm link")
         #expect(budget.snapshot(for: url)?.paced == true)
-
-        clock.advance(by: 1)
-        let twentieth = budget.tryAcquire(for: url, label: "tail prefetch")
-        #expect(twentieth?.granted == true)
-        budget.release(twentieth)
-        #expect(!budget.isPaced(url))
-        #expect(budget.snapshot(for: url)?.paced == false)
         #expect(budget.limit(for: url) == 1,
-                "disarming request pacing must not undo upstream's learned concurrency limit")
+                "clean grants must not undo upstream's learned concurrency limit")
+
+        clock.advance(by: 20.1)
+        #expect(!budget.isPaced(url), "the sixty-second quiet rule still disarms pacing")
     }
 
     @Test("sixty seconds without a refusal disarms pacing")

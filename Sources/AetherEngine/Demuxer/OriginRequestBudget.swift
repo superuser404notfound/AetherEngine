@@ -24,8 +24,8 @@ import Foundation
 /// A refusal also arms a request-rate pacer for that origin. It is deliberately learned rather than
 /// host-configured: the measured CDN served eight parallel 32 MB reads but first refused a run of
 /// 256 KB reads after 36 requests in 10 seconds, so concurrency and request rate are separate limits.
-/// Twenty clean grants or 60 seconds without another refusal disarm pacing; the learned concurrency
-/// ceiling remains because its recovery policy belongs to the existing budget.
+/// Sixty seconds without another refusal disarms pacing; the learned concurrency ceiling remains
+/// because its recovery policy belongs to the existing budget.
 ///
 /// A redirect chain is ONE origin here (#388). A metered source is routinely a portal that 302s to
 /// the host serving the bytes, and the host loading it can only name the portal: keeping a separate
@@ -43,13 +43,13 @@ final class OriginRequestBudget: @unchecked Sendable {
 
     static let shared = OriginRequestBudget()
 
-    /// The measured origin first refused 36 requests in 10 seconds. A four-request bucket refilling
-    /// at three per second stays just below that observed window while retaining a small read burst.
-    static let pacerCapacity = 4.0
-    static let pacerRefillPerSecond = 3.0
+    /// The cold probe first refused 36 requests in 10 seconds, but the atlas.2 device run refused
+    /// the third pump request in 2.1 seconds 45 seconds after the prior refusal, stalling for 35
+    /// seconds. A two-request bucket refilling one every two seconds keeps the warm link quieter.
+    static let pacerCapacity = 2.0
+    static let pacerRefillPerSecond = 0.5
     private static let firstQuietPeriod: TimeInterval = 2
     private static let maximumQuietPeriod: TimeInterval = 15
-    private static let cleanGrantsToDisarm = 20
     private static let quietSecondsToDisarm: TimeInterval = 60
 
     /// Scheme + host + port, matching `SuffixRangeSupport.originKey`. Deliberately NOT the full
@@ -101,7 +101,6 @@ final class OriginRequestBudget: @unchecked Sendable {
         var lastRefillAt: DispatchTime?
         var quietUntil: DispatchTime?
         var refusalStreak = 0
-        var cleanGrants = 0
         /// FIFO of waiters. Front is served first, so the pump cannot re-take the slot it just
         /// released ahead of a detour that has been waiting.
         var waiters: [DispatchSemaphore] = []
@@ -198,13 +197,11 @@ final class OriginRequestBudget: @unchecked Sendable {
                     }
                     merged.quietUntil = max(ourQuiet, theirQuiet)
                     merged.refusalStreak = max(merged.refusalStreak, joining.refusalStreak)
-                    merged.cleanGrants = min(merged.cleanGrants, joining.cleanGrants)
                 } else {
                     merged.tokens = joining.tokens
                     merged.lastRefillAt = joining.lastRefillAt
                     merged.quietUntil = theirQuiet
                     merged.refusalStreak = joining.refusalStreak
-                    merged.cleanGrants = joining.cleanGrants
                 }
             }
             merged.droppedTargets.formUnion(joining.droppedTargets)
@@ -249,7 +246,6 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.lastRefillAt = nil
         state.quietUntil = nil
         state.refusalStreak = 0
-        state.cleanGrants = 0
     }
 
     private func disarmPacerIfQuietLocked(_ state: inout OriginState, at instant: DispatchTime) {
@@ -268,13 +264,6 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.tokens = min(Self.pacerCapacity,
                            state.tokens + elapsed * Self.pacerRefillPerSecond)
         state.lastRefillAt = instant
-    }
-
-    private func noteCleanGrantLocked(_ state: inout OriginState) {
-        state.cleanGrants += 1
-        if state.cleanGrants >= Self.cleanGrantsToDisarm {
-            disarmPacerLocked(&state)
-        }
     }
 
     /// The caller already owns a concurrency slot. Hold it while the pacer waits: taking the slot
@@ -309,7 +298,6 @@ final class OriginRequestBudget: @unchecked Sendable {
                 refillPacerLocked(&state, at: instant)
                 if state.tokens >= 1 {
                     state.tokens -= 1
-                    noteCleanGrantLocked(&state)
                     origins[key] = state
                     lock.unlock()
                     let waitedMs = slotWaitedMs > 0 || pacingStarted != nil
@@ -440,7 +428,6 @@ final class OriginRequestBudget: @unchecked Sendable {
                 return nil
             }
             state.tokens -= 1
-            noteCleanGrantLocked(&state)
         }
         state.inflight += 1
         state.peakInflight = max(state.peakInflight, state.inflight)
@@ -496,7 +483,6 @@ final class OriginRequestBudget: @unchecked Sendable {
         state.refusals += 1
         state.lastRefusalAt = instant
         state.refusalStreak += 1
-        state.cleanGrants = 0
         state.tokens = 0
         state.lastRefillAt = instant
         let exponent = min(state.refusalStreak - 1, 3)
