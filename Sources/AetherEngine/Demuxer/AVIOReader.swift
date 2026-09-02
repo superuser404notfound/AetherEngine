@@ -60,10 +60,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let totalMs: Double
     }
 
-    /// #377 follow-up: two atlas.2 launches spent 5.3 and 9.5 seconds waiting for the first byte,
-    /// but the old whole-chain line could not identify which redirect hop owned that time.
+    /// #377 follow-up: 32 MB at 100 Mbps takes about 3 seconds after a healthy first byte, while
+    /// measured stalls waited 5.3 and 9.5 seconds before one; trigger on summed redirect-hop TTFB.
     static func slowFirstByteLine(taskSeconds: TimeInterval, hops: [HopTiming]) -> String? {
-        guard taskSeconds > 1 else { return nil }
+        let firstByteMs = hops.reduce(0) { $0 + $1.ttfbMs }
+        guard firstByteMs > 1_000 else { return nil }
         let taskMs = Int((taskSeconds * 1_000).rounded())
         let summary = hops.map { hop in
             var fields = ["\(hop.host):\(hop.port)"]
@@ -72,7 +73,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             fields.append("total=\(Int(hop.totalMs.rounded()))ms")
             return fields.joined(separator: " ")
         }.joined(separator: " -> ")
-        return "[AVIOReader] slow first byte: \(taskMs)ms over \(hops.count) hops: \(summary)"
+        return "[AVIOReader] slow first byte: task=\(taskMs)ms over \(hops.count) hops: \(summary)"
     }
 
     /// Signed redirect paths and queries carry tokens, so only host and port cross this adapter.
