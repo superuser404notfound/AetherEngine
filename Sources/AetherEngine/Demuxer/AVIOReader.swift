@@ -543,12 +543,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private static let winHighWaterDefault = 16 * 1024 * 1024
     private static let liveWinHighWaterDefault = 64 * 1024 * 1024
     private static let winLowWater = 8 * 1024 * 1024
-    // #220: how much the persistent reader asks for at a time. Bounds a single request's
-    // exposure by construction (an origin cannot serve more than it was asked for, whatever
-    // it thinks of flow control) and keeps the request cadence modest on a healthy link:
-    // one request per range boundary while the consumer keeps up, one per
-    // highWater-to-lowWater drain cycle when the origin outruns it.
+    // #220: floor for what the persistent reader asks for at a time, and every session's first
+    // range. Bounds a single request's exposure by construction. The 6.60.0-atlas.5 field trace
+    // delivered eighteen 32 MB fill ranges (576 MB) in 8.1 s, one request every 0.45 s; completed
+    // fills may grow toward the 128 MB ceiling below, while #310's unchanged high-water end still
+    // bounds memory and backpressure keeps steady-state playback on this 32 MB shape.
     static let persistentRangeBytes: Int64 = 32 * 1024 * 1024
+    private static let persistentRangeMaxBytes: Int64 = 128 * 1024 * 1024
+    private static let persistentRangeTargetSeconds: TimeInterval = 8
+    private static let megabyteBytes: Int64 = 1024 * 1024
     // #377: how long a pump range waits for an origin slot before going on the link anyway. The
     // pump is the main line and everything that can be holding a slot ahead of it is short (a 4 MB
     // detour block, a size probe), so this is "wait for the short thing", not "give up". Generous
@@ -738,6 +741,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// planned end, not a failure, and must not be charged to the reconnect budgets. Mirrors
     /// `connEndedByBackpressure`; cleared by `startPersistentConnection`.
     private var connEndedAtRangeEnd = false
+
+    /// Adaptive VOD range state. Every session starts at the #220 floor. A completed range sizes
+    /// the next one from delivery rate; a #310 backpressure end resets it to the floor. The shared
+    /// memory supplies the prior origin verdict to reopened sessions without changing their first
+    /// range. All instance fields are winCond-guarded.
+    private var persistentRangesStarted = 0
+    private var nextPersistentRangeBytes = AVIOReader.persistentRangeBytes
+    private var connFirstDataAt: DispatchTime?
+    private var connDeliveredBytes: Int64 = 0
 
     /// First byte the live connection was asked for. Distinct from `winStart` since #295: a
     /// continuation keeps the resident window, so the window no longer begins where the request
@@ -931,6 +943,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.connStallTimeout = max(0.05, connStallTimeout)
         self.winHighWater = max(1, windowHighWater
             ?? (isLive ? Self.liveWinHighWaterDefault : Self.winHighWaterDefault))
+        self.nextPersistentRangeBytes = PumpRangeSizeMemory.shared.rangeBytes(for: url)
+            ?? Self.persistentRangeBytes
     }
 
     /// Slow-CDN simulation: hold delivered bytes to `throttleKbps` by sleeping the demux thread before the
@@ -2571,6 +2585,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
+        let plannedRangeBytes = persistentRangesStarted == 0
+            ? Self.persistentRangeBytes
+            : nextPersistentRangeBytes
+        persistentRangesStarted += 1
         // #220: VOD asks for a fixed amount at a time, so the origin cannot deliver more than
         // was requested and the window is bounded by construction rather than by reaction. Two
         // cases keep the open-ended form: live, where the material is produced in real time so
@@ -2586,7 +2604,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // needs the START past the end, which cannot happen here), and necessary because
             // waiting for a resolved size would leave the first connection, the one that reads
             // from byte zero, open-ended.
-            if fileSize > offset { return min(Self.persistentRangeBytes, fileSize - offset) }
+            if fileSize > offset { return min(plannedRangeBytes, fileSize - offset) }
             return fileSize <= 0 ? Self.persistentRangeBytes : nil
         }()
         // #295: a request that begins inside the resident window, or exactly at its end, is a
@@ -2618,6 +2636,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connRetryAfter = 0
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
+        connFirstDataAt = nil
+        connDeliveredBytes = 0
         lastDeliveryAt = connStartedAt       // #309: the gap is measured from here until data lands
         // `nextFaultedRefillAt` is deliberately NOT reset here. The faulted-refill ladder sets it
         // just before authorising this very reconnect, so a reset on connection start erased the
@@ -2634,7 +2654,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         oldTask?.cancel()
         // #377: hand the old range's origin slot back HERE rather than waiting for its
         // `didCompleteWithError`, which arrives asynchronously. On a single-slot origin the pump
-        // would otherwise queue behind its own previous range at every 32 MB boundary and spend
+        // would otherwise queue behind its own previous range at every bounded-range boundary and spend
         // its whole acquire budget waiting for itself.
         Self.releaseBudgetTicket(of: oldTask)
 
@@ -2696,7 +2716,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         armDeliveryGapWatchdog(generation: generation, after: connStallTimeout)
         armFirstByteWitness(generation: generation, originURL: requestURLForBudget)
         // #240: not DEBUG-only any more, and it names its reader. This is the line a field report
-        // needs to answer "who is on the link": with bounded ranges every 32 MiB refill starts a
+        // needs to answer "who is on the link": with bounded ranges every refill starts a
         // generation, so an unlabelled sequence of them reads like several concurrent connections
         // when it is one reader walking forward. One line per range is a line every few seconds.
         EngineLog.emit(
@@ -2821,11 +2841,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             winCond.unlock()
             return
         }
-        lastDeliveryAt = DispatchTime.now()   // #309: the delivery-gap watchdog's only input
+        let deliveredAt = DispatchTime.now()
+        lastDeliveryAt = deliveredAt   // #309: the delivery-gap watchdog's only input
         var firstDataMs: Double? = nil
         if !connFirstDataSeen {
             connFirstDataSeen = true
-            firstDataMs = Double(DispatchTime.now().uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
+            connFirstDataAt = deliveredAt
+            firstDataMs = Double(deliveredAt.uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
             // #281 retest: the price of one round trip against this origin, which is what bounds
             // how long a read may wait for bytes that are already on the wire.
             lastFirstDataMs = firstDataMs ?? 0
@@ -2835,6 +2857,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             nextFaultedRefillAt = .distantPast
         }
         let count = data.count
+        connDeliveredBytes += Int64(count)
         // #310: delivery that lands with the backpressure end ALREADY recorded, i.e. after our
         // own cancel. A bounded in-flight tail is expected. A figure that keeps climbing is the
         // witness that ending is as advisory as suspending was (#174 blocking, #220 suspend:
@@ -2870,9 +2893,19 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         addBytesFetched(count)
         // #220: the requested range has been delivered in full. That ends the connection on
         // purpose; the read loop re-requests at the frontier once the consumer has drawn down.
-        if let end = connRangeEnd, winStart + Int64(window.count) > end {
+        if let end = connRangeEnd, winStart + Int64(window.count) > end, !connEndedAtRangeEnd {
             connEndedAtRangeEnd = true
             connEnded = true
+            if !connEndedByBackpressure, !isLive, fileSize > 0, let firstDataAt = connFirstDataAt {
+                let deliverySeconds = Double(deliveredAt.uptimeNanoseconds - firstDataAt.uptimeNanoseconds)
+                    / 1_000_000_000
+                let sized = Self.rangeSizeForDeliveryRate(
+                    deliveredBytes: connDeliveredBytes,
+                    deliverySeconds: deliverySeconds
+                )
+                nextPersistentRangeBytes = sized
+                PumpRangeSizeMemory.shared.note(sized, for: url)
+            }
         }
         winCond.broadcast()
         // #310: past high water the connection is ENDED, not suspended. suspend() is
@@ -2891,6 +2924,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if ahead > winHighWater, !connEnded, !isClosed, activeTask != nil {
             connEndedByBackpressure = true
             connEnded = true
+            nextPersistentRangeBytes = Self.persistentRangeBytes
             toCancel = activeTask
             activeTask = nil
             winCond.broadcast()
@@ -2927,6 +2961,20 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 #endif
             }
         }
+    }
+
+    /// Eight seconds of measured delivery, rounded to a whole MiB and held inside #220's floor and
+    /// the 128 MB exposure belt. Zero-duration loopback delivery is the limiting fast case.
+    static func rangeSizeForDeliveryRate(
+        deliveredBytes: Int64,
+        deliverySeconds: TimeInterval
+    ) -> Int64 {
+        guard deliveredBytes > 0 else { return persistentRangeBytes }
+        guard deliverySeconds > 0 else { return persistentRangeMaxBytes }
+        let targetBytes = Double(deliveredBytes) / deliverySeconds * persistentRangeTargetSeconds
+        let wholeMegabytes = Int64((targetBytes / Double(megabyteBytes)).rounded())
+        return min(persistentRangeMaxBytes,
+                   max(persistentRangeBytes, wholeMegabytes * megabyteBytes))
     }
 
     /// `respondedBy` is where this response came from, redirects followed, and it is passed for
@@ -3563,7 +3611,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }()
 
     /// #220: long-lived session for the persistent streaming path, paired with a per-task
-    /// `PersistentReadDelegate`. Bounded ranges end a connection every `persistentRangeBytes`,
+    /// `PersistentReadDelegate`. Bounded ranges end a connection at every planned range boundary,
     /// and a session per connection would make each of those a fresh TLS handshake against the
     /// origin. The delegate carries the connection generation, so per-task assignment is all
     /// that was ever needed here. The old per-request-session rule does not apply, and #243
@@ -4209,6 +4257,27 @@ final class SuffixRangeSupport: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         denied.removeAll()
         transportFailures.removeAll()
+    }
+}
+
+/// Last delivery-rate range verdict per origin. Like `SuffixRangeSupport`, this is process-lifetime
+/// memory of an origin property, keyed by scheme/host/port and protected by one leaf lock.
+final class PumpRangeSizeMemory: @unchecked Sendable {
+    static let shared = PumpRangeSizeMemory()
+
+    private let lock = NSLock()
+    private var rangeBytesByOrigin: [String: Int64] = [:]
+
+    func rangeBytes(for url: URL) -> Int64? {
+        guard let key = SuffixRangeSupport.originKey(for: url) else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return rangeBytesByOrigin[key]
+    }
+
+    func note(_ rangeBytes: Int64, for url: URL) {
+        guard let key = SuffixRangeSupport.originKey(for: url) else { return }
+        lock.lock(); defer { lock.unlock() }
+        rangeBytesByOrigin[key] = rangeBytes
     }
 }
 
