@@ -542,14 +542,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // that cannot bound by range request.
     private static let winHighWaterDefault = 16 * 1024 * 1024
     private static let liveWinHighWaterDefault = 64 * 1024 * 1024
-    private static let winLowWater = 8 * 1024 * 1024
+    private static let winLowWaterDefault = 8 * 1024 * 1024
+    private static let fastOriginWinHighWater = 128 * 1024 * 1024
+    private static let fastOriginWinLowWater = 64 * 1024 * 1024
+    private static let fastOriginBytesPerSecond = 12.5 * 1024 * 1024
     // #220: floor for what the persistent reader asks for at a time, and every session's first
-    // range. Bounds a single request's exposure by construction. The 6.60.0-atlas.5 field trace
-    // delivered eighteen 32 MB fill ranges (576 MB) in 8.1 s, one request every 0.45 s; completed
-    // fills may grow toward the 128 MB ceiling below, while #310's unchanged high-water end still
-    // bounds memory and backpressure keeps steady-state playback on this 32 MB shape.
+    // range. The 6.60.0-atlas.7 trace delivered three 128 MB ranges in 5.5 s at about 560 Mbps and
+    // the third was the process's first refusal. A completed fill now asks for eight seconds of
+    // delivery, bounded only by the file remainder and the sanity limit below; #310's high-water
+    // end still bounds memory when the consumer falls behind.
     static let persistentRangeBytes: Int64 = 32 * 1024 * 1024
-    private static let persistentRangeMaxBytes: Int64 = 128 * 1024 * 1024
+    private static let persistentRangeSanityBytes: Int64 = 2 * 1024 * 1024 * 1024
     private static let persistentRangeTargetSeconds: TimeInterval = 8
     private static let megabyteBytes: Int64 = 1024 * 1024
     // #377: how long a pump range waits for an origin slot before going on the link anyway. The
@@ -743,9 +746,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var connEndedAtRangeEnd = false
 
     /// Adaptive VOD range state. Every session starts at the #220 floor. A completed range sizes
-    /// the next one from delivery rate; a #310 backpressure end resets it to the floor. The shared
-    /// memory supplies the prior origin verdict to reopened sessions without changing their first
-    /// range. All instance fields are winCond-guarded.
+    /// the next one from delivery rate; a #310 backpressure end resets it to the session's window
+    /// so one request refills that window. The shared memory supplies the prior origin verdict to
+    /// reopened sessions without changing their first range. All instance fields are winCond-guarded.
     private var persistentRangesStarted = 0
     private var nextPersistentRangeBytes = AVIOReader.persistentRangeBytes
     private var connFirstDataAt: DispatchTime?
@@ -913,12 +916,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private var firstByteWitnessDelay: TimeInterval {
         min(Self.firstByteWitnessMaxSeconds, connStallTimeout * Self.firstByteWitnessFraction)
     }
-    /// High-water mark this reader ends the connection at. Mode-dependent (live absorbs a
-    /// join burst the VOD value was never sized for — see the backpressure doc block) and
-    /// an init parameter for the same reason `connStallTimeout` is one: a process-wide
-    /// hook would leak into whatever suite runs concurrently. The shipped values are the
-    /// two statics above.
-    private let winHighWater: Int
+    /// Water marks this reader ends and refills the connection at. They start mode-dependent
+    /// (live absorbs a join burst the VOD value was never sized for — see the backpressure doc
+    /// block). A completed fast VOD range may raise them for this session; winCond guards both and
+    /// neither ever falls. The high-water init parameter stays an instance test seam so it cannot
+    /// leak into whatever suite runs concurrently.
+    private var winHighWater: Int
+    private var winLowWater: Int
     private var throttleVClockNs: UInt64 = 0
     private let throttleLock = NSLock()
 
@@ -943,6 +947,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.connStallTimeout = max(0.05, connStallTimeout)
         self.winHighWater = max(1, windowHighWater
             ?? (isLive ? Self.liveWinHighWaterDefault : Self.winHighWaterDefault))
+        self.winLowWater = Self.winLowWaterDefault
         self.nextPersistentRangeBytes = PumpRangeSizeMemory.shared.rangeBytes(for: url)
             ?? Self.persistentRangeBytes
     }
@@ -1913,7 +1918,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 var refillRetryAfter: TimeInterval = 0
                 let undrained = window.count - max(0, Int(position - winStart))
                 let frontier = winStart + Int64(window.count)
-                if activeTask == nil, undrained <= Self.winLowWater,
+                if activeTask == nil, undrained <= winLowWater,
                    isLive || fileSize <= 0 || frontier < fileSize {
                     if connEndedAtRangeEnd || connEndedByBackpressure {
                         refillFrom = frontier
@@ -2899,11 +2904,21 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if !connEndedByBackpressure, !isLive, fileSize > 0, let firstDataAt = connFirstDataAt {
                 let deliverySeconds = Double(deliveredAt.uptimeNanoseconds - firstDataAt.uptimeNanoseconds)
                     / 1_000_000_000
+                let deliveryBytesPerSecond = deliverySeconds > 0
+                    ? Double(connDeliveredBytes) / deliverySeconds
+                    : .infinity
                 let sized = Self.rangeSizeForDeliveryRate(
                     deliveredBytes: connDeliveredBytes,
                     deliverySeconds: deliverySeconds
                 )
                 nextPersistentRangeBytes = sized
+                let fastWindow = Self.fastOriginWindow(
+                    deliveryBytesPerSecond: deliveryBytesPerSecond,
+                    isLive: isLive,
+                    fileSize: fileSize
+                )
+                winHighWater = max(winHighWater, fastWindow.high)
+                winLowWater = max(winLowWater, fastWindow.low)
                 PumpRangeSizeMemory.shared.note(sized, for: url)
             }
         }
@@ -2924,7 +2939,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         if ahead > winHighWater, !connEnded, !isClosed, activeTask != nil {
             connEndedByBackpressure = true
             connEnded = true
-            nextPersistentRangeBytes = Self.persistentRangeBytes
+            nextPersistentRangeBytes = Int64(winHighWater)
             toCancel = activeTask
             activeTask = nil
             winCond.broadcast()
@@ -2963,18 +2978,38 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
-    /// Eight seconds of measured delivery, rounded to a whole MiB and held inside #220's floor and
-    /// the 128 MB exposure belt. Zero-duration loopback delivery is the limiting fast case.
+    /// Eight seconds of measured delivery, rounded to a whole MiB and held above #220's floor.
+    /// The request builder clamps this to the file remainder; 2 GiB is only a corrupt-rate guard.
     static func rangeSizeForDeliveryRate(
         deliveredBytes: Int64,
         deliverySeconds: TimeInterval
     ) -> Int64 {
         guard deliveredBytes > 0 else { return persistentRangeBytes }
-        guard deliverySeconds > 0 else { return persistentRangeMaxBytes }
+        guard deliverySeconds > 0 else { return persistentRangeSanityBytes }
         let targetBytes = Double(deliveredBytes) / deliverySeconds * persistentRangeTargetSeconds
-        let wholeMegabytes = Int64((targetBytes / Double(megabyteBytes)).rounded())
-        return min(persistentRangeMaxBytes,
-                   max(persistentRangeBytes, wholeMegabytes * megabyteBytes))
+        let boundedBytes = min(Double(persistentRangeSanityBytes), targetBytes)
+        let wholeMegabytes = Int64((boundedBytes / Double(megabyteBytes)).rounded())
+        return max(persistentRangeBytes, wholeMegabytes * megabyteBytes)
+    }
+
+    /// The 6.60.0-atlas.7 device run opened 17 ranges in the minute before the first refusal;
+    /// steady 4K alone drained the 16 MB window about every four seconds. At 100 Mbps or faster,
+    /// a known-size VOD session uses 128/64 MB so it refills about every ten seconds. The same run
+    /// held 287 MB resident, while live and unresolved sources keep their established windows.
+    static func fastOriginWindow(
+        deliveryBytesPerSecond: Double,
+        isLive: Bool,
+        fileSize: Int64
+    ) -> (high: Int, low: Int) {
+        let current = (
+            high: isLive ? liveWinHighWaterDefault : winHighWaterDefault,
+            low: winLowWaterDefault
+        )
+        guard !isLive, fileSize > 0,
+              deliveryBytesPerSecond >= fastOriginBytesPerSecond else {
+            return current
+        }
+        return (fastOriginWinHighWater, fastOriginWinLowWater)
     }
 
     /// `respondedBy` is where this response came from, redirects followed, and it is passed for
