@@ -13,6 +13,15 @@ public enum SubtitleChannel: Sendable {
     case secondary
 }
 
+extension SubtitleForwardPrefetcher {
+    /// #151: on the 6.60.0-atlas.1 device run, refusals fell from roughly 150 to 21, but every 429
+    /// after the pump went quiet came from this best-effort reader reopening every 4 to 10 seconds.
+    /// A paced or single-slot origin keeps the pump's tap-fed subtitles and yields the speculative
+    /// far-ahead window, the same trade already documented for serial source requests.
+    static func shouldHold(originPaced: Bool, originSerial: Bool) -> Bool {
+        originPaced || originSerial
+    }
+}
 
 extension AetherEngine {
 
@@ -643,7 +652,29 @@ extension AetherEngine {
                 maxRestarts: AetherEngine.subtitleForwardPrefetchMaxRestarts,
                 backoffNanoseconds: AetherEngine.subtitleForwardPrefetchRestartBackoffNanoseconds)
             var resumeAt = anchor
+            var holdingForMeteredOrigin = false
             while !Task.isCancelled {
+                let originPaced = OriginRequestBudget.shared.isPaced(url)
+                let originSerial = OriginRequestBudget.shared.requiresSerialRequests(url)
+                if SubtitleForwardPrefetcher.shouldHold(
+                    originPaced: originPaced, originSerial: originSerial
+                ) {
+                    if !holdingForMeteredOrigin {
+                        EngineLog.emit(
+                            "[AetherEngine] #151 forward prefetch holding: origin is metered "
+                            + "(paced=\(originPaced) serial=\(originSerial))",
+                            category: .engine)
+                        holdingForMeteredOrigin = true
+                    }
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    continue
+                }
+                if holdingForMeteredOrigin {
+                    EngineLog.emit(
+                        "[AetherEngine] #151 forward prefetch resuming: origin is no longer metered",
+                        category: .engine)
+                    holdingForMeteredOrigin = false
+                }
                 // A custom source needs its own independent reader per attempt: the previous one
                 // is closed by the session that failed.
                 var attemptReader: IOReader? = nil

@@ -146,6 +146,18 @@ struct Issue151SubtitleForwardPrefetchTests {
             isLive: false, hasEmbeddedDrainTargets: true, hasSource: false))
     }
 
+    @Test("prefetch holds whenever its origin is paced or serial")
+    func meteredOriginHoldTruthTable() {
+        #expect(!SubtitleForwardPrefetcher.shouldHold(
+            originPaced: false, originSerial: false))
+        #expect(SubtitleForwardPrefetcher.shouldHold(
+            originPaced: true, originSerial: false))
+        #expect(SubtitleForwardPrefetcher.shouldHold(
+            originPaced: false, originSerial: true))
+        #expect(SubtitleForwardPrefetcher.shouldHold(
+            originPaced: true, originSerial: true))
+    }
+
     /// A drain-tick jump (seek) re-anchors the prefetcher; a fresh selection (no cursor yet) does
     /// not, because the selection path starts it itself; steady decode ticks never restart it.
     @Test("re-anchor fires on a jump with an existing cursor only")

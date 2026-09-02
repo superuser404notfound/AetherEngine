@@ -655,6 +655,19 @@ final class OriginRequestBudget: @unchecked Sendable {
         limit(for: url) == 1
     }
 
+    /// True while this origin's learned request-rate pacer remains armed. Resolve through the
+    /// redirect chain so the relay URL a host loaded reports the CDN's pacing state (#388), and
+    /// apply the same 60-second quiet disarm every other pacer query uses.
+    func isPaced(_ url: URL) -> Bool {
+        guard let raw = Self.originKey(for: url) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        let key = headLocked(raw)
+        guard var state = origins[key] else { return false }
+        disarmPacerIfQuietLocked(&state, at: now())
+        origins[key] = state
+        return state.quietUntil != nil
+    }
+
     func snapshot(for url: URL) -> Snapshot? {
         guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock(); defer { lock.unlock() }

@@ -166,6 +166,7 @@ struct OriginRequestBudgetTests {
         let clock = ManualDispatchClock()
         let budget = freshBudget(now: clock.now)
 
+        #expect(!budget.isPaced(url))
         let first = budget.tryAcquire(for: url, label: "tail prefetch")
         #expect(first?.granted == true)
         #expect(budget.snapshot(for: url)?.paced == false)
@@ -176,6 +177,43 @@ struct OriginRequestBudgetTests {
         #expect(later?.granted == true, "time alone must not arm an origin that never refused")
         #expect(budget.snapshot(for: url)?.paced == false)
         budget.release(later)
+    }
+
+    @Test("isPaced follows the pacer's armed, draining, and disarmed states")
+    func isPacedReportsThePacerLifetime() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+
+        #expect(!budget.isPaced(url))
+        budget.noteRefusal(for: url, status: 429)
+        #expect(budget.isPaced(url), "the first refusal arms pacing inside its quiet period")
+
+        clock.advance(by: 2)
+        for _ in 0..<4 {
+            let ticket = budget.tryAcquire(for: url, label: "pump")
+            #expect(ticket?.granted == true)
+            budget.release(ticket)
+        }
+        #expect(budget.isPaced(url),
+                "an empty bucket remains paced after the quiet period while tokens refill")
+
+        clock.advance(by: 60.1)
+        #expect(!budget.isPaced(url), "sixty seconds without a refusal disarms pacing")
+    }
+
+    @Test("isPaced answers for a relay URL through the redirect chain head")
+    func isPacedCrossesTheRedirectChain() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        let relay = URL(string: "https://relay.example.com/link/movie")!
+        let cdn = URL(string: "https://edge.example.net/signed/movie?token=one")!
+
+        budget.noteRedirect(from: relay, to: cdn)
+        budget.noteRefusal(for: cdn, status: 429)
+
+        #expect(budget.isPaced(cdn))
+        #expect(budget.isPaced(relay),
+                "the host-loaded relay must report pacing learned from its folded CDN")
     }
 
     @Test("the first refusal arms a two-second quiet period with an empty bucket")
@@ -324,6 +362,7 @@ struct OriginRequestBudgetTests {
         let twentieth = budget.tryAcquire(for: url, label: "tail prefetch")
         #expect(twentieth?.granted == true)
         budget.release(twentieth)
+        #expect(!budget.isPaced(url))
         #expect(budget.snapshot(for: url)?.paced == false)
         #expect(budget.limit(for: url) == 1,
                 "disarming request pacing must not undo upstream's learned concurrency limit")
