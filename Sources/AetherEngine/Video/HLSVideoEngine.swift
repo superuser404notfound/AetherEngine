@@ -77,6 +77,51 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?
 
+    /// The 2026-09-02 field session retained 64 segments spanning more than four minutes. Cache
+    /// mutations can arrive much faster than a host timeline needs to redraw, so fold them into at
+    /// most four snapshots a second while preserving every final resident shape.
+    private let residentRangesPublishLock = NSLock()
+    private var residentRangesPublishTask: Task<Void, Never>?
+    private var residentRangesPublishPending = false
+    private var residentRangesObserver: (@Sendable ([ClosedRange<Double>]) -> Void)?
+
+    func setResidentRangesObserver(
+        _ observer: (@Sendable ([ClosedRange<Double>]) -> Void)?
+    ) {
+        residentRangesPublishLock.lock()
+        residentRangesObserver = observer
+        residentRangesPublishLock.unlock()
+    }
+
+    func noteResidentSetChanged() {
+        residentRangesPublishLock.lock()
+        residentRangesPublishPending = true
+        guard residentRangesPublishTask == nil else {
+            residentRangesPublishLock.unlock()
+            return
+        }
+        residentRangesPublishTask = Task.detached(priority: .utility) { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            self?.publishResidentRanges()
+        }
+        residentRangesPublishLock.unlock()
+    }
+
+    private func publishResidentRanges() {
+        residentRangesPublishLock.lock()
+        residentRangesPublishPending = false
+        let observer = residentRangesObserver
+        residentRangesPublishLock.unlock()
+
+        observer?(residentRanges())
+
+        residentRangesPublishLock.lock()
+        residentRangesPublishTask = nil
+        let publishAgain = residentRangesPublishPending
+        residentRangesPublishLock.unlock()
+        if publishAgain { noteResidentSetChanged() }
+    }
+
     /// Side demuxer for live HLS ingest with a separate audio rendition playlist; nil for muxed-audio
     /// sessions. Torn down by `stop()` identically to the main demuxer (markClosed + detached close).
     var sideAudioDemuxer: Demuxer?
@@ -1258,8 +1303,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let retentionBudget = Self.sessionRetentionBudgetBytes(volumeAvailableBytes: availableBytes,
                                                                capRelaxed: capRelaxed)
         self.retentionBudgetBytes = retentionBudget
-        let segmentCache = SegmentCache(forwardWindow: forwardWindowSegments,
-                                        retentionBudgetBytes: retentionBudget)
+        let segmentCache = SegmentCache(
+            forwardWindow: forwardWindowSegments,
+            retentionBudgetBytes: retentionBudget,
+            onResidentSetChanged: { [weak self] in self?.noteResidentSetChanged() }
+        )
         self.cache = segmentCache
         EngineLog.emit(
             "[HLSVideoEngine] segment retention budget: \(retentionBudget / (1 << 20)) MiB "
@@ -2027,6 +2075,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var segmentCacheTotalBytes: Int { subsystemSnapshot().cache?.totalBytes ?? 0 }
     /// On-disk segment bytes (freshly stat-ed). Used by `aetherctl live --report-cache-bytes`.
     var segmentCacheDiskBytes: Int64 { subsystemSnapshot().cache?.diskBytes() ?? 0 }
+
+    /// Presentation-axis spans currently backed by the VOD segment cache. Live returns no claim:
+    /// its DVR history is a different contract, expressed by `seekableLiveRange` at the engine layer.
+    func residentRanges() -> [ClosedRange<Double>] {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        guard !isLiveSession, let cache, !segmentPlan.isEmpty else { return [] }
+        return cache.residentIndexRanges().compactMap { indexes in
+            guard indexes.lowerBound >= 0, indexes.upperBound < segmentPlan.count else { return nil }
+            let lower = segmentPlan[indexes.lowerBound].startSeconds
+            let upperIndex = indexes.upperBound + 1
+            let upper = upperIndex < segmentPlan.count
+                ? segmentPlan[upperIndex].startSeconds
+                : segmentPlan[indexes.upperBound].startSeconds
+                    + segmentPlan[indexes.upperBound].durationSeconds
+            return lower...upper
+        }
+    }
 
     /// Seconds of contiguous *safe* content ahead of the playhead on the media-playlist axis: what the
     /// consumer already holds, plus what sits contiguously above it in the disk SegmentCache (which is

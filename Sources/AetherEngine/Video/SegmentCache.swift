@@ -30,6 +30,7 @@ final class SegmentCache: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
+    private let onResidentSetChanged: (@Sendable () -> Void)?
 
     private let forwardWindow: Int
     /// 20 covers Continuous-Audio handover refetches (~7-10 segments backward); smaller values
@@ -102,10 +103,11 @@ final class SegmentCache: @unchecked Sendable {
 
     /// (10, 20)=30 entries, ~300 MB at 4K HDR HEVC ~10 MB/seg.
     init(forwardWindow: Int = 10, backwardWindow: Int = 20, retentionBudgetBytes: Int = 0,
-         baseDirectory: URL? = nil) {
+         baseDirectory: URL? = nil, onResidentSetChanged: (@Sendable () -> Void)? = nil) {
         self.forwardWindow = forwardWindow
         self.backwardWindow = backwardWindow
         self.retentionBudgetBytes = retentionBudgetBytes
+        self.onResidentSetChanged = onResidentSetChanged
 
         // aether-segments/ prefix lets sweepStaleSessionDirs() find sibling dirs from crashed sessions.
         let baseDir = baseDirectory ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -278,6 +280,7 @@ final class SegmentCache: @unchecked Sendable {
         }
 
         condition.lock()
+        let residentBefore = Set(entries.keys)
         // store racing close() must not resurrect bookkeeping; entry would point into deleted sessionDir.
         guard !closed else {
             condition.unlock()
@@ -294,9 +297,11 @@ final class SegmentCache: @unchecked Sendable {
             if index > _highestStoredIndex { _highestStoredIndex = index }
         }
         let doomed = pruneOutsideWindow()
+        let residentSetChanged = residentBefore != Set(entries.keys)
         condition.broadcast()
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
+        if residentSetChanged { onResidentSetChanged?() }
     }
 
     /// Adopt a staging file via rename(2). Page cache pages stay warm; skips a Swift Data round trip.
@@ -325,6 +330,7 @@ final class SegmentCache: @unchecked Sendable {
         }
 
         condition.lock()
+        let residentBefore = Set(entries.keys)
         guard !closed else {
             condition.unlock()
             try? FileManager.default.removeItem(at: fileURL)
@@ -346,9 +352,11 @@ final class SegmentCache: @unchecked Sendable {
             videoReaches[index] = videoReach
         }
         let doomed = pruneOutsideWindow()
+        let residentSetChanged = residentBefore != Set(entries.keys)
         condition.broadcast()
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
+        if residentSetChanged { onResidentSetChanged?() }
     }
 
     func close() {
@@ -382,6 +390,7 @@ final class SegmentCache: @unchecked Sendable {
         }
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
+        if !doomed.isEmpty { onResidentSetChanged?() }
     }
 
     /// Must be called with condition held.
@@ -513,6 +522,7 @@ final class SegmentCache: @unchecked Sendable {
         for url in doomed {
             try? FileManager.default.removeItem(at: url)
         }
+        if !doomed.isEmpty { onResidentSetChanged?() }
     }
 
     /// Authoritative disk footprint via fresh stat (not _totalBytes accumulator); diagnostics path.
@@ -585,6 +595,30 @@ final class SegmentCache: @unchecked Sendable {
         guard !entries.isEmpty else { return nil }
         let keys = entries.keys
         return (keys.min()!, keys.max()!)
+    }
+
+    /// Contiguous runs of segment indexes that are resident on disk. A 2026-09-02 field session
+    /// retained 64 segments across several islands, so min/max alone cannot describe the picture
+    /// a host can truthfully mark as loaded.
+    func residentIndexRanges() -> [ClosedRange<Int>] {
+        condition.lock()
+        defer { condition.unlock() }
+        let indexes = entries.keys.sorted()
+        guard let first = indexes.first else { return [] }
+        var ranges: [ClosedRange<Int>] = []
+        var lower = first
+        var upper = first
+        for index in indexes.dropFirst() {
+            if index == upper + 1 {
+                upper = index
+            } else {
+                ranges.append(lower...upper)
+                lower = index
+                upper = index
+            }
+        }
+        ranges.append(lower...upper)
+        return ranges
     }
 
     /// Monotonic across prunes; reset per restart via resetHighWaterForRestart().

@@ -92,6 +92,49 @@ struct SegmentCacheTests {
         #expect(c.totalBytes == 60)   // seg 5..10 == 6 * 10 bytes
     }
 
+    @Test("residentIndexRanges is empty when the cache is empty")
+    func residentRangesEmpty() {
+        let c = SegmentCache()
+        defer { c.close() }
+        #expect(c.residentIndexRanges().isEmpty)
+    }
+
+    @Test("residentIndexRanges reports one stored segment")
+    func residentRangesOneSegment() {
+        let c = SegmentCache()
+        defer { c.close() }
+        c.store(index: 3, data: makeData(10))
+        #expect(c.residentIndexRanges() == [3...3])
+    }
+
+    @Test("residentIndexRanges merges adjacent segments")
+    func residentRangesAdjacentSegments() {
+        let c = SegmentCache()
+        defer { c.close() }
+        c.store(index: 3, data: makeData(10))
+        c.store(index: 4, data: makeData(10))
+        #expect(c.residentIndexRanges() == [3...4])
+    }
+
+    @Test("residentIndexRanges preserves separated islands")
+    func residentRangesSeparatedSegments() {
+        let c = SegmentCache()
+        defer { c.close() }
+        c.store(index: 1, data: makeData(10))
+        c.store(index: 2, data: makeData(10))
+        c.store(index: 4, data: makeData(10))
+        #expect(c.residentIndexRanges() == [1...2, 4...4])
+    }
+
+    @Test("residentIndexRanges reflects evictBelow")
+    func residentRangesAfterEviction() {
+        let c = SegmentCache()
+        defer { c.close() }
+        for index in [1, 2, 4] { c.store(index: index, data: makeData(10)) }
+        c.evictBelow(2)
+        #expect(c.residentIndexRanges() == [2...2, 4...4])
+    }
+
     @Test("Init version resolution picks the highest fromSegment at or below the index")
     func initVersionResolution() {
         let c = SegmentCache()

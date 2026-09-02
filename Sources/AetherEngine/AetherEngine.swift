@@ -81,6 +81,11 @@ public final class AetherEngine: ObservableObject {
         didSet { recomputePlaybackPhase() }
     }
 
+    /// Where the loopback segment cache holds picture right now, on the same presentation axis
+    /// `seek(to:)` uses. An empty array is the nil-equivalent. Residency is not a promise that a seek
+    /// inside a range will be instant; the player may still need to re-anchor and decode at the target.
+    @Published public internal(set) var residentRanges: [ClosedRange<Double>] = []
+
     /// True from seek entry until physical landing, covering programmatic seeks, native AVKit scrubs and
     /// seeks the session could not take yet (#127/#178 stash). Unlike `state == .seeking` (optimistically
     /// flipped to `.playing`), this spans the real loopback-HLS landing, which resolves seconds after the
@@ -1236,7 +1241,22 @@ public final class AetherEngine: ObservableObject {
     let displayCriteria = DisplayCriteriaController()
 
     /// Loopback HLS-fMP4 engine. Non-nil between load and stop.
-    var nativeVideoSession: HLSVideoEngine?
+    var nativeVideoSession: HLSVideoEngine? {
+        didSet {
+            oldValue?.setResidentRangesObserver(nil)
+            guard let session = nativeVideoSession else {
+                residentRanges = []
+                return
+            }
+            session.setResidentRangesObserver { [weak self, weak session] ranges in
+                Task { @MainActor in
+                    guard let self, let session, self.nativeVideoSession === session else { return }
+                    self.residentRanges = ranges
+                }
+            }
+            residentRanges = session.residentRanges()
+        }
+    }
     /// AE#446 round 2: polls for the source coming back after a window was closed with ENDLIST.
     /// Cancelled on stop; see `handleLiveOutageWindowExhausted`.
     var liveOutageResumeWatcher: Task<Void, Never>?
@@ -3069,6 +3089,7 @@ public final class AetherEngine: ObservableObject {
             : nil
         state = .loading
         isBuffering = false
+        residentRanges = []
         readerStall = .flowing
         clock.currentTime = 0
         clock.bufferedPosition = 0
@@ -5729,6 +5750,7 @@ public final class AetherEngine: ObservableObject {
         clock.sourceTime = 0
         clock.bufferedPosition = 0
         isBuffering = false
+        residentRanges = []
         readerStall = .flowing
         // Hard-clear in-flight seek state: late callbacks are dropped by generation guards, but isSeeking
         // must not strand (#38). Open tickets are rejected rather than left dangling, so a host tracking
