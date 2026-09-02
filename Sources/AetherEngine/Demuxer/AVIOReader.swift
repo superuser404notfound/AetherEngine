@@ -1762,6 +1762,27 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // Serve via the pooled detour cache so the anchored streaming connection is NOT
                 // torn down (the reconnect storm + origin 429, AetherEngine#69).
                 if detourEligible {
+                    let detourSpan = Int64(Self.detourMaxBlocks) * Int64(Self.detourBlockSize)
+                    // 6.60.0-atlas.5 field trace: a 48 GB backward seek paid five 4 MB detour
+                    // requests and took 38.5 s before the pump re-anchored. Beyond the cache's
+                    // entire 32 MB span, preserve only a resident block or reposition immediately;
+                    // the header region stays on the #69 detour path because its reads repeat.
+                    if winStart - curPosition > detourSpan, curPosition >= detourSpan {
+                        switch serveFromDetour(into: buf.advanced(by: totalRead),
+                                               maxLen: requestSize - totalRead,
+                                               at: curPosition, allowFetch: false) {
+                        case .served(let n, _):
+                            diag.recordDetourServe(ms: 0, fetched: false)
+                            winCond.lock(); position = curPosition + Int64(n); winCond.broadcast(); winCond.unlock()
+                            totalRead += n
+                            detourTrackSequential(at: curPosition, length: n)
+                            continue
+                        case .rateLimited, .miss:
+                            detourResetRun()
+                            timedReconnect(seek: true, at: curPosition)
+                            continue
+                        }
+                    }
                     // Re-anchor the streaming connection once detour reads have turned sequential
                     // past the threshold (playback resumed here), so steady playback returns to
                     // the cheap window path instead of fetching 4 MB blocks forever.
