@@ -15,8 +15,8 @@ struct OriginRequestBudgetTests {
     private let sameOriginRotatedToken = URL(string: "https://cdn.example.com:443/signed/movie.mkv?token=b")!
     private let otherOrigin = URL(string: "https://other.example.com:443/movie.mkv")!
 
-    private func freshBudget() -> OriginRequestBudget {
-        let budget = OriginRequestBudget()
+    private func freshBudget(now: @escaping () -> DispatchTime = { .now() }) -> OriginRequestBudget {
+        let budget = OriginRequestBudget(now: now)
         return budget
     }
 
@@ -159,6 +159,205 @@ struct OriginRequestBudgetTests {
         #expect(budget.snapshot(for: url)?.refusals == 3)
 
         tickets.forEach { budget.release($0) }
+    }
+
+    @Test("an unrefused origin never arms the request-rate pacer")
+    func unrefusedOriginIsNeverPaced() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+
+        let first = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(first?.granted == true)
+        #expect(budget.snapshot(for: url)?.paced == false)
+        budget.release(first)
+
+        clock.advance(by: 600)
+        let later = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(later?.granted == true, "time alone must not arm an origin that never refused")
+        #expect(budget.snapshot(for: url)?.paced == false)
+        budget.release(later)
+    }
+
+    @Test("the first refusal arms a two-second quiet period with an empty bucket")
+    func firstRefusalArmsThePacer() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+
+        budget.noteRefusal(for: url, status: 429)
+        #expect(budget.snapshot(for: url)?.paced == true)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
+
+        clock.advance(by: 1.99)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
+                "the quiet period, not token refill, is the first gate")
+        clock.advance(by: 0.02)
+        let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(ticket?.granted == true)
+        budget.release(ticket)
+    }
+
+    @Test("Retry-After overrides the learned quiet period")
+    func retryAfterOverridesQuietPeriod() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+
+        budget.noteRefusal(for: url, status: 429, retryAfter: 6)
+        clock.advance(by: 5.99)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
+        clock.advance(by: 0.02)
+        let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(ticket?.granted == true)
+        budget.release(ticket)
+    }
+
+    @Test("refusals in one streak double the quiet period and cap it at fifteen seconds")
+    func refusalQuietPeriodDoublesAndCaps() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+
+        budget.noteRefusal(for: url, status: 429)
+        budget.noteRefusal(for: url, status: 429)
+        clock.advance(by: 3.99)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
+        clock.advance(by: 0.02)
+        let afterFour = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(afterFour?.granted == true, "the second refusal in the streak waits four seconds")
+        budget.release(afterFour)
+
+        budget.noteRefusal(for: url, status: 429)
+        budget.noteRefusal(for: url, status: 429)
+        clock.advance(by: 14.99)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
+        clock.advance(by: 0.02)
+        let afterCap = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(afterCap?.granted == true, "the fourth refusal caps at fifteen seconds, not sixteen")
+        budget.release(afterCap)
+    }
+
+    @Test("an acquire inside the quiet period waits and proceeds when the injected clock advances")
+    func acquireWaitsForThePacer() async {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.noteRefusal(for: url, status: 429)
+
+        let started = UnsafeFlag()
+        let granted = UnsafeFlag()
+        DispatchQueue.global().async {
+            started.set(true)
+            let ticket = budget.acquire(for: self.url, label: "pump", timeout: 1)
+            granted.set(ticket?.granted == true)
+            budget.release(ticket)
+        }
+
+        #expect(await waitUntil { started.value == true })
+        #expect(await waitUntil { budget.snapshot(for: url)?.inflight == 1 },
+                "the request owns its concurrency slot while the pacer holds it")
+        #expect(granted.value == nil, "the request must remain parked inside the quiet period")
+
+        clock.advance(by: 2)
+        #expect(await waitUntil { granted.value == true },
+                "advancing the injected clock must release the request without a two-second sleep")
+    }
+
+    @Test("a paced acquire that exhausts its caller budget proceeds ungranted")
+    func pacedAcquireRespectsTimeout() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.noteRefusal(for: url, status: 429)
+
+        let ticket = budget.acquire(for: url, label: "pump", timeout: 0)
+        #expect(ticket?.granted == false,
+                "request pacing is a throttle, not a correctness barrier")
+        #expect(budget.snapshot(for: url)?.inflight == 1,
+                "an over-budget request still counts as present on the link")
+        budget.release(ticket)
+        #expect(budget.snapshot(for: url)?.inflight == 0)
+    }
+
+    @Test("tokens refill at three per second and cap at four")
+    func tokensRefillAndCap() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.noteRefusal(for: url, status: 429)
+        clock.advance(by: 2)
+
+        for _ in 0..<4 {
+            let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+            #expect(ticket?.granted == true)
+            budget.release(ticket)
+        }
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
+                "the burst capacity is four")
+
+        clock.advance(by: 0.334)
+        let refilled = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(refilled?.granted == true, "one third of a second refills one token")
+        budget.release(refilled)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil)
+
+        clock.advance(by: 10)
+        for _ in 0..<4 {
+            let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+            #expect(ticket?.granted == true)
+            budget.release(ticket)
+        }
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
+                "a long refill must still cap the bucket at four")
+    }
+
+    @Test("twenty clean grants disarm pacing without changing the learned concurrency limit")
+    func cleanGrantsDisarmPacing() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.noteRefusal(for: url, status: 429)
+        clock.advance(by: 2)
+
+        for _ in 0..<19 {
+            clock.advance(by: 1)
+            let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+            #expect(ticket?.granted == true)
+            budget.release(ticket)
+        }
+        #expect(budget.snapshot(for: url)?.paced == true)
+
+        clock.advance(by: 1)
+        let twentieth = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(twentieth?.granted == true)
+        budget.release(twentieth)
+        #expect(budget.snapshot(for: url)?.paced == false)
+        #expect(budget.limit(for: url) == 1,
+                "disarming request pacing must not undo upstream's learned concurrency limit")
+    }
+
+    @Test("sixty seconds without a refusal disarms pacing")
+    func quietOriginDisarmsPacing() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.noteRefusal(for: url, status: 429)
+
+        clock.advance(by: 59.9)
+        #expect(budget.snapshot(for: url)?.paced == true)
+        clock.advance(by: 0.2)
+        #expect(budget.snapshot(for: url)?.paced == false)
+        let ticket = budget.tryAcquire(for: url, label: "tail prefetch")
+        #expect(ticket?.granted == true, "the bucket is irrelevant after the quiet disarm")
+        budget.release(ticket)
+    }
+
+    @Test("a host concurrency limit still wins while request pacing is armed")
+    func hostLimitStillWinsWithPacing() {
+        let clock = ManualDispatchClock()
+        let budget = freshBudget(now: clock.now)
+        budget.setHostLimit(1, for: url)
+        budget.noteRefusal(for: url, status: 429)
+        clock.advance(by: 2)
+
+        let held = budget.tryAcquire(for: url, label: "pump")
+        #expect(held?.granted == true)
+        #expect(budget.tryAcquire(for: url, label: "tail prefetch") == nil,
+                "available tokens do not override a full host concurrency budget")
+        #expect(budget.limit(for: url) == 1)
+        budget.release(held)
     }
 
     @Test("a host limit wins over anything learned, in both directions")
@@ -361,4 +560,22 @@ private final class UnsafeOrder: @unchecked Sendable {
     private var items: [String] = []
     var first: String? { lock.lock(); defer { lock.unlock() }; return items.first }
     func append(_ s: String) { lock.lock(); items.append(s); lock.unlock() }
+}
+
+/// Monotonic test clock for the refusal pacer. The production wait polls this clock, so advancing
+/// it releases a paced request without making the suite spend the CDN's two-to-fifteen-second
+/// quiet periods on wall time.
+private final class ManualDispatchClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nanoseconds: UInt64 = 1_000_000_000
+
+    func now() -> DispatchTime {
+        lock.lock(); defer { lock.unlock() }
+        return DispatchTime(uptimeNanoseconds: nanoseconds)
+    }
+
+    func advance(by seconds: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        nanoseconds += UInt64((seconds * 1_000_000_000).rounded())
+    }
 }

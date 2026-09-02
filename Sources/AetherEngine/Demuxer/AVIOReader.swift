@@ -345,9 +345,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// refusal on an edge target. Keying off `requestURL()` there names the source in the books for
     /// an answer it never gave. The chain folding (#388) lands both keys in one bucket either way,
     /// so this is about which host the books name, not about which budget moves.
-    private func noteOriginRefusal(status: Int, respondedBy: URL? = nil) {
+    private func noteOriginRefusal(status: Int, retryAfter: TimeInterval? = nil,
+                                   respondedBy: URL? = nil) {
         let refusing = respondedBy ?? requestURL()
-        OriginRequestBudget.shared.noteRefusal(for: refusing, status: status)
+        OriginRequestBudget.shared.noteRefusal(for: refusing, status: status, retryAfter: retryAfter)
         // The refusal usually comes back from the post-redirect CDN, while the engine's revive arm
         // only knows the URL the host loaded. Where those differ (a proxy that 302s to a signed CDN
         // target, the shape in the #377 report) the verdict would never be found on the key the
@@ -2225,8 +2226,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             if let http = response as? HTTPURLResponse {
                 let status = http.statusCode
                 if Self.isRateLimitStatus(status) {
-                    noteOriginRefusal(status: status, respondedBy: http.url)
-                    return .rateLimited(Self.parseRetryAfter(http))
+                    let retryAfter = Self.parseRetryAfter(http)
+                    noteOriginRefusal(status: status, retryAfter: retryAfter > 0 ? retryAfter : nil,
+                                      respondedBy: http.url)
+                    return .rateLimited(retryAfter)
                 }
                 if status != 200 && status != 206 {
                     if Self.isResolvedExpiryStatus(status) { invalidateResolvedURL() }
@@ -2865,7 +2868,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         var retryAfter: TimeInterval = 0
         if Self.isRateLimitStatus(status) {
             retryAfter = Self.parseRetryAfter(http)
-            noteOriginRefusal(status: status, respondedBy: respondedBy)
+            noteOriginRefusal(status: status, retryAfter: retryAfter > 0 ? retryAfter : nil,
+                              respondedBy: respondedBy)
         }
         var headerMs: Double? = nil
         winCond.lock()

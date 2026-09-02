@@ -21,6 +21,11 @@ import Foundation
 /// or the origin does, by answering 429/503/509, after which the budget halves from the concurrency
 /// it had actually reached. There is no automatic increase: an origin that has metered us once is
 /// treated as metering for the rest of the process, which costs some parallelism and no correctness.
+/// A refusal also arms a request-rate pacer for that origin. It is deliberately learned rather than
+/// host-configured: the measured CDN served eight parallel 32 MB reads but first refused a run of
+/// 256 KB reads after 36 requests in 10 seconds, so concurrency and request rate are separate limits.
+/// Twenty clean grants or 60 seconds without another refusal disarm pacing; the learned concurrency
+/// ceiling remains because its recovery policy belongs to the existing budget.
 ///
 /// A redirect chain is ONE origin here (#388). A metered source is routinely a portal that 302s to
 /// the host serving the bytes, and the host loading it can only name the portal: keeping a separate
@@ -38,6 +43,15 @@ final class OriginRequestBudget: @unchecked Sendable {
 
     static let shared = OriginRequestBudget()
 
+    /// The measured origin first refused 36 requests in 10 seconds. A four-request bucket refilling
+    /// at three per second stays just below that observed window while retaining a small read burst.
+    static let pacerCapacity = 4.0
+    static let pacerRefillPerSecond = 3.0
+    private static let firstQuietPeriod: TimeInterval = 2
+    private static let maximumQuietPeriod: TimeInterval = 15
+    private static let cleanGrantsToDisarm = 20
+    private static let quietSecondsToDisarm: TimeInterval = 60
+
     /// Scheme + host + port, matching `SuffixRangeSupport.originKey`. Deliberately NOT the full
     /// URL: a metered CDN hands out signed URLs with a rotating token, so a per-URL budget would
     /// start at zero on every refresh and cap nothing. What meters us is the host.
@@ -54,7 +68,7 @@ final class OriginRequestBudget: @unchecked Sendable {
         /// the ticket is returned rather than when it was handed out (#388).
         let key: String
         let label: String
-        /// True when the budget was capped and this ticket waited for room. Diagnostic only.
+        /// Time spent waiting for a concurrency slot or the refusal pacer. Diagnostic only.
         let waitedMs: Double
         /// False when no room came free within the caller's budget and it proceeded anyway.
         let granted: Bool
@@ -64,6 +78,7 @@ final class OriginRequestBudget: @unchecked Sendable {
         var inflight: Int
         var peakInflight: Int
         var limit: Int?
+        var paced: Bool
         var refusals: Int
         var secondsSinceLastRefusal: Double?
         /// How many callers are parked waiting for a slot right now. Reported so a test can wait on
@@ -80,6 +95,13 @@ final class OriginRequestBudget: @unchecked Sendable {
         var hostLimit: Int?
         var refusals = 0
         var lastRefusalAt: DispatchTime?
+        /// nil `quietUntil` means the request-rate pacer is inert. The bucket remains untouched
+        /// until the first refusal so an unmetered origin keeps its old request shape exactly.
+        var tokens = 0.0
+        var lastRefillAt: DispatchTime?
+        var quietUntil: DispatchTime?
+        var refusalStreak = 0
+        var cleanGrants = 0
         /// FIFO of waiters. Front is served first, so the pump cannot re-take the slot it just
         /// released ahead of a detour that has been waiting.
         var waiters: [DispatchSemaphore] = []
@@ -101,6 +123,11 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// second origin as far as a request budget is concerned: every request keyed on either end is
     /// answered by the same server, so both ends share one set of books.
     private var chainHead: [String: String] = [:]
+    private let now: () -> DispatchTime
+
+    init(now: @escaping () -> DispatchTime = { .now() }) {
+        self.now = now
+    }
 
     /// Resolve an origin key to the key its chain is kept under. Called under `lock`.
     private func headLocked(_ key: String) -> String {
@@ -162,6 +189,24 @@ final class OriginRequestBudget: @unchecked Sendable {
             if let theirs = joining.lastRefusalAt {
                 merged.lastRefusalAt = merged.lastRefusalAt.map { max($0, theirs) } ?? theirs
             }
+            if let theirQuiet = joining.quietUntil {
+                if let ourQuiet = merged.quietUntil {
+                    merged.tokens = min(merged.tokens, joining.tokens)
+                    if let theirRefill = joining.lastRefillAt {
+                        merged.lastRefillAt = merged.lastRefillAt.map { max($0, theirRefill) }
+                            ?? theirRefill
+                    }
+                    merged.quietUntil = max(ourQuiet, theirQuiet)
+                    merged.refusalStreak = max(merged.refusalStreak, joining.refusalStreak)
+                    merged.cleanGrants = min(merged.cleanGrants, joining.cleanGrants)
+                } else {
+                    merged.tokens = joining.tokens
+                    merged.lastRefillAt = joining.lastRefillAt
+                    merged.quietUntil = theirQuiet
+                    merged.refusalStreak = joining.refusalStreak
+                    merged.cleanGrants = joining.cleanGrants
+                }
+            }
             merged.droppedTargets.formUnion(joining.droppedTargets)
             // Their waiters are parked on semaphores this bucket now owns; dropping them would hang
             // every one of them for its full acquire budget.
@@ -194,8 +239,119 @@ final class OriginRequestBudget: @unchecked Sendable {
 
     // MARK: - Acquire / release
 
+    private static func elapsedSeconds(from earlier: DispatchTime, to later: DispatchTime) -> Double {
+        guard later.uptimeNanoseconds >= earlier.uptimeNanoseconds else { return 0 }
+        return Double(later.uptimeNanoseconds - earlier.uptimeNanoseconds) / 1_000_000_000
+    }
+
+    private func disarmPacerLocked(_ state: inout OriginState) {
+        state.tokens = 0
+        state.lastRefillAt = nil
+        state.quietUntil = nil
+        state.refusalStreak = 0
+        state.cleanGrants = 0
+    }
+
+    private func disarmPacerIfQuietLocked(_ state: inout OriginState, at instant: DispatchTime) {
+        guard state.quietUntil != nil, let refusedAt = state.lastRefusalAt,
+              Self.elapsedSeconds(from: refusedAt, to: instant) >= Self.quietSecondsToDisarm
+        else { return }
+        disarmPacerLocked(&state)
+    }
+
+    private func refillPacerLocked(_ state: inout OriginState, at instant: DispatchTime) {
+        guard let lastRefillAt = state.lastRefillAt else {
+            state.lastRefillAt = instant
+            return
+        }
+        let elapsed = Self.elapsedSeconds(from: lastRefillAt, to: instant)
+        state.tokens = min(Self.pacerCapacity,
+                           state.tokens + elapsed * Self.pacerRefillPerSecond)
+        state.lastRefillAt = instant
+    }
+
+    private func noteCleanGrantLocked(_ state: inout OriginState) {
+        state.cleanGrants += 1
+        if state.cleanGrants >= Self.cleanGrantsToDisarm {
+            disarmPacerLocked(&state)
+        }
+    }
+
+    /// The caller already owns a concurrency slot. Hold it while the pacer waits: taking the slot
+    /// first keeps the two admission rules in one order, so two callers cannot each hold one gate
+    /// while waiting for the other. Polling is bounded and intentionally short so an injected test
+    /// clock can advance without making the test spend the production quiet period on wall time.
+    private func ticketAfterPacing(raw: String, label: String, started: DispatchTime,
+                                   timeout: TimeInterval, slotWaitedMs: Double) -> Ticket {
+        var pacingStarted: DispatchTime?
+        let poller = DispatchSemaphore(value: 0)
+        while true {
+            let instant = now()
+            lock.lock()
+            let key = headLocked(raw)
+            var state = origins[key] ?? OriginState()
+            disarmPacerIfQuietLocked(&state, at: instant)
+
+            guard let quietUntil = state.quietUntil else {
+                origins[key] = state
+                lock.unlock()
+                let waitedMs = slotWaitedMs > 0
+                    ? Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds)
+                        / 1_000_000
+                    : 0
+                return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
+            }
+
+            let waitNeeded: TimeInterval
+            if instant < quietUntil {
+                waitNeeded = Self.elapsedSeconds(from: instant, to: quietUntil)
+            } else {
+                refillPacerLocked(&state, at: instant)
+                if state.tokens >= 1 {
+                    state.tokens -= 1
+                    noteCleanGrantLocked(&state)
+                    origins[key] = state
+                    lock.unlock()
+                    let waitedMs = slotWaitedMs > 0 || pacingStarted != nil
+                        ? Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds)
+                            / 1_000_000
+                        : 0
+                    if let pacingStarted {
+                        let pacedMs = Self.elapsedSeconds(from: pacingStarted, to: DispatchTime.now())
+                            * 1_000
+                        EngineLog.emit(
+                            "[OriginBudget] \(label) paced \(Int(pacedMs))ms",
+                            category: .demux, level: .verbose)
+                    }
+                    return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
+                }
+                waitNeeded = (1 - state.tokens) / Self.pacerRefillPerSecond
+            }
+            origins[key] = state
+            lock.unlock()
+
+            let elapsed = Self.elapsedSeconds(from: started, to: DispatchTime.now())
+            let remaining = timeout - elapsed
+            guard remaining > 0 else {
+                let waitedMs = elapsed * 1_000
+                if let pacingStarted {
+                    let pacedMs = Self.elapsedSeconds(from: pacingStarted, to: DispatchTime.now())
+                        * 1_000
+                    EngineLog.emit(
+                        "[OriginBudget] \(label) paced \(Int(pacedMs))ms",
+                        category: .demux, level: .verbose)
+                }
+                return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: false)
+            }
+
+            let poll = min(remaining, max(0.001, min(waitNeeded, 0.01)))
+            if pacingStarted == nil { pacingStarted = DispatchTime.now() }
+            _ = poller.wait(timeout: .now() + poll)
+        }
+    }
+
     /// Take a slot for one request against `url`, waiting up to `timeout` when the origin is
-    /// capped and full.
+    /// capped and full, or after a refusal while its request-rate pacer has no token.
     ///
     /// Always returns a ticket. A caller that could not be given room within its budget gets one
     /// with `granted == false` and proceeds: the budget is a throttle over an origin's tolerance,
@@ -214,7 +370,8 @@ final class OriginRequestBudget: @unchecked Sendable {
             state.peakInflight = max(state.peakInflight, state.inflight)
             origins[key] = state
             lock.unlock()
-            return Ticket(key: raw, label: label, waitedMs: 0, granted: true)
+            return ticketAfterPacing(raw: raw, label: label, started: started,
+                                     timeout: timeout, slotWaitedMs: 0)
         }
         let semaphore = DispatchSemaphore(value: 0)
         state.waiters.append(semaphore)
@@ -226,7 +383,8 @@ final class OriginRequestBudget: @unchecked Sendable {
 
         if signalled {
             // `release` counted us in before signalling, so the slot is already ours.
-            return Ticket(key: raw, label: label, waitedMs: waitedMs, granted: true)
+            return ticketAfterPacing(raw: raw, label: label, started: started,
+                                     timeout: timeout, slotWaitedMs: waitedMs)
         }
 
         // Timed out. Drop out of the queue and proceed uncounted-for: a slot handed to us between
@@ -265,9 +423,24 @@ final class OriginRequestBudget: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
+        let instant = now()
+        disarmPacerIfQuietLocked(&state, at: instant)
         guard state.inflight < (state.limit ?? Int.max) else {
             origins[key] = state
             return nil
+        }
+        if let quietUntil = state.quietUntil {
+            guard instant >= quietUntil else {
+                origins[key] = state
+                return nil
+            }
+            refillPacerLocked(&state, at: instant)
+            guard state.tokens >= 1 else {
+                origins[key] = state
+                return nil
+            }
+            state.tokens -= 1
+            noteCleanGrantLocked(&state)
         }
         state.inflight += 1
         state.peakInflight = max(state.peakInflight, state.inflight)
@@ -300,7 +473,8 @@ final class OriginRequestBudget: @unchecked Sendable {
 
     // MARK: - Learning the limit
 
-    /// The origin answered 429/503/509. Halve the concurrency it was actually given, floor 1.
+    /// The origin answered 429/503/509. Halve the concurrency it was actually given, floor 1,
+    /// and arm its request-rate pacer.
     ///
     /// Halving from the observed peak rather than dropping straight to 1 keeps the answer
     /// proportionate to what we were doing: an origin refused while four requests were open has
@@ -312,13 +486,25 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// asked are one origin as far as requests are concerned, so halving only the far end would
     /// leave the near end free to open exactly the request that was just refused.
     @discardableResult
-    func noteRefusal(for url: URL, status: Int) -> Int? {
+    func noteRefusal(for url: URL, status: Int, retryAfter: TimeInterval? = nil) -> Int? {
         guard let raw = Self.originKey(for: url) else { return nil }
+        let instant = now()
         lock.lock()
         let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
+        disarmPacerIfQuietLocked(&state, at: instant)
         state.refusals += 1
-        state.lastRefusalAt = DispatchTime.now()
+        state.lastRefusalAt = instant
+        state.refusalStreak += 1
+        state.cleanGrants = 0
+        state.tokens = 0
+        state.lastRefillAt = instant
+        let exponent = min(state.refusalStreak - 1, 3)
+        let exponentialQuiet = min(
+            Self.maximumQuietPeriod,
+            Self.firstQuietPeriod * pow(2, Double(exponent)))
+        let quiet = retryAfter.map { max(0, $0) } ?? exponentialQuiet
+        state.quietUntil = instant + quiet
         let previous = state.limit
         if let hostLimit = state.hostLimit {
             state.limit = hostLimit
@@ -326,18 +512,18 @@ final class OriginRequestBudget: @unchecked Sendable {
             let basis = state.limit ?? max(1, state.peakInflight)
             state.limit = max(1, basis / 2)
         }
-        let now = state.limit
+        let limitNow = state.limit
         let peak = state.peakInflight
         origins[key] = state
         lock.unlock()
 
-        if previous != now, let now {
+        if previous != limitNow, let limitNow {
             EngineLog.emit(
                 "[OriginBudget] \(key) answered \(status); concurrency budget "
-                + "\(previous.map(String.init) ?? "uncapped") -> \(now) (peak was \(peak))",
+                + "\(previous.map(String.init) ?? "uncapped") -> \(limitNow) (peak was \(peak))",
                 category: .demux)
         }
-        return now
+        return limitNow
     }
 
     /// Record that a refusal happened while fetching this source, WITHOUT touching the concurrency
@@ -351,10 +537,11 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// source URL carries the timestamp too, and only the timestamp.
     func noteRefusalWitnessed(for url: URL) {
         guard let raw = Self.originKey(for: url) else { return }
+        let instant = now()
         lock.lock(); defer { lock.unlock() }
         let key = headLocked(raw)
         var state = origins[key] ?? OriginState()
-        state.lastRefusalAt = DispatchTime.now()
+        state.lastRefusalAt = instant
         origins[key] = state
     }
 
@@ -365,7 +552,7 @@ final class OriginRequestBudget: @unchecked Sendable {
         guard let raw = Self.originKey(for: url) else { return false }
         lock.lock(); defer { lock.unlock() }
         guard let last = origins[headLocked(raw)]?.lastRefusalAt else { return false }
-        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - last.uptimeNanoseconds) / 1_000_000_000
+        let elapsed = Self.elapsedSeconds(from: last, to: now())
         return elapsed <= window
     }
 
@@ -471,12 +658,17 @@ final class OriginRequestBudget: @unchecked Sendable {
     func snapshot(for url: URL) -> Snapshot? {
         guard let raw = Self.originKey(for: url) else { return nil }
         lock.lock(); defer { lock.unlock() }
-        guard let state = origins[headLocked(raw)] else { return nil }
+        let key = headLocked(raw)
+        guard var state = origins[key] else { return nil }
+        let instant = now()
+        disarmPacerIfQuietLocked(&state, at: instant)
+        origins[key] = state
         let since = state.lastRefusalAt.map {
-            Double(DispatchTime.now().uptimeNanoseconds - $0.uptimeNanoseconds) / 1_000_000_000
+            Self.elapsedSeconds(from: $0, to: instant)
         }
         return Snapshot(inflight: state.inflight, peakInflight: state.peakInflight,
-                        limit: state.limit, refusals: state.refusals,
+                        limit: state.limit, paced: state.quietUntil != nil,
+                        refusals: state.refusals,
                         secondsSinceLastRefusal: since, waiting: state.waiters.count)
     }
 

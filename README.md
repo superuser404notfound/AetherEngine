@@ -1,3 +1,8 @@
+> [!NOTE]
+> This is the public Atlas-patched fork of
+> [superuser404notfound/AetherEngine](https://github.com/superuser404notfound/AetherEngine). Atlas
+> release tags carry two focused request-rate patches on top of the matching upstream tag.
+
 <p align="center">
   <img src=".github/aetherengine-logo.png" alt="AetherEngine" width="180">
 </p>
