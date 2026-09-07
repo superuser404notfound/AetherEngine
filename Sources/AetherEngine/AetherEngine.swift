@@ -3970,6 +3970,34 @@ public final class AetherEngine: ObservableObject {
                 )
             }
         }
+        // Recovery-point H.264 can play linearly through AVPlayer yet retain only
+        // ~3 fps after a cached seek. Container key flags include non-IDR recovery
+        // points; the loopback HLS path cuts on those flags and promises independent
+        // segments. Use libavcodec for repeated, positively identified recovery
+        // points, not for all H.264 or merely because an IDR was absent in a sample.
+        if !useSoftwarePath, probeOpened, !options.isLive, probe.isSourceSeekable,
+           detectedCodecID == AV_CODEC_ID_H264, options.preferredDecodePath != .software {
+            let videoIdx = probe.videoStreamIndex
+            let (result, rewound) = await Task.detached(priority: .userInitiated) { [probe] in
+                let result = H264RecoveryPointProbe.run(demuxer: probe, streamIndex: videoIdx)
+                return (result, probe.seek(to: 0))
+            }.value
+            if loadGeneration != gen {
+                probe.markClosed()
+                Task.detached { [probe] in probe.close() }
+                try checkLoadCurrent(gen)
+            }
+            guard rewound else {
+                probe.markClosed()
+                Task.detached { [probe] in probe.close() }
+                throw DemuxerError.readFailed(code: -5)
+            }
+            diagnostics.h264RecoveryPointKeyCount = result.evidence.recoveryKeys
+            useSoftwarePath = result.evidence.requiresCompatibilityPath
+            EngineLog.emit("[AetherEngine] H264 recovery-point sample: video=\(result.videoPackets) "
+                + "recoveryKeys=\(result.evidence.recoveryKeys) "
+                + "compatibility=\(useSoftwarePath)", category: .engine)
+        }
         // #2: an H.264 / HEVC format AVPlayer accepts at the HLS CODECS level but VideoToolbox can't
         // hardware-decode (H.264 High 4:2:2/4:4:4/High-10, HEVC Rext on Intel Macs / older Apple TV) reaches
         // readyToPlay then renders nothing on the native path. QuickTime plays it via its own software decoder;
@@ -6016,6 +6044,7 @@ public final class AetherEngine: ObservableObject {
         liveTelemetrySampler?.stop()
         liveTelemetrySampler = nil
         diagnostics.liveTelemetry = nil
+        diagnostics.h264RecoveryPointKeyCount = nil
         nativeCancellables.removeAll()
         // AE#158: keepCurrentItem defers the item detach to the next host.load(inPlaceSwap:) so a
         // system PiP window never sees a nil-item gap across a native->native load. Only meaningful

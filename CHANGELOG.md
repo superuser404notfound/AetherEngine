@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- H.264 VOD with repeated non-IDR immediate/exact recovery points uses the existing
+  software decoder for seek compatibility. On three reporting sources the native
+  HLS path remained around 3 fps after a seek despite a full buffer. A bounded
+  positive-evidence probe distinguishes this shape from ordinary IDR H.264; live
+  sessions and already-software sources are unchanged. Exposes the identity-free
+  `diagnostics.h264RecoveryPointKeyCount` sample result for hosts.
 
 ## [6.71.0] - 2026-09-06
 

@@ -23,6 +23,29 @@ That list is the supported set, not the compiled set. The FFmpeg build also carr
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback) that engages on the first interlaced frame and costs nothing on progressive content. The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`), gated per source on `VTCapabilityProbe`, codec id, declared field order, and on VOD the decode sample that verifies it.
 
+### H.264 recovery-point VOD seek compatibility
+
+Some H.264 VOD streams mark immediate/exact non-IDR recovery points as container
+keys. The local HLS cutter accepts those flags as independent segment boundaries,
+yet the reporting Apple TV retained only about 3 fps after a seek in three such
+streams, despite a full buffer and normal source timestamps. VidHub played those
+same private files normally; its internal decode route is not known.
+
+The engine samples positive evidence before selecting compatibility: repeated
+container-key packets with non-IDR slices and recovery SEI `recovery_frame_cnt=0`
+and `exact_match_flag=1`. Merely lacking an IDR, a malformed SEI or a non-key packet
+cannot trigger the route. The sample is bounded in packets and bytes of SEI parsed,
+with a between-read wall-clock limit; individual reads keep their transport timeout.
+The reused demuxer is rewound and load-generation ownership is rechecked.
+
+Confirmed sources use the existing libavcodec software path. This is a compatibility
+route, not a claim that all non-IDR input is undecodable by Apple hardware or a fix
+to native HLS random access. CPU/power costs differ; compressed payloads and source
+timestamps are not rewritten. Live/non-H.264 and already-software sessions avoid
+the probe. `diagnostics.h264RecoveryPointKeyCount` records the numeric decision.
+Physical acceptance covers three private MP4/H.264 sources on Apple TV, from-head,
+seek and pause/resume. Separate software read-ahead/cache work is not in this change.
+
 ### MP4 without composition offsets
 
 Some writers emit a sample table with no `ctts` while the H.264 bitstream still reorders pictures.

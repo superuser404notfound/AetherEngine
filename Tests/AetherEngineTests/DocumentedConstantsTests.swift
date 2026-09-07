@@ -106,6 +106,18 @@ final class DocumentedConstantsTests: XCTestCase {
 
     // MARK: - Probe budgets
 
+    func testRecoveryPointRoutingMatchesDocumentedThreshold() throws {
+        let docs = try documentation()
+        var evidence = H264RecoveryPoint.Evidence()
+        for _ in 0..<2 {
+            evidence.observe(containerKey: true, hasIDR: false, immediateExactRecovery: true)
+        }
+        XCTAssertFalse(evidence.requiresCompatibilityPath)
+        evidence.observe(containerKey: true, hasIDR: false, immediateExactRecovery: true)
+        XCTAssertTrue(evidence.requiresCompatibilityPath)
+        assertDocumented("Three positive samples select software compatibility", docs)
+    }
+
     /// docs/api.md states the defaults a host overrides with `probesize` / `maxAnalyzeDuration`.
     func testProbeBudgetDefaultsAreWhatTheDocsSay() throws {
         let docs = try documentation()

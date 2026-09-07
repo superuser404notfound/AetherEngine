@@ -659,6 +659,7 @@ as well.
 | Symbol | Notes |
 | --- | --- |
 | `diagnostics.liveTelemetry` | 1 Hz `LiveTelemetry?` snapshot while playing or paused, nil while idle. On a separate `ObservableObject` so its ticks cannot re-render a host observing the engine. |
+| `diagnostics.h264RecoveryPointKeyCount` | Positive non-IDR immediate/exact recovery keys in the bounded H.264 VOD routing sample. `nil` when no sample was taken; cleared on stop. Three positive samples select software compatibility; this count is not a decode-performance measurement. |
 | `EngineLog.handler` | Mirror every info-level line into a host capture path. Fires from whatever thread emitted it, so it must be thread-safe and non-blocking. |
 | `EngineLog.subsystem`, `EngineLog.Category` | `de.superuser404.AetherEngine`, one category per subsystem: `engine`, `ffmpeg`, `session`, `muxer`, `demux`, `hls.server`, `audio.bridge`, `sw.playback`, `scrub`. |
 | `EngineLog.Level` | `.info` reaches os_log and the host handler; `.verbose` is per-segment trace and reaches os_log's debug level **only**, never the handler, which is what keeps a mirrored stream readable. Read the verbose ones with `log stream --level debug`. |
