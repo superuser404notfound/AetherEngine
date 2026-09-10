@@ -10,7 +10,32 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A live HLS join now takes the backlog the origin is already holding, so the
+  startup cushion is filled at I/O speed instead of in wall clock (#521).** The
+  ingest entered a live playlist three segments behind the edge, and three
+  joined segments finalize only two downstream, because the last one stays open
+  until the next arrives. The loopback startup cushion wants three, so the first
+  `/media.m3u8` was withheld until the origin produced its next segment, at
+  wall-clock speed, with the content for it already sitting in the window. The
+  bound that caused it was in the wrong unit: `joinStart` targets a coverage in
+  SECONDS and `edgeOffset` capped that at three SEGMENTS, while the coverage
+  term already bounds long-segment providers on its own (6 s segments break at
+  12 s), so the count only ever bound the short-segment sources the 8 s
+  coverage floor was written for. Measured on `hlsfixture --window 8` with
+  `play --live --fast-zap`, three runs per row: first picture on a 2 s-segment
+  channel **2.22 s before, 0.20 s after**, on 1 s segments **0.41 to 1.22 s
+  before, 0.18 to 0.20 s after**, and that spread is half the finding, since
+  before the change the cost depended on where in the upstream segment cycle
+  the tune landed. The join is not paid back as lag: read off the origin's
+  request log, both arms reach the same upstream segment number at the same
+  wall clock, so the deeper entry is caught up at I/O speed rather than
+  standing as a lag behind the live edge. A window at the three-segment floor
+  is unchanged, a long-segment provider is unchanged, and the oldest listed
+  segment of a deeper window is now deliberately left alone so the burst does
+  not race the origin for a segment about to be dropped. Raw MPEG-TS with no
+  playlist is untouched: there is no window to enter further back into.
 
 ## [6.76.1] - 2026-09-09
 

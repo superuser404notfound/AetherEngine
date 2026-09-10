@@ -118,4 +118,53 @@ final class HLSPlaylistTrackerTests: XCTestCase {
         // reader's stall counter toward its ingestStalled terminal trip.
         XCTAssertEqual(tracker.stallCount, 0)
     }
+
+    // MARK: - Default join depth
+
+    func testDefaultJoinReachesTheCoverageTargetOnShortSegments() {
+        // The case the old count cap of 3 defeated: 1s segments want 8s of coverage, and the cap
+        // handed over 3s. Three joined segments finalize only two downstream (the last is still
+        // open), one short of the loopback startup cushion, so the join then waited a segment
+        // duration in wall clock for content the origin already had.
+        var tracker = HLSPlaylistTracker()
+        let uris = (0..<12).map { "s\($0)" }
+        let new = tracker.newSegments(in: playlist(sequence: 40, uris: uris, duration: 1))
+        XCTAssertEqual(new.map(\.uri), ["s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11"])
+    }
+
+    func testDefaultJoinLeavesTheOldestSegmentOfADeepWindow() {
+        // Eviction margin: the oldest listed segment is the one closest to being dropped, so the
+        // burst stops one short of it rather than racing the origin for a 404.
+        var tracker = HLSPlaylistTracker()
+        let new = tracker.newSegments(
+            in: playlist(sequence: 7, uris: ["a", "b", "c", "d", "e", "f", "g", "h"], duration: 1)
+        )
+        XCTAssertEqual(new.map(\.uri), ["b", "c", "d", "e", "f", "g", "h"])
+    }
+
+    func testDefaultJoinTakesAFloorDepthWindowWhole() {
+        // Three segments is as shallow as a live window is expected to get, so there is nothing to
+        // hold back and the margin does not apply. Byte-identical to the behaviour before the cap
+        // was raised, which is what keeps the change invisible to a minimal origin.
+        var tracker = HLSPlaylistTracker()
+        let new = tracker.newSegments(in: playlist(sequence: 12, uris: ["a", "b", "c"], duration: 1))
+        XCTAssertEqual(new.map(\.uri), ["a", "b", "c"])
+    }
+
+    func testDefaultJoinIsUnchangedForLongSegments() {
+        // The raised cap moves nothing here: the coverage term breaks a 6s-segment provider at 12s
+        // on its own, which is why the count was only ever binding on short segments.
+        var tracker = HLSPlaylistTracker()
+        let new = tracker.newSegments(
+            in: playlist(sequence: 3, uris: ["a", "b", "c", "d", "e", "f"], duration: 6)
+        )
+        XCTAssertEqual(new.map(\.uri), ["e", "f"])
+    }
+
+    func testJoinSegmentLimitAppliesTheMarginOnlyBelowTheCap() {
+        XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 3), 8)
+        XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 4), 3)
+        XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 9), 8)
+        XCTAssertEqual(HLSPlaylistTracker.joinSegmentLimit(edgeOffset: 8, windowSegmentCount: 20), 8)
+    }
 }

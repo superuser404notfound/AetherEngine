@@ -510,6 +510,22 @@ cadence and the holdback follows it down, so the win belongs to the source GOP r
 `TARGETDURATION` can never fall below `ceil(max EXTINF)`, and a long-GOP source therefore keeps most of
 its runway under either profile.
 
+**An HLS source with a window of its own now fills that cushion at the join rather than in wall clock**
+(6.77.0). The ingest used to enter a live playlist three segments behind the edge, and three joined
+segments finalize only two downstream, because the last one stays open until the next arrives. The
+cushion wants three, so the gate then waited one upstream segment duration for content the origin was
+already holding in its window. The join now takes the coverage its own policy always targeted, which on
+short segments is several times three. Measured against `hlsfixture --window 8` with `play --live
+--fast-zap`, three runs per row: first picture on a 2 s-segment channel **2.22 s before, 0.20 s after**;
+on 1 s segments **0.41 to 1.22 s before, 0.18 to 0.20 s after**, and the spread is the second half of
+the finding, since before the change the number depended on where in the upstream segment cycle the tune
+landed. A window at the three-segment floor has nothing deeper to offer and is unchanged, and so is a
+long-segment provider, whose coverage target was already met inside the old bound. The deeper entry is
+not paid back later: both arms fetch up to the same upstream segment number at the same wall clock, so
+it is caught up at I/O speed instead of becoming a standing lag behind the live edge. What it does not
+touch is a source with no playlist at all (raw MPEG-TS over HTTP), where there is no window to enter
+further back into and the content genuinely does not exist yet.
+
 ### The tail after the first serve, and which signal survives it
 
 A serve is not motion. Past it AVPlayer can present the first frame, publish

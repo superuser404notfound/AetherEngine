@@ -247,7 +247,8 @@ struct Issue177IngestPrefetchTests {
 
     @Test("backlog fetches overlap within the window and commit in playlist order")
     func prefetchOverlapsAndPreservesOrder() throws {
-        // First playlist advertises seg0..7 (the tracker joins on the last 3: seg5..7); the
+        // First playlist advertises seg0..7 (1 s segments, so the tracker's 8 s coverage target
+        // wants the whole window and the eviction margin leaves the oldest, joining seg1..7); the
         // refresh advertises seg0..15 with ENDLIST, delivering seg8..15 as one 8-segment batch
         // that exercises the full prefetch window.
         let segmentCount = 16
@@ -271,8 +272,8 @@ struct Issue177IngestPrefetchTests {
 
         #expect(reader.resolveSegmentFormatHint() == "mpegts")
 
-        // Join takes seg5..7 per the tracker's edge policy, the refresh appends seg8..15.
-        let expected = segments[5...].reduce(Data(), +)
+        // Join takes seg1..7 per the tracker's edge policy, the refresh appends seg8..15.
+        let expected = segments[1...].reduce(Data(), +)
         let got = drain(reader, expectedBytes: expected.count, timeout: 90)
 
         #expect(reader.terminalError == nil)
