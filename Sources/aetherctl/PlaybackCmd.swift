@@ -1400,6 +1400,19 @@ private func reportLegibleSelection(_ engine: AetherEngine, _ label: String) asy
 ///
 /// So this fetches the served WebVTT the way a receiver does: master -> the selected rendition's
 /// media playlist -> the segments covering the playhead, and counts CUE TEXT, not segments.
+private enum Self_VTT {}
+extension AetherEngine {
+    /// `HH:MM:SS.mmm` or `MM:SS.mmm` as seconds.
+    static func vttSeconds(_ s: String) -> Double? {
+        let parts = s.split(separator: ":").map(String.init)
+        guard !parts.isEmpty, let last = Double(parts.last!) else { return nil }
+        var total = last
+        if parts.count >= 2 { total += (Double(parts[parts.count - 2]) ?? 0) * 60 }
+        if parts.count >= 3 { total += (Double(parts[parts.count - 3]) ?? 0) * 3600 }
+        return total
+    }
+}
+
 @MainActor
 private func reportServedVTT(_ engine: AetherEngine, _ label: String, around playhead: Double,
                              sessionStart: Double) async {
@@ -1466,16 +1479,36 @@ private func reportServedVTT(_ engine: AetherEngine, _ label: String, around pla
     // and says nothing: a harness that checks the wrong segments fails the same way it would succeed.
     let relative = max(0, playhead)
     let startIndex = offsets.lastIndex(where: { $0.start <= relative }) ?? 0
-    var checked = 0, nonEmpty = 0, cues = 0
-    for (name, _) in offsets[startIndex...] where checked < 8 {
+    var checked = 0, nonEmpty = 0, cues = 0, misplaced = 0
+    var firstMismatch: String?
+    for (name, start) in offsets[startIndex...] where checked < 8 {
         checked += 1
         guard let body = await get(master.deletingLastPathComponent().appendingPathComponent(name)) else { continue }
         // A cue is a timestamp line plus text under it; counting "-->" counts cues without parsing.
         let c = body.components(separatedBy: "-->").count - 1
         cues += c
         if c > 0 { nonEmpty += 1 }
+        // Sodalite#156: a POPULATED segment whose cues sit outside the window the playlist declares for
+        // it is as invisible as an empty one, and it reads identically in every count above. The device
+        // capture ruled the empty case out (nothing served empty, 22 segments fetched, still a blank
+        // box), and irregular keyframes make segments as much as 7.5 s long against a nominal 4, so the
+        // declared window and the cue times are exactly the pair worth comparing.
+        let end = offsets.first(where: { $0.start > start })?.start ?? (start + 4)
+        for line in body.split(separator: "\n") where line.contains("-->") {
+            let parts = line.split(separator: " ")
+            guard let t = parts.first.map(String.init), let cueStart = AetherEngine.vttSeconds(t) else { continue }
+            if cueStart < start - 1 || cueStart > end + 1 {
+                misplaced += 1
+                if firstMismatch == nil {
+                    firstMismatch = String(format: "%@ declares [%.1f,%.1f) but carries a cue at %.1f",
+                                           name, start, end, cueStart)
+                }
+            }
+            break
+        }
     }
     print("  VTT \(label): rendition=\(pick.name) segments=\(checked) nonEmpty=\(nonEmpty) cues=\(cues)"
+          + (misplaced > 0 ? " MISPLACED=\(misplaced) \(firstMismatch ?? "")" : "")
           + " picked=\(offsets[startIndex...].prefix(2).map(\.name).joined(separator: ",")) "
           + "of=\(offsets.count) relative=\(String(format: "%.1f", relative)) playhead=\(String(format: "%.1f", playhead))"
           + (checked > 0 && nonEmpty == 0 ? "   <- a caption box with nothing in it" : ""))
