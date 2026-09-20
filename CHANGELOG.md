@@ -10,7 +10,19 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Record a live stream to a file, from the connection the session already holds** (#560).
+  `startRecording(to:)` / `stopRecording()` plus a published `recordingState`. The output is
+  MPEG-TS, a stream copy of the source packets taken before any audio bridging, so a bridged
+  TrueHD or DTS channel records its original audio while playback listens to FLAC, and a file cut
+  short by a crash is still playable up to the cut. No second connection to the origin is opened,
+  which is what makes it usable on IPTV, where a plan commonly caps an account at 1 to 3
+  simultaneous connections and a second connection knocks the viewer off the channel. Recording
+  follows the source rather than the playhead, so pause and DVR scrubbing do not interrupt it, and
+  a source reset ends it cleanly instead of writing past a seam. `nativeRemoteHLS`
+  (`.remoteBypass`) cannot record and throws `.unsupportedRoute`: AVFoundation holds the source
+  connection there and the engine never sees a byte. `aetherctl play --record <path>` drives it.
 
 ## [7.7.1] - 2026-09-19
 
