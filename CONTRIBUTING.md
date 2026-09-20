@@ -44,6 +44,16 @@ gets a real thread (`Thread.detachNewThread`), never `DispatchQueue.global().asy
 192 pool workers blocked, which is what a full parallel run of this suite produces, the queue had
 not started the block after 35 seconds while a detached thread ran in 3 milliseconds.
 
+**A blocking syscall in a test is unreachable for the `.timeLimit` trait, so it may not sit on the
+test's own thread.** Cancellation in Swift is cooperative: a test parked in `read`, `accept` or
+`waitUntilExit` never observes it, the trait never reports, and the job dies at its own
+`timeout-minutes` with the log of the killed run discarded, so not even the test's name survives.
+Measured on this suite: a launch helper parked in `FileHandle.availableData` ran past a one minute
+limit for more than ten, and the only trace was the subprocess in the runner's orphan-process
+cleanup. Put the blocking call on its own thread, `await` its result, and give the cancellation
+handler whatever ends it (closing the handle, killing the subprocess).
+`Support/PythonOrigin.swift` is the worked example.
+
 ## Where playback bugs get fixed
 
 A bug that reproduces in a host app but traces back to decoding, demuxing, the audio bridge, or display routing gets fixed **in the engine**, not worked around in the host. If a change starts adding host-side compensation for engine behavior, that is a signal the fix belongs here instead. PRs that move logic in the right direction are very welcome.

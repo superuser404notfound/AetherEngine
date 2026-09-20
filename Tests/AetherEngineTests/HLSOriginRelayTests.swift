@@ -6,7 +6,7 @@ import Testing
 
 @testable import AetherEngine
 
-@Suite("HLS origin relay addressing and rewriting")
+@Suite("HLS origin relay addressing and rewriting", .timeLimit(.minutes(3)))
 struct HLSOriginRelayAddressingTests {
 
     private let token = String(repeating: "ab", count: 16)
@@ -183,7 +183,7 @@ struct HLSOriginRelayAddressingTests {
 
     @Test("A range is forwarded verbatim and its framing comes back")
     func rangesPassThroughUntouched() async throws {
-        let upstream = try #require(RangeEchoOrigin())
+        let upstream = try #require(await RangeEchoOrigin())
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -207,7 +207,7 @@ struct HLSOriginRelayAddressingTests {
 
     @Test("A metered origin is charged to the budget the reader already reads")
     func refusalReachesTheSharedBudget() async throws {
-        let upstream = try #require(RangeEchoOrigin(status: 429))
+        let upstream = try #require(await RangeEchoOrigin(status: 429))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -236,7 +236,7 @@ struct HLSOriginRelayAddressingTests {
         // The path looks like a playlist and the body is whatever the origin serves with its 404.
         // Rewritten and framed as 200, that reaches AVPlayer as a parse error instead of as the
         // one word it can act on.
-        let upstream = try #require(RangeEchoOrigin(status: 404))
+        let upstream = try #require(await RangeEchoOrigin(status: 404))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -249,7 +249,7 @@ struct HLSOriginRelayAddressingTests {
     }
 
     @Test("A segment reaches the player while the origin is still sending it")
-    func mediaIsRelayedAsItArrives() throws {
+    func mediaIsRelayedAsItArrives() async throws {
         // Held to the last byte, a segment puts its whole download in front of the player's first
         // byte: AVPlayer abandons a segment whose first byte has not arrived in about 3.5 s (-12889),
         // and it sizes the next rendition off what it measured, which behind a buffer is a loopback
@@ -263,7 +263,7 @@ struct HLSOriginRelayAddressingTests {
         // put an answer on the wire, and a client stack that batches its own delivery would be timed
         // instead. Measured that way this failed on CI while passing here, which is exactly the
         // reading a client in the middle can produce.
-        let upstream = try #require(TricklingOrigin(slices: 2, pauseSeconds: 20))
+        let upstream = try #require(await TricklingOrigin(slices: 2, pauseSeconds: 20))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -321,7 +321,7 @@ struct HLSOriginRelayAddressingTests {
         // A body with no Content-Length cannot be framed for the player without measuring it, so it
         // is read whole. What must not follow is that a held body is treated as a playlist: the
         // rewriter would walk MPEG-TS as lines of text.
-        let upstream = try #require(TricklingOrigin(declaresLength: false))
+        let upstream = try #require(await TricklingOrigin(declaresLength: false))
         defer { upstream.stop() }
         let relay = HLSOriginRelay()
         let server = HLSLocalServer(relay: relay)
@@ -343,7 +343,7 @@ struct HLSOriginRelayAddressingTests {
     func trustProbeAnswersForTheOriginInHand() async throws {
         // An origin the system reaches is one AVPlayer reaches, so relaying it would move a whole
         // session's bytes through the process for nothing.
-        let reachable = try #require(RangeEchoOrigin())
+        let reachable = try #require(await RangeEchoOrigin())
         defer { reachable.stop() }
         let reached = await HLSOriginRelay.systemTrustRefuses(
             URL(string: "http://127.0.0.1:\(reachable.port)/movie.ts")!)
@@ -388,8 +388,8 @@ struct HLSOriginRelayAddressingTests {
         private let process: Process
         private let workDir: URL
 
-        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) {
-            guard let launched = PythonOrigin.launch(
+        init?(slices: Int = 8, pauseSeconds: Double = 0.05, declaresLength: Bool = true) async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-trickle-origin",
                 script: Self.serverPy(slices: slices, pauseSeconds: pauseSeconds,
                                       declaresLength: declaresLength))
@@ -447,55 +447,6 @@ struct HLSOriginRelayAddressingTests {
         }
     }
 
-    /// Writes `files` and `script` into a scratch directory, runs the script with the system
-    /// Python, and waits for its "READY <port>" line. The two origins below differ only in what
-    /// they serve, so the launch is written once.
-    enum PythonOrigin {
-        static func launch(prefix: String, script: String, files: [String: String] = [:])
-            -> (process: Process, port: UInt16, workDir: URL)?
-        {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
-            guard (try? FileManager.default.createDirectory(
-                at: dir, withIntermediateDirectories: true)) != nil else { return nil }
-            do {
-                for (name, body) in files {
-                    try body.write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
-                }
-                try script.write(
-                    to: dir.appendingPathComponent("origin.py"), atomically: true, encoding: .utf8)
-            } catch { return nil }
-
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-            proc.arguments = [dir.appendingPathComponent("origin.py").path]
-            proc.currentDirectoryURL = dir
-            let stdout = Pipe()
-            proc.standardOutput = stdout
-            proc.standardError = FileHandle.nullDevice
-            do { try proc.run() } catch { return nil }
-
-            var readyLine = ""
-            var pending = Data()
-            let deadline = Date().addingTimeInterval(10)
-            while Date() < deadline, !readyLine.contains("READY") {
-                let chunk = stdout.fileHandleForReading.availableData
-                if chunk.isEmpty {
-                    Thread.sleep(forTimeInterval: 0.05)
-                    continue
-                }
-                pending.append(chunk)
-                readyLine = String(decoding: pending, as: UTF8.self)
-            }
-            guard let match = readyLine.split(separator: " ").last,
-                let bound = UInt16(match.trimmingCharacters(in: .whitespacesAndNewlines))
-            else {
-                proc.terminate()
-                return nil
-            }
-            return (proc, bound, dir)
-        }
-    }
 
     /// Loopback HTTP origin that answers Range requests exactly as asked and records the last
     /// one it saw, which is what makes "forwarded verbatim" observable rather than asserted.
@@ -510,8 +461,8 @@ struct HLSOriginRelayAddressingTests {
             return text.split(separator: "\n").last.map(String.init)
         }
 
-        init?(status: Int = 206) {
-            guard let launched = PythonOrigin.launch(
+        init?(status: Int = 206) async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-range-origin", script: Self.serverPy(status: status))
             else { return nil }
             process = launched.process
@@ -573,8 +524,8 @@ struct HLSOriginRelayAddressingTests {
         private let process: Process
         private let workDir: URL
 
-        init?() {
-            guard let launched = PythonOrigin.launch(
+        init?() async {
+            guard let launched = await PythonOrigin.launch(
                 prefix: "aether-hls-origin", script: Self.serverPy,
                 files: ["cert.pem": SelfSignedTLSOrigin.certPEM, "key.pem": SelfSignedTLSOrigin.keyPEM])
             else { return nil }
