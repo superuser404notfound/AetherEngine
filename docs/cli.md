@@ -380,6 +380,15 @@ ffprobe -v error -show_format /tmp/killed.ts    # readable, duration near 30 s
 
 Fetches `init.mp4` and then each media segment in turn from the loopback server and SW-decodes each segment **in isolation** (a fresh decoder per segment, no carried reference frames), reporting how many are independently decodable. A segment that yields `framesDecoded == 0` is not self-contained: its first sample is not an IRAP, so it depends on a predecessor, which is the open-GOP / B-frame boundary defect (#92). `--from N` / `--count K` bound the range (default 0 / 12), `--no-dv` forces the SDR route, `--dump <dir>` writes each fetched segment for offline inspection. Exit 0 when every tested segment is independent, 2 when any is not. This is the ground-truth verifier the #92 fix was validated against (ffmpeg's `hls` muxer scores every segment independent).
 
+`--dump` also feeds `Scripts/segment-spans.py`, which answers the neighbouring question: not whether each segment stands alone, but whether the run of them is contiguous. It prints `[tfdt, tfdt + sum(sample_duration)]` per track for every `moof` and flags any gap or overlap against the previous segment of the same track.
+
+```bash
+swift run aetherctl segverify --from 0 --count 12 --dump /tmp/segs <url>
+python3 Scripts/segment-spans.py /tmp/segs/segverify_seg{0..11}.mp4
+```
+
+A healthy run prints `contiguous` on every line. AE#561 is the counter-example it exists for: a reported session where seg7's video ran to 34.034 s while seg8 opened at 33.492 s, half a second of overlap. Segments grabbed bare with curl carry no `moov`, so prepend `init.mp4` before passing them in.
+
 ## dovitest
 
 Runs the Dolby Vision Profile 7 to 8.1 converter over every video packet of the source and writes the converted elementary stream (Annex B) to `/tmp/aetherctl-dovitest.hevc`, reporting packets processed, conversions, and failures. Lets you confirm the in-engine `DoviRpuConverter` (libdovi) output matches the `dovi_tool -m 2` ground truth offline, without a DV panel:
