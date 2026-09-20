@@ -1182,7 +1182,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         }
         if let t = nativeRenderTick, tick == t + 2 {
             await reportLegibleSelection(engine, "after render on")
-            await reportServedVTT(engine, "after render on", around: engine.currentTime)
+            await reportServedVTT(engine, "after render on", around: engine.currentTime, sessionStart: startPosition ?? 0)
         }
         if let subsOffTick, tick == subsOffTick {
             print("  HOSTCALL subtitles off")
@@ -1203,7 +1203,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         if let t = subsOffTick, tick == t + 1 { await reportLegibleSelection(engine, "after off") }
         if let t = subsOnTick, tick == t + 4 {
             await reportLegibleSelection(engine, "after on")
-            await reportServedVTT(engine, "after on", around: engine.currentTime)
+            await reportServedVTT(engine, "after on", around: engine.currentTime, sessionStart: startPosition ?? 0)
         }
     }
 
@@ -1401,7 +1401,8 @@ private func reportLegibleSelection(_ engine: AetherEngine, _ label: String) asy
 /// So this fetches the served WebVTT the way a receiver does: master -> the selected rendition's
 /// media playlist -> the segments covering the playhead, and counts CUE TEXT, not segments.
 @MainActor
-private func reportServedVTT(_ engine: AetherEngine, _ label: String, around playhead: Double) async {
+private func reportServedVTT(_ engine: AetherEngine, _ label: String, around playhead: Double,
+                             sessionStart: Double) async {
     guard let item = engine.currentAVPlayerItem,
           let asset = item.asset as? AVURLAsset else {
         print("  VTT \(label): no item")
@@ -1443,14 +1444,30 @@ private func reportServedVTT(_ engine: AetherEngine, _ label: String, around pla
         print("  VTT \(label): \(pick.uri) unreachable")
         return
     }
-    let segments = media.split(separator: "\n").filter { $0.hasSuffix(".vtt") }.map(String.init)
-    // Segment index from the playhead: the playlist is uniform 4 s here, and the burst AVKit takes
-    // starts at the playhead, so this is the stretch whose emptiness the viewer would see.
-    let first = max(0, Int(playhead / 4.0) - Int(media.contains("EXT-X-MEDIA-SEQUENCE") ? 0 : 0))
+    // Walk EXTINF rather than assuming a uniform grid. A source with irregular keyframes (scene cuts,
+    // which is most real content) has segments of unequal length, and the reporter's log shows exactly
+    // that: `planSource` and `sourceStart` 1.96 s apart on every segment. Dividing the playhead by a
+    // nominal 4 s picked nothing there, and a harness that checks zero segments reports a clean run.
+    var offsets: [(name: String, start: Double)] = []
+    var acc = 0.0
+    var pending: Double?
+    for line in media.split(separator: "\n", omittingEmptySubsequences: false) {
+        if line.hasPrefix("#EXTINF:") {
+            pending = Double(line.dropFirst(8).split(separator: ",").first ?? "") ?? 0
+        } else if line.hasSuffix(".vtt") {
+            offsets.append((String(line), acc))
+            acc += pending ?? 0
+            pending = nil
+        }
+    }
+    // The playlist is the WHOLE VOD from segment 0, not a window around the mount, so the accumulated
+    // EXTINF is absolute item time and the playhead is read directly. Subtracting the session start
+    // here picked `subs_0_2.vtt`, eight seconds into the film, and reported it empty, which is true
+    // and says nothing: a harness that checks the wrong segments fails the same way it would succeed.
+    let relative = max(0, playhead)
+    let startIndex = offsets.lastIndex(where: { $0.start <= relative }) ?? 0
     var checked = 0, nonEmpty = 0, cues = 0
-    for name in segments where checked < 8 {
-        guard let n = Int(name.split(separator: "_").last?.split(separator: ".").first ?? ""),
-              n >= first, n < first + 12 else { continue }
+    for (name, _) in offsets[startIndex...] where checked < 8 {
         checked += 1
         guard let body = await get(master.deletingLastPathComponent().appendingPathComponent(name)) else { continue }
         // A cue is a timestamp line plus text under it; counting "-->" counts cues without parsing.
@@ -1459,5 +1476,7 @@ private func reportServedVTT(_ engine: AetherEngine, _ label: String, around pla
         if c > 0 { nonEmpty += 1 }
     }
     print("  VTT \(label): rendition=\(pick.name) segments=\(checked) nonEmpty=\(nonEmpty) cues=\(cues)"
+          + " picked=\(offsets[startIndex...].prefix(2).map(\.name).joined(separator: ",")) "
+          + "of=\(offsets.count) relative=\(String(format: "%.1f", relative)) playhead=\(String(format: "%.1f", playhead))"
           + (checked > 0 && nonEmpty == 0 ? "   <- a caption box with nothing in it" : ""))
 }

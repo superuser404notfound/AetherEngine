@@ -912,7 +912,20 @@ final class HLSLocalServer: @unchecked Sendable {
                   let vtt = provider?.nativeSubtitleVTT(ordinal: parsed.ordinal, segmentIndex: seg) else {
                 return send404(fd: fd, path: normalizedPath, reason: "no subtitle segment for \(normalizedPath)")
             }
-            EngineLog.emit("[HLSLocalServer] served subtitle .vtt ord=\(parsed.ordinal) seg=\(seg) bytes=\(vtt.utf8.count)", category: .hlsServer, level: .verbose)
+            // Sodalite#156: an EMPTY segment is the reported defect and a populated one is routine, so
+            // only the empty case is worth a line a reporter will see. AVKit takes the whole forward
+            // window in one burst (~45 segments) and never re-fetches, so logging every one of them at
+            // a visible level would push the surrounding evidence out of the 300-line ring, and it is
+            // exactly the surrounding evidence that says WHY a segment came out empty.
+            let cues = vtt.components(separatedBy: "-->").count - 1
+            if cues == 0 {
+                EngineLog.emit("[HLSLocalServer] served an EMPTY subtitle .vtt ord=\(parsed.ordinal) "
+                               + "seg=\(seg) bytes=\(vtt.utf8.count); the receiver caches this segment "
+                               + "as it is and never asks again", category: .hlsServer)
+            } else {
+                EngineLog.emit("[HLSLocalServer] served subtitle .vtt ord=\(parsed.ordinal) seg=\(seg) "
+                               + "bytes=\(vtt.utf8.count) cues=\(cues)", category: .hlsServer, level: .verbose)
+            }
             return send200(fd: fd, path: normalizedPath,
                            data: Data(vtt.utf8),
                            contentType: "text/vtt")
