@@ -118,6 +118,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// side index can alias main video index). Owned by HLSVideoEngine.
     private let sideAudioDemuxer: Demuxer?
 
+    /// AE#560: the live recording sink, read on the pump thread for every source packet. It gets
+    /// its own lock rather than sharing `restartLock`: the tap is on the hot path and must never
+    /// contend with a restart.
+    fileprivate let recordingSinkLock = NSLock()
+    fileprivate var recordingSink: LiveRecordingSink?
+
     /// One-packet lookahead per source for the dual-demuxer pull-merge (yields lower-DTS first).
     private var mergeMainLookahead: UnsafeMutablePointer<AVPacket>?
     private var mergeSideLookahead: UnsafeMutablePointer<AVPacket>?
@@ -2619,7 +2625,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// 1 s), because rrgomes' trace shows exactly that read waiting 19-46 s client-side while a
     /// fresh side reader overtakes it in 300 ms.
     private func readNextSourcePacket() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
-        guard !pumpFirstReadLogged else { return try readNextSourcePacketMerged() }
+        guard !pumpFirstReadLogged else { return try readNextSourcePacketMergedTapped() }
         pumpFirstReadLogged = true
         let t0 = DispatchTime.now()
         defer {
@@ -2629,7 +2635,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 category: .session, level: ms > 1000 ? .info : .verbose
             )
         }
-        return try readNextSourcePacketMerged()
+        return try readNextSourcePacketMergedTapped()
+    }
+
+    /// AE#560: the one place every source packet of this route passes through on its way to the
+    /// pump, main demuxer and side-audio demuxer already merged into global decode order. The
+    /// recording tap sits here rather than on `Demuxer.readPacket` for exactly that reason: a
+    /// packed AAC audio rendition in live HLS rides a SIDE demuxer, and a tap on the main one
+    /// alone would record those channels silently without audio.
+    ///
+    /// It is also upstream of `bridge.feed`, so the recording carries the source's own audio codec
+    /// while playback listens to the bridged rendition.
+    private func readNextSourcePacketMergedTapped() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
+        let read = try readNextSourcePacketMerged()
+        if let read { tapForRecording(read.packet) }
+        return read
     }
 
     private func readNextSourcePacketMerged() throws -> (packet: UnsafeMutablePointer<AVPacket>, origin: PacketOrigin)? {
@@ -4331,5 +4351,71 @@ enum DualSourceMergeOrder {
         let mainUs = av_rescale_q(mainTicks, mainTimeBase, micro)
         let sideUs = av_rescale_q(sideTicks, sideTimeBase, micro)
         return sideUs < mainUs
+    }
+}
+
+// MARK: - Live recording (AE#560)
+
+extension HLSSegmentProducer: LiveRecordingHost {
+
+    func recordingStreamDescriptors() -> [RecordingStreamDescriptor] {
+        var out: [RecordingStreamDescriptor] = []
+
+        let videoIndex = demuxer.videoStreamIndex
+        if videoIndex >= 0, let stream = demuxer.stream(at: videoIndex) {
+            out.append(RecordingStreamDescriptor(
+                sourceStreamIndex: videoIndex,
+                timeBaseNum: stream.pointee.time_base.num,
+                timeBaseDen: stream.pointee.time_base.den,
+                codecParameters: stream.pointee.codecpar,
+                isVideo: true))
+        }
+
+        // The audio source is the SIDE demuxer when one is open (a packed audio rendition), and the
+        // main demuxer otherwise. Reading the wrong one is how this feature would ship silent.
+        let audioSource = sideAudioDemuxer ?? demuxer
+        let audioIndex = audioSource.audioStreamIndex
+        if audioIndex >= 0, let stream = audioSource.stream(at: audioIndex) {
+            // A side demuxer numbers its streams independently, so it can hand back the same index
+            // the main demuxer already used for video. The writer maps packets by source index, so
+            // a collision would route audio into the video stream. Refuse instead.
+            if audioIndex == videoIndex, sideAudioDemuxer != nil {
+                EngineLog.emit(
+                    "[HLSSegmentProducer] recording refused: the side audio demuxer reuses source "
+                    + "stream index \(audioIndex), which the video stream already holds",
+                    category: .session
+                )
+                return []
+            }
+            out.append(RecordingStreamDescriptor(
+                sourceStreamIndex: audioIndex,
+                timeBaseNum: stream.pointee.time_base.num,
+                timeBaseDen: stream.pointee.time_base.den,
+                codecParameters: stream.pointee.codecpar,
+                isVideo: false))
+        }
+        return out
+    }
+
+    func setRecordingSink(_ sink: LiveRecordingSink?) {
+        recordingSinkLock.lock()
+        recordingSink = sink
+        recordingSinkLock.unlock()
+    }
+
+    /// Pump thread. Non-blocking by the sink's contract.
+    func tapForRecording(_ packet: UnsafeMutablePointer<AVPacket>) {
+        recordingSinkLock.lock()
+        let sink = recordingSink
+        recordingSinkLock.unlock()
+        guard let sink, let data = packet.pointee.data, packet.pointee.size > 0 else { return }
+        sink.accept(
+            packetBytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
+            sourceStreamIndex: packet.pointee.stream_index,
+            pts: packet.pointee.pts,
+            dts: packet.pointee.dts,
+            duration: packet.pointee.duration,
+            isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+        )
     }
 }

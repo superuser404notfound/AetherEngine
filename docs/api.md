@@ -670,6 +670,71 @@ For "where did this seek actually land", the honest signal is `SeekEvent.landed(
 `$seekEvents`. `await seek(to:)` returns no position, so a harness that records its own requested target
 reports an intention rather than an outcome.
 
+## Recording a live stream
+
+| Symbol | Notes |
+| --- | --- |
+| `startRecording(to:)` | `async throws`. Records the live source to a file, fed from the connection the session already holds. |
+| `stopRecording()` | `async`. Ends the recording and closes the file. Idempotent, and a no-op when nothing is recording. |
+| `$recordingState` | A `RecordingState`: `.idle`, `.recording(RecordingProgress)`, `.ended(RecordingEndReason)`, `.failed(RecordingFailure)`. Progress republishes at 1 Hz, not per packet. |
+
+No second connection is opened. That is the whole point of the feature rather than a detail of it:
+an IPTV plan commonly caps an account at 1 to 3 simultaneous connections, so a host that opens its
+own connection to record either fails outright or knocks the viewer off the channel. The engine
+already holds the one permitted connection and already demuxes every packet.
+
+The recording is a **stream copy of the source packets into MPEG-TS**, taken before any audio
+bridging. Nothing is decoded and nothing is re-encoded. A TrueHD or DTS channel therefore records
+its original audio while playback is listening to the bridged FLAC rendition, and a file cut short
+by a crash or a kill is still playable up to the truncation, which is why the container is MPEG-TS
+rather than fragmented MP4. The file opens on the first video keyframe after the call, so it starts
+on a decodable picture rather than mid-GOP.
+
+It follows the source, not the playhead. Pausing, or scrubbing back inside the DVR window, does not
+interrupt it.
+
+**Which routes can record.** Only the two where the engine owns the byte path:
+
+| `videoRoute` | Who holds the source connection | Recordable |
+| --- | --- | --- |
+| `.loopback` | The engine: demuxer, segment producer, local server | yes |
+| `.software` | The engine: demuxer, software playback host | yes |
+| `.remoteBypass` | AVFoundation, directly against the origin | no |
+
+On `.remoteBypass` (`LoadOptions.nativeRemoteHLS`) the engine never sees a byte, so there is nothing
+to record without opening the second connection the feature exists to avoid. `startRecording(to:)`
+throws `.unsupportedRoute(.remoteBypass)` rather than recording nothing. The escape is the one
+described under [Where the token rotates](#loading): reload with `nativeRemoteHLS: false` and the
+session moves onto the ingest reader and `.loopback`. The engine does not perform that reroute by
+itself, because it would visibly interrupt the picture as a side effect of pressing Record, and the
+routing decision belongs to the host.
+
+**The two reporting channels are disjoint.** A condition a host can act on before anything is
+written is thrown out of `startRecording(to:)`: `.notLive`, `.unsupportedRoute`, `.alreadyRecording`,
+`.cannotCreateFile`. A condition that can only be discovered while writing arrives through
+`$recordingState` as `.failed`, because by then the call has long returned: `.diskFull`,
+`.writeFailed`, `.writeTooSlow`. One failure is never reported through both.
+
+`.writeTooSlow` is a contract worth reading twice: writes are handed to a bounded queue drained off
+the demux thread, and when that queue fills, **the engine drops the recording rather than the
+picture**. A recording that cannot keep up ends and says so; a demux thread parked on a slow disk
+would stall playback, which is not a trade the engine makes.
+
+**A reset ends the recording.** When `liveSourceReset` fires, or the host calls
+`reloadAtCurrentPosition`, the file is closed cleanly and `$recordingState` publishes
+`.ended(.sourceReset)`. The recording does not carry on into the same file: a reset can bring back
+different codecs, different parameter sets or a different program, and writing that into streams
+declared from the old source produces a file that is unplayable or silently wrong past the seam. The
+host has the event and starts part two if it wants one. `stop()` and a new `load()` end it the same
+way with `.ended(.sessionEnded)`; a recording never outlives its session.
+
+**Not implemented: recording from the start of what is already buffered.** A recording begins at the
+call, not at the back of the DVR window. On `.loopback` what is retained is remuxed fMP4 with
+**bridged** audio, not source packets, so prepending it would produce one file whose audio codec
+changes in the middle. On `.software` the packet ring does hold source packets, but shipping the
+behaviour on one route and not the other under one API is worse than not shipping it. If you need it,
+say so on the tracker rather than working around it.
+
 ## Picture, layers and PiP
 
 | Symbol | Notes |
@@ -813,6 +878,10 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `SubtitleImage` | `cgImage`, `position`, `canvasSize`, `isForced`. |
 | `ExternalSubtitleTrack` | `url`, `name`, `language`, `isForced`, `isHearingImpaired`, `isDefault`, `httpHeaders` (nil forwards `LoadOptions.httpHeaders`), `formatHint` for URLs whose path hides the format, and `sourceStreamIndex` for a container holding several subtitle streams. That index addresses the container at `url`, not the played media. |
 | `NativeSubtitleTrack` | `ordinal`, `language`, `displayName`, plus `sameLanguageRank(of:in:)` for disambiguating same-language options (eng Full against eng SDH). |
+| `RecordingState` | `.idle`, `.recording(RecordingProgress)`, `.ended(RecordingEndReason)`, `.failed(RecordingFailure)`. What the session's live recording is doing. |
+| `RecordingProgress` | `url`, `startedAt`, `bytesWritten`, `durationSeconds`. Republished at 1 Hz while recording. |
+| `RecordingEndReason` | `.stoppedByHost`, `.sourceReset`, `.sessionEnded`. Why a recording stopped without failing; the file is closed and playable in every case. |
+| `RecordingFailure` | `.unsupportedRoute(VideoRoute)`, `.notLive`, `.alreadyRecording(URL)`, `.cannotCreateFile`, `.diskFull`, `.writeFailed`, `.writeTooSlow`, `.noStreamsToCopy`. The first four are thrown out of `startRecording(to:)`; the rest arrive through `$recordingState`. |
 | `TitleInfo` | `id` (0-based, longest first, id 0 is the main feature and the key for `selectTitle`), `name`, `durationSeconds`, `chapterCount`. |
 | `ChapterInfo` | `id`, `name`, `startSeconds`, `durationSeconds`. The two publishers differ in axis: `discChapters` are title-relative and seeked through `selectChapter(id:)`, `mediaChapters` carry content timestamps a host passes straight to `seek(to:)` and `selectChapter` no-ops for them. |
 | `AudioTapBuffer` | `buffer` (`AVAudioPCMBuffer`), `sourceTime`, `discontinuity`. Non-discontinuity buffers are strictly increasing and non-overlapping, which is what SpeechAnalyzer's input timeline requires. |

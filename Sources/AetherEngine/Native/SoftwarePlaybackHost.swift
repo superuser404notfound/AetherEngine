@@ -217,6 +217,10 @@ final class SoftwarePlaybackHost {
     /// Disk-spooled DVR rewind ring; non-nil for live sessions with dvrWindowSeconds set. Demux-thread appended (internally locked).
     nonisolated(unsafe) private var dvrRing: PacketRingBuffer?
 
+    /// AE#560: the live recording sink, read on the demux thread for every source packet.
+    nonisolated(unsafe) fileprivate var recordingSink: LiveRecordingSink?
+    fileprivate let recordingSinkLock = NSLock()
+
     /// True for a live session. Gates ring fill, edge publishing, and the
     /// live-DVR seek branch so the non-live SW path is untouched.
     private var isLive: Bool = false
@@ -1568,6 +1572,10 @@ final class SoftwarePlaybackHost {
         let getSubtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { [weak self] in
             self?.subtitleTapSink
         }
+        // AE#560: both read loops hand every source packet to this before any branching.
+        let recordingTap: @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { [weak self] pkt in
+            self?.tapForRecording(pkt)
+        }
         let subIndices = subtitleStreamIndices
         let subTimeBases = subtitleStreamTimeBases
         let subSplitSetIndices = splitDisplaySetSubtitleStreamIndices
@@ -1668,7 +1676,8 @@ final class SoftwarePlaybackHost {
                     subtitleStreamIndices: subIndices,
                     subtitleTimeBases: subTimeBases,
                     splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
-                    subtitleTapSink: getSubtitleTapSink
+                    subtitleTapSink: getSubtitleTapSink,
+                    recordingTap: recordingTap
                 )
             }
             let lookahead = audioLookahead
@@ -1742,7 +1751,8 @@ final class SoftwarePlaybackHost {
                 subtitleStreamIndices: subIndices,
                 subtitleTimeBases: subTimeBases,
                 splitDisplaySetSubtitleStreamIndices: subSplitSetIndices,
-                subtitleTapSink: getSubtitleTapSink
+                subtitleTapSink: getSubtitleTapSink,
+                recordingTap: recordingTap
             )
         }
     }
@@ -1765,7 +1775,8 @@ final class SoftwarePlaybackHost {
         subtitleStreamIndices: Set<Int32> = [],
         subtitleTimeBases: [Int32: AVRational] = [:],
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
-        subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil }
+        subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
+        recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in }
     ) {
         let discontinuityThresholdSeconds = 10.0
         var prevRawVideoPtsSec = Double.nan
@@ -1795,6 +1806,11 @@ final class SoftwarePlaybackHost {
                 onSourceEnded()
                 return false
             }
+
+            // AE#560: record before any branch. The DVR ring append further down sits inside
+            // `if let ring`, so a tap placed there would silently do nothing for a live session
+            // loaded without dvrWindowSeconds.
+            recordingTap(packet)
 
             let streamIdx = packet.pointee.stream_index
 
@@ -2243,7 +2259,8 @@ final class SoftwarePlaybackHost {
         subtitleStreamIndices: Set<Int32> = [],
         subtitleTimeBases: [Int32: AVRational] = [:],
         splitDisplaySetSubtitleStreamIndices: Set<Int32> = [],
-        subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil }
+        subtitleTapSink: @Sendable () -> ((@Sendable (Int32, UnsafeMutablePointer<AVPacket>, AVRational, Bool) -> Void)?) = { nil },
+        recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in }
     ) {
         // Clock arming: one-shot latch (seekClock is not idempotent -- re-calling snaps clock back to initialClockTime). Shared with host so a seek before first audio isn't overridden by a late re-arm.
 
@@ -2561,6 +2578,11 @@ final class SoftwarePlaybackHost {
                 if terminalGeneration.record(genBeforeRead) { onEnd(genBeforeRead) }
                 return !isLive
             }
+
+            // AE#560: record before any branch. The DVR ring append further down sits inside
+            // `if let ring`, so a tap placed there would silently do nothing for a live session
+            // loaded without dvrWindowSeconds.
+            recordingTap(packet)
 
             let streamIdx = packet.pointee.stream_index
 
@@ -3047,5 +3069,48 @@ final class SWPlaybackDiagState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (_lastAudioPts, _parked, _rebuffering, _sourceExhausted)
+    }
+}
+
+// MARK: - Live recording (AE#560)
+
+extension SoftwarePlaybackHost: LiveRecordingHost {
+
+    func recordingStreamDescriptors() -> [RecordingStreamDescriptor] {
+        guard let demuxer else { return [] }
+        var out: [RecordingStreamDescriptor] = []
+        let videoIndex = demuxer.videoStreamIndex
+        for index in [videoIndex, demuxer.audioStreamIndex] where index >= 0 {
+            guard let stream = demuxer.stream(at: index) else { continue }
+            out.append(RecordingStreamDescriptor(
+                sourceStreamIndex: index,
+                timeBaseNum: stream.pointee.time_base.num,
+                timeBaseDen: stream.pointee.time_base.den,
+                codecParameters: stream.pointee.codecpar,
+                isVideo: index == videoIndex))
+        }
+        return out
+    }
+
+    func setRecordingSink(_ sink: LiveRecordingSink?) {
+        recordingSinkLock.lock()
+        recordingSink = sink
+        recordingSinkLock.unlock()
+    }
+
+    /// Demux thread. Non-blocking by the sink's contract.
+    nonisolated func tapForRecording(_ packet: UnsafeMutablePointer<AVPacket>) {
+        recordingSinkLock.lock()
+        let sink = recordingSink
+        recordingSinkLock.unlock()
+        guard let sink, let data = packet.pointee.data, packet.pointee.size > 0 else { return }
+        sink.accept(
+            packetBytes: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
+            sourceStreamIndex: packet.pointee.stream_index,
+            pts: packet.pointee.pts,
+            dts: packet.pointee.dts,
+            duration: packet.pointee.duration,
+            isKeyframe: (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+        )
     }
 }

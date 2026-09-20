@@ -949,6 +949,11 @@ extension AetherEngine {
                 )
                 // AE#446 round 3: a #446 outage hold is waiting on this read; it has to stop saying so.
                 self.noteLiveSourceGivenUp()
+                // AE#560: a reset can bring back different codecs, different parameter sets or a
+                // different program, and writing that into streams declared from the old source
+                // produces a file that is unplayable or silently wrong past the seam. The recording
+                // ends here; the host has the event and starts part two if it wants one.
+                self.endRecordingIfRunning(reason: .sourceReset)
                 self.liveSourceReset.send()
             }
         }

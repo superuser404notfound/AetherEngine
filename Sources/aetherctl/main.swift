@@ -640,6 +640,8 @@ if first == "play" {
     // `LoadOptions.dolbyVisionHandling = .baseLayerOnly`: the base layer of a Dolby Vision source, the
     // Dolby Vision left out of the container. The harness for a record the bitstream contradicts.
     let playDVHandling: DolbyVisionHandling = takeFlag("--dv-base-layer", from: &rest) ? .baseLayerOnly : .automatic
+    // AE#560: record the live source to a file from the session's existing connection.
+    let playRecord = takeStringFlag("--record", from: &rest).map { URL(fileURLWithPath: $0) }
     // AE#492: `LoadOptions.deinterlaceFieldRate`. `send_field` (the default) emits one frame per
     // FIELD, so a 29.97i source hands the layer 59.94 frames per second against 23.976 for a
     // progressive one. That is the confound in every per-seek drop count taken across the two, and
@@ -873,7 +875,8 @@ if first == "play" {
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
                  assertDolbyVision: playAssertDV,
-                 dolbyVisionHandling: playDVHandling))
+                 dolbyVisionHandling: playDVHandling,
+                 record: playRecord))
 }
 
 if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].contains(first) {

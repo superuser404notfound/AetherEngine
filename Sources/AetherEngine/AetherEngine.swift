@@ -1233,7 +1233,21 @@ public final class AetherEngine: ObservableObject {
     @Published public internal(set) var nativeSubtitleDefaultOrdinal: Int = 0
 
     /// True for a live session (`LoadOptions.isLive`). Cleared in stopInternal so it can't bleed into the next VOD load.
-    @Published public private(set) var isLive: Bool = false
+    @Published public internal(set) var isLive: Bool = false
+
+    /// What the session's live recording is doing (AE#560). `.idle` when nothing is recording.
+    /// See `startRecording(to:)`.
+    @Published public internal(set) var recordingState: RecordingState = .idle
+
+    /// The running recording, if any. Retained here so a session teardown can end it.
+    var activeRecording: LiveRecordingWriter?
+
+    /// The route component feeding `activeRecording`, so the sink can be removed on stop. Weak: the
+    /// producer or software host is owned by its session and may be torn down under us.
+    weak var activeRecordingHost: AnyObject?
+
+    /// Republishes `recordingState` progress at 1 Hz while a recording runs.
+    var recordingProgressTimer: Timer?
 
     /// Forwarder; subscribe to `clock.$liveEdgeTime` for push (live-edge fields live on clock, not engine).
     public var liveEdgeTime: Double { clock.liveEdgeTime }
@@ -4763,6 +4777,10 @@ public final class AetherEngine: ObservableObject {
     /// Tear down and reload from the current position. Call after background return; tvOS invalidates
     /// AVIO connections and VT sessions on suspension.
     public func reloadAtCurrentPosition() async throws {
+        // AE#560: a reload re-opens the source, which can come back with different codecs or a
+        // different program, so the recording ends as a source reset rather than as a session end.
+        // stopInternal's own call further down is then a no-op.
+        endRecordingIfRunning(reason: .sourceReset)
         // #357: a background teardown already ran stopInternal and parked the selection, because on
         // that path the live state every snapshot below reads is wiped long before this call. When
         // nothing was parked this is exactly the pre-#357 live read.
@@ -6490,6 +6508,9 @@ public final class AetherEngine: ObservableObject {
     ///   black-screen latency per audio switch on the old fixed 5 s
     ///   poll; capped at ~2 s since #117, but still worth skipping).
     func stopInternal(resetDisplayCriteria: Bool = true, keepNativeHost: Bool = false, keepCustomReader: Bool = false, keepCurrentItem: Bool = false, finalTeardown: Bool = false) {
+        // AE#560: a recording never outlives its session. This covers stop(), a new load() and
+        // every reload, all of which pass through here before the demuxer goes away.
+        endRecordingIfRunning(reason: .sessionEnded)
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
         resumeAfterInterruption = false

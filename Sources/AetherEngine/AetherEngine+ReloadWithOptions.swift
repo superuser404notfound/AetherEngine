@@ -65,6 +65,10 @@ extension AetherEngine {
     public func reloadAtCurrentPosition(
         applying change: (inout LoadOptions) -> Void
     ) async throws -> SessionOptionCorrectionOutcome {
+        // AE#560: a reload re-opens the source, which can come back with different codecs or a
+        // different program, so the recording ends as a source reset rather than as a session end.
+        // stopInternal's own call further down is then a no-op.
+        endRecordingIfRunning(reason: .sourceReset)
         var proposed = loadedOptions
         change(&proposed)
 

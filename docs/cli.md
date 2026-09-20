@@ -359,6 +359,23 @@ round 11 documents on both sides of that thread.
 
 `--audio-stats` installs the engine audio tap and watches the decoded PCM itself: an `AGAP` line for every source-PTS discontinuity > 2 ms between consecutive buffers, and per-second `alead` (last decoded audio PTS minus the synchronizer clock) plus `abufs` (buffers delivered) appended to the telemetry. `alead` is the audio renderer's safety margin: on the SW live path the look-ahead pump holds it near `AudioLookaheadPolicy.targetLeadSeconds`; a collapse toward zero means the source or the feeder cannot keep real time (this is how the #107 audio-chopping report was diagnosed).
 
+`--record <path>` records the live source to a file from the connection the session already holds (AE#560), the same `AetherEngine.startRecording(to:)` a host calls. The output is MPEG-TS, a stream copy of the SOURCE packets taken before any audio bridging, so a bridged channel plays as FLAC and records as its original TrueHD or DTS. It is the arm that proves the tap sits on the right side of the bridge:
+
+```bash
+aetherctl play --live --live-ingest --seconds 60 --record /tmp/rec.ts <master.m3u8>
+ffprobe -v error -show_streams -select_streams a /tmp/rec.ts | grep codec_name   # NOT flac
+```
+
+Only `.loopback` and `.software` can record. On the remote-HLS bypass AVFoundation holds the source connection and the engine never sees a byte, so the run prints `RECORD refused: unsupportedRoute(remoteBypass)` and exits 3 rather than producing an empty file. A requested recording that produces no bytes, or that ends `.failed`, is also exit 3: a capability the flag asked for and did not deliver is a machine-checkable failure, not a green run somebody has to read the log for.
+
+Because a truncated MPEG-TS stays playable, the kill case is a real arm rather than an argument:
+
+```bash
+aetherctl play --live --live-ingest --seconds 120 --record /tmp/killed.ts <master.m3u8> &
+sleep 30; kill -9 %1
+ffprobe -v error -show_format /tmp/killed.ts    # readable, duration near 30 s
+```
+
 ## segverify
 
 Fetches `init.mp4` and then each media segment in turn from the loopback server and SW-decodes each segment **in isolation** (a fresh decoder per segment, no carried reference frames), reporting how many are independently decodable. A segment that yields `framesDecoded == 0` is not self-contained: its first sample is not an IRAP, so it depends on a predecessor, which is the open-GOP / B-frame boundary defect (#92). `--from N` / `--count K` bound the range (default 0 / 12), `--no-dv` forces the SDR route, `--dump <dir>` writes each fetched segment for offline inspection. Exit 0 when every tested segment is independent, 2 when any is not. This is the ground-truth verifier the #92 fix was validated against (ffmpeg's `hls` muxer scores every segment independent).

@@ -109,7 +109,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
                     httpHeaders: [String: String] = [:],
                     deinterlaceFieldRate: DeinterlaceFieldRate = .field,
                     assertDolbyVision: Bool = false,
-                    dolbyVisionHandling: DolbyVisionHandling = .automatic) -> Int32 {
+                    dolbyVisionHandling: DolbyVisionHandling = .automatic, record: URL? = nil) -> Int32 {
     EngineLog.handler = { print($0) }
     if mallocCensus {
         AetherEngine.setLargeAllocationCensusEnabled(
@@ -130,7 +130,7 @@ func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liv
     // CFRunLoopRun, not a blocking semaphore: AetherEngine is @MainActor, so parking the main thread would deadlock the executor.
     let box = UncheckedBox<Int32?>(nil)
     Task { @MainActor in
-        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision, dolbyVisionHandling: dolbyVisionHandling)
+        box.value = await playSmokeTest(url: url, seconds: seconds, live: live, forceSoftware: forceSoftware, nativeHLS: nativeHLS, liveIngest: liveIngest, fastZap: fastZap, liveStartImmediately: liveStartImmediately, dvrWindow: dvrWindow, subsPick: subsPick, hostCalls: hostCalls, audioStats: audioStats, seekEvery: seekEvery, seekPattern: seekPattern, seekCount: seekCount, startPosition: startPosition, frameTimes: frameTimes, presentTimes: presentTimes, pictureProbe: pictureProbe, sidecars: sidecars, audioSwitch: audioSwitch, teletextPage: teletextPage, teletextSwitch: teletextSwitch, audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches, pausedMount: pausedMount, optionCorrection: optionCorrection, sequentialOrigin: sequentialOrigin, maxConcurrentRequests: maxConcurrentRequests, heldConnection: heldConnection, declaredDuration: declaredDuration, httpHeaders: httpHeaders, deinterlaceFieldRate: deinterlaceFieldRate, assertDolbyVision: assertDolbyVision, dolbyVisionHandling: dolbyVisionHandling, record: record)
         CFRunLoopStop(CFRunLoopGetMain())
     }
     CFRunLoopRun()
@@ -449,7 +449,7 @@ private func seekIntentDrill(
 }
 
 @MainActor
-private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false, dolbyVisionHandling: DolbyVisionHandling = .automatic) async -> Int32 {
+private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware: Bool = false, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, pictureProbe: Bool = false, sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil, teletextPage: Int? = nil, teletextSwitch: TeletextPageSwitchRequest? = nil, audioDelayMs: Int = 0, audioDelaySwitches: [AudioDelaySwitchRequest] = [], pausedMount: Bool = false, optionCorrection: LoadOptionCorrectionRequest? = nil, sequentialOrigin: Bool = false, maxConcurrentRequests: Int? = nil, heldConnection: Bool = false, declaredDuration: Double? = nil, httpHeaders: [String: String] = [:], deinterlaceFieldRate: DeinterlaceFieldRate = .field, assertDolbyVision: Bool = false, dolbyVisionHandling: DolbyVisionHandling = .automatic, record: URL? = nil) async -> Int32 {
     let engine: AetherEngine
     do {
         engine = try AetherEngine()
@@ -621,6 +621,20 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
           + "fmt=\(engine.sourceVideoFormat)"
           + (engine.sourceDVProfile.map { " dvProfile=\($0)" } ?? "")
           + (engine.dolbyVisionConversion.map { " dvConversion=\($0)" } ?? ""))
+
+    // AE#560: record the live source to a file, from the connection this session already holds.
+    // A requested recording that produces nothing is a machine-checkable failure (exit 3), not a
+    // silent pass, which is the whole reason the flag exists.
+    var recordingRefused = false
+    if let record {
+        do {
+            try await engine.startRecording(to: record)
+            print("  RECORD started -> \(record.path)")
+        } catch {
+            print("  RECORD refused: \(error)")
+            recordingRefused = true
+        }
+    }
 
     // Mimic host-app post-load calls (AetherPlayer openInternal order) to reproduce
     // host-triggered transport races the bare harness would miss.
@@ -1207,6 +1221,11 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // one when the question is what a host's picker ends up showing.
     let finalSubtitleTracks = engine.subtitleTracks
     let finalActiveSubtitle = engine.activeSubtitleTrackIndex
+    if record != nil {
+        await engine.stopRecording()
+        print("  RECORD final state: \(engine.recordingState)")
+    }
+    let recordingState = engine.recordingState
     engine.stop()
     tapTask?.cancel()
     print("")
@@ -1337,6 +1356,27 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     if subsPick != nil && cueCount == 0 {
         print("VERDICT: playback OK, subtitle track selected, but no cues arrived")
         return 3
+    }
+    // AE#560: same shape as the subtitle verdicts above. A requested capability that produces
+    // nothing is a failure the harness can check, not a green run someone has to read the log for.
+    if recordingRefused {
+        print("VERDICT: playback OK but the requested recording was refused")
+        return 3
+    }
+    if let record {
+        switch recordingState {
+        case .failed(let failure):
+            print("VERDICT: playback OK but the recording failed: \(failure)")
+            return 3
+        case .ended, .recording, .idle:
+            let bytes = (try? FileManager.default
+                .attributesOfItem(atPath: record.path)[.size] as? Int64) ?? nil
+            guard let bytes, bytes > 0 else {
+                print("VERDICT: playback OK but the recording produced no bytes")
+                return 3
+            }
+            print("recording: \(bytes) B at \(record.path)")
+        }
     }
     print("VERDICT: OK")
     return 0
