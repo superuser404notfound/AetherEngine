@@ -768,7 +768,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// #65 watchdog: break a VOD backpressure park once the consumer fetch target has been frozen this long.
     /// Set above the log threshold so the diag tuple surfaces first. The host then re-anchors the producer on
-    /// AVPlayer's real position; a slow-but-advancing consumer never trips the detector (see BackpressureWedgeDetector).
+    /// AVPlayer's real position; a slow-but-advancing consumer never trips the detector, and seconds in which
+    /// the rendered clock advanced do not count toward it (AE#649; see BackpressureWedgeDetector).
     private static let backpressureWedgeBreakThresholdSeconds = 24
 
     /// #207: a disk park is normal steady state for an opt-in prefetch, so it stays quiet until it has
@@ -1825,12 +1826,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     // asking for segments, and stuck= is that number: 0 is a viewer scrubbing through
                     // resident content, a climbing one is a consumer that went quiet.
                     : wedgeDetector.secondsSinceTargetMoved == 0 ? "(consumer still fetching)"
+                    // AE#649: quiet but rendering is a consumer playing out its forward buffer,
+                    // and idle= (what the breaker counts) stays put while it does.
+                    : wedgeDetector.lastPollRendered ? "(consumer quiet, still playing)"
                     : "(no playback progress)"
                 EngineLog.emit(
                     "[HLSSegmentProducer] #65 backpressure PARK (\(context)) head=\(head) "
                     + "target=\(target) cacheTarget=\(cacheTarget) "
                     + "highStored=\(cache.highestStoredIndex) cached=\(cache.count) parked=\(parked)s "
                     + "stuck=\(wedgeDetector.secondsSinceTargetMoved)s "
+                    + "idle=\(wedgeDetector.secondsWithoutProgress)s "
                     + suspendReason,
                     category: .session
                 )
