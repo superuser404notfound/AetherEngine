@@ -13,14 +13,14 @@ the public-API contract.
 ### Fixed
 
 - **A VOD consumer that goes quiet while it keeps playing no longer trips the #65 wedge breaker.**
-  AVPlayer on a cellular iPhone fetches in bursts, several segments at once and then nothing for 24
-  to 58 s while it plays out a forward buffer of up to 109 s. The slow path counted that silence alone, broke the
-  park every few minutes and nudge-seeked a healthy session, which flushed the buffer on screen: a
-  half-second freeze of picture and sound each time, and a re-anchor that fetched the source it
-  already held a second time. The slow path now counts only seconds in which the consumer neither
-  fetched nor rendered; one that really stopped fetching still breaks on the fast path once its
-  buffer runs dry. The `PARK` line carries the new count as `idle=` and names a quiet but playing
-  consumer as such (AE#649).
+  AVPlayer on a cellular iPhone fetches in bursts, several segments at once and then nothing for
+  half a minute to almost two while it plays out a forward buffer of up to 113 s. The slow path
+  counted that silence alone, broke the park every few minutes and nudge-seeked a healthy session,
+  which flushed the buffer on screen: a half-second freeze of picture and sound each time, and a
+  re-anchor that fetched the source it already held a second time. The slow path now counts only
+  seconds in which the consumer neither fetched nor rendered; one that really stopped fetching
+  still breaks on the fast path once its buffer runs dry. The `PARK` line carries the new count as
+  `idle=` and names a quiet but playing consumer as such (AE#649, thanks @tschuegy).
 
 ## [7.18.0] - 2026-09-26
 
