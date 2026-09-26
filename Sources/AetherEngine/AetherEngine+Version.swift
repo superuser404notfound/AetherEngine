@@ -11,5 +11,5 @@ extension AetherEngine {
     ///
     /// Between releases, and in a consumer that pins an unreleased commit for a device test, this
     /// names the last PUBLISHED version the checkout descends from, not every patch in it.
-    public nonisolated static let version = "7.18.1"
+    public nonisolated static let version = "7.18.2"
 }

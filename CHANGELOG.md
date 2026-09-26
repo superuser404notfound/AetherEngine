@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.18.2] - 2026-09-26
+
 ### Fixed
 
 - **A software-path escalation reports the position its rebuild resumes at (AE#629).** Under a
