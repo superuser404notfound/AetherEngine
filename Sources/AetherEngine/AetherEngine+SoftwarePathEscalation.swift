@@ -34,20 +34,25 @@ extension AetherEngine {
 
         let absorbed = Self.absorbedFailure(request)
         let duringStartup = waitingLoadGenerations.contains(loadGeneration)
+        // AE#629 round 3: the position the rebuild resumes at, not the host's reading at the refusal.
+        // Under a mount a load() of the host's own raised, AVPlayer's clock reads the start of the
+        // segment it decodes up from until the mount seek lands (12.00 s under 15.90 s on the
+        // reporter's box), so the event and the rebuild disagreed by that gap.
+        let resumesAt = positionForSessionRebuild
 
         let verdict = request.domain == SoftwarePathEscalation.liveJoinErrorDomain
             ? "the native route cannot open this live bitstream"
             : "AVPlayer refused the media (\(request.domain)/\(request.code))"
         EngineLog.emit(
             "[AetherEngine] #561 \(verdict) at "
-            + "\(String(format: "%.2f", request.positionSeconds))s; rebuilding this session on the "
+            + "\(String(format: "%.2f", resumesAt))s; rebuilding this session on the "
             + "software path, which decodes it with libavcodec instead"
             + (duringStartup ? " (the waiting load follows it)" : "") + ": \(request.message)",
             category: .engine
         )
         softwarePathEscalations.send(SoftwarePathEscalationEvent(
             absorbedFailure: absorbed,
-            positionSeconds: request.positionSeconds,
+            positionSeconds: resumesAt,
             duringStartup: duringStartup))
 
         let rebuild = startTakeoverRebuild { $0.preferredDecodePath = .software }

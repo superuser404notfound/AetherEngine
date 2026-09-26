@@ -141,13 +141,18 @@ struct SoftwarePathEscalationTests {
 
     /// The ask's second form. Measured by the reporter: a host that heard only `videoRoute` could not
     /// tell the rescue from a routing decision.
-    @Test("A taken rung publishes the failure it absorbed", .timeLimit(.minutes(2)))
+    @Test("A taken rung publishes the failure it absorbed, at the position the rebuild resumes", .timeLimit(.minutes(2)))
     @MainActor
     func takenRungIsPublished() async throws {
         let origin = try ProbeHTTPTestOrigin(data: ProbeTestFixtures.hdr10Plus(), stage: .headers)
         defer { origin.stop() }
         let engine = try AetherEngine()
         engine.loadedURL = try #require(URL(string: "http://127.0.0.1:\(origin.port)/source.mkv"))
+        // AE#629 round 3, measured by the reporter: a mount raised by a load() of the host's own was
+        // refused while AVPlayer's clock read 12.00 s, the start of the segment under the 15.90 s the
+        // load was handed. The rebuild resumed at 15.90 s and the event said 12.00 s.
+        engine.state = .loading
+        engine.positionUnderReconstruction = 15.9
         var events: [SoftwarePathEscalationEvent] = []
         let sub = engine.softwarePathEscalations.sink { events.append($0) }
         defer { sub.cancel() }
@@ -162,7 +167,7 @@ struct SoftwarePathEscalationTests {
             absorbedFailure: PlaybackErrorInfo(
                 kind: .nativeItemFailed, message: "item death at a frozen position",
                 underlyingDomain: "CoreMediaErrorDomain", underlyingCode: -19602),
-            positionSeconds: 12,
+            positionSeconds: 15.9,
             duringStartup: false)])
     }
 
