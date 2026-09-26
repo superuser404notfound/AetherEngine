@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.18.1] - 2026-09-26
+
 ### Fixed
 
 - **A VOD consumer that goes quiet while it keeps playing no longer trips the #65 wedge breaker.**
