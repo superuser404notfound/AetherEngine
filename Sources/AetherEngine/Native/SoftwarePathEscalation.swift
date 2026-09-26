@@ -12,7 +12,8 @@ public struct SoftwarePathEscalationEvent: Sendable, Equatable {
     /// The failure the rebuild absorbed. `kind` is `.nativeItemFailed`; a failure the engine
     /// inferred from a frozen position across its own revives carries no underlying code.
     public let absorbedFailure: PlaybackErrorInfo
-    /// Where the session was when the native path gave up, in seconds.
+    /// Where the session was when the native path gave up, in seconds: the position the rebuild
+    /// resumes at, which during a mount is the one the mount was handed rather than AVPlayer's clock.
     public let positionSeconds: Double
     /// True when a `load()` was still waiting on this session's startup. That `load()` keeps waiting
     /// across the rebuild and returns when the rebuilt session is up, instead of throwing the

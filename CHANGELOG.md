@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A software-path escalation reports the position its rebuild resumes at (AE#629).** Under a
+  mount raised by a host `load()`, AVPlayer's clock reads the start of the segment it decodes up
+  from until the mount seek lands, and a refusal in that window put that reading on the `#561` line
+  and on `SoftwarePathEscalationEvent.positionSeconds`, while the rebuild itself resumed at the
+  position the load was handed: 12.00 s against 15.90 s on the reporter's Apple TV. Both now carry
+  the rebuild's position.
 
 ## [7.18.1] - 2026-09-26
 
