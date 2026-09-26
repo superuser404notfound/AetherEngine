@@ -285,6 +285,71 @@ struct Issue65LivelockTests {
         #expect(d.observe(currentTarget: 84, renderedPosition: 391.902) == true)  // 3s -> fast wedge
     }
 
+    // MARK: - BackpressureWedgeDetector quiet but rendering consumer (AE#649)
+
+    @Test("A consumer that goes quiet while it keeps rendering never trips the slow path (AE#649)")
+    func quietRenderingConsumerNeverTrips() {
+        // Field shape, cellular iPhone: AVPlayer fetched a burst of segments, then nothing for 58 s while
+        // it played through its forward buffer. Production thresholds: the old slow path tripped at 24 s
+        // and its nudge seek flushed the buffer on screen.
+        var d = BackpressureWedgeDetector(
+            breakThresholdSeconds: 24, fastBreakThresholdSeconds: 5,
+            initialTarget: 453, initialRenderedPosition: 1697.1)
+        for i in 1...58 {
+            #expect(d.observe(currentTarget: 453, renderedPosition: 1697.1 + Double(i)) == false)
+        }
+        #expect(d.secondsSinceTargetMoved == 58)
+        #expect(d.secondsWithoutProgress == 0)
+        #expect(d.lastPollRendered == true)
+    }
+
+    @Test("A quiet consumer that plays its buffer dry still breaks on the fast path (AE#649)")
+    func quietConsumerThatRunsDryFastTrips() {
+        // A consumer that really stopped fetching looks exactly like the healthy one above until its
+        // buffer runs out; from then it renders nothing, and that has to break in single digits.
+        var d = BackpressureWedgeDetector(
+            breakThresholdSeconds: 24, fastBreakThresholdSeconds: 5,
+            initialTarget: 453, initialRenderedPosition: 100.0)
+        for i in 1...30 {
+            #expect(d.observe(currentTarget: 453, renderedPosition: 100.0 + Double(i)) == false)
+        }
+        for _ in 1...4 {
+            #expect(d.observe(currentTarget: 453, renderedPosition: 130.0) == false)
+        }
+        #expect(d.observe(currentTarget: 453, renderedPosition: 130.0) == true) // 5th flat poll
+        #expect(d.lastTripFast == true)
+        #expect(d.lastPollRendered == false)
+    }
+
+    @Test("Rendering seconds hold the slow count rather than reset it (AE#649)")
+    func renderingHoldsTheSlowCount() {
+        // A consumer that neither fetches nor plays steadily (a frame now and then) is not saved by
+        // the odd frame: only the seconds without progress count, and they add up across the frames.
+        var d = BackpressureWedgeDetector(breakThresholdSeconds: 3, initialTarget: 53,
+                                          initialRenderedPosition: 10.0)
+        #expect(d.observe(currentTarget: 53, renderedPosition: 11.0) == false) // rendered, idle 0
+        #expect(d.observe(currentTarget: 53, renderedPosition: 11.0) == false) // idle 1
+        #expect(d.observe(currentTarget: 53, renderedPosition: 12.0) == false) // rendered, held at 1
+        #expect(d.observe(currentTarget: 53, renderedPosition: 12.0) == false) // idle 2
+        #expect(d.observe(currentTarget: 53, renderedPosition: 13.0) == false) // rendered, held at 2
+        #expect(d.observe(currentTarget: 53, renderedPosition: 13.0) == true)  // idle 3 -> slow wedge
+        #expect(d.lastTripFast == false)
+        #expect(d.secondsSinceTargetMoved == 6)
+    }
+
+    @Test("A fetch still restarts the slow count from zero (AE#649)")
+    func fetchResetsTheSlowCount() {
+        var d = BackpressureWedgeDetector(breakThresholdSeconds: 3, initialTarget: 53,
+                                          initialRenderedPosition: 10.0)
+        #expect(d.observe(currentTarget: 53, renderedPosition: 10.0) == false) // idle 1
+        #expect(d.observe(currentTarget: 53, renderedPosition: 10.0) == false) // idle 2
+        #expect(d.observe(currentTarget: 54, renderedPosition: 10.0) == false) // fetch -> 0
+        #expect(d.secondsWithoutProgress == 0)
+        #expect(d.observe(currentTarget: 54, renderedPosition: 10.0) == false) // idle 1
+        #expect(d.observe(currentTarget: 54, renderedPosition: 10.0) == false) // idle 2
+        #expect(d.observe(currentTarget: 54, renderedPosition: 10.0) == true)  // idle 3
+    }
+
     // MARK: - seekIsWedged (Piece B)
 
     @Test("Empty forward buffer at the rendered position is a wedge")

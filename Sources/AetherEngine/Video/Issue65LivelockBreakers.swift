@@ -10,9 +10,10 @@ import Foundation
 /// (`SegmentCache.targetIndex`) reaches a release target. A genuine wedge is the consumer target
 /// frozen for `breakThresholdSeconds` while AVPlayer is stuck and issuing no forward segment request;
 /// a slow-but-advancing consumer (cold cache, throttled CDN) keeps nudging the target up and must
-/// NEVER trip the breaker. Feed `observe(currentTarget:)` once per ~1 s poll (`ParkClock` makes the
-/// caller's wakeups into seconds): it resets the stuck timer whenever the target MOVES, so only a
-/// target that is frozen for the whole window trips.
+/// NEVER trip the breaker, and neither must a quiet consumer that is still rendering (AE#649).
+/// Feed `observe(currentTarget:)` once per ~1 s poll (`ParkClock` makes the caller's wakeups into
+/// seconds): it resets the stuck timer whenever the target MOVES, so only a target that is frozen for
+/// the whole window trips.
 struct BackpressureWedgeDetector {
     let breakThresholdSeconds: Int
     /// #93 retest fast path: trip after this many consecutive polls where the fetch target AND the
@@ -27,16 +28,28 @@ struct BackpressureWedgeDetector {
     /// at all. `maxTargetSeen` cannot: it only ever climbs.
     private var lastTarget: Int
     private var stuckSeconds: Int = 0
+    /// AE#649: what the slow path trips on. Polls since the target last moved in which the rendered
+    /// clock did not advance either; a poll whose clock advanced is held, not counted. Without a
+    /// rendered position every poll counts, so it equals `stuckSeconds` exactly as before.
+    private var idleSeconds: Int = 0
     private var lastRenderedPosition: Double?
     private var flatSeconds: Int = 0
     /// Diagnostic: whether the last `true` from `observe` came from the fast path.
     private(set) var lastTripFast = false
+    /// AE#649 diagnostic: whether the last poll saw the rendered clock move. The PARK line names a
+    /// quiet consumer that is playing out what it already holds, so it cannot be read as a stuck one.
+    private(set) var lastPollRendered = false
 
     /// AE#528 diagnostic: polls since the consumer's fetch target last moved. The PARK line carries
     /// it, so a park that is plain backpressure behind a consumer that keeps fetching (stuck=0s, a
     /// viewer scrubbing) is distinguishable at a glance from one whose consumer has gone quiet,
     /// instead of being inferred from `cacheTarget` deltas across log lines after the fact.
     var secondsSinceTargetMoved: Int { stuckSeconds }
+
+    /// AE#649 diagnostic: the count the slow path trips on (see `idleSeconds`). The PARK line carries
+    /// it beside `stuck=`, so a park behind a consumer that is quiet but playing (stuck climbing, idle
+    /// at 0) reads differently from one behind a consumer that stopped both fetching and rendering.
+    var secondsWithoutProgress: Int { idleSeconds }
 
     /// Rendered-clock deltas below this are aliasing/representation jitter, not playback progress
     /// (one poll second of real playback advances the clock by ~1 s).
@@ -54,6 +67,17 @@ struct BackpressureWedgeDetector {
     /// Returns `true` once the consumer fetch target has been frozen for `breakThresholdSeconds`, or
     /// (fast path) once target and rendered clock have both been frozen for `fastBreakThresholdSeconds`.
     ///
+    /// AE#649: with a rendered position wired, frozen for the slow path means frozen with NO
+    /// playback progress. A consumer can go quiet for longer than the threshold while playing
+    /// perfectly: AVPlayer on a cellular iPhone fetches in bursts, several segments at once and
+    /// then nothing for 24 to 58 s while it plays out a forward buffer of up to 109 s (the same
+    /// title on Wi-Fi fetched one segment every 3 to 7 s). Counting that silence tripped the
+    /// breaker every few minutes, and the #421 nudge seek it led to flushed the buffer on screen: a
+    /// half-second freeze of picture and sound, each time. Seconds in which the rendered clock
+    /// advanced are therefore held rather than counted. A consumer that really stopped fetching
+    /// still plays its buffer dry and then renders nothing, and that is the fast path's shape, so
+    /// it breaks within `fastBreakThresholdSeconds` of the clock going flat.
+    ///
     /// AE#528: frozen means UNCHANGED, not "no higher than before". A viewer scrubbing backwards
     /// declares a LOWER fetch target on every GET, and against a monotone high-water that was
     /// indistinguishable from a consumer that had stopped asking for anything: the busiest consumer
@@ -70,8 +94,9 @@ struct BackpressureWedgeDetector {
     /// (AVPlayer wants to play but is starved, `timeControlStatus == .waitingToPlay`) keeps `wantsToPlay`
     /// true and still trips. Defaults to true so existing callers and live keep their prior behaviour.
     ///
-    /// `renderedPosition` feeds the fast path; nil (not wired: tests, live) keeps it inert. Any move
-    /// beyond the flat epsilon, forward or backward (a new seek landing), restarts the flat window.
+    /// `renderedPosition` feeds the fast path and holds the slow count while the clock moves; nil (not
+    /// wired: tests, live) keeps both inert. Any move beyond the flat epsilon, forward or backward (a new
+    /// seek landing), restarts the flat window.
     ///
     /// `hasStartedRendering` is the cold-startup guard: before AVPlayer has ever presented a frame
     /// (`timeControlStatus` never reached `.playing`), a flat rendered clock is normal pre-roll, NOT a
@@ -87,7 +112,9 @@ struct BackpressureWedgeDetector {
             if currentTarget > maxTargetSeen { maxTargetSeen = currentTarget }
             lastTarget = currentTarget
             stuckSeconds = 0
+            idleSeconds = 0
             flatSeconds = 0
+            lastPollRendered = false
             if let rendered = renderedPosition { lastRenderedPosition = rendered }
             return false
         }
@@ -97,11 +124,19 @@ struct BackpressureWedgeDetector {
         if targetAdvanced { maxTargetSeen = currentTarget }
         stuckSeconds = targetMoved ? 0 : stuckSeconds + 1
         var clockFlat = false
+        var clockMoved = false
         if let rendered = renderedPosition {
             if let last = lastRenderedPosition {
                 clockFlat = abs(rendered - last) < Self.renderedClockFlatEpsilon
+                clockMoved = !clockFlat
             }
             lastRenderedPosition = rendered
+        }
+        lastPollRendered = clockMoved
+        if targetMoved {
+            idleSeconds = 0
+        } else if !clockMoved {
+            idleSeconds += 1
         }
         if targetAdvanced || !clockFlat {
             flatSeconds = 0
@@ -112,7 +147,7 @@ struct BackpressureWedgeDetector {
             lastTripFast = true
             return true
         }
-        if stuckSeconds >= breakThresholdSeconds {
+        if idleSeconds >= breakThresholdSeconds {
             lastTripFast = false
             return true
         }

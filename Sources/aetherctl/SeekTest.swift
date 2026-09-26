@@ -21,7 +21,8 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
     let parkCount = UncheckedBox<Int>(0)
     // AE#528: a park whose PARK line says stuck=0s is backpressure behind a consumer that is still
     // fetching (a viewer scrubbing through resident content), and the breaker deliberately does not
-    // fire there. Counted apart so the verdict cannot read a healthy park as an unrecovered wedge.
+    // fire there. AE#649 widened it to idle=0s, which also covers a consumer that is quiet but still
+    // rendering. Counted apart so the verdict cannot read a healthy park as an unrecovered wedge.
     let liveConsumerParkCount = UncheckedBox<Int>(0)
     // #65 fix signals: did the VOD wedge breaker fire and recover (Piece A producer re-anchor + Piece B
     // engine seek-deadline clock reconcile)? A wedge that is BROKEN + re-anchored is the fix engaging.
@@ -73,7 +74,7 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
         // "[HLSSegmentProducer] #65 backpressure PARK ...". Count abnormal parks (VOD wedge signature).
         if line.contains("#65 backpressure PARK") {
             parkCount.value += 1
-            if line.contains("stuck=0s") { liveConsumerParkCount.value += 1 }
+            if line.contains("idle=0s") { liveConsumerParkCount.value += 1 }
         }
         // Fix engaging: the wedge breaker exited the pump, the host re-anchored, and/or the seek deadline reconciled.
         if line.contains("#65 backpressure WEDGE BROKEN") { wedgeBrokenCount.value += 1 }
@@ -320,8 +321,8 @@ private func seekTestRun(url: URL, seeks: Int, gapMs: Int, settleSeconds: Double
         print("     leads the clock. The live seam-history port is the fix.")
     } else if parkCount.value > 0, parkCount.value == liveConsumerParkCount.value, !fixEngaged {
         print("  >> PARKED BEHIND A LIVE CONSUMER (not a wedge): \(parkCount.value) park(s), every one of them")
-        print("     logged stuck=0s, so the consumer kept declaring new fetch targets the whole time. The")
-        print("     breaker staying quiet here is AE#528 working; a wedge is a park whose stuck= climbs.")
+        print("     logged idle=0s, so the consumer kept declaring fetch targets or kept rendering the whole")
+        print("     time. The breaker staying quiet here is AE#528 working; a wedge is a park whose idle= climbs.")
     } else if parkCount.value > 0 {
         if fixEngaged {
             print("  >> PRODUCER WEDGE DETECTED AND BROKEN: \(parkCount.value) abnormal park(s) but the breaker fired")
