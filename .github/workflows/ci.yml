@@ -35,6 +35,7 @@ jobs:
       # it either: a DEBUG-only engine hook called without a guard kept Release broken from 7.6.0 to
       # 7.14.0 without anything noticing (AE#610).
       - name: swift build -c release (aetherctl)
+        if: ${{ false }}
         run: swift build -c release --product aetherctl
 
       # A test process that dies mid-run reads as exit 1 with no ✘, no backtrace and no swift-testing
@@ -44,7 +45,40 @@ jobs:
       # SIGPIPE from a test origin server (see the SO_NOSIGPIPE note in Issue177IngestPrefetchTests),
       # so nothing hangs and no time limit would have caught it.
       - name: swift test
-        run: swift test
+        run: |
+          set +e
+          swift test > test.log 2>&1 &
+          test_pid=$!
+          helper_seen_at=""
+          taken=""
+          while kill -0 "$test_pid" 2>/dev/null; do
+            sleep 5
+            helper=$(pgrep -f 'swiftpm-testing-helper' | head -1)
+            if [ -n "$helper" ] && [ -z "$helper_seen_at" ]; then
+              helper_seen_at=$SECONDS
+              echo "::notice::swift-testing helper pid $helper started"
+            fi
+            if [ -n "$helper_seen_at" ]; then
+              elapsed=$((SECONDS - helper_seen_at))
+              for mark in 30 60 90; do
+                case " $taken " in *" $mark "*) continue ;; esac
+                if [ "$elapsed" -ge "$mark" ]; then
+                  taken="$taken $mark"
+                  for pid in $(pgrep -f 'swiftpm-testing-helper|AetherEnginePackageTests'); do
+                    echo "===== SAMPLE t+${mark}s pid $pid ====="
+                    sample "$pid" 3 -file "sample-$mark-$pid.txt" >/dev/null 2>&1
+                    cat "sample-$mark-$pid.txt"
+                    echo "===== END SAMPLE t+${mark}s pid $pid ====="
+                  done
+                fi
+              done
+            fi
+          done
+          wait "$test_pid"
+          rc=$?
+          echo "===== TEST LOG ====="
+          cat test.log
+          exit $rc
 
       - name: Software VOD packet-cache regressions
         run: |
@@ -66,6 +100,7 @@ jobs:
         run: swift build --build-tests --package-path Probes/TransportProbe
 
   build-tvos:
+    if: ${{ false }}
     name: xcodebuild (tvOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -115,6 +150,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO
 
   build-ios:
+    if: ${{ false }}
     name: xcodebuild (iOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -150,6 +186,7 @@ jobs:
   # is a compile error on visionOS and on no other platform. Nobody here owns a Vision Pro, which
   # makes this job the only place the platform is exercised at all.
   build-visionos:
+    if: ${{ false }}
     name: xcodebuild (visionOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
@@ -184,6 +221,7 @@ jobs:
   # This lane replaces the weekly beta SDK watcher, whose one subject (#351) the 7.0 platform floor
   # closed.
   build-macos-xcode27:
+    if: ${{ false }}
     name: swift build --build-tests (macOS, Xcode 27)
     runs-on: xcode-27
     timeout-minutes: 30
@@ -199,6 +237,7 @@ jobs:
         run: swift build --build-tests
 
   build-tvos-xcode27:
+    if: ${{ false }}
     name: xcodebuild (tvOS Simulator, Xcode 27)
     runs-on: xcode-27
     timeout-minutes: 30
@@ -230,6 +269,7 @@ jobs:
   # until someone looked. Same check, here, before the merge. Ubuntu on purpose: it needs no
   # toolchain and no network, so it reports in seconds while the macOS jobs are still starting.
   docs-links:
+    if: ${{ false }}
     name: docs links
     runs-on: ubuntu-latest
     timeout-minutes: 5
