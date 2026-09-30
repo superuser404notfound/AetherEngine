@@ -61,8 +61,8 @@ final class LiveWindowObservedCadenceTests: XCTestCase {
         let provider = makeFastZapProvider()
         // Unsealed: legacy 18s (3 x fallback TD 6) so non-live/test conformers keep today's bound.
         XCTAssertEqual(provider.liveBlockingReloadHoldSeconds, 18.0, accuracy: 0.001)
-        // Seal at fastZap cadence: max segment 1.92s -> TD=2 -> hold 6s.
-        XCTAssertEqual(provider.liveTargetDurationSeconds(maxSegmentDuration: 1.92), 2)
+        // Seal at fastZap cadence: max segment 0.96s, cut here -> TD=ceil(1.5 x 0.96)=2 (AE#670) -> hold 6s.
+        XCTAssertEqual(provider.liveTargetDurationSeconds(maxSegmentDuration: 0.96), 2)
         XCTAssertEqual(provider.liveBlockingReloadHoldSeconds, 6.0, accuracy: 0.001)
         // Seal is session-stable: a later, longer segment cannot stretch the hold.
         _ = provider.liveTargetDurationSeconds(maxSegmentDuration: 5.76)

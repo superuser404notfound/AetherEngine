@@ -50,12 +50,12 @@ final class Issue195FastLiveJoinTests: XCTestCase {
     // MARK: - TARGETDURATION / holdback under fastZap
 
     func testFastZapShortGOPTargetDurationTracksGOP() {
-        // 0.96s keyframe cadence: ceil(0.96)=1, cut floor ceil(1.5*0.5)=1 -> TD=1 -> 3s holdback.
+        // 0.96s keyframe cadence, cut here: ceil(1.5*0.96)=2 (AE#670 GOP headroom) -> TD=2 -> 6s holdback.
         let cut = HLSVideoEngine.liveCutTargetSeconds(for: .fastZap)
-        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: 0.96, cutTargetSeconds: cut, cadenceFloorSeconds: nil), 1)
-        XCTAssertEqual(LiveEdgePolicy.holdBackSeconds(targetDuration: 1), 3.0, accuracy: 0.0001)
-        // 2s GOP: ceil(1.92)=2 -> TD=2 -> 6s holdback. Still 3x faster than the standard 18s.
-        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: 1.92, cutTargetSeconds: cut, cadenceFloorSeconds: nil), 2)
+        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: 0.96, cutTargetSeconds: cut, cadenceFloorSeconds: nil, segmentsAreCutHere: true), 2)
+        XCTAssertEqual(LiveEdgePolicy.holdBackSeconds(targetDuration: 2), 6.0, accuracy: 0.0001)
+        // 2s GOP: ceil(1.5*1.92)=3 -> TD=3 -> 9s holdback. Still 2x faster than the standard 18s.
+        XCTAssertEqual(LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: 1.92, cutTargetSeconds: cut, cadenceFloorSeconds: nil, segmentsAreCutHere: true), 3)
     }
 
     func testFastZapLongGOPDegradesToStandardBehavior() {

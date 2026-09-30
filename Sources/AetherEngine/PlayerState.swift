@@ -546,8 +546,10 @@ public struct LoadOptions: Sendable, Equatable {
     /// live-edge holdback (`HOLD-BACK` >= 3 x TARGETDURATION, RFC 8216bis) the first manifest is gated on
     /// (AE#189) becomes >= 18s, which a strict-realtime origin can only fill in wall-clock time (10-18s of
     /// black on an IPTV zap). `.fastZap` cuts at every keyframe past 0.5s instead: segments quantize to the
-    /// source keyframe cadence, TARGETDURATION follows the real GOP length, and the holdback shrinks with
-    /// it. The first serve still prefers the full holdback, but after two finalized segments a
+    /// source keyframe cadence, TARGETDURATION follows the real GOP length with 1.5x headroom over the
+    /// longest GOP seen before the seal (a broadcast's GOPs are irregular and each segment is one whole
+    /// GOP, AE#670), and the holdback shrinks with it: 1 s GOPs serve TARGETDURATION 2, a 6 s holdback.
+    /// The first serve still prefers the full holdback, but after two finalized segments a
     /// strict-realtime source gets one observed-segment grace clamped to 0.5...2.0s, then may serve a
     /// shallow first window. This bounds black-screen startup but may produce one early `-16832` or a
     /// short rebuffer. `.standard` retains the full-holdback guarantee. A smaller TARGETDURATION also

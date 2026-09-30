@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`.fastZap` live froze on sources with irregular GOPs (#670).** The engine's sub-second cut makes every segment one whole GOP, and TARGETDURATION was sealed from the first few with no headroom over them: a broadcast whose GOPs run 1.0 to 2.4 s sealed 1 on three 1.000 s ones, then broke `EXTINF <= TD` on every longer GOP and held the playlist unchanged past AVPlayer's patience (-12888, #524 on 1.5 s of runway, and on macOS the playlist refused outright). Self-cut fastZap segments now seal `ceil(1.5 x max EXTINF)`, the headroom `.standard` always had from its cut-target floor, so 1 s GOPs serve TARGETDURATION 2 and a 6 s holdback. Ingested segments and `.standard` are unchanged.
 
 ## [7.23.0] - 2026-09-30
 

@@ -343,13 +343,34 @@ enum LiveEdgePolicy {
     /// `cadenceFloorSeconds` are nil for VOD/EVENT. Every term is taken at the resolution the playlist
     /// serves (`servedSeconds`), so the value covers the EXTINFs the client is actually handed and no
     /// sub-millisecond noise can buy a whole second of holdback.
+    ///
+    /// AE#670: `segmentsAreCutHere` adds `ceil(1.5 x max EXTINF)` where that headroom has no other source
+    /// (`gopHeadroomApplies`).
     static func targetDurationSeconds(maxSegmentDuration: Double,
                                       cutTargetSeconds: Double?,
-                                      cadenceFloorSeconds: Double?) -> Int {
+                                      cadenceFloorSeconds: Double?,
+                                      segmentsAreCutHere: Bool = false) -> Int {
         var td = wholeSecondsCovering(max(1.0, maxSegmentDuration))
         if let cut = cutTargetSeconds { td = max(td, wholeSecondsCovering(cut * 1.5)) }
+        if gopHeadroomApplies(cutTargetSeconds: cutTargetSeconds, segmentsAreCutHere: segmentsAreCutHere) {
+            td = max(td, wholeSecondsCovering(maxSegmentDuration * 1.5))
+        }
         if let floor = cadenceFloorSeconds { td = max(td, targetDurationForCadence(floor)) }
         return td
+    }
+
+    /// AE#670: does the sealed value need headroom over the GOPs seen so far?
+    ///
+    /// A cut target under a second never bounds a segment: the cutter waits for the next keyframe, so
+    /// every segment it cuts is one whole source GOP, and the value is sealed from the first few of them.
+    /// A broadcast's GOPs are not regular (reported: 1.0 to 2.4 s, sealed on three 1.000 s ones), and a
+    /// later longer one then breaks `EXTINF <= TD` and holds the playlist unchanged past AVPlayer's
+    /// patience. `.standard` has that headroom already in its `1.5 x cut target` floor, and ingested
+    /// segments are bounded by the upstream's own target duration (AE#447 keeps TD 2 on those), so only
+    /// the engine's own sub-second cut needs it from the segments.
+    static func gopHeadroomApplies(cutTargetSeconds: Double?, segmentsAreCutHere: Bool) -> Bool {
+        guard segmentsAreCutHere, let cut = cutTargetSeconds else { return false }
+        return cut < 1.0
     }
 
     /// AVPlayer's default (and our explicitly advertised) live-edge holdback: `3 x TARGETDURATION`, the
@@ -377,10 +398,12 @@ enum LiveEdgePolicy {
                                         maxSegmentDuration: Double,
                                         cutTargetSeconds: Double?,
                                         cadenceFloorSeconds: Double?,
+                                        segmentsAreCutHere: Bool = false,
                                         windowSegmentCount: Int) -> Bool {
         let td = targetDurationSeconds(maxSegmentDuration: maxSegmentDuration,
                                        cutTargetSeconds: cutTargetSeconds,
-                                       cadenceFloorSeconds: cadenceFloorSeconds)
+                                       cadenceFloorSeconds: cadenceFloorSeconds,
+                                       segmentsAreCutHere: segmentsAreCutHere)
         return startupCushionSatisfied(
             segmentCount: segmentCount,
             summedDurationSeconds: summedDurationSeconds,
@@ -521,6 +544,7 @@ struct LiveTargetDurationDerivation {
     let value: Int
     let maxSegmentDuration: Double
     let cutTargetFloor: Double?
+    var gopHeadroomApplies = false
     let cadenceFloor: CadenceFloorTerm
     let selfReported: Double?
 
@@ -529,6 +553,10 @@ struct LiveTargetDurationDerivation {
         var terms = ["max EXTINF \(LiveEdgePolicy.seconds(maxSegmentDuration))s"]
         if let cutTargetFloor {
             terms.append("1.5 x cut target \(LiveEdgePolicy.seconds(cutTargetFloor * 1.5))s")
+        }
+        if gopHeadroomApplies {
+            terms.append("1.5 x max EXTINF \(LiveEdgePolicy.seconds(maxSegmentDuration * 1.5))s "
+                + "(each segment is one whole GOP)")
         }
         terms.append(cadenceFloor.account)
         let claim = selfReported.map {
@@ -2282,14 +2310,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let floor: CadenceFloorTerm = liveCadencePolicy.map { policy in
             policy.targetDurationFloorSeconds.map { CadenceFloorTerm.measured($0) } ?? .pending
         } ?? .unmeasurable
+        let cutHere = liveCadencePolicy == nil
         return LiveTargetDurationDerivation(
             value: LiveEdgePolicy.targetDurationSeconds(
                 maxSegmentDuration: maxSegmentDuration,
                 cutTargetSeconds: cutTarget,
-                cadenceFloorSeconds: floor.seconds
+                cadenceFloorSeconds: floor.seconds,
+                segmentsAreCutHere: cutHere
             ),
             maxSegmentDuration: maxSegmentDuration,
             cutTargetFloor: cutTarget,
+            gopHeadroomApplies: LiveEdgePolicy.gopHeadroomApplies(cutTargetSeconds: cutTarget,
+                                                                  segmentsAreCutHere: cutHere),
             cadenceFloor: floor,
             selfReported: liveCadencePolicy?.selfReportedTargetDurationSeconds
         )
