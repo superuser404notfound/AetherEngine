@@ -10,7 +10,7 @@ import Testing
 ///
 /// The lifecycle itself is iOS / tvOS only; the owed funnel is not, so these drive it through
 /// `noteDidEnterBackground()` and a policy seam that performs the same synchronous teardown.
-@Suite("A background decision owed during a load waits for the load to return", .timeLimit(.minutes(2)))
+@Suite("A background decision owed during a load waits for the load to return", .serialized, .timeLimit(.minutes(2)))
 @MainActor
 struct BackgroundDecisionWaitsForLoadTests {
 

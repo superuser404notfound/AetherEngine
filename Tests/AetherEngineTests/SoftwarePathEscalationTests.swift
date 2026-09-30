@@ -7,7 +7,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite("Software-path escalation (AE#561)")
+@Suite("Software-path escalation (AE#561)", .serialized)
 struct SoftwarePathEscalationTests {
 
     private static func availability(
