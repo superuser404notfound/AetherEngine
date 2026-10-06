@@ -50,6 +50,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// which is only correct while the two agree; on a source where they do not, every walker
         /// downstream (A53 captions, the DV P7 RPU rewrite) reads the packet at the wrong offsets.
         let nalFramingOverride: VideoNALFraming?
+        /// [MovieClaw P38] 见 `MP4SegmentMuxer.VideoConfig.annexBSamplesKeepParameterSets`
+        let annexBSamplesKeepParameterSets: Bool
         /// The session's BIT-1 framing verdict, handed to every muxer this producer builds for the
         /// program's own track (audit BIT-104).
         let nalFramingLatch: NALFramingLatch?
@@ -63,6 +65,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             colorOverride: MP4SegmentMuxer.ColorOverride? = nil,
             extradataOverride: [UInt8]? = nil,
             nalFramingOverride: VideoNALFraming? = nil,
+            annexBSamplesKeepParameterSets: Bool = false,
             nalFramingLatch: NALFramingLatch? = nil
         ) {
             self.codecpar = codecpar
@@ -73,6 +76,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.colorOverride = colorOverride
             self.extradataOverride = extradataOverride
             self.nalFramingOverride = nalFramingOverride
+            self.annexBSamplesKeepParameterSets = annexBSamplesKeepParameterSets
             self.nalFramingLatch = nalFramingLatch
         }
     }
@@ -791,7 +795,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// 10; 4K HEVC ~10 MB/seg = 200 MB old buffer); now per session from `LoadOptions.forwardBufferSegments`
     /// via `HLSVideoEngine.forwardWindowSegments`. MUST equal the SegmentCache's forwardWindow so the muxer
     /// never writes past the cache's forward edge (a drift is exactly what stalls AVPlayer).
-    private let bufferAheadSegments: Int
+    /// [MovieClaw P20] 可在运行中放大（`setBufferAheadSegments`）：泵线程读、宿主线程写，经锁
+    private var bufferAheadSegments: Int {
+        bufferAheadLock.lock(); defer { bufferAheadLock.unlock() }
+        return _bufferAheadSegments
+    }
+    private var _bufferAheadSegments: Int
+    private let bufferAheadLock = NSLock()
+
+    /// [MovieClaw P20] 与 `SegmentCache.setForwardWindow` 成对调用（先这里、后缓存，缓存的广播唤醒停泊中的泵）
+    func setBufferAheadSegments(_ segments: Int) {
+        bufferAheadLock.lock(); defer { bufferAheadLock.unlock() }
+        _bufferAheadSegments = segments
+    }
 
     /// #207: byte bound for an opt-in whole-source window. The segment ceiling is only a sanity bound,
     /// so the race-ahead parks once it has filled the session retention budget (`PrefetchDiskBudget`).
@@ -1477,7 +1493,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.audioMoovPrimeKnownUnobtainable = audioMoovPrimeKnownUnobtainable
         self.capturesAudioPrimeFrames =
             audio.map { MP4SegmentMuxer.audioNeedsParsedPacketForMoov($0.codecpar.pointee.codec_id) } ?? false
-        self.bufferAheadSegments = bufferAheadSegments
+        self._bufferAheadSegments = bufferAheadSegments
         self.prefetchDiskBudgetBytes = prefetchDiskBudgetBytes
         self.demuxer = demuxer
         self.sideAudioDemuxer = sideAudioDemuxer
@@ -1807,6 +1823,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// it) is distinguishable from healthy backpressure (cacheTarget climbing toward target). VOD only; live keeps
     /// its own watchdogs.
     private func awaitBackpressureRelease(target: Int, head: Int, context: String) -> Bool {
+        // [MovieClaw P20] 两处调用的 target 都是 head - bufferAheadSegments；停泊期间宿主放大了窗口就按新值重算
+        var target = target
         // Already broken on this session (e.g. a teardown-flush ensureMuxer call): stay broken, don't re-park.
         if isBackpressureWedgeBroken() { return false }
         // #240: parked means the forward buffer is full and the link is free. Released here rather
@@ -1831,6 +1849,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             initialRenderedPosition: playbackPositionProvider?()
         )
         while !checkShouldStop() {
+            // [MovieClaw P20] 只往低处调：窗口放大即放行，缩小不在停泊中途生效
+            target = min(target, head - bufferAheadSegments)
             if cache.awaitFetchHighWater(reaching: target, timeout: 1.0) {
                 retunePumpQoS()
                 if parked >= Self.backpressureWedgeLogThresholdSeconds {
@@ -2113,6 +2133,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             doviConfig: isAdCreative ? .keep : videoConfig.doviConfig,
             colorOverride: isAdCreative ? nil : videoConfig.colorOverride,
             extradataOverride: isAdCreative ? nil : videoConfig.extradataOverride,
+            annexBSamplesKeepParameterSets: isAdCreative ? false : videoConfig.annexBSamplesKeepParameterSets,
             nalFramingLatch: isAdCreative ? nil : videoConfig.nalFramingLatch
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
@@ -2132,7 +2153,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // audio stream that decodes to nothing can't buffer the whole span and fill the disk (#64).
                 // Floored at 8s (the historical 2 x 4s value): a sub-second fastZap cut target (AE#195)
                 // must not shrink the cap below typical TS A/V interleave skew.
-                maxBufferedFragmentSeconds: max(8.0, 2 * targetSegmentDurationSeconds),
+                // [MovieClaw P57] 点播边产出边送时分片内每 0.5 秒刷出一个片段：AVPlayer 收到一个片段就能用一个片段，
+                // 慢线路上不必等整个 GOP 长的分片下完才出画、开播
+                maxBufferedFragmentSeconds: servesProgressively
+                    ? AetherEngine.progressiveFragmentSeconds : max(8.0, 2 * targetSegmentDurationSeconds),
                 // AE#222 + mid-session rotation: the last frame a muxer accepted, or the host's
                 // construction-time prime while no muxer has accepted one yet.
                 audioMoovPrimeFrame: audioMoovPrimeFrame,
@@ -2160,6 +2184,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             // outgoing muxer's totals have to be folded before the reference goes.
             self.installMuxer(muxer)
             self.currentMuxerSegmentIndex = initialSegmentIndex
+            self.noteSegmentInProgress(initialSegmentIndex, muxer: muxer)   // [MovieClaw P57]
             return muxer
         } catch {
             EngineLog.emit(
@@ -2424,6 +2449,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return nil
         case .failed:
             // Failed cut: muxer has no open staging fd, every byte is silently discarded. Fatal.
+            abandonSegmentInProgress(currentMuxerSegmentIndex)   // [MovieClaw P57]
             EngineLog.emit(
                 "[HLSSegmentProducer] seg-\(currentMuxerSegmentIndex).m4s cut FAILED; "
                 + "muxer is wedged, ending pump",
@@ -2452,6 +2478,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         }
         currentMuxerSegmentIndex = newIdx
+        noteSegmentInProgress(newIdx, muxer: muxer)   // [MovieClaw P57]
         if isLive {
             // Live is source-paced: the pump only runs ahead of real time while draining the join
             // backlog, and the sliding window (notePlaylistBuild -> evictBelow) bounds resident
@@ -2594,6 +2621,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return .syncAt(offsetSeconds: offset)
     }
 
+    /// [MovieClaw P57] 点播边产出边送：这一段开始写了，登记它的暂存文件，请求到它的连接不必等写完
+    private var servesProgressively: Bool { !isLive && AetherEngine.servesSegmentsProgressively }
+
+    private func noteSegmentInProgress(_ index: Int, muxer: MP4SegmentMuxer) {
+        guard servesProgressively else { return }
+        cache.beginInProgress(index: index, stagingPath: muxer.stagingURL)
+    }
+
+    private func abandonSegmentInProgress(_ index: Int) {
+        guard servesProgressively, index != .min else { return }
+        cache.abandonInProgress(index: index)
+    }
+
     private func finalizeSessionMuxerAndAdopt() {
         guard let muxer = currentMuxer else { return }
         let idx = currentMuxerSegmentIndex
@@ -2611,6 +2651,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 reportSequentialSegmentFinalized(index: idx, isFinal: true)
             }
         } else {
+            abandonSegmentInProgress(idx)   // [MovieClaw P57]
             EngineLog.emit(
                 "[HLSSegmentProducer] seg-\(idx).m4s final finalize failed; not adopted",
                 category: .session
@@ -2625,6 +2666,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func discardSessionMuxer() {
         guard let muxer = currentMuxer else { return }
         let idx = currentMuxerSegmentIndex
+        abandonSegmentInProgress(idx)   // [MovieClaw P57] 残段不收进缓存：正在边读的一方先收到作废
         if let result = muxer.finalize() {
             try? FileManager.default.removeItem(at: result.path)
             EngineLog.emit(

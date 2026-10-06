@@ -860,7 +860,9 @@ extension AetherEngine {
             // the host asked for; without it the flag lasts exactly as long as the pre-opened demuxer.
             heldSourceConnection: loadedOptions.heldSourceConnection,
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
-            forwardBufferSegments: loadedOptions.forwardBufferSegments
+            forwardBufferSegments: loadedOptions.forwardBufferSegments,
+            backwardBufferSegments: loadedOptions.backwardBufferSegments,   // [MovieClaw P25]
+            hostMatroskaCues: loadedOptions.matroskaCues   // [MovieClaw P58]
         )
         // AE#464: every producer this session builds reads it off the session. Set before start().
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
@@ -1269,6 +1271,25 @@ extension AetherEngine {
         if !isLive, discTitles.isEmpty {
             latchedPresentationOrigin = session.sourceStartSeconds
             sourcePresentationOrigin = session.sourceStartSeconds
+        }
+        // [MovieClaw P39] 宿主起播：续播点要逐帧解太久时从前一个关键帧开播（见 `KeyframeSnapPolicy.startLanding`）。
+        // 关键帧表只有可信索引（MKV Cues / MP4 stss）才有；分片按关键帧切，吸附后的落点仍在已锚定的首个分片里。
+        // 用一次即清：同一场里引擎自己的重建（换音轨等）直接调 loadNative，要原位接上
+        var mountPosition = startPosition
+        let snapStart = startSnapArmed
+        startSnapArmed = false
+        if snapStart, !isLive, discTitles.isEmpty, let start = startPosition,
+           let landing = KeyframeSnapPolicy.startLanding(
+               target: start,
+               keyframes: session.seekKeyframeSourceSeconds.map { $0 - sourcePresentationOrigin },
+               costPerSecond: session.seekDecodeCostPerSecond,
+               budget: Self.startSnapDecodeBudgetSeconds) {
+            EngineLog.emit(
+                "[AetherEngine] [MovieClaw P39] start snapped to keyframe: requested="
+                + String(format: "%.2f", start) + "s landing=" + String(format: "%.2f", landing)
+                + "s cost/s=" + String(format: "%.3f", session.seekDecodeCostPerSecond),
+                category: .engine)
+            mountPosition = landing
         }
         // #368: a sequential archive's source timestamps restart at every chunk seam, so no single
         // source PTS anchors its display axis. It publishes the item axis instead, which the producer
@@ -1787,7 +1808,7 @@ extension AetherEngine {
         // writing into its successor's sequence.
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }
         host.load(url: playbackURL,
-                  startPosition: startPosition,
+                  startPosition: mountPosition,   // [MovieClaw P39]
                   perFrameHDR: true,
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
@@ -1796,6 +1817,7 @@ extension AetherEngine {
                       isLive: isLive,
                       // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
                       liveJoinStartsImmediately: loadedOptions.liveJoinStartsImmediately,
+                      vodStartsImmediately: loadedOptions.vodStartsImmediately,   // [MovieClaw patch P2]
                       // AE#520: the session knows whether the bitstream it stream-copied carries JOC;
                       // the HDMI route cannot, because Atmos passthrough and a stereo LPCM route
                       // report the same two channels.
@@ -1870,6 +1892,9 @@ extension AetherEngine {
         preopenedDemuxer: Demuxer?,
         generation: UInt64
     ) async throws {
+        // [MovieClaw P39] 起播吸附只给主力通路：软件通路自己按时间表定位，这次的一次性开关在这里作废，
+        // 免得留到之后某次主力通路的重建里被误用
+        startSnapArmed = false
         let deinterlaceMode = loadedOptions.deinterlaceMode
         let waitStarted = DispatchTime.now()
         if let outcome = await DeinterlaceHardwareWarmup.shared.waitIfNeeded(
@@ -2470,7 +2495,7 @@ extension AetherEngine {
                 playbackBackend = .software
                 activeAudioTrackIndex = audioStreamIndex.map { Int($0) }
                 activeVideoDecoder = Self.videoDecoderLabel(
-                    codecID: preservedVideoCodec, isSoftware: true
+                    codecID: preservedVideoCodec, isSoftware: !(softwareHost?.decodesVideoInHardware ?? false)
                 )
                 // AE#462: the rebuilt host's own resolved index (see the load site).
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(

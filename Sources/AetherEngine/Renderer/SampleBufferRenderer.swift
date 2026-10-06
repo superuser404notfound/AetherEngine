@@ -54,6 +54,13 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
+    /// [MovieClaw P17] Wait until the first frame leaves the renderer's current reorder window.
+    var framesBeforeFirstPresentation: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return reorderDepth + 1
+    }
+
     /// Frames waiting for a smaller presentation time. Diagnostics and tests.
     var heldFrameCount: Int {
         reorderLock.lock()

@@ -78,13 +78,18 @@ struct DiscTitle: Sendable, Equatable {
     /// happens to reach it (#651). Empty when the IFO declares none, nil when it is unreadable: only a
     /// title whose IFO was read gets the short probe, since only then is nothing left to discover.
     let dvdSubpictureStreamIDs: [Int]?
+    /// [MovieClaw P7] 每个 PlayItem 的 in_time（45 kHz，剪辑 STC 上的原始值），与 `bdClipIDs` 平行；
+    /// 按 CLPI 的 EP map 定位时用它把标题时间换回剪辑内的原始 PTS
+    let bdClipInTimes: [UInt64]?
 
     init(id: Int, durationTicks: UInt64, chapters: [DiscChapter] = [],
          bdClipIDs: [String]? = nil, bdClipSubtractTicks: [Int64]? = nil,
          bdClipCumulativeBeforeTicks: [UInt64]? = nil,
          dvdVTSN: Int? = nil, dvdTitleNumber: Int? = nil,
          streamLanguages: [Int: String] = [:],
-         dvdSubpictureStreamIDs: [Int]? = nil) {
+         dvdSubpictureStreamIDs: [Int]? = nil,
+         bdClipInTimes: [UInt64]? = nil) {
+        self.bdClipInTimes = bdClipInTimes
         self.id = id
         self.durationTicks = durationTicks
         self.chapters = chapters
@@ -137,6 +142,21 @@ extension ClipSpan {
 /// back so its content continues right after all earlier clips' presentation duration, anchored to clip 0's
 /// observed base. Using the observed (already 33-bit-unwrapped by the demuxer) base instead of the MPLS
 /// `inTime` field is what makes it correct when a clip's STC base crosses the 32-bit `inTime` wrap (~95443s).
+/// [MovieClaw P13] DVD 标题的时间表：标题时间每隔 unitSec 秒一个 VOBU 在拼接流里的字节起点
+/// （第 i 项对应 (i+1)×unitSec 秒，头一个单位时间里的定位落在标题起点）
+struct DVDTimeMap: Sendable, Equatable {
+    let unitSec: Double
+    let titleStartByte: Int64
+    let byteOffsets: [Int64]
+
+    /// 标题时间 → 不晚于它的 VOBU 的字节起点
+    func byteOffset(forTitleSeconds t: Double) -> Int64 {
+        let i = Int((max(0, t) / unitSec).rounded(.down)) - 1
+        guard i >= 0, !byteOffsets.isEmpty else { return titleStartByte }
+        return byteOffsets[min(i, byteOffsets.count - 1)]
+    }
+}
+
 enum ClipFold {
     static func offsetSeconds(observedBaseSec: Double, base0Sec: Double, cumulativeBeforeSec: Double) -> Double {
         observedBaseSec - base0Sec - cumulativeBeforeSec
@@ -177,9 +197,15 @@ struct DiscInfo: Sendable {
     /// Per-clip presentation-offset spans for the SELECTED multi-clip Blu-ray title, sorted by
     /// `concatByteStart`. Empty for single-clip / DVD / non-disc sources (Demuxer normalization no-ops).
     let clipTimeline: [ClipSpan]
+    /// [MovieClaw P7] 选中蓝光标题的 CLPI 定位表；DVD、读不到 CLPI 时为 nil（定位退回时间二分）
+    let seekTable: DiscSeekTable?
+    /// [MovieClaw P13] 选中 DVD 标题的时间表（IFO 的 VTS_TMAPT）；蓝光、没有时间表的盘为 nil
+    let dvdTimeMap: DVDTimeMap?
 
     init(reader: IOReader, formatHint: String, titles: [DiscTitle], selectedTitleIndex: Int,
-         clipTimeline: [ClipSpan] = []) {
+         clipTimeline: [ClipSpan] = [], seekTable: DiscSeekTable? = nil, dvdTimeMap: DVDTimeMap? = nil) {
+        self.seekTable = seekTable
+        self.dvdTimeMap = dvdTimeMap
         self.reader = reader
         self.formatHint = formatHint
         self.titles = titles

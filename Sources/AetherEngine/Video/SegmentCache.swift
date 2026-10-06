@@ -9,6 +9,21 @@ import Foundation
 // Thread-safe: all mutable state is guarded by `condition` (NSCondition), so it is safe to share
 // across the producer/provider threads and capture in @Sendable closures.
 final class SegmentCache: @unchecked Sendable {
+    // [MovieClaw P8] 最近一次建分片目录时磁盘已满（时间戳，秒）：VOD 泵因此失败时换成说人话的报错
+    nonisolated(unsafe) private static var storageExhaustedAt: TimeInterval = 0
+    private static let storageLock = NSLock()
+
+    static func markStorageExhausted() {
+        storageLock.lock(); defer { storageLock.unlock() }
+        storageExhaustedAt = ProcessInfo.processInfo.systemUptime
+    }
+
+    /// 最近 2 分钟内出现过「存储空间不足」
+    static var storageRecentlyExhausted: Bool {
+        storageLock.lock(); defer { storageLock.unlock() }
+        return storageExhaustedAt > 0 && ProcessInfo.processInfo.systemUptime - storageExhaustedAt < 120
+    }
+
 
     /// AE#412: where a stored segment's first random-access point sits, as an offset from the
     /// segment's ADVERTISED start (its plan boundary). An offset, not an absolute time, so it is
@@ -32,7 +47,8 @@ final class SegmentCache: @unchecked Sendable {
     private let condition = NSCondition()
     private let onResidentSetChanged: (@Sendable () -> Void)?
 
-    private let forwardWindow: Int
+    // [MovieClaw P20] 可在运行中放大（`setForwardWindow`），读写都在 condition 里
+    private var forwardWindow: Int
     /// 20 covers Continuous-Audio handover refetches (~7-10 segments backward); smaller values
     /// cascaded into restart chains that reset the FLAC bridge PTS and caused audible glitches.
     private let backwardWindow: Int
@@ -48,6 +64,13 @@ final class SegmentCache: @unchecked Sendable {
     /// Per-index byte ledger for _totalBytes. Stat-on-eviction was wrong when same index was
     /// overwritten (stat returned new size, old bytes stayed counted forever).
     private var entryBytes: [Int: Int] = [:]
+
+    /// [MovieClaw P57] 正在写的分片：段号 → 暂存文件。生产者开一段时登记（`beginInProgress`），封口（`adopt`）或
+    /// 作废（`abandonInProgress`）时去掉。取分片时它在这里就不必等写完，可以边写边读（`ProgressiveSegmentReader`）
+    private var inProgress: [Int: URL] = [:]
+    /// [MovieClaw P57] 最近封口的分片是哪个暂存文件改名来的、多少字节：边写边读的读取器据此判断「它读的那份」
+    /// 已经封口（而不是后来另一次生产换上的同号分片）。只留最近一批，够读取器收尾用
+    private var sealedFromStaging: [Int: (staging: URL, bytes: Int)] = [:]
 
     /// Pinned in RAM (~3.5 KB); AVPlayer fetches exactly once per session; never evicted.
     private var initSegment: Data?
@@ -123,6 +146,13 @@ final class SegmentCache: @unchecked Sendable {
         } catch {
             EngineLog.emit("[SegmentCache] session dir create failed at \(sessionDir.path): \(error)",
                            category: .session)
+            // [MovieClaw P8] 记下「空间不足」：后面分片一个都写不进去，最终的报错要说清是存储满了，
+            // 而不是笼统的「音频无法封装」
+            let nsError = error as NSError
+            if (nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteOutOfSpaceError)
+                || (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOSPC)) {
+                Self.markStorageExhausted()
+            }
         }
 
         // Before the sweep, so a sibling constructed in the same breath cannot read this session
@@ -149,6 +179,13 @@ final class SegmentCache: @unchecked Sendable {
         if fd >= 0 { Darwin.close(fd) }
     }
 
+    /// [MovieClaw P16] 不建会话、只清死会话留下的分片目录（App 启动时调一次）
+    static func sweepStaleSessions() {
+        let baseDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("aether-segments", isDirectory: true)
+        sweepStaleSessionDirs(baseDir: baseDir, currentSession: "")
+    }
+
     private static func sweepStaleSessionDirs(baseDir: URL, currentSession: String) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: baseDir,
@@ -157,8 +194,17 @@ final class SegmentCache: @unchecked Sendable {
             return
         }
         let cutoff = Date().addingTimeInterval(-3600)
+        // [MovieClaw P16] 有存活标记的目录不必等一小时：锁没人拿着就是死会话（进程死了内核会放掉 flock），立刻清。
+        // 原来一律等满一小时，被杀掉的会话每个都留下最多一个保留预算（2 GB）的分片：真机一小时里被结束十来次，
+        // App 占用长到 16 GB、把手机写满，4K 片子因此起播失败。留 10 秒余量，躲开「标记已建、锁还没拿到」的一瞬间
+        let markerCutoff = Date().addingTimeInterval(-10)
         for entry in entries where entry.lastPathComponent != currentSession {
             let created = (try? entry.resourceValues(forKeys: [.creationDateKey]))?.creationDate
+            if fm.fileExists(atPath: entry.appendingPathComponent(SessionDirectoryLiveness.markerName).path) {
+                guard created == nil || created! < markerCutoff, !SessionDirectoryLiveness.isLive(entry) else { continue }
+                try? fm.removeItem(at: entry)
+                continue
+            }
             guard created == nil || created! < cutoff else { continue }
             // AE#451: age says how long it has been there, not whether anyone is still using it.
             if SessionDirectoryLiveness.isLive(entry) {
@@ -250,6 +296,12 @@ final class SegmentCache: @unchecked Sendable {
             } else {
                 EngineLog.emit("[SegmentCache] write failed seg-\(index): \(error)",
                                category: .session)
+                // [MovieClaw P25] 与建目录失败同样记下「存储已满」
+                let nsError = error as NSError
+                if (nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileWriteOutOfSpaceError)
+                    || (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOSPC)) {
+                    Self.markStorageExhausted()
+                }
                 writeOK = false
             }
         }
@@ -308,7 +360,18 @@ final class SegmentCache: @unchecked Sendable {
         }
 
         condition.lock()
+        // [MovieClaw P57] 不论改名成败，这份暂存文件都不再「在写」；成功时记下它封口成了哪一段
+        if inProgress[index] == stagingPath { inProgress.removeValue(forKey: index) }
+        if renameOK {
+            sealedFromStaging[index] = (stagingPath, byteCount)
+            if sealedFromStaging.count > 64 {
+                for key in sealedFromStaging.keys.sorted().prefix(sealedFromStaging.count - 64) {
+                    sealedFromStaging.removeValue(forKey: key)
+                }
+            }
+        }
         guard !closed else {
+            condition.broadcast()
             condition.unlock()
             try? FileManager.default.removeItem(at: fileURL)
             return
@@ -351,6 +414,8 @@ final class SegmentCache: @unchecked Sendable {
         videoReaches.removeAll(keepingCapacity: false)
         initSegment = nil
         initVersions.removeAll(keepingCapacity: false)
+        inProgress.removeAll(keepingCapacity: false)          // [MovieClaw P57]
+        sealedFromStaging.removeAll(keepingCapacity: false)
         _totalBytes = 0
         _highestStoredIndex = -1
         condition.broadcast()
@@ -463,6 +528,72 @@ final class SegmentCache: @unchecked Sendable {
         return readOrDrop(index: index, url: url)
     }
 
+    // MARK: - [MovieClaw P57] 边产出边送
+
+    /// 生产者开始写第 `index` 段（暂存文件已打开、之后只会往后追加）。只在点播登记：直播有自己的窗口与阻塞刷新规则
+    func beginInProgress(index: Int, stagingPath: URL) {
+        condition.lock()
+        if !closed {
+            inProgress[index] = stagingPath
+            condition.broadcast()
+        }
+        condition.unlock()
+    }
+
+    /// 生产者放弃了正在写的第 `index` 段（重启、出错、停止时的残段不收进缓存）。正在边读的读取器随即收到「作废」
+    func abandonInProgress(index: Int) {
+        condition.lock()
+        if inProgress.removeValue(forKey: index) != nil { condition.broadcast() }
+        condition.unlock()
+    }
+
+    /// 边写边读的读取器问：它读的那份暂存文件现在是什么状态
+    enum InProgressState: Equatable {
+        case writing
+        case sealed(bytes: Int)
+        case abandoned
+    }
+
+    func inProgressState(index: Int, stagingPath: URL) -> InProgressState {
+        condition.lock()
+        defer { condition.unlock() }
+        if inProgress[index] == stagingPath { return .writing }
+        if let sealed = sealedFromStaging[index], sealed.staging == stagingPath { return .sealed(bytes: sealed.bytes) }
+        return .abandoned
+    }
+
+    /// 取分片的另一种等法：写完了给完整字节；`progressive` 时它一开始写就给一个边写边读的读取器，不必等写完。
+    /// 慢线路上一段分片要下十几秒，AVPlayer 却在收到第一个片段时就能出画、攒够一两秒就能开播（2026-09-30 Mac 实测：
+    /// 6 Mbit/s 下 4K 长 GOP 片从头播 17.3 → 1.8 秒开播，见 docs/design/playback-qoe.md §9.12）
+    func fetchSource(index: Int, timeout: TimeInterval, progressive: Bool) -> SegmentSource? {
+        let deadline = Date().addingTimeInterval(timeout)
+        condition.lock()
+        while true {
+            if let url = entries[index] {
+                condition.unlock()
+                return readOrDrop(index: index, url: url).map { .data($0) }
+            }
+            if closed {
+                condition.unlock()
+                return nil
+            }
+            if progressive, let staging = inProgress[index] {
+                condition.unlock()
+                if let reader = ProgressiveSegmentReader(cache: self, index: index, stagingPath: staging) {
+                    return .progressive(reader)
+                }
+                // 暂存文件刚好被改名封口或被删：回到锁里重看
+                condition.lock()
+                if inProgress[index] == staging { inProgress.removeValue(forKey: index) }
+                continue
+            }
+            if !condition.wait(until: deadline) {
+                condition.unlock()
+                return nil
+            }
+        }
+    }
+
     /// AE#451: a read that comes back empty for a file the bookkeeping still lists is the same lie
     /// `peekURL` guards against, and here it is load-bearing: this serve answers a retriable 503,
     /// and an entry left standing means every retry takes this branch again while the producer,
@@ -485,6 +616,14 @@ final class SegmentCache: @unchecked Sendable {
             if !condition.wait(until: deadline) { break }
         }
         return initSegment
+    }
+
+    /// [MovieClaw P20] 运行中调整前向窗口：之后的修剪按新窗口保留；广播一次，让停泊中的泵立即按新窗口重算
+    func setForwardWindow(_ segments: Int) {
+        condition.lock()
+        forwardWindow = segments
+        condition.broadcast()
+        condition.unlock()
     }
 
     /// Pump-side backpressure: one-shot wait for target or any broadcast. Returns true if target met.
@@ -843,5 +982,101 @@ final class SegmentCache: @unchecked Sendable {
     private func byteSize(of url: URL) -> Int {
         let values = try? url.resourceValues(forKeys: [.fileSizeKey])
         return values?.fileSize ?? 0
+    }
+}
+
+// MARK: - [MovieClaw P57] 边产出边送
+
+extension AetherEngine {
+    /// [MovieClaw P57] 点播分片边产出边送：分片正在写时本机服务器就开始按块发，封装器在分片内每
+    /// `progressiveFragmentSeconds` 刷出一个片段（默认开；关掉即原来的整段写完再交付、8 秒刷一次，对照用）
+    nonisolated(unsafe) public static var servesSegmentsProgressively = true
+    /// [MovieClaw P57] 边产出边送时分片内片段的长度（秒）。Mac 实测 6 Mbit/s 下 4K 长 GOP 片：1 秒时从头播 3.1 秒开播，
+    /// 0.5 秒时 1.8 秒；每个片段多一个几百字节的 moof 头，可以忽略
+    nonisolated(unsafe) public static var progressiveFragmentSeconds: Double = 0.5
+    /// [MovieClaw P59] 点播媒体播放列表也声明 EXT-X-INDEPENDENT-SEGMENTS（默认开；关掉即只有主播放列表声明，对照用）
+    nonisolated(unsafe) public static var declaresIndependentMediaSegments = true
+}
+
+/// 取到的分片：要么已经写完（完整字节），要么正在写（边写边读）
+enum SegmentSource {
+    case data(Data)
+    case progressive(ProgressiveSegmentReader)
+}
+
+/// [MovieClaw P57] 边写边读一个正在生产的分片。
+///
+/// 生产者把分片写进暂存文件：封装器每刷出一个片段（moof+mdat，点播约 0.5 秒一个）就往文件末尾追加一批字节，
+/// 从不回头改写；封口时整份文件原样改名进缓存（`SegmentCache.adopt`）。所以打开时拿住文件描述符，之后按文件大小
+/// 一路往后读，读到的就是最终分片的前缀；改名不影响已打开的描述符，封口后读到缓存登记的最终字节数即完。
+/// 生产者放弃这段（重启、出错）时读取器报「作废」，服务器随即断开连接，AVPlayer 会重新请求这一段。
+final class ProgressiveSegmentReader: @unchecked Sendable {
+    let index: Int
+    let stagingPath: URL
+    private let fd: Int32
+    private weak var cache: SegmentCache?
+    private(set) var offset: Int64 = 0
+
+    enum Next: Equatable {
+        case bytes(Data)
+        case finished
+        case abandoned
+    }
+
+    init?(cache: SegmentCache, index: Int, stagingPath: URL) {
+        let fd = open(stagingPath.path, O_RDONLY)
+        guard fd >= 0 else { return nil }
+        self.fd = fd
+        self.cache = cache
+        self.index = index
+        self.stagingPath = stagingPath
+    }
+
+    deinit { close(fd) }
+
+    /// 下一批字节；还没写出来就等（每 `pollInterval` 看一次），封口且读完给 `.finished`，作废或
+    /// 空等超过 `idleTimeout`（生产者卡死）给 `.abandoned`
+    func next(maxBytes: Int = 256 * 1024, pollInterval: TimeInterval = 0.02,
+              idleTimeout: TimeInterval = 60) -> Next {
+        let deadline = Date().addingTimeInterval(idleTimeout)
+        while true {
+            var st = stat()
+            let statOK = fstat(fd, &st) == 0
+            if statOK, st.st_size > offset {
+                let count = Int(min(Int64(maxBytes), st.st_size - offset))
+                var data = Data(count: count)
+                let read = data.withUnsafeMutableBytes { pread(fd, $0.baseAddress, count, off_t(offset)) }
+                if read > 0 {
+                    if read < count { data.removeSubrange(read ..< count) }
+                    offset += Int64(read)
+                    return .bytes(data)
+                }
+            }
+            switch cache?.inProgressState(index: index, stagingPath: stagingPath) ?? .abandoned {
+            case .writing:
+                break
+            case .sealed(let bytes):
+                if offset >= Int64(bytes) { return .finished }
+                // 封口时最后一个片段刚写进去：接着读；文件却没那么长（理论上不会）就当作废，别原地空转
+                if statOK, st.st_size > offset { continue }
+                return .abandoned
+            case .abandoned:
+                return .abandoned
+            }
+            if Date() >= deadline { return .abandoned }
+            Thread.sleep(forTimeInterval: pollInterval)
+        }
+    }
+
+    /// 一口气读到封口，给要完整字节的调用方（作废返回 nil）
+    func readToEnd() -> Data? {
+        var all = Data()
+        while true {
+            switch next() {
+            case .bytes(let d): all.append(d)
+            case .finished: return all
+            case .abandoned: return nil
+            }
+        }
     }
 }

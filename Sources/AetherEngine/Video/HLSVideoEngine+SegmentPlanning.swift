@@ -63,13 +63,22 @@ extension HLSVideoEngine {
     ///
     /// Coverage is the span between keyframes, never reaching to EOF, so a dense index that stops early
     /// (the trailing-gap-not-counted case) is unaffected: its span already exceeds one segment.
-    /// An index failing either witness is routed to the uniform-stride fallback.
+    ///
+    /// [MovieClaw P18] A third witness, **tail**: the span must also reach to within `maxTrailingGapSeconds` of the
+    /// source duration. An index that stops early by minutes is not "dense but short", it is a partial scan:
+    /// an MKV whose Cues are missing or point past EOF (an incomplete download) leaves only what the capped
+    /// prewarm walked, and the keyframe planner then emits a last segment from the final scanned keyframe to
+    /// the end of the title (device, 2026-09-28: 205 s → 5933 s), which the producer can never finish and
+    /// AVPlayer waits on forever. 60 s tolerates a long final GOP or a container duration padded by a
+    /// trailing audio / subtitle track.
+    /// An index failing any witness is routed to the uniform-stride fallback.
     static func keyframeIndexIsTrustworthy(
         keyframes: [Int64],
         videoTimeBase: AVRational,
         sourceDurationSeconds: Double,
         maxTrustedGapSeconds: Double = Swift.max(HLSVideoEngine.targetSegmentDuration * 4, 30),
-        minCoverageSeconds: Double = HLSVideoEngine.targetSegmentDuration
+        minCoverageSeconds: Double = HLSVideoEngine.targetSegmentDuration,
+        maxTrailingGapSeconds: Double = 60
     ) -> Bool {
         guard keyframes.count >= 2,
               sourceDurationSeconds > 0,
@@ -79,6 +88,7 @@ extension HLSVideoEngine {
         // In Double: an index spanning both Int64 extremes overflows the integer difference (audit HLS-102).
         let coverageSeconds = (Double(sorted[sorted.count - 1]) - Double(sorted[0])) * tb
         guard coverageSeconds >= minCoverageSeconds else { return false }
+        guard sourceDurationSeconds - coverageSeconds <= maxTrailingGapSeconds else { return false }  // [MovieClaw P18]
         var largestGapSeconds = 0.0
         for i in 1..<sorted.count {
             let gapSeconds = (Double(sorted[i]) - Double(sorted[i - 1])) * tb
@@ -125,7 +135,7 @@ extension HLSVideoEngine {
             // keeps holes, which is why the budget is logged with the plan rather than hidden.
             return Swift.max(targetSegmentDuration, seconds)
         default:
-            return targetSegmentDuration
+            return upstreamSegmentTargetSeconds   // [MovieClaw P33] 间隔未知不按 2 秒切
         }
     }
 
@@ -208,7 +218,8 @@ extension HLSVideoEngine {
         videoTimeBase: AVRational,
         sourceDurationSeconds: Double,
         startPts0: Int64 = 0,
-        strideSeconds: Double = HLSVideoEngine.targetSegmentDuration
+        strideSeconds: Double = HLSVideoEngine.targetSegmentDuration,
+        firstSegmentSeconds: Double? = nil   // [MovieClaw patch P3]
     ) -> [Segment] {
         guard sourceDurationSeconds > 0, sourceDurationSeconds.isFinite else { return [] }
         var stride = strideSeconds.isFinite && strideSeconds > 0 ? strideSeconds : Self.targetSegmentDuration
@@ -217,16 +228,18 @@ extension HLSVideoEngine {
         if sourceDurationSeconds / stride > Double(maxPlanSegments) {
             stride = sourceDurationSeconds / Double(maxPlanSegments)
         }
-        let count = min(maxPlanSegments, max(1, Int(ceil(sourceDurationSeconds / stride))))
+        // [MovieClaw patch P3] segment 0 spans [0, first), segment i >= 1 spans [first + (i-1)*stride, first + i*stride)
+        let first = firstSegmentSeconds.flatMap { $0.isFinite && $0 > 0 ? Swift.min($0, stride) : nil } ?? stride
+        let count = min(maxPlanSegments, sourceDurationSeconds <= first
+            ? 1 : 1 + Int(ceil((sourceDurationSeconds - first) / stride)))
         let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
         guard tb > 0 else { return [] }
 
         var plan: [Segment] = []
         plan.reserveCapacity(count)
         for i in 0..<count {
-            let startSeconds = Double(i) * stride
-            let endSeconds = i + 1 == count
-                ? sourceDurationSeconds : min(sourceDurationSeconds, Double(i + 1) * stride)
+            let startSeconds = i == 0 ? 0 : first + Double(i - 1) * stride
+            let endSeconds = i + 1 == count ? sourceDurationSeconds : min(sourceDurationSeconds, first + Double(i) * stride)
             guard let startPts = planPts(startPts0, plusSeconds: startSeconds, timeBase: tb),
                   let endPts = planPts(startPts0, plusSeconds: endSeconds, timeBase: tb) else { return [] }
             plan.append(Segment(
@@ -326,6 +339,7 @@ extension HLSVideoEngine {
         let tb = Double(videoTimeBase.num) / Double(videoTimeBase.den)
         guard tb > 0 else { return [] }
         let target = Self.targetSegmentDuration
+        let firstTarget = Self.firstSegmentTargetDuration   // [MovieClaw patch P3]
 
         let sorted = keyframes.sorted()
         let startPts0 = sorted[0]
@@ -339,7 +353,8 @@ extension HLSVideoEngine {
         while i < sorted.count {
             let segStartPts = sorted[i]
             let segStartSeconds = Double(segStartPts - startPts0) * tb
-            let thresholdSeconds = Double(segIdx + 1) * target
+            // [MovieClaw patch P3] absolute thresholds F, F+T, F+2T, ... (upstream: (N+1)*T)
+            let thresholdSeconds = firstTarget + Double(segIdx) * target
 
             var j = i + 1
             while j < sorted.count {
@@ -591,6 +606,8 @@ extension HLSVideoEngine {
         /// never going to reformat this track anyway). Callers fall back to deriving it from the
         /// extradata, which is only safe while the two agree.
         let measuredFraming: VideoNALFraming?
+        /// [MovieClaw P38] 样本仍是 Annex B，但配置记录已换成 hvcC：封装层自己把样本转成长度前缀、保留带内参数集
+        var annexBSamplesKeepParameterSets = false
     }
 
     /// Measure the video NAL framing on packets, then decide what config record the muxer gets.
@@ -647,6 +664,20 @@ extension HLSVideoEngine {
                 } ?? ", nothing to drop"),
                 category: .session
             )
+            // [MovieClaw P38] HEVC 点播：movenc 对 hvc1 转换时会剥掉样本里的 VPS/SPS/PPS（filter_ps），init 只剩片头那一套。
+            // 片中换过参数集的原盘（《黑豹2》118 秒、345.7 秒两次换 PPS）续播或播到换点后，硬解拿旧 PPS 解新切片
+            // 报 Cannot Decode，真机只有声音没有画面。改由封装层自己转换并保留带内参数集，配置记录给 hvcC，movenc 不再转换
+            if codecID == AV_CODEC_ID_HEVC, case .annexB = framing,
+               let record = VideoConfigRecord.fromAnnexB(
+                   canonical ?? source, codecID: codecID,
+                   width: codecpar.pointee.width, height: codecpar.pointee.height) {
+                EngineLog.emit(
+                    "[HLSVideoEngine] [MovieClaw P38] HEVC Annex B 样本由封装层转换并保留带内参数集（配置记录 \(source.count) B → hvcC \(record.count) B）",
+                    category: .session)
+                var result = VideoFramingNormalization(extradataOverride: record, measuredFraming: framing)
+                result.annexBSamplesKeepParameterSets = true
+                return result
+            }
             return VideoFramingNormalization(extradataOverride: canonical, measuredFraming: framing)
         }
 

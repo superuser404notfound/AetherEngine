@@ -408,6 +408,8 @@ final class NativeAVPlayerHost {
         /// AE#440: may the join's stall-avoidance hold be cut short once the cushion is proven. Live-only,
         /// and armed per load.
         var liveJoinStartsImmediately: Bool = false
+        /// [MovieClaw patch P2] The same one-shot for a VOD start.
+        var vodStartsImmediately: Bool = false
         /// 4 s matches the loopback segment cadence; the remote-HLS bypass passes 0 (system adaptive),
         /// where 4 s forced a 3-4 s black screen on bandwidth-limited Jellyfin live transcodes.
         var forwardBufferDuration: Double = 4.0
@@ -481,7 +483,8 @@ final class NativeAVPlayerHost {
         self.isLiveSession = contract.isLive
         // AE#440: per load, and only ever armed for a live session. The player is reused across loads,
         // so an override left armed from a live zap would meet the next VOD title's cold start.
-        self.liveJoinStartsImmediately = contract.isLive && contract.liveJoinStartsImmediately
+        self.liveJoinStartsImmediately = (contract.isLive && contract.liveJoinStartsImmediately)
+            || (!contract.isLive && contract.vodStartsImmediately)   // [MovieClaw patch P2]
         self.liveJoinImmediateStartSpent = false
         self.liveJoinImmediateStartProbeInFlight = false
         self.liveJoinThinBufferLogged = false
@@ -972,8 +975,10 @@ final class NativeAVPlayerHost {
     /// offer was made, in which case nothing is surfaced here and the engine rebuilds the session.
     private func offerToSoftwarePath(_ desc: String, item: AVPlayerItem, position: Double) -> Bool {
         let nsError = item.error as NSError?
+        // [MovieClaw P24] 「无法解码」外层是 AVFoundation 域、判决在底层 CoreMedia：一样交给引擎自己的解码器
+        let domain = SoftwarePathEscalation.effectiveErrorDomain(nsError)
         guard SoftwarePathEscalation.shouldEscalate(
-            errorDomain: nsError?.domain,
+            errorDomain: domain,
             availability: softwarePathAvailability?()
         ) else { return false }
         let at = position.isFinite ? String(format: "%.2f", position) + "s" : "an unreadable position"
@@ -984,7 +989,7 @@ final class NativeAVPlayerHost {
             category: .engine
         )
         pendingSoftwarePathEscalation = SoftwarePathEscalation.Request(
-            domain: nsError?.domain ?? "",
+            domain: domain ?? "",
             code: nsError?.code ?? 0,
             message: desc,
             positionSeconds: position.isFinite ? max(0, position) : 0
@@ -1506,8 +1511,21 @@ final class NativeAVPlayerHost {
                     category: .engine
                 )
             }
-            for _ in 0..<Self.liveJoinHoldWitnessSamples {
-                try? await Task.sleep(nanoseconds: UInt64(Self.liveJoinHoldWitnessInterval * 1_000_000_000))
+            // [MovieClaw P28] VOD 采样更密：过线后每多等一个采样间隔，就是多冻一截画面
+            let vod = self?.isLiveSession == false
+            let interval = vod ? AetherEngine.vodStartWitnessIntervalSeconds : Self.liveJoinHoldWitnessInterval
+            // [MovieClaw P57] 分片边产出边送时，慢线路上缓冲是一个片段一个片段慢慢涨的：从长 GOP 中间续播，
+            // 6 Mbit/s 下出首帧要 6 秒、攒够 1.5 秒还要再几秒，5 秒的见证早过期了，AVPlayer 自己的码率估计又一直
+            // 觉得跟不上，要等整段下完（模拟器实测首帧 6.4 秒、25 秒才开播）。所以边送时多看一会儿：头 5 秒照旧
+            // 每 `interval` 一次，之后每 0.1 秒一次，最多 `vodProgressiveWitnessBudgetSeconds`
+            let budget = vod && AetherEngine.servesSegmentsProgressively
+                ? Self.vodProgressiveWitnessBudgetSeconds : Self.vodHoldWitnessBudgetSeconds
+            let denseSamples = vod ? Int((min(budget, Self.vodHoldWitnessBudgetSeconds) / interval).rounded(.up))
+                                   : Self.liveJoinHoldWitnessSamples
+            let sparseSamples = vod ? Int((max(0, budget - Self.vodHoldWitnessBudgetSeconds) / 0.1).rounded(.up)) : 0
+            for sample in 0..<(denseSamples + sparseSamples) {
+                let wait = sample < denseSamples ? interval : 0.1
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                 guard let self else { account(.hostGone); return }
                 if let ending = Self.liveJoinHoldWitnessEnding(
                     itemIsCurrent: self.playerItem === item,
@@ -1528,6 +1546,22 @@ final class NativeAVPlayerHost {
                     itemIsReadyToPlay: reading.itemStatus == .readyToPlay
                 ) else { continue }
                 account(.crossed)
+                // [MovieClaw P28] VOD 的分片由本机远快于 1 倍速地产出，过线后的缓冲只会继续涨，上游「只记录不动手」
+                // 顾虑的直播 1 倍速供给不存在：真机 UHD 原盘起播时缓冲已 3.65 秒、AVPlayer 还多按了 0.6 秒。
+                // 所以 VOD 过线即开播；直播保持上游行为
+                if !self.isLiveSession, self.playerItem === item, self.playIntent,
+                   !self.liveJoinImmediateStartSpent,
+                   self.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                   self.avPlayer.reasonForWaitingToPlay == .toMinimizeStalls {
+                    self.liveJoinImmediateStartSpent = true
+                    self.liveJoinImmediateStartCutShort = true
+                    let rate = self.avPlayer.defaultRate != 0 ? self.avPlayer.defaultRate : 1.0
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) [MovieClaw P28] VOD 缓冲已过线（"
+                        + String(format: "%.2f", reading.aheadSeconds) + " 秒），不再等 AVPlayer 的码率估计，直接开播",
+                        category: .engine)
+                    self.avPlayer.playImmediately(atRate: rate)
+                }
                 return
             }
             account(.budgetSpent)
@@ -1635,6 +1669,10 @@ final class NativeAVPlayerHost {
     /// leaving a sampler running behind a session that has moved on.
     nonisolated static let liveJoinHoldWitnessInterval: Double = 0.25
     nonisolated static let liveJoinHoldWitnessSamples: Int = 20
+    /// [MovieClaw P28] VOD 的见证采样至多看 5 秒（间隔见 `AetherEngine.vodStartWitnessIntervalSeconds`）
+    nonisolated static let vodHoldWitnessBudgetSeconds: Double = 5
+    /// [MovieClaw P57] 分片边产出边送时 VOD 见证至多看这么久（见上面采样循环里的说明）
+    nonisolated static let vodProgressiveWitnessBudgetSeconds: Double = 45
 
     nonisolated static func secondsSince(_ start: DispatchTime) -> Double {
         Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000_000
@@ -1903,6 +1941,16 @@ final class NativeAVPlayerHost {
         seekGeneration &+= 1
         let gen = seekGeneration
         seekInFlight = true
+        // [MovieClaw P28] VOD 每次跳转重新给一次 P2 的「提前开播」：跳转落点后 AVPlayer 同样会以 ToMinimizeStalls
+        // 按住已缓冲好的画面等码率估计（真机 4K60 往回 5 秒、往前 20 秒都落在本机已产出的分片里，仍各等了 1.4–1.5 秒）。
+        // 守卫与起播时相同：缓冲非空且至少 1.5 秒才切，缓冲薄时照旧交给 AVPlayer 自己的策略
+        if !isLiveSession && liveJoinStartsImmediately {
+            liveJoinImmediateStartSpent = false
+            liveJoinThinBufferLogged = false
+            liveJoinNoDecisionLogged = false
+            liveJoinHoldWitnessStarted = false
+            liveJoinImmediateStartCutShort = false
+        }
         // AE#629: this seek's own landing publishes the clock from here on.
         mountSeekPending = false
         latestSeekRenderedTimePublished = false

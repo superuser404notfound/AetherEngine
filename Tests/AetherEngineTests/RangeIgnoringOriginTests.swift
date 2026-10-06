@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+
+// The upstream fixtures exercise a 32 MB initial range; MovieClaw defaults to a short index-first request.
 @testable import AetherEngine
 
 /// Audit DMX-101: an origin that cannot address bytes (a plain file server, a proxy that strips
@@ -122,7 +124,7 @@ struct RangeIgnoringOriginTests {
                                           respond: { _, _, _ in .serve200 })
         let server = try #require(maybe)
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.ts")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.ts")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -141,7 +143,7 @@ struct RangeIgnoringOriginTests {
                                           respond: respond)
         let server = try #require(maybe)
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.ts")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.ts")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -156,7 +158,7 @@ struct RangeIgnoringOriginTests {
         let total = Int64(40 * mb)
         let server = try #require(ThrottledOriginServer(totalSize: total, throttleUs: 500))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -192,7 +194,7 @@ struct RangeIgnoringOriginTests {
         }
         let server = try #require(ThrottledOriginServer(totalSize: total, throttleUs: 500, respond: respond))
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -228,7 +230,7 @@ struct RangeIgnoringOriginTests {
         let maybe = ThrottledOriginServer(totalSize: total, throttleUs: 500, respond: respond)
         let server = try #require(maybe)
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -250,7 +252,7 @@ struct RangeIgnoringOriginTests {
                                           respond: { _, _, _ in .serve200 })
         let server = try #require(maybe)
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/small.mp4")!)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/small.mp4")!, boundedInitialFetch: 32 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 

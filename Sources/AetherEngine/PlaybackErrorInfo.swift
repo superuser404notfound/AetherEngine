@@ -83,6 +83,9 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// neither gone nor unreadable, and a second player that decodes the track itself will play it.
     /// A host with a fallback ladder should DEMOTE on this one, not end the ladder.
     public static let audioBridgeProducedNoOutput = PlaybackErrorKind(rawValue: "audioBridgeProducedNoOutput")
+    /// [MovieClaw P25] 临时目录所在的卷写满了，切好的分片写不进去。片源没坏、网络也没断：
+    /// 宿主该收小缓冲窗口原位重开（或提示清理存储），不该当成「解不了」换播放器
+    public static let storageExhausted = PlaybackErrorKind(rawValue: "storageExhausted")
 }
 
 /// Machine-readable companion to the text inside `PlaybackState.error` (#376).

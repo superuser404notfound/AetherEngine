@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 
 /// A native session the engine rebuilt on the software path because AVPlayer refused its media
@@ -98,6 +99,20 @@ enum SoftwarePathEscalation {
 
     /// The domain of a media failure, i.e. AVFoundation could not make sense of what it was served.
     static let mediaErrorDomain = "CoreMediaErrorDomain"
+
+    /// [MovieClaw P24] 判断用的错误域。AVPlayer 报「无法解码」时外层是 AVFoundationErrorDomain（-11833 找不到解码器、
+    /// -11821 解码失败），真正的判决在底层的 CoreMedia 错误里（模拟器上 4K 10 bit HEVC：-11833，底层 -12906）。
+    /// 这同样是对片源媒体本身的判决——本机的硬件解码器解不了——交给引擎自己的 libavcodec 在本机 CPU 上解码
+    /// （软件通路）。原来只认外层是 CoreMedia 的失败，这类直接报错，App 只能换 MPV；现在 MPV 已移除，引擎自己兜
+    static func effectiveErrorDomain(_ error: NSError?) -> String? {
+        guard let error else { return nil }
+        guard error.domain == AVFoundationErrorDomain else { return error.domain }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError, underlying.domain == mediaErrorDomain {
+            return mediaErrorDomain
+        }
+        let decodeVerdicts = [AVError.Code.decoderNotFound.rawValue, AVError.Code.decodeFailed.rawValue]
+        return decodeVerdicts.contains(error.code) ? mediaErrorDomain : error.domain
+    }
 
     /// AE#627: a live join that read video for the whole keyframe wait and found no picture the native
     /// route can open a segment on (a feed without IDRs or recovery points, or with gradual refresh

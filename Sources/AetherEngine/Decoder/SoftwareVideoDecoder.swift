@@ -85,6 +85,45 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         skipLock.unlock()
     }
 
+    // MARK: [MovieClaw P31] 跳转后追落点时少干活
+    //
+    // 跳转按关键帧 / 时间表落在目标之前，目标之前的帧只是为了把解码状态带到落点，一帧都不显示。原来它们照样
+    // 全解、照样去隔行：真机 DVD《哪吒闹海》时间表 43 秒一格，跳转后追 23 秒内容用了 3 秒（约 8 倍速），期间画面冻住。
+    // 离落点超过 1 秒的包让解码器跳过不被参考的帧（MPEG-2 / H.264 / HEVC 的 B 帧，丢了不影响后面任何帧）；
+    // 离落点超过 0.25 秒解出来的帧直接丢，不进去隔行
+    nonisolated static let catchUpDiscardMarginSeconds = 1.0
+    nonisolated static let catchUpFilterMarginSeconds = 0.25
+    private var catchUpDiscarding = false
+    private var catchUpFramesSkipped = 0
+
+    /// `pts`（本流时间基）落在跳帧门槛之前超过 `margin` 秒。调用方持有 lock
+    private func isFarBeforeSkipThreshold(pts: Int64, margin: Double) -> Bool {
+        guard pts != Int64.min, timeBase.den > 0, let threshold = skipUntilPTS, threshold.isNumeric else { return false }
+        let seconds = Double(pts) * Double(timeBase.num) / Double(timeBase.den)
+        return seconds < threshold.seconds - margin
+    }
+
+    /// 按这个包离落点多远，切换解码器是否跳过不被参考的帧。没有时间戳的包沿用上一个包的决定。调用方持有 lock
+    private func applyCatchUpDiscard(_ ctx: UnsafeMutablePointer<AVCodecContext>, packet: UnsafeMutablePointer<AVPacket>) {
+        let stamp = packet.pointee.dts != Int64.min ? packet.pointee.dts : packet.pointee.pts
+        let far: Bool
+        if skipUntilPTS == nil {
+            far = false
+        } else if stamp == Int64.min {
+            return
+        } else {
+            far = isFarBeforeSkipThreshold(pts: stamp, margin: Self.catchUpDiscardMarginSeconds)
+        }
+        guard far != catchUpDiscarding else { return }
+        catchUpDiscarding = far
+        ctx.pointee.skip_frame = far ? AVDISCARD_NONREF : AVDISCARD_DEFAULT
+        if !far, catchUpFramesSkipped > 0 {
+            EngineLog.emit("[SWDecoder] [MovieClaw P31] 追落点：跳过 \(catchUpFramesSkipped) 帧的去隔行与显示准备",
+                           category: .swPlayback)
+            catchUpFramesSkipped = 0
+        }
+    }
+
     /// Protects codecContext across the demux thread (decode) and main thread (close/flush).
     private let lock = NSLock()
 
@@ -290,6 +329,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // happens first and the send never runs.
         if let epoch, epoch != _feedEpoch { lock.unlock(); return }
         guard let ctx = codecContext else { lock.unlock(); return }
+        applyCatchUpDiscard(ctx, packet: packet)
         var sendRet = avcodec_send_packet(ctx, packet)
         lock.unlock()
 
@@ -367,6 +407,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                     let pts = Double(f.pointee.pts) * Double(timeBase.num) / Double(timeBase.den)
                     onA53(extracted, pts)
                 }
+            }
+
+            // [MovieClaw P31] 离落点还远的帧不显示，也就不必去隔行（上传 GPU、按场出两帧）；留 0.25 秒给去隔行攒前后帧
+            if isFarBeforeSkipThreshold(pts: f.pointee.pts, margin: Self.catchUpFilterMarginSeconds) {
+                catchUpFramesSkipped += 1
+                av_frame_unref(f)
+                lock.unlock()
+                continue
             }
 
             let isInterlaced = (f.pointee.flags & (1 << 3)) != 0  // AV_FRAME_FLAG_INTERLACED

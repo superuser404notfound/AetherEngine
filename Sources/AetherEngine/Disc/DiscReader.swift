@@ -68,6 +68,7 @@ enum DiscReader {
             extentsOfClip: { clip in streamIndex["\(clip).m2ts"].flatMap { try? udf.extents(of: $0) } })
         let allExtents = assembled.extents
         var clipTimeline = assembled.clipTimeline
+        let resolvedClips = assembled.resolvedClips   // [MovieClaw P7]
         guard !allExtents.isEmpty else {
             EngineLog.emit("[disc] selected title \(selectedIndex) clips=\(selected.bdClipIDs ?? []) but resolved no m2ts extents in BDMV/STREAM (\(streamDir.count) entries); cannot build stream", category: .demux)
             return nil
@@ -80,12 +81,19 @@ enum DiscReader {
         }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
         EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) stnLanguages=\(selected.streamLanguages.count)", category: .demux)
+        // [MovieClaw P7] 各剪辑的 CLPI → 按 EP map 定位（跨剪辑跳转、续播起播不再二分）
+        let clipinfDir = (try? udf.list(path: ["BDMV", "CLIPINF"])) ?? []
+        let seekTable = buildSeekTable(title: selected, resolved: resolvedClips) { clip in
+            guard let e = clipinfDir.first(where: { $0.name.caseInsensitiveCompare("\(clip).clpi") == .orderedSame }),
+                  let exts = try? udf.extents(of: e), !exts.isEmpty else { return nil }
+            return readAll(reader, exts)
+        }
         storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
                          formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex,
-                         extents: allExtents, clipTimeline: clipTimeline)
+                         extents: allExtents, clipTimeline: clipTimeline, seekTable: seekTable)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: allExtents),
                         formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex,
-                        clipTimeline: clipTimeline)
+                        clipTimeline: clipTimeline, seekTable: seekTable)
     }
 
     // MARK: - Bounds on what a disc image can make recognition do (audit NET-103)
@@ -160,9 +168,10 @@ enum DiscReader {
     static func assembleBluRayTitle(
         clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
         extentsOfClip: (String) -> [(offset: Int64, length: Int64)]?
-    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan]) {
+    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan], resolvedClips: [(index: Int, clip: String, byteStart: Int64)]) {
         var allExtents: [(offset: Int64, length: Int64)] = []
         var clipTimeline: [ClipSpan] = []
+        var resolvedClips: [(index: Int, clip: String, byteStart: Int64)] = []
         var resolved: [String: [(offset: Int64, length: Int64)]?] = [:]
         var byteStart: Int64 = 0
         for (k, clip) in clipIDs.enumerated() {
@@ -178,6 +187,7 @@ enum DiscReader {
                 EngineLog.emit("[disc] title truncated at clip[\(k)]: more than \(maxTitleExtents) extents", category: .demux)
                 break
             }
+            resolvedClips.append((k, clip, byteStart))
             let predictedShift = k < subtractTicks.count ? Double(subtractTicks[k]) / discTickRate : 0
             let cumBeforeSec = k < cumulativeBeforeTicks.count ? Double(cumulativeBeforeTicks[k]) / discTickRate : 0
             clipTimeline.append(ClipSpan(concatByteStart: byteStart,
@@ -187,7 +197,7 @@ enum DiscReader {
             allExtents += exts
             byteStart += exts.reduce(Int64(0)) { $0 + max(0, $1.length) }
         }
-        return (allExtents, clipTimeline)
+        return (allExtents, clipTimeline, resolvedClips)
     }
 
     /// Memoize a successful recognition so a re-open of the same source (track switch on a remote ISO)
@@ -195,12 +205,13 @@ enum DiscReader {
     private static func storeRecognition(
         cacheKey: String?, selectTitleID: Int?,
         formatHint: String, titles: [DiscTitle], selectedIndex: Int,
-        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = []
+        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = [],
+        seekTable: DiscSeekTable? = nil, dvdTimeMap: DVDTimeMap? = nil
     ) {
         guard let cacheKey else { return }
         let recognition = DiscRecognition(formatHint: formatHint, titles: titles,
                                           selectedTitleIndex: selectedIndex, extents: extents,
-                                          clipTimeline: clipTimeline)
+                                          clipTimeline: clipTimeline, seekTable: seekTable, dvdTimeMap: dvdTimeMap)
         DiscRecognitionCache.store(key: cacheKey, selectTitleID: selectTitleID, recognition)
         // The probe opens with selectTitleID == nil (default title), but the rest of the engine
         // references that same title by its resolved id (== selectedIndex): reloads and the subtitle
@@ -237,13 +248,27 @@ enum DiscReader {
     /// Blu-ray ISO, else nil. `selectTitleID` chooses the title (default = main). DVD titles are the
     /// per-VTS VOB groups, filtered by the VMGI TT_SRPT title list (whole-VTS; per-cell splitting deferred).
     static func wrap(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
+        // [MovieClaw P5] 原盘目录走目录分支，放在识别缓存之前：缓存按「单个镜像 + 字节区间」重建读取器，
+        // 套不到「多个独立文件」上
+        if let folder = reader as? DiscDirectoryReader {
+            // [MovieClaw P26] DVD 目录（VIDEO_TS）与蓝光目录（BDMV）各走各的
+            if folder.discFiles.contains(where: { $0.path.uppercased().hasPrefix("VIDEO_TS/") }) {
+                return wrapDVDFolder(folder, selectTitleID: selectTitleID)
+            }
+            return wrapBluRayFolder(folder, selectTitleID: selectTitleID)
+        }
         if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,
                             selectedTitleIndex: cached.selectedTitleIndex,
-                            clipTimeline: cached.clipTimeline)
+                            clipTimeline: cached.clipTimeline, seekTable: cached.seekTable,
+                            dvdTimeMap: cached.dvdTimeMap)
         }
-        guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
+        guard looksLikeISO9660(reader) else {
+            // [MovieClaw P61] 只有 UDF、没有 ISO9660 桥接卷的 DVD 镜像：按 UDF 读 VIDEO_TS
+            if let dvd = wrapUDFDVD(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) { return dvd }
+            return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)
+        }
         let iso: ISO9660Reader
         do {
             iso = try ISO9660Reader(reader: reader)
@@ -256,40 +281,88 @@ enum DiscReader {
         } catch DiscError.directoryNotFound {
             return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)  // ISO9660 but not a DVD-Video disc (Blu-ray / data disc)
         }
+        if let dvd = wrapDVD(reader, files: files, sectorSize: iso.sectorSize, selectTitleID: selectTitleID, cacheKey: cacheKey) {
+            return dvd
+        }
+        return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey)
+    }
+
+    /// [MovieClaw P61] UDF-only DVD-Video 镜像（没有 ISO9660 桥接卷，第 16 扇区直接是 UDF 的 BEA01）：原来只认
+    /// ISO9660 的 DVD，这种盘落到蓝光分支、找不到 BDMV，退回把整个镜像当裸文件解复用，放出来是菜单那几秒。
+    /// VIDEO_TS 改经 UDF 列出（DVD 的 VOB / IFO 在盘上都是连续的一段；分成多段的文件跳过），其余与 ISO9660 同一套
+    static func wrapUDFDVD(_ reader: IOReader, selectTitleID: Int?, cacheKey: String?) -> DiscInfo? {
+        guard looksLikeUDF(reader), let udf = try? UDFReader(reader: reader),
+              let root = try? udf.list(path: []),
+              let dir = root.first(where: { $0.isDir && $0.name.uppercased() == "VIDEO_TS" }),
+              let entries = try? udf.list(path: [dir.name]) else { return nil }
+        let sector = 2048
+        let files: [DiscFile] = entries.compactMap { entry in
+            guard !entry.isDir, let exts = try? udf.extents(of: entry), let first = exts.first,
+                  first.offset % Int64(sector) == 0 else { return nil }
+            // 各段首尾相接才当成一段（录制工具偶尔把一个文件记成几段相邻的区间）
+            var end = first.offset
+            for ext in exts {
+                guard ext.offset == end else { return nil }
+                end += ext.length
+            }
+            return DiscFile(name: entry.name, startSector: Int(first.offset / Int64(sector)), length: Int(end - first.offset))
+        }
+        guard !files.isEmpty else { return nil }
+        EngineLog.emit("[disc] UDF-only DVD-Video image (\(files.count) VIDEO_TS entries)", category: .demux)
+        return wrapDVD(reader, files: files, sectorSize: sector, selectTitleID: selectTitleID, cacheKey: cacheKey)
+    }
+
+    /// DVD 镜像（ISO9660 或 UDF 列出的 VIDEO_TS）：选标题、拼 VOB、cell 折叠表与时间表，存识别缓存
+    private static func wrapDVD(_ reader: IOReader, files: [DiscFile], sectorSize: Int, selectTitleID: Int?,
+                                cacheKey: String?) -> DiscInfo? {
+        let readFile: (DiscFile) -> [UInt8] = { file in
+            readAll(reader, [(offset: Int64(file.startSector * sectorSize), length: Int64(file.length))])
+        }
+        guard let set = dvdTitleSet(files: files, selectTitleID: selectTitleID, readFile: readFile) else {
+            return nil
+        }
+        let (titles, selectedIndex) = (set.titles, set.selectedIndex)
+        let extents = set.vobs.map {
+            (offset: Int64($0.startSector * sectorSize), length: Int64($0.length))
+        }
+        let (cellTimeline, timeMap) = set.selectedIFO.map(dvdCellTimeline) ?? ([], nil)
+        storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
+                         formatHint: "mpeg", titles: titles, selectedIndex: selectedIndex, extents: extents,
+                         clipTimeline: cellTimeline, dvdTimeMap: timeMap)
+        return DiscInfo(reader: ConcatIOReader(base: reader, extents: extents),
+                        formatHint: "mpeg", titles: titles, selectedTitleIndex: selectedIndex,
+                        clipTimeline: cellTimeline, dvdTimeMap: timeMap)
+    }
+
+    /// DVD 的标题集（镜像与目录共用，[MovieClaw P26] 从镜像分支抽出）。标题就是整个标题集（VTS）的 VOB 组：
+    /// VIDEO_TS.IFO 的 TT_SRPT 说哪些标题集是真标题，据此滤掉花絮之类的附属标题集（解析失败、或滤完为空就用
+    /// 全部 VOB 组，读不了 VMGI 的盘照样能放多标题）。各 VTS_NN_0.IFO 的主 PGC 给片长与章节起点，属性表给
+    /// 音轨 / 字幕语言（VOB 里没有语言，只能靠它，#527）；读不了的 VTS IFO 片长记 0、没有章节，照样能放。
+    /// `readFile` 读整个文件的字节；返回选中标题的 VOB（按分段顺序）与它的 VTS IFO（cell 折叠与时间表用）
+    static func dvdTitleSet(files: [DiscFile], selectTitleID: Int?, readFile: (DiscFile) -> [UInt8])
+        -> (titles: [DiscTitle], selectedIndex: Int, vobs: [DiscFile], selectedIFO: [UInt8]?)? {
         let groups = DVDTitleSelector.enumerateTitleVOBGroups(files)
-        guard !groups.isEmpty else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
-        // VIDEO_TS.IFO's TT_SRPT names which title sets are real titles; filter the VOB groups to those so
-        // incidental content VTS are excluded. Any parse failure (or a filter that would empty the list)
-        // falls back to the full VOB-grouped set, so a disc with an unreadable VMGI still plays multi-title.
+        guard !groups.isEmpty else { return nil }
         var orderedGroups = groups
         let filesByName = Dictionary(files.map { ($0.name.uppercased(), $0) }, uniquingKeysWith: { first, _ in first })
-        if let ifoFile = filesByName["VIDEO_TS.IFO"] {
-            let ifoBytes = readAll(reader, [(offset: Int64(ifoFile.startSector * iso.sectorSize),
-                                             length: Int64(ifoFile.length))])
-            if let ifoTitles = DVDIFOParser.parseTitles(ifoBytes) {
-                let titleVTSNs = Set(ifoTitles.map(\.vtsn))
-                let filtered = groups.filter { titleVTSNs.contains($0.vtsn) }
-                if !filtered.isEmpty { orderedGroups = filtered }
-            }
+        if let ifoFile = filesByName["VIDEO_TS.IFO"],
+           let ifoTitles = DVDIFOParser.parseTitles(readFile(ifoFile)) {
+            let titleVTSNs = Set(ifoTitles.map(\.vtsn))
+            let filtered = groups.filter { titleVTSNs.contains($0.vtsn) }
+            if !filtered.isEmpty { orderedGroups = filtered }
         }
         let selectedIndex = selectTitleID.flatMap { orderedGroups.indices.contains($0) ? $0 : nil } ?? 0
-        let extents = orderedGroups[selectedIndex].vobs.map {
-            (offset: Int64($0.startSector * iso.sectorSize), length: Int64($0.length))
-        }
-        // Whole-VTS titles. Each VTS_NN_0.IFO's main PGC gives the title duration and chapter starts; a disc
-        // with an unreadable VTS IFO keeps duration 0 / no chapters but still plays. dvdVTSN keeps the
-        // title -> title-set mapping.
+        var selectedIFO: [UInt8]?  // [MovieClaw P13] 选中标题的 VTS IFO：cell 表与时间表
         let titles = orderedGroups.enumerated().map { idx, g -> DiscTitle in
             var durationTicks: UInt64 = 0
             var chapters: [DiscChapter] = []
-            // The VOBs carry no track language, so the IFO's attribute tables are the only source (#527).
             var streamLanguages: [Int: String] = [:]
             var subpictureStreamIDs: [Int]?
             let nn = g.vtsn < 10 ? "0\(g.vtsn)" : "\(g.vtsn)"
             let ifoName = "VTS_\(nn)_0.IFO"
             if let vtsIFO = filesByName[ifoName] {
-                let bytes = readAll(reader, [(offset: Int64(vtsIFO.startSector * iso.sectorSize),
-                                             length: Int64(vtsIFO.length))])
+                let bytes = readFile(vtsIFO)
+                if idx == selectedIndex { selectedIFO = bytes }
                 if let detail = DVDIFOParser.parseTitleDetail(bytes) {
                     durationTicks = detail.durationTicks
                     chapters = detail.chapterStartTicks.enumerated().map { i, start in
@@ -303,9 +376,37 @@ enum DiscReader {
                              streamLanguages: streamLanguages,
                              dvdSubpictureStreamIDs: subpictureStreamIDs)
         }
-        storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
-                         formatHint: "mpeg", titles: titles, selectedIndex: selectedIndex, extents: extents)
-        return DiscInfo(reader: ConcatIOReader(base: reader, extents: extents),
-                        formatHint: "mpeg", titles: titles, selectedTitleIndex: selectedIndex)
+        return (titles, selectedIndex, orderedGroups[selectedIndex].vobs, selectedIFO)
+    }
+
+    /// [MovieClaw P13] DVD 主 PGC 的 cell 折叠表与时间表（仓库 docs/design/disc-direct-play.md）。
+    ///
+    /// 整个 VTS 的 VOB 首尾相接当一条 MPEG-PS 读，可很多盘每个 cell 的 PTS 都从头开始：实测《公司的力量》
+    /// 三个 cell 各自从 0.37 秒起，第二个 cell 在标题时间 2670 秒处 PTS 归零，播放头与按时间二分的定位
+    /// 从那里起全乱（跳到 1200 秒后读到结尾）。这里把每个 cell 当成蓝光的一个剪辑交给现成的折叠
+    /// （`ClipSpan`：cell 在拼接流里的字节起点 + 标题时间轴上的起点），cell 的实际时间戳基准由解复用器
+    /// 读到的导航包（PCI 的 VOBU 起始 PTS 减去 cell 内已播时间）当场算出；时间表（VTS_TMAPT）给出
+    /// 「标题时间 → VOBU 扇区」，定位一次按字节到位。
+    /// 只处理最常见的形态：主 PGC 从标题 VOB 开头起、cell 按扇区首尾相接、没有多角度块（流的起始时间才是
+    /// cell 0 的基准）；别的形态两样都不给，维持原来的读法
+    static func dvdCellTimeline(_ ifo: [UInt8]) -> ([ClipSpan], DVDTimeMap?) {
+        guard let cells = DVDIFOParser.parseMainPGCCells(ifo), cells.count >= 2, cells[0].firstSector == 0,
+              !cells.contains(where: \.inAngleBlock),
+              zip(cells, cells.dropFirst()).allSatisfy({ $1.firstSector == $0.lastSector + 1 }) else { return ([], nil) }
+        let sector: Int64 = 2048
+        var spans: [ClipSpan] = []
+        var cumulative = 0.0
+        for cell in cells {
+            // 预测偏移按「PTS 每个 cell 从同一基准重来」估；导航包一到就换成实测值
+            spans.append(ClipSpan(concatByteStart: Int64(cell.firstSector) * sector,
+                                  cumulativeBeforeSec: cumulative, predictedShiftSec: -cumulative))
+            cumulative += cell.durationSec
+        }
+        let timeMap = DVDIFOParser.parseMainTimeMap(ifo).map {
+            DVDTimeMap(unitSec: $0.unitSec, titleStartByte: Int64(cells[0].firstSector) * sector,
+                       byteOffsets: $0.sectors.map { Int64($0) * sector })
+        }
+        EngineLog.emit("[disc] [MovieClaw P13] DVD title: \(cells.count) cells, time map \(timeMap.map { "\($0.byteOffsets.count) × \(Int($0.unitSec))s" } ?? "none")", category: .demux)
+        return (spans, timeMap)
     }
 }

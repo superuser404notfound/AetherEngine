@@ -1429,7 +1429,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     var mediaFetchCount: UInt64 {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return _mediaFetchCount
+        return _mediaFetchCount &+ _progressiveChunkCount
+    }
+
+    /// [MovieClaw P57] 边写边送时服务器每发出一块记一次。AVPlayer 在一条长时间的连接上收一个正在写的分片时不会发新请求，
+    /// 只数请求的 #65 卡死看门狗会把「正在收数据」当成「不再取数」（模拟器慢线路续播实测：卡顿 6 秒后被误判，定位一次又
+    /// 重载一次）。块发得出去说明 AVPlayer 在读这条连接；它真卡死不读了，套接字写满、块发不出去，计数也就不涨
+    private var _progressiveChunkCount: UInt64 = 0
+
+    func didDeliverProgressiveChunk(index: Int) {
+        stateLock.lock()
+        _progressiveChunkCount &+= 1
+        stateLock.unlock()
     }
     private var _mediaFetchCount: UInt64 = 0
 
@@ -1609,13 +1620,30 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AVPlayer -12889s at ~3.5 s of silence and three strikes kill the item). Live keeps its own
     /// contracts (below-window fast 404, LL-HLS blocking reload) and never signals.
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? {
-        guard let onSlow, !isLive else { return serveSegment(at: index) }
-        let signal = SlowServeSignal(thresholdSeconds: slowServeThresholdSeconds, onSlow: onSlow)
-        defer { signal.complete() }
-        return serveSegment(at: index)
+        Self.drain(mediaSegmentSource(at: index, onSlow: onSlow))
     }
 
-    private func serveSegment(at index: Int) -> Data? {
+    /// [MovieClaw P57] 给本机服务器用：分片正在写时返回边写边读的读取器，服务器边收边发（见 `SegmentCache.fetchSource`）
+    func mediaSegmentSource(at index: Int, onSlow: (@Sendable () -> Void)?) -> SegmentSource? {
+        guard let onSlow, !isLive else { return serveSource(at: index) }
+        let signal = SlowServeSignal(thresholdSeconds: slowServeThresholdSeconds, onSlow: onSlow)
+        defer { signal.complete() }
+        return serveSource(at: index)
+    }
+
+    /// [MovieClaw P57] 要完整字节的调用方：边写边读的就读到封口（作废时 nil）
+    static func drain(_ source: SegmentSource?) -> Data? {
+        switch source {
+        case .data(let data): return data
+        case .progressive(let reader): return reader.readToEnd()
+        case nil: return nil
+        }
+    }
+
+    /// [MovieClaw P57] 点播时取分片不必等它写完（直播有自己的窗口与阻塞刷新规则，照旧）
+    private var fetchesProgressively: Bool { !isLive && AetherEngine.servesSegmentsProgressively }
+
+    private func serveSource(at index: Int) -> SegmentSource? {
         guard index >= 0, index < currentSegmentCount else { return nil }
 
         // Segment below the live window is evicted; returning nil = fast 404 so AVPlayer resyncs.
@@ -1639,7 +1667,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
         // Fast path: serve from cache.
         if let hit = cache.peek(index: index) {
-            return logServed(index: index, bytes: hit, totalStart: totalStart, restarted: false)
+            return logServed(index: index, source: .data(hit), totalStart: totalStart, restarted: false)
         }
 
         // staleBelowProducer: indexRange() can still report stale lower bounds from a previous producer
@@ -1680,9 +1708,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 // min...max is not proof of residency: retained scrub bands leave interior holes.
                 // Only wait when the active producer can actually march into this index.
                 if activeProducerCovers(index),
-                   let waited = cache.fetch(index: index, timeout: sparseHoleWaitSlice) {
+                   let waited = cache.fetchSource(index: index, timeout: sparseHoleWaitSlice,
+                                                  progressive: fetchesProgressively) {
                     return logServed(
-                        index: index, bytes: waited, totalStart: totalStart, restarted: false)
+                        index: index, source: waited, totalStart: totalStart, restarted: false)
                 }
                 needsRestart = true
             } else {
@@ -1788,19 +1817,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                     }
                     attempt += 1
                 }
-                if let bytes = cache.fetch(index: index, timeout: repositionWaitSlice) {
-                    return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: true)
+                if let source = cache.fetchSource(index: index, timeout: repositionWaitSlice,
+                                                  progressive: fetchesProgressively) {
+                    return logServed(index: index, source: source, totalStart: totalStart, restarted: true)
                 }
                 // Audit SEG-3: a closed cache answers fetch at once, so riding a restart that
                 // outlives stop() would spin this thread until the ride cap.
                 if cache.isClosed { break }
             }
-            return logServed(index: index, bytes: nil, totalStart: totalStart, restarted: true)
+            return logServed(index: index, source: nil, totalStart: totalStart, restarted: true)
         }
 
-        let bytes = cache.fetch(index: index, timeout: forwardBackpressureWaitSeconds)
+        let source = cache.fetchSource(index: index, timeout: forwardBackpressureWaitSeconds,
+                                       progressive: fetchesProgressively)
         if tookForwardWait, !needsRestart {
-            if bytes == nil {
+            if source == nil {
                 // Record the front as of the END of the burned wait: progress DURING the wait
                 // resets the comparison base, so only a truly frozen march escalates next time.
                 recordForwardWaitMiss(index: index, front: activeMarchFront)
@@ -1808,7 +1839,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 clearForwardWaitMiss()
             }
         }
-        return logServed(index: index, bytes: bytes, totalStart: totalStart, restarted: needsRestart)
+        return logServed(index: index, source: source, totalStart: totalStart, restarted: needsRestart)
     }
 
     /// AE#169 round 2 pure decision: whether the forward-window backpressure wait may still trust
@@ -1836,11 +1867,18 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.unlock()
     }
 
-    private func logServed(index: Int, bytes: Data?, totalStart: DispatchTime, restarted: Bool) -> Data? {
+    private func logServed(index: Int, source: SegmentSource?, totalStart: DispatchTime,
+                           restarted: Bool) -> SegmentSource? {
         let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart.uptimeNanoseconds) / 1_000_000
-        if let bytes = bytes {
+        if case .data(let bytes) = source {
             EngineLog.emit(
                 "[HLSVideoEngine] seg\(index): served \(bytes.count) B (wait=\(String(format: "%.1f", elapsedMs))ms cache=\(cache.count) restarted=\(restarted))",
+                category: .session
+            )
+        } else if source != nil {
+            EngineLog.emit(
+                "[HLSVideoEngine] seg\(index): [MovieClaw P57] 正在写，边写边送 (wait=\(String(format: "%.1f", elapsedMs))ms "
+                + "cache=\(cache.count) restarted=\(restarted))",
                 category: .session
             )
         } else {
@@ -1849,7 +1887,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 category: .session
             )
         }
-        return bytes
+        return source
     }
 
     /// AE#408 pure decision: a backward target jump landed on a segment that is still resident. May the

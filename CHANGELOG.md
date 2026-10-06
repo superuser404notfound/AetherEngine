@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Import the MovieClaw downstream VOD and remote-disc extensions: HTTP BDMV/VIDEO_TS directory sources, CLPI/DVD indexed seeks, persistent source-range caching and prefetch, compact host Matroska Cues, runtime read-ahead controls, constrained-storage recovery, initial audio ordinals, and lower-latency startup/seek handling. Host-facing contracts and tuning switches are documented in `docs/api.md`; `PATCHES.md` records the original patch rationale and real-media regression results.
+
+### Changed
+
+- The downstream VOD producer uses shorter initial/target segments and progressive delivery, and bitmap OCR prefetch is armed only for native subtitle rendering. The existing upstream package targets, dependencies and examples remain available. This is a downstream contribution draft covering the complete extension set.
 
 ## [7.28.0] - 2026-10-06
 

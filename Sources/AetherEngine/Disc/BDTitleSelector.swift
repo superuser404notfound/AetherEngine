@@ -49,7 +49,8 @@ enum BDTitleSelector {
                                  chapters: chapters, bdClipIDs: playlist.clipIDs,
                                  bdClipSubtractTicks: clipSubtractTicks(playlist),
                                  bdClipCumulativeBeforeTicks: playlist.cumulativeBefore.count == playlist.clipIDs.count ? playlist.cumulativeBefore : nil,
-                                 streamLanguages: playlist.streamLanguages)
+                                 streamLanguages: playlist.streamLanguages,
+                                 bdClipInTimes: playlist.inTimes.count == playlist.clipIDs.count ? playlist.inTimes : nil)
             }
     }
 

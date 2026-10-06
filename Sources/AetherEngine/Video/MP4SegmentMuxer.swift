@@ -31,7 +31,8 @@ final class MP4SegmentMuxer {
 
     /// Force color signaling on the output codecpar before avformat_write_header.
     /// Used for DV P5: SPS VUI omits transfer, no colr atom; without an explicit
-    /// colr nclx the DV decoder won't engage on a dvh1 sample entry.
+    /// colr nclx the DV decoder won't engage on a dvh1 sample entry. Also SDR retagged
+    /// as sRGB on Mac / iPhone ([MovieClaw P60], see `ColorAttachments.presentsSDRAsSRGB`).
     struct ColorOverride {
         let primaries: AVColorPrimaries
         let trc: AVColorTransferCharacteristic
@@ -72,6 +73,9 @@ final class MP4SegmentMuxer {
         /// has numOfArrays=0 (in-band parameter sets) and the engine rebuilt a proper hvcC with
         /// VPS/SPS/PPS arrays; the mp4 muxer writes extradata directly into the hvcC/avcC box.
         let extradataOverride: [UInt8]?
+        /// [MovieClaw P38] 视频样本是 Annex B、配置记录是 hvcC：写包前由这里转成 4 字节长度前缀并保留全部 NAL
+        /// （含带内 VPS/SPS/PPS）。movenc 自己转换时对 hvc1 会剥掉参数集，片中换参数集的片子就解不了
+        let annexBSamplesKeepParameterSets: Bool
         /// The session's framing verdict for this track (audit BIT-104); nil gives the muxer its own.
         let nalFramingLatch: NALFramingLatch?
 
@@ -82,6 +86,7 @@ final class MP4SegmentMuxer {
             doviConfig: DoviConfigPolicy = .keep,
             colorOverride: ColorOverride? = nil,
             extradataOverride: [UInt8]? = nil,
+            annexBSamplesKeepParameterSets: Bool = false,
             nalFramingLatch: NALFramingLatch? = nil
         ) {
             self.codecpar = codecpar
@@ -90,6 +95,7 @@ final class MP4SegmentMuxer {
             self.doviConfig = doviConfig
             self.colorOverride = colorOverride
             self.extradataOverride = extradataOverride
+            self.annexBSamplesKeepParameterSets = annexBSamplesKeepParameterSets
             self.nalFramingLatch = nalFramingLatch
         }
     }
@@ -146,6 +152,8 @@ final class MP4SegmentMuxer {
     /// Same volume as cache adopt target so rename is metadata-only.
     private let sessionDir: URL
     private var currentStagingPath: URL
+    /// [MovieClaw P57] 当前分片的暂存文件：只往后追加，封口时原样改名进缓存，所以可以边写边读
+    var stagingURL: URL { currentStagingPath }
     private var fd: Int32 = -1
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
     private var pb: UnsafeMutablePointer<AVIOContext>?
@@ -171,6 +179,8 @@ final class MP4SegmentMuxer {
     /// length-prefixed at all. Latched at init: it is a property of the configuration record that
     /// lands in the sample entry, and the AE#561 sanitizer walks every video sample with it.
     private let videoNALLengthPrefixSize: Int?
+    /// [MovieClaw P38] 写包前把 Annex B 视频样本转成长度前缀（保留参数集）
+    private let convertsAnnexBVideoSamples: Bool
     /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
     /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
     /// be measured against. Read once from the environment, never set in a shipped configuration.
@@ -287,6 +297,7 @@ final class MP4SegmentMuxer {
         // AE#561: the override, when there is one, is the record that reaches the sample entry. Both
         // carry the same width (the #19 rebuild keeps the source header's first 22 bytes), so this
         // only matters for a source whose own extradata is missing or Annex B.
+        self.convertsAnnexBVideoSamples = video.annexBSamplesKeepParameterSets
         if let override = video.extradataOverride {
             self.videoNALLengthPrefixSize = override.withUnsafeBufferPointer {
                 NALUnitChain.lengthPrefixSize(
@@ -326,12 +337,20 @@ final class MP4SegmentMuxer {
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
+                // [MovieClaw P25] 测试钩子：模拟播放中存储被写满
+                if AetherEngine.storageFullSimulated {
+                    SegmentCache.markStorageExhausted()
+                    counter.writeFailed = true
+                    return
+                }
                 var written = 0
                 while written < count {
                     let n = write(counter.fd, ptr.advanced(by: written), count - written)
                     if n < 0 {
                         let err = errno
                         if err == EINTR { continue }
+                        // [MovieClaw P25] 写满了：记下来，泵失败时报「存储已满」而不是笼统的封装失败
+                        if err == ENOSPC { SegmentCache.markStorageExhausted() }
                         counter.writeFailed = true
                         return
                     }
@@ -632,6 +651,20 @@ final class MP4SegmentMuxer {
         packet.pointee.dts = clean.dts
 
         let streamIndex = packet.pointee.stream_index
+
+        // [MovieClaw P38] Annex B → 4 字节长度前缀，保留全部 NAL（含 VPS/SPS/PPS）；配置记录已是 hvcC，movenc 不再转换
+        if convertsAnnexBVideoSamples, streamIndex == videoOutputStreamIndex,
+           let data = packet.pointee.data, packet.pointee.size > 0,
+           let converted = AnnexBSampleConverter.lengthPrefixed(
+               UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size))) {
+            let grow = converted.count - Int(packet.pointee.size)
+            if grow > 0, av_grow_packet(packet, Int32(grow)) < 0 {
+                av_packet_unref(packet)
+                return (-1, .none)
+            }
+            if grow < 0 { av_shrink_packet(packet, Int32(converted.count)) }
+            converted.withUnsafeBytes { _ = memcpy(packet.pointee.data, $0.baseAddress, converted.count) }
+        }
 
         // #64 mid-segment flush bound: cap libavformat's interleaver RAM on a very long segment
         // (degenerate sparse-keyframe plan, or an audio stream that decodes to nothing) by emitting a

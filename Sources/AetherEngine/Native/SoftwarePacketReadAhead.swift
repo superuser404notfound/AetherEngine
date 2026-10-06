@@ -34,7 +34,21 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private let video: Stream
     private let audio: Stream?
     private let byteBudget: Int
-    private let forwardSeconds: Double
+    /// [MovieClaw P20] 可在运行中放大（`setForwardSeconds`）：线路跟不上时宿主把读前从 40 秒放到 3 分钟，暂停能多攒。
+    /// 停泊判断在 `condition` 里读、调度等级在生产者线程上读，单独一把锁
+    private var forwardSeconds: Double {
+        forwardSecondsLock.lock(); defer { forwardSecondsLock.unlock() }
+        return _forwardSeconds
+    }
+    private var _forwardSeconds: Double
+    private let forwardSecondsLock = NSLock()
+
+    func setForwardSeconds(_ seconds: Double) {
+        forwardSecondsLock.lock()
+        _forwardSeconds = max(1, seconds)
+        forwardSecondsLock.unlock()
+        condition.lock(); condition.broadcast(); condition.unlock()   // 停着的生产者按新窗口重判
+    }
     /// Producer thread only. See `start()` for why this is a class the producer moves itself.
     private var producerQoS: qos_class_t = QOS_CLASS_USER_INITIATED
     /// Mirror of `producerQoS` for the consumer's diagnostics, under `condition`.
@@ -85,7 +99,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         self.video = video
         self.audio = audio
         self.byteBudget = max(1, byteBudget)
-        self.forwardSeconds = max(1, forwardSeconds)
+        self._forwardSeconds = max(1, forwardSeconds)
         self.sourceClock = initialSourceClock
         self.fifo = fifo
         self.videoCoverage = SoftwarePacketCoverage(maximumRangeCount: coverageRangeCap)
@@ -517,11 +531,22 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         } catch { recordFailure(error, token: token) }
     }
 
+    /// [MovieClaw P23] 宿主要求暂停下载（蜂窝网 / 低数据模式下用户按了暂停）：已读到的留着，不再往前读
+    private var prefetchSuspended = false
+
+    func setPrefetchSuspended(_ suspended: Bool) {
+        condition.lock()
+        prefetchSuspended = suspended
+        condition.broadcast()
+        condition.unlock()
+    }
+
     private func shouldParkLocked() -> Bool {
         // One source record can cross the budget. A consumed active chunk cannot be deleted before
         // cursor rollover, so residency also includes bounded protected chunk slack (not an
         // unbounded batch). Unknown time coverage is never guessed from bitrate.
         guard count > 0 else { return false }
+        if prefetchSuspended { return true }   // [MovieClaw P23]
         if residentBytes >= byteBudget { return true }
         // The forward limit is measured on the RESERVOIR, from the packet the consumer last took
         // to the newest one stored, because that is what the producer is actually building and it

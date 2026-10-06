@@ -61,7 +61,7 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Area | Summary |
 | --- | --- |
 | Containers | MKV, MP4, WebM, MPEG-TS, AVI, ASF / WMV, OGG, FLV |
-| Disc | DVD-Video and Blu-ray ISO (decrypted): selectable titles and chapters, demuxed through the normal path |
+| Disc | DVD-Video and Blu-ray ISO (decrypted), plus remote BDMV / VIDEO_TS directories through `DiscDirectoryReader`: selectable titles and chapters, demuxed through the normal path |
 | Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 Main profile where HW AV1 exists |
 | Video (SW) | AV1 (dav1d) without HW, and AV1 High / Professional (4:4:4, 4:2:2, 12-bit) everywhere, VP9 / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, QuickTime RLE, the Flash tail (Sorenson Spark, On2 VP6) and anything else the FFmpeg build carries a decoder for (software is the default route; only HEVC, H.264 and HW-decodable AV1 go native), H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext where VideoToolbox has no HW decoder (Intel Macs, older chips), interlaced H.264 (AVPlayer does not deinterlace; on VOD the declared field order is verified against decoded frames, so progressive-in-interlaced-carriage keeps hardware decode); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 as single-layer 8.1, P8.1, P8.4, AV1 P10.x), HLG, HDR Vivid (played on its HLG / PQ base, CUVA metadata reported by `probe`) |
