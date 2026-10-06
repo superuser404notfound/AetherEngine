@@ -79,7 +79,10 @@ enum DVDIFOParser {
     /// Byte offset of the title set's main program chain: the longest PGC across the VTS_PGCIT search
     /// pointers. nil when the bytes are not a recognizable VTSI or the PGCIT is malformed. Shared, so the
     /// duration, the chapters and the stream-language tables all describe the same chain.
-    private static func mainPGCOffset(_ data: [UInt8]) -> Int? {
+    private static func mainPGCOffset(_ data: [UInt8]) -> Int? { mainPGC(data)?.offset }
+
+    /// 主 PGC 的字节偏移与它在 VTS_PGCIT 里的下标（时间表 VTS_TMAPT 按同一个下标排）
+    private static func mainPGC(_ data: [UInt8]) -> (offset: Int, index: Int)? {
         guard data.count >= vtsPgcitPointerOffset + 4,
               Array(data[0..<12]) == vtsMagic else { return nil }
         let pgcitSector = be32(data, vtsPgcitPointerOffset)
@@ -89,6 +92,7 @@ enum DVDIFOParser {
         let nrSrp = be16(data, pgcitBase)
         guard nrSrp > 0 else { return nil }
         var bestOffset = -1
+        var bestIndex = -1
         var bestTicks: UInt64 = 0
         for i in 0..<nrSrp {
             let srp = pgcitBase + 8 + i * 8
@@ -96,9 +100,57 @@ enum DVDIFOParser {
             let pgcOffset = pgcitBase + be32(data, srp + 4)
             guard pgcOffset >= 0, pgcOffset + pgcHeaderLength <= data.count else { continue }
             let ticks = dvdTimeTicks(data, pgcOffset + pgcPlaybackTimeOffset)
-            if bestOffset < 0 || ticks > bestTicks { bestOffset = pgcOffset; bestTicks = ticks }
+            if bestOffset < 0 || ticks > bestTicks { bestOffset = pgcOffset; bestIndex = i; bestTicks = ticks }
         }
-        return bestOffset >= 0 ? bestOffset : nil
+        return bestOffset >= 0 ? (bestOffset, bestIndex) : nil
+    }
+
+    // MARK: - [MovieClaw P13] 主 PGC 的 cell 与时间表（DVD 时间轴折叠与按字节定位）
+
+    /// 主 PGC 的一个 cell：在标题 VOB（VTSTT_VOBS，从 VTS_NN_1.VOB 起连续编号）里的首尾扇区、播放时长、
+    /// 是否在多角度块里
+    struct Cell: Sendable, Equatable {
+        let firstSector: Int
+        let lastSector: Int
+        let durationSec: Double
+        let inAngleBlock: Bool
+    }
+
+    private static let vtsTmaptiPointerOffset = 0xD4
+
+    /// 主 PGC 按播放顺序的 cell 表；读不懂返回 nil
+    static func parseMainPGCCells(_ data: [UInt8]) -> [Cell]? {
+        guard let pgc = mainPGC(data) else { return nil }
+        let nrCells = Int(data[pgc.offset + pgcNrCellsOffset])
+        guard nrCells > 0 else { return nil }
+        let cellTable = pgc.offset + be16(data, pgc.offset + pgcCellPlaybackOffsetField)
+        guard cellTable + nrCells * cellPlaybackEntrySize <= data.count else { return nil }
+        return (0..<nrCells).map { c in
+            let e = cellTable + c * cellPlaybackEntrySize
+            // 第 0 字节：块模式（高 2 位）、块类型（其后 2 位，1 = 多角度块）
+            let blockType = (Int(data[e]) >> 4) & 0x3
+            return Cell(firstSector: be32(data, e + 8), lastSector: be32(data, e + 20),
+                        durationSec: dvdTimeSeconds(data, e + pgcPlaybackTimeOffset), inAngleBlock: blockType == 1)
+        }
+    }
+
+    /// 主 PGC 的时间表（VTS_TMAPT）：第 i 项是标题时间 (i+1)×unit 秒所在 VOBU 的起始扇区（相对 VTSTT_VOBS）。
+    /// 光盘可以不带时间表，这时返回 nil
+    static func parseMainTimeMap(_ data: [UInt8]) -> (unitSec: Double, sectors: [Int])? {
+        guard let pgc = mainPGC(data), data.count >= vtsTmaptiPointerOffset + 4 else { return nil }
+        let tmaptiSector = be32(data, vtsTmaptiPointerOffset)
+        guard tmaptiSector > 0 else { return nil }
+        let base = tmaptiSector * sectorSize
+        guard base + 8 <= data.count else { return nil }
+        let count = be16(data, base)
+        guard pgc.index < count, base + 8 + (pgc.index + 1) * 4 <= data.count else { return nil }
+        let tmap = base + be32(data, base + 8 + pgc.index * 4)
+        guard tmap + 4 <= data.count else { return nil }
+        let unit = Int(data[tmap])
+        let entries = be16(data, tmap + 2)
+        guard unit > 0, entries > 0, tmap + 4 + entries * 4 <= data.count else { return nil }
+        // 最高位是「不连续」标志，其余 31 位是扇区号
+        return (Double(unit), (0..<entries).map { be32(data, tmap + 4 + $0 * 4) & 0x7FFF_FFFF })
     }
 
     /// Title-relative chapter starts from a PGC's program map + cumulative cell playback times. A chapter

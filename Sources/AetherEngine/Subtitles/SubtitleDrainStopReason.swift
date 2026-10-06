@@ -33,4 +33,7 @@ enum SubtitleDrainStopReason: String, Sendable {
     /// `startSubtitleForwardPrefetcher` is replacing a running session with a new one (a changed
     /// lead, or a jump the in-place re-anchor cannot serve). The one reason that is not a loss.
     case prefetchRebuild
+    /// [MovieClaw P21] 画中画 / 隔空播放结束，系统不再画原生字幕轨：图形字幕的文字识别与它那条读到
+    /// 270 秒之后的旁路预读一起停（平时字幕只靠主力通路顺带收下的包）
+    case nativeRenderingEnded
 }

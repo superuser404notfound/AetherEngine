@@ -1144,3 +1144,78 @@ Public for the CLI, the test suite, or a diagnostic overlay, and outside the sha
 - **`DiscInspector` / `DiscInspection`**, `DoviRpuConverter` and its probe, `AudioTapProbe`, `SoftwareDecodeProbeResult`, `A53SEIParser`: repro and inspection surfaces behind `aetherctl` subcommands.
 - **`HLSLiveIngestReader`'s internals** (`terminalError`, `upstreamTargetDuration`, `observedLiveCadenceSeconds`, `closedLiveCadenceSeconds`, `upstreamSegmentDurationSeconds`, `companionAudioReader`): fixture and diagnostic reads. The last two are the closed evidence the served TARGETDURATION is sealed from (AE#447); `upstreamTargetDuration` is the upstream's own claim, reported in the seal line and derived from nowhere.
 - **`SubtitleChannel`**: the primary / secondary selector on the engine's internal subtitle routing. No public signature takes one; a host picks the channel by calling the primary or the secondary method.
+
+
+## MovieClaw downstream extensions
+
+These extensions come from the MovieClaw downstream engine, based on AetherEngine 7.28.0.
+The source remains under the repository's existing license. The complete patch inventory and
+measured host regressions are in [PATCHES.md](../PATCHES.md).
+
+### Host integration contracts
+
+- `LoadOptions.vodStartsImmediately` opts VOD into a one-time `playImmediately` kick after sufficient
+  startup buffering. It defaults to false.
+- `LoadOptions.audioTrackOrdinal` selects the zero-based audio-track ordinal during the initial
+  probe, avoiding a post-start track-switch rebuild. `audioSourceStreamIndex` still takes precedence.
+- `LoadOptions.sourceCacheKey` identifies the underlying, immutable source across refreshed signed
+  URLs. Hosts must change the key when the source changes; a changed content length invalidates it.
+  For custom disc readers, call `bindSourceCacheKey(url:key:)` for each file before opening it.
+- `LoadOptions.matroskaCues` accepts `MatroskaHostCues(offset:data:)`, a complete compact video Cues
+  element at the original tail Cues offset. The offset must match the container's SeekHead; invalid
+  or mismatched hints are ignored. Subtitle side readers retain the original source index.
+- `LoadOptions.backwardBufferSegments` sets the retained backward segment window alongside the
+  existing forward window, so hosts can reduce both when storage is low.
+- `snapsNextStartToKeyframe` is a one-shot host request consumed and reset at the next `load()`.
+  It applies to a user's initial/resume load; internal reloads keep their exact position.
+- `setForwardBufferDuration(_:)` grows the loopback or software read-ahead window at runtime,
+  subject to storage limits. `setPrefetchSuspended(_:)` suspends speculative downloading separately
+  from playback pause, and the requested state survives in-place engine rebuilds.
+- `hostManagesAudioSessionCategory` lets an iOS/tvOS host declare the audio-session category,
+  policy and multichannel support before constructing its first engine. It defaults to false;
+  setting it to true transfers that category declaration to the host.
+- `PlaybackErrorKind.storageExhausted` distinguishes failed segment storage from codec/muxer errors,
+  allowing a host to reduce its window and reopen at the current position.
+- Bitmap-to-text OCR and its long subtitle prefetch window are armed when the host requests native
+  subtitle rendering through `setNativeSubtitleRendering(_:)`, for PiP, AirPlay or external displays.
+  Hosts rendering bitmap subtitles in their own overlay avoid the extra OCR reader.
+
+### Remote disc directories
+
+`DiscDirectoryReader` extends `IOReader` with `discFiles`, `preferredPlaylist`, and `openDiscFile(_:)`.
+`HTTPDiscDirectoryReader(files:preferredPlaylist:httpHeaders:)` accepts entries of
+`HTTPDiscDirectoryReader.File(path:size:url:)` and serves Blu-ray BDMV or DVD VIDEO_TS directories
+without a server-side concat/remux. Pass the directory reader as a custom source; the engine
+recognizes the title, concatenates its clips, and uses Blu-ray CLPI entry-point maps or DVD time maps
+for seeking. `Demuxer.discImageFragment` marks extensionless URLs as disc images locally; the URL
+fragment is not sent in the HTTP request.
+
+### Source cache lifecycle and prefetch
+
+Call `sweepStaleSessionCaches()` off the main thread during app startup, and
+`flushSourceByteCacheIndexes()` when the host enters the background. `preconnect(url:httpHeaders:)`
+warms origin connections without downloading media. `prefetchSourceRanges(url:cacheKey:ranges:httpHeaders:)`
+accepts `[SourceByteRange]` and returns `SourceRangePrefetchReport`, including fetched bytes,
+already-cached bytes, or a decline reason. Cancellation stops fetching while retaining bytes already
+written. Bind a stable source key before spending the prefetched ranges in a load.
+
+### Downstream tuning switches
+
+Configure process-wide tuning before playback, rather than racing mutations against active loads.
+
+| Member | Downstream behavior |
+| --- | --- |
+| `vodSegmentTargetSeconds` | VOD remux target duration; clamped to the supported range, with keyframe spacing still controlling actual cuts. |
+| `servesSegmentsProgressively`, `progressiveFragmentSeconds` | Progressive VOD segment delivery and its fragment duration. |
+| `declaresIndependentMediaSegments` | Advertise independently decodable media segments when the downstream producer emits them. |
+| `parkSecondaryTrueHDDuringProbe` | Keep secondary TrueHD tracks out of the initial stream-info probe, then restore them. |
+| `cuePrewarmTargetsStart` | Warm an MKV index at the requested start rather than the midpoint. |
+| `prefetchesMatroskaCues`, `usesHostMatroskaCues` | Enable index-first Cues prefetch and host-provided compact Cues respectively. |
+| `prioritizesIndexPrefetch` | Use a short initial header request and yield speculative head reads to the index prefetch. |
+| `waitsOnProgressingPrefetch`, `skipsDetourOnSlowLink` | Wait for productive prefetch work, and avoid costly detours on a slow link. |
+| `persistsSourceByteCache` | Retain source ranges across launches; set before the shared cache is first used. |
+| `sourceByteCacheKeepsSpareRuns`, `sourceByteCacheTrimKeepsMetadata` | Retain disjoint runs within a block, and prefer metadata ranges during startup trimming. |
+| `sourceByteCacheWritesInBackground` | Dispatch source-cache writes and eviction to the cache's serial I/O queue. |
+| `removePersistedSourceByteCache()` | Clear the persistent cache directory before the shared cache is first used. |
+| `temporaryVolumeAvailableBytes(importantUsage:)` | Query cached available storage for host and engine budgeting. |
+| `volumeAvailableBytesOverrideForTesting`, `simulateStorageFullUntilUptimeForTesting` | Test-only hooks for constrained storage and ENOSPC recovery. |

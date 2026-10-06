@@ -56,6 +56,15 @@ struct DemuxerOpenProfile: Sendable {
     /// ~300 ms). nil keeps the open-ended behaviour for every other path (playback streams from 0).
     var boundedInitialFetch: Int64? = nil
 
+    /// [MovieClaw P56] 这次播放从文件头起（没有续播点）。读取器据此决定索引提前取一到就把文件头连接续上：从头播时
+    /// 那正是接下来要播的字节；续播时引擎马上要跳到续播点，续上文件头只会在慢线路上白占带宽。默认 true（原来的行为）
+    var playbackStartsAtHead: Bool = true
+
+    /// [MovieClaw P58] 服务端给的 Matroska 精简索引：读取器在解复用器读 SeekHead 登记的 Cues 位置时直接给它。只挂在
+    /// 主播放的配置上（探测兼会话的那次打开、HLS 生成器的兜底打开与卡死重开）；旁路解复用器从 `.playback` 另起配置，
+    /// 照旧读原索引
+    var hostMatroskaCues: MatroskaHostCues? = nil
+
     /// `LoadOptions.sequentialOrigin`: the origin fabricates range answers, so the AVIO reader must
     /// run its forward-only streaming mode (one unranged GET from byte 0) and never issue a ranged
     /// request. Lives in the profile so the probe demuxer, the session demuxer, and every fresh
@@ -87,6 +96,20 @@ struct DemuxerOpenProfile: Sendable {
     /// playback open, so the probe, the HLS producer's own open and every rebuild agree; off for the
     /// disposable still extractor.
     var auditsRecordlessDolbyVision: Bool = true
+
+    /// [MovieClaw P56] 带上「这次从文件头起播」的声明，写法同 `withSequentialOrigin`，调用点链在已有的配置后面
+    func withPlaybackStartsAtHead(_ startsAtHead: Bool) -> DemuxerOpenProfile {
+        var copy = self
+        copy.playbackStartsAtHead = startsAtHead
+        return copy
+    }
+
+    /// [MovieClaw P58] 带上服务端给的精简索引（开关 `AetherEngine.usesHostMatroskaCues` 关着时不带），写法同上
+    func withHostMatroskaCues(_ cues: MatroskaHostCues?) -> DemuxerOpenProfile {
+        var copy = self
+        copy.hostMatroskaCues = AetherEngine.usesHostMatroskaCues ? cues : nil
+        return copy
+    }
 
     /// A copy of `self` under a different reader name, for two call sites that share a profile.
     func withReaderLabel(_ label: String) -> DemuxerOpenProfile {
@@ -475,6 +498,27 @@ public final class Demuxer: @unchecked Sendable {
     /// non-empty, `readPacket` and `indexedKeyframes` fold each clip's timestamps onto one contiguous
     /// timeline so the playhead does not leap at clip boundaries (AE#105). Guarded by `accessLock`.
     private var clipTimeline: [ClipSpan] = []
+    /// [MovieClaw P7] 选中蓝光标题的 CLPI 定位表：有它就按 EP map 按字节定位，不再按时间二分
+    private var discSeekTable: DiscSeekTable?
+    /// [MovieClaw P13] 选中 DVD 标题按 cell 折叠：cell 的时间戳基准从导航包算（见 `adoptDVDNav`）
+    private var dvdCellFold = false
+    /// [MovieClaw P13] 选中 DVD 标题的时间表：有它就「标题时间 → VOBU 字节偏移」一次定位
+    private var dvdTimeMap: DVDTimeMap?
+    /// [MovieClaw P18] 没有可用 Cues 的 MKV（文件头判定，见 `MatroskaCuesProbe`）：引擎起播前不做索引预热，
+    /// 按时间定位前先按字节探一个 Cluster 登记成索引项（`assistIndexlessMatroskaSeek`）
+    private(set) var indexlessMatroska = false
+    private var matroskaTimestampScale: UInt64 = 1_000_000
+    /// [MovieClaw P9] UHD 原盘双 PID 杜比视界：基础层（PID 0x1011）与增强层（PID 0x1015）的流下标，
+    /// 没有这种结构时为 -1。增强层只取它的 RPU 挂到同一时间戳的基础层包上，包本身不往下游送
+    private var dvBaseLayerStream: Int32 = -1
+    private var dvEnhancementStream: Int32 = -1
+    /// 增强层里取出的 RPU（按 PTS），等同一时间戳的基础层访问单元来取
+    private var dvPendingRPU: [Int64: [UInt8]] = [:]
+    /// 在等 RPU 的基础层包（保持解码顺序）
+    private var dvHeldBase: [UnsafeMutablePointer<AVPacket>] = []
+    /// 已挂好 RPU、等着交出的基础层包（保持解码顺序）
+    private var dvReady: [UnsafeMutablePointer<AVPacket>] = []
+    private var dvStats = (attached: 0, missed: 0)
     /// Last clip index resolved from a packet byte position; reused when a packet reports pos < 0
     /// (reads are sequential, so the clip only advances). Guarded by `accessLock`.
     private var lastClipIndex: Int = 0
@@ -501,6 +545,9 @@ public final class Demuxer: @unchecked Sendable {
         discStreamLanguages = info.selectedTitle?.streamLanguages ?? [:]
         discSubpictureStreamIDs = info.selectedTitle?.dvdSubpictureStreamIDs
         clipTimeline = info.clipTimeline
+        discSeekTable = info.seekTable
+        dvdTimeMap = info.dvdTimeMap
+        dvdCellFold = info.formatHint == "mpeg" && !info.clipTimeline.isEmpty
         lastClipIndex = 0
         lastReadClipIdx = -1
         clipBase0Sec = .nan
@@ -709,9 +756,15 @@ public final class Demuxer: @unchecked Sendable {
 
     /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension. Gates the HTTP disc-adapter
     /// path so a normal media URL keeps the optimized streaming AVIOReader open with no probe cost.
+    /// [MovieClaw P4] 宿主也可以用 URL 片段 `#aether-disc-image` 声明「这是光盘镜像」：MovieClaw 的取流地址
+    /// 是 `/playback/files/{id}/stream?token=…`，没有 .iso 后缀。片段只在本机，不随 HTTP 请求发出，
+    /// 重新装载（选标题、换音轨）时随 URL 原样沿用。
     static func isDiscImageURL(_ url: URL) -> Bool {
-        ["iso", "img", "udf"].contains(url.pathExtension.lowercased())
+        url.fragment == discImageFragment || ["iso", "img", "udf"].contains(url.pathExtension.lowercased())
     }
+
+    /// [MovieClaw P4] 声明光盘镜像的 URL 片段
+    public static let discImageFragment = "aether-disc-image"
 
     private func openHTTP(url: URL, extraHeaders: [String: String], isLive: Bool = false, selectTitleID: Int? = nil) throws {
         // A remote disc image goes through the same disc adapter as a local ISO (a raw .iso handed
@@ -763,7 +816,9 @@ public final class Demuxer: @unchecked Sendable {
             chunkMaxRetries: openProfile.avioMaxRetries,
             boundedInitialFetch: openProfile.boundedInitialFetch,
             sequentialOnly: openProfile.avioSequentialOnly,
-            heldConnection: openProfile.avioHeldConnection
+            heldConnection: openProfile.avioHeldConnection,
+            expectsHeadPlayback: openProfile.playbackStartsAtHead,
+            hostMatroskaCues: openProfile.hostMatroskaCues   // [MovieClaw P58]
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider
@@ -870,8 +925,11 @@ public final class Demuxer: @unchecked Sendable {
         // URL is nil because pb is already set.
         var ctxPtr: UnsafeMutablePointer<AVFormatContext>? = ctx
         var opts: OpaquePointer? = nil
+        // [MovieClaw P15] 光盘标题的时长 MPLS / IFO 里就有（`duration` 优先用它）：不再让 libavformat 从文件尾倒着
+        // 一段段读去估时长——经 HTTP 读几十 GB 的镜像尾部，实测蓝光镜像开播前多出 10 来次请求
         Self.applyDemuxerOptions(&opts, isLive: isLive,
-                                 skipDurationEstimate: openProfile.avioSequentialOnly)
+                                 skipDurationEstimate: openProfile.avioSequentialOnly
+                                     || selectedDiscTitleDurationSeconds != nil)
         let ret = avformat_open_input(&ctxPtr, nil, inputFormat, &opts)
         av_dict_free(&opts)
         guard ret == 0 else {
@@ -1023,18 +1081,37 @@ public final class Demuxer: @unchecked Sendable {
         // The reader runs `resolveStreamInfo()` on demand if its target stream's codec is unresolved.
         guard !openProfile.skipStreamInfo else {
             logStreams(ctx)
+            detectIndexlessMatroska(ctx)  // [MovieClaw P18]
             return
         }
         reclassifyAttachedPictures(ctx)
         boundProbeForDeclaredDiscTitle(ctx)
         let parked = parkUnresolvableAudio(ctx)
+        let parkedPGS = parkUnsizedPGS(ctx)  // [MovieClaw P12]
+        // [MovieClaw] 探测流的耗时与读量：起播分段里「探测」一段慢在读数据还是慢在解码，看这一行
+        let probeStarted = DispatchTime.now()
+        let bytesBefore = ctx.pointee.pb?.pointee.bytes_read ?? 0
         let findRet = avformat_find_stream_info(ctx, nil)
+        let probeMs = Double(DispatchTime.now().uptimeNanoseconds - probeStarted.uptimeNanoseconds) / 1_000_000
+        let bytesRead = (ctx.pointee.pb?.pointee.bytes_read ?? 0) - bytesBefore
+        EngineLog.emit(
+            "[Demuxer] [MovieClaw] find_stream_info took \(Int(probeMs))ms, read \(bytesRead / 1024) KB "
+            + "(fps_probe_size=\(ctx.pointee.fps_probe_size))",
+            category: .demux)
+        unparkUnsizedPGS(ctx, parkedPGS)
         unparkUnresolvableAudio(ctx, parked)
         guard findRet >= 0 else {
             emitOpenTimings(outcome: "find_stream_info failed (\(findRet))")
             throw DemuxerError.streamInfoFailed(code: findRet)
         }
         logStreams(ctx)
+        pairDolbyVisionDualPID(ctx)  // [MovieClaw P9]
+        detectIndexlessMatroska(ctx)  // [MovieClaw P18]
+        // [MovieClaw P13] DVD 按 cell 折叠：cell 0 的时间戳基准就是流的起始时间（引擎的源时间轴也以它为原点），
+        // 续播直接落在后面的 cell 时也有基准可折
+        if dvdCellFold, clipBase0Sec.isNaN, ctx.pointee.start_time != Int64.min {
+            clipBase0Sec = Double(ctx.pointee.start_time) / Double(AV_TIME_BASE)
+        }
         armGeneratedPTSSuppression(ctx)
         if openProfile.auditsRecordlessDolbyVision, let source = auditSource {
             let idx = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
@@ -1119,6 +1196,57 @@ public final class Demuxer: @unchecked Sendable {
     private func unparkUnresolvableAudio(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
         for i in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        }
+    }
+
+    /// [MovieClaw P12] PGS 字幕流在 find_stream_info 期间暂时当附件（同 `parkUnresolvableAudio` 的做法），探测完原样放回。
+    ///
+    /// libavformat 认定 PGS 流「参数不全」直到知道画布尺寸（has_codec_parameters：unspecified size），而容器头里没有这个
+    /// 尺寸、字幕包又稀疏，探测于是一直读到预算上限（50 MB）。真机实测带 PGS 的片子起播里「探测流」一项 0.6～1.1 秒，
+    /// 同样是 DTS 转码、不带 PGS 的《九门》只要 0.00 秒；蓝光原盘几乎都带 PGS。引擎画 PGS 时画布尺寸取自画面
+    /// （旁路读字幕的解复用器本来就不跑 find_stream_info），用不上这里探出来的尺寸
+    private func parkUnsizedPGS(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> [(index: Int, type: AVMediaType, placeholderCodec: Bool)] {
+        var parked: [(index: Int, type: AVMediaType, placeholderCodec: Bool)] = []
+        var sawTrueHD = false
+        let formatName = ctx.pointee.iformat.map { String(cString: $0.pointee.name) } ?? ""
+        let declaresCodecs = formatName.hasPrefix("mov,") || formatName.hasPrefix("matroska")
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let codecpar = ctx.pointee.streams[i]?.pointee.codecpar else { continue }
+            let type = codecpar.pointee.codec_type
+            let unsizedPGS = type == AVMEDIA_TYPE_SUBTITLE && codecpar.pointee.codec_id == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+                && codecpar.pointee.width == 0
+            // 认不出编码的数据流（广播录像里的 DSM-CC 数据轮播，stream_type 0x0D）同样永远「参数不全」：
+            // 真机日本电视台录像《再见我们的幼儿园》探测 0.79 秒就耗在这两路上。引擎从不读它们
+            let unknownData = (type == AVMEDIA_TYPE_DATA || type == AVMEDIA_TYPE_UNKNOWN)
+                && codecpar.pointee.codec_id == AV_CODEC_ID_NONE
+            // MP4 / MKV 由容器声明编码，认不出就是真没有解码器（国产 4K 剧的 Audio Vivid「av3a」5.1.4 音轨）：
+            // 同样判「参数不全」拖满探测预算，真机《交锋》探测 1.5 秒。TS / PS 的未知流可能靠嗅探认出来，不动
+            let unknownAudio = declaresCodecs && type == AVMEDIA_TYPE_AUDIO && codecpar.pointee.codec_id == AV_CODEC_ID_NONE
+            // [MovieClaw P34] 第二条起的 TrueHD：容器已声明采样率与声道，探测只差「采样格式」一项，要解出一帧才有；
+            // 解不出来（真机《变形金刚4》第二条 TrueHD）就读满 50 MB 预算，探测 0.76 秒。TrueHD 一律经音频桥接，
+            // 桥接自己开解码器、按解出的帧配重采样，用不上探出来的采样格式。第一条照常探（全景声等判定不受影响）
+            let isTrueHD = declaresCodecs && type == AVMEDIA_TYPE_AUDIO && codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD
+                && codecpar.pointee.sample_rate > 0 && codecpar.pointee.ch_layout.nb_channels > 0
+            let secondaryTrueHD = isTrueHD && sawTrueHD && AetherEngine.parkSecondaryTrueHDDuringProbe
+            if isTrueHD { sawTrueHD = true }
+            guard unsizedPGS || unknownData || unknownAudio || secondaryTrueHD else { continue }
+            codecpar.pointee.codec_type = AVMEDIA_TYPE_ATTACHMENT
+            // 编码号为 NONE 的流不论什么类型都判「参数不全」（unknown codec），探测期间给个占位的二进制数据编码号
+            if unknownData || unknownAudio { codecpar.pointee.codec_id = AV_CODEC_ID_BIN_DATA }
+            parked.append((i, type, unknownData || unknownAudio))
+        }
+        if !parked.isEmpty {
+            EngineLog.emit("[Demuxer] [MovieClaw P12/P34] \(parked.count) PGS / unknown data / unknown audio / secondary TrueHD stream(s) held out of find_stream_info", category: .demux)
+        }
+        return parked
+    }
+
+    private func unparkUnsizedPGS(_ ctx: UnsafeMutablePointer<AVFormatContext>,
+                                  _ parked: [(index: Int, type: AVMediaType, placeholderCodec: Bool)]) {
+        for (i, type, placeholderCodec) in parked where i < Int(ctx.pointee.nb_streams) {
+            guard let codecpar = ctx.pointee.streams[i]?.pointee.codecpar else { continue }
+            codecpar.pointee.codec_type = type
+            if placeholderCodec { codecpar.pointee.codec_id = AV_CODEC_ID_NONE }
         }
     }
 
@@ -1228,6 +1356,21 @@ public final class Demuxer: @unchecked Sendable {
         return ctx.pointee.bit_rate
     }
 
+    /// [MovieClaw P37] 平均码率：容器声明了就用它，没声明（原盘 / 光盘镜像的 MPEG-TS 时长是 NOPTS、bit_rate 为 0）
+    /// 按片源总字节 × 8 ÷ 时长估。宿主拿它填 HLS 的 BANDWIDTH：原来这时兜底 25 Mbit/s、峰值声明 50 Mbit/s，
+    /// UHD 原盘一段 2 秒 12～15 MB（约 60 Mbit/s）超出声明，真机 AVPlayer 报 -12318 后只放声音不出画面（《黑豹2》续播 20 秒无画）
+    func estimatedBitRate(durationSeconds: Double) -> Int64 {
+        let declared = bitRate
+        if declared > 0 { return declared }
+        let size: Int64? = {
+            accessLock.lock()
+            defer { accessLock.unlock() }
+            return avioProvider?.resolvedByteSize
+        }()
+        guard let size, size > 0, durationSeconds > 0 else { return 0 }
+        return Int64(Double(size) * 8 / durationSeconds)
+    }
+
     /// AVFormatContext.start_time in AV_TIME_BASE units. Non-zero on re-muxed
     /// MKV/TS; subtract from packet PTS for file-relative playback time.
     var formatStartTime: Int64 {
@@ -1256,7 +1399,34 @@ public final class Demuxer: @unchecked Sendable {
     /// GOTCHA: av_find_best_stream skips streams with no channels/sample_rate (live MPEG-TS
     /// probe may leave them that way). Use `firstAudioStreamIndexByType` as fallback.
     var audioStreamIndex: Int32 {
-        answeredFromStreams(\.audioStreamIndex) { Self.bestStreamIndex($0, AVMEDIA_TYPE_AUDIO) }
+        answeredFromStreams(\.audioStreamIndex) { firstLanguageAudioIndex($0, best: Self.bestStreamIndex($0, AVMEDIA_TYPE_AUDIO)) }
+    }
+
+    /// [MovieClaw P10] 没有一条音轨标了默认（蓝光 / DVD / TS 都不标）时，av_find_best_stream 按帧数、码率挑，
+    /// 常常挑到配音轨：真机《怦然心动》蓝光镜像起播放的是西班牙语 AC-3，第一条是英语 DTS。光盘按作者排定的
+    /// 顺序列音轨，第一条就是正片原声，所以语言以第一条为准；同语言里仍信 FFmpeg 的挑选（TrueHD 与它内嵌的
+    /// AC-3 核心之间挑哪条，对用户几乎没区别）。服务端的默认音轨同样是「标了默认的，否则第一条」
+    /// （decide.py `_preferred_audio`），两边因此一致，App 起播后也就不必为换语言再重载一次
+    private func firstLanguageAudioIndex(_ ctx: UnsafeMutablePointer<AVFormatContext>, best: Int32) -> Int32 {
+        guard best >= 0 else { return best }
+        var audio: [(index: Int32, language: String?, codec: AVCodecID)] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[i], let par = stream.pointee.codecpar,
+                  par.pointee.codec_type == AVMEDIA_TYPE_AUDIO else { continue }
+            if (stream.pointee.disposition & AV_DISPOSITION_DEFAULT) != 0 { return best }
+            let language = Self.resolvedLanguage(declared: metadataValue(stream.pointee.metadata, key: "language"),
+                                                  streamID: stream.pointee.id, discLanguages: discStreamLanguages)
+            audio.append((Int32(i), Self.isUndeterminedLanguage(language) ? nil : language?.lowercased(), par.pointee.codec_id))
+        }
+        guard let first = audio.first?.language, let picked = audio.first(where: { $0.index == best }),
+              let pickedLanguage = picked.language, pickedLanguage != first else { return best }
+        let sameLanguage = audio.filter { $0.language == first }
+        // 同语言里优先 AVPlayer 能原样拷贝的编码（免本机转码），否则第一条
+        let copyable: Set<AVCodecID> = [AV_CODEC_ID_AC3, AV_CODEC_ID_EAC3, AV_CODEC_ID_AAC]
+        let chosen = sameLanguage.first(where: { copyable.contains($0.codec) }) ?? sameLanguage[0]
+        EngineLog.emit("[Demuxer] [MovieClaw P10] default audio: best stream #\(best) is \(pickedLanguage), "
+                       + "first track is \(first); using #\(chosen.index)", category: .demux)
+        return chosen.index
     }
 
     /// First audio stream by codec_type regardless of codecpar completeness.
@@ -1355,7 +1525,7 @@ public final class Demuxer: @unchecked Sendable {
         guard let ctx = formatContext else { return TrackSnapshot() }
         return TrackSnapshot(
             videoStreamIndex: Self.bestStreamIndex(ctx, AVMEDIA_TYPE_VIDEO),
-            audioStreamIndex: Self.bestStreamIndex(ctx, AVMEDIA_TYPE_AUDIO),
+            audioStreamIndex: firstLanguageAudioIndex(ctx, best: Self.bestStreamIndex(ctx, AVMEDIA_TYPE_AUDIO)),
             firstAudioStreamIndexByType: Self.firstAudioStreamIndexByType(ctx),
             audioTracks: trackInfos(in: ctx, ofType: AVMEDIA_TYPE_AUDIO),
             subtitleTracks: trackInfos(in: ctx, ofType: AVMEDIA_TYPE_SUBTITLE),
@@ -1769,7 +1939,11 @@ public final class Demuxer: @unchecked Sendable {
         for i in 0..<Int32(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[Int(i)] else { continue }
             // AVDISCARD_DEFAULT = 0 (= passthrough), AVDISCARD_NONKEY = 32, AVDISCARD_ALL = 48.
-            if keep.contains(i) {
+            if keep.contains(i) || (i == dvEnhancementStream && keep.contains(dvBaseLayerStream)) {
+                // [MovieClaw P9] 增强层要读：它的 RPU 挂到基础层上
+                stream.pointee.discard = AVDISCARD_DEFAULT
+            } else if dvdCellFold, stream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_DVD_NAV {
+                // [MovieClaw P13] DVD 导航包要读：cell 的时间戳基准从它算，读完即丢、不往下游送
                 stream.pointee.discard = AVDISCARD_DEFAULT
             } else if i == pacing {
                 stream.pointee.discard = AVDISCARD_NONKEY
@@ -1955,7 +2129,22 @@ public final class Demuxer: @unchecked Sendable {
     /// Caller holds `accessLock`.
     private func readPacketLocked() throws -> UnsafeMutablePointer<AVPacket>? {
         while true {
-            guard let read = try readDemuxedPacketLocked() else { return nil }
+            if !dvReady.isEmpty { return dvReady.removeFirst() }  // [MovieClaw P9]
+            guard let read = try readDemuxedPacketLocked() else {
+                // [MovieClaw P9] 读到尾：还在等 RPU 的基础层包原样放行
+                if !dvHeldBase.isEmpty {
+                    dvReady.append(contentsOf: dvHeldBase)
+                    dvHeldBase.removeAll()
+                    continue
+                }
+                return nil
+            }
+            if dvEnhancementStream >= 0, !dvMergeDualLayer(read) { continue }  // [MovieClaw P9]
+            if dvdCellFold, adoptDVDNav(read) {  // [MovieClaw P13]
+                var owned: UnsafeMutablePointer<AVPacket>? = read
+                trackedPacketFree(&owned)
+                continue
+            }
             var packet: UnsafeMutablePointer<AVPacket>? = read
             let index = read.pointee.stream_index
             guard subpictureAssemblers[index] != nil else { return read }
@@ -1996,6 +2185,7 @@ public final class Demuxer: @unchecked Sendable {
     /// #651: drop half-joined subpicture units along with libavformat's own parser state.
     private func resetSubpictureAssembly() {
         for key in subpictureAssemblers.keys { subpictureAssemblers[key]?.reset() }
+        dvResetDualLayer()  // [MovieClaw P9] 定位后挂起的包与暂存的 RPU 都作废
     }
 
     /// An out-of-range source timestamp was logged once for this demuxer. Guarded by `accessLock`.
@@ -2151,6 +2341,20 @@ public final class Demuxer: @unchecked Sendable {
         // seekable by design, so live callers keep their own rules.
         guard isSourceSeekable else { return false }
         dropPeekedPacketsLocked()
+        // [MovieClaw P7] 蓝光有 CLPI：按折叠后的时间找剪辑、查 EP map 得到关键帧的字节偏移，按字节一次到位。
+        // 时间二分在各剪辑时间戳互相重叠时会落到别的剪辑里，经 HTTP 读机械盘时每一步还是一次请求加一次寻道
+        if let table = discSeekTable,
+           let hit = table.keyframe(forSourceSeconds: seconds, base0Sec: clipBase0Sec),
+           avformat_seek_file(ctx, -1, hit.offset, hit.offset, hit.offset, AVSEEK_FLAG_BYTE) >= 0 {
+            EngineLog.emit("[Demuxer] [MovieClaw P7] EP map seek: source=\(String(format: "%.3f", seconds))s → clip \(hit.clip) keyframe raw=\(String(format: "%.3f", hit.keyframeSec))s byte=\(hit.offset)", category: .demux)
+            avformat_flush(ctx)
+            resetSubpictureAssembly()
+            lastReadClipIdx = -1  // AE#105：落在剪辑中间，别把它当成顺序跨入
+            return true
+        }
+        // [MovieClaw P13] DVD 有时间表：标题时间 → VOBU 字节偏移。cell 之间 PTS 归零时按时间二分找不到落点
+        if dvdSeekByTimeMap(ctx, sourceSeconds: seconds) { return true }
+        assistIndexlessMatroskaSeek(ctx, targetSeconds: seconds)  // [MovieClaw P18]
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
         if ret < 0 {
             #if DEBUG
@@ -2189,6 +2393,19 @@ public final class Demuxer: @unchecked Sendable {
         }
         guard isSourceSeekable else { return false }  // audit HLS-103, see `seek(to:)`
         dropPeekedPacketsLocked()
+        // [MovieClaw P13] 同上：DVD 按时间表定位（时间戳是折叠后的源时间轴）
+        if dvdTimeMap != nil, let stream = ctx.pointee.streams[Int(streamIndex)],
+           stream.pointee.time_base.num > 0, stream.pointee.time_base.den > 0,
+           dvdSeekByTimeMap(ctx, sourceSeconds: Double(timestamp) * Double(stream.pointee.time_base.num)
+                                / Double(stream.pointee.time_base.den)) {
+            return true
+        }
+        // [MovieClaw P18] 没有 Cues 的 MKV：先按字节探一个目标前的 Cluster 登记成索引项
+        if indexlessMatroska, let stream = ctx.pointee.streams[Int(streamIndex)],
+           stream.pointee.time_base.num > 0, stream.pointee.time_base.den > 0 {
+            assistIndexlessMatroskaSeek(ctx, targetSeconds: Double(timestamp) * Double(stream.pointee.time_base.num)
+                                            / Double(stream.pointee.time_base.den))
+        }
         let ret = avformat_seek_file(
             ctx,
             streamIndex,
@@ -2333,6 +2550,12 @@ public final class Demuxer: @unchecked Sendable {
         // seek on a remote ISO sat wedged ~230 s and every later re-arm queued behind it.
         avioProvider?.beginReadDeadline(secondsFromNow: timeout)
         defer { avioProvider?.endReadDeadline() }
+        // [MovieClaw P7 / P13] 光盘有定位表就按字节一次到位（同 `seek(to:)`）：软件通路（VC-1 原盘、DVD 的 MPEG-2）
+        // 与字幕旁路都走这里，原来绕过了定位表、在 PTS 归零或互相重叠的剪辑里按时间二分
+        if discTableSeek(ctx, sourceSeconds: seconds) {
+            return !(avioProvider?.readDeadlineFired ?? false) && probeControl?.isStopped != true
+        }
+        assistIndexlessMatroskaSeek(ctx, targetSeconds: seconds)  // [MovieClaw P18]
         let ret = avformat_seek_file(ctx, anchor, Int64.min, timestamp, Int64.max, 0)
         avformat_flush(ctx)
         resetSubpictureAssembly()  // #651: libavformat just dropped the parsers this stands in for
@@ -2744,5 +2967,373 @@ private final class DemuxInterrupt: @unchecked Sendable {
             return true
         }
         return false
+    }
+}
+
+// MARK: - [MovieClaw P9] UHD 原盘双 PID 杜比视界（仓库 docs/design/player-engine.md）
+//
+// UHD 蓝光的杜比视界是 Profile 7：基础层（HDR10）在 PID 0x1011，增强层与 RPU 在单独的 PID 0x1015。
+// 引擎只看选中的基础层，于是按 HDR10 播放；增强层还被「只保留选中流」一并丢掉。这里在解复用层把两路配对：
+// 基础层补上 P7 记录（bl_present_flag=1），增强层每个访问单元的 RPU 按 PTS 追加到同一时间戳的基础层包尾
+// （Annex-B），下游现成的 P7 → 8.1 转换（只取 RPU、丢弃增强层）原样接手。增强层视频本身不送下游（FEL 的
+// 增强信息在 Apple 平台上本来也用不上）。
+//
+// 配对依据：
+// - 节目映射表里带 DOVI 描述符（0xB0）、bl_present_flag=0 的 HEVC 流就是增强层，记录照抄；
+// - 实测 UHD 原盘（《疾速追杀4》）的节目映射表根本没有 DOVI 描述符，两路都只有 HDMV 注册描述符，杜比视界
+//   只记在盘的 CLPI/MPLS 里。蓝光规格把 PID 0x1015 固定分给 HDR 增强层，所以 mpegts 里 PID 0x1011 与
+//   0x1015 两路 HEVC 并存就按双层杜比视界配对，P7 记录按基础层的分辨率与帧率合成（兼容 ID 6 = HDR10 基础层）。
+extension Demuxer {
+    /// 基础层包挂起的上限：超过就原样放行最早的那个（它的 RPU 没来，宁可按 HDR10 放这一帧也不能卡住）
+    fileprivate static let dvHoldLimit = 16
+    /// 蓝光规格的 PID 分配：主视频（基础层）与 HDR 增强层
+    fileprivate static let bdBaseLayerPID: Int32 = 0x1011
+    fileprivate static let bdEnhancementLayerPID: Int32 = 0x1015
+
+    /// 探测完成后找增强层与基础层这一对，给基础层写上 P7 记录
+    fileprivate func pairDolbyVisionDualPID(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        dvBaseLayerStream = -1
+        dvEnhancementStream = -1
+        dvResetDualLayer()
+        guard let iformat = ctx.pointee.iformat, let name = iformat.pointee.name,
+              String(cString: name).contains("mpegts") else { return }
+        struct Candidate { let index: Int32; let pid: Int32; let record: AVDOVIDecoderConfigurationRecord? }
+        var hevc: [Candidate] = []
+        for i in 0..<Int32(ctx.pointee.nb_streams) {
+            guard let stream = ctx.pointee.streams[Int(i)], let par = stream.pointee.codecpar,
+                  par.pointee.codec_type == AVMEDIA_TYPE_VIDEO, par.pointee.codec_id == AV_CODEC_ID_HEVC else { continue }
+            var record: AVDOVIDecoderConfigurationRecord?
+            if let item = av_packet_side_data_get(par.pointee.coded_side_data, par.pointee.nb_coded_side_data,
+                                                  AV_PKT_DATA_DOVI_CONF),
+               let data = item.pointee.data,
+               item.pointee.size >= MemoryLayout<AVDOVIDecoderConfigurationRecord>.size {
+                record = data.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
+            }
+            hevc.append(Candidate(index: i, pid: stream.pointee.id, record: record))
+        }
+        let enhancement = hevc.first { $0.record?.dv_profile == 7 && $0.record?.bl_present_flag == 0 }
+            ?? hevc.first { $0.record == nil && $0.pid == Self.bdEnhancementLayerPID }
+        guard let enhancement else { return }
+        let bare = hevc.filter { $0.record == nil && $0.index != enhancement.index }
+        guard let base = bare.first(where: { $0.pid == Self.bdBaseLayerPID }) ?? bare.first,
+              let baseStream = ctx.pointee.streams[Int(base.index)],
+              let basePar = baseStream.pointee.codecpar else { return }
+        let record: AVDOVIDecoderConfigurationRecord
+        if var declared = enhancement.record {
+            declared.bl_present_flag = 1
+            record = declared
+        } else {
+            var synthesized = AVDOVIDecoderConfigurationRecord()
+            synthesized.dv_version_major = 1
+            synthesized.dv_version_minor = 0
+            synthesized.dv_profile = 7
+            synthesized.dv_level = Self.dolbyVisionLevel(width: basePar.pointee.width, height: basePar.pointee.height,
+                                                         fps: av_q2d(baseStream.pointee.avg_frame_rate))
+            synthesized.rpu_present_flag = 1
+            synthesized.el_present_flag = 1
+            synthesized.bl_present_flag = 1
+            synthesized.dv_bl_signal_compatibility_id = 6
+            record = synthesized
+        }
+        let size = MemoryLayout<AVDOVIDecoderConfigurationRecord>.size
+        guard let item = av_packet_side_data_new(&basePar.pointee.coded_side_data, &basePar.pointee.nb_coded_side_data,
+                                                 AV_PKT_DATA_DOVI_CONF, size, 0),
+              let raw = item.pointee.data else { return }
+        memset(raw, 0, size)
+        raw.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee = record }
+        dvBaseLayerStream = base.index
+        dvEnhancementStream = enhancement.index
+        EngineLog.emit("[Demuxer] [MovieClaw P9] dual-PID Dolby Vision: base=#\(base.index) (pid 0x\(String(base.pid, radix: 16))) "
+                       + "enhancement=#\(enhancement.index) (pid 0x\(String(enhancement.pid, radix: 16))) "
+                       + "record=\(enhancement.record == nil ? "synthesized" : "declared") profile=7 level=\(record.dv_level) "
+                       + "compat=\(record.dv_bl_signal_compatibility_id); RPUs will ride on the base layer", category: .demux)
+    }
+
+    /// 杜比视界级别：按每秒像素数与画面宽度，取 Dolby 级别表里第一个装得下的（只用于编码串 dvh1.08.LL）
+    fileprivate static func dolbyVisionLevel(width: Int32, height: Int32, fps: Double) -> UInt8 {
+        let rate = fps.isFinite && fps > 0 ? fps : 24
+        let pixelsPerSecond = Double(width) * Double(height) * rate
+        let table: [(level: UInt8, maxPixelsPerSecond: Double, maxWidth: Int32)] = [
+            (1, 22_118_400, 1280), (2, 27_648_000, 1280), (3, 49_766_400, 1920), (4, 62_208_000, 2560),
+            (5, 124_416_000, 3840), (6, 199_065_600, 3840), (7, 248_832_000, 3840), (8, 398_131_200, 3840),
+            (9, 497_664_000, 3840), (10, 995_328_000, 3840), (11, 995_328_000, 7680), (12, 1_990_656_000, 7680),
+            (13, 3_981_312_000, 7680),
+        ]
+        return table.first { pixelsPerSecond <= $0.maxPixelsPerSecond * 1.001 && width <= $0.maxWidth }?.level ?? 6
+    }
+
+    /// 处理一个读到的包：返回 true = 照常交出；false = 已吸收（增强层）或挂起（等 RPU 的基础层）
+    fileprivate func dvMergeDualLayer(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
+        let index = packet.pointee.stream_index
+        if index == dvEnhancementStream {
+            if packet.pointee.pts != Int64.min, let rpu = Self.extractRPU(packet) {
+                dvPendingRPU[packet.pointee.pts] = rpu
+                if dvPendingRPU.count > 64, let oldest = dvPendingRPU.keys.min() { dvPendingRPU.removeValue(forKey: oldest) }
+            }
+            var owned: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&owned)
+            dvReleaseHeld()
+            return false
+        }
+        guard index == dvBaseLayerStream else { return true }
+        if dvHeldBase.isEmpty, dvAttachRPU(to: packet) { return true }
+        dvHeldBase.append(packet)
+        dvReleaseHeld()
+        return false
+    }
+
+    /// 从队首依次放行：挂上了 RPU 的、或挂起太多只能原样放行的
+    fileprivate func dvReleaseHeld() {
+        while let front = dvHeldBase.first {
+            if dvAttachRPU(to: front) || dvHeldBase.count > Self.dvHoldLimit {
+                dvReady.append(dvHeldBase.removeFirst())
+            } else {
+                break
+            }
+        }
+    }
+
+    /// 同一 PTS 的 RPU 已到：追加到包尾（00 00 00 01 + RPU NAL），返回 true
+    fileprivate func dvAttachRPU(to packet: UnsafeMutablePointer<AVPacket>) -> Bool {
+        let pts = packet.pointee.pts
+        guard pts != Int64.min, let rpu = dvPendingRPU.removeValue(forKey: pts) else {
+            if dvHeldBase.count > Self.dvHoldLimit { dvStats.missed += 1 }
+            return false
+        }
+        let oldSize = Int(packet.pointee.size)
+        guard av_grow_packet(packet, Int32(4 + rpu.count)) >= 0, let data = packet.pointee.data else { return false }
+        let tail = data.advanced(by: oldSize)
+        tail[0] = 0; tail[1] = 0; tail[2] = 0; tail[3] = 1
+        rpu.withUnsafeBufferPointer { tail.advanced(by: 4).update(from: $0.baseAddress!, count: rpu.count) }
+        dvStats.attached += 1
+        if dvStats.attached == 1 || dvStats.attached % 2000 == 0 {
+            EngineLog.emit("[Demuxer] [MovieClaw P9] RPU attached to base layer: \(dvStats.attached) (missed \(dvStats.missed))", category: .demux)
+        }
+        return true
+    }
+
+    /// 增强层访问单元（Annex-B）里的 RPU NAL（类型 62），含 2 字节 NAL 头、去掉尾随的零字节
+    fileprivate static func extractRPU(_ packet: UnsafeMutablePointer<AVPacket>) -> [UInt8]? {
+        guard let data = packet.pointee.data, packet.pointee.size > 5 else { return nil }
+        let bytes = UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))
+        var starts: [Int] = []  // 每个 NAL 头字节的下标
+        var i = 0
+        while i + 3 <= bytes.count {
+            if bytes[i] == 0, bytes[i + 1] == 0, bytes[i + 2] == 1 {
+                starts.append(i + 3)
+                i += 3
+            } else {
+                i += 1
+            }
+        }
+        for (k, start) in starts.enumerated() where start < bytes.count {
+            guard (bytes[start] >> 1) & 0x3F == 62 else { continue }
+            var end = k + 1 < starts.count ? starts[k + 1] - 3 : bytes.count
+            while end > start, bytes[end - 1] == 0 { end -= 1 }
+            guard end - start > 2 else { return nil }
+            return Array(bytes[start..<end])
+        }
+        return nil
+    }
+
+    /// 定位后挂起的包与暂存的 RPU 都作废（包归还给跟踪分配器）
+    fileprivate func dvResetDualLayer() {
+        for packet in dvHeldBase + dvReady {
+            var owned: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&owned)
+        }
+        dvHeldBase.removeAll()
+        dvReady.removeAll()
+        dvPendingRPU.removeAll()
+    }
+}
+
+
+// MARK: - [MovieClaw P13] DVD 按 cell 折叠时间轴、按时间表定位（仓库 docs/design/disc-direct-play.md）
+extension Demuxer {
+    /// 导航包（MPEG-PS 私有流 2 里的 PCI）：记下它所在 cell 的时间戳基准，返回 true 表示这是导航包、已吸收。
+    /// PCI 里 VOBU 起始 PTS（90 kHz）减去 cell 内已播时间（C_ELTM）就是这个 cell 开头的原始时间戳，
+    /// 折叠偏移 = 基准 − cell 0 的基准 − 标题时间轴上这个 cell 之前的总时长。导航包在每个 VOBU 的最前面，
+    /// 顺序跨入新 cell、跳转落在 cell 中间，都是先读到它、再读到这个 cell 的音视频包，偏移总赶在前面
+    fileprivate func adoptDVDNav(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
+        guard let ctx = formatContext,
+              let stream = ctx.pointee.streams[Int(packet.pointee.stream_index)],
+              stream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_DVD_NAV else { return false }
+        // libavformat 按子流拆成两种包：PCI（首字节 0x00，980 字节）与 DSI（0x01），只用 PCI
+        guard let data = packet.pointee.data, packet.pointee.size >= 0x1D, data[0] == 0x00 else { return true }
+        let startPTS = (UInt32(data[0x0D]) << 24) | (UInt32(data[0x0E]) << 16) | (UInt32(data[0x0F]) << 8) | UInt32(data[0x10])
+        func bcd(_ b: UInt8) -> Double { Double(Int(b >> 4) * 10 + Int(b & 0x0F)) }
+        let frameByte = data[0x1C]
+        let fps: Double = (frameByte >> 6) == 1 ? 25 : ((frameByte >> 6) == 3 ? 30000.0 / 1001.0 : 0)
+        let elapsed = bcd(data[0x19]) * 3600 + bcd(data[0x1A]) * 60 + bcd(data[0x1B])
+            + (fps > 0 ? bcd(frameByte & 0x3F) / fps : 0)
+        let cellBase = Double(startPTS) / 90000 - elapsed
+        let idx = ClipSpan.index(forPos: packet.pointee.pos, in: clipTimeline, fallback: lastClipIndex)
+        if idx == 0 {
+            if clipBase0Sec.isNaN { clipBase0Sec = cellBase }
+            return true
+        }
+        guard clipBase0Sec.isFinite, idx < clipResolvedShiftSec.count else { return true }
+        let shift = ClipFold.offsetSeconds(observedBaseSec: cellBase, base0Sec: clipBase0Sec,
+                                           cumulativeBeforeSec: clipTimeline[idx].cumulativeBeforeSec)
+        if !clipResolvedShiftSec[idx].isFinite || abs(clipResolvedShiftSec[idx] - shift) > 0.05 {
+            clipResolvedShiftSec[idx] = shift
+            EngineLog.emit("[Demuxer] [MovieClaw P13] DVD cell \(idx): base=\(String(format: "%.3f", cellBase))s "
+                           + "cumBefore=\(String(format: "%.1f", clipTimeline[idx].cumulativeBeforeSec))s → shift \(String(format: "%.3f", shift))s",
+                           category: .demux)
+        }
+        return true
+    }
+
+    /// 光盘的定位表（蓝光 CLPI 的 EP map、DVD 的时间表）按字节一次到位；都没有、或按字节定位失败时返回 false。调用方持有 accessLock
+    /// [MovieClaw P18] 读文件头判断 MKV 有没有可用的 Cues（`MatroskaCuesProbe.headInfo`）。只在可随机读、知道总长的
+    /// matroska 源上做；文件头读取器本来就留着，不多发请求。读完把读位置放回原处，libavformat 接着读不受影响。
+    private func detectIndexlessMatroska(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        indexlessMatroska = false
+        guard let name = ctx.pointee.iformat?.pointee.name, String(cString: name).hasPrefix("matroska"),
+              timeSeekableReader == nil, !isDiscSource,
+              let pb = ctx.pointee.pb, pb.pointee.seekable != 0,
+              let size = avioProvider?.resolvedByteSize, size > 0
+        else { return }
+        let saved = avio_seek(pb, 0, SEEK_CUR)
+        guard saved >= 0 else { return }
+        defer { avio_seek(pb, saved, SEEK_SET) }
+        guard avio_seek(pb, 0, SEEK_SET) >= 0 else { return }
+        var head = [UInt8](repeating: 0, count: 64 * 1024)
+        let got = head.withUnsafeMutableBufferPointer { avio_read(pb, $0.baseAddress, Int32($0.count)) }
+        guard got > 0 else { return }
+        let info = MatroskaCuesProbe.headInfo(Array(head.prefix(Int(got))), fileSize: size)
+        matroskaTimestampScale = info.timestampScale
+        switch info.cues {
+        case .missing, .pastEndOfFile:
+            indexlessMatroska = true
+            EngineLog.emit("[Demuxer] [MovieClaw P18] MKV has no usable Cues (\(info.cues)); seeks will be assisted by cluster probes", category: .demux)
+        case .present, .unknown:
+            break
+        }
+    }
+
+    /// [MovieClaw P18] 没有 Cues 的 MKV 在按时间定位前调用：按字节比例估一个位置、往后找最近的 Cluster 读出时间码，
+    /// 至多校正两次，得到目标之前最近的一个 Cluster；再从它按平均码率估到目标之后半秒处探一次，得到目标之后最近的
+    /// 一个。两个（连同途中探到的）都登记成视频流的索引项，libavformat 的两种定位于是都有落脚点：反向（`seek(to:)`、
+    /// `seekBounded`）落在目标前最近的一项，正向（生产端「不早于目标」的 `seek(to:streamIndex:)`）落在目标后最近的
+    /// 一项。只登记目标前那一个时，正向定位会跳到索引里下一个已知项——真机往回跳到 300 秒落在了续播时读过的 885 秒；
+    /// 按 Cluster 长度逐个往后跳又太贵——《饥饿站台》的 Cluster 约 0.3 秒一个，跳 13 秒读了 50 MB、定位花 2 秒。
+    /// 不登记则 matroska_read_seek 只能从上一个已知位置逐个 Cluster 线性读过去（续播到 900 秒约 1.8 GB）。
+    /// 落点前后都已经读过（播放时 libavformat 边读边登记关键帧）就不再探。
+    private func assistIndexlessMatroskaSeek(_ ctx: UnsafeMutablePointer<AVFormatContext>, targetSeconds: Double) {
+        guard indexlessMatroska, targetSeconds > 0, let pb = ctx.pointee.pb,
+              let size = avioProvider?.resolvedByteSize, size > 0, ctx.pointee.duration > 0 else { return }
+        let videoIndex = av_find_best_stream(ctx, AVMEDIA_TYPE_VIDEO, -1, -1, nil, 0)
+        guard videoIndex >= 0, let stream = ctx.pointee.streams[Int(videoIndex)] else { return }
+        let tb = stream.pointee.time_base
+        guard tb.num > 0, tb.den > 0 else { return }
+        let tbSeconds = Double(tb.num) / Double(tb.den)
+        let targetTs = Int64(targetSeconds / tbSeconds)
+        let knownBefore = av_index_search_timestamp(stream, targetTs, AVSEEK_FLAG_BACKWARD)
+        let knownAfter = av_index_search_timestamp(stream, targetTs, 0)
+        if knownBefore >= 0, knownAfter >= 0,
+           let low = avformat_index_get_entry(stream, knownBefore), let high = avformat_index_get_entry(stream, knownAfter),
+           Double(targetTs - low.pointee.timestamp) * tbSeconds < 20,
+           Double(high.pointee.timestamp - targetTs) * tbSeconds < 20 {
+            return
+        }
+        let duration = Double(ctx.pointee.duration) / Double(AV_TIME_BASE)
+        let scale = Double(matroskaTimestampScale) / 1e9
+        let aim = max(0, targetSeconds - 3)  // 宁早勿晚：按字节估的位置常有码率误差
+        var estimate = min(size - 1, Int64(Double(size) * min(1, aim / duration)))
+        var best: MatroskaClusterHit?
+        for _ in 0 ..< 3 {
+            guard let hit = probeMatroskaCluster(pb, from: estimate, size: size) else { break }
+            let seconds = Double(hit.timestamp) * scale
+            if seconds <= targetSeconds, best.map({ seconds > Double($0.timestamp) * scale }) ?? true { best = hit }
+            if seconds <= targetSeconds, seconds >= targetSeconds - 10 { break }
+            guard seconds > 1, hit.pos > 0 else { break }
+            // 按这一次落点校准的码率重估（同 `byteEstimateCorrection`）
+            let corrected = min(size - 1, max(0, Int64(Double(hit.pos) * aim / seconds)))
+            guard corrected != estimate else { break }
+            estimate = corrected
+        }
+        guard let first = best else { return }
+        func register(_ hit: MatroskaClusterHit) {
+            av_add_index_entry(stream, hit.pos, Int64(Double(hit.timestamp) * scale / tbSeconds), 0, 0, AVINDEX_KEYFRAME)
+        }
+        register(first)
+        // 目标之后最近的一个：按本地码率从目标前那个估到目标之后（多估 10%）往后找；还落在目标前就当作更近的「之前」、
+        // 用这两点的斜率更新码率再探。码率不能用「文件大小 ÷ 片长」：截断的文件片长照写全片（《饥饿站台》按它算每秒
+        // 2 MB，实际 3.6 MB，每次只跳到剩余距离的一半）
+        var before = first
+        var bytesPerSecond = Double(first.timestamp) * scale > 1
+            ? Double(first.pos) / (Double(first.timestamp) * scale) : Double(size) / duration
+        var after: MatroskaClusterHit?
+        for _ in 0 ..< 4 {
+            let gap = max(0.5, targetSeconds + 0.5 - Double(before.timestamp) * scale)
+            let from = min(size - 1, before.pos + Int64(gap * bytesPerSecond * 1.1))
+            guard let hit = probeMatroskaCluster(pb, from: from, size: size), hit.timestamp > before.timestamp else { break }
+            register(hit)
+            if Double(hit.timestamp) * scale >= targetSeconds { after = hit; break }
+            let span = Double(hit.timestamp - before.timestamp) * scale
+            if span >= 0.5 { bytesPerSecond = Double(hit.pos - before.pos) / span }
+            before = hit
+        }
+        let beforeText = String(format: "%.1fs", Double(before.timestamp) * scale)
+        let afterText = after.map { String(format: "%.1fs", Double($0.timestamp) * scale) } ?? "none"
+        EngineLog.emit("[Demuxer] [MovieClaw P18] cluster probe for \(String(format: "%.1f", targetSeconds))s → "
+                       + "before \(beforeText), after \(afterText) registered as index entries",
+                       category: .demux)
+    }
+
+    private struct MatroskaClusterHit {
+        let pos: Int64
+        let timestamp: UInt64
+    }
+
+    /// 从 `offset` 往后读（至多 8 MB）找第一个 Cluster。块与块之间留 32 字节重叠，免得 Cluster 头正好切在块边界上
+    private func probeMatroskaCluster(_ pb: UnsafeMutablePointer<AVIOContext>, from offset: Int64,
+                                      size: Int64) -> MatroskaClusterHit? {
+        let chunk = 512 * 1024
+        var start = offset
+        var carry: [UInt8] = []
+        while start - offset < 8 * 1024 * 1024, start < size {
+            guard avio_seek(pb, start, SEEK_SET) >= 0 else { return nil }
+            var buffer = [UInt8](repeating: 0, count: chunk)
+            let got = buffer.withUnsafeMutableBufferPointer { avio_read(pb, $0.baseAddress, Int32(chunk)) }
+            guard got > 0 else { return nil }
+            let bytes = carry + buffer.prefix(Int(got))
+            if let hit = MatroskaCuesProbe.firstCluster(in: bytes) {
+                return MatroskaClusterHit(pos: start - Int64(carry.count) + Int64(hit.index), timestamp: hit.timestamp)
+            }
+            carry = Array(bytes.suffix(32))
+            start += Int64(got)
+        }
+        return nil
+    }
+
+    fileprivate func discTableSeek(_ ctx: UnsafeMutablePointer<AVFormatContext>, sourceSeconds seconds: Double) -> Bool {
+        if let table = discSeekTable,
+           let hit = table.keyframe(forSourceSeconds: seconds, base0Sec: clipBase0Sec),
+           avformat_seek_file(ctx, -1, hit.offset, hit.offset, hit.offset, AVSEEK_FLAG_BYTE) >= 0 {
+            EngineLog.emit("[Demuxer] [MovieClaw P7] EP map seek: source=\(String(format: "%.3f", seconds))s → clip \(hit.clip) keyframe raw=\(String(format: "%.3f", hit.keyframeSec))s byte=\(hit.offset)", category: .demux)
+            avformat_flush(ctx)
+            resetSubpictureAssembly()
+            lastReadClipIdx = -1
+            return true
+        }
+        return dvdSeekByTimeMap(ctx, sourceSeconds: seconds)
+    }
+
+    /// 按时间表定位：源时间（cell 0 的时间戳基准 + 标题时间）→ 标题时间 → 不晚于它的 VOBU 的字节偏移，按字节一次到位。
+    /// 没有时间表、还不知道 cell 0 的基准、或按字节定位失败时返回 false（调用方退回原来的按时间定位）。调用方持有 accessLock
+    fileprivate func dvdSeekByTimeMap(_ ctx: UnsafeMutablePointer<AVFormatContext>, sourceSeconds seconds: Double) -> Bool {
+        guard let map = dvdTimeMap, clipBase0Sec.isFinite else { return false }
+        let titleSeconds = max(0, seconds - clipBase0Sec)
+        let offset = map.byteOffset(forTitleSeconds: titleSeconds)
+        guard avformat_seek_file(ctx, -1, offset, offset, offset, AVSEEK_FLAG_BYTE) >= 0 else { return false }
+        EngineLog.emit("[Demuxer] [MovieClaw P13] DVD time map seek: title=\(String(format: "%.3f", titleSeconds))s → byte \(offset)",
+                       category: .demux)
+        avformat_flush(ctx)
+        resetSubpictureAssembly()
+        lastReadClipIdx = -1  // 落在 cell 中间，偏移等导航包来算
+        return true
     }
 }

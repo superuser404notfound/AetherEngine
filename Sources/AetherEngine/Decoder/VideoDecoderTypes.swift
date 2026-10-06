@@ -110,33 +110,55 @@ enum ColorAttachments {
     /// at 720x480 and 720x576 as much as at 1080p and for MPEG-2 as much as H.264, and a lone BT.601
     /// matrix gets SMPTE-C primaries and the BT.709 curve.
     static func presented(_ d: ColorDescription) -> Tags {
-        let declaredPrimaries = primaries(d.primaries)
-        let declaredMatrix = matrix(d.matrix)
-        let bt709 = kCVImageBufferColorPrimaries_ITU_R_709_2
-        let bt601Matrix = kCVImageBufferYCbCrMatrix_ITU_R_601_4
-        let bt2020Matrix = kCVImageBufferYCbCrMatrix_ITU_R_2020
-        let bt2020Primaries = kCVImageBufferColorPrimaries_ITU_R_2020
-        let smpteC = kCVImageBufferColorPrimaries_SMPTE_C
-        let ebu = kCVImageBufferColorPrimaries_EBU_3213
-
-        let resolvedPrimaries: CFString = declaredPrimaries ?? {
-            switch declaredMatrix {
-            case bt601Matrix?:  smpteC
-            case bt2020Matrix?: bt2020Primaries
-            default:            bt709
-            }
-        }()
-        let resolvedMatrix: CFString = declaredMatrix ?? {
-            switch declaredPrimaries {
-            case smpteC?, ebu?:     bt601Matrix
-            case bt2020Primaries?:  bt2020Matrix
-            default:                kCVImageBufferYCbCrMatrix_ITU_R_709_2
-            }
-        }()
+        let filled = filled(d)
         return Tags(
-            primaries: resolvedPrimaries,
-            transfer: transfer(d.transfer) ?? kCVImageBufferTransferFunction_ITU_R_709_2,
-            matrix: resolvedMatrix)
+            primaries: primaries(filled.primaries) ?? kCVImageBufferColorPrimaries_ITU_R_709_2,
+            transfer: shownTransfer(transfer(d.transfer)),
+            matrix: matrix(filled.matrix) ?? kCVImageBufferYCbCrMatrix_ITU_R_709_2)
+    }
+
+    /// `presented`'s gap filling in FFmpeg's values, for the fMP4 `colr` box the loopback path writes.
+    /// A value CoreVideo has no name for counts as a gap, the same as unspecified.
+    static func filled(_ d: ColorDescription) -> ColorDescription {
+        let declaredPrimaries = primaries(d.primaries) != nil ? d.primaries : nil
+        let declaredMatrix = matrix(d.matrix) != nil ? d.matrix : nil
+        let resolvedPrimaries: AVColorPrimaries = declaredPrimaries ?? {
+            switch declaredMatrix {
+            case AVCOL_SPC_SMPTE170M?, AVCOL_SPC_BT470BG?:    AVCOL_PRI_SMPTE170M
+            case AVCOL_SPC_BT2020_NCL?, AVCOL_SPC_BT2020_CL?: AVCOL_PRI_BT2020
+            default:                                          AVCOL_PRI_BT709
+            }
+        }()
+        let resolvedMatrix: AVColorSpace = declaredMatrix ?? {
+            switch declaredPrimaries {
+            case AVCOL_PRI_SMPTE170M?, AVCOL_PRI_SMPTE240M?, AVCOL_PRI_BT470BG?: AVCOL_SPC_SMPTE170M
+            case AVCOL_PRI_BT2020?:                                              AVCOL_SPC_BT2020_NCL
+            default:                                                             AVCOL_SPC_BT709
+            }
+        }()
+        return ColorDescription(primaries: resolvedPrimaries, transfer: d.transfer,
+                                matrix: resolvedMatrix, range: d.range)
+    }
+
+    /// [MovieClaw P60] SDR goes to the screen as sRGB on Mac and iPhone: code values shown as they are,
+    /// the way Infuse, VLC and mpv without ICC show them. Tagged BT.709 (or untagged, which CoreVideo reads
+    /// as BT.709) the system applies its scene-referred Rec.709 conversion, ~1.961 gamma: measured on
+    /// 我不是大师 S01E17 against the decoded frame, midtones +8~10 code values brighter than Infuse.
+    /// Not tvOS: there the picture goes out as a Rec.709 signal and the TV owns the curve, so a BT.709
+    /// tag is already pass-through and an sRGB one would be converted into it.
+    #if os(macOS) || os(iOS)
+    static let presentsSDRAsSRGB = true
+    #else
+    static let presentsSDRAsSRGB = false
+    #endif
+
+    /// The transfer tag a buffer goes to the display layer with (P60): whatever would be shown with the
+    /// BT.709 curve, a missing tag included (CoreVideo reads that as BT.709), goes as sRGB instead.
+    static func shownTransfer(_ tag: CFString?) -> CFString {
+        let bt709 = kCVImageBufferTransferFunction_ITU_R_709_2
+        guard presentsSDRAsSRGB else { return tag ?? bt709 }
+        if let tag, tag != bt709 { return tag }
+        return kCVImageBufferTransferFunction_sRGB
     }
 
     /// The colour space CoreVideo manages a buffer with these tags in, i.e. the one playback shows the

@@ -25,12 +25,27 @@ enum SWClockAnchorPolicy {
     static func resolve(initialSeconds: Double,
                         firstSampleSeconds: Double,
                         toleranceSeconds: Double = SWClockAnchorPolicy.toleranceSeconds) -> Resolution {
+        // [MovieClaw P13] 只有首个样本「晚于」起播点才算中途加入。早于起播点是粗粒度定位落在了前面（DVD 时间表
+        // 16 秒一格、长 GOP 的关键帧），时钟仍锚在起播点、之前的帧跳过；原来一律按首个样本锚，《聪明的一休》
+        // 续播落在 12 秒前，画面要等时钟真的走到起播点才出，起播 8.9 秒
         guard firstSampleSeconds.isFinite,
-              abs(firstSampleSeconds - initialSeconds) > toleranceSeconds else {
+              firstSampleSeconds - initialSeconds > toleranceSeconds else {
             return Resolution(anchorSeconds: initialSeconds, sessionZeroSeconds: 0)
         }
         return Resolution(anchorSeconds: firstSampleSeconds,
                           sessionZeroSeconds: max(0, firstSampleSeconds - initialSeconds))
+    }
+
+    /// [MovieClaw P35] 点播片源在装载时就定下的 session zero：容器起点明显不为 0（超过容差）时取起点，否则 0。
+    ///
+    /// 软件通路原来只在首个样本「晚于」起播点时才得出 session zero（给直播中途加入用）。时间戳从几百秒起的
+    /// 点播片源（《戴珍珠耳环》VC-1 原盘 raw 从 600 秒起），从头播时首样本 600 对起播点 0 会触发、时间轴对；
+    /// 续播到 600 时首样本 600 对起播点 600 不触发，于是整条时间轴按 raw 发布：续播点差 600 秒，
+    /// 跳到 600 秒之前落在第一个包之前、时钟等不到画面，永远卡住（真机每批必现）。主力通路按 AE#270
+    /// 以容器起点为 0，这里对齐同一口径。容差内的小起点（DVD、B 帧 MP4）照旧按 raw，行为不变。
+    static func vodSessionZero(sourceOriginSeconds: Double, isLive: Bool) -> Double {
+        guard !isLive, sourceOriginSeconds.isFinite, sourceOriginSeconds > toleranceSeconds else { return 0 }
+        return sourceOriginSeconds
     }
 
     /// Converts a session-axis position into the source axis.

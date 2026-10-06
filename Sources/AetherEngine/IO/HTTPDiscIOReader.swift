@@ -31,6 +31,8 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
     private let totalSize: Int64
     /// Warmed bytes (#647), read before the network. Immutable, so a fork shares them without a copy.
     private let residentSpans: [ResidentSpan]
+    /// [MovieClaw P22] 片源字节缓存的键（宿主登记过这个地址才有）：换音轨重建、往回跳、字幕旁路读过的字节从本机拿
+    private let byteCacheKey: String?
 
     private let lock = NSLock()
     private var position: Int64 = 0
@@ -40,11 +42,21 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
     private var lastFetchEnd: Int64 = -1
     /// Current adaptive read-ahead window; grows on sequential refills, resets on a seek.
     private var currentChunkSize: Int
+    #if DEBUG
+    private var debugFetchCount = 0
+    #endif
+    /// [MovieClaw P15] 最近用过的小块（≤ 1 MB），按 LRU 留 8 块。开盘解析盘内结构时，目录 / 文件项与文件数据分在两处、
+    /// 每次只读一个扇区地来回跳，单缓冲每跳一次就整块重取：实测蓝光镜像《怦然心动》识别阶段 26 次请求里 20 次是这样来回重取的
+    private var recentBlocks: [(start: Int64, data: [UInt8])] = []
+    private static let recentBlockLimit = 8
+    private static let recentBlockMaxBytes = 1024 * 1024
     /// `cancelled` has its own lock: `read` holds `lock` across the (slow) fetch, and the fetch's
     /// retry loop must poll `cancelled` without re-entering the non-reentrant `lock`, and `cancel()`
     /// must be able to set it from another thread while a read is in flight.
     private let cancelLock = NSLock()
     private var cancelled = false
+    /// [MovieClaw P29] 后台预取的下一块（调用方持有 lock 时读写）。见 `startPrefetch`
+    private var prefetch: PendingFetch?
 
     /// Probes total size and range support with one (retried) `bytes=0-0` request, unless
     /// `prewarmed` has already stated both. Returns nil if the source is unreachable or answers `200`
@@ -120,6 +132,8 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
         self.session = session
         self.residentSpans = residentSpans.filter { !$0.isEmpty }
         self.totalSize = totalSize
+        self.byteCacheKey = SourceByteCache.shared.key(for: url)
+        if let byteCacheKey { SourceByteCache.shared.noteContentLength(key: byteCacheKey, length: totalSize) }
     }
 
     private static func makeSession(_ sessionConfiguration: URLSessionConfiguration?) -> URLSession {
@@ -199,7 +213,16 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
 
     func read(_ outBuffer: UnsafeMutablePointer<UInt8>?, size n: Int32) -> Int32 {
         guard let out = outBuffer, n > 0 else { return -1 }
+        #if DEBUG
+        let lockT0 = DispatchTime.now()
+        #endif
         lock.lock(); defer { lock.unlock() }
+        #if DEBUG
+        let lockWaitMs = Double(DispatchTime.now().uptimeNanoseconds - lockT0.uptimeNanoseconds) / 1e6
+        if lockWaitMs > 50 {
+            EngineLog.emit("[HTTPDiscIOReader] [MovieClaw 测速] read 等锁 \(Int(lockWaitMs))ms offset=\(position)", category: .demux)
+        }
+        #endif
         if position >= totalSize { return 0 }
 
         if let span = residentSpans.first(where: { $0.covers(position) }) {
@@ -215,6 +238,24 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
             return Int32(toCopy)
         }
 
+        if position < bufferStart || position >= bufferStart + Int64(buffer.count),
+           let hit = recentBlocks.firstIndex(where: { position >= $0.start && position < $0.start + Int64($0.data.count) }) {
+            // [MovieClaw P15] 刚用过的小块里就有：换成当前缓冲，不发请求（光盘内容不会变）
+            let block = recentBlocks.remove(at: hit)
+            stashCurrentBuffer()
+            bufferStart = block.start
+            buffer = block.data
+        }
+        if position < bufferStart || position >= bufferStart + Int64(buffer.count), let byteCacheKey {
+            // [MovieClaw P22] 本场已经下过的字节从本机拿（换音轨重建、往回跳、字幕旁路）
+            let cached = SourceByteCache.shared.read(key: byteCacheKey, offset: position, into: out,
+                                                     maxLen: min(Int(n), Int(totalSize - position)))
+            if cached > 0 {
+                position += Int64(cached)
+                lastFetchEnd = position
+                return Int32(cached)
+            }
+        }
         if position < bufferStart || position >= bufferStart + Int64(buffer.count) {
             currentChunkSize = Self.nextChunkSize(
                 position: position, lastFetchEnd: lastFetchEnd,
@@ -222,12 +263,47 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
             // Stop at the next warmed span: its bytes are already here.
             let limit = residentSpans.lazy.map(\.start).filter { $0 > self.position }.min() ?? totalSize
             let want = Int(min(Int64(currentChunkSize), limit - position))
-            guard want > 0, let data = fetchWithRetry(offset: position, length: want), !data.isEmpty else {
+            #if DEBUG
+            // [MovieClaw] 排查用：开盘阶段的前 64 次取数（识别光盘结构时的请求形态）
+            if debugFetchCount < 64 {
+                debugFetchCount += 1
+                EngineLog.emit("[HTTPDiscIOReader] fetch#\(debugFetchCount) offset=\(position) len=\(want)", category: .demux)
+            }
+            #endif
+            #if DEBUG
+            let fetchT0 = DispatchTime.now()
+            let sequential = position == lastFetchEnd
+            #endif
+            guard want > 0, let data = takePrefetch(offset: position) ?? fetchWithRetry(offset: position, length: want),
+                  !data.isEmpty else {
                 return -1
             }
+            #if DEBUG
+            // [MovieClaw 测速] 跳转后的首次取数与慢取数都记下耗时，定位缓冲外跳转慢在哪
+            let fetchMs = Double(DispatchTime.now().uptimeNanoseconds - fetchT0.uptimeNanoseconds) / 1e6
+            if debugFetchCount >= 64, !sequential || fetchMs > 300 {
+                EngineLog.emit("[HTTPDiscIOReader] [MovieClaw 测速] fetch offset=\(position) len=\(want) seq=\(sequential) 耗时 \(Int(fetchMs))ms", category: .demux)
+            }
+            #endif
+            if let byteCacheKey {   // [MovieClaw P22]
+                #if DEBUG
+                let writeT0 = DispatchTime.now()
+                #endif
+                SourceByteCache.shared.write(key: byteCacheKey, offset: position, data: data)
+                #if DEBUG
+                let writeMs = Double(DispatchTime.now().uptimeNanoseconds - writeT0.uptimeNanoseconds) / 1e6
+                if writeMs > 50 {
+                    EngineLog.emit("[HTTPDiscIOReader] [MovieClaw 测速] 写片源缓存 \(data.count / 1024)KB 耗时 \(Int(writeMs))ms", category: .demux)
+                }
+                #endif
+            }
+            stashCurrentBuffer()  // [MovieClaw P15]
             bufferStart = position
             buffer = [UInt8](data)
             lastFetchEnd = position + Int64(buffer.count)
+            if currentChunkSize >= maxChunkSize {   // [MovieClaw P29] 顺序读到满窗口：下一块先请求出去
+                startPrefetch(offset: lastFetchEnd)
+            }
         }
 
         let bufOffset = Int(position - bufferStart)
@@ -239,6 +315,14 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
         }
         position += Int64(toCopy)
         return Int32(toCopy)
+    }
+
+    /// [MovieClaw P15] 当前缓冲是小块时收进最近块（调用方持有 lock）；播放期的大块（按顺序读、窗口涨到几 MB）不留
+    private func stashCurrentBuffer() {
+        guard bufferStart >= 0, !buffer.isEmpty, buffer.count <= Self.recentBlockMaxBytes else { return }
+        recentBlocks.removeAll { $0.start == bufferStart }
+        recentBlocks.append((bufferStart, buffer))
+        if recentBlocks.count > Self.recentBlockLimit { recentBlocks.removeFirst() }
     }
 
     func seek(offset: Int64, whence: Int32) -> Int64 {
@@ -261,6 +345,73 @@ final class HTTPDiscIOReader: IOReader, @unchecked Sendable {
     func cancel() {
         cancelLock.lock(); cancelled = true; cancelLock.unlock()
         session.getAllTasks { $0.forEach { $0.cancel() } }
+    }
+
+    // MARK: - [MovieClaw P29] 单块预取
+
+    /// 一次在途的预取。`result` 在 `done.signal()` 之前写好，等到信号后才读，不另加锁
+    private final class PendingFetch: @unchecked Sendable {
+        let offset: Int64
+        let length: Int
+        let done = DispatchSemaphore(value: 0)
+        var result: RangeResponse?
+        var task: URLSessionDataTask?
+        init(offset: Int64, length: Int) { self.offset = offset; self.length = length }
+    }
+
+    /// [MovieClaw P29] 顺序读到满窗口后，趁解复用处理当前这块，把下一块先请求出去。
+    ///
+    /// 原来「取一块 → 处理完 → 再取下一块」完全串行：真机 UHD 原盘每 8 MB 一次请求约 170 ms（≈ 48 MB/s），
+    /// 其中约 40 ms 是请求往返与两次取数之间的处理时间，起播要攒的两个分片（~53 MB）、缓冲外跳转后的首个分片都卡在这上面。
+    /// 预取把这段空档与传输重叠起来。只预取一块（多占 8 MB 内存）；跳走了就在下次取数时撤掉。调用方持有 lock
+    private func startPrefetch(offset: Int64) {
+        prefetch?.task?.cancel()
+        prefetch = nil
+        guard offset < totalSize else { return }
+        let limit = residentSpans.lazy.map(\.start).filter { $0 > offset }.min() ?? totalSize
+        let length = Int(min(Int64(maxChunkSize), limit - offset))
+        guard length > 0 else { return }
+        cancelLock.lock(); let stop = cancelled; cancelLock.unlock()
+        if stop { return }
+        let pending = PendingFetch(offset: offset, length: length)
+        var req = URLRequest(url: url, timeoutInterval: requestTimeout)
+        req.httpMethod = "GET"
+        req.setValue(Self.rangeHeader(offset: offset, length: length), forHTTPHeaderField: "Range")
+        for (k, v) in extraHeaders { req.setValue(v, forHTTPHeaderField: k) }
+        let delegate = RangeFetchDelegate(offset: offset, length: length)
+        delegate.onCompletion = {
+            if let http = delegate.response {
+                pending.result = RangeResponse(status: http.statusCode,
+                                               contentRange: http.value(forHTTPHeaderField: "Content-Range"),
+                                               body: delegate.body, answer: delegate.answer)
+            }
+            pending.done.signal()
+        }
+        let task = session.dataTask(with: req)
+        task.delegate = delegate
+        pending.task = task
+        prefetch = pending
+        task.resume()
+    }
+
+    /// [MovieClaw P29] 取走落在 `offset` 的预取。不是这里的（跳走了）就撤掉；预取失败返回 nil，
+    /// 由调用方照常带重试地取，所以预取出错不会比没有预取更糟。调用方持有 lock
+    private func takePrefetch(offset: Int64) -> Data? {
+        guard let pending = prefetch else { return nil }
+        prefetch = nil
+        guard pending.offset == offset else {
+            pending.task?.cancel()
+            return nil
+        }
+        if pending.done.wait(timeout: .now() + requestTimeout + 5) == .timedOut {
+            pending.task?.cancel()
+            return nil
+        }
+        guard let r = pending.result, r.status == 206, !r.body.isEmpty,
+              let contentRange = r.contentRange, Self.parseContentRangeStart(contentRange) == offset
+        else { return nil }
+        Self.recordFetched(bytes: r.body.count)
+        return r.body.count > pending.length ? r.body.prefix(pending.length) : r.body
     }
 
     func makeIndependentReader() -> IOReader? {

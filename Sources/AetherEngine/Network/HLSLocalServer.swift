@@ -17,6 +17,10 @@ protocol HLSSegmentProvider: AnyObject {
     /// Default forwards to `mediaSegment(at:)` without ever signalling.
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data?
 
+    /// [MovieClaw P57] 同上，但分片正在写时可以返回边写边读的读取器，服务器边收边发（点播）。
+    /// 默认包一层 `mediaSegment(at:onSlow:)` 的完整字节
+    func mediaSegmentSource(at index: Int, onSlow: (@Sendable () -> Void)?) -> SegmentSource?
+
     /// Optional file URL for disk-backed segments (cache adopt path). Server streams file -> socket bypassing Foundation Data; sendfile(2) was tried but SIGSYS'd on tvOS sandbox.
     /// Must name a file that exists: the server stats and opens it afterwards, and a URL whose file
     /// has gone is answered with an error response rather than the bytes the bookkeeping promised.
@@ -27,6 +31,9 @@ protocol HLSSegmentProvider: AnyObject {
     /// The axis is a statement about bytes in AVPlayer's timeline, so a placement composed from a
     /// request needs to know whether that request was answered. Default ignores it.
     func didServeMediaSegment(index: Int, delivered: Bool)
+
+    /// [MovieClaw P57] 边写边送的分片又发出去一块（给只数请求的卡死看门狗当「还在取数」的证据）。默认忽略
+    func didDeliverProgressiveChunk(index: Int)
 
     var segmentCount: Int { get }
     func segmentDuration(at index: Int) -> Double
@@ -143,8 +150,12 @@ protocol HLSSegmentProvider: AnyObject {
 
 extension HLSSegmentProvider {
     func mediaSegment(at index: Int, onSlow: (@Sendable () -> Void)?) -> Data? { mediaSegment(at: index) }
+    func mediaSegmentSource(at index: Int, onSlow: (@Sendable () -> Void)?) -> SegmentSource? {
+        mediaSegment(at: index, onSlow: onSlow).map { .data($0) }
+    }
     func mediaSegmentURL(at index: Int) -> URL? { nil }
     func didServeMediaSegment(index: Int, delivered: Bool) {}
+    func didDeliverProgressiveChunk(index: Int) {}
     var staticMasterPlaylistBody: String? { nil }
     var firstVisibleSegmentIndex: Int { 0 }
     func segmentIsDiscontinuous(at index: Int) -> Bool { false }
@@ -1209,7 +1220,7 @@ final class HLSLocalServer: @unchecked Sendable {
                     // ~3.5 s time-to-first-byte watchdog logs -12889 per silent request and three
                     // strikes fail the item (failedToPlayToEndTime, terminal from the couch).
                     let early = EarlyHeaderState()
-                    let data = provider?.mediaSegment(at: index, onSlow: { [weak self] in
+                    let source = provider?.mediaSegmentSource(at: index, onSlow: { [weak self] in
                         guard let self, early.markSentOnce() else { return }
                         EngineLog.emit(
                             "[HLSLocalServer] seg\(index): slow serve, sending early chunked header",
@@ -1218,6 +1229,21 @@ final class HLSLocalServer: @unchecked Sendable {
                                           data: Self.chunkedResponseHeader(contentType: "video/mp4"),
                                           path: "\(normalizedPath) [early header]")
                     })
+                    // [MovieClaw P57] 分片正在写：先回分块响应头（慢时已提前回过就不再回），边读边按块发出去，
+                    // AVPlayer 收到一个片段就能用一个片段；生产者放弃这段时断开连接，AVPlayer 会重新请求
+                    if case .progressive(let reader) = source {
+                        if early.markSentOnce() {
+                            guard writeAll(fd: fd, data: Self.chunkedResponseHeader(contentType: "video/mp4"),
+                                           path: "\(normalizedPath) [progressive header]") else {
+                                return refused(false)
+                            }
+                        }
+                        return delivered(sendProgressiveBody(fd: fd, path: normalizedPath, reader: reader))
+                    }
+                    let data: Data? = {
+                        if case .data(let d) = source { return d }
+                        return nil
+                    }()
                     if early.wasSent {
                         guard let data, !data.isEmpty else {
                             // Headers are committed; abort so AVPlayer sees a truncated transfer
@@ -1296,6 +1322,37 @@ final class HLSLocalServer: @unchecked Sendable {
 
     /// Body for an early-header serve: the whole segment as one chunk. Four separate send()
     /// calls so mmap-backed segment Data is never copied into a Swift heap buffer.
+    /// [MovieClaw P57] 边写边读的分片按块发出去：每读到一批（通常就是封装器刚刷出的一个片段）发一块，
+    /// 封口读完发结束块。作废（生产者重启、出错）时不发结束块直接返回 false：连接关掉，AVPlayer 看到的是一次
+    /// 中断的传输、会重试这一段，而不是把残段当成完整分片收下
+    private func sendProgressiveBody(fd: Int32, path: String, reader: ProgressiveSegmentReader) -> Bool {
+        let provider = self.provider
+        var sent = 0
+        while true {
+            switch reader.next() {
+            case .bytes(let data):
+                guard writeAll(fd: fd, data: Self.chunkFrameHeader(size: data.count), path: "\(path) [chunk size]"),
+                      writeAll(fd: fd, data: data, path: path),
+                      writeAll(fd: fd, data: Self.chunkFrameTrailer, path: "\(path) [chunk trailer]") else {
+                    return false
+                }
+                sent += data.count
+                provider?.didDeliverProgressiveChunk(index: reader.index)
+            case .finished:
+                EngineLog.emit(
+                    "[HLSLocalServer] -> 200 \(path) bytes=\(sent) type=video/mp4 [MovieClaw P57 边写边送]",
+                    category: .hlsServer, level: .verbose)
+                return writeAll(fd: fd, data: Self.chunkedFinal, path: "\(path) [chunk final]")
+            case .abandoned:
+                EngineLog.emit(
+                    "[HLSLocalServer] \(path): [MovieClaw P57] 边写边送到 \(sent) 字节时这段被生产者放弃，"
+                    + "断开连接让 AVPlayer 重新请求",
+                    category: .hlsServer)
+                return false
+            }
+        }
+    }
+
     private func sendChunkedBody(fd: Int32, path: String, data: Data) -> Bool {
         EngineLog.emit(
             "[HLSLocalServer] -> 200 \(path) bytes=\(data.count) type=video/mp4 [chunked, early header]",
@@ -1962,6 +2019,13 @@ final class HLSLocalServer: @unchecked Sendable {
         } else {
             // EXT-X-PLAYLIST-TYPE:VOD lets AVPlayer prune fetched segments past the buffer-behind window; without it RSS grows linearly with segment count for the whole playback.
             lines.append("#EXT-X-PLAYLIST-TYPE:VOD")
+            // [MovieClaw P59] 媒体播放列表里也声明「每段独立」。只写在主播放列表里时 AVPlayer 不认：跳转后它先要目标前 5 段
+            // 自己找关键帧（模拟器实测：目标在第 58 段，先来要第 53 段），生产者只好从那里重启，把目标前 15～23 秒的内容整段
+            // 下完才到落点，慢线路上这就是几十秒。点播分片都在关键帧处切（`vodCutter` 只在关键帧开新段，#92），声明属实，
+            // 与主播放列表那一行是同一个事实
+            if AetherEngine.declaresIndependentMediaSegments {
+                lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
+            }
         }
         // Absolute custom-scheme URIs route sub-resources through AVAssetResourceLoader; relative URIs go through CFNetwork (aetherctl workflow).
         let initURI: (Int) -> String

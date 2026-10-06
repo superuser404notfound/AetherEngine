@@ -57,8 +57,57 @@ extension AetherEngine {
         subtitleOCRLastTickUptime = nil   // #271
     }
 
+    // MARK: - [MovieClaw P21] 文字识别只在系统画原生字幕时跑
+
+    /// 进画中画 / 隔空播放时：当前选中的是内封图形字幕、识别还没在跑，就现在启动，连同读到 270 秒之后的旁路预读。
+    /// 返回这次是否新启动（新启动的要冲一次系统缓存的空字幕窗口）
+    @discardableResult
+    func armNativeBitmapOCRIfNeeded(ordinal: Int) -> Bool {
+        guard ordinal < nativeSubtitleTrackTable.count else { return false }
+        let entry = nativeSubtitleTrackTable[ordinal]
+        guard entry.needsOCR, let stream = entry.sourceStreamIndex, subtitleOCRArmedOrdinal != ordinal else {
+            return false
+        }
+        startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(stream))
+        startSubtitleForwardPrefetcher()
+        return true
+    }
+
+    /// 画中画结束：识别与长预读都停（识别过的区域记着，下次进画中画不重识别）
+    func stopNativeBitmapOCR() {
+        nativeOCRCacheBustTask?.cancel()
+        nativeOCRCacheBustTask = nil
+        guard subtitleOCRArmedOrdinal != nil else { return }
+        cancelSubtitleOCRWorker()
+        cancelSubtitleForwardPrefetcher(reason: .nativeRenderingEnded)
+    }
+
+    /// 刚启动识别时，系统已经按选中原生字幕轨的那一刻拉走了一批字幕窗口，那时还没识别出来，会被当成空的缓存住。
+    /// 等识别覆盖到播放点后 60 秒（最多 8 秒），「取消再选中」一次原生字幕轨，让系统重新拉（#32 同一手法）
+    func scheduleNativeOCRCacheBust(ordinal: Int) {
+        nativeOCRCacheBustTask?.cancel()
+        nativeOCRCacheBustTask = Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled, let self else { return }
+                let covered = self.nativeStore(atOrdinal: ordinal)?.readMaxCueEnd() ?? 0
+                if covered >= self.sourceTime + 60 { break }
+            }
+            guard !Task.isCancelled, let self, self.nativeSubtitleRenderingRequested,
+                  self.nativeSubtitleReapplyOrdinal == ordinal else { return }
+            EngineLog.emit("[AetherEngine] [MovieClaw P21] OCR warmed for ordinal=\(ordinal); "
+                           + "reselecting the native rendition to refetch empty cached windows",
+                           category: .engine)
+            self.setNativeSubtitleSelected(track: nil)
+            self.setNativeSubtitleSelected(track: ordinal)
+        }
+    }
+
     /// Load/stop teardown: forget covered-region state too (new session, new axis).
     func resetSubtitleOCRState() {
+        nativeOCRCacheBustTask?.cancel()
+        nativeOCRCacheBustTask = nil
         cancelSubtitleOCRWorker()
         subtitleOCRCursors.removeAll()
         subtitleOCRPendingStates.removeAll()

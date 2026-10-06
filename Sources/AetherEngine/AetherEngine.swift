@@ -1741,6 +1741,7 @@ public final class AetherEngine: ObservableObject {
             }
             residentPlaylistRanges = []
             residentRanges = []
+            if prefetchSuspendedRequested { session.setPrefetchSuspended(true) }   // [MovieClaw P23] 重建后照样停着
             // Ask for the first snapshot instead of reading it here: this didSet runs on the main actor
             // right after `start()`, so a synchronous read would take the session's restart lock and the
             // cache's condition on main while the producer is already storing into both (AE#422).
@@ -1838,7 +1839,10 @@ public final class AetherEngine: ObservableObject {
 
     /// SW decode host (dav1d/libavcodec) for codecs AVPlayer can't handle (AV1 on tvOS, VP9, MPEG-2, VC-1).
     /// Non-nil between load and stop when the source routed SW.
-    var softwareHost: SoftwarePlaybackHost?
+    var softwareHost: SoftwarePlaybackHost? {
+        // [MovieClaw P23] 重建后照样停着
+        didSet { if prefetchSuspendedRequested { softwareHost?.setPrefetchSuspended(true) } }
+    }
 
     /// Combine subscriptions mirroring softwareHost's @Published. Cancelled in stopInternal.
     var softwareCancellables: Set<AnyCancellable> = []
@@ -1935,6 +1939,14 @@ public final class AetherEngine: ObservableObject {
     /// the producer already anchors `startPosition` on (`segmentIndexForPlaylistTime`), while `sourceTime`
     /// stays true source PTS for subtitle-cue alignment. Reset to 0 on load/stop; set in onPlaylistShiftChanged.
     var sourcePresentationOrigin: Double = 0
+
+    /// [MovieClaw P39] 宿主要求下一次 `load()` 的起播点按代价吸附到关键帧（见 `KeyframeSnapPolicy.startLanding`）。
+    /// 一次性：`load()` 入口取走并清零。只该在用户起播 / 续播时设；引擎自己的重建（换音轨、回前台、AirPlay 切换）
+    /// 走同一个 `load()`，不设它就原位接上，画面不会往回跳
+    public var snapsNextStartToKeyframe = false
+
+    /// [MovieClaw P39] 本次装载是否吸附起播点：`load()` 入口从 `snapsNextStartToKeyframe` 取来，`loadNative` 用掉即清
+    var startSnapArmed = false
 
     /// AE#270: the origin this session settled on, nil before the first publish. A non-disc VOD source
     /// keeps its first one: later publishes fold producer drift into the shift, and re-reading them would
@@ -2145,6 +2157,9 @@ public final class AetherEngine: ObservableObject {
     /// would be lost at the next audio-track switch or background return.
     func setLoadedAudioDelay(_ seconds: Double) { loadedOptions.audioDelaySeconds = seconds }
 
+    /// [MovieClaw P20] 运行中放大的前向缓冲也写回载入选项：换音轨、回前台这类原地重建按它重放，不退回 10 段
+    func setLoadedForwardBufferSegments(_ segments: Int) { loadedOptions.forwardBufferSegments = segments }
+
     /// AE#464 round 2: the fourth narrow write, and the one that makes a session-preserving reload
     /// preserve the session's transport. `autoplay` describes a MOUNT, and a rebuild is not a mount;
     /// writing the session's own transport state here is what both reload branches then replay,
@@ -2277,6 +2292,13 @@ public final class AetherEngine: ObservableObject {
     /// cursors/pending persist across deselect/reselect (no re-recognition of covered regions)
     /// and reset only on load/stop.
     var subtitleOCRArmedOrdinal: Int?
+    /// [MovieClaw P21] 进画中画才启动文字识别时，识别出一段后「取消再选中」一次原生字幕轨，冲掉系统
+    /// 在识别之前拉走并缓存的空字幕窗口（见 `scheduleNativeOCRCacheBust`）
+    var nativeOCRCacheBustTask: Task<Void, Never>?
+    /// [MovieClaw P23] 宿主要求的暂停下载状态（见 `setPrefetchSuspended`），会话重建后重新落到新会话
+    var prefetchSuspendedRequested = false
+    /// [MovieClaw P23] AVPlayer 直连服务端流时暂停前的预读时长，恢复时还原
+    var suspendedRemoteForwardBuffer: TimeInterval?
     var subtitleOCRWorkerTask: Task<Void, Never>?
     var subtitleOCRBatchInFlight = false
     var subtitleOCRSidecarFillTask: Task<Void, Never>?
@@ -3572,6 +3594,9 @@ public final class AetherEngine: ObservableObject {
     /// leaves the main thread. The closure captures no engine state, so it holds no reference to `self`.
     private var audioSessionCategoryTask: Task<Void, Never>?
 
+    /// [MovieClaw P47] 宿主自己设音频会话的类别、策略与多声道支持（并负责激活）时设为 true：引擎建实例时不再声明类别
+    nonisolated(unsafe) public static var hostManagesAudioSessionCategory = false
+
     #if os(iOS) || os(tvOS)
     /// Pending off-main deactivation (#215). See `scheduleAudioSessionDeactivation()`.
     private var audioSessionDeactivationTask: Task<Void, Never>?
@@ -3620,14 +3645,18 @@ public final class AetherEngine: ObservableObject {
         //
         // Issue #114: the declaration runs off the main thread. See `audioSessionCategoryTask`.
         #if os(iOS) || os(tvOS)
-        audioSessionCategoryTask = Task.detached(priority: .userInitiated) {
-            let session = AVAudioSession.sharedInstance()
-            do {
-                try session.setCategory(.playback, mode: .moviePlayback, policy: AetherEngine.audioSessionRouteSharingPolicy)
-                try session.setSupportsMultichannelContent(true)
-                EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) policy=\(AetherEngine.audioSessionRouteSharingPolicy.rawValue) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
-            } catch {
-                EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
+        // [MovieClaw P47] 宿主自己管音频会话（点播放就按自己的策略设好类别并激活）：引擎不再每建一个实例就重设一遍。
+        // 原来这里用默认策略重设，会把宿主要的「长视频」策略改掉；会话已激活时换策略要重新协商路由，装载还要先等这次跨进程调用
+        if !AetherEngine.hostManagesAudioSessionCategory {
+            audioSessionCategoryTask = Task.detached(priority: .userInitiated) {
+                let session = AVAudioSession.sharedInstance()
+                do {
+                    try session.setCategory(.playback, mode: .moviePlayback, policy: AetherEngine.audioSessionRouteSharingPolicy)
+                    try session.setSupportsMultichannelContent(true)
+                    EngineLog.emit("[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) policy=\(AetherEngine.audioSessionRouteSharingPolicy.rawValue) maxChannels=\(session.maximumOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
+                } catch {
+                    EngineLog.emit("[AetherEngine] AVAudioSession setup error: \(error)", category: .engine)
+                }
             }
         }
         #endif
@@ -3780,6 +3809,11 @@ public final class AetherEngine: ObservableObject {
             abandonStartupContinuation()
             throw CancellationError()
         }
+        // [MovieClaw P22] 本次地址登记到宿主给的稳定键上：探测、播放、重建、字幕旁路打开这个地址都落到同一份字节缓存
+        if case .url(let url) = source { SourceByteCache.shared.bind(url: url, key: options.sourceCacheKey) }
+        // [MovieClaw P39] 一次性开关在入口取走：这次装载内部的重开（HLS 改道等）与之后的重建都不再吸附
+        startSnapArmed = snapsNextStartToKeyframe
+        snapsNextStartToKeyframe = false
         let attempt = LoadAttempt()
         defer { if let gen = attempt.generation { waitingLoadGenerations.remove(gen) } }
         do {
@@ -4225,7 +4259,9 @@ public final class AetherEngine: ObservableObject {
             // Detach avformat_open_input + find_stream_info off @MainActor (~6 s on a slow CDN).
             // AetherEngine#10: a @MainActor async body without a suspension point blocks the main thread
             // despite the async signature; Task.detached.value introduces a real background hop.
-            try await Task.detached(priority: .userInitiated) { [probe, source, options] in
+            // [MovieClaw P56] 没有续播点（或不到 1 秒）就是从文件头起播
+            let startsAtHead = (startPosition ?? 0) < 1
+            try await Task.detached(priority: .userInitiated) { [probe, source, options, startsAtHead] in
                 // Caller-bounded find_stream_info budget (#68); nil keeps the .playback default. This probe
                 // demuxer is reused as the session demuxer, so the cap lands on the open that actually pays it.
                 let probeProfile = DemuxerOpenProfile.playback.withProbeBudget(
@@ -4233,6 +4269,8 @@ public final class AetherEngine: ObservableObject {
                     .withSequentialOrigin(options.sequentialOrigin,
                                           declaredDuration: options.declaredDurationSeconds)
                     .withHeldSourceConnection(options.heldSourceConnection)
+                    .withPlaybackStartsAtHead(startsAtHead)   // [MovieClaw P56]
+                    .withHostMatroskaCues(options.matroskaCues)   // [MovieClaw P58]
                 switch source {
                 case .url(let u):
                     // isLive configures the AVIOReader for endless-feed mode; must be set at open time because
@@ -4493,9 +4531,14 @@ public final class AetherEngine: ObservableObject {
         // On probe failure (probedAudioTracks empty) the override can't be validated, so honor it
         // verbatim and let the reopened session re-validate it: an explicit audioSourceStreamIndex
         // still wins (the contract), matching pre-#72 behavior where the raw override was passed through.
+        // [MovieClaw patch P11] 宿主按序号指定的起播音轨换成流下标，排在显式流下标之后
+        let ordinalAudio: Int32? = options.audioTrackOrdinal.flatMap { ordinal in
+            let ordered = probedAudioTracks.sorted { $0.id < $1.id }
+            return ordered.indices.contains(ordinal) ? Int32(ordered[ordinal].id) : nil
+        }
         let selectedAudio = Self.selectAudioIndex(
             tracks: probedAudioTracks,
-            override: audioSourceStreamIndex,
+            override: audioSourceStreamIndex ?? ordinalAudio,
             preferredLanguages: options.preferredAudioLanguages
         ) ?? (probeOpened ? nil : audioSourceStreamIndex)
         let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
@@ -5038,7 +5081,7 @@ public final class AetherEngine: ObservableObject {
                     )
                 }
                 activeVideoDecoder = Self.videoDecoderLabel(
-                    codecID: detectedCodecID, isSoftware: true
+                    codecID: detectedCodecID, isSoftware: !(softwareHost?.decodesVideoInHardware ?? false)
                 )
                 // AE#462: the host's own resolved index, not the engine's pick. The pick says which
                 // track was ASKED for; only the host knows whether a decoder opened for it, and this
@@ -5480,6 +5523,25 @@ public final class AetherEngine: ObservableObject {
         var target: Double = isLive
             ? (liveLanding?.sessionTarget ?? seconds)
             : max(0, min(seconds, duration))
+        // [MovieClaw P36] 主力通路点播：精确落点要逐帧解太久时吸附到最近的关键帧（见 KeyframeSnapPolicy）
+        if !isLive, origin == .host, nativeHost != nil, softwareHost == nil,
+           let session = nativeVideoSession, !session.seekKeyframeSourceSeconds.isEmpty {
+            let base = sourcePresentationOrigin
+            let from = clock.currentTime
+            if let snapped = KeyframeSnapPolicy.landing(
+                target: target, from: from,
+                keyframes: session.seekKeyframeSourceSeconds.map { $0 - base },
+                costPerSecond: session.seekDecodeCostPerSecond,
+                budget: Self.seekSnapDecodeBudgetSeconds),
+               snapped <= duration {
+                EngineLog.emit(
+                    "[AetherEngine] [MovieClaw P36] seek snapped to keyframe: requested=\(String(format: "%.2f", target))s "
+                    + "landing=\(String(format: "%.2f", snapped))s from=\(String(format: "%.2f", from))s "
+                    + "cost/s=\(String(format: "%.3f", session.seekDecodeCostPerSecond))",
+                    category: .engine)
+                target = snapped
+            }
+        }
         if isLive, softwareHost != nil, nativeHost == nil, let window = liveWindow {
             let landing = Self.softwareLiveLanding(requested: target, window: window)
             if landing < target {
@@ -6982,7 +7044,10 @@ public final class AetherEngine: ObservableObject {
         // the title's content start; that base differs by backend (native re-times onto a 0-based playlist
         // shifted by playlistShiftSeconds; the software path's raw clock begins at the container start,
         // sourceStartSeconds). Add it so the seek lands on the chapter, not the base seconds early.
-        let base = (playbackBackend == .software) ? sourceStartSeconds : playlistShiftSeconds
+        // [MovieClaw P35] 软件通路已把起点折进 session zero 的部分不能再加一遍
+        let base = (playbackBackend == .software)
+            ? max(0, sourceStartSeconds - (softwareHost?.sessionZeroSeconds ?? 0))
+            : playlistShiftSeconds
         let target = chapter.startSeconds + base
         EngineLog.emit(
             "[AetherEngine] selectChapter: seeking to chapter \(id) @ title-relative "

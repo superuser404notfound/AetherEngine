@@ -592,6 +592,29 @@ public struct LoadOptions: Sendable, Equatable {
     /// AVPlayer's own policy for the join.
     public var liveJoinStartsImmediately: Bool = true
 
+    /// [MovieClaw patch P2] The AE#440 one-shot for VOD starts: when AVPlayer holds a VOD start in
+    /// `ToMinimizeStalls` over a proven, non-empty buffer of at least
+    /// `minimumLiveJoinBufferAhead` seconds, cut the hold short once with `playImmediately`.
+    /// The loopback producer runs far ahead of 1x, so the rate estimate AVPlayer waits on only
+    /// delays a start whose cushion is already there (0.2 to 0.6 s on device). Same four guards as
+    /// the live lever; default `false`.
+    public var vodStartsImmediately: Bool = false
+
+    /// [MovieClaw patch P11] 起播音轨按「第几条音轨」指定（容器里音轨的顺序，从 0 数）：探测完换成流下标，
+    /// 首帧就是这条轨，不用起播后再 `selectAudioTrack` 重载一次（真机蓝光镜像为此起播 2.5 → 4.2 秒）。
+    /// 宿主记着的是与服务端同口径的 embedded:N，事先不知道流下标，所以按序号给。显式的
+    /// `audioSourceStreamIndex`（换轨、重建时恢复当前轨）照旧优先；序号越界时不起作用。默认 nil
+    public var audioTrackOrdinal: Int? = nil
+
+    /// [MovieClaw P22] 片源字节缓存的键（见 `SourceByteCache`）：同一个片源在这一场里每个字节只下一次——
+    /// 换音轨、回前台的整场重建，往回跳的重产，都从本机拿已下过的字节。取流地址每次带新令牌，所以由宿主
+    /// 给一个稳定的键（MovieClaw 用「文件 id + 大小」）；nil = 不缓存（上游行为）。只作用于 URL 片源
+    public var sourceCacheKey: String? = nil
+
+    /// [MovieClaw P58] 服务端给的 Matroska 精简索引（只含视频轨索引点，见 `MatroskaHostCues`）：主播放的解复用器读
+    /// Cues 时直接给它，不再下载原索引。nil = 照旧（上游行为）。只作用于 URL 片源的主播放读取器
+    public var matroskaCues: MatroskaHostCues? = nil
+
     /// Whether `play()` may move a behind-live playhead by itself. Default `true`, which is the historical
     /// behaviour (AE#444).
     ///
@@ -786,6 +809,10 @@ public struct LoadOptions: Sendable, Equatable {
     /// remote server directly.
     public var forwardBufferSegments: Int?
 
+    /// [MovieClaw P25] 分片缓存的后方窗口（段数），nil = 默认 20。存储紧张时由宿主和 `forwardBufferSegments`
+    /// 一起收小，让自研引擎在剩余空间不多时照样能放（最少 2 段，见 `HLSVideoEngine.clampedBackwardWindow`）
+    public var backwardBufferSegments: Int?
+
     /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a
     /// `.playing` state (current behavior, byte-identical). Set `false` to mount PAUSED: a host that
     /// holds a pause at mount (synchronized-start lobby that loads several devices and starts them on
@@ -912,6 +939,7 @@ public struct LoadOptions: Sendable, Equatable {
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
         forwardBufferSegments: Int? = nil,
+        backwardBufferSegments: Int? = nil,
         autoplay: Bool = true,
         teletextPage: Int? = nil,
         audioDelaySeconds: Double = 0,
@@ -957,6 +985,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
         self.forwardBufferSegments = forwardBufferSegments
+        self.backwardBufferSegments = backwardBufferSegments
         self.autoplay = autoplay
         self.teletextPage = teletextPage
         self.audioDelaySeconds = audioDelaySeconds

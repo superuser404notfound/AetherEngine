@@ -21,7 +21,16 @@ final class CustomIOReaderBridge: AVIOProvider, @unchecked Sendable {
         reader as? TimeSeekableIOReader
     }
 
-    var cumulativeBytesFetched: Int64 { 0 }  // custom readers don't track network bytes
+    /// [MovieClaw P19] 交给解复用器的字节数，当作「已从源拉取」上报（加载速度、带宽估计都靠它）。自定义读取器自己
+    /// 不报网络字节，原来这里写死 0：光盘镜像、原盘目录经 HTTP 直推时顶栏加载速度恒为「0 KB/s」、带宽估计也是空的
+    /// （真机《蜘蛛侠：英雄无归》UHD 原盘）。光盘是顺序流式读，读取器的小块缓存只在识别盘结构时起作用，
+    /// 播放期间交出去的字节就是从网络拉来的字节
+    var cumulativeBytesFetched: Int64 {
+        deliveredLock.lock(); defer { deliveredLock.unlock() }
+        return deliveredBytes
+    }
+    private let deliveredLock = NSLock()
+    private var deliveredBytes: Int64 = 0
 
     /// #112 round 9: same demux-thread-only contract as AVIOReader's deadline. Armed by
     /// `Demuxer.seekBounded` around a positioning seek; `performRead` checks it between callbacks, so
@@ -189,6 +198,9 @@ final class CustomIOReaderBridge: AVIOProvider, @unchecked Sendable {
         let n = callingHost { reader.read(buf, size: allowed) }
         if n == 0 { return FFmpegErr.eof }  // IOReader uses 0 for EOF; avio expects AVERROR_EOF.
         readByteBudget.consumed(n)
+        if n > 0 {
+            deliveredLock.lock(); deliveredBytes += Int64(n); deliveredLock.unlock()
+        }
         return n
     }
 

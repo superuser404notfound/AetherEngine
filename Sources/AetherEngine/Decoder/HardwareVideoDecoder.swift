@@ -128,24 +128,30 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             )
         }
 
-        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else {
+        let isVP9 = codecpar.pointee.codec_id == AV_CODEC_ID_VP9  // [MovieClaw P14]
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_HEVC || (isVP9 && Self.decodesVP9InHardware(codecpar)) else {
             throw VideoDecoderError.unsupportedCodec(id: codecpar.pointee.codec_id.rawValue)
         }
 
         // 1. Build CMVideoFormatDescription from the hvcC extradata via
         //    kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms (same shape AVFoundation uses for .mp4/.mkv).
-        guard let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else {
-            throw VideoDecoderError.noExtradata
+        //    [MovieClaw P14] VP9 没有 extradata：vpcC 由流参数拼出来
+        let atomsDict: NSDictionary
+        if isVP9 {
+            atomsDict = ["vpcC": Self.vpcC(codecpar)]
+        } else {
+            guard let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else {
+                throw VideoDecoderError.noExtradata
+            }
+            atomsDict = ["hvcC": Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))]
         }
-        let hvcCData = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
         var fd: CMVideoFormatDescription?
-        let atomsDict: NSDictionary = ["hvcC": hvcCData]
         let extensions: NSDictionary = [
             kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atomsDict,
         ]
         let fdStatus = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            codecType: kCMVideoCodecType_HEVC,
+            codecType: isVP9 ? kCMVideoCodecType_VP9 : kCMVideoCodecType_HEVC,
             width: width,
             height: height,
             extensions: extensions,
@@ -217,7 +223,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
 
         EngineLog.emit(
-            "[HardwareVideoDecoder] opened HEVC \(width)x\(height) "
+            "[HardwareVideoDecoder] opened \(isVP9 ? "VP9" : "HEVC") \(width)x\(height) "
             + "\(use10Bit ? "10-bit" : "8-bit") "
             + "transfer=\(codecpar.pointee.color_trc.rawValue)",
             category: .swPlayback
@@ -392,9 +398,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if let primaries = colorPrimaries {
             CVBufferSetAttachment(imageBuffer, kCVImageBufferColorPrimariesKey, primaries, .shouldPropagate)
         }
-        if let transfer = colorTransfer {
-            CVBufferSetAttachment(imageBuffer, kCVImageBufferTransferFunctionKey, transfer, .shouldPropagate)
-        }
+        // [MovieClaw P60] SDR goes out as sRGB on Mac / iPhone. An undeclared transfer is judged on the tag
+        // VideoToolbox read off the SPS VUI, so an HDR stream the container never labelled stays HDR.
+        let decodedTransfer = colorTransfer
+            ?? (CVBufferCopyAttachment(imageBuffer, kCVImageBufferTransferFunctionKey, nil) as? String).map { $0 as CFString }
+        CVBufferSetAttachment(imageBuffer, kCVImageBufferTransferFunctionKey,
+                              ColorAttachments.shownTransfer(decodedTransfer), .shouldPropagate)
         if let matrix = colorMatrix {
             CVBufferSetAttachment(imageBuffer, kCVImageBufferYCbCrMatrixKey, matrix, .shouldPropagate)
         }
@@ -453,4 +462,54 @@ private func hwDecoderOutputCallback(
         imageBuffer: imageBuffer,
         pts: presentationTimeStamp
     )
+}
+
+// MARK: - [MovieClaw P14] VP9 硬解（VideoToolbox）
+//
+// VP9 原来一律走 libavcodec 软解：真机 4K VP9（《The Age of A.I.》）本进程 CPU 约 48%，连播 7 分钟温度就到「偏热」。
+// iOS 26.2 起 VideoToolbox 的 VP9 解码器是「补充解码器」，登记后才可用（`VTRegisterSupplementalVideoDecoderIfAvailable`）；
+// 登记后照常建 VTDecompressionSession，格式描述用 vpcC（没有 extradata，由流参数拼），包原样送进去。
+extension HardwareVideoDecoder {
+    /// 登记 VP9 补充解码器并确认有硬解（只做一次）
+    static let vp9HardwareAvailable: Bool = {
+        if #available(iOS 26.2, tvOS 26.2, macOS 11.0, visionOS 26.2, *) {
+            VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
+            return VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9)
+        }
+        return false
+    }()
+
+    /// 这条 VP9 流交给硬件：有硬解，且是 4:2:0 的 8 / 10 bit（profile 0 / 2）；4:4:4 等少见格式仍软解
+    static func decodesVP9InHardware(_ codecpar: UnsafeMutablePointer<AVCodecParameters>) -> Bool {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_VP9, vp9HardwareAvailable else { return false }
+        let format = vp9Format(codecpar)
+        return format.chroma <= 1 && (format.depth == 8 || format.depth == 10)
+    }
+
+    /// 位深与色度抽样（vpcC 的编码：0/1 = 4:2:0，2 = 4:2:2，3 = 4:4:4）
+    private static func vp9Format(_ codecpar: UnsafeMutablePointer<AVCodecParameters>) -> (depth: Int, chroma: UInt8) {
+        guard let desc = av_pix_fmt_desc_get(AVPixelFormat(rawValue: codecpar.pointee.format)) else {
+            return (codecpar.pointee.bits_per_raw_sample > 8 ? Int(codecpar.pointee.bits_per_raw_sample) : 8, 1)
+        }
+        let depth = Int(desc.pointee.comp.0.depth)
+        let chroma: UInt8 = desc.pointee.log2_chroma_w == 1 ? (desc.pointee.log2_chroma_h == 1 ? 1 : 2) : 3
+        return (depth, chroma)
+    }
+
+    /// vpcC 盒的内容（version 1、flags 0，后接 VPCodecConfigurationRecord）
+    static func vpcC(_ codecpar: UnsafeMutablePointer<AVCodecParameters>) -> Data {
+        let par = codecpar.pointee
+        let format = vp9Format(codecpar)
+        let profile: UInt8 = (0 ... 3).contains(par.profile) ? UInt8(par.profile) : (format.depth > 8 ? 2 : 0)
+        // 容器多半不写级别：按画面大小给一个够用的（4K 用 5.1）
+        let level: UInt8 = par.level > 0 && par.level < 100 ? UInt8(par.level)
+            : (Int(par.width) * Int(par.height) > 2_228_224 ? (Int(par.width) * Int(par.height) > 8_912_896 ? 61 : 51) : 41)
+        let fullRange: UInt8 = par.color_range == AVCOL_RANGE_JPEG ? 1 : 0
+        return Data([1, 0, 0, 0, profile, level,
+                     UInt8(format.depth << 4) | (format.chroma << 1) | fullRange,
+                     UInt8(truncatingIfNeeded: par.color_primaries.rawValue),
+                     UInt8(truncatingIfNeeded: par.color_trc.rawValue),
+                     UInt8(truncatingIfNeeded: par.color_space.rawValue),
+                     0, 0])
+    }
 }

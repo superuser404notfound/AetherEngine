@@ -126,7 +126,11 @@ extension AetherEngine {
         subtitleDrainCursors[.primary] = nil
         // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition.
         // Armed BEFORE the prefetcher start so the raised lead is picked up.
-        if let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
+        // [MovieClaw P21] 只在系统真要画原生字幕（画中画 / 隔空播放 / 外接显示）时才启动：平时字幕由 App
+        // 自己的字幕层画，识别用不上，它还要把旁路预读拉到 270 秒——UHD 原盘每选一次图形字幕就多下约 2 GB
+        // （2026-09-28 实测）。进画中画时由 `setNativeSubtitleRendering(true)` 补上
+        if nativeSubtitleRenderingRequested,
+           let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
            nativeSubtitleTrackTable[ordinal].needsOCR {
             startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(index))
         }
@@ -684,10 +688,17 @@ extension AetherEngine {
     /// #151: forward prefetch runs for VOD sessions only (live content past the edge does not
     /// exist and the pump already rides it), needs an embedded drain target (external/sidecar
     /// tracks hold whole files, CC is tap-fed) and a loaded source to open a side demuxer on.
+    /// [MovieClaw P21] 只在图形字幕的文字识别在跑（系统在画原生字幕轨）时才跑。
+    ///
+    /// 这条旁路是第二条连接，在 MKV / TS 上会把音视频字节整份再下一遍（上面 #240 的注释），开着内封字幕
+    /// 全程流量翻倍（2026-09-28 实测 69.5 → 140 Mbit/s）。而主力通路 / 软件通路本来就把所有内封字幕轨的包
+    /// 顺带收进字幕存储（#112），覆盖到它们各自的读取前沿（播放点后约 40 秒），画字幕、换字幕、App 的字幕
+    /// 时间偏移都够用；图形字幕的结束时间每一轮按存储里的下一个包重新推算（#362），前沿推进后自己改正。
+    /// 只有系统一次预取约 240 秒原生字幕窗口时（文字识别），才需要读到前沿之外
     nonisolated static func shouldRunSubtitleForwardPrefetch(
-        isLive: Bool, hasEmbeddedDrainTargets: Bool, hasSource: Bool
+        isLive: Bool, hasEmbeddedDrainTargets: Bool, hasSource: Bool, ocrArmed: Bool
     ) -> Bool {
-        !isLive && hasEmbeddedDrainTargets && hasSource
+        !isLive && hasEmbeddedDrainTargets && hasSource && ocrArmed
     }
 
     /// #151: a drain-tick jump with an existing cursor (seek / producer re-anchor) restarts the
@@ -728,7 +739,8 @@ extension AetherEngine {
         guard Self.shouldRunSubtitleForwardPrefetch(
             isLive: isLive,
             hasEmbeddedDrainTargets: !subtitleDrainTargets.isEmpty,
-            hasSource: loadedURL != nil),
+            hasSource: loadedURL != nil,
+            ocrArmed: subtitleOCRArmedOrdinal != nil),
             let store = activeSubtitlePacketStore,
             let url = loadedURL else { return }
         let isCustom = isCustomSource
@@ -2348,13 +2360,18 @@ extension AetherEngine {
             pendingNativeRenderingRequest = active
             return
         }
+        // [MovieClaw P21] 系统不画原生字幕了：图形字幕的文字识别与它的长预读一起停
+        if !active { stopNativeBitmapOCR() }
         guard active, let activeIdx = activeSubtitleTrackIndex,
               let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: activeIdx, in: nativeSubtitleTrackTable)
         else {
             setNativeSubtitleSelected(track: nil)
             return
         }
+        // [MovieClaw P21] 平时不识别（见 selectSubtitleTrack），进画中画这一刻才启动
+        let armedNow = armNativeBitmapOCRIfNeeded(ordinal: ordinal)
         setNativeSubtitleSelected(track: ordinal)
+        if armedNow { scheduleNativeOCRCacheBust(ordinal: ordinal) }
     }
 
     // MARK: - Session-preserving reload carryover (#170)

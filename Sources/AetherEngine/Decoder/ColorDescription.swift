@@ -50,6 +50,22 @@ struct ColorDescription: Equatable {
                   range: codecpar.pointee.color_range)
     }
 
+    /// [MovieClaw P60] What the parameter sets in `extradata` declare, read by opening the decoder without
+    /// feeding it a packet: libavcodec's HEVC decoder exports the first SPS's VUI colour at init
+    /// (`hevc_decode_extradata`), which demuxing never copies into codecpar. That is the shape of an
+    /// MKV whose Colour element names only the matrix while the VUI says PQ. Nil when no decoder opens.
+    static func parameterSets(codecpar: UnsafePointer<AVCodecParameters>) -> ColorDescription? {
+        guard let codec = avcodec_find_decoder(codecpar.pointee.codec_id) else { return nil }
+        var ctx = avcodec_alloc_context3(codec)
+        guard let c = ctx else { return nil }
+        defer { avcodec_free_context(&ctx) }
+        guard avcodec_parameters_to_context(c, codecpar) >= 0 else { return nil }
+        c.pointee.thread_count = 1
+        guard avcodec_open2(c, codec, nil) >= 0 else { return nil }
+        return ColorDescription(primaries: c.pointee.color_primaries, transfer: c.pointee.color_trc,
+                                matrix: c.pointee.colorspace, range: c.pointee.color_range)
+    }
+
     /// The description to act on: the bitstream wherever it committed to a value, the container for the
     /// fields it left open. Per field, because a partially filled VUI is the common case and the one
     /// that fails silently (a matrix without a transfer reads HDR to a gate and reads nothing to zimg).

@@ -605,9 +605,14 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
     /// Bounded crash-remnant cleanup, never a recursive search of the caller's temporary root.
     /// Only our UUID-named direct-child directories older than one day are candidates. Keep the
     /// candidate's advisory lease held until removal finishes; age alone never proves abandonment.
+    /// [MovieClaw P16] 死会话目录的最小年龄：只用来躲开「目录已建、租约还没拿到」的一瞬间。
+    /// 原来要等 24 小时，被杀掉的软件通路会话（VP9、MPEG-2、VC-1、DVD）每个留下 1 GB 上下的包缓存，
+    /// 真机一夜攒了 6.6 GB；租约（flock）才是活着的凭据，进程一死内核就放掉
+    static let staleAgeSeconds: TimeInterval = 10
+
     static func sweepStaleSessionDirs(parentDirectory: URL, currentSession: String? = nil,
                                      now: Date = Date(), maxEntries: Int = 64,
-                                     maxRemovals: Int = 8) -> StaleSweepResult {
+                                     maxRemovals: Int = 32) -> StaleSweepResult {
         guard maxEntries > 0, maxRemovals > 0,
               let entries = FileManager.default.enumerator(at: parentDirectory,
                 includingPropertiesForKeys: nil,
@@ -627,7 +632,7 @@ final class SoftwarePacketDiskFIFO: @unchecked Sendable {
             guard lstat(entry.path, &info) == 0 else { failures += 1; continue }
             let modified = Double(info.st_mtimespec.tv_sec) + Double(info.st_mtimespec.tv_nsec) / 1e9
             guard info.st_mode & S_IFMT == S_IFDIR,
-                  now.timeIntervalSince1970 - modified >= 86_400 else { continue }
+                  now.timeIntervalSince1970 - modified >= Self.staleAgeSeconds else { continue }
             let dirFD = open(entry.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
             guard dirFD >= 0 else { failures += 1; continue }
             defer { Darwin.close(dirFD) }

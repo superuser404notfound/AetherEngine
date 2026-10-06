@@ -394,7 +394,7 @@ enum SessionOptionCorrection {
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "isLive", "audioOnly",
         "dvrWindowSeconds",
-        "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",
+        "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately", "vodStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "serveIFramePlaylist", "confirmAtmos",
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",
@@ -402,5 +402,6 @@ enum SessionOptionCorrection {
         "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "autoplay",
         "audioDelaySeconds", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
         "escalatesToSoftwarePath", "sharedOutputRole", "isLiveRejoin", "subtitleSessionCarryover",
+        "audioTrackOrdinal",  // [MovieClaw patch P11]
     ]
 }
