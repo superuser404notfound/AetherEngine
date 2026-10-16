@@ -144,6 +144,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// (HEVC allows at most 16 pictures of it), so it is a timestamp discontinuity: the highest PTS
     /// restarts from this packet and the learned lead is left alone, instead of absorbing the jump
     /// into the lead and switching the look-ahead cap off for the rest of the session.
+    /// A jump forward by more than `maxLead` is the same kind of discontinuity: the old highest PTS
+    /// belongs to the previous segment, so it restarts from this packet and a later packet is judged
+    /// against the new segment, not against a PTS the stream has left behind.
     ///
     /// The learned lead is also capped at `maxLearnedLead`: a backward step inside the 16-picture
     /// window that is still a glitch (a 12-frame one, say) would otherwise raise the lead for the whole
@@ -153,6 +156,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
         -> (pts: Double, maxSeen: Double, lead: Double) {
         let seen = maxSeenPTS ?? packetPTS
         if seen - packetPTS > maxLead {
+            return (packetPTS - reorderLead, packetPTS, reorderLead)
+        }
+        if packetPTS - seen > maxLead {
             return (packetPTS - reorderLead, packetPTS, reorderLead)
         }
         let maxSeen = max(seen, packetPTS)
@@ -338,6 +344,17 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.lock()
         defer { reorderLock.unlock() }
         return _outOfOrderFramesDropped
+    }
+
+    /// Frames the arrival-order path discarded for sitting below the seek threshold: the pictures of the
+    /// GOP the seek landed in that precede the target. A decision rather than a loss, so it stays out of
+    /// `lostBeforeLayer`, but counted so a seek that discards more than its GOP is visible.
+    /// Guarded by `reorderLock`.
+    private var _arrivalSkippedFramesDropped = 0
+    var arrivalSkippedFramesDropped: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _arrivalSkippedFramesDropped
     }
 
     /// #298: frames refused at the enqueue gate for carrying an unschedulable PTS. Guarded by `reorderLock`.
@@ -612,6 +629,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
     private func handOverOnArrival(pixelBuffer: CVPixelBuffer, pts: CMTime, ptsSeconds: Double,
                                    hdr10PlusData: Data?) {
         if let below = arrivalSkipBelow, ptsSeconds < below {
+            _arrivalSkippedFramesDropped += 1
             reorderLock.unlock()
             return
         }

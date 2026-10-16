@@ -243,6 +243,11 @@ struct ArrivalOrderHandoverTests {
         #expect(handed.seconds.allSatisfy { $0 >= Self.time(100).seconds })
         #expect(handed.seconds.count == 44)
         #expect(renderer.framesBelowFloor == 0)
+        // The anchor at 96 is refused by the seek threshold itself; the three B-frames below the target
+        // that follow the first frame past it are the floor's, and counted.
+        #expect(renderer.arrivalSkippedFramesDropped == 3)
+        #expect(renderer.arrivalSkippedFramesDropped + handed.seconds.count == 47)
+        #expect(renderer.takeCadence().lostBeforeLayer == 0, "a seek's discard is a decision, not a loss")
     }
 
     @Test("Without a frame rate the renderer keeps its reorder buffer")

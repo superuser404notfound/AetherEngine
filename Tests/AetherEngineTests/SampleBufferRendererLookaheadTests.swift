@@ -180,6 +180,26 @@ struct SampleBufferRendererLookaheadTests {
         #expect(abs(r.lead - 4 * frame) < 1e-9)
     }
 
+    @Test("A forward timestamp jump is a discontinuity too: the highest PTS restarts and the lead is kept")
+    func forwardDiscontinuityRestartsTheGate() {
+        let frame = 1.0 / 24
+        let maxLead = SampleBufferRenderer.maxReorderPictures * frame
+        let lead = 3 * frame
+        // 100 s on from the highest PTS seen.
+        let d = SampleBufferRenderer.displayOrderPTS(packetPTS: 200, maxSeenPTS: 100, reorderLead: lead, maxLead: maxLead)
+        #expect(d.maxSeen == 200)
+        #expect(d.lead == lead)
+        #expect(abs(d.pts - (200 - lead)) < 1e-9)
+        // A packet 4 frames behind the new highest PTS is judged against it, not against 100 s.
+        let r = SampleBufferRenderer.displayOrderPTS(packetPTS: 200 - 4 * frame, maxSeenPTS: d.maxSeen, reorderLead: d.lead,
+                                                     maxLead: maxLead)
+        #expect(abs(r.lead - 4 * frame) < 1e-9)
+        // A jump inside the 16-picture window is not one: forward steps of a few frames are ordinary.
+        let s = SampleBufferRenderer.displayOrderPTS(packetPTS: 100 + 5 * frame, maxSeenPTS: 100, reorderLead: lead,
+                                                     maxLead: maxLead)
+        #expect(s.maxSeen == 100 + 5 * frame && s.lead == lead)
+    }
+
     @Test("The pool threshold follows the look-ahead cap")
     func poolFollowsCap() {
         #expect(DoviFelComposer.outputPoolAllocationThreshold == SampleBufferRenderer.felVideoLookaheadFrames + 2 + DoviFelComposer.maxFramesInFlight + 1)
