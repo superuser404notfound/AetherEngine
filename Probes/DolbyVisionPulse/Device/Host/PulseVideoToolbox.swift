@@ -51,6 +51,8 @@ final class PulseHostView: UIView {
                 try FileManager.default.moveItem(at: tmp, to: localURL)
                 log("downloaded \(url.lastPathComponent) to temp")
             }
+            // Each arm fetches its own copy; drop it when the arm ends so repeated runs do not fill the app's temp dir.
+            defer { if !url.isFileURL { try? FileManager.default.removeItem(at: localURL) } }
             let asset = AVURLAsset(url: localURL)
             guard let track = try await asset.loadTracks(withMediaType: .video).first,
                   let fd = try await track.load(.formatDescriptions).first else { log("no video track"); return }

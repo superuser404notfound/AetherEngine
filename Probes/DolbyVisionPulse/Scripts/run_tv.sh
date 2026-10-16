@@ -52,37 +52,61 @@ case "$SEQ" in
     LABELS=T,NE,TL,PM ;;
   soak)
     : "${SOAK_URL:?SEQ=soak needs SOAK_URL=<http url or a file under PULSE_OUT>}"
+    # The arm list is `,`/`|`/`;` separated and travels inside JSON, so keep the soak inputs to plain URL and number characters.
+    [[ "$SOAK_URL" != *[!A-Za-z0-9._~:/?\&=%+@-]* ]] || { echo "SOAK_URL has characters the arm list cannot carry (allowed: letters, digits and . _ ~ : / ? & = % + @ -)"; exit 1; }
+    [[ "${SOAK_MIN:-5}" != *[!0-9]* ]] || { echo "SOAK_MIN must be a whole number of minutes"; exit 1; }
+    SEEKS=${SOAK_SEEKS:-60@1800,150@600,240@3000}
+    SEEKS_RE='^[0-9]+@[0-9]+(,[0-9]+@[0-9]+)*$'   # a variable, so it also works in bash, which matches a quoted pattern literally
+    [[ "$SEEKS" =~ $SEEKS_RE ]] || { echo "SOAK_SEEKS must look like 60@1800,150@600 (seconds@position, comma separated)"; exit 1; }
     case "$SOAK_URL" in
       http://*|https://*) U="$SOAK_URL" ;;
       *) [[ -e "$OUT/$SOAK_URL" ]] || { echo "no such file under $OUT: $SOAK_URL"; exit 1; }
          U="$B/${SOAK_URL#./}" ;;
     esac
-    ARMS="SOAK|soak|$U|minutes=${SOAK_MIN:-5};seeks=${SOAK_SEEKS:-60@1800,150@600,240@3000}"
+    ARMS="SOAK|soak|$U|minutes=${SOAK_MIN:-5};seeks=$SEEKS"
     LABELS=SOAK ;;
   *) echo "unknown SEQ=$SEQ (main|el|vt|count|soak)"; exit 1 ;;
 esac
 
+BUILD_LOG=""
+BUILD_FAILED=0
+SERVER=""
+cleanup() {
+  [[ -z "$BUILD_LOG" || "$BUILD_FAILED" == 1 ]] || rm -f "$BUILD_LOG"
+  [[ -z "$SERVER" ]] || kill $SERVER 2>/dev/null
+}
+# Cleanup runs once, from the EXIT trap; a signal only turns into an exit with the conventional status.
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
+
 if [[ "${1:-}" != "--no-build" ]]; then
   SIGN=()
   [[ -n "${TEAM:-}" ]] && SIGN=(DEVELOPMENT_TEAM="$TEAM")
-  xcodebuild -project "$ROOT/Device/DolbyVisionPulse.xcodeproj" -scheme DolbyVisionPulse \
-    -destination 'generic/platform=tvOS' -configuration Debug -derivedDataPath "$DD" \
-    -allowProvisioningUpdates PULSE_BUNDLE_PREFIX="$PREFIX" "${SIGN[@]}" build | tail -1
+  BUILD_LOG=$(mktemp -t pulse-build)
+  if ! xcodebuild -project "$ROOT/Device/DolbyVisionPulse.xcodeproj" -scheme DolbyVisionPulse \
+      -destination 'generic/platform=tvOS' -configuration Debug -derivedDataPath "$DD" \
+      -allowProvisioningUpdates PULSE_BUNDLE_PREFIX="$PREFIX" "${SIGN[@]}" build >"$BUILD_LOG" 2>&1; then
+    BUILD_FAILED=1
+    grep -E "error:|BUILD FAILED" "$BUILD_LOG" | head -20 || tail -n 30 "$BUILD_LOG"
+    echo "build failed; full log: $BUILD_LOG"
+    exit 1
+  fi
+  tail -n 1 "$BUILD_LOG"
   xcrun devicectl device install app --device "$DEVICE" "$DD/Build/Products/Debug-appletvos/DolbyVisionPulseHost.app"
 fi
 
 python3 "$HERE/serve.py" $PORT "$IP" "$OUT" >/dev/null 2>&1 &
 SERVER=$!
-trap 'kill $SERVER 2>/dev/null' EXIT
 sleep 1
 
 LOG=tv_${SEQ}_$(date +%Y%m%d_%H%M%S).log
 echo "labels for analyze.py: --arms $LABELS"
 [[ "$SEQ" == soak ]] || echo "start the phone recording now; launching in 10 s"
 sleep 10
-# `process launch` hands --environment-variables to the app process (unlike a test bundle).
+# `process launch` hands --environment-variables to the app process (unlike a test bundle). The JSON is
+# built by json.dumps so nothing in the arm list can break out of the string.
+ENV_JSON=$(python3 -c 'import json, sys; print(json.dumps({"PULSE_ARMS": sys.argv[1]}))' "$ARMS")
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing --console \
-  --environment-variables "{\"PULSE_ARMS\":\"$ARMS\"}" $BUNDLE | tee "$LOG" || echo "(launch ended non-zero: app crashed or was killed; pulling the log anyway)"
+  --environment-variables "$ENV_JSON" $BUNDLE | tee "$LOG" || echo "(launch ended non-zero: app crashed or was killed; pulling the log anyway)"
 xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContainer \
   --domain-identifier $BUNDLE --source Library/Caches/pulse-log.txt --destination "${LOG%.log}.app.log" \
   >/dev/null 2>&1 || echo "(could not pull the app log)"

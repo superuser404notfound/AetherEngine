@@ -10,6 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Changed
+
+- **`aetherctl play` rejects `--no-fel` and `--no-dual-layer`.** Since 7.37.0 they were accepted and
+  did nothing; they are now unknown flags like any other. `aetherctl` and the diagnostics SPI are
+  outside the SemVer contract.
+- **`aetherctl dvsurvey` indices no longer shift after a parse failure.** Frame indices count the
+  title's RPU-carrying video packets whether or not the RPU parsed, so they match the pin test's scan
+  count.
+- **The pulse probe's `run_tv.sh` is stricter.** It shows the build's error lines instead of one
+  `tail` line, builds the launch JSON with `json.dumps`, validates the soak inputs, and cleans up
+  once on exit or on a signal. The VideoToolbox arms delete their downloaded clip when they end.
+
 ### Fixed
 
 - **The Profile 7 `el_type` probe and the interlace sample rewind with a bounded seek.** Both walk

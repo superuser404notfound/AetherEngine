@@ -14,6 +14,8 @@ import Dovi
 /// consumption test (see `DoviDisplayMetadataDebug`).
 @_spi(Diagnostics)
 public struct DoviRpuFrameSurvey: Sendable {
+    /// Position among the title's RPU-carrying video packets, counted whether or not the RPU parsed, so
+    /// it matches the pin test's scan count (`darkest:N` scans the first N of these).
     public let frameIndex: Int
     /// Non-zero on the first frame of a new scene. Dolby Vision DM resets its temporal filters here.
     public let sceneRefresh: Bool
@@ -188,6 +190,7 @@ extension AetherEngine {
 
         var frames: [DoviRpuFrameSurvey] = []
         var packetsProcessed = 0
+        var rpuPackets = 0
         var failures = 0
         var elType: String?
 
@@ -202,7 +205,9 @@ extension AetherEngine {
                 // extractEL: false; the survey never touches pixels, so the EL is dead weight.
                 let layers = DoviRpuConverter.separateDualLayers(packet, extractEL: false)
                 if let raw = layers.rpuData {
-                    let idx = frames.count
+                    // Counted per RPU packet, parsed or not: a parse failure must not shift every later index.
+                    let idx = rpuPackets
+                    rpuPackets += 1
                     let parsed: DoviRpuFrameSurvey? = raw.withUnsafeBufferPointer { buf in
                         guard let base = buf.baseAddress else { return nil }
                         return DoviRpuSurvey.parse(nal: base, length: buf.count, frameIndex: idx)

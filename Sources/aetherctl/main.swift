@@ -78,11 +78,11 @@ func printUsage() {
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
-             [--max-concurrent-requests N]
-                     [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
+                 [--max-concurrent-requests N] [--audio-stats]
+                 [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
-                      FEL dual-layer route (off by default, as in the engine; --no-fel
-                      is accepted and does nothing); --surface (or --window) presents
+                      FEL dual-layer route (off by default, as in the engine);
+                      --surface (or --window) presents
                       into a window; --cycle-el S flips the FEL residual every S
                       seconds, which needs --fel and a surface; --subs activates the first
                       matching embedded subtitle track and logs overlay cues;
@@ -701,12 +701,8 @@ if first == "play" {
     let playRecord = takeStringFlag("--record", from: &rest).map { URL(fileURLWithPath: $0) }
     // Dolby Vision Profile 7 FEL dual-layer decoding, opt-in like the engine's own
     // `preferDualLayerDolbyVision` (default false): `--fel` turns it on, so a plain `play` runs the
-    // route a host gets by default. `--no-fel` / `--no-dual-layer` are accepted as no-ops for the
-    // scripts written when `play` turned it on by itself. Each spelling is taken separately, so
-    // passing two leaves neither behind in `rest`.
+    // route a host gets by default.
     let playFel = takeFlag("--fel", from: &rest)
-    _ = takeFlag("--no-fel", from: &rest)
-    _ = takeFlag("--no-dual-layer", from: &rest)
     let playPreferDualLayerDV = playFel
     let playSurfaceFlag = takeFlag("--surface", from: &rest)
     let playWindowFlag = takeFlag("--window", from: &rest)

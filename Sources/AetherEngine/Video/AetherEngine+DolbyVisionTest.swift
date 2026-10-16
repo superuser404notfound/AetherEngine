@@ -14,6 +14,9 @@ extension AetherEngine {
     /// Drive it from a debug menu; `aetherctl play --fel --dv-pin` takes the same spec on the Mac.
     /// `aetherctl dvsurvey` prints a spec tuned to the title you intend to play.
     ///
+    /// A captured pin belongs to the arming, not to a title: it survives a new `load`, so disarm
+    /// (pass nil) before loading another title.
+    ///
     /// - Parameter spec: e.g. `"darkest:240,period:2"`, or nil to disarm.
     /// - Returns: false if `spec` carried no recognisable capture rule, in which case nothing was
     ///   armed, a typo leaves playback alone rather than pinning something arbitrary.
