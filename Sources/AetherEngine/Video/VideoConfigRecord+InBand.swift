@@ -109,21 +109,24 @@ extension VideoConfigRecord {
         // The ceiling is also armed on the input, so one oversized read cannot spend more than the
         // budget between two checks of the loop.
         demuxer.beginInputByteBudget(Int64(byteBudget))
-        while scanMayContinue(packetsRead: packetsRead, videoPackets: videoPackets, bytesRead: bytesRead,
-                              packetBudget: packetBudget, readBudget: readBudget, byteBudget: byteBudget),
-              !sets.isComplete {
-            guard let pkt = try? demuxer.readPacket() else { break }
-            var toFree: UnsafeMutablePointer<AVPacket>? = pkt
-            defer { trackedPacketFree(&toFree) }
-            packetsRead += 1
-            bytesRead += Int(max(pkt.pointee.size, 0))
-            guard pkt.pointee.stream_index == streamIndex else { continue }
-            videoPackets += 1
-            if let data = pkt.pointee.data {
-                sets.collect(from: data, size: Int(pkt.pointee.size))
+        // Scoped so the ceiling is disarmed before the rewind below, which it would otherwise refuse.
+        do {
+            defer { demuxer.endInputByteBudget() }
+            while scanMayContinue(packetsRead: packetsRead, videoPackets: videoPackets, bytesRead: bytesRead,
+                                  packetBudget: packetBudget, readBudget: readBudget, byteBudget: byteBudget),
+                  !sets.isComplete {
+                guard let pkt = try? demuxer.readPacket() else { break }
+                var toFree: UnsafeMutablePointer<AVPacket>? = pkt
+                defer { trackedPacketFree(&toFree) }
+                packetsRead += 1
+                bytesRead += Int(max(pkt.pointee.size, 0))
+                guard pkt.pointee.stream_index == streamIndex else { continue }
+                videoPackets += 1
+                if let data = pkt.pointee.data {
+                    sets.collect(from: data, size: Int(pkt.pointee.size))
+                }
             }
         }
-        demuxer.endInputByteBudget()
         demuxer.seek(to: 0)
 
         guard let vps = sets.vps, let sps = sets.sps, let pps = sets.pps else {

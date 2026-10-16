@@ -22,13 +22,12 @@ the public-API contract.
   stopped on packet counts alone, so a source with no parameter sets and very large packets could read
   far past the head. It now also stops at 16 MiB of input and leaves the record as it was.
 - **Frames the arrival-order path discards below the seek threshold are counted**
-  (`arrivalSkippedFramesDropped`), as the reorder path counts its late frames.
-- **A timestamp jump forward by more than the reorder window restarts the look-ahead gate's highest
-  PTS**, the way a jump backward does, so a later packet is judged against the new segment.
+  (`arrivalSkippedFramesDropped`), as the reorder path counts its late frames, and the cadence log
+  line shows the total as `skip=`.
 - **A Profile 7 enhancement slot below the latest base slot that no base picture filled pairs by access
   unit** instead of being extrapolated to a time no base frame has.
 
-### Internal
+### Tests and CI
 
 - `FrameSideDataRing` documents that its keys are always in the 90 kHz time base (so the ±300 tick
   window is ±3.3 ms whatever the container's time base), with a test on 1/1000 keys.

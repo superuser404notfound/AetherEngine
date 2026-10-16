@@ -144,9 +144,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// (HEVC allows at most 16 pictures of it), so it is a timestamp discontinuity: the highest PTS
     /// restarts from this packet and the learned lead is left alone, instead of absorbing the jump
     /// into the lead and switching the look-ahead cap off for the rest of the session.
-    /// A jump forward by more than `maxLead` is the same kind of discontinuity: the old highest PTS
-    /// belongs to the previous segment, so it restarts from this packet and a later packet is judged
-    /// against the new segment, not against a PTS the stream has left behind.
+    /// The gate is armed only on the dual-layer route (VOD, seekable); a forward jump holds the packet
+    /// until the clock reaches it, when the layer would present it anyway.
     ///
     /// The learned lead is also capped at `maxLearnedLead`: a backward step inside the 16-picture
     /// window that is still a glitch (a 12-frame one, say) would otherwise raise the lead for the whole
@@ -156,9 +155,6 @@ final class SampleBufferRenderer: @unchecked Sendable {
         -> (pts: Double, maxSeen: Double, lead: Double) {
         let seen = maxSeenPTS ?? packetPTS
         if seen - packetPTS > maxLead {
-            return (packetPTS - reorderLead, packetPTS, reorderLead)
-        }
-        if packetPTS - seen > maxLead {
             return (packetPTS - reorderLead, packetPTS, reorderLead)
         }
         let maxSeen = max(seen, packetPTS)
@@ -438,6 +434,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
         /// timestamps plus failed sample-buffer builds. A gap between the decoder's count and
         /// `handedOver` that this does not account for is a post-seek skip.
         let lostBeforeLayer: Int
+        /// Cumulative frames the arrival-order path discarded below the seek threshold. A decision
+        /// rather than a loss, so it is not part of `lostBeforeLayer`.
+        let arrivalSkipped: Int
         /// Shortest and longest gap between consecutive handed-over timestamps over the interval,
         /// nil when fewer than two frames were handed over. Source axis, seconds.
         let minDeltaSeconds: Double?
@@ -455,6 +454,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         _maxHandedDeltaSeconds = -.infinity
         return Cadence(handedOver: enqueueCount,
                        lostBeforeLayer: _untimedFramesDropped + _sampleBuildFailures + _outOfOrderFramesDropped,
+                       arrivalSkipped: _arrivalSkippedFramesDropped,
                        minDeltaSeconds: minD, maxDeltaSeconds: maxD)
     }
 
@@ -630,7 +630,14 @@ final class SampleBufferRenderer: @unchecked Sendable {
                                    hdr10PlusData: Data?) {
         if let below = arrivalSkipBelow, ptsSeconds < below {
             _arrivalSkippedFramesDropped += 1
+            let skipped = _arrivalSkippedFramesDropped
             reorderLock.unlock()
+            if skipped == 1 {
+                EngineLog.emit(
+                    "[Renderer] frame at \(String(format: "%.3f", ptsSeconds))s is below the seek threshold "
+                    + "\(String(format: "%.3f", below))s; skipping until the first frame at or past it",
+                    category: .swPlayback)
+            }
             return
         }
         // #303: the newest timestamp admitted, as on the reorder path.

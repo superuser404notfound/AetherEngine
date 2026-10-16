@@ -124,7 +124,7 @@ struct InBandParameterSetRebuildTests {
         let codecpar = try #require(demuxer.stream(at: videoIdx)?.pointee.codecpar)
         let before = codecpar.pointee.extradata_size
         #expect(!VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(
-            demuxer: demuxer, streamIndex: videoIdx, byteBudget: 0))
+            demuxer: demuxer, streamIndex: videoIdx, byteBudget: 4096))
         #expect(codecpar.pointee.extradata_size == before)
         #expect(VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: demuxer, streamIndex: videoIdx))
     }

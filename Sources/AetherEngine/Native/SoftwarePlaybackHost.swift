@@ -3815,6 +3815,7 @@ final class SoftwarePlaybackHost {
                 + (d.sourceExhausted ? "eof=y " : "")
                 + "enq=+\(dEnq) disp=+\(dHanded) "
                 + "lost=\(cadence.lostBeforeLayer)(\(dLost >= 0 ? "+" : "")\(dLost)) "
+                + "skip=\(cadence.arrivalSkipped) "
                 + "dpts=\(spacing) layerDrop=\(dropped)(\(dDrop >= 0 ? "+" : "")\(dDrop)) "
                 + "delay=\(delay >= 0 ? String(format: "%.2f", delay) : "-")"
                 + "(\(dDelay >= 0 ? "+" : "")\(String(format: "%.2f", dDelay))) "

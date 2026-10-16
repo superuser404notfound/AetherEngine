@@ -5223,7 +5223,9 @@ public final class AetherEngine: ObservableObject {
                 let verdict = InterlaceProbe.run(demuxer: probe, streamIndex: videoIdx)
                 // The sample consumed packets and the session reuses this demuxer. A rewind that
                 // stalls leaves the declaration standing: the sample says nothing about the title.
-                guard probe.seekBounded(to: 0, timeout: Self.probeRewindSeekTimeout) else { return InterlaceProbe.Verdict.inconclusive(reason: "source did not rewind") }
+                guard probe.seekBounded(to: 0, timeout: Self.probeRewindSeekTimeout) else {
+                    return InterlaceProbe.Verdict.inconclusive(reason: "source did not rewind")
+                }
                 return verdict
             }.value
             if loadGeneration != gen {
