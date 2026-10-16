@@ -543,8 +543,8 @@ extension DoviGpuEdgeCaseTests {
     /// The GPU's float-to-int conversion saturates, so this passes without the clamp too; it locks in the
     /// result the clamp-before-convert in `dovi_denormalize` is meant to give.
     @Test("GPU MMR result far outside the range ends at the VDR range limit",
-          arguments: [(Int32.max, 940), (Int32.min, 64)])
-    func mmrOutOfRangeClamps(coef: Int32, expectedLuma: Int) throws {
+          arguments: [Int32.max, Int32.min])
+    func mmrOutOfRangeClamps(coef: Int32) throws {
         let composer = try #require(DoviFelComposer())
         var poly = DoviPolynomialParams()
         poly.numPivots = 2
@@ -558,7 +558,8 @@ extension DoviGpuEdgeCaseTests {
         var p = Self.params(flags: [.disableResidual, .lumaMmr])
         p.polyY = poly
         p.mmrY = mmr
+        p.ditherMode = .debugRawVDR
         let out = try Self.composeConstant(composer, bl: (512, 300, 700), el: (512, 512, 512), params: p)
-        #expect(Self.lumaValues(out) == [expectedLuma])
+        #expect(Set(DoviTestSupport.rawVDR(out)[0]) == [coef > 0 ? 4095 : 0])
     }
 }

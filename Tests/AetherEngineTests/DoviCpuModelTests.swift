@@ -91,10 +91,10 @@ struct DoviCpuModelTests {
             return s
         }
 
-        /// Bounded to `Int32`, mirroring the shader's `int` conversion. The VDR-range clamp is left out on
-        /// purpose so the census below still counts predictions outside the range.
+        /// The VDR-range clamp is left out on purpose so the census below still counts predictions outside
+        /// the range.
         func denormalize(_ n: Double) -> Int {
-            Int(min(max((n * blMax * scale).rounded(.toNearestOrEven), Double(Int32.min)), Double(Int32.max)))
+            Int((n * blMax * scale).rounded(.toNearestOrEven))
         }
 
         /// Inverse NLQ in `Int64`, reconstructing at the middle of the quantisation step.

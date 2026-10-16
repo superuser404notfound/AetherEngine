@@ -1428,7 +1428,7 @@ final class DoviFelComposer: @unchecked Sendable {
         // A ceiling of 0 clamps every magnitude to min(|r|, 0) = 0 under the spec's clamp, so the residual
         // contributes nothing: refusing it, which drops the residual, is exact.
         guard scaledMax > 0, scaledMax <= Int64(Int32.max) else {
-            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) out of range; dropping residual", category: .swPlayback)
+            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) zero or out of range; dropping residual", category: .swPlayback)
             return disabled
         }
 
