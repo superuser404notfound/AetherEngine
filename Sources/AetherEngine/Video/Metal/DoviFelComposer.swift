@@ -727,6 +727,9 @@ final class DoviFelComposer: @unchecked Sendable {
         let elH = CVPixelBufferGetHeight(enhancementBuffer)
 
         guard blW > 0, blH > 0, elW > 0, elH > 0 else { return nil }
+        // Chroma is subsampled by two and rounds up: an odd luma size still has a last chroma column/row.
+        let blCW = (blW + 1) / 2, blCH = (blH + 1) / 2
+        let elCW = (elW + 1) / 2, elCH = (elH + 1) / 2
         guard let pool = ensurePool(width: blW, height: blH) else { return nil }
 
         // A base-layer frame is NOT close to the composed one on real titles: measured on the three
@@ -766,11 +769,11 @@ final class DoviFelComposer: @unchecked Sendable {
         // bound as Uint so the kernels see raw code values; the enhancement layer
         // is bound as Unorm because it is upsampled by the hardware bilinear sampler.
         guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blW / 2, height: blH / 2, keepAlive: &keepAliveTextures),
+              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures),
               let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Unorm, width: elW, height: elH, keepAlive: &keepAliveTextures),
-              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Unorm, width: elW / 2, height: elH / 2, keepAlive: &keepAliveTextures),
+              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Unorm, width: elCW, height: elCH, keepAlive: &keepAliveTextures),
               let outYTex = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-              let outUvTex = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: blW / 2, height: blH / 2, keepAlive: &keepAliveTextures) else {
+              let outUvTex = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures) else {
             return nil
         }
 
@@ -828,7 +831,7 @@ final class DoviFelComposer: @unchecked Sendable {
         encoder.setTexture(elUvTex, index: 2)
         encoder.setTexture(outUvTex, index: 3)
         encoder.setBuffer(paramBuffer, offset: 0, index: 0)
-        dispatch(encoder, width: blW / 2, height: blH / 2,
+        dispatch(encoder, width: blCW, height: blCH,
                  threadgroup: threadgroupSize(for: pipelines.chromaPipeline))
 
         encoder.endEncoding()
@@ -1359,7 +1362,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// the fixed-point ABI disables the residual for that component instead of
     /// being clamped, while keeping the decoded shift and pivots so a probe can
     /// still report what the RPU said.
-    private static func parseNlqParams(
+    static func parseNlqParams(
         nlq: UnsafePointer<DoviRpuDataNlq>?,
         component c: Int,
         label: String,
@@ -1422,8 +1425,10 @@ final class DoviFelComposer: @unchecked Sendable {
         // vdr_in_max is a normalised ceiling in Q(coefficient_log2_denom); the
         // same shift that converts the residual converts the ceiling.
         let scaledMax = maxFp >> Int64(nlqShift)
-        guard scaledMax >= 0, scaledMax <= Int64(Int32.max) else {
-            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) out of range; dropping residual", category: .swPlayback)
+        // A ceiling of 0 clamps every magnitude to min(|r|, 0) = 0 under the spec's clamp, so the residual
+        // contributes nothing: refusing it, which drops the residual, is exact.
+        guard scaledMax > 0, scaledMax <= Int64(Int32.max) else {
+            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) zero or out of range; dropping residual", category: .swPlayback)
             return disabled
         }
 

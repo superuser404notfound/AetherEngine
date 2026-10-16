@@ -26,6 +26,11 @@ the public-API contract.
   line shows the total as `skip=`.
 - **A Profile 7 enhancement slot below the latest base slot that no base picture filled pairs by access
   unit** instead of being extrapolated to a time no base frame has.
+- **Dolby Vision FEL composer: odd sizes, a zero NLQ ceiling and out-of-range MMR.** A base layer
+  with an odd width or height left its last chroma column or row unwritten; chroma planes now round
+  up. An NLQ `vdr_in_max` that shifts down to 0 is refused like any other value that does not fit,
+  so the residual is dropped, which is what the spec's clamp gives for a ceiling of 0. The MMR result
+  is clamped to the VDR range as a float before it is converted to an integer.
 
 ### Tests and CI
 

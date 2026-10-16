@@ -325,7 +325,8 @@ static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale,
     // The prediction is clamped to the VDR range before the residual is added, as DoViBaker does for both
     // the polynomial and the MMR result, so a prediction outside it cannot be pulled back in by the
     // residual: a negative one starts from 0, one above full scale from vdr_max.
-    return clamp(int(rint(pred_norm * float(bl_max) * float(vdr_scale))), 0, int(vdr_max));
+    // The clamp is in float, before the conversion: an MMR result far outside the range would overflow int.
+    return int(rint(clamp(pred_norm * float(bl_max) * float(vdr_scale), 0.0f, float(vdr_max))));
 }
 
 /* ============================================================================
@@ -361,6 +362,7 @@ static inline int dovi_eval_inv_nlq(constant struct DoviNlqParams &nlq, int el_v
     long mag_fp = (2L * long(abs(r)) - 1L) * long(nlq.nlq_scale);
     long threshold2 = 2L * long(nlq.nlq_threshold);
     long mag = (mag_fp + threshold2) >> (nlq.nlq_shift + 1u);
+    // parseNlqParams refuses a ceiling of 0, so the > 0 test only matters for hand-built parameters.
     if (nlq.vdr_in_max > 0 && mag > long(nlq.vdr_in_max)) {
         mag = long(nlq.vdr_in_max);
     }
@@ -506,8 +508,8 @@ kernel void dovi_compose_chroma(
     constant struct DoviMetalParams&       params        [[buffer(0)]],
     uint2                                  gid           [[thread_position_in_grid]])
 {
-    uint uv_width = params.bl_width / 2u;
-    uint uv_height = params.bl_height / 2u;
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
 
     if (gid.x >= uv_width || gid.y >= uv_height) {
         return;
@@ -562,7 +564,7 @@ kernel void dovi_compose_chroma(
             // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
             // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
             // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
-            float2 el_uv_size = float2(params.el_width / 2u, params.el_height / 2u);
+            float2 el_uv_size = float2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u);
             float2 uv = float2(gid) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
             float2 el = dovi_sample_el_2d(el_uv_tex, s, uv, el_uv_size) * dovi_unorm_to_code;
             if (cb_active) {
