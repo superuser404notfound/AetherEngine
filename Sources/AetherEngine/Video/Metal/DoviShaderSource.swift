@@ -361,6 +361,7 @@ static inline int dovi_eval_inv_nlq(constant struct DoviNlqParams &nlq, int el_v
     long mag_fp = (2L * long(abs(r)) - 1L) * long(nlq.nlq_scale);
     long threshold2 = 2L * long(nlq.nlq_threshold);
     long mag = (mag_fp + threshold2) >> (nlq.nlq_shift + 1u);
+    // parseNlqParams refuses a ceiling of 0, so the > 0 test only matters for hand-built parameters.
     if (nlq.vdr_in_max > 0 && mag > long(nlq.vdr_in_max)) {
         mag = long(nlq.vdr_in_max);
     }

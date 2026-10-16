@@ -1362,7 +1362,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// the fixed-point ABI disables the residual for that component instead of
     /// being clamped, while keeping the decoded shift and pivots so a probe can
     /// still report what the RPU said.
-    private static func parseNlqParams(
+    static func parseNlqParams(
         nlq: UnsafePointer<DoviRpuDataNlq>?,
         component c: Int,
         label: String,
@@ -1425,7 +1425,9 @@ final class DoviFelComposer: @unchecked Sendable {
         // vdr_in_max is a normalised ceiling in Q(coefficient_log2_denom); the
         // same shift that converts the residual converts the ceiling.
         let scaledMax = maxFp >> Int64(nlqShift)
-        guard scaledMax >= 0, scaledMax <= Int64(Int32.max) else {
+        // A ceiling of 0 clamps every magnitude to min(|r|, 0) = 0 under the spec's clamp, so the residual
+        // contributes nothing: refusing it, which drops the residual, is exact.
+        guard scaledMax > 0, scaledMax <= Int64(Int32.max) else {
             logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) out of range; dropping residual", category: .swPlayback)
             return disabled
         }
