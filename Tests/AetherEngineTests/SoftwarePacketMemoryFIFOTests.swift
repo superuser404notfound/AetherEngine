@@ -5,7 +5,7 @@ import Testing
 /// The purgeable-memory packet store (tvOS's software VOD packet store) must behave like the
 /// disk store for everything the read-ahead relies on: FIFO order across chunks, cursors that
 /// restore backwards and forwards, the still walk, and history that is bounded and evictable.
-@Suite("Software packet memory FIFO")
+@Suite("Software packet memory FIFO", .offCooperativePool)
 struct SoftwarePacketMemoryFIFOTests {
 
     /// Records of 1000 bytes filled with their index, so a read can be checked by content.
