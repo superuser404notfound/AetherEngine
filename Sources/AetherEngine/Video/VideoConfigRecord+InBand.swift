@@ -64,6 +64,15 @@ extension VideoConfigRecord {
         return hvcC
     }
 
+    /// Input the in-band scan may read in total, foreign streams included. Parameter sets sit at the
+    /// first IRAP, so a few packets find them; this only caps a stream that never carries any.
+    static let inBandScanByteBudget = 16 * 1024 * 1024
+
+    static func scanMayContinue(packetsRead: Int, videoPackets: Int, bytesRead: Int,
+                                packetBudget: Int, readBudget: Int, byteBudget: Int) -> Bool {
+        packetsRead < readBudget && videoPackets < packetBudget && bytesRead < byteBudget
+    }
+
     /// Replace a video stream's empty hvcC with one rebuilt from the parameter sets at the head of the
     /// source, so the hardware-decode verdict and `HardwareVideoDecoder` see the record AVPlayer would
     /// have reconstructed for itself. Returns true when the record was replaced.
@@ -71,8 +80,14 @@ extension VideoConfigRecord {
     /// Seekable sources only: the scan reads from the head and seeks back to 0, which is where every
     /// caller starts playback from anyway (the start position is applied later). A forward-only
     /// source is left alone, and keeps today's route. Runs off the main actor; it reads packets.
+    ///
+    /// The scan is bounded in packets and in bytes: a stream that carries no parameter sets, or one
+    /// whose packets are very large, ends it at `inBandScanByteBudget` of input rather than reading
+    /// until the packet count runs out, and leaves the record as it was.
     @discardableResult
-    static func completeHEVCRecordFromInBandParameterSets(demuxer: Demuxer, streamIndex: Int32) -> Bool {
+    static func completeHEVCRecordFromInBandParameterSets(
+        demuxer: Demuxer, streamIndex: Int32, byteBudget: Int = inBandScanByteBudget
+    ) -> Bool {
         // Stream access goes through `withStream`, never a pointer held across the packet reads: a
         // stop() closes the demuxer from another thread and frees its streams.
         let needsRebuild = demuxer.withStream(at: streamIndex) { stream -> Bool in
@@ -89,23 +104,31 @@ extension VideoConfigRecord {
         var sets = HEVCParameterSets()
         var videoPackets = 0
         var packetsRead = 0
+        var bytesRead = 0
         demuxer.seek(to: 0)
-        while packetsRead < readBudget, videoPackets < packetBudget, !sets.isComplete {
+        // The ceiling is also armed on the input, so one oversized read cannot spend more than the
+        // budget between two checks of the loop.
+        demuxer.beginInputByteBudget(Int64(byteBudget))
+        while scanMayContinue(packetsRead: packetsRead, videoPackets: videoPackets, bytesRead: bytesRead,
+                              packetBudget: packetBudget, readBudget: readBudget, byteBudget: byteBudget),
+              !sets.isComplete {
             guard let pkt = try? demuxer.readPacket() else { break }
             var toFree: UnsafeMutablePointer<AVPacket>? = pkt
             defer { trackedPacketFree(&toFree) }
             packetsRead += 1
+            bytesRead += Int(max(pkt.pointee.size, 0))
             guard pkt.pointee.stream_index == streamIndex else { continue }
             videoPackets += 1
             if let data = pkt.pointee.data {
                 sets.collect(from: data, size: Int(pkt.pointee.size))
             }
         }
+        demuxer.endInputByteBudget()
         demuxer.seek(to: 0)
 
         guard let vps = sets.vps, let sps = sets.sps, let pps = sets.pps else {
             EngineLog.emit(
-                "[VideoConfigRecord] in-band parameter-set scan found none: packets=\(videoPackets) "
+                "[VideoConfigRecord] in-band parameter-set scan found none: packets=\(videoPackets) bytes=\(bytesRead) "
                 + "vps=\(sets.vps != nil) sps=\(sets.sps != nil) pps=\(sets.pps != nil)",
                 category: .engine
             )
