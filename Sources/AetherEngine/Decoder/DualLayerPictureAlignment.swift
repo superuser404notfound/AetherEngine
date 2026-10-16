@@ -139,8 +139,11 @@ struct DualLayerPictureAlignment {
             reorderedUnits += 1
             return known
         }
-        // That base-layer picture is still to come: extrapolate from the time per slot.
-        guard let origin, let latest, latest.slot != origin.slot,
+        // A slot beyond the latest base picture is still to come: extrapolate from the time per slot.
+        // A slot at or below it that is not in `baseTime` was pruned, or its base picture carried no
+        // POC: it is not still to come, and an extrapolated time would belong to no base frame, so it
+        // pairs by access unit like an unknown slot.
+        guard let origin, let latest, elSlot > latest.slot, latest.slot != origin.slot,
               let result = Self.extrapolate(origin: origin, latest: latest, slot: elSlot) else {
             lastEnhancementPlaced = false; return pts
         }

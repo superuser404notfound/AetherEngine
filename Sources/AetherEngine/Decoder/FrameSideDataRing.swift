@@ -5,10 +5,17 @@ import Foundation
 /// Stores `{ params, dmNAL }` keyed by canonical PTS.
 /// Fixed capacity of 32 entries (reorder depth plus maximum layer skew with margin).
 /// Insert overwrites the oldest entry when full.
-/// Lookup scans up to 32 entries for the nearest key within ±300 ticks (~3.3 ms).
+/// Lookup scans up to 32 entries for the nearest key within ±300 ticks.
+///
+/// Keys are in a 90 kHz time base, always: the owner builds every key with
+/// `DualLayerVideoDecoder.canonicalKey`, which rescales the stream's time base (Matroska's 1/1000,
+/// MPEG-TS's 1/90000, whatever the demuxer reports) to 90 kHz, and nothing else inserts or looks up.
+/// So the window is ±300 / 90 000 s = ±3.3 ms; fed raw 1/1000 ticks it would be ±300 ms, several
+/// frames wide. `jitterToleranceTicks` is therefore in 90 kHz ticks, not in any stream's.
 /// No heap reallocation on insert, no sorting, no dictionary overhead.
 struct FrameSideDataRing: Sendable {
     static let capacity = 32
+    /// ±3.3 ms, in the 90 kHz time base every key is in.
     static let jitterToleranceTicks: Int64 = 300
 
     /// Distance between two canonical keys, or nil when either is the missing-PTS key (`Int64.min`) or the

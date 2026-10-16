@@ -167,4 +167,37 @@ struct DualLayerPictureAlignmentSyntheticTests {
         let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 21), el: Self.slice(T.trailR, poc: 6)), pts: 21000)
         #expect(r == Result(pts: 6000, placed: true))
     }
+
+    // MARK: - Slots missing from the base layer's times
+
+    @Test("an enhancement slot below the latest base slot that no base picture filled pairs by access unit")
+    func missingPastSlotKeepsUnitTime() {
+        var a = Self.seeded()
+        a.reset()
+        // Base POCs 0, 1, 2, then 4: slot 3 is never filled (a picture the base layer did not number).
+        _ = Self.run(&a, Self.unit(bl: Self.slice(T.idrNLP, poc: 0), el: Self.slice(T.idrNLP, poc: 0), parameterSets: true), pts: 0)
+        for i in [1, 2, 4] {
+            _ = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: i), el: Self.slice(T.trailR, poc: i)), pts: Int64(i) * 1000)
+        }
+        // Unit 4: base POC 5 (latest slot 5, time 5000); the enhancement layer shows POC 3, whose slot
+        // is below the latest and has no base time. Extrapolating along the origin-to-latest line
+        // (1000 per slot) would give 3000, a time no base frame has; the unit keeps its own 5000.
+        let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 5), el: Self.slice(T.trailR, poc: 3)), pts: 5000)
+        #expect(r == Result(pts: 5000, placed: false))
+        #expect(a.reorderedUnits == 0)
+    }
+
+    @Test("an enhancement slot beyond the latest base slot is extrapolated from the time per slot")
+    func futureSlotExtrapolates() {
+        var a = Self.seeded()
+        a.reset()
+        _ = Self.run(&a, Self.unit(bl: Self.slice(T.idrNLP, poc: 0), el: Self.slice(T.idrNLP, poc: 0), parameterSets: true), pts: 0)
+        for i in 1...2 {
+            _ = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: i), el: Self.slice(T.trailR, poc: i)), pts: Int64(i) * 1000)
+        }
+        // Unit 3: base POC 3 (time 3000), enhancement POC 4: one slot ahead at 1000 per slot.
+        let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 3), el: Self.slice(T.trailR, poc: 4)), pts: 3000)
+        #expect(r == Result(pts: 4000, placed: true))
+        #expect(a.reorderedUnits == 1)
+    }
 }
