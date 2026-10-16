@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Dolby Vision FEL composer: odd sizes, a zero NLQ ceiling and out-of-range MMR.** A base layer
+  with an odd width or height left its last chroma column or row unwritten; chroma planes now round
+  up. An NLQ `vdr_in_max` that shifts down to 0 is refused like any other value that does not fit,
+  so the residual is dropped, which is what the spec's clamp gives for a ceiling of 0. The MMR result
+  is clamped to the VDR range as a float before it is converted to an integer.
 
 ## [7.38.1] - 2026-10-16
 

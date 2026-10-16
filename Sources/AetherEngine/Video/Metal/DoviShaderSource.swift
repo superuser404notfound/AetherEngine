@@ -325,7 +325,8 @@ static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale,
     // The prediction is clamped to the VDR range before the residual is added, as DoViBaker does for both
     // the polynomial and the MMR result, so a prediction outside it cannot be pulled back in by the
     // residual: a negative one starts from 0, one above full scale from vdr_max.
-    return clamp(int(rint(pred_norm * float(bl_max) * float(vdr_scale))), 0, int(vdr_max));
+    // The clamp is in float, before the conversion: an MMR result far outside the range would overflow int.
+    return int(rint(clamp(pred_norm * float(bl_max) * float(vdr_scale), 0.0f, float(vdr_max))));
 }
 
 /* ============================================================================
