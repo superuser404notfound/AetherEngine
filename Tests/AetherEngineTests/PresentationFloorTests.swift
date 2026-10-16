@@ -258,17 +258,39 @@ struct ArrivalOrderHandoverTests {
         let renderer = SampleBufferRenderer()
         renderer.setArrivalOrderHandover(frameRate: 24)
         let pixels = Self.makePixelBuffer()
-        let needle = "is below the seek threshold"
-        for target in [100, 200] {
-            renderer.flush(removingDisplayedImage: false)
-            renderer.setSkipThreshold(Self.time(target))
-            renderer.setSkipThreshold(Self.time(target))   // re-armed after the landing: still one seek
-            for i in PresentationFloorTests.decodeOrder(gop: 8, frames: 16, startingAt: target - 4) {
-                renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i))
-            }
+        // Targets no other test uses, matched on the threshold in the line itself: the capture sees
+        // every test that logs at the same time.
+        let first = 300   // 12.500 s
+        let second = 400  // 16.667 s
+        let firstLines = { capture.matching("threshold 12.500s") }
+        let secondLines = { capture.matching("threshold 16.667s") }
+
+        renderer.flush(removingDisplayedImage: false)
+        renderer.setSkipThreshold(Self.time(first))
+        for i in PresentationFloorTests.decodeOrder(gop: 8, frames: 16, startingAt: first - 4) {
+            renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i))
         }
-        #expect(renderer.arrivalSkippedFramesDropped > 2, "the counter stays cumulative across seeks")
-        #expect(capture.matching(needle).count == 2)
+        #expect(firstLines().count == 1)
+
+        // A seek sets the same threshold again after the landing: still one seek, still one line,
+        // even though more frames below the target arrive.
+        // (The first frame at or past the threshold clears the renderer's own refusal; the frames
+        // below it that follow are the floor's, and are what get logged.)
+        renderer.setSkipThreshold(Self.time(first))
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(first))
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(first - 2))
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(first - 1))
+        #expect(firstLines().count == 1, "the same target again is not a new seek")
+
+        // A new target without a flush in between is a new seek: its first skipped frame is logged.
+        renderer.setSkipThreshold(Self.time(second))
+        #expect(secondLines().isEmpty)
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(second))
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(second - 2))
+        renderer.enqueue(pixelBuffer: pixels, pts: Self.time(second - 1))
+        #expect(secondLines().count == 1)
+        #expect(firstLines().count == 1)
+        #expect(renderer.arrivalSkippedFramesDropped >= 7, "the counter stays cumulative across seeks")
     }
 
     @Test("Without a frame rate the renderer keeps its reorder buffer")
