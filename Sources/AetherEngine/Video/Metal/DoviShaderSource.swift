@@ -506,8 +506,8 @@ kernel void dovi_compose_chroma(
     constant struct DoviMetalParams&       params        [[buffer(0)]],
     uint2                                  gid           [[thread_position_in_grid]])
 {
-    uint uv_width = params.bl_width / 2u;
-    uint uv_height = params.bl_height / 2u;
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
 
     if (gid.x >= uv_width || gid.y >= uv_height) {
         return;
@@ -562,7 +562,7 @@ kernel void dovi_compose_chroma(
             // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
             // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
             // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
-            float2 el_uv_size = float2(params.el_width / 2u, params.el_height / 2u);
+            float2 el_uv_size = float2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u);
             float2 uv = float2(gid) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
             float2 el = dovi_sample_el_2d(el_uv_tex, s, uv, el_uv_size) * dovi_unorm_to_code;
             if (cb_active) {
