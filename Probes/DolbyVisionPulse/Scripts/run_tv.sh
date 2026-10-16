@@ -55,14 +55,15 @@ case "$SEQ" in
     # The arm list is `,`/`|`/`;` separated and travels inside JSON, so keep the soak inputs to plain URL and number characters.
     [[ "$SOAK_URL" != *[!A-Za-z0-9._~:/?\&=%+@-]* ]] || { echo "SOAK_URL has characters the arm list cannot carry (allowed: letters, digits and . _ ~ : / ? & = % + @ -)"; exit 1; }
     [[ "${SOAK_MIN:-5}" != *[!0-9]* ]] || { echo "SOAK_MIN must be a whole number of minutes"; exit 1; }
-    SEEKS_RE='^[0-9]+@[0-9]+(,[0-9]+@[0-9]+)*$'   # a variable: a quoted pattern would be matched literally
-    [[ "${SOAK_SEEKS:-60@1800}" =~ $SEEKS_RE ]] || { echo "SOAK_SEEKS must look like 60@1800,150@600 (seconds@position, comma separated)"; exit 1; }
+    SEEKS=${SOAK_SEEKS:-60@1800,150@600,240@3000}
+    SEEKS_RE='^[0-9]+@[0-9]+(,[0-9]+@[0-9]+)*$'   # a variable, so it also works in bash, which matches a quoted pattern literally
+    [[ "$SEEKS" =~ $SEEKS_RE ]] || { echo "SOAK_SEEKS must look like 60@1800,150@600 (seconds@position, comma separated)"; exit 1; }
     case "$SOAK_URL" in
       http://*|https://*) U="$SOAK_URL" ;;
       *) [[ -e "$OUT/$SOAK_URL" ]] || { echo "no such file under $OUT: $SOAK_URL"; exit 1; }
          U="$B/${SOAK_URL#./}" ;;
     esac
-    ARMS="SOAK|soak|$U|minutes=${SOAK_MIN:-5};seeks=${SOAK_SEEKS:-60@1800,150@600,240@3000}"
+    ARMS="SOAK|soak|$U|minutes=${SOAK_MIN:-5};seeks=$SEEKS"
     LABELS=SOAK ;;
   *) echo "unknown SEQ=$SEQ (main|el|vt|count|soak)"; exit 1 ;;
 esac
@@ -70,7 +71,12 @@ esac
 BUILD_LOG=""
 BUILD_FAILED=0
 SERVER=""
-trap '[[ -z "$BUILD_LOG" || "$BUILD_FAILED" == 1 ]] || rm -f "$BUILD_LOG"; [[ -z "$SERVER" ]] || kill $SERVER 2>/dev/null' EXIT INT TERM
+cleanup() {
+  [[ -z "$BUILD_LOG" || "$BUILD_FAILED" == 1 ]] || rm -f "$BUILD_LOG"
+  [[ -z "$SERVER" ]] || kill $SERVER 2>/dev/null
+}
+# Cleanup runs once, from the EXIT trap; a signal only turns into an exit with the conventional status.
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 
 if [[ "${1:-}" != "--no-build" ]]; then
   SIGN=()
