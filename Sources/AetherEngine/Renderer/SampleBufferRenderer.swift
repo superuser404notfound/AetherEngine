@@ -347,6 +347,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// `lostBeforeLayer`, but counted so a seek that discards more than its GOP is visible.
     /// Guarded by `reorderLock`.
     private var _arrivalSkippedFramesDropped = 0
+    /// Whether this seek's first skipped frame has been logged. Re-armed whenever the threshold changes
+    /// or is cleared, so the line fires once per seek rather than once per renderer. Guarded by `reorderLock`.
+    private var arrivalSkipLogged = false
     var arrivalSkippedFramesDropped: Int {
         reorderLock.lock()
         defer { reorderLock.unlock() }
@@ -537,6 +540,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // the lowest one to come, so the floor starts here rather than at that frame.
         if arrivalFloor != nil, let time, time.isNumeric {
             arrivalFloor?.reset(start: CMTimeGetSeconds(time))
+            // A seek sets the same threshold again after the landing; only a new target is a new seek.
+            if arrivalSkipBelow != CMTimeGetSeconds(time) { arrivalSkipLogged = false }
             arrivalSkipBelow = CMTimeGetSeconds(time)
         }
         reorderLock.unlock()
@@ -630,9 +635,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
                                    hdr10PlusData: Data?) {
         if let below = arrivalSkipBelow, ptsSeconds < below {
             _arrivalSkippedFramesDropped += 1
-            let skipped = _arrivalSkippedFramesDropped
+            let logFirst = !arrivalSkipLogged
+            arrivalSkipLogged = true
             reorderLock.unlock()
-            if skipped == 1 {
+            if logFirst {
                 EngineLog.emit(
                     "[Renderer] frame at \(String(format: "%.3f", ptsSeconds))s is below the seek threshold "
                     + "\(String(format: "%.3f", below))s; skipping until the first frame at or past it",
@@ -704,6 +710,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // The renderer's own flush below also drops the expectation it was given.
         arrivalFloor?.reset()
         arrivalSkipBelow = nil
+        arrivalSkipLogged = false
         // #303: nothing is held any more, so the frontier is not a frontier. Left standing, a
         // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
         // however far the seek travelled.

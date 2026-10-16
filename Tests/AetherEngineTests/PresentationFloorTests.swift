@@ -250,6 +250,27 @@ struct ArrivalOrderHandoverTests {
         #expect(renderer.takeCadence().lostBeforeLayer == 0, "a seek's discard is a decision, not a loss")
     }
 
+    @Test("The first skipped frame of each seek is logged once, not once per renderer")
+    @MainActor
+    func firstSkipLogsOncePerSeek() {
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let renderer = SampleBufferRenderer()
+        renderer.setArrivalOrderHandover(frameRate: 24)
+        let pixels = Self.makePixelBuffer()
+        let needle = "is below the seek threshold"
+        for target in [100, 200] {
+            renderer.flush(removingDisplayedImage: false)
+            renderer.setSkipThreshold(Self.time(target))
+            renderer.setSkipThreshold(Self.time(target))   // re-armed after the landing: still one seek
+            for i in PresentationFloorTests.decodeOrder(gop: 8, frames: 16, startingAt: target - 4) {
+                renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i))
+            }
+        }
+        #expect(renderer.arrivalSkippedFramesDropped > 2, "the counter stays cumulative across seeks")
+        #expect(capture.matching(needle).count == 2)
+    }
+
     @Test("Without a frame rate the renderer keeps its reorder buffer")
     @MainActor
     func offWithoutARate() {
