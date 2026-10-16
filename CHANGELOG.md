@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **`aetherctl play` rejects `--no-fel` and `--no-dual-layer`.** Since 7.37.0 they were accepted and
+  did nothing; they are now unknown flags like any other. `dvsurvey` frame indices count the title's
+  RPU-carrying video packets whether or not the RPU parsed, so a parse failure no longer shifts the
+  indices after it and they match the pin test's scan count. The pulse probe's `run_tv.sh` shows the
+  build's error lines instead of one `tail` line, builds the launch JSON with `json.dumps`, validates
+  the soak inputs, and the VideoToolbox arms delete their downloaded clip when they end.
 
 ## [7.38.1] - 2026-10-16
 

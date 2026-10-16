@@ -106,9 +106,10 @@ func runDvSurvey(url: URL, maxFrames: Int, listFrames: Int) -> Int32 {
     print("    aetherctl play --fel --surface --dv-pin '\(rule),period:2' <url>")
     print("        pins the first frame matching this exact threshold")
     print("")
-    print("Then play this title on the Apple TV and watch the panel. The decoded pixels are")
-    print("bit-identical in both phases, so a 2-second brightness or saturation pulse means the")
-    print("attachment reached the panel. A flat picture means it did not.")
+    print("`aetherctl play` runs on this Mac. To test the panel, arm the same pin string in a host app on")
+    print("the Apple TV (AetherEngine.armDolbyVisionPinTest) and play this title there. The decoded")
+    print("pixels are bit-identical in both phases, so a 2-second brightness or saturation pulse")
+    print("means the attachment reached the panel. A flat picture means it did not.")
     print("")
 
     // Below roughly a quarter-stop of combined L1 movement the panel's own tone mapping absorbs the

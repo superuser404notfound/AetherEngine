@@ -37,6 +37,9 @@ import Dovi
 ///   to 2. A positive value below `minimumPeriod` (a pulse faster than a panel can show) is raised
 ///   to it, and a value that is not a finite number is ignored.
 ///
+/// A captured pin belongs to the arming, not to a title: it survives a new `load`, so disarm
+/// (`armDolbyVisionPinTest(nil)`) before loading another title.
+///
 /// `darkest:240,period:2` is the usual starting point: scan ten seconds, pin the
 /// darkest frame found, pulse every two seconds.
 ///
