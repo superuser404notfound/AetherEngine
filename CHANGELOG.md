@@ -10,7 +10,31 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The Profile 7 `el_type` probe and the interlace sample rewind with a bounded seek.** Both walk
+  the head of the source on the session's own demuxer and then seek it back to the start, with the
+  plain seek that carries no deadline, so a remote source that stalled there parked the load. The
+  seek now takes the same 5 s budget as the other load-time seeks; when it does not land, the
+  enhancement layer type is unknown (the dual-layer route is not taken) and the interlace sample is
+  inconclusive (the declared field order stands).
+- **The in-band parameter-set scan has a byte budget.** `completeHEVCRecordFromInBandParameterSets`
+  stopped on packet counts alone, so a source with no parameter sets and very large packets could read
+  far past the head. It now also stops at 16 MiB of input and leaves the record as it was.
+- **Frames the arrival-order path discards below the seek threshold are counted**
+  (`arrivalSkippedFramesDropped`), as the reorder path counts its late frames.
+- **A timestamp jump forward by more than the reorder window restarts the look-ahead gate's highest
+  PTS**, the way a jump backward does, so a later packet is judged against the new segment.
+- **A Profile 7 enhancement slot below the latest base slot that no base picture filled pairs by access
+  unit** instead of being extrapolated to a time no base frame has.
+
+### Internal
+
+- `FrameSideDataRing` documents that its keys are always in the 90 kHz time base (so the ±300 tick
+  window is ±3.3 ms whatever the container's time base), with a test on 1/1000 keys.
+- The suites that block a thread (`SoftwarePacketMemoryFIFOTests`, `DualLayerEdgeCaseTests`) run off
+  the cooperative pool, and `DoviRealFileExportTests` on the one-lane trait, so the one-thread CI step
+  does not starve the other tests.
 
 ## [7.38.1] - 2026-10-16
 
