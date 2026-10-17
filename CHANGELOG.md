@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A seek that misses the software path's packet cache no longer ends playback at its landing.**
+  The miss empties the read-ahead store while holding the store's operation lock, and a demux-loop
+  read that began inside the seek's window could leave its wait at once (its reader was not current
+  yet), get the lock only after the seek had landed, find the store empty and return nil, which the
+  loop takes for end of stream: "end of media" at the landing. An empty store is now the end only
+  when the producer has seen the source's own end; before that the read throws `.interrupted` and the
+  loop reads again. Seen on DVD-Video, whose time-map seek settles at once: a seek past the first
+  cell ended playback in 7 of 8 runs, in none of 8 with the fix (48 seeks that missed the cache).
 
 ## [7.39.0] - 2026-10-17
 
