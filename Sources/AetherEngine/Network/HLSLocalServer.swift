@@ -76,6 +76,8 @@ protocol HLSSegmentProvider: AnyObject {
     var masterCodecs: String? { get }
     var masterResolution: (width: Int, height: Int)? { get }
     var masterVideoRange: HLSVideoRange? { get }
+    /// REQ-VIDEO-LAYOUT on EXT-X-STREAM-INF ("CH-STEREO" for a stereo session); nil omits it.
+    var masterVideoLayout: String? { get }
     var masterBandwidth: Int? { get }
 
     /// SUPPLEMENTAL-CODECS on EXT-X-STREAM-INF. DV P8.1 = "dvh1.08.LL/db1p", P8.4 = "dvh1.08.LL/db4h"; P5 is nil (dvh1.05.LL goes in primary CODECS). AVPlayer's master-level codec filter silently drops variants whose primary CODECS it can't fall back to; bare dvh1 master stalled at fetch 2-3 without advancing to media.m3u8.
@@ -187,6 +189,7 @@ extension HLSSegmentProvider {
     var masterCodecs: String? { nil }
     var masterResolution: (width: Int, height: Int)? { nil }
     var masterVideoRange: HLSVideoRange? { nil }
+    var masterVideoLayout: String? { nil }
     var masterBandwidth: Int? { nil }
     var masterSupplementalCodecs: String? { nil }
     var masterFrameRate: Double? { nil }
@@ -1781,7 +1784,9 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         var lines: [String] = []
         lines.append("#EXTM3U")
-        lines.append("#EXT-X-VERSION:7")
+        // A REQ- attribute needs version 12: under 7 AVPlayer refuses the master (-12642, measured on
+        // macOS 27 and the visionOS 27 simulator). Every other master keeps the version it always had.
+        lines.append(provider.masterVideoLayout != nil ? "#EXT-X-VERSION:12" : "#EXT-X-VERSION:7")
         lines.append("#EXT-X-INDEPENDENT-SEGMENTS")
 
         // EXT-X-STREAM-INF attribute order per Apple's HLS Authoring Spec Appendixes: BANDWIDTH, AVERAGE-BANDWIDTH, CODECS, SUPPLEMENTAL-CODECS, RESOLUTION/FRAME-RATE/VIDEO-RANGE, HDCP-LEVEL/CLOSED-CAPTIONS.
@@ -1808,6 +1813,9 @@ final class HLSLocalServer: @unchecked Sendable {
         }
         if let hdcp = provider.masterHDCPLevel {
             streamInfAttrs.append("HDCP-LEVEL=\(hdcp)")
+        }
+        if let layout = provider.masterVideoLayout {
+            streamInfAttrs.append("REQ-VIDEO-LAYOUT=\"\(layout)\"")
         }
         // AE#458: the audio is muxed into the variant, so its rendition carries no URI (RFC 8216 4.3.4.2.1).
         // That tag is the ONLY place AVFoundation reads an audio language from on an HLS asset: measured on

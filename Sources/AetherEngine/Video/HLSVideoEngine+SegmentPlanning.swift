@@ -742,7 +742,15 @@ extension HLSVideoEngine {
     /// the media packets (untouched) and in the muxer's `mdcv`/`clli` boxes, not the hvcC SEI array. DV is
     /// unaffected too: the dvcC/dvvC boxes and RPU live outside the hvcC extradata. Returns nil when the record
     /// already holds only parameter-set arrays (no rewrite needed) or cannot be parsed as an hvcC.
-    static func canonicalizeHEVCConfigRecord(_ extradata: [UInt8]) -> [UInt8]? {
+    ///
+    /// `keepingSEIPayloadTypes` keeps the prefix SEI NAL units whose first payload is one of these types, in an
+    /// SEI array of their own, and still drops every other one. An MV-HEVC session keeps
+    /// `stereoReferenceDisplaysSEIPayloadType`: Apple's writer puts that SEI in the `hvcC`, and without it there
+    /// AVFoundation decodes the base view alone although `lhvC` and every layer-1 slice are there (measured on
+    /// macOS 27: AVPlayerVideoOutput with the stereoscopic preset gets one buffer for both eyes; with the SEI
+    /// back, one per eye; the Vision Pro showed the left eye only).
+    static func canonicalizeHEVCConfigRecord(_ extradata: [UInt8],
+                                             keepingSEIPayloadTypes: Set<Int> = []) -> [UInt8]? {
         guard extradata.count >= 23 else { return nil }
         guard extradata[0] == 1 else { return nil }  // configurationVersion; guards against Annex-B / non-hvcC
         let numOfArrays = Int(extradata[22])
@@ -768,15 +776,45 @@ extension HLSVideoEngine {
         }
 
         let parameterSetTypes: Set<Int> = [32, 33, 34]  // VPS, SPS, PPS
-        let kept = arrays.filter { parameterSetTypes.contains($0.type) }
-        guard kept.count < arrays.count else { return nil }  // nothing to drop: already canonical
+        var kept: [[UInt8]] = arrays.filter { parameterSetTypes.contains($0.type) }.map { Array(extradata[$0.range]) }
+        var keptSEI: [[UInt8]] = []   // whole NAL units (2-byte length dropped)
+        for array in arrays where array.type == 39 && !keepingSEIPayloadTypes.isEmpty {
+            var o = array.range.lowerBound + 3
+            while o + 2 <= array.range.upperBound {
+                let len = (Int(extradata[o]) << 8) | Int(extradata[o + 1])
+                let nal = Array(extradata[(o + 2)..<(o + 2 + len)])
+                if let type = Self.firstSEIPayloadType(nal), keepingSEIPayloadTypes.contains(type) { keptSEI.append(nal) }
+                o += 2 + len
+            }
+        }
+        if !keptSEI.isEmpty {
+            var array: [UInt8] = [0x80 | 39, UInt8(keptSEI.count >> 8), UInt8(keptSEI.count & 0xFF)]  // array_completeness
+            for nal in keptSEI { array += [UInt8(nal.count >> 8), UInt8(nal.count & 0xFF)] + nal }
+            kept.append(array)
+        }
+        let keptBytes = kept.reduce(0) { $0 + $1.count }
+        guard keptBytes < extradata.count - 23 else { return nil }  // nothing to drop: already canonical
 
         var out: [UInt8] = []
-        out.reserveCapacity(23 + kept.reduce(0) { $0 + $1.range.count })
+        out.reserveCapacity(23 + keptBytes)
         out.append(contentsOf: extradata[0..<22])  // header verbatim (profile/tier/level/lengthSize)
         out.append(UInt8(kept.count))               // rewritten numOfArrays
-        for array in kept { out.append(contentsOf: extradata[array.range]) }
+        for array in kept { out.append(contentsOf: array) }
         return out
+    }
+
+    /// SEI payload type 176, three_dimensional_reference_displays_info (H.265 annex G): what Apple's MV-HEVC
+    /// writer puts in the `hvcC` and AVFoundation needs there to decode the second view.
+    static let stereoReferenceDisplaysSEIPayloadType = 176
+
+    /// The first payload type of an SEI NAL unit (2-byte NAL header, then 0xFF-continued payload type), nil if
+    /// it is not one.
+    static func firstSEIPayloadType(_ nal: [UInt8]) -> Int? {
+        guard nal.count >= 3, (Int(nal[0]) >> 1) & 0x3F == 39 || (Int(nal[0]) >> 1) & 0x3F == 40 else { return nil }
+        var type = 0, i = 2
+        while i < nal.count, nal[i] == 0xFF { type += 255; i += 1 }
+        guard i < nal.count else { return nil }
+        return type + Int(nal[i])
     }
 
     /// ADTS AAC from MPEG-TS arrives without an AudioSpecificConfig in `extradata`; the fMP4 `mp4a`/`esds` sample entry can't be written. Synthesizes a 2-byte ASC, installs it, and clears the TS codec_tag the mov muxer rejects. Returns true when applied; caller strips per-frame ADTS headers.

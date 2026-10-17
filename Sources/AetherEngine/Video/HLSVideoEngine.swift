@@ -60,6 +60,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (`VideoRoutingPolicy.presentsDolbyVisionBaseLayer`), ahead of every DV branch including AE#455.
     let dolbyVisionHandling: DolbyVisionHandling
 
+    /// From `LoadOptions.stereoPresentation`: how a 3D source is presented (`StereoVideoSignal.resolve`).
+    let stereoPresentation: StereoPresentation
+
+    /// Diagnostic lever for `aetherctl serve --stereo`: resolve the stereo signal as visionOS does on a
+    /// system that presents 2D, so a Mac can serve a visionOS simulator or device what it would get.
+    let stereoOnAnySystem: Bool
+
+    /// What this session tells AVPlayer about a stereo source; nil for 2D. Set with the video config.
+    private(set) var stereoSignal: StereoVideoSignal?
+
     /// AE#532: the profile this source's own RPU reports, when the container record was worth doubting
     /// (`DolbyVisionRecordAudit`). nil when nothing was read, which is every source but a Profile 5
     /// record over a BT.2020 YCbCr HDR VUI. The route believes it over the record.
@@ -1022,6 +1032,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         undecodableAudioStreamIndices: Set<Int32> = [],
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         objectAudioRendering: ObjectAudioRendering = .off,
+        stereoPresentation: StereoPresentation = .automatic,
+        stereoOnAnySystem: Bool = false,
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
@@ -1074,6 +1086,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.undecodableAudioStreamIndices = undecodableAudioStreamIndices
         self.audioBridgeMode = audioBridgeMode
         self.objectAudioRendering = objectAudioRendering
+        self.stereoPresentation = stereoPresentation
+        self.stereoOnAnySystem = stereoOnAnySystem
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveJoinProfile = liveJoinProfile
@@ -1563,6 +1577,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
         let measuredVideoNALFraming = framingNormalization.measuredFraming
 
+        // Resolved here, before the config record is rebuilt: an MV-HEVC session keeps one SEI the AE#187
+        // canonicalization would drop (`canonicalizeHEVCConfigRecord`).
+        let stereo = StereoVideoSignal.resolve(
+            presentation: stereoPresentation,
+            codecID: codecpar.pointee.codec_id,
+            multilayer: (videoStream.pointee.disposition & AV_DISPOSITION_MULTILAYER) != 0,
+            containerStereo: StereoVideoSignal.containerStereo(codecpar),
+            systemPresentsStereo: stereoOnAnySystem || StereoVideoSignal.systemPresentsStereo
+        )
         let hevcExtradataOverride: [UInt8]?
         if let normalized = framingNormalization.extradataOverride {
             hevcExtradataOverride = normalized
@@ -1581,7 +1604,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         } else if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
                   let ed = codecpar.pointee.extradata,
                   case let source = Array(UnsafeBufferPointer(start: ed, count: Int(codecpar.pointee.extradata_size))),
-                  let canonical = Self.canonicalizeHEVCConfigRecord(source) {
+                  let canonical = Self.canonicalizeHEVCConfigRecord(
+                      source, keepingSEIPayloadTypes: stereo.signal == .multiview
+                          ? [Self.stereoReferenceDisplaysSEIPayloadType] : []) {
             hevcExtradataOverride = canonical
             EngineLog.emit(
                 "[HLSVideoEngine] canonicalized hvcC (stripped non-parameter-set NAL arrays): "
@@ -1705,6 +1730,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // The extradata-derived framing is a claim, not a measurement.
         var framingMeasuredLengthPrefixed = false
         if case .lengthPrefixed? = measuredVideoNALFraming { framingMeasuredLengthPrefixed = true }
+        stereoSignal = stereo.signal
+        if stereo.signal != nil || stereoPresentation != .automatic
+            || StereoVideoSignal.containerStereo(codecpar) != nil
+            || (videoStream.pointee.disposition & AV_DISPOSITION_MULTILAYER) != 0 {
+            EngineLog.emit("[HLSVideoEngine] stereo: \(stereo.reason)", category: .session)
+        }
         let videoConfig = HLSSegmentProducer.StreamConfig(
             codecpar: UnsafePointer(ownedVideoParams.ptr),
             timeBase: videoTimeBase,
@@ -1715,7 +1746,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             extradataOverride: hevcExtradataOverride,
             nalFramingOverride: measuredVideoNALFraming,
             convertsAnnexBSamples: framingNormalization.convertsAnnexBSamples,
-            nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed)
+            nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed),
+            stereo: stereo.signal
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
@@ -2123,6 +2155,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             audioLanguage: servedAudioLanguage,
             audioChannelCount: servedAudioChannels,
             audioIsAtmosStreamCopy: servedAudioIsAtmosStreamCopy,
+            videoLayout: stereoSignal != nil ? StereoVideoSignal.videoLayout : nil,
             isLive: isLiveSession,
             servesSegmentsProgressively: servesSegmentsProgressively,
             // Sequential archives: playlist grows with the producer's REAL cut durations. The
@@ -2829,7 +2862,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 codecTagOverride: cfg.codecTagOverride, doviConfig: cfg.doviConfig,
                 colorOverride: cfg.colorOverride, extradataOverride: cfg.extradataOverride,
                 convertsAnnexBSamples: cfg.convertsAnnexBSamples,
-                nalFramingLatch: cfg.nalFramingLatch),
+                nalFramingLatch: cfg.nalFramingLatch, stereo: cfg.stereo),
             stagingDir: staging)
         let format: IFrameRenditionFormat
         let buildFragment: (Data, Int, IFrameRendition.Entry) -> IFrameFragmentBuilder.Output?

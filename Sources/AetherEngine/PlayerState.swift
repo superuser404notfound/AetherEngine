@@ -577,6 +577,14 @@ public struct LoadOptions: Sendable, Equatable {
     /// `ObjectAudioRendering`.
     public var objectAudioRendering: ObjectAudioRendering
 
+    /// How a 3D source is presented where the system shows stereo (visionOS; elsewhere every source plays
+    /// 2D as before). `.automatic` (default) keeps an MV-HEVC stream's second view and presents the frame
+    /// packing a container declares; `.sideBySide` / `.overUnder` say what the file's name alone says (a
+    /// host's per-title choice); `.mono` plays 2D. Frame packing is signalled on HEVC only: AVPlayer
+    /// refuses it on H.264 over HLS, so an H.264 packed frame plays 2D. See `StereoVideoSignal`. A tuning
+    /// field: `reloadAtCurrentPosition(applying:)` carries a change (a viewer's per-title 2D / 3D choice).
+    public var stereoPresentation: StereoPresentation = .automatic
+
     /// Treat the source as a live stream. `seek(to:)` becomes a no-op; `isLive` surface reflects this for host UIs. Set explicitly: auto-detection from `probe.durationSeconds == 0` is too noisy (VOD MKVs with broken duration headers). Default `false`.
     public var isLive: Bool
 
@@ -987,6 +995,7 @@ public struct LoadOptions: Sendable, Equatable {
         panelPresentsDolbyVision: Bool = false,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         objectAudioRendering: ObjectAudioRendering = .off,
+        stereoPresentation: StereoPresentation = .automatic,
         isLive: Bool = false,
         audioOnly: Bool = false,
         dvrWindowSeconds: Double? = nil,
@@ -1041,6 +1050,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.panelPresentsDolbyVision = panelPresentsDolbyVision
         self.audioBridgeMode = audioBridgeMode
         self.objectAudioRendering = objectAudioRendering
+        self.stereoPresentation = stereoPresentation
         self.isLive = isLive
         self.audioOnly = audioOnly
         self.dvrWindowSeconds = dvrWindowSeconds

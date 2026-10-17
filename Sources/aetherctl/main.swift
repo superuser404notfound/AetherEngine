@@ -67,7 +67,7 @@ func printUsage() {
 
     Usage:
       aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-atmos] <url>
-      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4] [--audio-index N] <url>
+      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--fel] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
@@ -1034,6 +1034,15 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)
     let customAudioIndex = takeIntFlag("--audio-index", from: &rest).map(Int32.init)
+    // `--stereo auto|mono|sbs|ou`: serve a 3D source the way visionOS gets it, from any system.
+    let serveStereo: StereoPresentation? = takeStringFlag("--stereo", from: &rest).map {
+        switch $0 {
+        case "mono": return .mono
+        case "sbs": return .sideBySide
+        case "ou": return .overUnder
+        default: return .automatic
+        }
+    }
     let audioOnlyFlag = takeFlag("--audio-only", from: &rest)
     // AE#445: the custom-source live shape had no harness at all, so a retention question about it
     // could only be reasoned about. These four flags are the reporter's reader in parameters.
@@ -1138,7 +1147,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
                  audioDelayMs: serveAudioDelayMs, iFrames: serveIFrames,
                  objectAudioRendering: serveObjectAudioRendering,
                  // `--audio-index` (parsed once above, shared with customio): serve that source stream.
-                 audioStreamIndex: customAudioIndex)
+                 audioStreamIndex: customAudioIndex, stereo: serveStereo)
     case "validate":
         exit(runValidate(url: url, dvModeAvailable: dvModeAvailable, forceDVWithoutDisplay: forceDV,
                          dolbyVisionHandling: dvHandling))

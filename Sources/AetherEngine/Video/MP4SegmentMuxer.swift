@@ -78,6 +78,8 @@ final class MP4SegmentMuxer {
         let convertsAnnexBSamples: Bool
         /// The session's framing verdict for this track (audit BIT-104); nil gives the muxer its own.
         let nalFramingLatch: NALFramingLatch?
+        /// A stereo source's signalling (`StereoVideoSignal`); nil leaves the track as the source has it.
+        let stereo: StereoVideoSignal?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -87,7 +89,8 @@ final class MP4SegmentMuxer {
             colorOverride: ColorOverride? = nil,
             extradataOverride: [UInt8]? = nil,
             convertsAnnexBSamples: Bool = false,
-            nalFramingLatch: NALFramingLatch? = nil
+            nalFramingLatch: NALFramingLatch? = nil,
+            stereo: StereoVideoSignal? = nil
         ) {
             self.codecpar = codecpar
             self.timeBase = timeBase
@@ -97,6 +100,7 @@ final class MP4SegmentMuxer {
             self.extradataOverride = extradataOverride
             self.convertsAnnexBSamples = convertsAnnexBSamples
             self.nalFramingLatch = nalFramingLatch
+            self.stereo = stereo
         }
     }
 
@@ -355,9 +359,21 @@ final class MP4SegmentMuxer {
         self.byteCounter = counter
 
         let sampleEntryOverride = audio?.soundSampleEntryOverride
+        let stereo = video.stereo
         self.splitter = FragmentSplitter(
             onHeaderComplete: { initBytes in
-                let initBytes = Self.installingSoundSampleEntry(sampleEntryOverride, in: initBytes)
+                var initBytes = Self.installingSoundSampleEntry(sampleEntryOverride, in: initBytes)
+                if case .framePacked(let packing)? = stereo {
+                    if let packed = StereoVideoSignal.installingViewPacking(packing, in: initBytes) {
+                        initBytes = packed
+                    } else {
+                        EngineLog.emit(
+                            "[MP4SegmentMuxer] ERROR: no video sample entry in the \(initBytes.count) B init "
+                            + "to carry the frame packing; the film plays 2D",
+                            category: .session
+                        )
+                    }
+                }
                 // AE#187 defense-in-depth: strip a zero-sample video `sdtp` from the fragmented init before
                 // forwarding it. The pinned FFmpegBuild (n8.1.2) never writes it, so this is a no-op there;
                 // it neutralizes the box only for a consumer that links an older FFmpeg (a -force_load'ed
@@ -591,6 +607,24 @@ final class MP4SegmentMuxer {
         }
         if let extradata = video.extradataOverride {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
+        }
+        if video.stereo == .multiview {
+            // movenc writes `lhvC` (the second layer's parameter sets, which the extradata carries after
+            // the base layer's) only for a stream with this disposition, and a new stream has none. The
+            // source's stereo side data stays: from an MP4 it is the `vexu` the film came with.
+            videoStream.pointee.disposition |= AV_DISPOSITION_MULTILAYER
+        } else if videoStream.pointee.codecpar.pointee.nb_coded_side_data > 0,
+                  videoStream.pointee.codecpar.pointee.coded_side_data != nil {
+            // Anything else leaves the source's stereo claim out. movenc turns a Matroska StereoMode into
+            // `st3d` plus a `vexu` with both eye views and no packing, which AVFoundation reads as a
+            // stereo track it cannot split (measured: HasLeft/RightStereoEyeView, no ViewPackingKind);
+            // a packed frame gets Apple's full vexu after write_header instead (`installingViewPacking`),
+            // and a 2D session is plainly 2D.
+            av_packet_side_data_remove(
+                videoStream.pointee.codecpar.pointee.coded_side_data,
+                &videoStream.pointee.codecpar.pointee.nb_coded_side_data,
+                AV_PKT_DATA_STEREO3D
+            )
         }
         if let audio = audio {
             guard let audioStream = avformat_new_stream(ctx, nil) else {

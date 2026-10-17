@@ -35,6 +35,38 @@ struct HEVCConfigRecordTests {
         return r
     }
 
+    @Test("An MV-HEVC session keeps the 3D reference displays SEI and still drops libx265's")
+    func keepsStereoSEI() {
+        let vps: [UInt8] = Array(repeating: 0xA1, count: 24)
+        let sps: [UInt8] = Array(repeating: 0xB2, count: 43)
+        let pps: [UInt8] = Array(repeating: 0xC3, count: 7)
+        // The NAL Apple's MV-HEVC writer puts in the hvcC (Stereo.A, macOS 27): prefix SEI, payload 176, size 4.
+        let stereo: [UInt8] = [0x4E, 0x01, 0xB0, 0x04, 0x0D, 0x00, 0x20, 0x00, 0x80]
+        let x265: [UInt8] = [0x4E, 0x01, 0x05] + Array(repeating: 0xD4, count: 40)   // user data unregistered
+        let source = Self.buildHvcC([
+            Self.encodeArray(type: 32, completeness: true, nals: [vps]),
+            Self.encodeArray(type: 33, completeness: true, nals: [sps]),
+            Self.encodeArray(type: 34, completeness: true, nals: [pps]),
+            Self.encodeArray(type: 39, completeness: false, nals: [x265, stereo]),
+        ])
+        let kept = HLSVideoEngine.canonicalizeHEVCConfigRecord(
+            source, keepingSEIPayloadTypes: [HLSVideoEngine.stereoReferenceDisplaysSEIPayloadType])
+        #expect(kept == Self.buildHvcC([
+            Self.encodeArray(type: 32, completeness: true, nals: [vps]),
+            Self.encodeArray(type: 33, completeness: true, nals: [sps]),
+            Self.encodeArray(type: 34, completeness: true, nals: [pps]),
+            Self.encodeArray(type: 39, completeness: true, nals: [stereo]),
+        ]))
+        // Every other session drops it as before (AE#187).
+        #expect(HLSVideoEngine.canonicalizeHEVCConfigRecord(source) == Self.buildHvcC([
+            Self.encodeArray(type: 32, completeness: true, nals: [vps]),
+            Self.encodeArray(type: 33, completeness: true, nals: [sps]),
+            Self.encodeArray(type: 34, completeness: true, nals: [pps]),
+        ]))
+        #expect(HLSVideoEngine.firstSEIPayloadType([0x4E, 0x01, 0xFF, 0x05, 0x00]) == 260)
+        #expect(HLSVideoEngine.firstSEIPayloadType([0x42, 0x01, 0x01]) == nil)   // an SPS
+    }
+
     @Test("Drops the SEI_PREFIX array, keeps VPS/SPS/PPS in order")
     func stripsSeiPrefix() {
         let vps: [UInt8] = Array(repeating: 0xA1, count: 24)

@@ -56,6 +56,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// The session's BIT-1 framing verdict, handed to every muxer this producer builds for the
         /// program's own track (audit BIT-104).
         let nalFramingLatch: NALFramingLatch?
+        /// Forwarded to `MP4SegmentMuxer.VideoConfig.stereo`.
+        let stereo: StereoVideoSignal?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -67,8 +69,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
             extradataOverride: [UInt8]? = nil,
             nalFramingOverride: VideoNALFraming? = nil,
             convertsAnnexBSamples: Bool = false,
-            nalFramingLatch: NALFramingLatch? = nil
+            nalFramingLatch: NALFramingLatch? = nil,
+            stereo: StereoVideoSignal? = nil
         ) {
+            self.stereo = stereo
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.codecTagOverride = codecTagOverride
@@ -2172,7 +2176,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             colorOverride: isAdCreative ? nil : videoConfig.colorOverride,
             extradataOverride: isAdCreative ? nil : videoConfig.extradataOverride,
             convertsAnnexBSamples: isAdCreative ? false : videoConfig.convertsAnnexBSamples,
-            nalFramingLatch: isAdCreative ? nil : videoConfig.nalFramingLatch
+            nalFramingLatch: isAdCreative ? nil : videoConfig.nalFramingLatch,
+            stereo: isAdCreative ? nil : videoConfig.stereo
         )
         let muxerAudio: MP4SegmentMuxer.AudioConfig? = audioConfig.map { a in
             MP4SegmentMuxer.AudioConfig(codecpar: a.codecpar, timeBase: a.inputTimeBase,
