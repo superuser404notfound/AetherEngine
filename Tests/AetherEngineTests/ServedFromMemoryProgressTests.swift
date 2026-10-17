@@ -68,9 +68,6 @@ struct ServedFromMemoryProgressTests {
     @Test("a retained-span serve is not progress against a metered origin",
           .timeLimit(.minutes(2)))
     func retainedSpanServeDoesNotClearTheLadder() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         // The first range ends here and every refill at the frontier is refused: the shape of an
         // origin that answers the range boundary and meters everything past it.
         let frontier: Int64 = 8 * 1024 * 1024
@@ -82,7 +79,8 @@ struct ServedFromMemoryProgressTests {
         defer { server.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
-                                boundedInitialFetch: frontier)
+                                boundedInitialFetch: frontier,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 

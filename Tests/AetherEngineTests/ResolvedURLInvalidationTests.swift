@@ -134,9 +134,6 @@ struct ResolvedURLInvalidationTests {
     @Test("a rate-limited refill keeps the pin instead of re-resolving through the source",
           .timeLimit(.minutes(2)))
     func rateLimitedRefillKeepsThePin() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 256 * 1024
         let attempts = AttemptCounter()
         // CDN: meters the first two attempts at the boundary refill, then serves.
@@ -158,7 +155,8 @@ struct ResolvedURLInvalidationTests {
         defer { source.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -186,9 +184,6 @@ struct ResolvedURLInvalidationTests {
     @Test("a 509 refill keeps the pin instead of re-resolving through the source",
           .timeLimit(.minutes(2)))
     func connectionCappedRefillKeepsThePin() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 256 * 1024
         let attempts = AttemptCounter()
         // CDN: the lingering-slot shape — 509 for the first two attempts at the boundary
@@ -211,7 +206,8 @@ struct ResolvedURLInvalidationTests {
         defer { source.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -241,9 +237,6 @@ struct ResolvedURLInvalidationTests {
     @Test("a permanent 509 pays the rate-limit ladder and gives up cleanly",
           .timeLimit(.minutes(2)))
     func permanent509TakesTheRateLimitLadder() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 256 * 1024
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
@@ -262,7 +255,8 @@ struct ResolvedURLInvalidationTests {
         defer { source.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -301,9 +295,6 @@ struct ResolvedURLInvalidationTests {
     @Test("a 509 outliving the keep-pin grace re-resolves once through the source",
           .timeLimit(.minutes(2)))
     func stalePinned509HealsThroughTheSource() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 256 * 1024
         let leases = LeaseLatch()
         // CDN: a lease minted before the boundary fault is a dead session and refuses that
@@ -328,7 +319,8 @@ struct ResolvedURLInvalidationTests {
         defer { source.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -364,9 +356,6 @@ struct ResolvedURLInvalidationTests {
     /// 20 generations across ~85 s, none of them counted).
     @Test("a draining window does not reset the rate-limit ladder", .timeLimit(.minutes(2)))
     func drainingWindowKeepsTheLadderCharged() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 2 * 1024 * 1024
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
@@ -385,7 +374,8 @@ struct ResolvedURLInvalidationTests {
         defer { source.stop() }
 
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
@@ -428,13 +418,6 @@ struct ResolvedURLInvalidationTests {
     @Test("an idle pin is dropped by its FIRST refusal instead of riding out the grace",
           .timeLimit(.minutes(2)))
     func idlePinDropsOnTheFirstRefusal() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        AetherEngine.pinIdleSecondsForTesting = 0.2
-        defer {
-            AetherEngine.reconnectBackoffScaleForTesting = 1.0
-            AetherEngine.pinIdleSecondsForTesting = nil
-        }
-
         let leases = LeaseLatch()
         let gate = RefusalGate()
         let cdnMaybe = ThrottledOriginServer(
@@ -465,7 +448,9 @@ struct ResolvedURLInvalidationTests {
         // request already in flight is never re-offered to the origin's gate.
         let firstRange: Int64 = 1024 * 1024
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02,
+                                pinIdleSeconds: 0.2)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 

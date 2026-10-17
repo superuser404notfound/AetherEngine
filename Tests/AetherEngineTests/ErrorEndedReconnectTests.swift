@@ -42,9 +42,6 @@ struct ErrorEndedReconnectTests {
     @Test("an origin refusing every refill is retried with backoff and given up on",
           .timeLimit(.minutes(2)))
     func refusedRefillIsBoundedAndGivenUp() async throws {
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
-
         let firstRange: Int64 = 512 * 1024
         let serverMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
@@ -53,7 +50,8 @@ struct ErrorEndedReconnectTests {
         let server = try #require(serverMaybe)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
-                                boundedInitialFetch: firstRange)
+                                boundedInitialFetch: firstRange,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         let phases = PhaseLog()
         reader.onNetworkPhaseChanged = { phases.append($0) }

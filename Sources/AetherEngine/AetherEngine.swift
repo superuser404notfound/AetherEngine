@@ -1676,17 +1676,6 @@ public final class AetherEngine: ObservableObject {
         sourceThrottleKbpsForTesting = max(0, kbps)
     }
 
-    /// TEST-ONLY: scales the reader's reconnect backoff (1.0 = real timing). Read once by each
-    /// `AVIOReader` at init, so set it before `load`/`start`. Lets a bounded give-up that spans
-    /// ~13 exponential backoffs finish in test time instead of a minute of real sleeping.
-    nonisolated(unsafe) static var reconnectBackoffScaleForTesting = 1.0
-
-    /// TEST-ONLY: how long a pinned redirect target may carry no bytes before its first refusal
-    /// drops it instead of riding out the keep-pin grace (#392). Read once by each `AVIOReader` at
-    /// init, so set it before `load`/`start`. nil keeps the shipped minute, which no test can wait
-    /// out. See `AVIOReader.pinIdleRepinSecondsDefault`.
-    nonisolated(unsafe) static var pinIdleSecondsForTesting: TimeInterval? = nil
-
     /// Reads `AVPlayer.eligibleForHDRPlayback` and `AVPlayer.availableHDRModes` at call time.
     /// Eligibility is display-configuration aware on all platforms (its change notification fires
     /// on display connection/disconnection), so per-load reads pick up monitor changes; the value

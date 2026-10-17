@@ -290,7 +290,6 @@ struct Issue255BodyReserveTests {
         })
         defer { server.stop() }
 
-        AVIOReader.peakBodyReserveForTesting = 0
         // The budget matters here, because it bounds the wait for the staggered probe ladder:
         // `sizeProbeStaggerSeconds + min(25, chunkRequestTimeout) + 2`. At 5 that is 7.75 s, and a
         // loaded CI runner took longer than that to get the HEAD fallback's closure onto a thread:
@@ -308,7 +307,7 @@ struct Issue255BodyReserveTests {
         #expect(server.requests.contains { $0.method == "HEAD" },
                 "the HEAD fallback never ran, so this exercised nothing: \(server.requests)")
         #expect(reader.isSeekable, "the HEAD probe stopped resolving the size")
-        let peak = AVIOReader.peakBodyReserveForTesting
+        let peak = reader.peakBodyReserveForTesting
         #expect(peak <= Self.reserveCeiling,
                 "a response reserved \(peak / 1024 / 1024) MB up front")
     }
@@ -325,7 +324,6 @@ struct Issue255BodyReserveTests {
         })
         defer { server.stop() }
 
-        AVIOReader.peakBodyReserveForTesting = 0
         let chunk = 1024 * 1024
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/big.mkv")!,
                                 chunkSize: chunk, prefetchEnabled: false,
@@ -339,7 +337,8 @@ struct Issue255BodyReserveTests {
         #expect(reader.read(into: buf, size: Int32(want)) == Int32(want),
                 "the truncated chunk did not serve the reader's first read")
 
-        let peak = AVIOReader.peakBodyReserveForTesting
+        let peak = reader.peakBodyReserveForTesting
+        #expect(peak > 0, "no chunk fetch reported a reservation")
         #expect(peak <= Self.reserveCeiling,
                 "a response reserved \(peak / 1024 / 1024) MB up front")
         #expect(server.bodyBytesWritten < bodyBytes / 2,

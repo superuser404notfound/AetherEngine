@@ -165,8 +165,6 @@ struct Issue309SilentTransportDeathTests {
     @Test("a generation that never sees a first byte is ended too", .timeLimit(.minutes(2)))
     func headersWithoutABodyAreEnded() async throws {
         let stallTimeout: TimeInterval = 0.6
-        AetherEngine.reconnectBackoffScaleForTesting = 0.02
-        defer { AetherEngine.reconnectBackoffScaleForTesting = 1.0 }
 
         let silenceOffset = Self.silenceOffset
         let attempts = AttemptCounter()
@@ -180,7 +178,8 @@ struct Issue309SilentTransportDeathTests {
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
                                 boundedInitialFetch: Self.firstRange,
-                                connStallTimeout: stallTimeout)
+                                connStallTimeout: stallTimeout,
+                                backoffScale: 0.02)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
