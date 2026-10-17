@@ -130,6 +130,11 @@ final class SoftwarePlaybackHost {
     /// upgrade the published `videoFormat` from `.hdr10` → `.hdr10Plus`.
     nonisolated(unsafe) var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
 
+    /// Fires (off-main) when the demux loop re-anchors the clock at a first sample past the load anchor,
+    /// with the session zero it resolved. Hooked by `AetherEngine` to republish `mediaChapters` from the
+    /// clock's real zero.
+    nonisolated(unsafe) var onClockSessionZero: (@Sendable (Double) -> Void)?
+
     /// AE#658: forwarded from the video decoder, off-main.
     nonisolated(unsafe) var onDecodedVideoFormat: (@Sendable (DecodedVideoFormat) -> Void)?
 
@@ -1275,11 +1280,23 @@ final class SoftwarePlaybackHost {
         // Reset the live feeder state for the new session.
         resetFeederState()
 
+        // The session zero a cold load predicts from the source's origin, the way a resume derives it.
+        // Set for every non-live source, not only a resume: a seek or a scrub still before the first play
+        // converts with it, and the demux loop only resolves the real zero when it first arms the clock
+        // (a pre-play seek arms the clock itself, so the loop never would). Reported, so the engine's
+        // chapter axis, harvest anchors and stills all read the same zero.
+        if !isLive {
+            let predictedZero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
+            if predictedZero != clockSessionZero {
+                clockSessionZero = predictedZero
+                onClockSessionZero?(predictedZero)
+            }
+        }
+
         if let start = startPosition, start.isFinite, start > 0 {
             // AE#724: the anchor is a session-axis position; on an offset-origin source it is carried
             // over before it reaches the demuxer, the skip threshold and the clock, as a seek's is.
-            let zero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
-            clockSessionZero = zero
+            let zero = clockSessionZero
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
@@ -2244,6 +2261,7 @@ final class SoftwarePlaybackHost {
         // the clock at a first-sample PTS far past the anchor (mid-stream-joined source).
         let onClockAnchored: @Sendable (Double) -> Void = { [weak self] zero in
             self?.clockSessionZero = zero
+            self?.onClockSessionZero?(zero)
         }
 
         if liveSession, let ring {

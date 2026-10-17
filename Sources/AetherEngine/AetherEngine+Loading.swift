@@ -2009,6 +2009,14 @@ extension AetherEngine {
                 self.decodedVideoFormat = format
             }
         }
+        // The clock's real session zero, for the chapter axis (`mediaChapters`).
+        host.onClockSessionZero = { [weak self, weak host] zero in
+            Task { @MainActor in
+                guard let self, let host, self.softwareHost === host else { return }
+                self.softwareClockSessionZero = zero
+                self.republishMediaChapters()
+            }
+        }
         // SW host provides session-relative edge on each tick; publishLiveWindow is a no-op when liveWindow is nil.
         host.onLiveEdge = { [weak self] edge in
             self?.publishLiveWindow(edgeSessionTime: edge)

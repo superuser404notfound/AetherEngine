@@ -1534,15 +1534,26 @@ public final class Demuxer: @unchecked Sendable {
         }
     }
 
-    /// Container (Matroska/MP4) chapters mapped to the public model. Empty when the container declares
-    /// none. Disc sources keep their playlist/IFO chapters via `discChapterInfos`; both can coexist and
-    /// the engine picks. See `chapterInfos(from:containerDuration:)` for the id, naming and duration rules.
-    func mediaChapterInfos() -> [ChapterInfo] {
+    /// Container (Matroska/MP4) chapters as the container states them, on the source axis, plus what the
+    /// published axis needs later: the container duration and the container start (the origin the
+    /// playback clock begins at). Snapshotted at probe time because the probe is closed before the route
+    /// is known, and a reopen of the same source must rebuild the list without re-probing.
+    struct ContainerChapterSource: Equatable {
+        let chapters: [RawContainerChapter]
+        let containerDuration: Double?
+        let formatStartSeconds: Double
+        /// `resolvedSourceStartOrigin`: the container start, backed up by the video stream's own start when
+        /// the container does not state one. The software host anchors its clock on this origin.
+        let sourceStartOrigin: Double
+    }
+
+    /// The container's chapters, or nil when the container declares none.
+    func containerChapterSource() -> ContainerChapterSource? {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext,
               ctx.pointee.nb_chapters > 0,
-              let chapterList = ctx.pointee.chapters else { return [] }
+              let chapterList = ctx.pointee.chapters else { return nil }
 
         var raw: [RawContainerChapter] = []
         raw.reserveCapacity(Int(ctx.pointee.nb_chapters))
@@ -1560,9 +1571,45 @@ public final class Demuxer: @unchecked Sendable {
                 title: metadataValue(chapter.metadata, key: "title")
             ))
         }
+        guard !raw.isEmpty else { return nil }
         let declared = ctx.pointee.duration
         let containerDuration = declared > 0 ? Double(declared) / Double(AV_TIME_BASE) : nil
-        return Self.chapterInfos(from: raw, containerDuration: containerDuration)
+        let formatStart = ctx.pointee.start_time
+        let formatStartSeconds = formatStart != Int64.min && formatStart > 0
+            ? Double(formatStart) / Double(AV_TIME_BASE) : 0
+        return ContainerChapterSource(chapters: raw, containerDuration: containerDuration,
+                                      formatStartSeconds: formatStartSeconds,
+                                      sourceStartOrigin: sourceStartOriginLocked(ctx))
+    }
+
+    /// Container chapters on the published axis: every start and end moved back by `origin` (the
+    /// container start the playback clock begins at), so a published start is the value `seek(to:)` and
+    /// `currentTime` use for that moment. A chapter that lies wholly before the origin is left out; one
+    /// that starts before it is clamped to the content start.
+    ///
+    /// "Wholly before" is judged on the effective end, not the declared one: a chapter runs to the next
+    /// chapter's start, and only the last falls back to its declared end (when it is after its start) and
+    /// then to the container duration. MKVs routinely write `end == start`, so a declared end of 0 on a
+    /// chapter that really runs for minutes must not drop it.
+    static func chapterInfos(_ source: ContainerChapterSource, origin: Double) -> [ChapterInfo] {
+        let sorted = source.chapters.sorted { $0.start < $1.start }
+        let onContent = sorted.enumerated().compactMap { i, ch -> RawContainerChapter? in
+            if origin > 0 {
+                let effectiveEnd: Double
+                if i + 1 < sorted.count {
+                    effectiveEnd = sorted[i + 1].start
+                } else if ch.end > ch.start {
+                    effectiveEnd = ch.end
+                } else {
+                    effectiveEnd = Swift.max(ch.start, source.containerDuration.map { $0 + origin } ?? ch.start)
+                }
+                guard effectiveEnd > origin else { return nil }
+            }
+            return RawContainerChapter(start: Swift.max(0, ch.start - origin),
+                                       end: Swift.max(0, ch.end - origin),
+                                       title: ch.title)
+        }
+        return chapterInfos(from: onContent, containerDuration: source.containerDuration)
     }
 
     private func attachedPictureData() -> Data? {
@@ -2604,6 +2651,11 @@ public final class Demuxer: @unchecked Sendable {
         accessLock.lock()
         defer { accessLock.unlock() }
         guard let ctx = formatContext else { return 0 }
+        return sourceStartOriginLocked(ctx)
+    }
+
+    /// Caller holds `accessLock`.
+    private func sourceStartOriginLocked(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> Double {
         var videoStart = Int64.min
         var tbNum: Int32 = 0
         var tbDen: Int32 = 0

@@ -685,11 +685,22 @@ public final class AetherEngine: ObservableObject {
     /// Chapters of the selected title. Empty until Blu-ray chapter parsing ships (Phase 2); declared
     /// now so hosts can bind the picker against a stable API.
     @Published public internal(set) var discChapters: [ChapterInfo] = []
-    /// Container (Matroska/MP4) chapters of the loaded source, from the probe demuxer at load. Empty
-    /// when the container declares none and for disc sources (whose chapters publish on `discChapters`
-    /// with title-relative seek semantics). `startSeconds` values are content timestamps a host passes
-    /// straight to `seek(to:)`.
+    /// Container (Matroska/MP4) chapters of the loaded source. Empty when the container declares none and
+    /// for disc sources (whose chapters publish on `discChapters` with title-relative seek semantics).
+    ///
+    /// `startSeconds` and `durationSeconds` are on the same 0-based axis as `currentTime`, `duration` and
+    /// `seek(to:)`: the container's own chapter time minus the container start the playback clock begins
+    /// at. So `seek(to: mediaChapters[i].startSeconds)` lands on that chapter, on either backend. A chapter
+    /// that ends before the content starts (a pre-roll before a container start of 5 s) is not published.
+    /// The raw container times are not on this axis; `sourceTime` is the one that reads them.
     @Published public internal(set) var mediaChapters: [ChapterInfo] = []
+    /// The container chapters behind `mediaChapters`, on the source axis, snapshotted at probe time. Kept
+    /// apart from the published list so the list can be rebased when the backend (and with it the origin)
+    /// is settled, and so a reopen of the same source rebuilds it without re-probing.
+    var containerChapterSource: Demuxer.ContainerChapterSource?
+    /// The session zero the software host's clock actually anchored on, once it has re-anchored on its
+    /// first sample (a source starting past the 2 s tolerance). Nil until then, and for any other backend.
+    var softwareClockSessionZero: Double?
     /// The id of the title the disc demuxer should (re)open with. Mirrors `selectedDiscTitle?.id` but
     /// kept as plain state so it survives the stopInternal inside a reload and threads into audio-switch /
     /// background-resume reopens (a URL-disc reopen with no id would silently revert to the main title).
@@ -704,7 +715,11 @@ public final class AetherEngine: ObservableObject {
     /// Exposed for diagnostic overlays; hosts should not branch on it. Branch on `videoRoute` instead,
     /// which also separates the two native pipelines (#321).
     @Published public internal(set) var playbackBackend: PlaybackBackend = .none {
-        didSet { recomputeVideoRoute(); recomputeAudioDelivery(); recomputeAirPlayPictureStaysLocal() }
+        didSet {
+            recomputeVideoRoute(); recomputeAudioDelivery(); recomputeAirPlayPictureStaysLocal()
+            // The chapter origin depends on the backend; a backend that is not settled yet keeps the list.
+            if playbackBackend != .none { republishMediaChapters() }
+        }
     }
 
     /// True while a wireless AirPlay receiver holds the audio route and the session's picture cannot
@@ -4313,6 +4328,8 @@ public final class AetherEngine: ObservableObject {
         discTitles = []
         selectedDiscTitle = nil
         discChapters = []
+        containerChapterSource = nil
+        softwareClockSessionZero = nil
         mediaChapters = []
         subtitleCueDiagnosticBudget = .init()
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
@@ -4757,7 +4774,8 @@ public final class AetherEngine: ObservableObject {
         // clamped to an in-range id); non-disc sources report empty/nil (#67).
         discTitles = probeOpened ? probe.discTitleInfos() : []
         discChapters = probeOpened ? probe.discChapterInfos() : []
-        mediaChapters = (probeOpened && discTitles.isEmpty) ? probe.mediaChapterInfos() : []
+        containerChapterSource = (probeOpened && discTitles.isEmpty) ? probe.containerChapterSource() : nil
+        republishMediaChapters()
         activeDiscTitleID = probeOpened ? probe.selectedDiscTitleID : nil
         selectedDiscTitle = activeDiscTitleID.flatMap { id in discTitles.first { $0.id == id } }
         // Content start PTS for the software-path chapter-seek base (see sourceStartSeconds). start_time is
@@ -6644,11 +6662,12 @@ public final class AetherEngine: ObservableObject {
         // Font attachments are session-scoped but must survive stopInternal (audio-track-switch skips the probe;
         // clearing in stopInternal would leave the session with an empty font list after any audio switch).
         fontAttachments = []
-        // Container chapters belong to the source URL, not to the pipeline, so they follow the same rule:
-        // every reopen of the same source (audio switch, iOS background return, #127 expiry) runs through
-        // stopInternal without re-probing, and a wipe there would strip them for the rest of the session.
-        // Disc chapters are NOT in this block: a title switch really does change them, and the reload path
-        // recaptures them from the reopened demuxer.
+        // Container chapters belong to the source URL, not to the pipeline: the internal reopens of the same
+        // source (audio switch, iOS background return, #127 expiry) run through stopInternal without
+        // re-probing, so stopInternal leaves them alone. This is the end of the session, so they go here,
+        // and the next load probes the new source. Disc chapters are cleared by stopInternal: a title
+        // switch really does change them, and the reload path recaptures them from the reopened demuxer.
+        containerChapterSource = nil
         mediaChapters = []
         videoFormat = .sdr
         sourceVideoFormat = .sdr
@@ -7446,6 +7465,22 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
+    /// Publishes `mediaChapters` from `containerChapterSource` on the axis of the current backend. While no
+    /// backend is settled (the probe at load, before the route is chosen) nothing is published: the origin
+    /// is not known, and raw container times must not reach a host as seek targets. The backend's `didSet`
+    /// publishes once it is.
+    func republishMediaChapters() {
+        guard let source = containerChapterSource, playbackBackend != .none else {
+            mediaChapters = []
+            return
+        }
+        let origin = PresentationAxis.containerChapterOrigin(
+            backend: playbackBackend, formatStartSeconds: source.formatStartSeconds,
+            sourceStartOrigin: source.sourceStartOrigin, softwareClockZero: softwareClockSessionZero,
+            isLive: isLive)
+        mediaChapters = Demuxer.chapterInfos(source, origin: origin)
+    }
+
     /// Seek to a chapter within the active disc title. `id` is a `ChapterInfo.id` from `discChapters`. A thin
     /// wrapper over `seek(to:)` (no pipeline rebuild, since the chapter lives in the playing title's stream).
     /// No-op when `id` is unknown. (#67)
@@ -7715,6 +7750,7 @@ public final class AetherEngine: ObservableObject {
         }
 
         softwareCancellables.removeAll()
+        softwareClockSessionZero = nil
         // #353: the picture belongs to the session. Left standing, the next source would be laid out
         // against this one's rectangle for as long as it takes its own first frame to arrive.
         softwareDisplaySize = nil
