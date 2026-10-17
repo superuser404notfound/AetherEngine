@@ -104,6 +104,9 @@ enum LoadOptionChange {
 /// and optionally activate an embedded subtitle track (`--subs <codec-or-lang>`)
 /// and log every overlay cue that arrives. Repro harness for "loads but never
 /// plays" reports and for live teletext end-to-end validation (#107).
+/// `play --atmos-bed`: the harness-wide object-audio setting, written once by the argument parser.
+nonisolated(unsafe) var playObjectAudioRenderingOverride: ObjectAudioRendering = .off
+
 func runPlay(url: URL, seconds: Double, live: Bool, nativeHLS: Bool = false, liveIngest: Bool = false, fastZap: Bool = false, liveStartImmediately: Bool = true, dvrWindow: Double?, subsPick: String?, hostCalls: [String], audioStats: Bool = false, seekEvery: Double? = nil, seekPattern: [Double] = [], seekCount: Int? = nil, startPosition: Double? = nil, mallocCensus: Bool = false, forceSoftware: Bool = false, softwareEscalation: Bool = true,
                     censusThresholdMB: Int? = nil, censusHz: Double? = nil, frameTimes: Bool = false, presentTimes: Bool = false, servedURL: Bool = false, pictureProbe: Bool = false, pictureOrigin: Double = 0, nativeVideoFrameDiagnostics: Bool = false, nativeVideoFrameRecovery: Bool = false,
                     sidecars: [ExternalSubtitleTrack] = [], audioSwitch: AudioSwitchRequest? = nil,
@@ -558,6 +561,7 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         dolbyVisionHandling: dolbyVisionHandling,
         preferDualLayerDolbyVision: preferDualLayerDolbyVision,
         panelPresentsDolbyVision: assertDolbyVision,
+        objectAudioRendering: playObjectAudioRenderingOverride,
         isLive: live,
         dvrWindowSeconds: dvrWindow,
         liveJoinProfile: fastZap ? .fastZap : .standard,

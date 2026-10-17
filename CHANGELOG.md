@@ -10,6 +10,39 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **The software host (the Dolby Vision FEL route) can now show a Now-Playing card and answer remote
+  commands.** It has no `AVPlayer`, so it had neither. With the new `ownsSoftwareNowPlaying` set (off by
+  default, independent of `ownsVideoNowPlayingSession`), the engine publishes title, artwork, duration,
+  elapsed and rate from the staged `externalMetadata` / `setVideoNowPlayingInfo`, and serves play, pause,
+  toggle, skip (`remoteSkipInterval`, default 10 s) and change-position from the Siri Remote, headsets,
+  Control Center and media keys. It republishes on seek, pause, speed change, stall and end.
+  `softwareNowPlayingActive` tells a host when to add its own next/previous. The AVPlayer paths are
+  unchanged.
+- **Scrub thumbnails work on a software session that plays a local file.**
+  `supportsCacheBackedStills` was false there and `scrubThumbnail` and `scrubPreviewFrame` answered
+  nil, so a Dolby Vision FEL title (which plays through the software host) had no scrub stills
+  unless the host built its own `FrameExtractor`. The engine now decodes them from the file, the
+  base layer for a dual-layer title, with no extra connection and through the same calls the
+  AVPlayer path answers: `scrubPreviewFrame` honours `isCancelled` and the 750 ms / 900 packet bound
+  and reports the decoded frame's own time. A file on a network mount opens a second file handle.
+  Remote software sessions already served stills from the packet cache.
+- **The software host follows the system caption style.** Subtitles composited into software-path
+  PiP frames now use the user's Settings > Accessibility > Subtitles & Captioning choices (font,
+  size, text colour and opacity, background and window colour and opacity, edge style) the way
+  AVPlayer's legible output does, and re-render when the setting changes. A field counts as chosen
+  only where it differs from the system default, and carries the system's precedence against the
+  cue's own styling. `SubtitleCaptionStyle.current()` and `observeChanges(_:)` expose the same style
+  to a host that draws its own overlay. Bitmap subtitles are untouched.
+- **The software playback host keeps Atmos.** On the software host (the Dolby Vision FEL route and
+  video the hardware decoder cannot play), E-AC-3 JOC is handed to the audio renderer compressed,
+  with the decoder primed once per process, and TrueHD Atmos and DTS:X are rendered to APAC under the
+  existing `objectAudioRendering` option. Other audio, live streams and `.off` still decode to PCM.
+  The automatic audio pick now prefers a TrueHD Atmos or DTS:X track on the software host too. A
+  renderer error on these routes is logged in release builds. `aetherctl play` gains
+  `--atmos-bed <layout>`.
+
 ### Changed
 
 - **The documentation no longer says TrueHD Atmos objects are always lost.** The Known limitations

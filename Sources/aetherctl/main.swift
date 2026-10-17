@@ -70,7 +70,7 @@ func printUsage() {
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4] [--audio-index N] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--fel] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--atmos-bed 5.1.2|7.1.4] [--fel] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -695,6 +695,17 @@ if first == "play" {
     let seekCount = takeIntFlag("--seek-count", from: &rest)
     let mallocCensus = takeFlag("--malloc-census", from: &rest)
     let playForceSW = takeFlag("--sw", from: &rest)
+    // Atmos delivery: E-AC-3 JOC compressed to the renderer on the software host, TrueHD Atmos and DTS:X
+    // rendered into this bed as APAC (LoadOptions.objectAudioRendering).
+    var playObjectAudioRendering: ObjectAudioRendering = .off
+    if let bed = takeStringFlag("--atmos-bed", from: &rest) {
+        guard let layout = SpatialSpeakerLayout(rawValue: bed) else {
+            print("ERROR: --atmos-bed expects one of \(SpatialSpeakerLayout.allCases.map(\.rawValue)), got '\(bed)'")
+            exit(64)
+        }
+        playObjectAudioRendering = .apac(layout)
+    }
+    playObjectAudioRenderingOverride = playObjectAudioRendering
     let playSoftwareEscalation = !takeFlag("--no-sw-escalation", from: &rest)
     // AE#493: `LoadOptions.panelPresentsDolbyVision`, the host assertion. macOS has no per-mode display
     // capability API, so DV is unclaimable from inside the engine and a Mac run routes every DV source

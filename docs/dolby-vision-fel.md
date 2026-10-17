@@ -133,7 +133,10 @@ decode to PCM, played through the sample-buffer audio renderer) and never AVPlay
 emits Dolby Atmos objects, and the platform does not pass a bitstream through. An E-AC-3 (JOC) track
 therefore plays as its channel-bed core (5.1 or 7.1), without the Atmos objects; on the native route the
 same track is handed to AVPlayer unchanged. TrueHD behaves as on the native route, which decodes it too and
-loses the objects either way. Hosts that want E-AC-3 Atmos on a Profile 7 FEL title leave
+loses the objects either way. That is the default. With `LoadOptions.objectAudioRendering` set, the host keeps the
+objects: an E-AC-3 JOC track goes to the renderer compressed (after the system's Atmos decoder is registered in the
+process), and TrueHD Atmos and DTS:X are rendered as APAC. Verified on macOS only; the tvOS behaviour of both is
+unmeasured. Hosts that do not set it and want E-AC-3 Atmos on a Profile 7 FEL title leave
 `preferDualLayerDolbyVision` off for it. `DualLayerRouteAudioTests` pins the routing half of this.
 
 ## 4. Evidence
@@ -322,7 +325,7 @@ Profile 8.1 metadata attached (§2), and how tvOS presents that on such a displa
 The native route, by contrast, strips the Dolby Vision for such a display (`CodecRoutePolicy`) and plays
 the HDR10 base layer. A host that wants the base layer on a non-Dolby-Vision display leaves the flag off,
 or sets it from what it knows of the display. The audio trade-off of §3.1 (an E-AC-3 Atmos track plays as
-its channel-bed core, without the objects) applies on this route whatever the display. This is the current
+its channel-bed core, without the objects unless `objectAudioRendering` is set) applies on this route whatever the display. This is the current
 behaviour, documented rather than designed; it is not changed here.
 
 ### 5.2.3 What the route gives up against the native route
