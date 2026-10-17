@@ -57,6 +57,52 @@ enum HDR10PlusMetadataScan {
         }
     }
 
+    /// The packet's ST 2094-40 message in the shape `kCMSampleAttachmentKey_HDR10PlusPerFrameData`
+    /// documents: the registered T.35 bytes from `itu_t_t35_country_code` (0xB5) on. The VideoToolbox
+    /// route decodes into a pixel buffer and builds the display layer's sample buffer itself, so the
+    /// per-frame metadata reaches the layer only through this attachment. H.264 / HEVC SEI and
+    /// Matroska's packet side data; the first message the full validation accepts wins.
+    static func coreMediaPayload(
+        _ packet: UnsafePointer<AVPacket>, codecID: AVCodecID, framing: VideoNALFraming
+    ) -> Data? {
+        var sideDataSize = 0
+        if let sideData = av_packet_get_side_data(packet, AV_PKT_DATA_DYNAMIC_HDR10_PLUS, &sideDataSize),
+           validSideData(sideData, size: sideDataSize) {
+            var allocationSize = 0
+            guard let metadata = av_dynamic_hdr_plus_alloc(&allocationSize) else { return nil }
+            defer { av_free(metadata) }
+            memcpy(metadata, sideData, allocationSize)
+            return coreMediaPayload(metadata)
+        }
+        guard codecID == AV_CODEC_ID_H264 || codecID == AV_CODEC_ID_HEVC,
+              let data = packet.pointee.data, packet.pointee.size > 0,
+              mayContainT35Header(data, size: Int(packet.pointee.size)) else { return nil }
+        var payload: Data?
+        _ = scanNALs(
+            UnsafeBufferPointer(start: data, count: Int(packet.pointee.size)),
+            codecID: codecID, framing: framing
+        ) { bytes, size in
+            guard validT35(bytes, size) else { return false }
+            if payload == nil { payload = Data(bytes: bytes, count: size) }
+            return true
+        }
+        return payload
+    }
+
+    /// `av_dynamic_hdr_plus_to_t35` writes the message from the application version on, without the
+    /// six header bytes Core Media's attachment has to start with, so they go back in front here.
+    static func coreMediaPayload(_ metadata: UnsafePointer<AVDynamicHDRPlus>) -> Data? {
+        var buffer: UnsafeMutablePointer<UInt8>?
+        var size = 0
+        guard av_dynamic_hdr_plus_to_t35(metadata, &buffer, &size) >= 0, let buffer, size > 0 else {
+            return nil
+        }
+        defer { av_free(buffer) }
+        var payload = Data(t35Header)
+        payload.append(buffer, count: size)
+        return payload
+    }
+
     /// Audit BIT-4: exact prefilter. The playback scan runs on every video packet until its first hit,
     /// so a source without HDR10+ paid a byte-wise NAL walk for the whole session. The T.35 header
     /// holds no `00 00` pair, so no emulation-prevention byte can land inside it and AV1 does not

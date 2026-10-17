@@ -517,17 +517,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             guard let entry = sideData[i] else { continue }
             guard entry.pointee.type == AV_FRAME_DATA_DYNAMIC_HDR_PLUS else { continue }
             guard let raw = entry.pointee.data, entry.pointee.size > 0 else { continue }
-            return raw.withMemoryRebound(
-                to: AVDynamicHDRPlus.self,
-                capacity: 1
-            ) { recordPtr -> Data? in
-                var dataPtr: UnsafeMutablePointer<UInt8>? = nil
-                var size: Int = 0
-                let result = av_dynamic_hdr_plus_to_t35(recordPtr, &dataPtr, &size)
-                guard result >= 0, let buf = dataPtr, size > 0 else { return nil }
-                let data = Data(bytes: buf, count: size)
-                av_free(buf)  // use av_free, not plain free(): libavutil allocator contract
-                return data
+            // Core Media reads the attachment from the T.35 country code on; libavutil's serialiser
+            // leaves out the six header bytes, so the payload attached before did not have that shape.
+            return raw.withMemoryRebound(to: AVDynamicHDRPlus.self, capacity: 1) {
+                HDR10PlusMetadataScan.coreMediaPayload($0)
             }
         }
         return nil
