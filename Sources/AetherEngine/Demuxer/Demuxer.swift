@@ -487,6 +487,16 @@ public final class Demuxer: @unchecked Sendable {
     /// #651: one assembler per stream `declareDiscSubpictureStreams` created, keyed by stream index.
     /// Those streams have no libavformat parser, so their fragments are joined here. Under `accessLock`.
     private var subpictureAssemblers: [Int32: DVDSubpictureAssembler] = [:]
+    /// A UHD Blu-ray clip's two Dolby Vision layers, folded into one Profile 7 stream as they are read
+    /// (`BluRayDolbyVisionLayers`); nil for every other source.
+    private var doviLayers: BluRayDolbyVisionLayers?
+    /// Base-layer packets waiting for the enhancement-layer unit with their PTS, in read order; `ready` once their RPU
+    /// is appended. The enhancement unit usually follows its base unit, sometimes a picture or two later.
+    private var doviHeldBase: [(packet: UnsafeMutablePointer<AVPacket>, ready: Bool)] = []
+    /// RPUs of enhancement units that came before their base unit, by PTS.
+    private var doviEarlyRPUs: [Int64: [UInt8]] = [:]
+    /// Base-layer pictures that went out without an RPU (no matching enhancement unit), for the log.
+    private var doviUnpairedBase = 0
 
     /// Per-clip presentation-offset spans for a selected multi-clip Blu-ray title (empty otherwise). When
     /// non-empty, `readPacket` and `indexedKeyframes` fold each clip's timestamps onto one contiguous
@@ -1069,6 +1079,7 @@ public final class Demuxer: @unchecked Sendable {
             throw DemuxerError.streamInfoFailed(code: findRet)
         }
         logStreams(ctx)
+        armBluRayDolbyVisionLayers(ctx)
         // A cell-folded DVD title is anchored on cell 0's base, which is where the stream starts (the
         // engine's source axis starts there too), so a resume that lands in a later cell can fold at once.
         if dvdCellFold, clipBase0Sec.isNaN, ctx.pointee.start_time != Int64.min {
@@ -1158,6 +1169,84 @@ public final class Demuxer: @unchecked Sendable {
     private func unparkUnresolvableAudio(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
         for i in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        }
+    }
+
+    /// A UHD Blu-ray clip with its Dolby Vision enhancement layer on PID 0x1015: the base layer is declared
+    /// Profile 7 and `readPacketLocked` hands it out with each picture's RPU appended (`BluRayDolbyVisionLayers`).
+    private func armBluRayDolbyVisionLayers(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
+        dropHeldDolbyVisionBaseLocked()
+        doviLayers = BluRayDolbyVisionLayers.detect(ctx)
+        guard let layers = doviLayers, let base = ctx.pointee.streams[Int(layers.base)] else { return }
+        let declared = BluRayDolbyVisionLayers.declareProfile7(base)
+        EngineLog.emit(
+            "[Demuxer] Blu-ray Dolby Vision: base layer stream=\(layers.base) (PID 0x1011), enhancement layer "
+            + "stream=\(layers.enhancement) (PID 0x1015); RPUs folded into the base layer, "
+            + (declared ? "declared Profile 7" : "record already present"),
+            category: .demux
+        )
+    }
+
+    /// Frees the base-layer packets still waiting for their enhancement units (a seek, a reopen, close).
+    private func dropHeldDolbyVisionBaseLocked() {
+        for held in doviHeldBase {
+            var packet: UnsafeMutablePointer<AVPacket>? = held.packet
+            trackedPacketFree(&packet)
+        }
+        doviHeldBase = []
+        doviEarlyRPUs = [:]
+    }
+
+    /// How many base-layer pictures may wait for their enhancement units before the oldest goes out without one.
+    private static let doviHoldLimit = 8
+
+    /// The oldest waiting base-layer packet, once its RPU is in, or once too many wait behind it (it goes without
+    /// one), or at the end of the source; nil while it may still be completed.
+    private func releaseDolbyVisionBaseLocked(atEnd: Bool = false) -> UnsafeMutablePointer<AVPacket>? {
+        guard let head = doviHeldBase.first,
+              head.ready || atEnd || doviHeldBase.count > Self.doviHoldLimit else { return nil }
+        doviHeldBase.removeFirst()
+        if !head.ready { noteUnpairedBase() }
+        return head.packet
+    }
+
+    /// One packet through the Blu-ray Dolby Vision fold. A base-layer packet waits in `doviHeldBase` until the
+    /// enhancement unit with its PTS brings the RPU (appended to it); an enhancement unit that comes first leaves its
+    /// RPU in `doviEarlyRPUs`. Enhancement packets never leave the demuxer. Returns the packet to hand out (other
+    /// streams pass straight through, a step or two ahead of the picture being completed), nil to read on.
+    private func foldDolbyVisionLayersLocked(_ read: UnsafeMutablePointer<AVPacket>,
+                                             _ layers: BluRayDolbyVisionLayers) -> UnsafeMutablePointer<AVPacket>? {
+        switch read.pointee.stream_index {
+        case layers.enhancement:
+            var packet: UnsafeMutablePointer<AVPacket>? = read
+            defer { trackedPacketFree(&packet) }
+            guard let rpu = BluRayDolbyVisionLayers.rpu(inAnnexB: UnsafeRawBufferPointer(
+                start: read.pointee.data, count: Int(max(0, read.pointee.size)))) else { return nil }
+            if let i = doviHeldBase.firstIndex(where: { !$0.ready && $0.packet.pointee.pts == read.pointee.pts }) {
+                doviHeldBase[i].ready = BluRayDolbyVisionLayers.append(rpu, to: doviHeldBase[i].packet)
+            } else {
+                if doviEarlyRPUs.count >= Self.doviHoldLimit * 2,
+                   let oldest = doviEarlyRPUs.keys.min() { doviEarlyRPUs[oldest] = nil }
+                doviEarlyRPUs[read.pointee.pts] = rpu
+            }
+            return nil
+        case layers.base:
+            var ready = false
+            if let rpu = doviEarlyRPUs.removeValue(forKey: read.pointee.pts) {
+                ready = BluRayDolbyVisionLayers.append(rpu, to: read)
+            }
+            doviHeldBase.append((read, ready))
+            return nil
+        default:
+            return read
+        }
+    }
+
+    private func noteUnpairedBase() {
+        doviUnpairedBase += 1
+        if doviUnpairedBase == 1 || doviUnpairedBase % 500 == 0 {
+            EngineLog.emit("[Demuxer] Blu-ray Dolby Vision: \(doviUnpairedBase) base-layer picture(s) without an RPU "
+                           + "(no enhancement unit with their PTS)", category: .demux)
         }
     }
 
@@ -1824,6 +1913,9 @@ public final class Demuxer: @unchecked Sendable {
             // AVDISCARD_DEFAULT = 0 (= passthrough), AVDISCARD_NONKEY = 32, AVDISCARD_ALL = 48.
             if keep.contains(i) {
                 stream.pointee.discard = AVDISCARD_DEFAULT
+            } else if let layers = doviLayers, i == layers.enhancement, keep.contains(layers.base) {
+                // The base layer's RPUs are in the enhancement layer; `readPacketLocked` absorbs its packets.
+                stream.pointee.discard = AVDISCARD_DEFAULT
             } else if dvdCellFold, stream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_DVD_NAV {
                 // A cell-folded DVD title reads its navigation packs for the cell bases; `readPacketLocked`
                 // absorbs them, so they never reach a caller.
@@ -2028,7 +2120,15 @@ public final class Demuxer: @unchecked Sendable {
     /// Caller holds `accessLock`.
     private func readPacketLocked() throws -> UnsafeMutablePointer<AVPacket>? {
         while true {
-            guard let read = try readDemuxedPacketLocked() else { return nil }
+            if let ready = releaseDolbyVisionBaseLocked() { return ready }
+            guard var read = try readDemuxedPacketLocked() else {
+                // The last base-layer pictures go out even if their enhancement units never came.
+                return releaseDolbyVisionBaseLocked(atEnd: true)
+            }
+            if let layers = doviLayers {
+                guard let out = foldDolbyVisionLayersLocked(read, layers) else { continue }
+                read = out
+            }
             if dvdCellFold, adoptDVDNav(read) {
                 var owned: UnsafeMutablePointer<AVPacket>? = read
                 trackedPacketFree(&owned)
@@ -2073,6 +2173,9 @@ public final class Demuxer: @unchecked Sendable {
 
     /// #651: drop half-joined subpicture units along with libavformat's own parser state.
     private func resetSubpictureAssembly() {
+        // Every caller is a place libavformat just dropped its read state (a seek, a flush): a base-layer picture
+        // held for its enhancement unit belongs to the old position too.
+        dropHeldDolbyVisionBaseLocked()
         for key in subpictureAssemblers.keys { subpictureAssemblers[key]?.reset() }
     }
 
@@ -2842,6 +2945,8 @@ public final class Demuxer: @unchecked Sendable {
         while streamUsers > 0 { streamTableLock.wait() }
         streamTableLock.unlock()
         dropPeekedPacketsLocked()
+        dropHeldDolbyVisionBaseLocked()
+        doviLayers = nil
         if formatContext != nil {
             avformat_close_input(&formatContext)
         }
