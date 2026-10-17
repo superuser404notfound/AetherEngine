@@ -90,6 +90,12 @@ final class FrameDecodeContext: @unchecked Sendable {
         return false
     }
 
+    /// Whether a source's frames can become a still in this build. A Dolby Vision Profile 5 / 10.0
+    /// frame needs `DolbyVisionStillConverter`, which only the `DolbyVisionStillReshaping` trait compiles.
+    static func yieldsStill(dolbyVisionNoBaseLayer: Bool) -> Bool {
+        !dolbyVisionNoBaseLayer || AetherEngine.OptionalComponent.dolbyVisionStillReshaping.isBuiltIn
+    }
+
     /// Whether this open may ask VideoToolbox. A no-base-layer Dolby Vision title stays on software
     /// (audit BIT-102): VideoToolbox hands 10-bit 4:2:0 over as P010, `DolbyVisionStillConverter` accepts
     /// only `yuv420p10le`, and the IPT-PQ-C2 planes then went through the BT.2020 tone map, which is the
@@ -435,6 +441,9 @@ final class FrameDecodeContext: @unchecked Sendable {
         reportDecodedTime: ((Double?) -> Void)? = nil
     ) -> CGImage? {
         guard isOpen, let ctx = codecContext, let demuxer else { return nil }
+        // Without the reshaping these planes are IPT, which the standard path would read as YCbCr
+        // (the green / magenta still of #103): no still at all, and nothing read or decoded for it.
+        guard Self.yieldsStill(dolbyVisionNoBaseLayer: isDolbyVisionNoBaseLayer) else { return nil }
 
         // Bound this decode's HTTP reads so a stalled remote source can't park the
         // serial decode queue and freeze the scrub preview (issue #27). No-op for
@@ -531,6 +540,7 @@ final class FrameDecodeContext: @unchecked Sendable {
             let width = mode == .thumbnail
                 ? targetWidth
                 : Self.clampedWidth(frame: f, maxSize: maxSize)
+            #if DolbyVisionStillReshaping
             if isDolbyVisionNoBaseLayer {
                 let sar = resolvedSAR(frame: f)
                 if let img = DolbyVisionStillConverter.makeImage(frame: f, targetWidth: width, sar: sar) {
@@ -538,6 +548,7 @@ final class FrameDecodeContext: @unchecked Sendable {
                 }
                 // No DV metadata on this frame / unsupported layout: fall through to the standard path.
             }
+            #endif
             if isHDR {
                 var toned = HDRToneMapper.toneMap(frame: f, targetWidth: width, timeBase: timeBase)
                 if toned != nil {

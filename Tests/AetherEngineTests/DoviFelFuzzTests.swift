@@ -72,7 +72,9 @@ struct DoviFelFuzzTests {
         defer { dovi_rpu_free(rpu) }
         #expect(dovi_rpu_get_error(rpu) == nil, "\(dovi_rpu_get_error(rpu).map { String(cString: $0) } ?? "")",
                 sourceLocation: sourceLocation)
+        #if DualLayerDolbyVision
         #expect(DoviFelComposer.parseRpuParameters(rpu: rpu) != nil, sourceLocation: sourceLocation)
+        #endif
     }
 
     static func mutate(_ input: [UInt8], _ rng: inout RNG) -> [UInt8] {
@@ -113,6 +115,7 @@ struct DoviFelFuzzTests {
         return framed(base) + framed(el) + framed(rpu)
     }
 
+    #if DualLayerDolbyVision
     static func checkMutatedRpuParsing(seedRPU: [UInt8], label: String, rngState: UInt64, iterations: Int) throws {
         #expect(seedRPU.withUnsafeBufferPointer { DoviRpuGuard.crcIsValid($0.baseAddress!, $0.count) }, "a seed RPU must pass the CRC guard")
         try expectLibdoviAccepts(seedRPU)
@@ -169,6 +172,7 @@ struct DoviFelFuzzTests {
         let seed = try #require(try Self.seed())
         try Self.checkMutatedRpuParsing(seedRPU: seed.rpu, label: "clip", rngState: 0xFE1, iterations: 4000)
     }
+    #endif
 
     static func checkMutatedPacketSplitting(seedPacket: [UInt8], useCustomBlockSource: Bool, iterations: Int) {
         var rng = RNG(state: useCustomBlockSource ? 0xA11 : 0xB22)

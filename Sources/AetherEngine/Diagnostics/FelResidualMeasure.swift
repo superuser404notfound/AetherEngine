@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreVideo
 import CoreMedia
@@ -109,3 +111,4 @@ enum FelResidualMeasure {
         return s
     }
 }
+#endif

@@ -21,6 +21,7 @@ extension AetherEngine {
             // A zap between the request and the frame would hand the new channel the old one's picture.
             return loadGeneration == gen ? image : nil
         }
+        guard session.yieldsStills else { return nil }
         // Segment table and tfdt use continuous output time, including across source PTS rebases.
         let outputSeconds = seconds - liveSessionShiftSeconds
         let gen = loadGeneration

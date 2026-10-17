@@ -9,12 +9,12 @@
 /* Begin PBXBuildFile section */
 		1CC1EA98D9C5F77AAC72F7CC /* PulseVideoToolbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9672B7938DDC09AAB435BC6 /* PulseVideoToolbox.swift */; };
 		77CB08AE958747D4126970C6 /* DolbyVisionPulseHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BCA97A8853B09B4E7B4B99A /* DolbyVisionPulseHostApp.swift */; };
-		C3F88D052478C6D03F65C74C /* AetherEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 5DDCF6DD2D95C3E73D4B2B5C /* AetherEngine */; };
+		C3F88D052478C6D03F65C74C /* PulseEngine in Frameworks */ = {isa = PBXBuildFile; productRef = 5DDCF6DD2D95C3E73D4B2B5C /* PulseEngine */; };
 		FB3139445F0E0031753BB397 /* PulseLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCACA2DF252349E564F73EAC /* PulseLog.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		6EC0C4402B0A4CFAB2376CAB /* AetherEngine */ = {isa = PBXFileReference; lastKnownFileType = folder; name = AetherEngine; path = ../../..; sourceTree = SOURCE_ROOT; };
+		6EC0C4402B0A4CFAB2376CAB /* PulseEngine */ = {isa = PBXFileReference; lastKnownFileType = folder; path = PulseEngine; sourceTree = SOURCE_ROOT; };
 		7BCA97A8853B09B4E7B4B99A /* DolbyVisionPulseHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DolbyVisionPulseHostApp.swift; sourceTree = "<group>"; };
 		81B68F565101F4AD4C23902A /* DolbyVisionPulseHost.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DolbyVisionPulseHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B9672B7938DDC09AAB435BC6 /* PulseVideoToolbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PulseVideoToolbox.swift; sourceTree = "<group>"; };
@@ -26,7 +26,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C3F88D052478C6D03F65C74C /* AetherEngine in Frameworks */,
+				C3F88D052478C6D03F65C74C /* PulseEngine in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -36,7 +36,7 @@
 		877A8AC0E76ED624DD6E3BF6 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
-				6EC0C4402B0A4CFAB2376CAB /* AetherEngine */,
+				6EC0C4402B0A4CFAB2376CAB /* PulseEngine */,
 			);
 			name = Packages;
 			sourceTree = "<group>";
@@ -84,7 +84,7 @@
 			);
 			name = DolbyVisionPulseHost;
 			packageProductDependencies = (
-				5DDCF6DD2D95C3E73D4B2B5C /* AetherEngine */,
+				5DDCF6DD2D95C3E73D4B2B5C /* PulseEngine */,
 			);
 			productName = DolbyVisionPulseHost;
 			productReference = 81B68F565101F4AD4C23902A /* DolbyVisionPulseHost.app */;
@@ -114,7 +114,7 @@
 			mainGroup = 91F1FECFC9FBC63638DFB9F0;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				A1D5E5D261EA7A828134329D /* XCLocalSwiftPackageReference "../../.." */,
+				A1D5E5D261EA7A828134329D /* XCLocalSwiftPackageReference "PulseEngine" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A0369D737D33D357FE77916A /* Products */;
@@ -325,16 +325,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		A1D5E5D261EA7A828134329D /* XCLocalSwiftPackageReference "../../.." */ = {
+		A1D5E5D261EA7A828134329D /* XCLocalSwiftPackageReference "PulseEngine" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = ../../..;
+			relativePath = PulseEngine;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		5DDCF6DD2D95C3E73D4B2B5C /* AetherEngine */ = {
+		5DDCF6DD2D95C3E73D4B2B5C /* PulseEngine */ = {
 			isa = XCSwiftPackageProductDependency;
-			productName = AetherEngine;
+			productName = PulseEngine;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

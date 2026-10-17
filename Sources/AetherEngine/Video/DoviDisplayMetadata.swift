@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreVideo
 
@@ -125,3 +127,4 @@ enum DoviDisplayMetadata {
         return nil
     }
 }
+#endif

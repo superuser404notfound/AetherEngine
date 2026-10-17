@@ -254,6 +254,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// that took it, at once when the rendition stays absent, or in `stop()`.
     var customIFrameReader: (reader: IOReader, formatHint: String?)?
     private(set) var iFrameRenditionVerdict: IFrameRenditionEligibility.Verdict = .absent(.notRequested)
+    /// False for a Dolby Vision Profile 5 / 10.0 source in a build without the
+    /// `DolbyVisionStillReshaping` trait: none of its frames can become a correct still.
+    private(set) var yieldsStills = true
     /// AE#682: the server withheld the JPEG I-frame playlist because AVPlayer never asked for a media
     /// segment, which is how a refused HDR variant looks next to an SDR I-frame rendition.
     var iFrameRenditionWithheld: Bool { server?.iFrameRenditionWithheld ?? false }
@@ -2233,6 +2236,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // the standard sourceIsHDR && panelReadyForHDR check routes them correctly.
         // #15: a SUBTITLES rendition lives only in a master; the pure decision below forces the
         // master for routing-safe subtitled sources so PiP can show subtitles.
+        let stillsAvailable = FrameDecodeContext.yieldsStill(
+            dolbyVisionNoBaseLayer: FrameDecodeContext.isDVNoBaseLayer(codecpar: codecpar))
+        yieldsStills = stillsAvailable
+        if !stillsAvailable {
+            EngineLog.emit("[HLSVideoEngine] Dolby Vision Profile 5 / 10.0 stills are not built in "
+                           + "(DolbyVisionStillReshaping trait off): no scrub thumbnails, I-frame stills "
+                           + "or held pictures for this source", category: .session)
+        }
         // AE#682: decided before the routing below, because an I-frame rendition is one of the
         // reasons to serve a master at all.
         let iFrameCandidate = IFrameRenditionEligibility.candidate(.init(
@@ -2244,7 +2255,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             originIsSerial: sourceReopenableByURL
                 && OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
             isDiscSource: dem.isDiscSource,
-            secondReaderAvailable: sourceReopenableByURL || customIFrameReader != nil))
+            secondReaderAvailable: sourceReopenableByURL || customIFrameReader != nil,
+            stillsUnavailable: !stillsAvailable))
         let hasNativeSubs = enableNativeSubtitleTrackForSession && !nativeSubtitleCueStoresForSession.isEmpty
         // AE#187: tvOS HW HEVC needs the codec advertised in a master's CODECS attribute; a bare media
         // playlist (H.264 is fine media-direct) fails the item with tracks count=0 / -12848. Scope to

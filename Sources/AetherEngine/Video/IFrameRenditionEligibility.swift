@@ -8,6 +8,9 @@ enum IFrameRenditionEligibility {
     enum AbsentReason: String, Equatable {
         case notRequested, live, planNotKeyframeAligned, sequentialOrigin, heldSourceConnection
         case serialOrigin, discSource, noSecondReader, mediaPlaylistRouting
+        /// A Dolby Vision Profile 5 / 10.0 source in a build without the `DolbyVisionStillReshaping`
+        /// trait: no entry could be answered with a correct picture.
+        case dolbyVisionStillsNotBuiltIn
     }
 
     enum Verdict: Equatable {
@@ -24,6 +27,8 @@ enum IFrameRenditionEligibility {
         var originIsSerial: Bool
         var isDiscSource: Bool
         var secondReaderAvailable: Bool
+        /// The source's frames cannot become a still in this build (`FrameDecodeContext.yieldsStill`).
+        var stillsUnavailable = false
     }
 
     /// Everything except the master decision, which needs this verdict as one of its inputs.
@@ -36,6 +41,7 @@ enum IFrameRenditionEligibility {
         if i.originIsSerial { return .absent(.serialOrigin) }
         if i.isDiscSource { return .absent(.discSource) }
         guard i.secondReaderAvailable else { return .absent(.noSecondReader) }
+        if i.stillsUnavailable { return .absent(.dolbyVisionStillsNotBuiltIn) }
         return .served
     }
 

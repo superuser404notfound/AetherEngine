@@ -35,6 +35,7 @@ Apple TV and a phone on a tripod.
 | `Scripts/dump_attachments.swift` | prints what VideoToolbox attaches to a decoded Dolby Vision frame, with a hash of the RPU |
 | `Scripts/sim_recording.py` | a fake phone recording, to prove the analysis before trusting a real one |
 | `Device/` | the tvOS host app (xcodegen project, committed generated project) |
+| `Device/PulseEngine/` | the local package the host links the engine through; it enables the engine's `DualLayerDolbyVision` trait |
 
 ## Tools
 
@@ -127,6 +128,13 @@ dual-layer decoder reported a FEL stream (or a summary line with a failure), and
 for the wrong reason.
 
 ## Run on an Apple TV
+
+The dual-layer route is an optional component of the engine, compiled only with its
+`DualLayerDolbyVision` package trait. The host gets it through `Device/PulseEngine/Package.swift`, which
+depends on the engine with that trait set, because XcodeGen cannot set a package's traits itself. Without
+the trait every `engine` and `soak` arm would play the native route, so the host checks
+`AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn` before the first arm, shows a slate
+saying the trait is missing, logs an `ERROR` line and exits with status 70.
 
 The host app takes its arms from the environment variable `PULSE_ARMS`:
 

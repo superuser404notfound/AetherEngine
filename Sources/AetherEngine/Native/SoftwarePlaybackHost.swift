@@ -146,7 +146,7 @@ final class SoftwarePlaybackHost {
 
     /// Whether load selected VideoToolbox rather than libavcodec / dav1d for video decoding.
     /// Only meaningful after load has returned successfully.
-    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder }
+    var usesHardwareVideoDecoder: Bool { videoDecoder is HardwareVideoDecoder || decodesDualLayer }
 
     /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
     /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
@@ -931,7 +931,7 @@ final class SoftwarePlaybackHost {
 
     /// Pure decoder selection predicate for Profile 7 / HEVC streams on the software host.
     /// DualLayerVideoDecoder is selected ONLY when dvProfile == 7 && elType == "FEL" && preferDualLayerDolbyVision
-    /// && dolbyVisionHandling == .automatic.
+    /// && dolbyVisionHandling == .automatic, in a build with the DualLayerDolbyVision trait.
     /// All other combinations (e.g. MEL, baseLayerOnly, preferDualLayerDolbyVision == false) pick HardwareVideoDecoder.
     nonisolated static func shouldUseDualLayerDecoder(
         dvProfile: Int?,
@@ -939,11 +939,23 @@ final class SoftwarePlaybackHost {
         preferDualLayerDolbyVision: Bool,
         dolbyVisionHandling: DolbyVisionHandling
     ) -> Bool {
-        dvProfile == 7
+        DualLayerRouteDecision.isBuiltIn
+            && dvProfile == 7
             && elType == "FEL"
             && preferDualLayerDolbyVision
             && dolbyVisionHandling == .automatic
     }
+
+    /// Whether `decoder` is a `DualLayerVideoDecoder`; always false without the trait.
+    nonisolated static func isDualLayer(_ decoder: any VideoDecodingPipeline) -> Bool {
+        #if DualLayerDolbyVision
+        return decoder is DualLayerVideoDecoder
+        #else
+        return false
+        #endif
+    }
+
+    var decodesDualLayer: Bool { Self.isDualLayer(videoDecoder) }
 
     /// Selects and instantiates the appropriate VideoDecodingPipeline based on stream and host options.
     func selectVideoDecoder(
@@ -958,6 +970,7 @@ final class SoftwarePlaybackHost {
                 preferDualLayerDolbyVision: preferDualLayerDolbyVision,
                 dolbyVisionHandling: dolbyVisionHandling
             ) {
+                #if DualLayerDolbyVision
                 // No Metal device: the composer cannot be built, so decode the base layer alone (the
                 // decoder the software host uses for any other Profile 7 stream) instead of opening a
                 // decoder whose `open()` can only throw. A shader that fails to compile is caught later,
@@ -966,6 +979,7 @@ final class SoftwarePlaybackHost {
                     return DualLayerVideoDecoder(composer: composer)
                 }
                 EngineLog.emit("[SWHost] DV P7 dual-layer route: no Metal device for the composer, decoding the base layer alone", category: .swPlayback)
+                #endif
                 return HardwareVideoDecoder()
             } else {
                 return HardwareVideoDecoder()
@@ -1067,6 +1081,7 @@ final class SoftwarePlaybackHost {
                 dvProfile: dvProfile
             )
             videoDecoder = chosen
+            #if DualLayerDolbyVision
             if let dual = chosen as? DualLayerVideoDecoder {
                 // An in-band primary open failure (no hvcC to open from) leaves nothing to show. Surface it
                 // through the same `failure` the read loops use for a decode error. It belongs to the
@@ -1083,7 +1098,8 @@ final class SoftwarePlaybackHost {
                     }
                 }
             }
-            if chosen is DualLayerVideoDecoder {
+            #endif
+            if decodesDualLayer {
                 EngineLog.emit(
                     "[SWHost] selected DualLayerVideoDecoder (Metal P7 FEL) for codec_id=\(codecpar.pointee.codec_id.rawValue)",
                     category: .swPlayback
@@ -1110,14 +1126,14 @@ final class SoftwarePlaybackHost {
         // the same reorder depth as the single-layer hardware decoder, used only when arrival-order handover
         // below is off (no frame rate).
         renderer.setReorderDepth(SampleBufferRenderer.reorderDepth(
-            forHardwareDecoder: videoDecoder is HardwareVideoDecoder || videoDecoder is DualLayerVideoDecoder))
+            forHardwareDecoder: videoDecoder is HardwareVideoDecoder || decodesDualLayer))
         renderer.setFELLookahead(
-            enabled: videoDecoder is DualLayerVideoDecoder,
+            enabled: decodesDualLayer,
             frameRate: AetherEngine.detectFrameRate(stream: vStream))
         // The FEL look-ahead window only holds if none of it waits in the reorder buffer; see
         // `SampleBufferRenderer.arrivalFloor`. Without a frame rate it stays on the reorder buffer.
         renderer.setArrivalOrderHandover(
-            frameRate: videoDecoder is DualLayerVideoDecoder ? AetherEngine.detectFrameRate(stream: vStream) : nil)
+            frameRate: decodesDualLayer ? AetherEngine.detectFrameRate(stream: vStream) : nil)
 
         // Flip display layer into HDR mode before frames arrive; without this preferredDynamicRange stays .standard and PQ/HLG renders desaturated.
         if let codecpar = vStream.pointee.codecpar {
@@ -1583,10 +1599,12 @@ final class SoftwarePlaybackHost {
 
     #if DEBUG
     func invalidateVideoSessionForTesting() -> Bool {
+        #if DualLayerDolbyVision
         if let dual = videoDecoder as? DualLayerVideoDecoder {
             dual.invalidateSessionsForTesting()
             return true
         }
+        #endif
         guard let hw = videoDecoder as? HardwareVideoDecoder else { return false }
         hw.invalidateSessionForTesting()
         return true
@@ -3466,7 +3484,7 @@ final class SoftwarePlaybackHost {
                 while !mayDecodeVideoPacket(packet) && !stopRequested() && !backgroundAudioOnly() {
                     // A seek can move the clock backwards while this compressed FEL packet is
                     // held. Leave the wait so the generation check below discards it immediately.
-                    if videoDecoder is DualLayerVideoDecoder, seekGeneration() != genBeforeRead { break }
+                    if Self.isDualLayer(videoDecoder), seekGeneration() != genBeforeRead { break }
                     autoreleasepool {
                         if !isPlaying() {
                             condition.lock()

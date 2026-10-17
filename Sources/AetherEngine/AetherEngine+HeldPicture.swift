@@ -26,7 +26,8 @@ extension AetherEngine {
     /// fresh output sees anything, which is why the caller pauses first). Dolby Vision without a
     /// displayable base layer (Profile 5, AV1 Profile 10) cannot be taken from that output, which
     /// vends the base layer; it is decoded from the resident segment instead, frame-accurately and
-    /// through the same RPU reshaping the scrub stills use (`DolbyVisionStillConverter`).
+    /// through the same RPU reshaping the scrub stills use (`DolbyVisionStillConverter`), which only a
+    /// build with the `DolbyVisionStillReshaping` trait has; without it the hold is skipped.
     ///
     /// Software: the rebuild replaces host and layer, and the old host's `stop()` flushes its layer to
     /// black for the whole startup of the new one. The frame is read back from the renderer.
@@ -57,6 +58,13 @@ extension AetherEngine {
         let held: (frame: CVPixelBuffer, isHDR: Bool, route: String)?
         if let host = nativeSource {
             if Self.heldPictureNeedsReshaping(videoFormat: videoFormat, dolbyVisionProfile: sourceDVProfile) {
+                // Without the reshaping there is no correct picture to hold, so nothing is decoded.
+                guard OptionalComponent.dolbyVisionStillReshaping.isBuiltIn else {
+                    heldPictureLastSkip = "Dolby Vision still reshaping not built in"
+                    EngineLog.emit("[AetherEngine] held picture: skipped (Dolby Vision still reshaping not built in, "
+                                   + "DolbyVisionStillReshaping trait off)", category: .engine)
+                    return
+                }
                 held = await reshapedDolbyVisionStill(itemSeconds: host.avPlayer.currentTime().seconds)
                     .map { ($0, false, "Dolby Vision reshaped") }
             } else {

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreMedia
 import CoreVideo
@@ -93,14 +95,6 @@ extension SingleLayerVideoDecoder {
 
 extension HardwareVideoDecoder: SingleLayerVideoDecoder {}
 
-/// AE#739: a decoder whose VideoToolbox sessions the system can invalidate behind its back, and that
-/// can build them again. The host recovers through this rather than through one decoder type.
-protocol VideoSessionRebuilding: AnyObject {
-    var onSessionLost: (@Sendable () -> Void)? { get set }
-    @discardableResult func rebuildSession() -> Bool
-}
-
-extension HardwareVideoDecoder: VideoSessionRebuilding {}
 extension DualLayerVideoDecoder: VideoSessionRebuilding {}
 
 /// Video decoding pipeline that transparently coordinates dual VideoToolbox HEVC decoders
@@ -1853,3 +1847,4 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         recordSideData(key: key, params: params, dmNAL: displayMetadataNAL, usesPrevious: usesPrevious, disableResidual: disableResidual)
     }
 }
+#endif

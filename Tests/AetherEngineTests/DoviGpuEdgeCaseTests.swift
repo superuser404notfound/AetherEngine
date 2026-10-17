@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -518,3 +520,4 @@ extension DoviGpuEdgeCaseTests {
         #expect(Set(DoviTestSupport.rawVDR(c)[2]) == [3996])
     }
 }
+#endif

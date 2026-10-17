@@ -1,3 +1,4 @@
+#if DualLayerDolbyVision
 import Foundation
 @_spi(Diagnostics) import AetherEngine
 
@@ -66,3 +67,4 @@ func runFelTest(url: URL, maxFrames: Int = 100) -> Int32 {
         return 2
     }
 }
+#endif

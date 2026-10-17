@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import CoreMedia
 import CoreVideo
@@ -631,3 +633,4 @@ struct DualLayerEdgeCaseTests {
             dvProfile: 7, elType: "MEL", preferDualLayerDolbyVision: true, dolbyVisionHandling: .automatic))
     }
 }
+#endif

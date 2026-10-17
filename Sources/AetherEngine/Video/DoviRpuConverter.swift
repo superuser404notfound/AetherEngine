@@ -29,7 +29,9 @@ public enum DoviRpuConverter {
         /// (L1 statistics, L2 trims, L5/L8/L9/L11), which `DoviDisplayMetadata` attaches to the
         /// composed pixel buffer. Nil when there was no RPU or the conversion failed.
         let convertedRpu: [UInt8]?
+        #if DualLayerDolbyVision
         let rpuParams: DoviMetalParams?
+        #endif
         let isFEL: Bool
         let isMEL: Bool
         let success: Bool
@@ -39,17 +41,30 @@ public enum DoviRpuConverter {
         /// a `use_prev_vdr_rpu_flag` frame can still say whether its residual applies.
         let disableResidual: Bool
 
+        #if DualLayerDolbyVision
         init(elPacket: UnsafeMutablePointer<AVPacket>?, rpuData: [UInt8]?, convertedRpu: [UInt8]? = nil, rpuParams: DoviMetalParams? = nil, isFEL: Bool, isMEL: Bool = false, success: Bool, usesPreviousMapping: Bool = false, disableResidual: Bool = false) {
+            self.rpuParams = rpuParams
             self.elPacket = elPacket
             self.rpuData = rpuData
             self.convertedRpu = convertedRpu
-            self.rpuParams = rpuParams
             self.isFEL = isFEL
             self.isMEL = isMEL
             self.success = success
             self.usesPreviousMapping = usesPreviousMapping
             self.disableResidual = disableResidual
         }
+        #else
+        init(elPacket: UnsafeMutablePointer<AVPacket>?, rpuData: [UInt8]?, convertedRpu: [UInt8]? = nil, isFEL: Bool, isMEL: Bool = false, success: Bool, usesPreviousMapping: Bool = false, disableResidual: Bool = false) {
+            self.elPacket = elPacket
+            self.rpuData = rpuData
+            self.convertedRpu = convertedRpu
+            self.isFEL = isFEL
+            self.isMEL = isMEL
+            self.success = success
+            self.usesPreviousMapping = usesPreviousMapping
+            self.disableResidual = disableResidual
+        }
+        #endif
     }
 
     /// Stream classification from one RPU (dolby-vision-fel.md §5.2, invariant I9): a property of the
@@ -162,7 +177,9 @@ public enum DoviRpuConverter {
         let keepRpuBytes = extractEL || extractParams
         var rawRpuBytes: [UInt8]?
         var convertedRpuBytes: [UInt8]?
+        #if DualLayerDolbyVision
         var rpuParams: DoviMetalParams?
+        #endif
         var converted = false
         var isFEL = false
         var isMEL = false
@@ -188,7 +205,9 @@ public enum DoviRpuConverter {
                     return
                 }
                 defer { dovi_rpu_free(rpu) }
+                #if DualLayerDolbyVision
                 let thisParams: DoviMetalParams? = extractParams ? DoviFelComposer.parseRpuParameters(rpu: rpu) : nil
+                #endif
                 var thisPrevious = false, thisDisableResidual = false, thisFEL = false, thisMEL = false
                 // Only the dual-layer outputs read the header; the P8.1 rewrite drops what it yields.
                 if keepRpuBytes, let hdr = dovi_rpu_get_header(rpu) {
@@ -223,7 +242,9 @@ public enum DoviRpuConverter {
 
                 rawRpuBytes = thisRaw
                 convertedRpuBytes = keepRpuBytes ? [UInt8](UnsafeBufferPointer(start: outData, count: out.pointee.len)) : nil
+                #if DualLayerDolbyVision
                 rpuParams = thisParams
+                #endif
                 usesPrevious = thisPrevious
                 disableResidual = thisDisableResidual
                 isFEL = thisFEL
@@ -287,6 +308,7 @@ public enum DoviRpuConverter {
 
         // A dropped-RPU degrade still produces a valid HDR10 packet, but reports failure so callers
         // can log it and the probe can flag the source for dovi_tool inspection.
+        #if DualLayerDolbyVision
         return DualLayerPacketResult(
             elPacket: producedElPacket,
             rpuData: rawRpuBytes,
@@ -298,6 +320,18 @@ public enum DoviRpuConverter {
             usesPreviousMapping: usesPrevious,
             disableResidual: disableResidual
         )
+        #else
+        return DualLayerPacketResult(
+            elPacket: producedElPacket,
+            rpuData: rawRpuBytes,
+            convertedRpu: convertedRpuBytes,
+            isFEL: isFEL && !isMEL,
+            isMEL: isMEL,
+            success: !degraded && !allocationFailed,
+            usesPreviousMapping: usesPrevious,
+            disableResidual: disableResidual
+        )
+        #endif
     }
 
     /// Returns `false` when a libdovi conversion fails (or on an internal allocation failure).

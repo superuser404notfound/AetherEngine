@@ -1,4 +1,4 @@
-// Only with the DTSXObjectAudio trait (on by default): the decoder and its library are not built without it.
+// Only with the DTSXObjectAudio trait (off by default): the decoder and its library are not built without it.
 #if DTSXObjectAudio
 import Testing
 import Foundation

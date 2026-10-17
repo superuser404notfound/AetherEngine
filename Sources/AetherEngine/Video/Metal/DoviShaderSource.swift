@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 
 /// Canonical Metal source for the Dolby Vision FEL composer.
@@ -728,3 +730,4 @@ kernel void dovi_layout_probe(
         preamble + "\n" + sharedStructs + "\n" + kernels + "\n"
     }
 }
+#endif

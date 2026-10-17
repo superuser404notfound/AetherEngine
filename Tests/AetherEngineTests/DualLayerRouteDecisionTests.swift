@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: without it every Profile 7 decision is `notBuiltIn`.
+#if DualLayerDolbyVision
 import Testing
 import AetherLibavcodec
 @testable import AetherEngine
@@ -211,3 +213,4 @@ struct DualLayerRouteDecisionTests {
                                               settledGeneration: 3, stopRequested: false))
     }
 }
+#endif

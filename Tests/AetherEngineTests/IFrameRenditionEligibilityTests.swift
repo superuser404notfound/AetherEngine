@@ -20,7 +20,8 @@ struct IFrameRenditionEligibilityTests {
 
     @Test("each failed requirement names its own reason",
           arguments: ["notRequested", "live", "planNotKeyframeAligned", "sequentialOrigin",
-                      "heldSourceConnection", "serialOrigin", "discSource", "noSecondReader"])
+                      "heldSourceConnection", "serialOrigin", "discSource", "noSecondReader",
+                      "dolbyVisionStillsNotBuiltIn"])
     func eachReason(reason: String) throws {
         let expected = try #require(IFrameRenditionEligibility.AbsentReason(rawValue: reason))
         let verdict = IFrameRenditionEligibility.candidate(inputs { i in
@@ -33,6 +34,7 @@ struct IFrameRenditionEligibilityTests {
             case .serialOrigin: i.originIsSerial = true
             case .discSource: i.isDiscSource = true
             case .noSecondReader: i.secondReaderAvailable = false
+            case .dolbyVisionStillsNotBuiltIn: i.stillsUnavailable = true
             case .mediaPlaylistRouting: break
             }
         })

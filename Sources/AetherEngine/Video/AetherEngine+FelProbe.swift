@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreMedia
 import CoreVideo
@@ -247,3 +249,4 @@ extension AetherEngine {
         set { DoviFelComposer.residualEnabled = newValue }
     }
 }
+#endif

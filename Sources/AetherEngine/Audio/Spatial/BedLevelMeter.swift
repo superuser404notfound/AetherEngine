@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Accelerate
 import Foundation
 
@@ -183,3 +185,4 @@ struct BedLevelMeter {
         amplitude > 0 ? String(format: "%.1f", 20 * log10(amplitude)) : "-inf"
     }
 }
+#endif

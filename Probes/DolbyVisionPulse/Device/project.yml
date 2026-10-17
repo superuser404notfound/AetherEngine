@@ -1,14 +1,12 @@
 # Device harness for the Dolby Vision pulse test (Probes/DolbyVisionPulse/README.md): a tvOS app
 # that plays the clips from Scripts/build.sh, arm by arm, so a camera pointed at the television can
 # see whether the Dolby Vision metadata reaches the panel. It depends on the engine as a local Swift
-# package (the repository root, three levels up).
+# package (the repository root, three levels up), through `PulseEngine/`, a local package that enables
+# the engine's DualLayerDolbyVision trait: XcodeGen cannot set a package's traits, and without that
+# trait the `engine` and `soak` arms would measure the native route (the app refuses to run them).
 #
 # Regenerate with `xcodegen generate --spec project.yml` from this directory. The generated project
 # is committed so that running the probe needs Xcode and nothing else.
-#
-# XcodeGen names the local-package folder reference after the checkout directory it ran in, which
-# would commit a developer's folder name. After regenerating, change that name in project.pbxproj
-# (the `PBXFileReference` with `path = ../../..`, and its group entry) back to `AetherEngine`.
 name: DolbyVisionPulse
 options:
   bundleIdPrefix: de.superuser404.dolbyvisionpulse
@@ -27,8 +25,8 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: YES
 
 packages:
-  AetherEngine:
-    path: ../../..
+  PulseEngine:
+    path: PulseEngine
 
 targets:
   DolbyVisionPulseHost:
@@ -39,8 +37,8 @@ targets:
         excludes:
           - Info.plist
     dependencies:
-      - package: AetherEngine
-        product: AetherEngine
+      - package: PulseEngine
+        product: PulseEngine
     info:
       path: Host/Info.plist
       properties:

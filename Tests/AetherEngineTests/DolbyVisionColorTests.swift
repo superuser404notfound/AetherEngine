@@ -1,3 +1,5 @@
+// Only with the DolbyVisionStillReshaping trait: the still converter is not built without it.
+#if DolbyVisionStillReshaping
 import Testing
 import AetherLibavutil
 @testable import AetherEngine
@@ -171,3 +173,4 @@ struct DolbyVisionColorTests {
         #expect(abs(ord2.map(0, (0.3, 0.2, 0.1)) - 0.39) < 1e-12)
     }
 }
+#endif

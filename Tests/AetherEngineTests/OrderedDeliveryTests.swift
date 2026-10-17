@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the dual-layer route is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import CoreMedia
 import CoreVideo
@@ -245,3 +247,4 @@ struct OrderedDeliveryTests {
         #expect(recorder.snapshot == [0])
     }
 }
+#endif

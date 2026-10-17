@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 @testable import AetherEngine
@@ -150,3 +152,4 @@ struct FrameSideDataRingTests {
         #expect(ring.find(key: 1_000) == nil)
     }
 }
+#endif

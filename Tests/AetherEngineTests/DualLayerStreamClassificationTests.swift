@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import CoreMedia
 import CoreVideo
@@ -238,3 +240,4 @@ struct DualLayerStreamClassificationTests {
         #expect(got.0 !== bl, "a disable_residual RPU must not bypass composition")
     }
 }
+#endif

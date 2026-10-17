@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Foundation
 import Testing
 import Metal
@@ -96,3 +98,4 @@ struct DoviEnhancementUpsamplerTests {
         for gx in 1..<64 { #expect(row[gx] >= row[gx - 1], "monotone at \(gx)") }
     }
 }
+#endif

@@ -459,6 +459,7 @@ struct DoviRpuConverterTests {
         #expect(packetBytes(pkt) == input)
     }
 
+    #if DualLayerDolbyVision
     // MARK: - Single parse per RPU
 
     /// Each RPU must be parsed exactly once. Before the fix, `separateDualLayers`
@@ -628,6 +629,7 @@ struct DoviRpuConverterTests {
         #expect(result.isMEL == false)
         #expect(result.success == true)
     }
+    #endif
 
     /// Hex-string decoder for RPU fixtures.
     private func hexToBytes(_ hex: String) -> [UInt8] {

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the dual-layer route is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -97,3 +99,4 @@ struct DoviDisplayMetadataTests {
         #expect(Self.surfaceValue(b, DoviDisplayMetadata.rpuDataKey) == nil)
     }
 }
+#endif

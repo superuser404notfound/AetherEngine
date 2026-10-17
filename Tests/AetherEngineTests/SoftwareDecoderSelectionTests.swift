@@ -21,6 +21,7 @@ struct SoftwareDecoderSelectionTests {
         #expect(decoder is HardwareVideoDecoder)
     }
 
+    #if DualLayerDolbyVision
     @MainActor
     @Test("P7 FEL opted in selects DualLayerVideoDecoder")
     func felOptedInSelectsDualLayer() {
@@ -36,6 +37,25 @@ struct SoftwareDecoderSelectionTests {
         )
         #expect(decoder is DualLayerVideoDecoder)
     }
+    #else
+    @MainActor
+    @Test("P7 FEL opted in keeps HardwareVideoDecoder in a build without the DualLayerDolbyVision trait")
+    func felOptedInWithoutTraitKeepsBaseLayer() {
+        let host = SoftwarePlaybackHost()
+        host.elType = "FEL"
+        host.preferDualLayerDolbyVision = true
+
+        let decoder = host.selectVideoDecoder(
+            codecID: AV_CODEC_ID_HEVC,
+            canHardwareDecode: true,
+            dvProfile: 7
+        )
+        #expect(decoder is HardwareVideoDecoder)
+        #expect(!SoftwarePlaybackHost.shouldUseDualLayerDecoder(
+            dvProfile: 7, elType: "FEL", preferDualLayerDolbyVision: true, dolbyVisionHandling: .automatic
+        ))
+    }
+    #endif
 
     @MainActor
     @Test("P7 MEL selects HardwareVideoDecoder across all option combinations")
@@ -149,7 +169,7 @@ struct SoftwareDecoderSelectionTests {
         // Section 5.2 table: only dvProfile == 7 && elType == "FEL" && preferDualLayerDolbyVision && .automatic
         #expect(SoftwarePlaybackHost.shouldUseDualLayerDecoder(
             dvProfile: 7, elType: "FEL", preferDualLayerDolbyVision: true, dolbyVisionHandling: .automatic
-        ))
+        ) == DualLayerRouteDecision.isBuiltIn)
         #expect(!SoftwarePlaybackHost.shouldUseDualLayerDecoder(
             dvProfile: 7, elType: "FEL", preferDualLayerDolbyVision: true, dolbyVisionHandling: .baseLayerOnly
         ))

@@ -49,6 +49,11 @@ struct DoviFelRealFileTests {
 
     /// The first two clips, when present: the ones long enough to seek into.
     static var firstTwoClips: [String] { [fixtures[0], fixtures[1]].filter(available) }
+}
+
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
+extension DoviFelRealFileTests {
 
     // MARK: - Harness
 
@@ -478,3 +483,4 @@ struct DoviFelRealFileTests {
         }
     }
 }
+#endif

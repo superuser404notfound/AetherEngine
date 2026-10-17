@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 @testable import AetherEngine
@@ -168,3 +170,4 @@ struct DualLayerPictureAlignmentSyntheticTests {
         #expect(r == Result(pts: 6000, placed: true))
     }
 }
+#endif

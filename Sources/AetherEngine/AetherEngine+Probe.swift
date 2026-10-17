@@ -703,21 +703,9 @@ extension AetherEngine {
 
     /// Whether the build links the codec's object decoder (#777: its package trait). Without it the codec
     /// keeps the channel bridge, so the pick has no heights to prefer it for.
-    nonisolated static let linksTrueHDObjectDecoder: Bool = {
-        #if TrueHDObjectAudio
-        return true
-        #else
-        return false
-        #endif
-    }()
+    nonisolated static let linksTrueHDObjectDecoder = OptionalComponent.trueHDObjectAudio.isBuiltIn
 
-    nonisolated static let linksDTSXObjectDecoder: Bool = {
-        #if DTSXObjectAudio
-        return true
-        #else
-        return false
-        #endif
-    }()
+    nonisolated static let linksDTSXObjectDecoder = OptionalComponent.dtsxObjectAudio.isBuiltIn
 
     /// The tracks object rendering keeps the heights of.
     nonisolated static func isRenderableObjectAudio(_ track: TrackInfo) -> Bool {

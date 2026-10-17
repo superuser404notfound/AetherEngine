@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -118,6 +120,8 @@ struct DoviGpuCurveSweepTests {
 
     // MARK: - Luma: multi-piece polynomial
 
+    // The reference curve is the still converter's, compiled only with DolbyVisionStillReshaping.
+    #if DolbyVisionStillReshaping
     @Test("GPU luma sweep: a 3-piece polynomial with per-piece order and denominator matches the reference curve")
     func lumaMultiPiecePolynomialSweep() throws {
         guard let composer = DoviFelComposer() else {
@@ -350,6 +354,7 @@ struct DoviGpuCurveSweepTests {
     }
 
     // MARK: - Identity is bit-exact
+    #endif
 
     @Test("GPU identity curve is bit-exact: every base-layer code survives the round trip")
     func identityCurveIsBitExact() throws {
@@ -392,3 +397,4 @@ struct DoviGpuCurveSweepTests {
         #expect(output[1023][0] == 940)
     }
 }
+#endif

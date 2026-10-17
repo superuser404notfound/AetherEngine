@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -323,3 +325,4 @@ struct DoviFelMathTests {
         #expect(sampleY > 400 && sampleY < 600, "Output Y sample must be near mid-gray (~512), was \(sampleY)")
     }
 }
+#endif

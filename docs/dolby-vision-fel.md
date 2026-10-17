@@ -4,6 +4,14 @@ How AetherEngine plays a Profile 7 dual-layer source (base layer + enhancement l
 Dolby Vision, what has been proven on device, and the design that does it with bounded CPU, GPU and
 memory while staying correct.
 
+**Optional component.** The route and the composer are compiled only with the `DualLayerDolbyVision`
+package trait, which is off by default ([README › Optional components](../README.md#optional-components)).
+Built without it, `preferDualLayerDolbyVision` is accepted and changes nothing: the route decision
+reports `not taken (built without the DualLayerDolbyVision trait)` and every Profile 7 source takes the
+native route. Everything below describes a build with the trait; `aetherctl play --fel`, `--cycle-el`,
+`--dv-pin`, `aetherctl feltest` and the DEBUG pin test (`armDolbyVisionPinTest`) need it too, and the
+pulse probe links the engine with it through `Probes/DolbyVisionPulse/Device/PulseEngine`.
+
 **Platforms.** Nothing in the route or the composer is tvOS-specific: the two VideoToolbox decoders and
 the Metal kernels are the same on iOS, iPadOS and macOS, the route has no platform gate, and
 `aetherctl play --fel --surface` runs it on a Mac. What is measured per platform is the display half:
@@ -256,7 +264,7 @@ passes it into `VideoRoutingPolicy`:
 | Source | `dolbyVisionHandling` | `preferDualLayerDolbyVision` | Device | Route |
 |---|---|---|---|---|
 | P7, `el_type` FEL | `.automatic` | true (opt-in; the default is false) | VideoToolbox HEVC hardware + Metal | software host, `DualLayerVideoDecoder` |
-| P7, `el_type` FEL | `.automatic` | false (the default), or no VideoToolbox HEVC hardware decode | — | native (8.1 conversion where the display takes Dolby Vision, otherwise the HDR10 base layer) |
+| P7, `el_type` FEL | `.automatic` | false (the default), a build without the `DualLayerDolbyVision` trait, or no VideoToolbox HEVC hardware decode | any | native (8.1 conversion where the display takes Dolby Vision, otherwise the HDR10 base layer) |
 | P7, `el_type` MEL | `.automatic` | any | — | native (as above; the conversion loses nothing for MEL) |
 | P7, any | `.baseLayerOnly` | any | — | HDR10 base layer |
 
@@ -267,11 +275,11 @@ onto the software path by any other combination gets a plain `HardwareVideoDecod
 
 The route is FEL only and capability gated (`DualLayerRouteDecision`, pure and unit-tested). Everything
 else keeps the native route, which plays single-layer 8.1 where the display takes Dolby Vision and the
-HDR10 base layer where it does not: the preference is off, `dolbyVisionHandling` is not `.automatic`, a
+HDR10 base layer where it does not: the preference is off, the build lacks the `DualLayerDolbyVision` trait, `dolbyVisionHandling` is not `.automatic`, a
 live or non-seekable source, a box with no hardware HEVC decoder for the stream, a MEL source (nothing
 to compose), an enhancement layer the probe could not classify, a base layer of unknown size, and a
 stream the box could not decode twice in real time. The checks run in that order (the code's order:
-preference, handling, live/seekable, hardware, `el_type`, geometry, budget). The `el_type` probe (a packet
+preference, trait, handling, live/seekable, hardware, `el_type`, geometry, budget). The `el_type` probe (a packet
 scan and a seek) runs once nothing up to and including the hardware check has ruled the route out, so it
 also runs for a stream that the geometry or the budget then refuses: the MEL / unknown answer outranks
 the size reasons in the log line, and that precedence needs the probe's answer.
@@ -295,6 +303,7 @@ A Profile 7 load logs exactly one line, whichever way it goes (other sources log
 [AetherEngine] DV P7 dual-layer route: taken (el_type=FEL, 3840x2160@23.976, budget 80%)
 [AetherEngine] DV P7 dual-layer route: not taken (el_type=MEL, nothing to compose), keeps the native route (8.1 where the display takes Dolby Vision)
 [AetherEngine] DV P7 dual-layer route: not taken (preferDualLayerDolbyVision is off), keeps the native route (8.1 where the display takes Dolby Vision)
+[AetherEngine] DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait), keeps the native route (8.1 where the display takes Dolby Vision)
 [AetherEngine] DV P7 dual-layer route: not taken (over the real-time budget, 3840x2160@60 needs 200% of it), keeps the native route (8.1 where the display takes Dolby Vision)
 [AetherEngine] DV P7 dual-layer route: not taken (base-layer size unknown), keeps the native route (8.1 where the display takes Dolby Vision)
 ```

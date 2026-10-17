@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import Dovi
@@ -98,3 +100,4 @@ struct DoviElBitDepthTests {
         #expect(DoviFelComposer.parseRpuParameters(rpu: rpu) == nil)
     }
 }
+#endif

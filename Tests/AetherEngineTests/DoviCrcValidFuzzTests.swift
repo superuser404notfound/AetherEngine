@@ -92,6 +92,7 @@ struct DoviCrcValidFuzzTests {
             if let dump = env["AETHER_FUZZ_DUMP"] { try? Data(m).write(to: URL(fileURLWithPath: dump + label)) }
             guard let rpu = m.withUnsafeBufferPointer({ DoviRpuGuard.parse($0.baseAddress!, $0.count) }) else { guarded += 1; continue }
             defer { dovi_rpu_free(rpu) }
+            #if DualLayerDolbyVision
             if let p = DoviFelComposer.parseRpuParameters(rpu: rpu) {
                 parsed += 1
                 for poly in [p.polyY, p.polyCb, p.polyCr] {
@@ -99,6 +100,7 @@ struct DoviCrcValidFuzzTests {
                     #expect(q.numPivots <= UInt32(DoviPolynomialParams.maxPivots))
                 }
             }
+            #endif
             if let out = DoviRpuConverter.convertedUnspec62(rpu) {
                 written += 1
                 dovi_data_free(out)

@@ -23,7 +23,7 @@ struct DualLayerRouteAudioTests {
                 dvProfile: 7, dolbyVisionHandling: .automatic,
                 preferDualLayerDolbyVision: prefer, canHardwareDecode: { true }, elType: "FEL")
         }
-        #expect(requiresSoftware(prefer: true))
+        #expect(requiresSoftware(prefer: true) == DualLayerRouteDecision.isBuiltIn)
         #expect(!requiresSoftware(prefer: false))
     }
 

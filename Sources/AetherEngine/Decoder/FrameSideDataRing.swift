@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 
 /// Fixed-capacity ring buffer for Dolby Vision per-frame side data (dolby-vision-fel.md §5.3).
@@ -162,3 +164,4 @@ struct FrameSideDataRing: Sendable {
         entryCount = 0
     }
 }
+#endif

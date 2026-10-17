@@ -1,4 +1,4 @@
-// Only with the DTSXObjectAudio trait (on by default), which links LibDTSX.
+// Only with the DTSXObjectAudio trait (off by default), which links LibDTSX.
 #if DTSXObjectAudio
 import Foundation
 import DTSX

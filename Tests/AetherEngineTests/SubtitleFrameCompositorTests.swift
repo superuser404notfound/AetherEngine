@@ -203,6 +203,7 @@ struct SubtitleFrameCompositorTests {
         }
     }
 
+    #if DualLayerDolbyVision
     /// The Profile 7 FEL route hands the renderer composed P010 frames carrying the Dolby Vision RPU
     /// and compatibility ID. In PiP with a cue up, the frame the layer receives is the compositor's
     /// copy: it has to carry the source frame's attachments (the CFString "1" among them, which the
@@ -235,6 +236,7 @@ struct SubtitleFrameCompositorTests {
             #expect(attachment(out, DoviDisplayMetadata.compatibilityIDKey as CFString) == nil)
         }
     }
+    #endif
 
     @Test("an untagged source renders through BT.709")
     func untaggedSourceFallsBackTo709() throws {

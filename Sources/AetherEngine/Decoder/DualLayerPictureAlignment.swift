@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 
 /// Gives each enhancement-layer packet the presentation time of the base-layer picture it belongs to.
@@ -171,3 +173,4 @@ struct DualLayerPictureAlignment {
         let (v, o) = a.addingReportingOverflow(b); return o ? nil : v
     }
 }
+#endif

@@ -157,6 +157,16 @@ struct PulseHarnessView: View {
             PulseLog.shared.note(line)
         }
         say("sequence: " + arms.map { "\($0.label)(\($0.mode))" }.joined(separator: " "))
+        // Without the trait the engine accepts preferDualLayerDolbyVision and plays the native route, so
+        // every `engine` and `soak` arm would film the wrong thing. Refuse the whole sequence instead.
+        if arms.contains(where: { $0.mode == "engine" || $0.mode == "soak" }),
+           !AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn {
+            slate = "AetherEngine was built without the DualLayerDolbyVision trait"
+            say("ERROR: the engine and soak arms need AetherEngine's DualLayerDolbyVision trait, which this "
+                + "build lacks (PulseEngine/Package.swift sets it); refusing the sequence")
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            exit(70)
+        }
         for (n, arm) in arms.enumerated() {
             slate = "\(n + 1)/\(arms.count)  \(arm.label)"
             host.window?.avDisplayManager.preferredDisplayCriteria = nil

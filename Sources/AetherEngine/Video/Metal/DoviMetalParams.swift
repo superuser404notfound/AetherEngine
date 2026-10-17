@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 
 /// How one reshaping piece is evaluated (`mapping_idc`).
@@ -313,3 +315,4 @@ struct DoviMetalParams: Sendable {
         return data
     }
 }
+#endif

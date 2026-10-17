@@ -1,3 +1,5 @@
+// Only with the DolbyVisionStillReshaping trait (off by default).
+#if DolbyVisionStillReshaping
 import Foundation
 import CoreGraphics
 import AetherLibavutil
@@ -415,3 +417,4 @@ enum DolbyVisionStillConverter {
         UInt8(min(max(x, 0), 1) * 255.0 + 0.5)
     }
 }
+#endif

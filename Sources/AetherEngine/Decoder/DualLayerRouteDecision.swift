@@ -18,6 +18,8 @@ enum DualLayerRouteDecision: Equatable {
         /// Not HEVC Dolby Vision Profile 7: nothing to decide, and nothing is logged.
         case notProfile7
         case preferenceOff
+        /// The package was built without the `DualLayerDolbyVision` trait, so there is no composer.
+        case notBuiltIn
         case baseLayerOnlyHandling
         case liveOrNotSeekable
         case noHardwareHEVC
@@ -50,6 +52,9 @@ enum DualLayerRouteDecision: Equatable {
             value.rounded() == value ? String(Int(value)) : String(format: "%.3f", value)
         }
     }
+
+    /// Whether the composer is compiled in (the `DualLayerDolbyVision` package trait, off by default).
+    static let isBuiltIn = AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn
 
     /// The most pixels per second, base layer plus enhancement layer, the route is willing to decode in
     /// real time: UHD 3840x2160 at 30 fps (248.8 Mpx/s) plus a 1920x1080 enhancement layer at 30 fps
@@ -98,6 +103,7 @@ enum DualLayerRouteDecision: Equatable {
     ) -> Reason? {
         guard codecID == AV_CODEC_ID_HEVC, dvProfile == 7 else { return .notProfile7 }
         guard preferDualLayerDolbyVision else { return .preferenceOff }
+        guard isBuiltIn else { return .notBuiltIn }
         guard dolbyVisionHandling == .automatic else { return .baseLayerOnlyHandling }
         guard !isLive, isSourceSeekable else { return .liveOrNotSeekable }
         guard canHardwareDecode?() ?? true else { return .noHardwareHEVC }
@@ -165,6 +171,8 @@ extension DualLayerRouteDecision.Reason {
             return "not Dolby Vision Profile 7"
         case .preferenceOff:
             return "preferDualLayerDolbyVision is off"
+        case .notBuiltIn:
+            return "built without the DualLayerDolbyVision trait"
         case .baseLayerOnlyHandling:
             return "dolbyVisionHandling is baseLayerOnly"
         case .liveOrNotSeekable:

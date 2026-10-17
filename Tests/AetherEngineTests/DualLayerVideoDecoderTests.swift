@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import CoreMedia
 import CoreVideo
@@ -2753,3 +2755,4 @@ struct DualLayerVideoDecoderTests {
         #expect(PacketBalanceTracker.alive - aliveBefore < iterations / 2)
     }
 }
+#endif

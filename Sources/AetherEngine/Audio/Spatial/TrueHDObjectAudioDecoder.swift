@@ -1,4 +1,4 @@
-// Only with the TrueHDObjectAudio trait (on by default), which links LibTrueHD.
+// Only with the TrueHDObjectAudio trait (off by default), which links LibTrueHD.
 #if TrueHDObjectAudio
 import Foundation
 import TrueHD

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -93,4 +95,5 @@ struct DoviRealFileExportTests {
         print("[export] \(name): \(CVPixelBufferGetWidth(first.bl))x\(CVPixelBufferGetHeight(first.bl)) x\(rec.captures.count) -> \(dir.path)")
     }
 }
+#endif
 #endif

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import CoreMedia
 import CoreVideo
@@ -330,3 +332,4 @@ final class OrderedDelivery: @unchecked Sendable {
     var hasOnFrameForTesting: Bool { queue.sync { onFrame != nil } }
     var currentOnFrame: DecodedFrameHandler? { queue.sync { onFrame } }
 }
+#endif

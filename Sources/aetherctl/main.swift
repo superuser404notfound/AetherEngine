@@ -81,7 +81,8 @@ func printUsage() {
              [--max-concurrent-requests N]
                      [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
-                      FEL dual-layer route (off by default, as in the engine; --no-fel
+                      FEL dual-layer route (off by default, as in the engine, and only in
+                      a build with the DualLayerDolbyVision trait; --no-fel
                       is accepted and does nothing); --surface (or --window) presents
                       into a window; --cycle-el S flips the FEL residual every S
                       seconds, which needs --fel and a surface; --subs activates the first
@@ -111,7 +112,7 @@ func printUsage() {
                           (#92: SW-decode each segment in isolation; framesDecoded==0 => not independent)
       aetherctl disc-inspect <disc.iso>
       aetherctl dovitest [--out PATH.hevc] <file>
-      aetherctl feltest [--frames N] <file>
+      aetherctl feltest [--frames N] <file>   (DualLayerDolbyVision trait)
       aetherctl dvsurvey [--frames N] [--list K] <file>
       aetherctl extract [--at <sec>] [--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio [--seconds N] <url>
@@ -489,7 +490,12 @@ if first == "feltest" {
     }
     rest.removeAll { $0 == urlArg }
     rejectStrayFlags(rest, subcommand: "feltest")
+    #if DualLayerDolbyVision
     exit(runFelTest(url: parseSourceURL(urlArg), maxFrames: frames))
+    #else
+    print("ERROR: feltest needs the DualLayerDolbyVision trait (swift build --traits DualLayerDolbyVision)")
+    exit(64)
+    #endif
 }
 
 // Dolby Vision display-metadata survey: picks the pin for the on-device consumption test.
@@ -718,6 +724,10 @@ if first == "play" {
             print("ERROR: --cycle-el takes a period of at least 0.1 seconds, got '\(spec)'")
             exit(64)
         }
+        #if !DualLayerDolbyVision
+        print("ERROR: --cycle-el needs the DualLayerDolbyVision trait (swift build --traits DualLayerDolbyVision)")
+        exit(64)
+        #else
         if !playFel {
             print("[aetherctl] note: --cycle-el only changes a session on the dual-layer route; add --fel")
         }
@@ -737,10 +747,14 @@ if first == "play" {
             }
         }
         t.start()
+        #endif
     }
     // `--dv-pin <spec>`: arm the Dolby Vision pin test (DEBUG builds), same grammar `dvsurvey` prints.
     if let spec = takeStringFlag("--dv-pin", from: &rest) {
-        #if DEBUG
+        #if !DualLayerDolbyVision
+        print("ERROR: --dv-pin needs the DualLayerDolbyVision trait (swift build --traits DualLayerDolbyVision)")
+        exit(64)
+        #elseif DEBUG
         guard AetherEngine.armDolbyVisionPinTest(spec) else {
             print("ERROR: --dv-pin '\(spec)' carries no capture rule (e.g. 'darkest:240,period:2')")
             exit(64)
@@ -1112,6 +1126,9 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
             exit(64)
         }
         serveObjectAudioRendering = .apac(layout)
+        #if !(TrueHDObjectAudio || DTSXObjectAudio)
+        print("[aetherctl] note: --atmos-bed renders nothing without the TrueHDObjectAudio / DTSXObjectAudio traits")
+        #endif
     } else {
         serveObjectAudioRendering = .off
     }

@@ -24,7 +24,8 @@ enum VideoRoutingPolicy {
         canHardwareDecode: (() -> Bool)?
     ) -> Bool {
         guard codecID == AV_CODEC_ID_HEVC, dvProfile == 7,
-              preferDualLayerDolbyVision, dolbyVisionHandling == .automatic else { return false }
+              preferDualLayerDolbyVision, DualLayerRouteDecision.isBuiltIn,
+              dolbyVisionHandling == .automatic else { return false }
         return canHardwareDecode?() ?? true
     }
 

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import Metal
@@ -239,3 +241,4 @@ struct DoviLayoutProbeTests {
         #expect(Data(rawBytes) == expectedData)
     }
 }
+#endif

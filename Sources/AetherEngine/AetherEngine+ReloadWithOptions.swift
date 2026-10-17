@@ -398,14 +398,15 @@ enum SessionOptionCorrection {
     /// handling refuses when the preference is on, where it can turn the route on or off. With the
     /// preference off the handling cannot move the route. Only a Profile 7 source can route
     /// differently, so any other source is not refused: the change there moves nothing, which is also
-    /// what the rebuild does.
+    /// what the rebuild does. A build without the `DualLayerDolbyVision` trait has no such route, so
+    /// nothing is refused there.
     static func dualLayerRouteRefusal(
         isCustomSource: Bool,
         current: LoadOptions,
         proposed: LoadOptions,
         dvProfile: Int?
     ) -> SessionReloadRefusal? {
-        guard isCustomSource, dvProfile == 7 else { return nil }
+        guard DualLayerRouteDecision.isBuiltIn, isCustomSource, dvProfile == 7 else { return nil }
         let preferenceChanged = proposed.preferDualLayerDolbyVision != current.preferDualLayerDolbyVision
         let handlingMovesRoute = proposed.dolbyVisionHandling != current.dolbyVisionHandling
             && proposed.preferDualLayerDolbyVision

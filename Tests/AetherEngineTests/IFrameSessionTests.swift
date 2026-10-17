@@ -84,6 +84,8 @@ struct IFrameSessionTests {
 
     private static let dolbyVisionFixture = "user/Patterns_Of_Nature_DoVi_24_P5_UHD_HEVC-10mbps_DD+JOC-768kbps_iOS.mp4"
 
+    // Profile 5 stills need the DolbyVisionStillReshaping trait (README, "Optional components").
+    #if DolbyVisionStillReshaping
     @Test("a Dolby Vision session serves SDR JPEG stills on the plan's timeline",
           .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
     func dolbyVisionServesJPEG() throws {
@@ -131,6 +133,20 @@ struct IFrameSessionTests {
         let playlist = try String(contentsOf: playlistURL, encoding: .utf8)
         #expect(playlist.contains("iframe1.mp4"))
     }
+    #else
+    @Test("without the reshaping trait a Profile 5 session lists no I-frame rendition",
+          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
+    func dolbyVisionWithoutReshapingHasNoRendition() throws {
+        let engine = HLSVideoEngine(url: fixtureURL(Self.dolbyVisionFixture), dvModeAvailable: true)
+        engine.requestIFramePlaylist()
+        _ = try engine.start()
+        defer { engine.stop() }
+        #expect(engine.iFrameRenditionVerdict == .absent(.dolbyVisionStillsNotBuiltIn))
+        #expect(!engine.yieldsStills)
+        let prov = try #require(engine.provider)
+        #expect(!prov.iFrameRenditionServed)
+    }
+    #endif
 
     @Test("the loopback server answers the three new paths",
           .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))

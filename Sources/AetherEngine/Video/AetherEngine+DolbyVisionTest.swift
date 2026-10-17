@@ -1,4 +1,5 @@
-#if DEBUG
+// Only in DEBUG builds with the DualLayerDolbyVision trait: it pins metadata on composed frames.
+#if DEBUG && DualLayerDolbyVision
 import Foundation
 
 /// Diagnostic controls (SPI, not host API) for the on-device Dolby Vision consumption test.

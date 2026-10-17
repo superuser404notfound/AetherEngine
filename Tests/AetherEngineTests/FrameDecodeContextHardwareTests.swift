@@ -90,6 +90,11 @@ struct FrameDecodeContextHardwareTests {
 
         #expect(context.isDolbyVisionNoBaseLayer)
         #expect(context.hardwareDecoderName == "none")
+        #if !DolbyVisionStillReshaping
+        // Without the reshaping the IPT planes would be read as YCbCr: no still at all instead.
+        #expect(context.decodeFrame(at: 1, mode: .thumbnail, targetWidth: 320, maxSize: nil,
+                                    isCancelled: { false }) == nil)
+        #endif
     }
 
     /// One 64x64 MPEG-4 Part 2 frame. VideoToolbox does not offer that legacy codec, while

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import CoreVideo
@@ -209,3 +211,4 @@ extension DoviGpuAdversarialTests {
         for plane in DoviTestSupport.rawVDR(out)[1...] { #expect(Set(plane) == [2048]) }
     }
 }
+#endif

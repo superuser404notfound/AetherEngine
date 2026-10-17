@@ -1,4 +1,4 @@
-// Only with the TrueHDObjectAudio trait (on by default): the decoder and its library are not built without it.
+// Only with the TrueHDObjectAudio trait (off by default): the decoder and its library are not built without it.
 #if TrueHDObjectAudio
 import Testing
 import Foundation

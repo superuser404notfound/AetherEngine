@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Foundation
 
 /// One block of decoded object audio, borrowed from the decoder: `planes` stay valid only until the
@@ -44,3 +46,4 @@ extension ObjectAudioDecoding {
     var selfResetCount: Int { 0 }
     func releaseHeldBlocks() {}
 }
+#endif

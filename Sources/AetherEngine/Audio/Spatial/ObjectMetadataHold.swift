@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Foundation
 
 /// Holds the blocks an object decoder returns between a reset and the stream's first object metadata.
@@ -105,3 +107,4 @@ final class ObjectMetadataHold {
         heldFrames = 0
     }
 }
+#endif

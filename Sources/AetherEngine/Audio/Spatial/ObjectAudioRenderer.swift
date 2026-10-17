@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Accelerate
 import Foundation
 
@@ -277,3 +279,4 @@ final class ObjectAudioRenderer {
         }
     }
 }
+#endif

@@ -298,7 +298,7 @@ struct VideoRoutingPolicyTests {
             preferDualLayerDolbyVision: true,
             canHardwareDecode: { true },
             elType: "FEL"
-        ))
+        ) == DualLayerRouteDecision.isBuiltIn)
     }
 
     @Test("the el_type probe is only wanted when its answer can change the route")
@@ -310,7 +310,7 @@ struct VideoRoutingPolicyTests {
                 codecID: codec, dvProfile: profile, dolbyVisionHandling: handling,
                 preferDualLayerDolbyVision: prefer, canHardwareDecode: hardware)
         }
-        #expect(wanted())
+        #expect(wanted() == DualLayerRouteDecision.isBuiltIn)
         #expect(!wanted(prefer: false), "not opted in: no probe")
         #expect(!wanted(handling: .baseLayerOnly))
         #expect(!wanted(hardware: { false }), "no proven hardware session: the host would not compose")
@@ -431,9 +431,10 @@ struct VideoRoutingPolicyTests {
                 for prefer in preferOptions {
                     for hw in hwOptions {
                         // Section 5.2 table:
-                        // P7 FEL + .automatic + preferDualLayerDolbyVision (true) + HW decode -> software host
-                        // All other combinations -> native (false)
-                        let expected = (el == "FEL")
+                        // P7 FEL + .automatic + preferDualLayerDolbyVision (true) + HW decode -> software host,
+                        // in a build with the DualLayerDolbyVision trait. All other combinations -> native (false)
+                        let expected = DualLayerRouteDecision.isBuiltIn
+                            && el == "FEL"
                             && handling == .automatic
                             && prefer
                             && hw
@@ -480,7 +481,7 @@ struct VideoRoutingPolicyTests {
             preferDualLayerDolbyVision: true,
             canHardwareDecode: { true },
             elType: "FEL"
-        ))
+        ) == DualLayerRouteDecision.isBuiltIn)
     }
 
     @Test("Profile 7 MEL stays native regardless of preferences")

@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 import Foundation
 import Metal
 import CoreVideo
@@ -1451,3 +1453,4 @@ final class DoviFelComposer: @unchecked Sendable {
         return params
     }
 }
+#endif

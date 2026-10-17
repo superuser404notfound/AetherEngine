@@ -15,6 +15,7 @@ import AetherLibavutil
 /// behaves like the real one on exactly those points.
 @Suite("TrueHD Atmos spatial bridge", .timeLimit(.minutes(2)))
 struct SpatialAudioBridgeTests {
+    #if TrueHDObjectAudio || DTSXObjectAudio
 
     /// Stand-in object decoder: one pushed byte is one 40-frame access unit (TrueHD's 1/1200 s),
     /// the first `skipAfterReset` access units after a reset are discarded as a real decoder does
@@ -142,6 +143,9 @@ struct SpatialAudioBridgeTests {
         return out
     }
 
+    #endif
+
+    #if TrueHDObjectAudio
     @Test("only TrueHD that FFmpeg marks Atmos, at 48 kHz or not yet known, is rendered")
     func eligibility() {
         let on = ObjectAudioRendering.apac(.l714)
@@ -154,7 +158,9 @@ struct SpatialAudioBridgeTests {
                 "E-AC-3 JOC is already Atmos and stream-copies")
         #expect(HLSVideoEngine.spatialRenderingLayout(rendering: .off, codecID: AV_CODEC_ID_TRUEHD, profile: 30, sampleRate: 48_000) == nil)
     }
+    #endif
 
+    #if DTSXObjectAudio
     @Test("every 48 kHz DTS-HD MA track is a DTS:X candidate, whatever FFmpeg's label; lossy DTS is not")
     func dtsEligibility() {
         let on = ObjectAudioRendering.apac(.l714)
@@ -171,7 +177,9 @@ struct SpatialAudioBridgeTests {
         #expect(HLSVideoEngine.spatialRenderingLayout(rendering: .off, codecID: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS_HD_MA_X, sampleRate: 48_000) == nil)
         #expect(HLSVideoEngine.objectAudioSource(codecID: AV_CODEC_ID_TRUEHD, profile: 30) == .trueHDAtmos)
     }
+    #endif
 
+    #if TrueHDObjectAudio || DTSXObjectAudio
     @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024")
     func anchorsOnSource() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
@@ -442,6 +450,7 @@ struct SpatialAudioBridgeTests {
         return (try #require(initBytes), segment, sessionDir)
     }
 
+    #endif
     @Test("the Atmos output activator's bundled stream reads as E-AC-3 with the Atmos extension")
     @MainActor
     func silentAtmosStreamIsAtmos() async throws {
@@ -457,6 +466,7 @@ struct SpatialAudioBridgeTests {
         #expect(CMFormatDescriptionGetMediaSubType(format) == kAudioFormatEnhancedAC3)
     }
 
+    #if TrueHDObjectAudio || DTSXObjectAudio
     @Test("movenc muxes the stand-in and the init segment carries the real apac entry")
     func muxedInitCarriesAPAC() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
@@ -545,8 +555,10 @@ struct SpatialAudioBridgeTests {
         }
         return nil
     }
+    #endif
 }
 
+#if TrueHDObjectAudio || DTSXObjectAudio
 /// The bed level line is the engine's half of a missing-heights report: it says which channels of the
 /// rendered bed carried sound in what AVPlayer was handed, so a silent height here and a silent height
 /// at the receiver are told apart.
@@ -791,3 +803,4 @@ extension SpatialAudioBridgeTests {
         #expect(bridge.servedChannelCount == layout.channelCount)
     }
 }
+#endif

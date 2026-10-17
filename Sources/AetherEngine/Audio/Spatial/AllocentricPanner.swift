@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Foundation
 import simd
 
@@ -158,3 +160,4 @@ struct AllocentricPanner: Sendable {
         simd_clamp(p, SIMD3(repeating: 0), SIMD3(repeating: 1))
     }
 }
+#endif

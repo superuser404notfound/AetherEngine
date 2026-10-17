@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import CoreVideo
 import Foundation
@@ -279,3 +281,4 @@ struct DoviComposeAsyncTests {
         }
     }
 }
+#endif

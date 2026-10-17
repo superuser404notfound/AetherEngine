@@ -180,10 +180,12 @@ struct SampleBufferRendererLookaheadTests {
         #expect(abs(r.lead - 4 * frame) < 1e-9)
     }
 
+    #if DualLayerDolbyVision
     @Test("The pool threshold follows the look-ahead cap")
     func poolFollowsCap() {
         #expect(DoviFelComposer.outputPoolAllocationThreshold == SampleBufferRenderer.felVideoLookaheadFrames + 2 + DoviFelComposer.maxFramesInFlight + 1)
     }
+    #endif
 
     private func mayEnqueue(rate: Double?, pts: Double, clock: Double,
                             ready: Bool = true, armed: Bool = true) -> Bool {

@@ -1,4 +1,4 @@
-#if DEBUG
+#if DEBUG && DualLayerDolbyVision
 import Testing
 import Foundation
 @testable import AetherEngine

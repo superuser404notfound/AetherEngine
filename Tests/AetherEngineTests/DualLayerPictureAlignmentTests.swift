@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait: the composer is not built without it.
+#if DualLayerDolbyVision
 import Testing
 import Foundation
 import AetherLibavformat
@@ -136,3 +138,4 @@ struct DualLayerPictureAlignmentTests {
         #expect(DualLayerPictureAlignment.extrapolate(origin: (3, 0), latest: (3, 40), slot: 6) == nil)
     }
 }
+#endif

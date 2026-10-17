@@ -32,6 +32,52 @@ the public-API contract.
 - **The PiP source keeps its off-main snapshot fresh without the controller helper**, so a host using
   `playbackDelegate` with its own content source gets current state and duration.
 
+## [7.39.0] - 2026-10-17
+
+**Not built by default any more: TrueHD Atmos and DTS:X object rendering, Profile 7 FEL dual-layer
+composition, and Dolby Vision Profile 5 / 10.0 stills.** Each is now an optional component behind a
+package trait that is off by default (`TrueHDObjectAudio`, `DTSXObjectAudio`, `DualLayerDolbyVision`,
+`DolbyVisionStillReshaping`). A host that used any of them re-enables it on its package dependency:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.39.0",
+         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
+```
+
+or in Xcode's package dependency editor (XcodeGen cannot set traits; see
+[README › Optional components](README.md#optional-components)). These components may be subject to
+third-party patent licensing; integrators who enable them are responsible for their own licensing.
+
+### Changed
+
+- **Optional components, off by default.** Without its trait a component is not compiled, and a library
+  behind it is neither linked nor resolved. The public API is unchanged and the options become no-ops:
+  `objectAudioRendering` keeps the codec on the channel bridge, and `preferDualLayerDolbyVision` keeps a
+  Profile 7 source on the native route (the route line reads `not taken (built without the
+  DualLayerDolbyVision trait)`, and `reloadAtCurrentPosition(applying:)` no longer refuses flipping it on a
+  custom-reader session, since nothing would move). The two audio traits used to be on by default; the
+  dual-layer path (`DualLayerVideoDecoder`, the Metal composer, `OrderedDelivery`, the per-frame display
+  metadata and the FEL diagnostics) and the still reshaping (`DolbyVisionStillConverter`) were always
+  compiled.
+- **A Dolby Vision Profile 5 / 10.0 source has no stills without `DolbyVisionStillReshaping`.** Its planes
+  are IPT, which the standard still path would read as YCbCr (the green / magenta picture of #103), so it
+  yields none: `scrubThumbnail` and `scrubPreviewFrame` return nil without decoding anything,
+  `supportsCacheBackedStills` is false, the I-frame rendition is absent (`dolbyVisionStillsNotBuiltIn`),
+  an audio switch holds no picture, and the session log says so once. Playback is unaffected, as are
+  Profile 8.x, HDR10, HLG and SDR stills.
+
+### Added
+
+- **`AetherEngine.OptionalComponent`**, with `isBuiltIn` and `traitName` per component, so a host can
+  hide a setting its build would ignore.
+- **`Probes/AllTraits`**, a consumer package that enables every trait; CI builds it for tvOS and iOS, runs
+  the suite with all traits (including on a one-thread cooperative pool) and builds a release `aetherctl`
+  with them. The Dolby Vision pulse probe links the engine through `PulseEngine/` with
+  `DualLayerDolbyVision` and refuses to run its FEL arms without it.
+- `aetherctl feltest`, `play --cycle-el` and `play --dv-pin` need `DualLayerDolbyVision` and exit 64
+  without it; the `@_spi(Diagnostics)` FEL tooling (`felDecodeProbe`, `FelProbeResult`,
+  `felResidualEnabled`, `armDolbyVisionPinTest` and the pin queries) exists only with it.
+
 ## [7.38.1] - 2026-10-16
 
 ### Fixed

@@ -790,3 +790,12 @@ private func hwDecoderOutputCallback(
         pts: presentationTimeStamp
     )
 }
+
+/// AE#739: a decoder whose VideoToolbox sessions the system can invalidate behind its back, and that
+/// can build them again. The host recovers through this rather than through one decoder type.
+protocol VideoSessionRebuilding: AnyObject {
+    var onSessionLost: (@Sendable () -> Void)? { get set }
+    @discardableResult func rebuildSession() -> Bool
+}
+
+extension HardwareVideoDecoder: VideoSessionRebuilding {}

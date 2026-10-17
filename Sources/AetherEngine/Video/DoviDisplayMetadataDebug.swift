@@ -1,3 +1,5 @@
+// Only with the DualLayerDolbyVision trait (off by default).
+#if DualLayerDolbyVision
 #if DEBUG
 import Foundation
 import Dovi
@@ -310,4 +312,5 @@ enum DoviDisplayMetadataDebug {
     static func substitute(_ nal: [UInt8]?) -> [UInt8]? { shared.substitute(nal) }
     static func parse(spec: String) -> DoviPinTest.Config? { DoviPinTest.parse(spec: spec) }
 }
+#endif
 #endif

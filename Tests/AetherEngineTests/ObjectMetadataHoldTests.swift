@@ -1,3 +1,5 @@
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait: the renderer is not built without one.
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Testing
 import Foundation
 @testable import AetherEngine
@@ -145,3 +147,4 @@ struct ObjectMetadataHoldTests {
         #expect(out[1].updates.first?.frameOffset == 0)
     }
 }
+#endif
