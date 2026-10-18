@@ -32,6 +32,18 @@ the public-API contract.
   decode. `aetherctl play` takes `--atmos-bed` as `serve` does and prints them: on a TrueHD Atmos
   remux, `obj=13/13 up=4 bed=7.1.4`.
 
+### Fixed
+
+- **An SDR master AVPlayer refuses a second time goes to the software path at once.** The master →
+  media fallback is single-shot per session, and a session-preserving rebuild (an audio pick) serves the
+  master again. When AVPlayer refused that one too, the refusal had nowhere to go: the error it published
+  was overwritten by the rebuild finishing, and the session sat on the failed item behind AVKit's failure
+  glyph until something else gave out. On an H.264 BluRay remux whose avcC states profile 0
+  (`avc1.000000`) that was the producer reaching the in-band SPS change 16 s later (Apple TV 4K, tvOS 27).
+  The repeat is now the AE#561 rung's to take, as `AetherEngine.RepeatedMasterRefusal` in
+  `softwarePathEscalations`. An SDR refusal says nothing about the panel (#535), so only an SDR master
+  qualifies; an HDR master refused twice keeps its current answer.
+
 ## [7.39.0] - 2026-10-17
 
 **Not built by default any more: TrueHD Atmos and DTS:X object rendering, Profile 7 FEL dual-layer

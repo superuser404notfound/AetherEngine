@@ -100,4 +100,20 @@ enum MasterFallbackDecision {
     ) -> Bool {
         isMasterRejectionCode(errorCode) && servingMasterPlaylist && !alreadyFellBack
     }
+
+    /// An SDR master refused AGAIN in a session that has already fallen back once: a session-preserving
+    /// rebuild (an audio switch) re-serves the master, and AVPlayer refuses it the way it refused the first.
+    ///
+    /// An SDR refusal says nothing about the display (#535), so twice is a verdict on the media, and the
+    /// software path is the rung left (AE#561). Before this the second refusal had nowhere to go: the
+    /// fallback is single-shot, the error it published was overwritten by the rebuild finishing, and the
+    /// session sat on a failed item behind AVKit's failure glyph until the producer, paced by a consumer
+    /// that no longer asked for anything, reached the in-band SPS change 16 s later (device log, H.264
+    /// BluRay remux whose avcC states profile 0, 2026-10-17). An HDR master refused twice keeps the
+    /// current answer: the panel can be the reason.
+    static func shouldEscalateRepeatedRefusal(
+        errorCode: Int, servingMasterPlaylist: Bool, alreadyFellBack: Bool, servedSourceIsHDR: Bool
+    ) -> Bool {
+        isMasterRejectionCode(errorCode) && servingMasterPlaylist && alreadyFellBack && !servedSourceIsHDR
+    }
 }

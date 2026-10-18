@@ -106,6 +106,10 @@ enum SoftwarePathEscalation {
     /// stream by decoding through it.
     static let liveJoinErrorDomain = "AetherEngine.LiveJoin"
 
+    /// An SDR master AVPlayer refused twice in one session (`MasterFallbackDecision.shouldEscalateRepeatedRefusal`),
+    /// which is a verdict on the media for the same reason a CoreMedia failure is.
+    static let repeatedMasterRefusalErrorDomain = "AetherEngine.RepeatedMasterRefusal"
+
     /// Whether a failed native item is worth handing to the engine's own decoder.
     ///
     /// The domain is the discriminator. A CoreMedia failure is a verdict on the MEDIA, which is the
@@ -122,6 +126,6 @@ enum SoftwarePathEscalation {
         // The bypass has no local muxer and decodes nothing here, so #461 ignores the option anyway.
         guard !availability.nativeRemoteHLS else { return false }
         return errorDomain == mediaErrorDomain || errorDomain == liveJoinErrorDomain
-            || errorDomain == videoConfigurationErrorDomain
+            || errorDomain == videoConfigurationErrorDomain || errorDomain == repeatedMasterRefusalErrorDomain
     }
 }

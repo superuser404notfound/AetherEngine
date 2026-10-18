@@ -2778,6 +2778,7 @@ public final class AetherEngine: ObservableObject {
             publishError(PlaybackErrorInfo(kind: .masterPlaylistRejected, message: rejection.message, underlyingDomain: rejection.domain, underlyingCode: rejection.code))
             return
         }
+        if escalateRepeatedMasterRefusal(rejection, session: session, expectedGeneration: expectedGeneration) { return }
         guard MasterFallbackDecision.shouldFallBackToMediaPlaylist(
             errorCode: rejection.code,
             servingMasterPlaylist: session.servingMasterPlaylist,

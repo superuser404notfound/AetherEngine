@@ -74,6 +74,58 @@ struct MasterFallbackDecisionTests {
         #expect(!MasterFallbackDecision.shouldFallBackToMediaPlaylist(
             errorCode: -11868, servingMasterPlaylist: true, alreadyFellBack: true))
     }
+
+    /// Device log, Apple TV 4K, an H.264 BluRay remux whose avcC states profile 0 (`avc1.000000`): the SDR
+    /// master was refused with -11848, the media fallback mounted, the audio pick's rebuild re-served the
+    /// master and AVPlayer refused it again 1.6 s later. The fallback is single-shot, so that refusal had
+    /// nowhere to go and the session sat on the failed item for 16 s, until the producer reached the
+    /// in-band SPS change and the software path was taken anyway.
+    @Test("An SDR master refused a second time in one session goes to the software path")
+    func repeatedSDRRefusalEscalates() {
+        #expect(MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: -11848, servingMasterPlaylist: true, alreadyFellBack: true, servedSourceIsHDR: false))
+        #expect(SoftwarePathEscalation.shouldEscalate(
+            errorDomain: SoftwarePathEscalation.repeatedMasterRefusalErrorDomain,
+            availability: .init(alreadyEscalated: false, preferredDecodePath: .automatic, nativeRemoteHLS: false)))
+    }
+
+    @Test("A first refusal, an HDR master, or a media playlist does not escalate on the repeat rule")
+    func repeatRuleIsNarrow() {
+        // First refusal: the media fallback is the answer, which keeps hardware decode.
+        #expect(!MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: -11848, servingMasterPlaylist: true, alreadyFellBack: false, servedSourceIsHDR: false))
+        // An HDR master can be refused by the panel (#535), so twice is not a verdict on the media.
+        #expect(!MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: -11848, servingMasterPlaylist: true, alreadyFellBack: true, servedSourceIsHDR: true))
+        // Not serving the master: the media playlist's own failures take the ordinary route.
+        #expect(!MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: -11848, servingMasterPlaylist: false, alreadyFellBack: true, servedSourceIsHDR: false))
+        // Not a refusal of the master at all.
+        #expect(!MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: -12889, servingMasterPlaylist: true, alreadyFellBack: true, servedSourceIsHDR: false))
+    }
+
+    /// A pure decision cannot see the call site, so this reads it, as the #535 latch test does: the repeat
+    /// rule has to run before the single-shot gate that would otherwise publish the refusal.
+    @Test("The fallback offers a repeated refusal to the software path before its single-shot gate")
+    func fallbackOffersTheRepeatFirst() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/AetherEngine")
+        let engine = try String(contentsOf: sources.appendingPathComponent("AetherEngine.swift"), encoding: .utf8)
+        let fn = try #require(engine.range(of: "func fallBackToMediaPlaylist("))
+        let body = String(engine[fn.lowerBound...].prefix(2500))
+        let offer = try #require(body.range(of: "escalateRepeatedMasterRefusal(rejection"))
+        let gate = try #require(body.range(of: "shouldFallBackToMediaPlaylist("))
+        #expect(offer.lowerBound < gate.lowerBound)
+
+        let rung = try String(contentsOf: sources.appendingPathComponent("AetherEngine+SoftwarePathEscalation.swift"),
+                              encoding: .utf8)
+        let helper = try #require(rung.range(of: "func escalateRepeatedMasterRefusal("))
+        let helperBody = String(rung[helper.lowerBound...].prefix(1800))
+        #expect(helperBody.contains("shouldEscalateRepeatedRefusal("))
+        #expect(helperBody.contains("escalateToSoftwarePath(request"))
+    }
 }
 
 /// #98: the media fallback reloads where the REJECTED item was placed. A recovery swaps a fresh item in
@@ -133,7 +185,10 @@ struct MasterFallbackPositionTests {
             .appendingPathComponent("Sources/AetherEngine/AetherEngine.swift")
         let text = try #require(try? String(contentsOf: source, encoding: .utf8))
         let fn = try #require(text.range(of: "func fallBackToMediaPlaylist("))
-        let body = String(text[fn.lowerBound...].prefix(4000))
+        // The whole function, as #93's transport-intent test reads it: a fixed-length window broke on an
+        // unrelated line added above the placement read.
+        let end = try #require(text[fn.upperBound...].range(of: "\n    }\n"))
+        let body = String(text[fn.lowerBound..<end.upperBound])
         #expect(body.contains("host.mountedStartPosition"))
     }
 }

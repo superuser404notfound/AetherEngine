@@ -36,6 +36,30 @@ extension AetherEngine {
         await escalateToSoftwarePath(request, expectedGeneration: generation)
     }
 
+    /// The second refusal of an SDR master in one session goes to the software path the moment it lands,
+    /// rather than leaving a failed item on screen (`MasterFallbackDecision.shouldEscalateRepeatedRefusal`).
+    /// True when the escalation was taken, in which case the caller surfaces nothing.
+    @MainActor
+    func escalateRepeatedMasterRefusal(_ rejection: DisplayRejection, session: HLSVideoEngine,
+                                       expectedGeneration: UInt64) -> Bool {
+        guard MasterFallbackDecision.shouldEscalateRepeatedRefusal(
+            errorCode: rejection.code, servingMasterPlaylist: session.servingMasterPlaylist,
+            alreadyFellBack: masterFallbackUsed, servedSourceIsHDR: session.servedSourceIsHDR) else { return false }
+        let request = SoftwarePathEscalation.Request(
+            domain: SoftwarePathEscalation.repeatedMasterRefusalErrorDomain, code: rejection.code,
+            message: "AVPlayer refused this session's SDR master a second time: \(rejection.message)",
+            positionSeconds: positionForSessionRebuild)
+        guard SoftwarePathEscalation.shouldEscalate(errorDomain: request.domain, availability: .init(
+            alreadyEscalated: softwarePathEscalationBudget.isSpent,
+            preferredDecodePath: loadedOptions.preferredDecodePath,
+            nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
+            hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath)) else { return false }
+        hop(for: expectedGeneration) { [weak self] in
+            await self?.escalateToSoftwarePath(request, expectedGeneration: expectedGeneration)
+        }
+        return true
+    }
+
 
     /// Rebuild this session on the software path, once, because the native one refused the media.
     /// `expectedGeneration` is the session the failure was raised under (audit LIF-103).
