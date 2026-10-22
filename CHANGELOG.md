@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The Atmos output activator runs on HDMI routes again (#848).** Since #834 it compared every
+  output port against `"HDMI"`, but `AVAudioSession.Port.HDMI` is `"HDMIOutput"`, so no HDMI route
+  ever took it and an APAC session on tvOS played without the silent Atmos stream
+  (`[AtmosOutputActivator] off on route ports=[HDMIOutput]`). The test that compares the constant with
+  the session's own value builds only for iOS and tvOS; the value is now also pinned where the suite
+  runs on macOS.
 
 ## [7.46.0] - 2026-10-22
 
