@@ -17,7 +17,7 @@ struct ItemSwapStillTests {
     /// Four seconds of H.264 plus silent AAC, long enough to still be playing when the capture runs
     /// and with an audio stream for the audio-switch rebuild to name. The shared fixtures end after
     /// 0.2 s, before an output attached to them sees a frame.
-    private static func fixtureURL() async throws -> URL {
+    static func fixtureURL() async throws -> URL {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("ae711-still-\(UUID().uuidString).mp4")
         let writer = try AVAssetWriter(outputURL: file, fileType: .mp4)
@@ -443,7 +443,7 @@ struct ItemSwapStillTests {
         #expect(view.isHoldingStill)
     }
 
-    private static func centreGrey(_ image: CGImage) -> Int? {
+    static func centreGrey(_ image: CGImage) -> Int? {
         var pixel = [UInt8](repeating: 0, count: 4)
         guard let context = CGContext(
             data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,

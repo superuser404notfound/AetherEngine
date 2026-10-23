@@ -22,6 +22,11 @@ extension AetherEngine {
         let gen = loadGeneration
         guard let session = nativeVideoSession else {
             guard let host = softwareHost else { return nil }
+            if softwareStillsFromLocalFile {
+                let result = await localSoftwareStill(atSessionSeconds: seconds, refined: refined,
+                                                      maxWidth: maxWidth, isCancelled: isCancelled)
+                return gen == loadGeneration && !Task.isCancelled && !isCancelled() ? result : nil
+            }
             let result = await host.scrubPreviewFrame(atSessionSeconds: seconds, refined: refined,
                                                      maxWidth: maxWidth, isCancelled: isCancelled)
             return gen == loadGeneration && !Task.isCancelled && !isCancelled() ? result : nil
@@ -101,11 +106,19 @@ extension AetherEngine {
     ///
     /// A software session (AE#605) has no segments; it decodes the still out of the packet cache
     /// its seeks already land in, keyframe to target, on the same session axis `seek(to:)` takes.
+    /// One that plays a local file keeps no cache and reads the file instead (see
+    /// `softwareStillsFromLocalFile`). Either way the picture is the base layer, so a Dolby Vision
+    /// Profile 7 title needs no enhancement layer to show a still.
     public func vodScrubThumbnail(atSeconds seconds: Double, maxWidth: Int = 320) async -> CGImage? {
         guard !isLive else { return nil }
         guard let session = nativeVideoSession else {
             guard let host = softwareHost else { return nil }
             let gen = loadGeneration
+            if softwareStillsFromLocalFile {
+                let frame = await localSoftwareStill(atSessionSeconds: seconds, refined: false,
+                                                     maxWidth: maxWidth, isCancelled: { false })
+                return loadGeneration == gen ? frame?.image : nil
+            }
             let image = await host.vodScrubStill(atSessionSeconds: seconds, maxWidth: maxWidth)
             return loadGeneration == gen ? image : nil
         }
@@ -140,11 +153,53 @@ extension AetherEngine {
         }
     }
 
+    /// A key no segment carries, for the one extractor a local-file software session keeps in
+    /// `scrubThumbnailExtractors` (teardown and the stale-generation clear already cover that list).
+    nonisolated static let localSoftwareStillKey = -1
+
+    /// True when a software VOD session plays a local file whose frames can become stills. Such a
+    /// session keeps no packet cache, because re-reading the file is a page-cache hit, so its stills
+    /// are decoded from the file by a `FrameExtractor`. That opens no connection to any origin, which
+    /// is what the cache exists to avoid. False for a Dolby Vision Profile 5 / 10.0 file without the
+    /// `DolbyVisionStillReshaping` trait, which `FrameDecodeContext` refuses every still of.
+    var softwareStillsFromLocalFile: Bool {
+        guard let softwareHost, !isLive, !isCustomSource, loadedURL?.isFileURL == true,
+              softwareHost.videoYieldsStills else { return false }
+        return !softwareHost.servesPacketCacheStills
+    }
+
+    /// The still for a local-file software session. `refined` asks for the frame at the target, not
+    /// the keyframe before it. The extractor takes the source axis, which `seek(to:)` also lands on
+    /// after its session-to-source shift. It decodes the base layer, the same picture the host's
+    /// own decoder shows for a dual-layer Dolby Vision title.
+    func localSoftwareStill(atSessionSeconds seconds: Double, refined: Bool, maxWidth: Int,
+                            isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
+        guard let host = softwareHost, softwareStillsFromLocalFile, seconds.isFinite, seconds >= 0 else { return nil }
+        let gen = loadGeneration
+        let extractor: FrameExtractor
+        if let held = scrubThumbnailExtractors.first(where: { $0.segmentIndex == Self.localSoftwareStillKey }) {
+            extractor = held.extractor
+        } else {
+            guard let made = makeFrameExtractor() else { return nil }
+            scrubThumbnailExtractors.append((Self.localSoftwareStillKey, made))
+            extractor = made
+        }
+        let source = host.sourceSeconds(forSession: seconds)
+        guard let still = await extractor.boundedLocalStill(at: source, refined: refined, maxWidth: maxWidth,
+                                                            isCancelled: isCancelled),
+              gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
+        // The time of the frame that was decoded, back on the session axis. A source that stamps no
+        // frame time can only be labelled with the request.
+        let zero = host.sourceSeconds(forSession: 0)
+        let actual = still.decodedSeconds.map { max(0, $0 - zero) } ?? seconds
+        return ScrubFrame(image: still.image, actualSeconds: actual, refined: refined)
+    }
+
     /// True when the active session can serve cache-backed stills from `scrubThumbnail` with no
     /// second connection: any native session (live or VOD, SegmentCache), a software live session
-    /// (DVR packet ring, #544) and a software VOD session reading a remote source (packet cache,
-    /// AE#605). False before load and on a software session that plays a local file, which keeps no
-    /// cache because re-reading the file is free; `makeFrameExtractor()` serves that case. Hosts on a single-connection source should gate the
+    /// (DVR packet ring, #544), a software VOD session reading a remote source (packet cache,
+    /// AE#605) and one playing a local file (decoded from the file, no connection at all). False
+    /// before load. Hosts on a single-connection source should gate the
     /// scrub-preview affordance on this: true means use `scrubThumbnail`; false means hide
     /// the preview rather than show blank frames from a refused second-connection
     /// FrameExtractor (#106). It reports capability, not per-frame availability: transient
@@ -154,6 +209,6 @@ extension AetherEngine {
     public var supportsCacheBackedStills: Bool {
         if let session = nativeVideoSession { return session.yieldsStills }
         guard let softwareHost else { return false }
-        return isLive || softwareHost.servesPacketCacheStills
+        return isLive || softwareHost.servesPacketCacheStills || softwareStillsFromLocalFile
     }
 }

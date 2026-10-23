@@ -62,6 +62,8 @@ public final class AetherEngine: ObservableObject {
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
             settleOwedBackgroundAction()
+            // A renderer path has no player for the Atmos output activator to observe; it follows this.
+            atmosOutputActivator?.refresh()
             if let logTag { EngineLog.emit("[AetherEngine:\(logTag)] state=\(state)", category: .engine) }
         }
     }
@@ -1037,6 +1039,12 @@ public final class AetherEngine: ObservableObject {
     /// on interruption end (see the observer in setupLifecycleObservers). Disarmed by user pause()
     /// and stopInternal().
     private var resumeAfterInterruption = false
+    /// True between an audio-session interruption's BEGAN and ENDED. See `AetherEngine+InterruptionGuard.swift`.
+    var audioInterruptionActive = false
+    /// A `play()` pressed while an interruption was active on a renderer path, held until it ends.
+    var playDeferredByInterruption = false
+    /// Bumped by every `pause()`: lets an await in the interruption-end path see that the user paused meanwhile.
+    var userPauseCount = 0
 
     /// Wedge-safe keepalive decision: keep the video pipeline alive on background ONLY while the app stays
     /// genuinely running (PiP active, or actively playing for background audio), never across an idle
@@ -1997,6 +2005,10 @@ public final class AetherEngine: ObservableObject {
 
     /// Combine subscriptions mirroring softwareHost's @Published. Cancelled in stopInternal.
     var softwareCancellables: Set<AnyCancellable> = []
+    /// Now-Playing card and remote commands for the software host, which has no AVPlayer to supply them.
+    var softwareNowPlaying: SoftwareNowPlayingController?
+    /// Where the software host's Now-Playing goes; replaced by tests so they never touch the shared centers.
+    var makeSoftwareNowPlayingSink: @MainActor () -> SoftwareNowPlayingSink = { SystemNowPlayingSink() }
 
     /// FFmpeg audio-only host (music). Mutually exclusive with nativeHost/softwareHost; stopInternal tears all down.
     var audioHost: AudioPlaybackHost?
@@ -3809,6 +3821,8 @@ public final class AetherEngine: ObservableObject {
     /// Block-based observers are NOT auto-removed on dealloc; the bag removes them in its own deinit.
     /// A MainActor deinit can't touch non-Sendable stored state under Swift 6, hence the helper class.
     private let lifecycleObservers = LifecycleObserverBag()
+    /// For lifecycle observers installed from extension files.
+    func retainLifecycleObserver(_ observer: NSObjectProtocol) { lifecycleObservers.append(observer) }
 
     private final class LifecycleObserverBag: @unchecked Sendable {
         private let lock = NSLock()
@@ -4821,14 +4835,12 @@ public final class AetherEngine: ObservableObject {
             tracks: probedAudioTracks,
             override: audioSourceStreamIndex,
             preferredLanguages: options.preferredAudioLanguages,
-            // Only where the spatial bridge can run: the loopback route of a VOD video session on an OS
-            // with the APAC encoder. Live, audio-only, the software path and older systems would decode
-            // TrueHD or DTS for its 7.1 bed and no heights, so the default track keeps its place there.
+            // Only where the spatial bridge can run: a VOD video session on an OS with the APAC encoder,
+            // on the loopback route or on the software host (which renders TrueHD Atmos and DTS:X as
+            // APAC too). Live, audio-only and older systems would decode TrueHD or DTS for its 7.1 bed
+            // and no heights, so the default track keeps its place there.
             prefersObjectAudio: options.objectAudioRendering != .off && ObjectAudioRendering.isAvailable
-                && !options.isLive && !options.audioOnly
-                && !VideoRoutingPolicy.requiresSoftwarePath(
-                    codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
-                    av1Available: VTCapabilityProbe.av1Available),
+                && !options.isLive && !options.audioOnly,
             defaultIndex: probedDefaultAudioIndex
         ) ?? (probeOpened ? nil : audioSourceStreamIndex)
         let resolvedInitialAudio = selectedAudio ?? probedDefaultAudioIndex
@@ -5548,7 +5560,8 @@ public final class AetherEngine: ObservableObject {
                 // label claimed one for a session that had dropped its audio and gone video-only.
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
                     audioTracks: probedAudioTracks,
-                    activeIndex: softwareHost?.audioStreamIndex ?? -1
+                    activeIndex: softwareHost?.audioStreamIndex ?? -1,
+                    route: softwareHost?.audioRoute ?? .pcm
                 )
                 presentCurrentLayer()
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
@@ -5728,6 +5741,7 @@ public final class AetherEngine: ObservableObject {
 
     public func play() {
         recordTransportDuringRebuild(playing: true)
+        if deferPlayForInterruption() { return }
         // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
         // cannot advance; AVPlayer.play() would no-op and leave the button frozen. Rewind to the start
         // first, then resume. `.ended` is excluded (see shouldRewindBeforePlay): it stays terminal so a
@@ -5745,12 +5759,17 @@ public final class AetherEngine: ObservableObject {
         if state == .paused || state == .loading {
             state = .playing
         }
+        // A resume that leaves `state` at `.playing` (the end of an audio interruption) restarts the
+        // renderer without a state change; the Atmos output activator follows the renderer, so tell it.
+        atmosOutputActivator?.refresh()
         clampLiveResumeIfBehindWindow()
     }
 
     public func pause() {
         recordTransportDuringRebuild(playing: false)
         resumeAfterInterruption = false
+        playDeferredByInterruption = false
+        userPauseCount &+= 1
         activeTransportHost?.pause()
         isBuffering = false
         if state == .playing {
@@ -7296,6 +7315,7 @@ public final class AetherEngine: ObservableObject {
     /// items are replayed at host creation.
     public func setExternalMetadata(_ items: [AVMetadataItem]) {
         pendingExternalMetadata = items
+        refreshSoftwareNowPlayingIdentity()
         nativeHost?.setExternalMetadata(items)
         audioAVPlayerHost?.setExternalMetadata(items)
     }
@@ -7326,6 +7346,27 @@ public final class AetherEngine: ObservableObject {
         nativeHost?.nowPlayingSession
     }
 
+    #endif
+
+    /// Opt in to the software host (the Dolby Vision FEL route) publishing its own Now-Playing card and
+    /// answering the system's remote commands. That host has no `AVPlayer`, so neither AVKit nor an
+    /// auto-publishing session exists for it; with this set the engine writes the shared Now-Playing
+    /// info and serves play, pause, toggle, skip and change-position, republishing on seek, pause, speed
+    /// change, stall and end. Identity comes from `setExternalMetadata`, overlaid by
+    /// `setVideoNowPlayingInfo` on iOS and tvOS. Off by default; independent of
+    /// `ownsVideoNowPlayingSession`, so the native path is unaffected. Read when the software host is
+    /// built, so set it before `load()`. A secondary `sharedOutputRole` never takes it.
+    public var ownsSoftwareNowPlaying: Bool = false
+
+    /// Skip distance advertised to, and used for, the software host's remote skip buttons. Read when the
+    /// software host is built.
+    public var remoteSkipInterval: Double = 10
+
+    /// True while the engine is publishing Now-Playing for a software-host session. A host that wants
+    /// next/previous registers them on `MPRemoteCommandCenter.shared()` only while this is true.
+    @Published public internal(set) var softwareNowPlayingActive: Bool = false
+
+    #if os(tvOS) || os(iOS)
     /// Staged per-item Now-Playing dictionary for the native video path. Replayed at host creation
     /// and onto every fresh AVPlayerItem (gate reloads, media fallback, in-place swaps). Caller-managed
     /// like the audio variant: pass an empty dict to clear.
@@ -7338,6 +7379,7 @@ public final class AetherEngine: ObservableObject {
     /// still staged, so a host that opts in on a later load keeps what it set.
     public func setVideoNowPlayingInfo(_ info: [String: Any]) {
         pendingVideoNowPlayingInfo = info
+        refreshSoftwareNowPlayingIdentity()
         nativeHost?.setNowPlayingInfo(info)
     }
     #endif
@@ -7424,6 +7466,12 @@ public final class AetherEngine: ObservableObject {
         }
         // Zero is a pause, not a speed: it must not become what a later resume comes back at (#436).
         if clamped != 0 { desiredRate = clamped }
+        defer { refreshSoftwareNowPlaying() }
+        if clamped == 0 {
+            playDeferredByInterruption = false
+            resumeAfterInterruption = false
+            userPauseCount &+= 1
+        }
         // #730: while paused a speed is a speed, not a play press. Handing it to the host would play
         // (`avPlayer.rate = x`) behind a state that still says paused; seeding the resume rate is what
         // the next play() reads on every host.
@@ -7431,7 +7479,17 @@ public final class AetherEngine: ObservableObject {
             activeTransportHost?.setResumeRate(clamped)
             return
         }
+        // F5: a speed change must not restart audio the system just paused for an interruption.
+        if clamped != 0, Self.interruptionHoldsTransport(
+            interrupted: audioInterruptionActive, rendererPath: softwareHost != nil || audioHost != nil
+        ) {
+            EngineLog.emit("[AetherEngine] setRate(\(clamped)) held: an audio interruption is active; the speed applies when playback resumes", category: .engine)
+            activeTransportHost?.setResumeRate(clamped)
+            return
+        }
         activeTransportHost?.setRate(clamped)
+        // A rate of zero parks the renderer path without a state change; the activator follows it.
+        atmosOutputActivator?.refresh()
     }
 
     // MARK: - Audio / subtitle track selection
@@ -7744,6 +7802,8 @@ public final class AetherEngine: ObservableObject {
         loadGeneration &+= 1
         scrubPreviewSourceGeneration = UUID()
         resumeAfterInterruption = false
+        playDeferredByInterruption = false
+        audioInterruptionActive = false
         #if os(iOS) || os(tvOS)
         // A deactivation still queued from a previous teardown must not land on this session (#215).
         audioSessionDeactivationTask?.cancel()
@@ -7856,6 +7916,7 @@ public final class AetherEngine: ObservableObject {
         }
 
         softwareCancellables.removeAll()
+        stopSoftwareNowPlaying()
         softwareClockSessionZero = nil
         // #353: the picture belongs to the session. Left standing, the next source would be laid out
         // against this one's rectangle for as long as it takes its own first frame to arrive.
@@ -8082,6 +8143,11 @@ public final class AetherEngine: ObservableObject {
         AudioRouteDescription.changeLogger
         #endif
 
+        #if os(iOS) || os(tvOS)
+        installRouteRemovalObserver()
+        installChannelCountChangeObserver()
+        #endif
+
         #if os(iOS)
         let routeObserver = nc.addObserver(
             forName: AVAudioSession.routeChangeNotification,
@@ -8123,6 +8189,9 @@ public final class AetherEngine: ObservableObject {
                     default: stateEligible = true
                     }
                     self.resumeAfterInterruption = intent && stateEligible
+                    // An idle or failed session has no playback to protect, and a stale BEGAN must not
+                    // leave a later session unplayable.
+                    if stateEligible { self.noteAudioInterruptionBegan() }
                     EngineLog.emit("[AetherEngine] AVAudioSession interruption BEGAN reason=\(reason) resumeArmed=\(self.resumeAfterInterruption) otherAudio=\(session.isOtherAudioPlaying) silenceHint=\(session.secondaryAudioShouldBeSilencedHint)", category: .engine)
                 } else {
                     let shouldResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
@@ -8133,8 +8202,13 @@ public final class AetherEngine: ObservableObject {
                     #else
                     let backgroundSafe = true
                     #endif
-                    let firing = self.resumeAfterInterruption && backgroundSafe && shouldResume
-                    EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing)", category: .engine)
+                    let deferredPlay = self.noteAudioInterruptionEnded()
+                    let firing = Self.interruptionEndShouldPlay(
+                        armed: self.resumeAfterInterruption, shouldResume: shouldResume,
+                        deferredPlay: deferredPlay, backgroundSafe: backgroundSafe)
+                    let pausesBefore = self.userPauseCount
+                    let loadBefore = self.loadGeneration
+                    EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing) deferredPlay=\(deferredPlay)", category: .engine)
                     if firing {
                         self.resumeAfterInterruption = false
                         // AE#549: the native path gets its session back from AVFoundation, the renderer
@@ -8148,6 +8222,8 @@ public final class AetherEngine: ObservableObject {
                                            category: .engine)
                             await self.activateRendererAudioSession()
                         }
+                        // A pause pressed while the session was being reactivated wins.
+                        guard self.userPauseCount == pausesBefore, self.loadGeneration == loadBefore else { return }
                         self.play()
                     }
                 }
@@ -8296,7 +8372,7 @@ public final class AetherEngine: ObservableObject {
         let action = Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
+            softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state
@@ -8428,7 +8504,7 @@ public final class AetherEngine: ObservableObject {
         return Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
+            softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state

@@ -183,6 +183,39 @@ public actor FrameExtractor {
         return image
     }
 
+    /// A still for a scrub preview over a local file, with the contract of `scrubPreviewFrame`: the
+    /// caller's `isCancelled` is polled through the decode, the decode stops at the same 750 ms /
+    /// 900 packet bound a resident one does, and the time of the frame actually decoded comes back
+    /// (nil when the source stamps none) so the caller can label the picture rather than the request.
+    /// Uncached, because a cache hit would not carry that time. `refined` decodes to the target;
+    /// otherwise the first frame after the seek is returned, at `maxWidth`.
+    func boundedLocalStill(at seconds: Double, refined: Bool, maxWidth: Int,
+                           isCancelled: @escaping @Sendable () -> Bool) async -> (image: CGImage, decodedSeconds: Double?)? {
+        guard !isShutDown, seconds.isFinite, seconds >= 0 else { return nil }
+        currentToken?.cancel()
+        let token = CancelToken()
+        currentToken = token
+        let context = self.context
+        let mode: FrameMode = refined ? .snapshot : .thumbnail
+        let size = CGSize(width: maxWidth, height: maxWidth)
+        let result = await runOnQueue { () -> (image: CGImage, decodedSeconds: Double?)? in
+            if token.isCancelled || isCancelled() { return nil }
+            do { try context.ensureOpen() } catch {
+                EngineLog.emit("[FrameExtractor] open failed: \(error)", category: .swPlayback)
+                return nil
+            }
+            var decoded: Double?
+            guard let image = context.decodeFrame(
+                at: seconds, mode: mode, targetWidth: maxWidth, maxSize: refined ? size : nil,
+                isCancelled: { token.isCancelled || isCancelled() },
+                reportDecodedTime: { decoded = $0 }, bounded: true),
+                !token.isCancelled, !isCancelled() else { return nil }
+            return (image, decoded)
+        }
+        scheduleIdleClose()
+        return result
+    }
+
     /// Disposable source-backed preview with one budget spanning open, stream
     /// analysis, seek and decode. The controlled reader counts every input byte,
     /// the monotonic deadline interrupts I/O, and a late result is discarded.

@@ -28,6 +28,51 @@ the public-API contract.
   puts in the `hvcC`; without it AVFoundation decoded the base view alone despite `lhvC` and every layer-1
   slice (one buffer for both eyes from `AVPlayerVideoOutput`; the left eye only on a Vision Pro). A
   multiview session now keeps that SEI and still drops every other one.
+- **The software host (the Dolby Vision FEL route) can now show a Now-Playing card and answer remote
+  commands.** It has no `AVPlayer`, so it had neither. With the new `ownsSoftwareNowPlaying` set (off by
+  default, independent of `ownsVideoNowPlayingSession`), the engine publishes title, artwork, duration,
+  elapsed and rate from the staged `externalMetadata` / `setVideoNowPlayingInfo`, and serves play, pause,
+  toggle, skip (`remoteSkipInterval`, default 10 s) and change-position from the Siri Remote, headsets,
+  Control Center and media keys. It republishes on seek, pause, speed change, stall and end.
+  `softwareNowPlayingActive` tells a host when to add its own next/previous. The AVPlayer paths are
+  unchanged.
+- **Scrub thumbnails work on a software session that plays a local file.**
+  `supportsCacheBackedStills` was false there and `scrubThumbnail` and `scrubPreviewFrame` answered
+  nil, so a Dolby Vision FEL title (which plays through the software host) had no scrub stills
+  unless the host built its own `FrameExtractor`. The engine now decodes them from the file, the
+  base layer for a dual-layer title, with no extra connection and through the same calls the
+  AVPlayer path answers: `scrubPreviewFrame` honours `isCancelled` and the 750 ms / 900 packet bound
+  and reports the decoded frame's own time. A file on a network mount opens a second file handle.
+  A Dolby Vision Profile 5 / 10.0 file without the `DolbyVisionStillReshaping` trait keeps
+  `supportsCacheBackedStills` false, since none of its frames can become a still. Remote software
+  sessions already served stills from the packet cache.
+- **The software host follows the system caption style.** Subtitles composited into software-path
+  PiP frames now use the user's Settings > Accessibility > Subtitles & Captioning choices (font,
+  size, text colour and opacity, background and window colour and opacity, edge style) the way
+  AVPlayer's legible output does, and re-render when the setting changes. A field counts as chosen
+  only where it differs from the system default, and carries the system's precedence against the
+  cue's own styling. `SubtitleCaptionStyle.current()` and `observeChanges(_:)` expose the same style
+  to a host that draws its own overlay. Bitmap subtitles are untouched.
+- **The software playback host keeps Atmos.** On the software host (the Dolby Vision FEL route and
+  video the hardware decoder cannot play), E-AC-3 JOC is handed to the audio renderer compressed,
+  with the decoder primed once per process, and TrueHD Atmos and DTS:X are rendered to APAC under the
+  existing `objectAudioRendering` option (DTS:X into 7.1.4 or 9.1.6 only, and a TrueHD track whose
+  profile the probe missed read from its own major sync, as on the loopback route). Other audio,
+  live streams and `.off` still decode to PCM, and a TrueHD or DTS track kept on PCM says why in the
+  log. The automatic audio pick now prefers a TrueHD Atmos or DTS:X track on the software host too. A
+  renderer error on these routes is logged in release builds. On tvOS the Atmos output activator
+  runs on HDMI beside the routes that carry Dolby Atmos (TrueHD Atmos as APAC and compressed E-AC-3
+  JOC, not DTS:X), as it does beside the loopback route's TrueHD APAC, so a sink that needs it shows
+  Atmos for the software host too. `audioDelivery` reports them as `.bridged` (APAC) and
+  `.streamCopy` (compressed E-AC-3 JOC), and `activeAudioDecoder` names them (for example
+  "TRUEHD Atmos → APAC 7.1.4"); the PCM decode stays `.decoded`. The clock's "audio is not
+  recovering" fallback waits for the APAC route's first buffer (about 100 TrueHD access units) instead
+  of anchoring every TrueHD load on video after 50 packets.
+- **The renderer paths pause when a removable audio output goes away.** On iOS and tvOS the software
+  host and the audio host now pause, as AVPlayer does, when headphones, a Bluetooth device (A2DP, LE,
+  HFP), an AirPlay output or a USB output is removed while playing or seeking. HDMI is not one of
+  them: an ARC / eARC soundbar or receiver switching on or off on an Apple TV keeps playing. The
+  native path is unchanged.
 
 ### Changed
 
@@ -38,6 +83,8 @@ the public-API contract.
   build.** The shipped TrueHD path already took every object as a point; the panner's size and snap
   code and the element state's size, snap and zone fields are now compiled out of it as well. No
   change to what a shipped build plays.
+- `setRate(0)` disarms the resume after an audio-session interruption on every path, as `pause()`
+  does: a session the host set to rate 0 stays paused when the interruption ends.
 
 ### Fixed
 

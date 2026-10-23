@@ -123,14 +123,27 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// How far inside the end a clamped past-EOF request lands, to reach a safely-decodable frame.
     static let clampBackoffSeconds: Double = 1.0
 
+    /// The origin the container's duration is measured from: `AVFormatContext.start_time` (in
+    /// AV_TIME_BASE units) when the container has one, else the video stream's own start. They differ
+    /// when another stream begins earlier than the video, and the span runs from the earlier one.
+    static func clampOrigin(formatStartTime: Int64, videoStartSeconds: Double?) -> Double {
+        if formatStartTime != Int64.min { return Double(formatStartTime) / Double(AV_TIME_BASE) }
+        return videoStartSeconds ?? 0
+    }
+
     /// Clamp a still-extraction seek target to the demuxer's known duration. Seeking far past EOF
     /// lands on a garbage/empty frame that decodes "successfully" but is blank (AE#105: a mis-selected
     /// decoy Blu-ray title whose demuxer knew only 76s while the scrub asked for 611s). Returns the
     /// request unchanged when the duration is unknown (<= 0) or the request is within tolerance of the
     /// end; otherwise the last safely-decodable position.
-    static func clampSeekSeconds(requested: Double, duration: Double) -> Double {
-        guard duration > 0, requested > duration + pastDurationTolerance else { return requested }
-        return max(0, duration - clampBackoffSeconds)
+    ///
+    /// `duration` is the container's span, measured from the container's own start time, and
+    /// `requested` is on the source axis. `start` is that container origin (see `clampOrigin`), so
+    /// the end is `start + duration`.
+    static func clampSeekSeconds(requested: Double, duration: Double, start: Double = 0) -> Double {
+        let origin = start.isFinite ? max(0, start) : 0
+        guard duration > 0, requested > origin + duration + pastDurationTolerance else { return requested }
+        return max(origin, origin + duration - clampBackoffSeconds)
     }
 
     init(url: URL, httpHeaders: [String: String], selectTitleID: Int? = nil,
@@ -428,6 +441,9 @@ final class FrameDecodeContext: @unchecked Sendable {
     ///
     /// `isCancelled` is polled between packets and before conversion so a superseded scrub
     /// bails promptly. Returns nil on EOF / decode failure / cancellation. Frees all FFmpeg allocs.
+    ///
+    /// A resident decode always stops at the 750 ms / 900 packet bound; `bounded` applies the same
+    /// bound to a decode of any other kind.
     func decodeFrame(
         at seconds: Double,
         mode: FrameMode,
@@ -438,7 +454,8 @@ final class FrameDecodeContext: @unchecked Sendable {
         residentTarget: Double? = nil,
         reportResidentTime: ((Double, Bool) -> Void)? = nil,
         residentDeadline: ContinuousClock.Instant? = nil,
-        reportDecodedTime: ((Double?) -> Void)? = nil
+        reportDecodedTime: ((Double?) -> Void)? = nil,
+        bounded: Bool = false
     ) -> CGImage? {
         guard isOpen, let ctx = codecContext, let demuxer else { return nil }
         // Without the reshaping these planes are IPT, which the standard path would read as YCbCr
@@ -462,7 +479,10 @@ final class FrameDecodeContext: @unchecked Sendable {
         // past EOF returns a blank garbage frame that still reports success (AE#105). Both the seek and
         // the forward-decode target below must use the clamped value or snapshot would chase an
         // unreachable PTS forever.
-        let seekSeconds = Self.clampSeekSeconds(requested: seconds, duration: demuxer.duration)
+        // The target axis stays the video stream's; only the end of the span is measured from the container.
+        let containerStart = Self.clampOrigin(formatStartTime: demuxer.formatStartTime,
+                                              videoStartSeconds: presentationStartSeconds)
+        let seekSeconds = Self.clampSeekSeconds(requested: seconds, duration: demuxer.duration, start: containerStart)
         if seekSeconds != seconds {
             EngineLog.emit(
                 "[FrameExtractor] still past duration: t=\(String(format: "%.2f", seconds))s "
@@ -566,7 +586,7 @@ final class FrameDecodeContext: @unchecked Sendable {
         var draining = false
         while true {
             if isCancelled() { return nil }
-            if residentTarget != nil, (ContinuousClock.now >= deadline || packetCount >= 900) { return nil }
+            if residentTarget != nil || bounded, (ContinuousClock.now >= deadline || packetCount >= 900) { return nil }
 
             if !draining {
                 let packetOrNil: UnsafeMutablePointer<AVPacket>?
@@ -640,7 +660,8 @@ final class FrameDecodeContext: @unchecked Sendable {
                         residentTarget: residentTarget,
                         reportResidentTime: reportResidentTime,
                         residentDeadline: deadline,
-                        reportDecodedTime: reportDecodedTime)
+                        reportDecodedTime: reportDecodedTime,
+                        bounded: bounded)
                 }
                 if let residentTarget {
                     guard f.pointee.pts != Int64.min else { return nil }

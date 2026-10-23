@@ -853,19 +853,27 @@ extension AetherEngine {
         return "VideoToolbox \(name) (HW)"
     }
 
-    /// User-facing label for the active audio decoder on the SW path (libavcodec -> CoreAudio). nil when
-    /// no audio track. AE#462: `activeIndex` is the HOST's resolved index, never the engine's pick. The
-    /// pick says which track was asked for; a session whose decoder refused to open serves none, and
-    /// this label used to name one for it.
+    /// User-facing label for the active audio pipeline on the SW path. nil when no audio track. AE#462:
+    /// `activeIndex` is the HOST's resolved index, never the engine's pick. The pick says which track was
+    /// asked for; a session whose decoder refused to open serves none, and this label used to name one
+    /// for it. `route` is the host's `audioRoute`: the PCM decode is libavcodec into CoreAudio, the Atmos
+    /// routes are named the way the loopback route names its own APAC ("TRUEHD Atmos → APAC 7.1.4").
     nonisolated static func softwareAudioDecoderLabel(
         audioTracks: [TrackInfo],
-        activeIndex: Int32
+        activeIndex: Int32,
+        route: SoftwareAtmosRoute = .pcm
     ) -> String? {
         guard activeIndex >= 0,
               let track = audioTracks.first(where: { $0.id == Int(activeIndex) }) else {
             return nil
         }
-        return "libavcodec \(track.codec.uppercased()) → CoreAudio"
+        let codec = track.codec.uppercased()
+        switch route {
+        case .pcm: return "libavcodec \(codec) → CoreAudio"
+        case .compressedEAC3JOC: return "\(codec) Atmos → renderer (compressed)"
+        case .apac(let layout):
+            return codec.hasPrefix("DTS") ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
+        }
     }
 
     // MARK: - Format / frame-rate probing

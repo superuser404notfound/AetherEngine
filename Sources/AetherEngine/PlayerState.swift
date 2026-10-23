@@ -107,18 +107,19 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// rung can change it. A source whose audio stream the pick passed over (its parameters left
     /// empty by the probe) is `.droppedNoPipeline`, not this (AE#641).
     case noAudioInSource
-    /// The source's audio bitstream is muxed into fMP4 unchanged: Atmos, DTS-HD and every other
-    /// bitstream reach the renderer exactly as authored.
+    /// The source's audio bitstream reaches the renderer unchanged: muxed into fMP4 on the loopback route
+    /// (Atmos, DTS-HD and every other bitstream exactly as authored), or, on the software host under
+    /// `LoadOptions.objectAudioRendering`, an E-AC-3 JOC track handed to the sample-buffer renderer compressed.
     case streamCopy
-    /// The audio is decoded and re-encoded for the fMP4 pipeline, because its codec is not fMP4-legal
-    /// or AVPlayer rejects it there. The channel bridge (FLAC or E-AC-3) is lossless for the bed
-    /// channels, and object metadata in a TrueHD-MAT or JOC bitstream does not survive its PCM
-    /// intermediate; under `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` /
-    /// `DTSXObjectAudio` traits (off by default), TrueHD Atmos and DTS:X are rendered with
-    /// their objects and heights into a speaker bed and encoded as APAC instead.
+    /// The audio is decoded and re-encoded, because its codec is not fMP4-legal or AVPlayer rejects it
+    /// there. The channel bridge (FLAC or E-AC-3) is lossless for the bed channels, and object metadata in
+    /// a TrueHD-MAT or JOC bitstream does not survive its PCM intermediate; under
+    /// `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio`
+    /// traits (off by default), TrueHD Atmos and DTS:X are rendered with their objects and heights into a
+    /// speaker bed and encoded as APAC instead, on the loopback route and on the software host alike.
     case bridged
-    /// libavcodec decodes the audio and the engine renders it itself (the software path and the
-    /// software audio-only host).
+    /// libavcodec decodes the audio to PCM and the engine renders it itself (the software path without an
+    /// object-audio route, and the software audio-only host).
     case decoded
     /// The source HAS audio and none of it could be delivered: no libavcodec decoder for it, the
     /// bridge could not be built or could not write its header, no stream could be picked because the
