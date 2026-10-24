@@ -8,7 +8,19 @@ import Foundation
 /// PiP window (which renders only the sample-buffer layer) shows subtitles. Enabled ONLY while
 /// pictureInPictureActive; fullscreen subtitles stay with the host's on-frame overlay. Playback wins
 /// over subtitles: every failure path returns the original buffer untouched.
+///
+/// Text cues follow the user's system caption style (`SubtitleCaptionStyle`), read once when the
+/// compositor is first enabled and re-read when the setting changes; with nothing customised the
+/// look is the default one.
 final class SubtitleFrameCompositor: @unchecked Sendable {
+
+    /// Nothing is read from the system here: the compositor sits in every software renderer and
+    /// stays disabled outside PiP, so the style is loaded on the first `update(enabled: true)`.
+    init(styleProvider: @escaping @Sendable () -> SubtitleCaptionStyle = SubtitleCaptionStyle.current,
+         observesSystemStyle: Bool = true) {
+        self.styleProvider = styleProvider
+        self.observesSystemStyle = observesSystemStyle
+    }
 
     struct TextLayout: Equatable {
         let fontSize: CGFloat
@@ -26,9 +38,10 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     }
 
     /// Default look: readable in a small window, resolution-independent.
-    nonisolated static func textLayout(frameWidth: CGFloat, frameHeight: CGFloat) -> TextLayout {
+    nonisolated static func textLayout(frameWidth: CGFloat, frameHeight: CGFloat,
+                                       sizeScale: Double = 1) -> TextLayout {
         TextLayout(
-            fontSize: frameHeight * 0.05,
+            fontSize: frameHeight * 0.05 * CGFloat(sizeScale),
             bottomMargin: frameHeight * 0.06,
             maxTextWidth: frameWidth * 0.9
         )
@@ -69,7 +82,15 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     /// Cache key of the overlay currently rendered (active cue ids); nil = no overlay cached.
     private var cachedCueIDs: [Int]?
     private var cachedOverlay: CIImage?
+    /// The style `cachedOverlay` was drawn in. Compared on a hit, so an overlay rendered from a
+    /// snapshot that a `setStyle` has since superseded can never be served.
+    private var cachedStyle: SubtitleCaptionStyle?
     private var loggedFailure = false
+    private let styleProvider: @Sendable () -> SubtitleCaptionStyle
+    private let observesSystemStyle: Bool
+    private var style: SubtitleCaptionStyle = .standard
+    private var styleLoaded = false
+    private var styleObservation: SubtitleCaptionStyle.Observation?
 
     private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
     private var pool: CVPixelBufferPool?
@@ -81,6 +102,38 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         self.cues = cues
         self.enabled = enabled
         if delaySeconds.isFinite { self.delaySeconds = delaySeconds }
+        let needsStyle = enabled && !styleLoaded
+        lock.unlock()
+        if needsStyle { loadStyle() }
+    }
+
+    /// The one system read, with the observation seeded from it. Runs outside the lock: a settings
+    /// change can arrive on another thread and call `setStyle`.
+    private func loadStyle() {
+        let initial = styleProvider()
+        let observation = observesSystemStyle
+            ? SubtitleCaptionStyle.observeChanges(startingFrom: initial) { [weak self] in self?.setStyle($0) }
+            : nil
+        lock.lock()
+        // A `setStyle` that got in first is newer than what was just read.
+        if !styleLoaded {
+            style = initial
+            styleLoaded = true
+        }
+        if styleObservation == nil { styleObservation = observation }
+        lock.unlock()
+    }
+
+    /// Any thread; the system caption style changed. The cached overlay was drawn in the old one.
+    func setStyle(_ new: SubtitleCaptionStyle) {
+        lock.lock()
+        styleLoaded = true
+        if new != style {
+            style = new
+            cachedCueIDs = nil
+            cachedOverlay = nil
+            cachedStyle = nil
+        }
         lock.unlock()
     }
 
@@ -90,12 +143,13 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         let enabled = self.enabled
         let cues = self.cues
         let delay = self.delaySeconds
+        let style = self.style
         lock.unlock()
         guard enabled else { return buffer }
 
         let active = Self.activeCues(in: cues, at: ptsSeconds, delaySeconds: delay)
         guard !active.isEmpty else {
-            lock.lock(); cachedCueIDs = nil; cachedOverlay = nil; lock.unlock()
+            lock.lock(); cachedCueIDs = nil; cachedOverlay = nil; cachedStyle = nil; lock.unlock()
             return buffer
         }
 
@@ -103,12 +157,13 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         let height = CVPixelBufferGetHeight(buffer)
         let overlay: CIImage
         lock.lock()
-        let cacheHit = cachedCueIDs == active.map(\.id) ? cachedOverlay : nil
+        let cacheHit = cachedCueIDs == active.map(\.id) && cachedStyle == style ? cachedOverlay : nil
         lock.unlock()
         if let cacheHit {
             overlay = cacheHit
         } else {
-            guard let rendered = Self.renderOverlay(for: active, frameWidth: CGFloat(width), frameHeight: CGFloat(height)) else {
+            guard let rendered = Self.renderOverlay(for: active, frameWidth: CGFloat(width), frameHeight: CGFloat(height),
+                                                     style: style) else {
                 logFailureOnce("overlay render failed")
                 return buffer
             }
@@ -116,6 +171,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
             lock.lock()
             cachedCueIDs = active.map(\.id)
             cachedOverlay = overlay
+            cachedStyle = style
             lock.unlock()
         }
 
@@ -155,7 +211,8 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     /// One CGImage per cue-set change: text cues bottom-up in the default look, image cues at their
     /// canvas-mapped rects. CG coordinate origin is bottom-left; layout values are top-left based,
     /// so y flips via frameHeight.
-    nonisolated static func renderOverlay(for cues: [SubtitleCue], frameWidth: CGFloat, frameHeight: CGFloat) -> CGImage? {
+    nonisolated static func renderOverlay(for cues: [SubtitleCue], frameWidth: CGFloat, frameHeight: CGFloat,
+                                          style: SubtitleCaptionStyle = .standard) -> CGImage? {
         guard let ctx = CGContext(
             data: nil, width: Int(frameWidth), height: Int(frameHeight),
             bitsPerComponent: 8, bytesPerRow: 0,
@@ -163,7 +220,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        let layout = textLayout(frameWidth: frameWidth, frameHeight: frameHeight)
+        let layout = textLayout(frameWidth: frameWidth, frameHeight: frameHeight, sizeScale: style.sizeScale)
         var textBaselineFromBottom = layout.bottomMargin
 
         for cue in cues {
@@ -174,11 +231,11 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
                 ctx.draw(image.cgImage, in: rect)
             case .text(let text):
                 drawTextBlock([SubtitleTextRun(text: text, color: nil)], placement: cue.placement,
-                              in: ctx, layout: layout, frameWidth: frameWidth,
+                              in: ctx, layout: layout, style: style, frameWidth: frameWidth,
                               frameHeight: frameHeight, baselineFromBottom: &textBaselineFromBottom)
             case .richText(let runs):
                 drawTextBlock(runs, placement: cue.placement,
-                              in: ctx, layout: layout, frameWidth: frameWidth,
+                              in: ctx, layout: layout, style: style, frameWidth: frameWidth,
                               frameHeight: frameHeight, baselineFromBottom: &textBaselineFromBottom)
             }
         }
@@ -202,9 +259,11 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     /// Font for a run. ASS `\fs` is relative to libavcodec's default style size
     /// (`ASS_DEFAULT_FONT_SIZE` = 16), so it scales the layout's base size rather than naming
     /// pixels, which keeps a cue proportionate at any frame height.
-    nonisolated static func font(for run: SubtitleTextRun, baseSize: CGFloat) -> CTFont {
+    nonisolated static func font(for run: SubtitleTextRun, baseSize: CGFloat,
+                                 style: SubtitleCaptionStyle = .standard) -> CTFont {
         let size = run.fontSize.map { baseSize * CGFloat($0) / 16.0 } ?? baseSize
-        let name = run.fontName ?? "HelveticaNeue-Medium"
+        // The field's precedence orders the user's font and the cue's; the default comes last.
+        let name = style.resolvedFontName(cueFont: run.fontName) ?? "HelveticaNeue-Medium"
         let base = CTFontCreateWithName(name as CFString, size, nil)
         var traits: CTFontSymbolicTraits = []
         if run.isBold { traits.insert(.traitBold) }
@@ -251,6 +310,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     private nonisolated static func drawTextBlock(_ runs: [SubtitleTextRun],
                                                   placement: SubtitleTextPlacement?,
                                                   in ctx: CGContext, layout: TextLayout,
+                                                  style: SubtitleCaptionStyle,
                                                   frameWidth: CGFloat, frameHeight: CGFloat,
                                                   baselineFromBottom: inout CGFloat) {
         let split = lines(from: runs)
@@ -260,7 +320,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         // Build every line first: a placed block needs its own measured size before it can be put
         // anywhere, and the default stack needs the same measurements anyway.
         let built: [(line: CTLine, runs: [SubtitleTextRun], bounds: CGRect)] = split.compactMap {
-            guard let attributed = attributedLine($0, layout: layout) else { return nil }
+            guard let attributed = attributedLine($0, layout: layout, style: style) else { return nil }
             let ctLine = CTLineCreateWithAttributedString(attributed)
             return (ctLine, $0, CTLineGetBoundsWithOptions(ctLine, .useOpticalBounds))
         }
@@ -281,34 +341,87 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
             cursorY = origin.y
         }
 
+        // The window sits behind every line's own background, one rectangle around the block.
+        if let window = style.resolvedWindow {
+            let blockHeight = lineHeights.reduce(0, +) + layout.fontSize * 0.2 * CGFloat(built.count - 1)
+            ctx.setFillColor(window)
+            ctx.fill(CGRect(x: originX, y: cursorY - pad / 2, width: boxWidth, height: blockHeight)
+                .insetBy(dx: -layout.fontSize * 0.3, dy: -layout.fontSize * 0.3))
+        }
+
         // Bottom-up, so the last line is drawn first and reads top-down on screen.
         for (index, entry) in built.enumerated().reversed() {
             let boxHeight = lineHeights[index]
-            ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.6))
-            ctx.fill(CGRect(x: originX, y: cursorY - pad / 2, width: boxWidth, height: boxHeight)
-                .insetBy(dx: -2, dy: -2))
+            if let background = style.resolvedBackground {
+                ctx.setFillColor(background)
+                ctx.fill(CGRect(x: originX, y: cursorY - pad / 2, width: boxWidth, height: boxHeight)
+                    .insetBy(dx: -2, dy: -2))
+            }
             let textX = originX + pad
             let baseline = cursorY + pad / 2 - entry.bounds.minY
+            let edge = style.edgeStyle?.value
+            ctx.saveGState()
+            if edge == .uniform {
+                // The outline is its own pass underneath the text, in a transparency layer: the fill
+                // is copied over the stroke inside the layer, so the glyph shows the text colour alone
+                // (a translucent colour does not pick up the stroke's inner half) and the layer
+                // composites onto the line background and window as one unit, leaving both intact.
+                ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+                ctx.saveGState()
+                applyEdge(edge, in: ctx, fontSize: layout.fontSize)
+                ctx.textPosition = CGPoint(x: textX, y: baseline)
+                CTLineDraw(entry.line, ctx)
+                ctx.restoreGState()
+                ctx.setBlendMode(.copy)
+            } else {
+                applyEdge(edge, in: ctx, fontSize: layout.fontSize)
+            }
+            ctx.setTextDrawingMode(.fill)
             ctx.textPosition = CGPoint(x: textX, y: baseline)
             CTLineDraw(entry.line, ctx)
+            if edge == .uniform { ctx.endTransparencyLayer() }
+            ctx.restoreGState()
             drawStrikethrough(entry.runs, on: entry.line, in: ctx, at: CGPoint(x: textX, y: baseline),
-                              layout: layout)
+                              layout: layout, style: style)
             cursorY += boxHeight + layout.fontSize * 0.2
         }
         if placement == nil { baselineFromBottom = cursorY }
     }
 
+    /// Edge treatment for the glyphs about to be drawn, as the system's five styles: an outline for
+    /// uniform (a stroke-only setup, drawn as a pass of its own before the fill), a soft offset
+    /// shadow, and hard one-sided shadows for raised and depressed. The context's y axis points up,
+    /// so raised puts the shadow below the glyph.
+    nonisolated static func applyEdge(_ edge: SubtitleCaptionStyle.EdgeStyle?, in ctx: CGContext,
+                                      fontSize: CGFloat) {
+        let black = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
+        let step = max(1, fontSize * 0.06)
+        switch edge {
+        case .uniform:
+            ctx.setTextDrawingMode(.stroke)
+            ctx.setStrokeColor(black)
+            ctx.setLineWidth(step * 1.5 * 2)
+            ctx.setLineJoin(.round)
+        case .dropShadow:
+            ctx.setShadow(offset: CGSize(width: step, height: -step), blur: step * 1.5, color: black)
+        case .raised:
+            ctx.setShadow(offset: CGSize(width: 0, height: -step), blur: 0, color: black)
+        case .depressed:
+            ctx.setShadow(offset: CGSize(width: 0, height: step), blur: 0, color: black)
+        case .none?, nil:
+            break
+        }
+    }
+
     private nonisolated static func attributedLine(_ runs: [SubtitleTextRun],
-                                                   layout: TextLayout) -> CFAttributedString? {
+                                                   layout: TextLayout,
+                                                   style: SubtitleCaptionStyle) -> CFAttributedString? {
         guard let attributed = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0) else { return nil }
         CFAttributedStringBeginEditing(attributed)
         for run in runs {
             var attributes: [CFString: Any] = [
-                kCTFontAttributeName: font(for: run, baseSize: layout.fontSize),
-                kCTForegroundColorAttributeName: run.color.map {
-                    CGColor(red: CGFloat($0.r) / 255, green: CGFloat($0.g) / 255,
-                            blue: CGFloat($0.b) / 255, alpha: 1)
-                } ?? CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+                kCTFontAttributeName: font(for: run, baseSize: layout.fontSize, style: style),
+                kCTForegroundColorAttributeName: style.resolvedTextColor(cueColor: run.color)
             ]
             if run.isUnderlined {
                 attributes[kCTUnderlineStyleAttributeName] = CTUnderlineStyle.single.rawValue
@@ -326,7 +439,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
     /// get a rule drawn over their own glyph range.
     private nonisolated static func drawStrikethrough(_ runs: [SubtitleTextRun], on line: CTLine,
                                                       in ctx: CGContext, at origin: CGPoint,
-                                                      layout: TextLayout) {
+                                                      layout: TextLayout, style: SubtitleCaptionStyle) {
         var index = 0
         for run in runs {
             let length = run.text.utf16.count
@@ -334,11 +447,8 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
             guard run.isStruckThrough, length > 0 else { continue }
             let startX = CTLineGetOffsetForStringIndex(line, index, nil)
             let endX = CTLineGetOffsetForStringIndex(line, index + length, nil)
-            let size = CTFontGetSize(font(for: run, baseSize: layout.fontSize))
-            ctx.setStrokeColor(run.color.map {
-                CGColor(red: CGFloat($0.r) / 255, green: CGFloat($0.g) / 255,
-                        blue: CGFloat($0.b) / 255, alpha: 1)
-            } ?? CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            let size = CTFontGetSize(font(for: run, baseSize: layout.fontSize, style: style))
+            ctx.setStrokeColor(style.resolvedTextColor(cueColor: run.color))
             ctx.setLineWidth(max(1, size * 0.06))
             let y = origin.y + size * 0.28
             ctx.move(to: CGPoint(x: origin.x + startX, y: y))
@@ -387,6 +497,7 @@ final class SubtitleFrameCompositor: @unchecked Sendable {
         enabled = false
         cachedCueIDs = nil
         cachedOverlay = nil
+        cachedStyle = nil
         pool = nil
         poolFormat = nil
         loggedFailure = false

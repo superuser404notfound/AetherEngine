@@ -133,7 +133,10 @@ decode to PCM, played through the sample-buffer audio renderer) and never AVPlay
 emits Dolby Atmos objects, and the platform does not pass a bitstream through. An E-AC-3 (JOC) track
 therefore plays as its channel-bed core (5.1 or 7.1), without the Atmos objects; on the native route the
 same track is handed to AVPlayer unchanged. TrueHD behaves as on the native route, which decodes it too and
-loses the objects either way. Hosts that want E-AC-3 Atmos on a Profile 7 FEL title leave
+loses the objects either way. That is the default. With `LoadOptions.objectAudioRendering` set, the host keeps the
+objects: an E-AC-3 JOC track goes to the renderer compressed (after the system's Atmos decoder is registered in the
+process), and TrueHD Atmos and DTS:X are rendered as APAC. Verified on macOS only; the tvOS behaviour of both is
+unmeasured. Hosts that do not set it and want E-AC-3 Atmos on a Profile 7 FEL title leave
 `preferDualLayerDolbyVision` off for it. `DualLayerRouteAudioTests` pins the routing half of this.
 
 ## 4. Evidence
@@ -276,11 +279,11 @@ onto the software path by any other combination gets a plain `HardwareVideoDecod
 The route is FEL only and capability gated (`DualLayerRouteDecision`, pure and unit-tested). Everything
 else keeps the native route, which plays single-layer 8.1 where the display takes Dolby Vision and the
 HDR10 base layer where it does not: the preference is off, the build lacks the `DualLayerDolbyVision` trait, `dolbyVisionHandling` is not `.automatic`, a
-live or non-seekable source, a box with no hardware HEVC decoder for the stream, a MEL source (nothing
+live or non-seekable source, a box with no hardware HEVC decoder for the stream, an AirPlay video receiver on the audio route (iOS, as the host reports it), a MEL source (nothing
 to compose), an enhancement layer the probe could not classify, a base layer of unknown size, and a
 stream the box could not decode twice in real time. The checks run in that order (the code's order:
-preference, trait, handling, live/seekable, hardware, `el_type`, geometry, budget). The `el_type` probe (a packet
-scan and a seek) runs once nothing up to and including the hardware check has ruled the route out, so it
+preference, trait, handling, live/seekable, hardware, AirPlay video receiver, `el_type`, geometry, budget). The `el_type` probe (a packet
+scan and a seek) runs once nothing up to and including the AirPlay receiver check has ruled the route out, so it
 also runs for a stream that the geometry or the budget then refuses: the MEL / unknown answer outranks
 the size reasons in the log line, and that precedence needs the probe's answer.
 
@@ -323,7 +326,7 @@ Profile 8.1 metadata attached (§2), and how tvOS presents that on such a displa
 The native route, by contrast, strips the Dolby Vision for such a display (`CodecRoutePolicy`) and plays
 the HDR10 base layer. A host that wants the base layer on a non-Dolby-Vision display leaves the flag off,
 or sets it from what it knows of the display. The audio trade-off of §3.1 (an E-AC-3 Atmos track plays as
-its channel-bed core, without the objects) applies on this route whatever the display. This is the current
+its channel-bed core, without the objects unless `objectAudioRendering` is set) applies on this route whatever the display. This is the current
 behaviour, documented rather than designed; it is not changed here.
 
 ### 5.2.3 What the route gives up against the native route
@@ -339,7 +342,7 @@ checked against the code:
 | Picture in Picture | `AVPlayer`-based: the stock `AVPlayerViewController` and a host-built `AVPictureInPictureController` both work. | No `AVPlayer`, so no stock player PiP. The engine publishes `SoftwarePiPSource` (the layer plus the transport answers for a sample-buffer PiP content source) and the host builds the `AVPictureInPictureController` around it; while PiP is active, subtitle cues are drawn into the frames by `SubtitleFrameCompositor`, which carries the pixel-buffer attachments through. Whether the PiP window presents the composed picture as Dolby Vision is not measured. |
 | Scrub thumbnails | With `serveIFramePlaylist`, an `EXT-X-I-FRAME-STREAM-INF` rendition next to the master, so a stock `AVPlayerViewController` draws its own thumbnails and scans on I-frames, plus `scrubThumbnail(atSeconds:)`. | No I-frame playlist, so a stock player shows no thumbnails of its own. `scrubThumbnail(atSeconds:)` answers from the software host's retained packet cache (`servesPacketCacheStills`) and only when that cache exists: a local file is read directly and has none, so there the call returns nil. The still is the base layer decoded by libavcodec, not the composed picture. |
 | Subtitles | Text tracks can be declared in the init segment and served as WebVTT renditions (`prepareNativeSubtitles`), so `AVMediaSelection`, PiP and external screens render them. | No renditions and no `AVMediaSelection`. The engine decodes the cues and publishes them; the host draws its own overlay in the app. They appear in a PiP window only through the frame compositor above, and the system caption styling does not apply. |
-| AirPlay | `AVPlayer` hands the receiver the stream (the engine serves the loopback over the LAN address for it). | The layer draws on the device and only the audio renderer follows the route, so a wireless receiver plays sound only. The engine publishes `airPlayPictureStaysLocal` (iOS) so a host can say so. Not applicable where the device is itself the receiver. |
+| AirPlay | `AVPlayer` hands the receiver the stream (the engine serves the loopback over the LAN address for it). | The layer draws on the device and only the audio renderer follows the route, so a wireless receiver plays sound only. The engine publishes `airPlayPictureStaysLocal` (iOS) so a host can say so. When the host reports that the receiver shows video (`setAirPlayReceiverShowsVideo(_:)`), a FEL source takes the native route instead (8.1 where the display takes Dolby Vision, no enhancement layer) so the receiver gets a picture; an audio-only output such as a HomePod keeps the dual-layer route. This is decided at each load: on a URL source `reloadAtCurrentPosition()` decides again, a custom source keeps its route until the next `load()`. Not applicable where the device is itself the receiver. |
 
 A host that needs any of these for a Profile 7 title leaves the flag off for it, as for the Atmos
 trade-off of §3.1.

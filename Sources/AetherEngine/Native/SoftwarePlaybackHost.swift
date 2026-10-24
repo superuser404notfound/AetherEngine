@@ -8,7 +8,8 @@ import AetherLibavutil
 
 /// Software-decode playback host (FFmpeg/dav1d pipeline): AV1 on Apple TV (no HW AV1 on tvOS), VP9.
 /// AVSampleBufferRenderSynchronizer is the master clock; display layer attached for A/V sync.
-/// Intentionally skips EAC3+JOC and DV HDMI handshake (AV1 sources rarely carry Atmos or DV).
+/// Atmos: E-AC-3 JOC goes to the renderer compressed; TrueHD Atmos and DTS:X render to APAC when
+/// `ObjectAudioRendering` asks for it (see `SoftwareAtmosRoute`). Everything else decodes to PCM.
 @MainActor
 final class SoftwarePlaybackHost {
     /// Codecs whose presentation reordering has an established bound get the read-ahead's
@@ -271,7 +272,12 @@ final class SoftwarePlaybackHost {
     private let renderer: SampleBufferRenderer
     /// Swapped per codec at load(): SoftwareVideoDecoder for AV1/VP9, HardwareVideoDecoder for HEVC. Protocol keeps the demux loop codec-agnostic.
     private var videoDecoder: any VideoDecodingPipeline
-    private var audioDecoder: AudioDecoder?
+    private var audioDecoder: (any SoftwareAudioProducing)?
+    /// How this session's audio reaches the renderer (`SoftwareAtmosRoute`), for the logs and the tests.
+    private(set) var audioRoute: SoftwareAtmosRoute = .pcm
+    /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
+    /// the renderer as Atmos instead of as the PCM decode of their core.
+    var objectAudioRendering: ObjectAudioRendering = .off
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
@@ -1339,18 +1345,23 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
             }
-            let aDec = AudioDecoder()
             do {
                 // AE#462 harness (TEST-ONLY): same forced drop the loopback cascade honors.
                 if AetherEngine.forceAudioPipelineFailureForTesting {
                     throw NSError(domain: "AetherEngineTestHook", code: -462, userInfo: [
                         NSLocalizedDescriptionKey: "audio pipeline forced to fail (TEST-ONLY)"])
                 }
-                try aDec.open(stream: aStream)
-                self.audioDecoder = aDec
+                let made = try await makeAudioProducer(demuxer: dem, streamIndex: resolvedAudioIdx, isLive: isLive)
+                // A stop() can land on the suspension above, as on the ones below.
+                guard !stopRequested else { made.producer.close(); return }
+                self.audioDecoder = made.producer
+                self.audioRoute = made.route
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
                 self.audioTimeBaseSeconds = atb.den > 0 ? Double(atb.num) / Double(atb.den) : 0
+            } catch is CancellationError {
+                // stop() landed while the audio route was being chosen; the demuxer is closing.
+                return
             } catch {
                 EngineLog.emit("[SWHost] audio open failed (\(error)); video-only", category: .swPlayback)
                 self.audioStreamIndex = -1
@@ -1431,8 +1442,8 @@ final class SoftwarePlaybackHost {
             // remote source that has to scan for its landing would otherwise block the main thread here.
             let outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
                                            { [weak self] in self?.stopRequested ?? true })
-            // Besides the in-band record completion above, this is load()'s only suspension point, so it
-            // is the other place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
+            // Like the others (the audio route choice, the cache setup, the primer wait), this
+            // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
             guard !stopRequested, !Task.isCancelled, outcome != .superseded else {
                 throw CancellationError()
@@ -1499,8 +1510,23 @@ final class SoftwarePlaybackHost {
             readAhead?.start()
         }
 
+        // The Atmos decoder registration started when the route was chosen and has run alongside the
+        // resume seek and the cache setup; only what is left of its window is waited out here, and
+        // only on the compressed-JOC route (`AtmosDecoderPrimer`). The first enqueue is after load().
+        await Self.awaitAtmosPrimer(for: audioRoute, wait: atmosPrimerWait)
+        guard !stopRequested else { return }
+
         startTimeUpdates()
         isReady = true
+    }
+
+    /// How the host waits for the Atmos decoder registration. Replaced by tests.
+    var atmosPrimerWait: @MainActor () async -> Void = { await AtmosDecoderPrimer.shared.ensurePrimed() }
+
+    /// Waits for the registration on the route that needs it and never on any other.
+    static func awaitAtmosPrimer(for route: SoftwareAtmosRoute, wait: @MainActor () async -> Void) async {
+        guard route == .compressedEAC3JOC else { return }
+        await wait()
     }
 
     // MARK: - Transport
@@ -2150,7 +2176,7 @@ final class SoftwarePlaybackHost {
     nonisolated static func feedRingPacket(
         _ pkt: PacketRingBuffer.Packet,
         videoDecoder: any VideoDecodingPipeline,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
@@ -2727,7 +2753,7 @@ final class SoftwarePlaybackHost {
     /// Ring cursor -> decoders -> renderer with back-pressure. Pause = timeshift (reader keeps filling); DVR seek = cursor move.
     nonisolated private static func runLiveFeederLoop(
         videoDecoder: any VideoDecodingPipeline,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         videoStreamIndex: Int32,
         audioStreamIndex: Int32,
@@ -3158,7 +3184,7 @@ final class SoftwarePlaybackHost {
         readAhead: SoftwarePacketReadAhead?,
         videoDecoder: any VideoDecodingPipeline,
         videoStreamIndex: Int32,
-        audioDecoder: AudioDecoder?,
+        audioDecoder: (any SoftwareAudioProducing)?,
         audioOutput: AudioOutput?,
         audioStreamIndex: Int32,
         renderer: SampleBufferRenderer,
@@ -3551,6 +3577,13 @@ final class SoftwarePlaybackHost {
                 // Play the parked tail out before the flush: nothing more will arrive, the queues
                 // must drain to end-of-media. The wait lifts a rebuffer hold on its own - held,
                 // the clock would never take the tail and end-of-media would never be reached.
+                // What the audio producer still holds (the APAC encoder's last packets) goes in
+                // first, so the drain below plays it too.
+                if let aDec = audioDecoder, let aOut = audioOutput {
+                    for buf in aDec.endOfStream() {
+                        guard aOut.enqueue(sampleBuffer: buf, ifEpoch: audioEpochBeforeRead) else { break }
+                    }
+                }
                 releaseRebufferHold("end of media, nothing left to rebuffer from")
                 waitForRenderer(.drainAll)
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
@@ -3843,7 +3876,11 @@ final class SoftwarePlaybackHost {
                         av_packet_free_safe(packet)
                         return true
                     }
-                    tapSink?(buf)   // #95: mirrored behind the accept, so a refused buffer is not transcribed
+                }
+                // #95: mirrored behind the accept, so a refused buffer is not transcribed. The tap
+                // transcribes PCM, so a producer that hands the renderer compressed audio decodes it here.
+                if let tapSink {
+                    for buf in aDec.tapBuffers(for: packet, produced: buffers) { tapSink(buf) }
                 }
                 if let last = buffers.last {
                     let pts = CMSampleBufferGetPresentationTimeStamp(last)

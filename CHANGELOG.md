@@ -18,9 +18,53 @@ the public-API contract.
   from the clock counted the hold as one, and with several engines at once could not tell whose line
   it was. The level and a `.began` / `.released(.ready | .timedOut | .cancelled)` stream now come from
   each engine instance. See `docs/api.md`.
+- **The software host (the Dolby Vision FEL route) can now show a Now-Playing card and answer remote
+  commands.** It has no `AVPlayer`, so it had neither. With the new `ownsSoftwareNowPlaying` set (off by
+  default, independent of `ownsVideoNowPlayingSession`), the engine publishes title, artwork, duration,
+  elapsed and rate from the staged `externalMetadata` / `setVideoNowPlayingInfo`, and serves play, pause,
+  toggle, skip (`remoteSkipInterval`, default 10 s) and change-position from the Siri Remote, headsets,
+  Control Center and media keys. It republishes on seek, pause, speed change, stall and end.
+  `softwareNowPlayingActive` tells a host when to add its own next/previous. The AVPlayer paths are
+  unchanged.
+- **Scrub thumbnails work on a software session that plays a local file.**
+  `supportsCacheBackedStills` was false there and `scrubThumbnail` and `scrubPreviewFrame` answered
+  nil, so a Dolby Vision FEL title (which plays through the software host) had no scrub stills
+  unless the host built its own `FrameExtractor`. The engine now decodes them from the file, the
+  base layer for a dual-layer title, with no extra connection and through the same calls the
+  AVPlayer path answers: `scrubPreviewFrame` honours `isCancelled` and the 750 ms / 900 packet bound
+  and reports the decoded frame's own time. A file on a network mount opens a second file handle.
+  Remote software sessions already served stills from the packet cache.
+- **The software host follows the system caption style.** Subtitles composited into software-path
+  PiP frames now use the user's Settings > Accessibility > Subtitles & Captioning choices (font,
+  size, text colour and opacity, background and window colour and opacity, edge style) the way
+  AVPlayer's legible output does, and re-render when the setting changes. A field counts as chosen
+  only where it differs from the system default, and carries the system's precedence against the
+  cue's own styling. `SubtitleCaptionStyle.current()` and `observeChanges(_:)` expose the same style
+  to a host that draws its own overlay. Bitmap subtitles are untouched.
+- **The software playback host keeps Atmos.** On the software host (the Dolby Vision FEL route and
+  video the hardware decoder cannot play), E-AC-3 JOC is handed to the audio renderer compressed,
+  with the decoder primed once per process, and TrueHD Atmos and DTS:X are rendered to APAC under the
+  existing `objectAudioRendering` option. Other audio, live streams and `.off` still decode to PCM.
+  The automatic audio pick now prefers a TrueHD Atmos or DTS:X track on the software host too. A
+  renderer error on these routes is logged in release builds. `aetherctl play` gains
+  `--atmos-bed <layout>`.
 
 ### Changed
 
+- **A Profile 7 FEL source keeps the native route while the host reports an AirPlay video receiver on the audio route (iOS).**
+  The dual-layer route draws into a local layer that no receiver picks up, so a TV the viewer sent the
+  title to played sound only. When the host says the receiver shows video
+  (`setAirPlayReceiverShowsVideo(_:)`, new, default off), the load takes the native route instead (8.1
+  where the display takes Dolby Vision, the enhancement layer is lost), logs
+  `an AirPlay video receiver ...` as the reason and skips the `el_type` scan. An audio-only output such
+  as a HomePod does not set it, so the title keeps the dual-layer route; the engine cannot tell the two
+  apart itself. The route is decided at each load: on a URL source `reloadAtCurrentPosition()` decides
+  again, a custom source keeps its route until the next `load()`.
+- **The software host waits for a running display-mode switch before it starts playing (tvOS).** The
+  native path already did; the software path gave up on an HDR switch at the pre-flight cap and never
+  waited for a rate-only one.
+- **`airPlayPictureStaysLocal` reads false while the screen is mirrored.** The host reports it through
+  `setScreenMirrored(_:)` (new).
 - **TrueHD Atmos is decoded exactly and its objects are rendered again (#731).**
   Since 7.40.0 the `TrueHDObjectAudio` path built every output out of the stream's 7.1 channel
   presentation, split by where the objects' energy lay, with the objects decoded without their matrix

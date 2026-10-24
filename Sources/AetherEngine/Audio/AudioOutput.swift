@@ -270,11 +270,18 @@ final class AudioOutput: @unchecked Sendable {
             let ch = fmt.map { "\($0.mChannelsPerFrame)ch" } ?? "?"
             let count = CMSampleBufferGetNumSamples(sampleBuffer)
             EngineLog.emit("[AudioOutput] first enqueue: \(sr) \(ch), \(count) samples, renderer.error=\(String(describing: renderer.error))", category: .swPlayback)
-        } else if let err = renderer.error, !_loggedRendererError {
-            _loggedRendererError = true
-            EngineLog.emit("[AudioOutput] renderer error: \(err)", category: .swPlayback)
         }
         #endif
+        // Unconditional: a format the renderer refuses (a compressed or APAC route) otherwise plays
+        // silence with nothing in a release log to say why.
+        if !_loggedRendererError, let err = renderer.error {
+            _loggedRendererError = true
+            let fmt = CMSampleBufferGetFormatDescription(sampleBuffer).flatMap {
+                CMAudioFormatDescriptionGetStreamBasicDescription($0)?.pointee
+            }
+            let id = fmt.map { String(format: "0x%08x", $0.mFormatID) } ?? "?"
+            EngineLog.emit("[AudioOutput] ERROR: renderer error on format \(id): \(err)", category: .swPlayback)
+        }
         return true
     }
 
@@ -283,8 +290,8 @@ final class AudioOutput: @unchecked Sendable {
     /// is where a renderer that posts its notifications from inside `enqueue` would post them.
     var afterRendererEnqueueForTesting: (@Sendable () -> Void)?
     private var _loggedFirstEnqueue = false
-    private var _loggedRendererError = false
     #endif
+    private var _loggedRendererError = false
 
     /// The shift itself, pure so it can be checked without a renderer. Every timing entry moves
     /// by `offset`, presentation and decode alike; an entry with no valid presentation stamp is left

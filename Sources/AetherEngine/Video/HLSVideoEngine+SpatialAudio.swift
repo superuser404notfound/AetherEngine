@@ -99,6 +99,15 @@ extension HLSVideoEngine {
         demuxer: Demuxer,
         streamIndex: Int32
     ) -> DTSXObjectAudioDecoder.Verdict? {
+        Self.dtsxVerdict(decoder: decoder, demuxer: demuxer, streamIndex: streamIndex)
+    }
+
+    /// The verdict without an engine, for the software host, which renders the same bed.
+    static func dtsxVerdict(
+        decoder: DTSXObjectAudioDecoder,
+        demuxer: Demuxer,
+        streamIndex: Int32
+    ) -> DTSXObjectAudioDecoder.Verdict? {
         var verdict: DTSXObjectAudioDecoder.Verdict?
         var heldBytes = 0
         try? demuxer.peekPackets(maxPackets: Self.dtsxVerdictPacketBudget) { packet in

@@ -26,6 +26,10 @@ enum DualLayerRouteDecision: Equatable {
         case baseLayerOnlyHandling
         case liveOrNotSeekable
         case noHardwareHEVC
+        /// An AirPlay receiver that shows video holds the audio route (iOS). It takes a stream, not a
+        /// composed picture, so the session keeps the native route (8.1 where the display takes Dolby
+        /// Vision; the enhancement layer is lost). An audio-only AirPlay output (a speaker) is not this reason.
+        case airPlayVideoReceiver
         case melEnhancementLayer
         case enhancementLayerTypeUnknown
         /// The base layer's width or height is not positive (the probe found none): the budget cannot be
@@ -103,7 +107,8 @@ enum DualLayerRouteDecision: Equatable {
         isLive: Bool,
         isSourceSeekable: Bool,
         canHardwareDecode: (() -> Bool)?,
-        enhancementLayerInPackets: Bool = true
+        enhancementLayerInPackets: Bool = true,
+        airPlayVideoReceiver: Bool = false
     ) -> Reason? {
         guard codecID == AV_CODEC_ID_HEVC, dvProfile == 7 else { return .notProfile7 }
         guard preferDualLayerDolbyVision else { return .preferenceOff }
@@ -112,6 +117,7 @@ enum DualLayerRouteDecision: Equatable {
         guard dolbyVisionHandling == .automatic else { return .baseLayerOnlyHandling }
         guard !isLive, isSourceSeekable else { return .liveOrNotSeekable }
         guard canHardwareDecode?() ?? true else { return .noHardwareHEVC }
+        guard !airPlayVideoReceiver else { return .airPlayVideoReceiver }
         return nil
     }
 
@@ -127,13 +133,15 @@ enum DualLayerRouteDecision: Equatable {
         elType: String?,
         geometry: Geometry,
         enhancementLayerSize: (width: Int, height: Int)? = nil,
-        enhancementLayerInPackets: Bool = true
+        enhancementLayerInPackets: Bool = true,
+        airPlayVideoReceiver: Bool = false
     ) -> DualLayerRouteDecision {
         if let reason = blockingReasonBeforeProbe(
             codecID: codecID, dvProfile: dvProfile, dolbyVisionHandling: dolbyVisionHandling,
             preferDualLayerDolbyVision: preferDualLayerDolbyVision, isLive: isLive,
             isSourceSeekable: isSourceSeekable, canHardwareDecode: canHardwareDecode,
-            enhancementLayerInPackets: enhancementLayerInPackets) {
+            enhancementLayerInPackets: enhancementLayerInPackets,
+            airPlayVideoReceiver: airPlayVideoReceiver) {
             return .notTaken(reason)
         }
         switch elType {
@@ -188,6 +196,8 @@ extension DualLayerRouteDecision.Reason {
             return "live or non-seekable source"
         case .noHardwareHEVC:
             return "no hardware HEVC decoder for this stream"
+        case .airPlayVideoReceiver:
+            return "an AirPlay video receiver holds the audio route and takes a stream, not a composed picture"
         case .melEnhancementLayer:
             return "el_type=MEL, nothing to compose"
         case .enhancementLayerTypeUnknown:
