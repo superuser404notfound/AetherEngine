@@ -40,6 +40,7 @@ final class LoopbackAudioReader: @unchecked Sendable {
 
     // Worker-thread state (only touched from the loop / runOnce).
     private var nextIndex: Int?
+    private var lastDecodedStartPTS: Double?
     private var lastDecodedEndPTS: Double?
     private var pendingDiscontinuity = true
     private var missStreak = 0
@@ -80,13 +81,15 @@ final class LoopbackAudioReader: @unchecked Sendable {
     func runOnce() -> StepResult {
         let playhead = deps.playhead() ?? 0
 
-        switch AudioTapPacing.decide(lastDecodedEndPTS: lastDecodedEndPTS, playhead: playhead,
+        switch AudioTapPacing.decide(lastDecodedStartPTS: lastDecodedStartPTS,
+                                     lastDecodedEndPTS: lastDecodedEndPTS, playhead: playhead,
                                      leadSeconds: AudioTapDefaults.leadSeconds,
                                      toleranceSeconds: AudioTapDefaults.toleranceSeconds) {
         case .sleep:
             return .slept
         case .reanchor:
             nextIndex = deps.anchorIndex(playhead)
+            lastDecodedStartPTS = nil
             lastDecodedEndPTS = nil
             pendingDiscontinuity = true
             missStreak = 0
@@ -127,6 +130,7 @@ final class LoopbackAudioReader: @unchecked Sendable {
         }
 
         let shift = deps.shiftSeconds()
+        lastDecodedStartPTS = chunks.first?.ptsSeconds
         for chunk in chunks {
             deps.emit(AudioTapBuffer(buffer: chunk.buffer,
                                      sourceTime: chunk.ptsSeconds + shift,

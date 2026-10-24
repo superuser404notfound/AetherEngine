@@ -6,8 +6,13 @@ import XCTest
 /// to decode the next segment, idle, or re-anchor after the playhead moved away.
 final class AudioTapPacingTests: XCTestCase {
 
+    /// One-second segments: the last decoded one starts a second before it ends.
     private func decide(_ last: Double?, _ playhead: Double) -> AudioTapPacing.Decision {
-        AudioTapPacing.decide(lastDecodedEndPTS: last, playhead: playhead,
+        decide(start: last.map { $0 - 1 }, end: last, playhead)
+    }
+
+    private func decide(start: Double?, end: Double?, _ playhead: Double) -> AudioTapPacing.Decision {
+        AudioTapPacing.decide(lastDecodedStartPTS: start, lastDecodedEndPTS: end, playhead: playhead,
                               leadSeconds: 10, toleranceSeconds: 2)
     }
 
@@ -40,6 +45,23 @@ final class AudioTapPacingTests: XCTestCase {
     func testPlayheadJumpedBackReanchors() {
         // Backward seek: decoded position is far ahead of the new playhead.
         XCTAssertEqual(decide(300.0, 100.0), .reanchor)
-        XCTAssertEqual(decide(112.5, 100.0), .reanchor)     // > lead + tolerance
+        XCTAssertEqual(decide(113.5, 100.0), .reanchor)     // segment start > lead + tolerance
+    }
+
+    func testALongSegmentDecodedWithinTheLeadIsNotABackwardJump() {
+        // A 10 s segment decoded while the lead had room: it starts within the lead and ends a
+        // whole segment past it. That is the lead full, not the playhead gone back.
+        XCTAssertEqual(decide(start: 109.5, end: 119.5, 100.0), .sleep)
+        XCTAssertEqual(decide(start: 104, end: 120, 100.0), .sleep, "a 16 s segment")
+    }
+
+    func testALongSegmentStillReanchorsOnARealBackwardSeek() {
+        XCTAssertEqual(decide(start: 110, end: 120, 50.0), .reanchor)
+        XCTAssertEqual(decide(start: 112.5, end: 122.5, 100.0), .reanchor)
+    }
+
+    func testWithoutASegmentStartOnlyTheEndIsJudged() {
+        XCTAssertEqual(decide(start: nil, end: 119.5, 100.0), .sleep)
+        XCTAssertEqual(decide(start: nil, end: 90.0, 100.0), .reanchor)
     }
 }

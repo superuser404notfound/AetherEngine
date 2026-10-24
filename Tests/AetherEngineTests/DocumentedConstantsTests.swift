@@ -109,6 +109,18 @@ final class DocumentedConstantsTests: XCTestCase {
         return text
     }
 
+    /// docs/architecture.md quotes the audio tap's lead, tolerance and stream buffer.
+    func testAudioTapPacingAndBufferMatchDocumentation() throws {
+        XCTAssertEqual(AudioTapDefaults.leadSeconds, 10)
+        XCTAssertEqual(AudioTapDefaults.toleranceSeconds, 2)
+        XCTAssertEqual(AudioTapDefaults.streamBufferChunks, 256)
+        XCTAssertEqual(Double(AudioTapDefaults.streamBufferChunks * AudioTapDefaults.minSamplesPerChunk) / AudioTapDefaults.sampleRate, 25.6, accuracy: 0.001)
+        let docs = try documentation()
+        assertDocumented("`AudioTapDefaults.leadSeconds` (10 s)", docs)
+        assertDocumented("longer than the 2 s tolerance", docs)
+        assertDocumented("`AudioTapDefaults.streamBufferChunks` (256 buffers, 25.6 s)", docs)
+    }
+
     /// docs/formats.md quotes the lead a software-path live join keeps behind the newest media.
     func testSoftwareLiveJoinLeadMatchesDocumentation() throws {
         XCTAssertEqual(SoftwareLiveJoinPolicy.leadSeconds, 4)

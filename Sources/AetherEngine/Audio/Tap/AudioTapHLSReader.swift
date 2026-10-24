@@ -31,6 +31,7 @@ final class AudioTapHLSReader: @unchecked Sendable {
     private var playlist: HLSMediaPlaylist?
     private var tracker = HLSPlaylistTracker()
     private var nextIndex: Int?
+    private var lastDecodedStartPTS: Double?
     private var lastDecodedEndPTS: Double?
     private var pendingDiscontinuity = true
 
@@ -76,13 +77,15 @@ final class AudioTapHLSReader: @unchecked Sendable {
     func stepVOD() async -> StepResult {
         guard let media = playlist else { return .finished }
         let playhead = deps.playhead() ?? 0
-        switch AudioTapPacing.decide(lastDecodedEndPTS: lastDecodedEndPTS, playhead: playhead,
+        switch AudioTapPacing.decide(lastDecodedStartPTS: lastDecodedStartPTS,
+                                     lastDecodedEndPTS: lastDecodedEndPTS, playhead: playhead,
                                      leadSeconds: AudioTapDefaults.leadSeconds,
                                      toleranceSeconds: AudioTapDefaults.toleranceSeconds) {
         case .sleep:
             return .slept
         case .reanchor:
             nextIndex = VideoSegmentProvider.segmentIndex(forPlaylistTime: playhead, durations: durations)
+            lastDecodedStartPTS = nil
             lastDecodedEndPTS = nil
             pendingDiscontinuity = true
             return .reanchored
@@ -132,6 +135,7 @@ final class AudioTapHLSReader: @unchecked Sendable {
     /// from lastDecodedEndPTS so seams abut (the monotonic filter trims priming overlaps).
     private func emit(chunks: [AudioTapChunk], segmentStart: Double) {
         var cursor = pendingDiscontinuity ? segmentStart : (lastDecodedEndPTS ?? segmentStart)
+        lastDecodedStartPTS = cursor
         for chunk in chunks {
             deps.emit(AudioTapBuffer(buffer: chunk.buffer, sourceTime: cursor, discontinuity: pendingDiscontinuity))
             pendingDiscontinuity = false

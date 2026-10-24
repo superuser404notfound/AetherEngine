@@ -15,6 +15,8 @@ final class LoopbackAudioReaderTests: XCTestCase {
         var decoded: [Int] = []              // one entry per decode call
         var emitted: [AudioTapBuffer] = []
         var segmentSeconds: Double = 1.0
+        /// Stamp each decode with its segment's own time rather than the count of decodes.
+        var stampsBySegmentIndex = false
     }
 
     private func makeReader(_ w: World) -> LoopbackAudioReader {
@@ -23,14 +25,17 @@ final class LoopbackAudioReaderTests: XCTestCase {
             shiftSeconds: { w.shift },
             anchorIndex: { Int($0 / w.segmentSeconds) },
             initData: { _ in Data([0]) },
-            segmentData: { w.segments.contains($0) ? Data([1]) : nil },
+            segmentData: { w.segments.contains($0) ? Data(String($0).utf8) : nil },
             highestStoredIndex: { w.highestStored },
-            decodeSegment: { _, _ in
+            decodeSegment: { _, segment in
                 w.decoded.append(w.decoded.count)
-                let idx = Double(w.decoded.count - 1)
+                let idx = w.stampsBySegmentIndex
+                    ? Double(String(decoding: segment, as: UTF8.self)) ?? 0
+                    : Double(w.decoded.count - 1)
+                let frames = AVAudioFrameCount(48_000 * w.segmentSeconds)
                 let buf = AVAudioPCMBuffer(pcmFormat: AetherEngine.audioTapFormat,
-                                           frameCapacity: 48_000)!
-                buf.frameLength = 48_000
+                                           frameCapacity: frames)!
+                buf.frameLength = frames
                 return [AudioTapChunk(buffer: buf, ptsSeconds: idx * w.segmentSeconds)]
             },
             emit: { w.emitted.append($0) }
@@ -49,6 +54,48 @@ final class LoopbackAudioReaderTests: XCTestCase {
         // First buffer after install is a discontinuity, the rest abut.
         XCTAssertTrue(w.emitted[0].discontinuity)
         XCTAssertFalse(w.emitted[1].discontinuity)
+    }
+
+    /// Ten-second segments, as an IPTV panel's live channels and many VOD remuxes have: the
+    /// reader decodes one segment past the lead and then waits for the playhead, and never goes
+    /// back over what it decoded while the playhead only moves forward.
+    func testLongSegmentsAreDecodedOnceEachAsThePlayheadMovesOn() {
+        let w = World()
+        w.segmentSeconds = 10
+        w.stampsBySegmentIndex = true
+        w.segments = Set(0...30); w.highestStored = 30
+        let reader = makeReader(w)
+        var playhead = 0.0
+        var steps: [LoopbackAudioReader.StepResult] = []
+        while playhead < 60 {
+            w.playhead = playhead
+            steps.append(reader.runOnce())
+            playhead += 0.25
+        }
+        XCTAssertFalse(steps.contains(.reanchored), "no backward jumps while playing forward")
+        let starts = w.emitted.map(\.sourceTime)
+        XCTAssertEqual(starts, starts.sorted(), "every segment once, in order")
+        XCTAssertEqual(Set(starts).count, starts.count)
+        XCTAssertEqual(w.emitted.filter(\.discontinuity).count, 1, "only the first is a discontinuity")
+        // The lead holds: at most a segment past it, and never behind the playhead.
+        XCTAssertGreaterThanOrEqual((starts.last ?? 0) + 10, 60)
+        XCTAssertLessThanOrEqual(starts.last ?? 0, 60 + 10)
+    }
+
+    func testLongSegmentsReanchorOnABackwardSeek() {
+        let w = World()
+        w.segmentSeconds = 10
+        w.stampsBySegmentIndex = true
+        w.segments = Set(0...30); w.highestStored = 30
+        w.playhead = 100
+        let reader = makeReader(w)
+        XCTAssertEqual(reader.runOnce(), .decoded, "segment 10, 100–110 s")
+        XCTAssertEqual(reader.runOnce(), .slept, "the lead is full")
+        w.playhead = 40
+        XCTAssertEqual(reader.runOnce(), .reanchored)
+        XCTAssertEqual(reader.runOnce(), .decoded)
+        XCTAssertEqual(w.emitted.last?.sourceTime ?? 0, 40, accuracy: 0.001, "from the playhead's segment")
+        XCTAssertTrue(w.emitted.last?.discontinuity ?? false)
     }
 
     func testSourceTimeFoldsShift() {
