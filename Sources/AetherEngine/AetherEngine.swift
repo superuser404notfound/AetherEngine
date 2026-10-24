@@ -1686,7 +1686,13 @@ public final class AetherEngine: ObservableObject {
     /// CONFIGURATION and the user changes that in Settings, which they can only reach by leaving the app.
     /// Nothing reports the change itself, so the return is the one event guaranteed to follow it. See
     /// `clearPanelRefusalOnForegroundReturn`.
-    nonisolated(unsafe) static var panelRefusedHDRMaster = false
+    nonisolated(unsafe) static var panelRefusedHDRMaster = false {
+        didSet {
+            // A display that refused an HDR master no longer vouches for the HDR proof either.
+            guard panelRefusedHDRMaster, !oldValue else { return }
+            Task { @MainActor in DisplayCriteriaController.forgetPanelProof("a refused HDR master") }
+        }
+    }
 
     /// AE#588: forget a refusal on a real return from the background.
     ///
@@ -7027,6 +7033,7 @@ public final class AetherEngine: ObservableObject {
                     && self.nativeVideoSession?.servedSourceIsHDR == true,
                 fellBackToMedia: self.masterFallbackUsed,
                 sessionIsPlaying: self.state == .playing) {
+                self.displayCriteria.notePanelEngagedHDR("AVFoundation accepted the HDR master")
                 self.republishPanelPresentsHDR(
                     effectiveFormat: effectiveFormat,
                     because: "AVFoundation accepted the HDR master, which a display presenting SDR "
