@@ -596,6 +596,7 @@ extension AetherEngine {
                   // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
                   skipInitialSeek: startPosition == nil,
                   inPlaceSwap: inPlaceHandover,
+                  diagnosticContext: options.sourceDiagnosticsContext,
                   contract: .init(
                       isLive: options.isLive,
                       // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
@@ -779,7 +780,8 @@ extension AetherEngine {
         if rememberVerdict { rerouteVerdictMemory.record(url, now: Date()) }
         var options = loadedOptions
         options.nativeRemoteHLS = false
-        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders)
+        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders,
+                                        diagnosticContext: options.sourceDiagnosticsContext)
         do {
             _ = try await load(source: .custom(reader, formatHint: "mpegts"), options: options)
         } catch is CancellationError {
@@ -886,6 +888,7 @@ extension AetherEngine {
             // path only for the host's explicit fastZap profile.
             liveJoinProfile: loadedOptions.liveJoinProfile,
             sourceOpenPolicy: loadedOptions.sourceOpenPolicy,
+            diagnosticContext: loadedOptions.sourceDiagnosticsContext,
             liveStartupGraceSeconds: loadedOptions.liveStartupGraceSeconds,
             liveStartupSingleSegmentMinimumSeconds: loadedOptions.liveStartupSingleSegmentMinimumSeconds,
             liveEdgeCushionSeconds: loadedOptions.liveEdgeCushionSeconds,
@@ -1946,6 +1949,7 @@ extension AetherEngine {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
                   inPlaceSwap: inPlaceHandover,
+                  diagnosticContext: loadedOptions.sourceDiagnosticsContext,
                   contract: .init(
                       isLive: isLive,
                       // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.
@@ -2207,6 +2211,7 @@ extension AetherEngine {
         let sequentialOrigin = loadedOptions.sequentialOrigin
         let heldSourceConnection = loadedOptions.heldSourceConnection
         let sourceOpenPolicy = loadedOptions.sourceOpenPolicy
+        let diagnosticContext = loadedOptions.sourceDiagnosticsContext
         let declaredDuration = loadedOptions.declaredDurationSeconds
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
@@ -2224,7 +2229,7 @@ extension AetherEngine {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).withSourceOpenPolicy(sourceOpenPolicy).withRequestHeaders(requestHeaders), isLive: isLive)
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).withSourceOpenPolicy(sourceOpenPolicy).withDiagnosticContext(diagnosticContext).withRequestHeaders(requestHeaders), isLive: isLive)
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -2292,6 +2297,7 @@ extension AetherEngine {
         let sequentialOrigin = loadedOptions.sequentialOrigin
         let heldSourceConnection = loadedOptions.heldSourceConnection
         let sourceOpenPolicy = loadedOptions.sourceOpenPolicy
+        let diagnosticContext = loadedOptions.sourceDiagnosticsContext
         let declaredDuration = loadedOptions.declaredDurationSeconds
         // Built on the main actor, captured into the detach: surfaces source stall/reconnect to playbackPhase (#85).
         let networkPhaseSink: @Sendable (ReaderNetworkPhase) -> Void = { [weak self] phase in
@@ -2305,7 +2311,7 @@ extension AetherEngine {
                 dem = pre
             } else {
                 dem = Demuxer()
-                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).withSourceOpenPolicy(sourceOpenPolicy).withRequestHeaders(requestHeaders))
+                try dem.open(url: url, extraHeaders: sourceHTTPHeaders, profile: .playback.withProbeBudget(probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration).withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDuration).withHeldSourceConnection(heldSourceConnection).withSourceOpenPolicy(sourceOpenPolicy).withDiagnosticContext(diagnosticContext).withRequestHeaders(requestHeaders))
             }
             dem.onNetworkPhaseChanged = networkPhaseSink
             try await host.load(
@@ -2589,6 +2595,7 @@ extension AetherEngine {
         let reloadProfile = DemuxerOpenProfile.playback.withProbeBudget(
             probesize: loadedOptions.probesize, maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration)
             .withSourceOpenPolicy(loadedOptions.sourceOpenPolicy)
+            .withDiagnosticContext(loadedOptions.sourceDiagnosticsContext)
         var customPreopened: Demuxer? = nil
         if isCustomSource, let reader = customReader {
             let hint = customFormatHint

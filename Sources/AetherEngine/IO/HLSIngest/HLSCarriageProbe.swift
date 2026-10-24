@@ -129,31 +129,46 @@ enum HLSCarriageProbe {
     static func classifySegmentHead(
         url: URL,
         httpHeaders: [String: String],
-        session: URLSession
+        session: URLSession,
+        diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context
     ) async throws -> MPEGTransportStreamCodecProbe.Verdict {
-        var request = makeRequest(url, httpHeaders: httpHeaders)
+        var request = SourceNetworkDiagnostics.request(makeRequest(url, httpHeaders: httpHeaders), context: diagnosticContext)
         request.setValue("bytes=0-\(maximumSegmentHeadBytes - 1)", forHTTPHeaderField: "Range")
-        let (bytes, response) = try await session.bytes(for: request)
-        defer { bytes.task.cancel() }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-        guard status == 200 || status == 206 else {
-            throw HLSIngestError.playlistUnreachable(status: status)
+        let trace = SourceNetworkDiagnostics.Trace(role: .hlsSegment, context: SourceNetworkDiagnostics.context(for: request))
+        var task: URLSessionTask?
+        var terminalError: Error?
+        defer {
+            if let task { trace.completed(task: task, error: terminalError) }
+            else { trace.record(.completed, originalURL: url, url: url, error: terminalError) }
         }
-        var data = Data()
-        data.reserveCapacity(segmentHeadChunkBytes)
-        var nextVerdictAt = segmentHeadChunkBytes
-        for try await byte in bytes {
-            data.append(byte)
-            guard data.count >= nextVerdictAt else { continue }
-            let verdict = MPEGTransportStreamCodecProbe.classify(data)
-            if verdict != .inconclusive { return verdict }
-            guard data.count < maximumSegmentHeadBytes else { break }
-            nextVerdictAt = min(maximumSegmentHeadBytes, data.count + segmentHeadChunkBytes)
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            task = bytes.task
+            trace.response(task: bytes.task, response: response)
+            defer { bytes.task.cancel() }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200 || status == 206 else {
+                throw HLSIngestError.playlistUnreachable(status: status)
+            }
+            var data = Data()
+            data.reserveCapacity(segmentHeadChunkBytes)
+            var nextVerdictAt = segmentHeadChunkBytes
+            for try await byte in bytes {
+                data.append(byte)
+                guard data.count >= nextVerdictAt else { continue }
+                let verdict = MPEGTransportStreamCodecProbe.classify(data)
+                if verdict != .inconclusive { return verdict }
+                guard data.count < maximumSegmentHeadBytes else { break }
+                nextVerdictAt = min(maximumSegmentHeadBytes, data.count + segmentHeadChunkBytes)
+            }
+            guard !data.isEmpty else {
+                throw HLSIngestError.unsupportedSegmentFormat
+            }
+            return MPEGTransportStreamCodecProbe.classify(data)
+        } catch {
+            terminalError = error
+            throw error
         }
-        guard !data.isEmpty else {
-            throw HLSIngestError.unsupportedSegmentFormat
-        }
-        return MPEGTransportStreamCodecProbe.classify(data)
     }
 
     /// Resolves the playlist down to the segment whose PMT answers the question, or settles the verdict
@@ -229,6 +244,6 @@ enum HLSCarriageProbe {
         for (field, value) in httpHeaders {
             request.setValue(value, forHTTPHeaderField: field)
         }
-        return request
+        return SourceNetworkDiagnostics.request(request, context: SourceNetworkDiagnostics.context)
     }
 }

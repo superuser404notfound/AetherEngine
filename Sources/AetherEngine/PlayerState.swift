@@ -412,6 +412,8 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
 }
 
 public struct LoadOptions: Sendable, Equatable {
+    /// Diagnostic identity only; retained with the source across internal reloads.
+    public var sourceDiagnosticsContext: SourceNetworkDiagnostics.Context? = nil
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
     /// The engine writes no display criteria because AVKit does: `true` is `DisplayCriteriaOwner.avKit`, and the

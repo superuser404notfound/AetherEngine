@@ -4034,7 +4034,8 @@ public final class AetherEngine: ObservableObject {
         guard let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: playlistURL,
             httpHeaders: options.httpHeaders,
-            persistentHTTP1: options.heldSourceConnection
+            persistentHTTP1: options.heldSourceConnection,
+            diagnosticContext: options.sourceDiagnosticsContext
         ) else { return .notTaken }
         try checkLoadCurrent(generation)
         EngineLog.emit(
@@ -4077,10 +4078,12 @@ public final class AetherEngine: ObservableObject {
         defer { if let gen = attempt.generation { waitingLoadGenerations.remove(gen) } }
         do {
             let probe = try await withTaskCancellationHandler {
-                try await loadSession(
-                    source: source, startPosition: startPosition, options: options,
-                    audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
-                    attempt: attempt)
+                try await SourceNetworkDiagnostics.$context.withValue(options.sourceDiagnosticsContext) {
+                    try await loadSession(
+                        source: source, startPosition: startPosition, options: options,
+                        audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
+                        attempt: attempt)
+                }
             } onCancel: {
                 Task { @MainActor [weak self] in self?.abandonCancelledLoad(attempt) }
             }
@@ -4209,7 +4212,8 @@ public final class AetherEngine: ObservableObject {
             )
             options.nativeRemoteHLS = false
             source = .custom(
-                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders),
+                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders,
+                                    diagnosticContext: options.sourceDiagnosticsContext),
                 formatHint: "mpegts"
             )
         }
@@ -4511,7 +4515,8 @@ public final class AetherEngine: ObservableObject {
             return try await load(
                 source: .custom(
                     HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders),
+                                        httpHeaders: loadedOptions.httpHeaders,
+                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,
@@ -4552,6 +4557,7 @@ public final class AetherEngine: ObservableObject {
                                           declaredDuration: options.declaredDurationSeconds)
                     .withHeldSourceConnection(options.heldSourceConnection)
                     .withSourceOpenPolicy(options.sourceOpenPolicy)
+                    .withDiagnosticContext(options.sourceDiagnosticsContext)
                     .withRequestHeaders(requestHeaders)
                 switch source {
                 case .url(let u):
@@ -4676,20 +4682,12 @@ public final class AetherEngine: ObservableObject {
             // reader's is (`publishLoadFailure`), not a stream the probe could not read: a host that
             // takes a custom probe failure to mean the format moves the channel to another route for
             // good, over a 509 an IPTV panel gives while another device holds the account's last slot.
-            if let ingest = reader as? HLSLiveIngestReader,
-               case .playlistUnreachable(let status)? = ingest.terminalError {
-                if status > 0 {
-                    let kind: PlaybackErrorKind = AVIOReader.isRateLimitStatus(status) ? .sourceRateLimited : .sourceRefused
-                    publishError(PlaybackErrorInfo(kind: kind,
-                                                   message: "Failed to load: the live playlist answered HTTP \(status)",
-                                                   underlyingCode: status))
-                } else {
-                    publishError(.liveSourceUnavailable, "Failed to load: the live playlist could not be reached")
-                }
-                throw DemuxerError.openFailed(code: -1)
+            if let ingest = reader as? HLSLiveIngestReader, let failure = ingest.terminalFailure {
+                publishLoadFailure(failure, isLiveStart: true)
+                throw failure
             }
             publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed", underlying: probeFailure)
-            throw DemuxerError.openFailed(code: -1)
+            throw probeFailure ?? DemuxerError.openFailed(code: -1)
         }
 
         // The reader already spent the configured initial and recovery budgets. Reopening
@@ -4724,7 +4722,8 @@ public final class AetherEngine: ObservableObject {
             return try await load(
                 source: .custom(
                     HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders),
+                                        httpHeaders: loadedOptions.httpHeaders,
+                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,
@@ -4781,13 +4780,13 @@ public final class AetherEngine: ObservableObject {
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
             // #796: a live open the origin answered with a status fails with that answer, as the VOD
-            // path's does. Without this a 503 from a metered panel reached the host as an outage.
-            if let readerError = probeFailure as? AVIOReaderError, case .httpStatus = readerError {
-                publishLoadFailure(readerError)
-                throw readerError
-            }
-            publishError(.liveSourceUnavailable, "Live source unavailable")
-            throw DemuxerError.openFailed(code: -5)
+            // path's does (`publishLoadFailure` types it as sourceRefused / sourceRateLimited and the
+            // reader's httpStatus is thrown). A live open that reaches nothing keeps
+            // liveSourceUnavailable: the reader rode its transport failures out on the reconnect
+            // ladder, and the URL error its last connection ended with is the cause it gives up with.
+            let failure = probeFailure ?? DemuxerError.openFailed(code: -5)
+            publishLoadFailure(failure, isLiveStart: true, transportFailureCode: probe.openTransportFailureCode)
+            throw failure
         }
 
         // Forward-only custom sources cannot rewind; audio-switch and background-reload stay no-op for them.

@@ -82,6 +82,8 @@ struct DemuxerOpenProfile: Sendable {
     /// distinguished them. Defaults to the pump, since every other path builds its profile explicitly.
     var readerLabel: String = "pump"
     var sourceOpenPolicy: SourceOpenPolicy = .init()
+    /// Captured by the load before detached opens; retained by each fresh session reader.
+    var diagnosticContext: SourceNetworkDiagnostics.Context? = nil
     /// AE#792: the session's live header set. A reader opened with one reads its headers from it per
     /// request instead of keeping the `extraHeaders` it was opened with, so a session-scoped open (the
     /// playback demuxer, the producer's reopens) follows `updateRequestHeaders(_:)`. Nil everywhere else.
@@ -90,6 +92,12 @@ struct DemuxerOpenProfile: Sendable {
     func withSourceOpenPolicy(_ policy: SourceOpenPolicy) -> DemuxerOpenProfile {
         var copy = self
         copy.sourceOpenPolicy = policy
+        return copy
+    }
+
+    func withDiagnosticContext(_ context: SourceNetworkDiagnostics.Context?) -> DemuxerOpenProfile {
+        var copy = self
+        copy.diagnosticContext = context
         return copy
     }
 
@@ -259,6 +267,10 @@ public final class Demuxer: @unchecked Sendable {
     /// own (never `accessLock`, which `av_read_frame` holds for a whole network read) makes that
     /// load a retained snapshot instead of a race.
     private let providerLock = NSLock()
+    /// AE#818: the URL error the source reader last recorded when the open gave up. Diagnostic data
+    /// for a live start's give-up to name as its cause; nil when the open succeeded, failed for
+    /// another reason, or the source is not an HTTP reader.
+    private(set) var openTransportFailureCode: Int?
     private var _avioProvider: AVIOProvider?
     private var avioProvider: AVIOProvider? {
         get {
@@ -675,7 +687,7 @@ public final class Demuxer: @unchecked Sendable {
         self.openProfile = profile
         beginOpenTiming()
         self.auditSource = isLive ? nil : (url, extraHeaders)
-        let isHTTP = url.scheme == "http" || url.scheme == "https"
+        let isHTTP = ["http", "https"].contains(url.scheme?.lowercased() ?? "")
 
         if isHTTP {
             try openHTTP(url: url, extraHeaders: extraHeaders, isLive: isLive, selectTitleID: selectTitleID)
@@ -806,7 +818,8 @@ public final class Demuxer: @unchecked Sendable {
             sequentialOnly: openProfile.avioSequentialOnly,
             heldConnection: openProfile.avioHeldConnection,
             sourceOpenPolicy: openProfile.sourceOpenPolicy,
-            requestHeaderStore: openProfile.requestHeaders
+            requestHeaderStore: openProfile.requestHeaders,
+            diagnosticContext: openProfile.diagnosticContext
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider
@@ -840,6 +853,7 @@ public final class Demuxer: @unchecked Sendable {
         do {
             try provider.open()
         } catch {
+            openTransportFailureCode = (provider as? AVIOReader)?.lastTransportFailureCode
             abandonProvider(provider)
             throw error
         }
@@ -919,6 +933,7 @@ public final class Demuxer: @unchecked Sendable {
         av_dict_free(&opts)
         guard ret == 0 else {
             formatContext = nil
+            openTransportFailureCode = (avioProvider as? AVIOReader)?.lastTransportFailureCode
             avioProvider?.close()
             avioProvider = nil
             throw DemuxerError.openFailed(code: ret)
@@ -3054,10 +3069,40 @@ public final class Demuxer: @unchecked Sendable {
     }
 }
 
-enum DemuxerError: Error, CustomStringConvertible, LocalizedError {
+enum DemuxerError: Error, CustomNSError, CustomStringConvertible, LocalizedError {
     case openFailed(code: Int32)
     case streamInfoFailed(code: Int32)
     case readFailed(code: Int32)
+
+    static var errorDomain: String { "AetherEngine.DemuxerError" }
+    static let ffmpegErrorCodeKey = "AetherFFmpegErrorCode"
+    var errorUserInfo: [String: Any] {
+        let code: Int32
+        switch self {
+        case .openFailed(let value), .streamInfoFailed(let value), .readFailed(let value): code = value
+        }
+        return [NSLocalizedDescriptionKey: description, Self.ffmpegErrorCodeKey: Int(code)]
+    }
+    // Preserve Swift's implicit NSError codes from before CustomNSError conformance.
+    var errorCode: Int {
+        switch self {
+        case .openFailed: 0
+        case .streamInfoFailed: 1
+        case .readFailed: 2
+        }
+    }
+
+    static func preservedFFmpegCode(in error: Error?) -> Int? {
+        var next = error as NSError?
+        for _ in 0..<6 {
+            guard let current = next else { break }
+            if current.domain == errorDomain,
+               let code = current.userInfo[ffmpegErrorCodeKey] as? Int,
+               code < 0, Int32(exactly: code) != nil { return code }
+            next = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
+    }
 
     /// AE#283: this is the most common error at the load boundary, and the AVERROR code is the whole
     /// diagnosis (INVALIDDATA vs a POSIX errno vs EOF). Rendering it keeps a refused transcode

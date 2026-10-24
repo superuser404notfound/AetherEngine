@@ -13,8 +13,9 @@ struct LostSourceReadErrorTests {
         let port: UInt16
         private let listener: LoopbackListener
         private let bodyBytes: Int
-        private let lock = NSLock()
+        private let lock = NSCondition()
         private var stopped = false
+        private var bodyCutRequested = false
         private var isStopped: Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -35,8 +36,16 @@ struct LostSourceReadErrorTests {
         func stop() {
             lock.lock()
             stopped = true
+            lock.broadcast()
             lock.unlock()
             listener.stop()
+        }
+
+        func cutBody() {
+            lock.lock()
+            bodyCutRequested = true
+            lock.broadcast()
+            lock.unlock()
         }
 
         private func serve(_ fd: Int32) {
@@ -64,6 +73,13 @@ struct LostSourceReadErrorTests {
                     sent += n
                 }
             }
+            if !isHead {
+                // Prove a mid-read loss: CFNetwork may otherwise reject the truncated body
+                // before delivering any data, correctly turning this into an open failure.
+                lock.lock()
+                while !bodyCutRequested && !stopped { lock.wait() }
+                lock.unlock()
+            }
             // Half-close, as `ThrottledOriginServer.serveThenDrop` does: a full close can turn into
             // an RST that discards bytes the reader has not been handed yet.
             shutdown(fd, SHUT_WR)
@@ -81,15 +97,30 @@ struct LostSourceReadErrorTests {
         }
     }
 
-    @Test("a length-less stream cut off mid-body reports EIO, not EOF", .timeLimit(.minutes(1)))
-    func cutOffLengthlessStreamIsAnError() throws {
+    @Test("a length-less stream cut off mid-body reports EIO, not EOF",
+          .timeLimit(.minutes(1)), arguments: [false, true])
+    func cutOffLengthlessStreamIsAnError(sequentialOnly: Bool) async throws {
         let origin = try #require(LengthlessResettingOrigin(bodyBytes: 256 * 1024))
         defer { origin.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/live.ts")!,
-                                prefetchEnabled: false)
-        defer { reader.markClosed(); reader.close() }
-        try reader.open()
-        #expect(drain(reader) == FFmpegErr.eio)
+                                prefetchEnabled: false, sequentialOnly: sequentialOnly)
+        let outcome = try await withTaskCancellationHandler {
+            try await ProbeTestJob {
+                defer { reader.markClosed(); reader.close() }
+                try reader.open()
+                var firstByte: UInt8 = 0
+                let firstRead = withUnsafeMutablePointer(to: &firstByte) { reader.read(into: $0, size: 1) }
+                guard firstRead == 1 else { return (firstRead, firstRead) }
+                origin.cutBody()
+                return (firstRead, drain(reader))
+            }.outcome()
+        } onCancel: {
+            reader.markClosed()
+            origin.stop()
+        }
+        let (firstRead, last) = try outcome.get()
+        try #require(firstRead == 1)
+        #expect(last == FFmpegErr.eio)
     }
 
     @Test("a seekable read whose fetch fails reports EIO, not EOF", .timeLimit(.minutes(1)))

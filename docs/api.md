@@ -49,7 +49,37 @@ The message inside `.error` is worth logging verbatim, and it comes from two dif
 
 So the string is a payload, not a key, and `$errorInfo` is the key. It publishes a `PlaybackErrorInfo` beside the state: a `PlaybackErrorKind` naming what failed in a form that survives a locale and a release, plus the underlying `NSError` domain and code wherever a Foundation / AVFoundation failure is involved. A non-nil `underlyingDomain` also marks the messages whose text the OS has localized.
 
-A failed custom-source probe publishes `.customSourceProbeFailed` with the probe error's `underlyingDomain` and `underlyingCode` when available. That information is set before the terminal `.error` state is delivered, so a state observer can read the cause from `errorInfo` without parsing the message. The engine's own live HLS ingest (`HLSLiveIngestReader`, which a known HLS playlist URL on the live path loads through) is the exception: when the probe failed because the live playlist was refused, the load publishes the origin's answer the way an HTTP reader's failed open does, `.sourceRateLimited` (429/503/509) or `.sourceRefused` with the status in `underlyingCode`, and `.liveSourceUnavailable` when the playlist could not be reached at all, so a host does not read a refusal as a stream it cannot play. A plain-URL live open (`isLive`) the origin answers with a status fails the same way (#796, a 500 or 502 is asked once more first); only a live open that reaches nothing publishes `.liveSourceUnavailable`.
+A failed custom-source probe publishes `.customSourceProbeFailed` with the probe error's `underlyingDomain` and `underlyingCode` when available. That information is set before the terminal `.error` state is delivered, so a state observer can read the cause from `errorInfo` without parsing the message. The engine's own live HLS ingest (`HLSLiveIngestReader`, which a known HLS playlist URL on the live path loads through) is the exception: when the probe failed because the live playlist was refused, the load publishes the origin's answer the way an HTTP reader's failed open does, `.sourceRateLimited` (429/503/509) or `.sourceRefused` with the status in `underlyingCode`, and `.liveSourceUnavailable` when the playlist could not be reached at all, so a host does not read a refusal as a stream it cannot play. A plain-URL live open (`isLive`) the origin answers with a status fails the same way (#796, a 500 or 502 is asked once more first); a TLS trust refusal on either publishes `.sourceCertificateRejected`. Only a live open that reaches nothing publishes `.liveSourceUnavailable`: a transport failure there is ridden out by the reconnect ladder first, and when the start gives up, the last connection's URL error domain and code are carried in `underlyingDomain` / `underlyingCode`. A transport failure does not establish that the media format is unsupported.
+
+Outside live startup, `.hlsFormatUnsupported` identifies an HLS segment, encryption or demuxed-audio layout
+the ingest cannot handle. `.hlsIngestFailed` identifies invalid playlists, invalid
+responses, decryption failures or an ingest stall. Both retain the underlying
+`HLSIngestError`; hosts can use the optional subreason below for diagnosis. These
+kinds describe the failure and do not select a host's retry or fallback policy.
+Live startup retains `.liveSourceUnavailable` except for HTTP and TLS refusals;
+the original cause remains available as described under [Diagnostics](#diagnostics).
+
+`PlaybackErrorInfo.hlsDiagnosticReason` preserves an optional finite
+`HLSIngestDiagnosticReason` from an underlying `HLSIngestError`, including through
+Foundation error wrappers. `HLSIngestError.diagnosticReason` exposes the same value
+directly. Missing EXTM3U, missing TARGETDURATION, an empty segment list, invalid
+response/encoding, unsupported encryption and key/decryption failures have
+distinct stable raw values; an unknown playlist or decryption message becomes a
+finite fallback, never a new token containing that message. This adds diagnostic
+detail without changing the failure's classification or recovery policy. Explicit
+`HLSIngestError` NSError codes match the historical Swift bridge; its error domain
+and human-readable descriptions are preserved. The message remains arbitrary payload
+and is not safe structured telemetry.
+
+`PlaybackErrorInfo.ffmpegErrorCode` optionally carries the original negative FFmpeg
+result from a demux failure, including through an NSError wrapper. It is separate
+from `underlyingCode`: the historical `AetherEngine.DemuxerError` case codes remain
+0 (open), 1 (stream information), and 2 (read). A thrown demux NSError carries the
+same FFmpeg value under `AetherFFmpegErrorCode` in `userInfo`. Missing or invalid
+metadata leaves the optional field nil; the existing error domain, message and
+case code keep their meaning. Applications that need FFmpeg-specific diagnostics
+or compatibility decisions should use this field instead of interpreting a case
+code as an FFmpeg result.
 
 Two kinds carry a number a host will want to read, and both mean the same thing happened: the origin answered the source request with an HTTP status instead of media, and `underlyingCode` is that status. `.sourceRefused` is the origin's verdict on the resource or on itself (a 401/403 refusal, which on a connection-capped IPTV panel most often means "the slot is still held", a 404, a 5xx). `.sourceRateLimited` is the same answer in the rate-limit shapes (429/503/509), split off because the recovery differs: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player meets the same meter (AE#377). Both are distinct from `.sourceOpenFailed`, which is what a corrupt or unreadable source produces; before `.sourceRefused` existed a refusal and a corrupt file arrived alike as "Invalid data found when processing input".
 
@@ -250,6 +280,9 @@ Two refusals, both raised BEFORE any teardown, so a refused correction leaves th
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with, so the change could not take effect; call `load()` again with the new option. `SessionReloadRefusal` is a public enum: this is a new case, so a host that switches over it exhaustively must handle it (a `default:` or a new `case`). |
 | `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path, where the side-audio merge does not exist, so it would play silent. |
 
+Changing `sourceDiagnosticsContext` also throws `loadIdentityNotCorrectable` before
+teardown: it identifies the original load and its requests. Pass a different
+context to a fresh `load()`; a tuning correction that keeps the context is allowed.
 Both are all-or-nothing: a correction refused for one field installs none of it.
 
 **Where a correction lands.** A URL source rebuilds through the full `load`, so every field applies.
@@ -1217,6 +1250,59 @@ as well.
 
 ## Diagnostics
 
+A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, including its
+original URL error in `underlyingDomain` / `underlyingCode`. That cause is diagnostic
+data only: a transport failure at open is still ridden out by the reconnect ladder,
+and the URL error is attached when the start finally gives up. HTTP refusals remain
+`sourceRefused` / `sourceRateLimited`, and TLS trust failures remain
+`sourceCertificateRejected`. Preserving a cause does not reclassify a dead live
+channel as a VOD `sourceOpenFailed`. `HLSIngestError.playlistUnreachable(status:)`
+also carries refused segment or AES key requests; its historical name and
+NSError case code are retained.
+
+`SourceNetworkDiagnostics.handler` optionally observes real source-request events.
+It is a process-wide observer and runs on the emitting thread, so a host callback
+must be thread-safe and non-blocking. Events from simultaneous players can interleave;
+filter by captured context or request identity rather than arrival order. `SourceNetworkDiagnostics.Event` carries a per-request `requestID`,
+`role`, `phase`, status/URL error code, byte/timing metrics and optional `context`.
+All event fields are immutable. `SourceNetworkDiagnostics.Role` and
+`SourceNetworkDiagnostics.Phase` are string-backed structs with stable `rawValue`
+tokens and `init(rawValue:)` for future values. Roles are `persistentRead`
+(`PersistentRead`), `chunkFetch` (`ChunkFetch`), `streaming` (`Streaming`),
+`probe` (`Probe`), `tailPrefetch` (`TailPrefetch`), `hlsPlaylist` (`HLSPlaylist`),
+`hlsSegment` (`HLSSegment`), `hlsKey` (`HLSKey`) and `boundedBody` (`BoundedBody`).
+Phases are `response`, `redirect`, `completed`, `metrics`, `bodyLimitExceeded`
+(`body_limit_exceeded`) and `abandoned`. Hosts should handle unknown values.
+It does not contain response bodies, header values or localized errors. Its
+`originalURL` and `url` are raw source URLs for host-side correlation: the host must
+redact them before persistence or forwarding and must choose its own logging and
+retention policy. Installing a handler does not change request or TLS policy.
+
+For source ownership, set `LoadOptions.sourceDiagnosticsContext` to a
+`SourceNetworkDiagnostics.Context(playbackID:attemptID:)` before `load()`. Both
+UUIDs are opaque host-owned identifiers; the engine neither creates a host session
+nor sends the identifiers in HTTP headers or URLs. The optional task-local
+`SourceNetworkDiagnostics.context` supplies the same context while constructing a
+standalone `HLSLiveIngestReader(playlistURL:httpHeaders:diagnosticContext:)` or
+other instrumented reader. An explicit `diagnosticContext` selects that reader's
+context instead. AVIO readers capture it at initialization and pass it explicitly
+to probes, ranged reads, reconnects, chunk fetches, streaming and tail prefetch,
+including requests started on detached or FFmpeg threads. HLS playlist, segment, key and carriage-probe requests capture
+their context at creation, retain it through redirects/completion and retain the
+source's context across internal reader reloads. A late event keeps the outgoing
+attempt's identifiers. A request without context remains unattributed; a handler
+must not fill it from whichever player happens to be active when it arrives.
+The context is load identity: `reloadAtCurrentPosition(applying:)` refuses a changed
+context before teardown, keeping the running session and its attribution intact.
+The held HTTP/1 HLS transport emits the same event contract: a streamed body emits
+`completed` only when it ends or fails, `body_limit_exceeded` when its bound is
+exceeded, and `abandoned` when the consumer drops or abandons it. The byte count
+excludes bytes discarded by a background drain. An open that fails after a response
+head arrived reports the hop that answered (the redirect target, not the original
+URL) and that head's status. AVPlayer's own internal
+network requests are not exposed, and a source path without instrumentation or
+captured context cannot be attributed by this API.
+
 `LoadOptions.nativeVideoFrameDiagnostics` opts into decoded-frame observation on SDR native
 loopback playback. It defaults to `false`; remote bypass, HDR, external playback, mobile
 background activity, PiP (including its foreground transition), pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
@@ -1290,6 +1376,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 
 | Option | Default | What it does |
 | --- | --- | --- |
+| `sourceDiagnosticsContext` | nil | Optional opaque `SourceNetworkDiagnostics.Context` retained by AVIO/HLS requests and internal reloads for host-side diagnostics. No wire headers, request-policy or playback effect. |
 | `httpHeaders` | empty | Extra headers on every probe, range and segment fetch. On `nativeRemoteHLS` they ride into the `AVURLAsset`, so header-enforcing IPTV origins work. Forwarded to sidecar subtitle fetches unless overridden. **Scoping differs by route.** On the plain `nativeRemoteHLS` bypass AVFoundation itself sends them to every host the playlists name (cross-host variants, segments and `EXT-X-KEY` URIs) and carries them across 302 redirects, so credential headers there reach every such host and the engine cannot narrow that. The per-origin credential scoping described for `HLSLiveIngestReader` applies only on the routes the engine fetches itself: the ingest, the disc reader, the origin relay, the subtitle proxy, the audio tap and the live subtitle renditions. A credential that must not reach every host a playlist names should not ride in `httpHeaders` on the bypass. |
 | `isLive` | false | Treat the source as live. Set it explicitly; duration-based auto-detection is too noisy. |
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. The window is a ceiling: the disk budget (a quarter of the free space, at most 2 GiB) bounds what is actually kept, so a long window on a high-bitrate channel or a small volume holds less than it asks for. With several engines running, each one's quarter is taken from the free space the others have not already claimed, so a tile added on a tight volume holds less history than the first one (AE#687). |
@@ -1344,7 +1431,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `sequentialOrigin` | false | Declare an origin that fabricates range answers: one long-lived unranged GET, no ranged probes, non-seekable pb. **Seeking is unavailable**; re-request the archive at a shifted start instead. A URL source the reader finds forward-only by itself (`Range` ignored, so it can only stream front to back; the open confirms a 200 answer with a one byte range, because some CDNs answer a cache miss that way) is served this way without the declaration when its container states a duration, which a stated `Content-Length` lets an MPEG-TS source estimate; `loadedOptions` then reads `true` with that duration declared, and without a duration it stays on the software path. An AirPlay hop on such a session swaps the item onto the LAN address instead of reopening the source, since a reopen could only start again from byte 0. |
 | `declaredDurationSeconds` | nil | Trusted duration, overriding the container's. Required alongside `sequentialOrigin` on VOD, where the tail read is gone. |
 | `maxConcurrentSourceRequests` | nil | Most requests the reader may have open against this origin at once, across every path it fetches on (pump ranges, detour blocks, size probes, tail prefetch, subtitle side reader, and the HLS live ingest's playlist, segment and key fetches, whose prefetch window narrows to it, AE#678). nil counts without capping and lowers the ceiling on its own after a 429/503/509. Set it when the provider states a limit; `1` also switches off the speculative parallel paths, which exist only to overlap with the pump. Counts **requests**, not TCP connections, because over HTTP/2 a session multiplexes every request onto one connection while the origin still counts each one (AE#377). It is also the only ceiling: several engines playing from one origin are bounded by this value and by what the origin refuses, not by a transport pool underneath it (AE#450). |
-| `sourceOpenPolicy` | `SourceOpenPolicy()` | HTTP VOD opening budgets for the playback reader and its reopens: `firstByteTimeout` (15 s) bounds the first data wait, `sizeProbeTimeout` (25 s) bounds the one retry and the whole size discovery, slot waits included. Nonpositive or nonfinite values take the defaults, anything above 120 s is capped. A request that gets no response is retried once with an open-ended Range and that connection stays the playback connection; two unanswered requests fail as `.sourceOpenFailed` instead of demoting the source to forward-only. A real length-less or Range-ignoring response keeps the ordinary sequential handling. Single-request origins run the size probes serially, others race them and join the losers before playback starts. Live, `sequentialOrigin`, remote HLS and disposable probes keep their own budgets. |
+| `sourceOpenPolicy` | `SourceOpenPolicy()` | HTTP VOD opening budgets for the playback reader and its reopens: `firstByteTimeout` (15 s) bounds the first data wait, `sizeProbeTimeout` (25 s) bounds the one retry and the whole size discovery, slot waits included. Nonpositive or nonfinite values take the defaults, anything above 120 s is capped. A request that gets no response is retried once with an open-ended Range and that connection stays the playback connection; two unanswered requests fail as `.sourceOpenFailed` instead of demoting the source to forward-only. A real length-less or Range-ignoring response keeps the ordinary sequential handling. Single-request origins run the size probes serially, others race them and join the losers before playback starts. When an open retires a failed ranged connection and switches to forward-only playback, the retired connection's transport error cannot fail the replacement; a refusal or transport failure from the replacement itself still reaches the host. Live, `sequentialOrigin`, remote HLS and disposable probes keep their own budgets. |
 | `heldSourceConnection` | false | Ask the source **once** and pull it, instead of ending the connection at the reader's window high water and asking again every 8 to 16 MB of drain (AE#377). For an origin that punishes repeated requests rather than concurrency: some CDNs refuse new requests for minutes at a stretch while serving an already open connection at full rate, and against one of those the request cadence is the defect, at any range size (measured at the reporting origin: 32 MB ranges raised to 256 MB, eight times fewer requests, the refusals unchanged). Where `maxConcurrentSourceRequests` bounds how many requests are in flight, this removes the second request. The read path is the engine's own HTTP/1.1 over a demand-driven stream task, so: **HTTP/1.1 only** (no ALPN, an HTTP/2-only origin is out of scope), the **system proxy configuration does not apply**, and TLS is the OS's through the same host trust decision as every other engine session but has not been exercised against a self-signed origin. A viewer who pauses ends the connection after five seconds and resuming costs one request at the frontier, because a held flow nobody reads is the process-wide Network.framework starvation of AE#310. Applies to the playback reader; the subtitle and enrichment side readers keep the default transport, since they park for minutes at a time. The open-time detection of an origin that ignores `Range` (see `sequentialOrigin`) does not cover it, because its open is open-ended. A finite HLS VOD on the HEVC-in-MPEG-TS ingest (AE#268) is covered too (AE#732): playlist, key and segment requests run over one persistent HTTP/1.1 connection per origin, reused across segments and fetched one at a time, for origins that refuse h2 or new connections but serve consecutive requests on one keep-alive connection. Each body is streamed into the ingest as it arrives. A full FIFO lets the current body finish but admits no next segment or key request until consumption makes room; seek, close or cancellation retires that wait. Only the wait for a response head has a wall-clock ceiling (45 s); a body ends on its size limit or on 30 s without a byte, never on its duration. A new connection opens only on a server close, an origin change, or a seek that abandons a body with more than 2 MB left or too slow to arrive within 3 s (otherwise the remainder is drained and the connection kept, with the next request waiting for it), and the log names each connection's protocol and request count. **Names the session**: the transport is chosen at open, so a reload that changes it is refused. |
 | `autoplay` | true | False mounts paused: the load skips the terminal `play()` and settles at `.paused` for a host that resumes later. It describes THIS MOUNT and nothing after it: the rebuilds a session makes on its own (`reloadAtCurrentPosition`, an option correction, the AirPlay LAN swap, an audio-delay nudge) come back in the transport state the session is in, not in this one. Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothing (the log names it as not applied rather than as applied, AE#464 round 3, and the call returns it as `sessionOwned` with `rebuilt` false rather than spending a teardown on it, AE#464 round 4); call `play()` or `pause()` instead. |
 

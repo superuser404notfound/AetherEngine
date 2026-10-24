@@ -26,6 +26,7 @@ struct PlaybackErrorInfoTests {
             #expect(observed?.kind == .customSourceProbeFailed)
             #expect(observed?.underlyingDomain == "AetherEngine.DemuxerError")
             #expect(observed?.underlyingCode != nil)
+            #expect(observed?.ffmpegErrorCode != nil)
             #expect(observed == engine.errorInfo)
         }
     }
@@ -44,10 +45,33 @@ struct PlaybackErrorInfoTests {
     }
 
     @MainActor
-    @Test("A live HLS join that reaches nothing publishes an unavailable live source", .timeLimit(.minutes(1)))
+    @Test("A live HLS join retains the actual connection error", .timeLimit(.minutes(1)))
     func unreachableLiveJoinIsUnavailable() async throws {
         let observed = try await failedLiveIngestLoad(try #require(URL(string: "http://127.0.0.1:1/live/1.m3u8")))
         #expect(observed?.kind == .liveSourceUnavailable)
+        #expect(observed?.underlyingDomain == NSURLErrorDomain)
+        #expect(observed?.underlyingCode == NSURLErrorCannotConnectToHost)
+    }
+
+    @MainActor
+    @Test("HLS format limits, invalid bodies and key HTTP refusals stay distinct")
+    func hlsFailureClassification() throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        for (error, kind, code) in [
+            (HLSIngestError.unsupportedSegmentFormat, PlaybackErrorKind.hlsFormatUnsupported, 4),
+            (.encryptedNotSupported, .hlsFormatUnsupported, 3),
+            (.playlistInvalid(reason: "private"), .hlsIngestFailed, 1),
+            (.segmentDecryptFailed(reason: "private"), .hlsIngestFailed, 2),
+            (.playlistUnreachable(status: 403), .sourceRefused, 403)
+        ] {
+            engine.publishLoadFailure(error)
+            #expect(engine.errorInfo?.kind == kind)
+            #expect(engine.errorInfo?.underlyingCode == code)
+        }
+        engine.publishLoadFailure(URLError(.secureConnectionFailed))
+        #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
+        #expect(engine.errorInfo?.underlyingCode == -1200)
     }
 
     @MainActor
@@ -85,11 +109,14 @@ struct PlaybackErrorInfoTests {
         defer { token.cancel() }
         var options = LoadOptions()
         options.isLive = true
+        let reader = HLSLiveIngestReader(playlistURL: url)
         do {
             _ = try await engine.load(
-                source: .custom(HLSLiveIngestReader(playlistURL: url), formatHint: "mpegts"), options: options)
+                source: .custom(reader, formatHint: "mpegts"), options: options)
             Issue.record("A refused live playlist must fail the load")
-        } catch {}
+        } catch {
+            #expect(reader.terminalError != nil, "Existing hosts must still observe a terminal reader")
+        }
         return observed
     }
 
@@ -133,6 +160,46 @@ struct PlaybackErrorInfoTests {
         #expect(info.kind == .nativeItemFailed)
         #expect(info.underlyingDomain == "CoreMediaErrorDomain")
         #expect(info.underlyingCode == -12939)
+        #expect(info.ffmpegErrorCode == nil)
+    }
+
+    @Test("Demux diagnostics preserve historical case codes and a separate FFmpeg cause")
+    func capturesDemuxDiagnostics() {
+        let cases: [(DemuxerError, Int)] = [
+            (.openFailed(code: -1094995529), 0),
+            (.streamInfoFailed(code: -1094995529), 1),
+            (.readFailed(code: -1094995529), 2)
+        ]
+        for (error, code) in cases {
+            let info = PlaybackErrorInfo(kind: .customSourceProbeFailed, message: "private", underlying: error)
+            #expect(info.underlyingDomain == "AetherEngine.DemuxerError")
+            #expect(info.underlyingCode == code)
+            #expect(info.ffmpegErrorCode == -1094995529)
+        }
+        let wrapper = NSError(domain: "wrapper", code: 42,
+                              userInfo: [NSUnderlyingErrorKey: DemuxerError.readFailed(code: -5) as NSError])
+        let info = PlaybackErrorInfo(kind: .sourceOpenFailed, message: "private", underlying: wrapper)
+        #expect(info.underlyingDomain == "wrapper")
+        #expect(info.underlyingCode == 42)
+        #expect(info.ffmpegErrorCode == -5)
+    }
+
+    @Test("FFmpeg metadata requires the SDK domain, a negative Int32 and bounded wrappers")
+    func rejectsInvalidDemuxDiagnostics() {
+        let invalidValues: [Any] = ["private", -1.5, Double.nan, Double.infinity, 0, 1, Int(Int32.min) - 1]
+        for value in invalidValues {
+            let error = NSError(domain: DemuxerError.errorDomain, code: 0,
+                                userInfo: [DemuxerError.ffmpegErrorCodeKey: value])
+            #expect(PlaybackErrorInfo(kind: .sourceOpenFailed, message: "private", underlying: error).ffmpegErrorCode == nil)
+        }
+        let wrongDomain = NSError(domain: "unrelated", code: 0,
+                                  userInfo: [DemuxerError.ffmpegErrorCodeKey: -5])
+        #expect(PlaybackErrorInfo(kind: .sourceOpenFailed, message: "private", underlying: wrongDomain).ffmpegErrorCode == nil)
+        var wrapped = DemuxerError.openFailed(code: -5) as NSError
+        for _ in 0..<6 {
+            wrapped = NSError(domain: "wrapper", code: 42, userInfo: [NSUnderlyingErrorKey: wrapped])
+        }
+        #expect(PlaybackErrorInfo(kind: .sourceOpenFailed, message: "private", underlying: wrapped).ffmpegErrorCode == nil)
     }
 
     @Test("An engine-authored failure has no underlying domain, which is how a host tells the halves apart")
@@ -140,6 +207,7 @@ struct PlaybackErrorInfoTests {
         let info = PlaybackErrorInfo(kind: .liveSourceUnavailable, message: "Live source unavailable")
         #expect(info.underlyingDomain == nil)
         #expect(info.underlyingCode == nil)
+        #expect(info.ffmpegErrorCode == nil)
         // The same constructor path the hosts use when there is nothing underneath.
         let fromNilError = PlaybackErrorInfo(kind: .liveSourceUnavailable,
                                              message: "Live source unavailable",

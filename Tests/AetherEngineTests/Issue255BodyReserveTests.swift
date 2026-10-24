@@ -27,6 +27,7 @@ final class ScriptedOriginServer: @unchecked Sendable {
     struct Recorded: Sendable {
         let method: String
         let range: String?
+        var path: String = "/"
     }
 
     struct Reply {
@@ -40,6 +41,8 @@ final class ScriptedOriginServer: @unchecked Sendable {
         var close: Bool = false
         /// Real bytes to serve instead of the filler; `bodyBytes` is ignored when set.
         var body: Data? = nil
+        /// A `Location` header, for a scripted redirect.
+        var location: String? = nil
     }
 
     private let listener: LoopbackListener
@@ -118,10 +121,12 @@ final class ScriptedOriginServer: @unchecked Sendable {
     private func serveOneRequest(_ fd: Int32) -> Bool {
         guard !stopped, let header = readRequestHeader(fd) else { return false }
         let lines = header.components(separatedBy: "\r\n")
-        let method = lines.first?.split(separator: " ").first.map(String.init) ?? "GET"
+        let requestLine = lines.first?.split(separator: " ") ?? []
+        let method = requestLine.first.map(String.init) ?? "GET"
+        let path = requestLine.count > 1 ? String(requestLine[1]) : "/"
         let range = lines.first(where: { $0.lowercased().hasPrefix("range:") })
             .map { String($0.dropFirst("range:".count)).trimmingCharacters(in: .whitespaces) }
-        let recorded = Recorded(method: method, range: range)
+        let recorded = Recorded(method: method, range: range, path: path)
         lock.lock()
         _requests.append(recorded)
         lock.unlock()
@@ -131,6 +136,7 @@ final class ScriptedOriginServer: @unchecked Sendable {
         var head = "HTTP/1.1 \(r.status) \(r.status == 206 ? "Partial Content" : "OK")\r\n"
         if let declared = r.declaredLength { head += "Content-Length: \(declared)\r\n" }
         if let cr = r.contentRange { head += "Content-Range: \(cr)\r\n" }
+        if let location = r.location { head += "Location: \(location)\r\n" }
         head += "Accept-Ranges: bytes\r\n"
         head += "Connection: \(keepAlive ? "keep-alive" : "close")\r\n\r\n"
         guard writeFully(fd, Array(head.utf8)) else { return false }

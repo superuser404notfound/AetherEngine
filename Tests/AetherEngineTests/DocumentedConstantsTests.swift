@@ -18,6 +18,13 @@ import AetherLibavcodec
 /// Adding a number to the docs? Pin it here in the same commit.
 @MainActor
 final class DocumentedConstantsTests: XCTestCase {
+    func testDemuxNSErrorCaseCodesMatchDocumentation() throws {
+        XCTAssertEqual((DemuxerError.openFailed(code: -1) as NSError).code, 0)
+        XCTAssertEqual((DemuxerError.streamInfoFailed(code: -1) as NSError).code, 1)
+        XCTAssertEqual((DemuxerError.readFailed(code: -1) as NSError).code, 2)
+        assertDocumented("0 (open), 1 (stream information), and 2 (read)", try documentation())
+    }
+
     func testLiveReplayQuarantineBoundsMatchDocumentation() throws {
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingBytes, 96 * 1_024 * 1_024)
         XCTAssertEqual(LivePacketReplayGuard.maximumPendingPackets, 10_000)
