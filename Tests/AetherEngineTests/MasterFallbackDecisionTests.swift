@@ -133,7 +133,11 @@ struct MasterFallbackPositionTests {
             .appendingPathComponent("Sources/AetherEngine/AetherEngine.swift")
         let text = try #require(try? String(contentsOf: source, encoding: .utf8))
         let fn = try #require(text.range(of: "func fallBackToMediaPlaylist("))
-        let body = String(text[fn.lowerBound...].prefix(4000))
+        // The whole function, up to the next declaration: a fixed-length window dropped the call
+        // out of view the moment the function grew (AE#849).
+        let rest = text[fn.upperBound...]
+        let end = rest.range(of: "\n    func ")?.lowerBound ?? rest.endIndex
+        let body = String(text[fn.lowerBound..<end])
         #expect(body.contains("host.mountedStartPosition"))
     }
 }

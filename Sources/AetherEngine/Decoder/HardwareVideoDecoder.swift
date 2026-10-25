@@ -21,9 +21,26 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         set { skipLock.lock(); _onFrame = newValue; skipLock.unlock() }
     }
     private var _onFrame: DecodedFrameHandler?
-    /// Not yet wired on the VT side (follow-up: read AV_PKT_DATA_DYNAMIC_HDR10_PLUS before decode,
-    /// mirror SoftwareVideoDecoder.extractHDR10PlusBytes). Flag kept so host wiring stays identical to SW path.
+    /// Fires once (decode thread) on the first packet carrying a valid ST 2094-40 message, as the
+    /// libavcodec decoder does; the engine then moves `videoFormat` to `.hdr10Plus`.
     var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+    /// HDR10+ per frame. VideoToolbox outputs in presentation order and the packets arrive in decode
+    /// order, so each packet's payload waits here under its presentation time until its frame comes
+    /// out, and leaves as that frame's `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. Only a PQ
+    /// stream is scanned; HDR10+ describes nothing else. Its own lock: the output callback must not
+    /// take `lock` (see `decode`).
+    private var scansHDR10Plus = false
+    private var hdr10PlusFraming = VideoNALFraming.lengthPrefixed(size: 4)
+    private var seenHDR10Plus = false
+    private let hdr10PlusLock = NSLock()
+    private var hdr10PlusByPTS: [HDR10PlusKey: Data] = [:]
+    private struct HDR10PlusKey: Hashable {
+        let value: CMTimeValue
+        let timescale: CMTimeScale
+        init(_ time: CMTime) { value = time.value; timescale = time.timescale }
+    }
+    /// Far past any reorder depth: entries for frames VideoToolbox never output do not pile up.
+    private static let hdr10PlusPendingLimit = 64
     var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
     var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
     private var streamColor = ColorDescription.unspecified
@@ -298,6 +315,10 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         streamColor = ColorDescription(codecpar: codecpar)
         streamCodecID = codecpar.pointee.codec_id
         streamProfile = codecpar.pointee.profile
+        scansHDR10Plus = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
+        hdr10PlusFraming = .lengthPrefixed(size: NALUnitChain.lengthPrefixSize(
+            codecID: streamCodecID, extradata: extradata,
+            extradataSize: Int(codecpar.pointee.extradata_size)) ?? 4)
         self.colorPrimaries = ColorAttachments.primaries(codecpar.pointee.color_primaries)
         self.colorTransfer = ColorAttachments.transfer(codecpar.pointee.color_trc)
         self.colorMatrix = ColorAttachments.matrix(codecpar.pointee.color_space)
@@ -588,6 +609,14 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
         guard sbStatus == noErr, let sb = sampleBuffer else { return }
 
+        let hdr10PlusPayload = scansHDR10Plus
+            ? HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: streamCodecID, framing: hdr10PlusFraming)
+            : nil
+        if hdr10PlusPayload != nil, !seenHDR10Plus {
+            seenHDR10Plus = true
+            onFirstHDR10PlusDetected?()
+        }
+
         // Tag non-keyframes as DependsOnOthers so VT can drop pre-seek RASL frames after a flush.
         if (packet.pointee.flags & AV_PKT_FLAG_KEY) == 0 {
             if let attachArray = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true),
@@ -620,6 +649,14 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             awaitingKeyframe = false
             recoveredAfterDropping = droppedAwaitingKeyframe
         }
+        // Stored only for a packet that reaches VT (the drops above never output a frame), and before
+        // the call, since VT may output synchronously.
+        if let hdr10PlusPayload {
+            hdr10PlusLock.lock()
+            if hdr10PlusByPTS.count >= Self.hdr10PlusPendingLimit { hdr10PlusByPTS.removeAll() }
+            hdr10PlusByPTS[HDR10PlusKey(pts)] = hdr10PlusPayload
+            hdr10PlusLock.unlock()
+        }
         // Async decode with temporal queueing; callback fires on VT's internal queue.
         var infoFlags = VTDecodeInfoFlags()
         let decodeStatus = VTDecompressionSessionDecodeFrame(
@@ -631,6 +668,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
         // AE#739: permanent for this session. Still under the hold that fed it, so a rebuild cannot
         // land between the call and the verdict and have the new session condemned for the old one.
+        if decodeStatus != noErr, hdr10PlusPayload != nil {
+            hdr10PlusLock.lock(); hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts)); hdr10PlusLock.unlock()
+        }
         let lostNow = decodeStatus == kVTInvalidSessionErr && !sessionLost
         if lostNow { sessionLost = true }
         lock.unlock()
@@ -677,6 +717,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // Drain in-flight frames then signal a discontinuity so VT drops its reference picture state.
         VTDecompressionSessionWaitForAsynchronousFrames(session)
         VTDecompressionSessionFinishDelayedFrames(session)
+        hdr10PlusLock.lock(); hdr10PlusByPTS.removeAll(); hdr10PlusLock.unlock()
     }
 
     func close() {
@@ -724,6 +765,12 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         skipLock.lock()
         _framesDecoded &+= 1
         skipLock.unlock()
+        var hdr10PlusData: Data?
+        if scansHDR10Plus {
+            hdr10PlusLock.lock()
+            hdr10PlusData = hdr10PlusByPTS.removeValue(forKey: HDR10PlusKey(pts))
+            hdr10PlusLock.unlock()
+        }
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
                 return
@@ -757,7 +804,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
 
         reportDecodedFormat(imageBuffer)
-        onFrame?(imageBuffer, pts, nil)
+        onFrame?(imageBuffer, pts, hdr10PlusData)
     }
 
     /// VideoToolbox decodes straight into the display buffer, so the buffer IS the decoded picture; its

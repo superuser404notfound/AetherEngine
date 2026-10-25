@@ -421,8 +421,16 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         }
         if count == 0 {
             let error = failure
+            // Only the source's own end ends the stream. The wait above also stops for a reader
+            // that is not current, and a seek can make it current again while this read waits for
+            // `operations`, which a cache miss holds to empty the store: that store is about to
+            // refill from the new position, and reading it as the end stopped playback at the
+            // landing (a DVD seek past the first cell, whose time-map seek settles at once, hit it
+            // in 7 of 8 runs).
+            let sourceEnded = ended
             condition.unlock()
             if let error { throw error }
+            guard sourceEnded else { throw ReadError.interrupted }
             return nil
         }
         condition.unlock()

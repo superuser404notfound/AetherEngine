@@ -1734,6 +1734,9 @@ public final class AetherEngine: ObservableObject {
     /// master and refusal answers the question the display will not. Latched for the process because the
     /// answer costs a fallback to obtain and does not change while the output configuration does not.
     ///
+    /// AE#849: tvOS only. A panel that engages HDR on demand (iOS, macOS) is never latched, see
+    /// `MasterFallbackDecision.shouldLatchPanelRefusal`.
+    ///
     /// Set ONLY by the two display-rejection codes. `-1002` also reaches the same fallback and means the
     /// manifest was filtered at parse time (#130), which is a statement about the playlist and not about
     /// the display; latching on it would teach the process a fact about the panel from an unrelated bug.
@@ -2753,8 +2756,13 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let itemDeathConfirmSeconds: TimeInterval = 3.0
 
     /// Single-shot latch for the reactive master->media fallback (#98): fall back at most once per
-    /// session so a media reload that also fails cannot loop. Reset on each load.
+    /// session so a media reload that also fails cannot loop. Reset in loadSession and in
+    /// stopInternal, so a session-preserving rebuild gets its own (#849).
     var masterFallbackUsed = false
+
+    /// AE#849: this session's fallback answered a display refusal of an HDR master, which an audio
+    /// switch does not change. Per session like `masterFallbackUsed`, and reset with it.
+    var masterRefusedByDisplay = false
 
     /// #93 PiP skips: AVKit-side seeks (PiP +-15s buttons) bypass the engine seek API, so a far
     /// playhead jump is detected on $renderedTime and, once settled, the native subtitle readers
@@ -2920,6 +2928,8 @@ public final class AetherEngine: ObservableObject {
             return
         }
         masterFallbackUsed = true
+        masterRefusedByDisplay = MasterFallbackDecision.isDisplayRejectionCode(rejection.code)
+            && session.servedSourceIsHDR
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
         // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
         if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
@@ -2932,11 +2942,17 @@ public final class AetherEngine: ObservableObject {
                     category: .engine)
             } else if MasterFallbackDecision.shouldLatchPanelRefusal(
                 code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
-                displaySwitchInProgress: switching) {
+                displaySwitchInProgress: switching,
+                panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand) {
                 Self.panelRefusedHDRMaster = true
                 EngineLog.emit(
                     "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
                     + "routes HDR sources media-direct until it returns from the background (#588)",
+                    category: .engine)
+            } else if HLSVideoEngine.builtInPanelEngagesOnDemand {
+                EngineLog.emit(
+                    "[DisplayCriteria] HDR master refused (code=\(rejection.code)) on a panel that engages HDR "
+                    + "on demand; this item falls back, later titles still offer the master (#849)",
                     category: .engine)
             } else {
                 EngineLog.emit(
@@ -7662,7 +7678,8 @@ public final class AetherEngine: ObservableObject {
                 if self.activeAudioTrackIndex == selected { continue }
                 let beforeReload = self.loadGeneration
                 let failure = await self.reloadWithAudioOverride(
-                    url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload)
+                    url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload,
+                    keepsDisplayRefusedMediaRoute: true)
                 // This rebuild owns one stopInternal generation. Background teardown or
                 // another SDK recovery cannot lend its successor to queued audio work.
                 guard !Task.isCancelled, self.audioSelectionEpoch == epoch, failure == nil,
@@ -7940,6 +7957,15 @@ public final class AetherEngine: ObservableObject {
         stallReengageTask = nil
         itemDeathConfirmTask?.cancel()
         itemDeathConfirmTask = nil
+        // The master->media fallback single-shot is per SESSION, and the reload this teardown
+        // precedes builds a new one (a fresh HLSVideoEngine with its own master). `load()` resets
+        // it in loadSession's prologue, but the session-preserving rebuilds
+        // (`reloadWithAudioOverride`, `reloadAtCurrentPosition`) reach loadNative directly and
+        // never pass through there, so a fallback spent on the outgoing session's master used to
+        // leak into the reload's, which then could not recover from its own master rejection and
+        // surfaced `.masterPlaylistRejected` instead of falling back (#849).
+        masterFallbackUsed = false
+        masterRefusedByDisplay = false
         // #95: stop the tap reader before the session (and its SegmentCache) goes away.
         // #356: counterpart to the install line, because a session-preserving reload lands here
         // too. The host sees its stream finish and has to re-install; without this the device log

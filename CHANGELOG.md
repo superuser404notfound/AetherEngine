@@ -106,6 +106,25 @@ the public-API contract.
 
 ### Fixed
 
+- **A pump that cannot keep up on the efficiency class stops dropping to it (#850, thanks @imbenjamin).**
+  The AE#286 relaxation moved the segment pump to `.utility` once it was 16 s ahead, on the
+  assumption that it still produces faster than real time there. A 4K Dolby Vision remux with
+  TrueHD Atmos rendered to APAC on an A15 Apple TV made 0.10 to 0.51x on `.utility`, so every
+  relaxed stretch drained the lead, the forward window never filled and VOD stalled every few
+  minutes. The pump now measures what it produces against wall time while relaxed and stays on
+  `.userInitiated` for the rest of the session once that falls below real time, and it rechecks
+  once a second instead of only at segment boundaries, where one slow segment had outlasted the
+  whole lead. A session that keeps up relaxes exactly as before.
+
+- **HDR10+ reaches the display on the software path (#814, thanks @williamliu0516).** The VideoToolbox decoder there never read the
+  ST 2094-40 SEI, so a PQ HEVC title played as plain HDR10 and `videoFormat` stayed `.hdr10`; it now
+  reports `.hdr10Plus` on the first message and hands each frame its payload as
+  `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. The libavcodec decoder attached one per frame already,
+  but from `av_dynamic_hdr_plus_to_t35`, which leaves out the six T.35 header bytes the attachment must
+  start with (`0xB5 0x00 0x3C 0x00 0x01 0x04`); they are put back. The loopback path needed nothing:
+  the SEI is in every served fragment from MKV, MP4 and MPEG-TS sources, and AVPlayer's decoded buffers
+  carry the per-frame metadata (measured on macOS 27 with a two-scene fixture).
+
 - **A plain-URL live open the origin answers with a status fails with that answer (#796, thanks @cmcpherson274).**
   7.38.0 typed the refusal in the reader, but the live fail-fast after the probe dropped it, so a 503
   reached the host as `liveSourceUnavailable` and `load` threw `DemuxerError.openFailed(-5)`. It now
@@ -133,6 +152,40 @@ the public-API contract.
   of each other are muxed exactly as before. When the source arrives barely faster than its bitrate
   and the silent tail is longer than the producer's lead, playback waits at the end of the audio until
   the producer has reached the end of the file, then plays the tail.
+
+- **A seek that misses the software path's packet cache no longer ends playback at its landing (AE#811, thanks @williamliu0516).**
+  The miss empties the read-ahead store while holding the store's operation lock, and a demux-loop
+  read that began inside the seek's window could leave its wait at once (its reader was not current
+  yet), get the lock only after the seek had landed, find the store empty and return nil, which the
+  loop takes for end of stream: "end of media" at the landing. An empty store is now the end only
+  when the producer has seen the source's own end; before that the read throws `.interrupted` and the
+  loop reads again. Seen on DVD-Video, whose time-map seek settles at once: a seek past the first
+  cell ended playback in 7 of 8 runs, in none of 8 with the fix (48 seeks that missed the cache).
+
+- **A session-preserving reload recovers from its own master rejection again (#849, thanks @adityabakare).**
+  The reactive master-to-media fallback is single-shot per session, and its latch was reset only in
+  `load()`'s prologue, which `reloadWithAudioOverride` and `reloadAtCurrentPosition` never pass
+  through. A fallback spent on the outgoing session's master (a Dolby Vision P8.1 source's one
+  `-11868` at mount) carried into the reload, so the rebuilt master's own rejection (an audio switch
+  to AC-3 on macOS) was signalled but never mounted the media playlist and ended the session at
+  `.masterPlaylistRejected` ("Cannot open"). The latch now resets in `stopInternal`, the teardown
+  every rebuild passes through.
+
+- **An audio switch keeps the media playlist its session fell back to (#849).** When the display
+  refused the session's HDR master (`-11868` / `-11848`), the switch rebuilt a master that differs
+  only in its audio CODECS and paid the same rejection and in-place fallback again. It now serves
+  the media playlist straight away, and the rebuilt session carries the refusal so the switch after
+  it does too. A parse failure, an SDR refusal, `selectTitle` and `reloadAtCurrentPosition` still
+  route afresh: those either change the picture or follow a return from the background, where the
+  display may have changed.
+
+- **A refused HDR master no longer latches the panel refusal on iOS and macOS (#849).** The AE#588
+  latch only moves the panel answer, and the routing on a panel that engages HDR on demand reads the
+  display's eligibility instead, so on those platforms it changed nothing except a log line claiming
+  every later HDR title went media-direct. Such a refusal is not a fact about the panel either: on a
+  MacBook Air M1 SDR panel a Dolby Vision P8.1 master with and without `SUPPLEMENTAL-CODECS`, a
+  High-tier 3832x1600 PQ master and an audio switch to AC-3 on each were all accepted. The item still
+  falls back, later titles are still offered the master, and the log now says so. tvOS is unchanged.
 
 ## [7.47.0] - 2026-10-23
 

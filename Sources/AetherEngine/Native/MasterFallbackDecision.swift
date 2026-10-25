@@ -46,9 +46,19 @@ enum MasterFallbackDecision {
     /// AE#535 (2026-10-11): nor when the refused master advertised `VIDEO-RANGE=SDR`. A refusal of an SDR
     /// master says nothing about HDR presentation, yet it latched the HDR route for every later title
     /// (cmcpherson274, two SDR titles' -11848 refusals at 7.15.1 and 7.17.1).
+    ///
+    /// AE#849: nor on a panel that engages HDR on demand (iOS, macOS). The latch only ever moves the
+    /// panel answer, and the routing there reads the display's eligibility instead, so it changed nothing
+    /// but a log line claiming every later HDR title went media-direct. Nor is the refusal a fact about
+    /// such a panel: an eligible built-in panel takes the master however it is presenting (measured on a
+    /// MacBook Air M1 SDR panel: a P8.1 master with and without SUPPLEMENTAL-CODECS, a High-tier 3832x1600
+    /// PQ master and an audio switch to AC-3 on both, none refused), so a refusal there is about the
+    /// master, and latching it would take the master from later titles it would have served.
     static func shouldLatchPanelRefusal(code: Int, servedMasterIsHDR: Bool, displayEligibleForHDRNow: Bool,
-                                        displaySwitchInProgress: Bool) -> Bool {
+                                        displaySwitchInProgress: Bool,
+                                        panelEngagesHDROnDemand: Bool = false) -> Bool {
         isDisplayRejectionCode(code) && servedMasterIsHDR && displayEligibleForHDRNow && !displaySwitchInProgress
+            && !panelEngagesHDROnDemand
     }
 
     /// Any code that means "AVPlayer rejected the served master itself": the display-rejection pair
@@ -99,5 +109,17 @@ enum MasterFallbackDecision {
         errorCode: Int, servingMasterPlaylist: Bool, alreadyFellBack: Bool
     ) -> Bool {
         isMasterRejectionCode(errorCode) && servingMasterPlaylist && !alreadyFellBack
+    }
+
+    /// AE#849: whether an audio switch rebuilds onto the media playlist its session already fell back to.
+    ///
+    /// The switch changes the audio and nothing the display was asked about, so a display that refused
+    /// this session's HDR master refuses the rebuilt one too and the rebuild pays the same rejection and
+    /// fallback again. Only a display refusal of an HDR master carries: a `-1002` parse failure is about
+    /// the playlist, which the switch rewrites, and an SDR refusal is about the window (#535).
+    static func audioSwitchKeepsMediaRoute(
+        outgoingServingMaster: Bool, outgoingMasterRefusedByDisplay: Bool
+    ) -> Bool {
+        !outgoingServingMaster && outgoingMasterRefusedByDisplay
     }
 }

@@ -471,4 +471,42 @@ struct HDR10PlusMetadataScanTests {
             }
         }
     }
+
+    @Test("Core Media's per-frame payload starts at the T.35 country code, from SEI and from side data")
+    func coreMediaPayload() throws {
+        // SEI: the validated message, verbatim and header first, whatever the framing.
+        for hevc in [true, false] {
+            let codec = hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264
+            try withPacket(Self.lengthPrefixed(Self.sei(hevc: hevc), width: 4)) { packet in
+                let payload = HDR10PlusMetadataScan.coreMediaPayload(
+                    packet, codecID: codec, framing: .lengthPrefixed(size: 4))
+                #expect(payload.map { [UInt8]($0) } == Self.t35())
+            }
+            try withPacket(Self.annexB(Self.sei(hevc: hevc))) { packet in
+                let payload = HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: codec, framing: .annexB)
+                #expect(payload.map { [UInt8]($0) } == Self.t35())
+            }
+        }
+        // Side data: libavutil's serialiser omits the six header bytes, which have to come back.
+        for source in [Self.t35(), Self.t35(windows: 3, grids: true, toneMapping: true)] {
+            try withPacket { packet in
+                try addSideData(packet, payload: source)
+                let payload = try #require(HDR10PlusMetadataScan.coreMediaPayload(
+                    packet, codecID: AV_CODEC_ID_VP9, framing: .annexB))
+                #expect(Array(payload.prefix(6)) == Self.header)
+                #expect(payload.count == source.count)
+                let metadata = try #require(av_dynamic_hdr_plus_alloc(nil))
+                defer { av_free(metadata) }
+                let parsed = payload.withUnsafeBytes {
+                    av_dynamic_hdr_plus_from_t35(
+                        metadata, $0.bindMemory(to: UInt8.self).baseAddress! + 6, payload.count - 6)
+                }
+                #expect(parsed >= 0)
+            }
+        }
+        // Nothing to attach: a packet without the message, and a slice that only looks like one.
+        try withPacket(Self.annexB([0x26, 0x01] + Self.header)) { packet in
+            #expect(HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: AV_CODEC_ID_HEVC, framing: .annexB) == nil)
+        }
+    }
 }

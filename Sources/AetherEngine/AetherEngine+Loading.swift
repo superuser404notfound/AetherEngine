@@ -806,6 +806,7 @@ extension AetherEngine {
         dvrWindowSeconds: Double? = nil,
         liveRejoin: Bool = false,
         preopenedDemuxer: Demuxer? = nil,
+        keepsMediaPlaylistRoute: Bool = false,
         generation: UInt64,
         resolvePanelRouting: (() async throws -> Bool)? = nil
     ) async throws {
@@ -1350,6 +1351,13 @@ extension AetherEngine {
         // #93 residual: hand the resume position to the session so the FIRST producer anchors at
         // the matching segment instead of producing seg0 into an immediate teardown.
         session.initialStartSeconds = startPosition
+        if keepsMediaPlaylistRoute {
+            session.keepsMediaPlaylistRoute = true
+            EngineLog.emit(
+                "[AetherEngine] #849 audio switch keeps the media playlist: the display refused this "
+                + "session's HDR master, and the switch does not change what it was asked",
+                category: .session)
+        }
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
         var playbackURL: URL
@@ -2441,7 +2449,8 @@ extension AetherEngine {
         expectedGeneration: UInt64,
         discTitleIDOverride: Int? = nil,
         resumeOverride: Double? = nil,
-        resumePlaying: Bool? = nil
+        resumePlaying: Bool? = nil,
+        keepsDisplayRefusedMediaRoute: Bool = false
     ) async -> Error? {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
         guard loadGeneration == expectedGeneration, loadedURL != nil else {
@@ -2579,12 +2588,20 @@ extension AetherEngine {
                 return nil
             }
         }
+        // AE#849: read before the teardown resets it. See `MasterFallbackDecision.audioSwitchKeepsMediaRoute`.
+        let keepsMediaRoute = keepsDisplayRefusedMediaRoute
+            && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
+                outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
+                outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
         stopInternal(resetDisplayCriteria: false,
                      keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                      keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .inactive
         pendingInPlaceItemHandover = keepAudioSwitchItem
+        // The rebuilt session starts on the media playlist and never falls back itself, so it inherits
+        // the refusal, or the switch after this one would serve the master again.
+        masterRefusedByDisplay = keepsMediaRoute
         if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         let gen = loadGeneration
@@ -2784,6 +2801,7 @@ extension AetherEngine {
                     // Live reload = live REJOIN: skip initial seek so AVPlayer joins at edge-minus-holdback, not the stale rebuilt start. See LiveReloadPolicy.
                     liveRejoin: loadedOptions.isLive,
                     preopenedDemuxer: customPreopened,
+                    keepsMediaPlaylistRoute: keepsMediaRoute,
                     generation: gen
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)

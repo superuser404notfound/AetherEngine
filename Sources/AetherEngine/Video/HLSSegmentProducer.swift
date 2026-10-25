@@ -924,6 +924,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pumpQoSCurrent: qos_class_t = QOS_CLASS_USER_INITIATED
     private var pumpQoSLastSeg = Int.min
     private var pumpEpochHighestStored = Int.min
+    /// AE#850: a segment boundary is not often enough to decide on. At 0.1x a single segment took
+    /// 19 s of wall time on `.utility`, longer than the whole relaxed lead, so the promotion landed
+    /// at lead -1 with AVPlayer already waiting. The pump also decides once a second in between.
+    private var pumpQoSNextCheckNanos: UInt64 = 0
+    private var pumpRelaxationRate = PumpRelaxationRateProbe()
+    /// AE#850: set once the relaxed class has measured below real time. It outlives pump restarts:
+    /// a seek does not make the decode, the bridge or the device any cheaper.
+    private var pumpRelaxationRefused = false
 
     private let stateLock = NSLock()
     private var pumpStarted = false
@@ -1867,6 +1875,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// it) is distinguishable from healthy backpressure (cacheTarget climbing toward target). VOD only; live keeps
     /// its own watchdogs.
     private func awaitBackpressureRelease(target: Int, head: Int, context: String) -> Bool {
+        // AE#850: a relaxed pump that parks is keeping up.
+        if pumpQoSCurrent == QOS_CLASS_UTILITY { pumpRelaxationRate.reset() }
         // Already broken on this session (e.g. a teardown-flush ensureMuxer call): stay broken, don't re-park.
         if isBackpressureWedgeBroken() { return false }
         // #240: parked means the forward buffer is full and the link is free. Released here rather
@@ -2040,6 +2050,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func awaitPrefetchDiskBudgetRelease(head: Int, context: String,
                                                 detectWedge: Bool = false) -> Bool {
         guard prefetchDiskBudgetBytes > 0 else { return true }
+        if pumpQoSCurrent == QOS_CLASS_UTILITY { pumpRelaxationRate.reset() }
         // #240: same release as the backpressure park; a parked pump is not using the link.
         sideReaderLinkGate?.videoFetchEnded()
         defer { sideReaderLinkGate?.videoFetchBegan() }
@@ -2765,7 +2776,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // A consumer that has fetched has still not necessarily started rendering: AVPlayer keeps
         // filling its startup buffer after the first segment, and demoting there cost 80 ms of
         // time-to-first-frame under load with the forward buffer already 9 segments deep.
-        let relaxed = Self.pumpMayRelax(
+        let relaxed = !pumpRelaxationRefused && Self.pumpMayRelax(
             hasStartedRendering: hasStartedRenderingProvider?() ?? true,
             targetIndex: target,
             epochHighestStored: pumpEpochHighestStored,
@@ -2774,6 +2785,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let desired: qos_class_t = relaxed ? QOS_CLASS_UTILITY : QOS_CLASS_USER_INITIATED
         guard desired != pumpQoSCurrent else { return }
         pumpQoSCurrent = desired
+        pumpRelaxationRate.suspend()
         pthread_set_qos_class_self_np(desired, 0)
         // Read the class back: a thread that was opted out of the QoS system silently keeps the old
         // one, and then the whole mechanism is a no-op that still looks configured.
@@ -2781,6 +2793,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
             "[HLSSegmentProducer] pump qos -> \(QoSClass.name(desired)) "
             + "(now=\(QoSClass.name(qos_class_self())) epochHead=\(pumpEpochHighestStored) "
             + "target=\(target) lead=\(lead))",
+            category: .session
+        )
+    }
+
+    /// AE#850: while relaxed, compare the content this pump demuxes against wall time, and stop
+    /// relaxing for the rest of the session once `.utility` has proved slower than real time. The
+    /// demux position stands for production because the bridge and the muxer run on this thread (the
+    /// APAC encode queue inherits its class), so a pump that demuxes slowly produces slowly.
+    private func measurePumpRelaxationRate(nowNanos: UInt64, dts: Int64) {
+        guard !isLive, !pumpRelaxationRefused, pumpQoSCurrent == QOS_CLASS_UTILITY,
+              dts != Int64.min, sourceVideoTbSeconds > 0 else { return }
+        let wall = Double(nowNanos) / 1e9
+        let content = Double(dts) * sourceVideoTbSeconds
+        guard let rate = pumpRelaxationRate.observe(wallSeconds: wall, contentSeconds: content) else { return }
+        pumpRelaxationRefused = true
+        EngineLog.emit(
+            "[HLSSegmentProducer] pump qos: utility produced at \(String(format: "%.2f", rate))x real time, "
+            + "below \(String(format: "%.2f", PumpRelaxationRateProbe.requiredRate))x, "
+            + "staying userInitiated for this session (AE#850)",
             category: .session
         )
     }
@@ -3379,7 +3410,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // consumer waiting on the first segment it cuts.
         pumpQoSCurrent = QOS_CLASS_USER_INITIATED
         pumpQoSLastSeg = Int.min
+        pumpQoSNextCheckNanos = 0
         pumpEpochHighestStored = Int.min
+        pumpRelaxationRate.suspend()
         pthread_set_qos_class_self_np(pumpQoSCurrent, 0)
         EngineLog.emit(
             "[HLSSegmentProducer] pump thread qos=\(QoSClass.name(qos_class_self()))",
@@ -4458,8 +4491,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         : vodCutter.index(pts: planBoundaryAxis.timestamp(dts: packet.pointee.dts,
                                                                           pts: packet.pointee.pts),
                                           isKeyframe: isVideoKeyframe)
-                    if thisVideoSeg != pumpQoSLastSeg {
+                    let nowNanos = DispatchTime.now().uptimeNanoseconds
+                    if thisVideoSeg != pumpQoSLastSeg || nowNanos >= pumpQoSNextCheckNanos {
                         pumpQoSLastSeg = thisVideoSeg
+                        pumpQoSNextCheckNanos = nowNanos + 1_000_000_000
+                        measurePumpRelaxationRate(nowNanos: nowNanos, dts: packet.pointee.dts)
                         retunePumpQoS()
                     }
                     if let prev = pendingVideoPkt {
