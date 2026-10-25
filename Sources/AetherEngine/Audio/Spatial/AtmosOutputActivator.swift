@@ -11,8 +11,8 @@ import AVFoundation
 ///
 /// The stream (`Resources/silent-atmos.mp4`, written bit by bit by `Scripts/make-silent-atmos.swift`)
 /// decodes to digital silence, so nothing is mixed into the programme. It plays only while the host
-/// player plays or waits to play an item `playsAPAC` accepts, and is released otherwise, since a
-/// prerolled E-AC-3 stream would compete with other audio.
+/// player plays or waits to play an item `playsAPAC` accepts (and for a short grace after a pause,
+/// see #848), and is released otherwise, since a prerolled E-AC-3 stream would compete with other audio.
 ///
 /// It runs only for TrueHD Atmos rendered to APAC: a DTS:X programme is not Dolby Atmos, and the
 /// receiver must not say it is.
@@ -25,6 +25,13 @@ import AVFoundation
 /// `AVSampleBufferAudioRenderer`, and an Apple TV 4K (tvOS 26.6) whose receiver showed Atmos for the
 /// AVPlayer route's APAC did not show it for the same title's APAC on that renderer. There the activator
 /// follows the host's transport instead of a player (`attachRenderer`).
+///
+/// #848: a host pause no longer pauses it at once. Stopping the stream let the output leave Dolby
+/// Atmos, and a Samsung HW-Q990H re-locked on every resume and scrub, sometimes with a short dropout.
+/// It keeps playing for `pauseGrace` and pauses only if the host is still paused then. The grace is
+/// bounded because a playing player keeps the receiver busy and counts as audio playing, and a long
+/// pause re-locking once on resume is the lesser cost; it ends before tvOS's shortest screen saver
+/// delay of two minutes.
 @MainActor
 final class AtmosOutputActivator {
     static let silentAtmosStream = Bundle.module.url(forResource: "silent-atmos", withExtension: "mp4")!
@@ -40,9 +47,17 @@ final class AtmosOutputActivator {
     private var routeObserver: NSObjectProtocol?
     private let outputPortTypes: @MainActor () -> [String]
     private var loggedRouteVerdict: Bool?
+    private let pauseGrace: Duration
+    private var pauseAfterGrace: Task<Void, Never>?
 
-    init(outputPortTypes: @escaping @MainActor () -> [String] = AtmosOutputActivator.currentOutputPortTypes) {
+    nonisolated static let defaultPauseGrace: Duration = .seconds(60)
+
+    init(
+        outputPortTypes: @escaping @MainActor () -> [String] = AtmosOutputActivator.currentOutputPortTypes,
+        pauseGrace: Duration = AtmosOutputActivator.defaultPauseGrace
+    ) {
         self.outputPortTypes = outputPortTypes
+        self.pauseGrace = pauseGrace
         player.automaticallyWaitsToMinimizeStalling = false
     }
 
@@ -160,16 +175,33 @@ final class AtmosOutputActivator {
             return
         }
         guard playing else {
-            player.pause()
+            holdThroughPause()
             return
         }
+        pauseAfterGrace?.cancel()
+        pauseAfterGrace = nil
         if looper == nil {
             looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: Self.silentAtmosStream))
         }
         player.play()
     }
 
+    /// True while the silent stream is playing.
+    var isPlayingStream: Bool { player.rate != 0 }
+
+    private func holdThroughPause() {
+        guard isPlayingStream, pauseAfterGrace == nil else { return }
+        pauseAfterGrace = Task { [weak self, pauseGrace] in
+            try? await Task.sleep(for: pauseGrace)
+            guard !Task.isCancelled, let self else { return }
+            self.pauseAfterGrace = nil
+            self.player.pause()
+        }
+    }
+
     private func release() {
+        pauseAfterGrace?.cancel()
+        pauseAfterGrace = nil
         guard let looper else { return }
         player.pause()
         looper.disableLooping()

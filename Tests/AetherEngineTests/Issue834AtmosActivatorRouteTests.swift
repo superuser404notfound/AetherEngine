@@ -35,6 +35,15 @@ struct Issue834AtmosActivatorRouteTests {
         #expect(AetherEngine.softwareAtmosOutputPlaying(.error("failed")) == nil)
     }
 
+    // The session's own value, pinned where there is no session: the test below only builds for iOS
+    // and tvOS, so a macOS run passed with the constant spelled "HDMI" while every HDMI route on an
+    // Apple TV reported "HDMIOutput" and none took the activator.
+    @Test("the spelled-out port type is the one tvOS reports for HDMI")
+    func portTypeIsHDMIOutput() {
+        #expect(AtmosOutputActivator.hdmiPortType == "HDMIOutput")
+        #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: ["HDMI"]))
+    }
+
     #if os(iOS) || os(tvOS)
     @Test("the spelled-out port type is the session's own")
     func portTypeMatchesTheSession() {

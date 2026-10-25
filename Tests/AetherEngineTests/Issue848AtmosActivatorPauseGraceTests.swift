@@ -1,0 +1,74 @@
+import AVFoundation
+import Testing
+@testable import AetherEngine
+
+/// AE#848: pausing the silent Atmos stream with the host let an HDMI soundbar drop out of Dolby Atmos
+/// and re-lock on every resume and scrub. The stream now rides through a pause for a bounded grace.
+@MainActor
+@Suite("The Atmos output activator holds through a short pause (#848)", .serialized)
+struct Issue848AtmosActivatorPauseGraceTests {
+
+    private func attached(grace: Duration, ports: [String] = ["HDMIOutput"]) -> (AtmosOutputActivator, AVPlayer) {
+        let host = AVPlayer(playerItem: AVPlayerItem(url: AtmosOutputActivator.silentAtmosStream))
+        host.isMuted = true
+        let activator = AtmosOutputActivator(outputPortTypes: { ports }, pauseGrace: grace)
+        activator.attach(to: host) { _ in true }
+        return (activator, host)
+    }
+
+    @Test("a pause keeps the stream playing until the grace runs out")
+    func pauseHoldsThenPauses() async throws {
+        let (activator, host) = attached(grace: .milliseconds(300))
+        defer { activator.detach() }
+        host.play()
+        #expect(activator.isPlayingStream)
+        host.pause()
+        #expect(activator.isPlayingStream)
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(!activator.isPlayingStream)
+        host.play()
+        #expect(activator.isPlayingStream)
+    }
+
+    @Test("a resume inside the grace keeps the stream playing past it")
+    func resumeInsideGraceCancelsThePause() async throws {
+        let (activator, host) = attached(grace: .milliseconds(300))
+        defer { activator.detach() }
+        host.play()
+        host.pause()
+        try await Task.sleep(for: .milliseconds(100))
+        host.play()
+        try await Task.sleep(for: .milliseconds(700))
+        #expect(activator.isPlayingStream)
+    }
+
+    @Test("a paused host never starts the stream")
+    func pausedHostDoesNotStart() {
+        let (activator, _) = attached(grace: .seconds(60))
+        defer { activator.detach() }
+        #expect(!activator.isPlayingStream)
+    }
+
+    @Test("detaching during the grace stops the stream at once")
+    func detachEndsTheGrace() {
+        let (activator, host) = attached(grace: .seconds(60))
+        host.play()
+        host.pause()
+        activator.detach()
+        #expect(!activator.isPlayingStream)
+    }
+
+    @Test("a route that is not HDMI never plays it")
+    func nonHDMIRouteStaysOff() {
+        let (activator, host) = attached(grace: .seconds(60), ports: ["AirPlay"])
+        defer { activator.detach() }
+        host.play()
+        #expect(!activator.isPlayingStream)
+    }
+
+    @Test("the default grace ends before the shortest tvOS screen saver delay")
+    func defaultGraceIsBounded() {
+        #expect(AtmosOutputActivator.defaultPauseGrace > .seconds(10))
+        #expect(AtmosOutputActivator.defaultPauseGrace < .seconds(120))
+    }
+}
