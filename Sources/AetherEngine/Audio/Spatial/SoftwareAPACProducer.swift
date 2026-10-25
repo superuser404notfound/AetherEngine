@@ -43,10 +43,11 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
 
     var feedEpoch: UInt64 { feedLock.withLock { _feedEpoch } }
 
-    /// The bridge's first packet needs an encode chunk behind it, about 4096 frames, which is some 100
-    /// TrueHD access units (one per packet), plus up to another 100 while the decoder waits for a major
-    /// sync after a mid-stream start. The demux loop's default of 50 sent every TrueHD load to the
-    /// video-anchored clock; the bridge's own dead-decoder bound is the budget.
+    /// The bridge's first packet needs an encode chunk (2048 frames) and the encoder's 2048 priming
+    /// frames behind it, about 4096 frames, which is some 100 TrueHD access units (one per packet), plus
+    /// up to another 100 while the decoder waits for a major sync after a mid-stream start. The demux
+    /// loop's default of 50 sent every TrueHD load to the video-anchored clock; the bridge's own
+    /// dead-decoder bound is the budget.
     var firstBufferPacketBudget: Int { SpatialAudioBridge.silentFeedPacketThreshold }
 
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
