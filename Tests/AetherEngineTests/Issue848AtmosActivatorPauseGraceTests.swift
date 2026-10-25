@@ -71,4 +71,26 @@ struct Issue848AtmosActivatorPauseGraceTests {
         #expect(AtmosOutputActivator.defaultPauseGrace > .seconds(10))
         #expect(AtmosOutputActivator.defaultPauseGrace < .seconds(120))
     }
+
+    @Test("the software host's renderer path rides through a pause for the same grace")
+    func rendererPathHoldsThroughPause() async throws {
+        var playing: Bool? = true
+        let activator = AtmosOutputActivator(outputPortTypes: { ["HDMIOutput"] }, pauseGrace: .milliseconds(300))
+        defer { activator.detach() }
+        activator.attachRenderer { playing }
+        #expect(activator.isPlayingStream)
+        playing = false
+        activator.refresh()
+        #expect(activator.isPlayingStream)
+        try await Task.sleep(for: .milliseconds(900))
+        #expect(!activator.isPlayingStream)
+        playing = true
+        activator.refresh()
+        #expect(activator.isPlayingStream)
+        playing = false
+        activator.refresh()
+        playing = nil
+        activator.refresh()
+        #expect(!activator.isPlayingStream)
+    }
 }
