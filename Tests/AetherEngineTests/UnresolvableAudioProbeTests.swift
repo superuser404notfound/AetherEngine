@@ -87,7 +87,7 @@ struct UnresolvableAudioProbeTests {
     func ac4ChannelOpensEarly() throws {
         let ts = SyntheticTS.broadcast(accessUnits: 3000, audio: .ac4)
         #expect(ts.count > 5_000_000)
-        let reader = CountingReader(data: ts)
+        let reader = ProbeReachReader(data: ts)
         let demuxer = Demuxer()
         try demuxer.open(reader: reader, formatHint: "mpegts", profile: .playback, isLive: true)
         defer { demuxer.close() }
@@ -114,7 +114,7 @@ struct UnresolvableAudioProbeTests {
     }
 
     private func reach(_ ts: Data) throws -> Int {
-        let reader = CountingReader(data: ts)
+        let reader = ProbeReachReader(data: ts)
         let demuxer = Demuxer()
         try demuxer.open(reader: reader, formatHint: "mpegts", profile: .playback, isLive: true)
         defer { demuxer.close() }
@@ -125,7 +125,7 @@ struct UnresolvableAudioProbeTests {
 
 /// Counts how far into the source an open had to read. Disc probing is off because its sparse
 /// signature reads seek near the end, and the reach is the whole measurement here.
-private final class CountingReader: IOReader, @unchecked Sendable {
+final class ProbeReachReader: IOReader, @unchecked Sendable {
     private let data: Data
     private var position = 0
     private var furthest = 0
@@ -173,7 +173,7 @@ private final class CountingReader: IOReader, @unchecked Sendable {
 /// With `ac4` the PMT gains a private stream carrying the `AC-4` registration descriptor, which is
 /// the row `mpegts.c` matches to `AV_CODEC_ID_AC4`; the payload behind it is junk, since nothing in
 /// this build could decode a real one either.
-private enum SyntheticTS {
+enum SyntheticTS {
 
     static let videoPID: UInt16 = 0x0100
     static let pmtPID: UInt16 = 0x1000
@@ -216,16 +216,22 @@ private enum SyntheticTS {
 """
 
     static let audioPID: UInt16 = 0x0101
+    static let subtitlePID: UInt16 = 0x0102
 
     /// What the PMT declares on the audio PID.
     enum AudioShape { case none, ac4 }
 
-    static func broadcast(accessUnits: Int, audio: AudioShape = .none) -> Data {
+    /// What the PMT declares on the subtitle PID. `.pgs` is a Blu-ray PGS track that never carries a
+    /// packet, the shape of a sparse track whose first cue lies past the probe.
+    enum SubtitleShape { case none, pgs }
+
+    static func broadcast(accessUnits: Int, audio: AudioShape = .none,
+                          subtitle: SubtitleShape = .none) -> Data {
         let au = Data(base64Encoded: h264Base64, options: .ignoreUnknownCharacters) ?? Data()
         var cc: [UInt16: UInt8] = [:]
         var out = Data()
         out.append(psi(pid: 0x0000, cc: &cc, section: patSection()))
-        out.append(psi(pid: pmtPID, cc: &cc, section: pmtSection(audio: audio)))
+        out.append(psi(pid: pmtPID, cc: &cc, section: pmtSection(audio: audio, subtitle: subtitle)))
         for i in 0..<accessUnits {
             let pts = Int64(i) * frameTicks
             out.append(pes(pid: videoPID, streamID: 0xE0, payload: au, pts: pts, cc: &cc))
@@ -246,11 +252,17 @@ private enum SyntheticTS {
         return section(tableID: 0x00, body: body)
     }
 
-    private static func pmtSection(audio: AudioShape) -> Data {
+    private static func pmtSection(audio: AudioShape, subtitle: SubtitleShape) -> Data {
         var body = Data([0x00, 0x01])
         body.append(contentsOf: [0xC1, 0x00, 0x00])
         body.append(contentsOf: [UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF)])
-        body.append(contentsOf: [0xF0, 0x00])
+        if subtitle == .pgs {
+            // `mpegts.c` only reads the HDMV stream types under an `HDMV` program registration.
+            body.append(contentsOf: [0xF0, 0x06, 0x05, 0x04])
+            body.append(contentsOf: Array("HDMV".utf8))
+        } else {
+            body.append(contentsOf: [0xF0, 0x00])
+        }
         body.append(contentsOf: [0x1B, UInt8(0xE0 | (videoPID >> 8)), UInt8(videoPID & 0xFF),
                                  0xF0, 0x00])
         switch audio {
@@ -261,6 +273,10 @@ private enum SyntheticTS {
                                      0xF0, 0x06,
                                      0x05, 0x04])                 // registration_descriptor
             body.append(contentsOf: Array("AC-4".utf8))
+        }
+        if subtitle == .pgs {
+            body.append(contentsOf: [0x90, UInt8(0xE0 | (subtitlePID >> 8)), UInt8(subtitlePID & 0xFF),
+                                     0xF0, 0x00])
         }
         return section(tableID: 0x02, body: body)
     }

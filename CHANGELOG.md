@@ -104,6 +104,15 @@ the public-API contract.
   press while one is held plays at once, so a begin that never gets its end cannot lock the
   transport; `pause()`, `stop()` or a reload cancels the held play. AVPlayer already behaves this way.
 
+- **PGS subtitle tracks no longer hold the playback probe to its byte ceiling (#858, thanks @qoli).**
+  `find_stream_info` will not let a PGS track go until a decoded composition segment has given it
+  a width. PGS is sparse, so on a source whose first cue lies past the probe, one such track kept
+  the main open reading to the 50 MiB ceiling (about 14 s on the reported remote Matroska source
+  with four of them). Known PGS tracks now sit out the probe the way undecodable audio does
+  (#466). Every track keeps its index, language and codec. The canvas comes from the decoded
+  composition segment, with the video size as fallback, just as on the subtitle side reader
+  since #87.
+
 ### Fixed
 
 - **A pump that cannot keep up on the efficiency class stops dropping to it (#850, thanks @imbenjamin).**
@@ -236,6 +245,16 @@ the public-API contract.
   there and waits, at most 3 s, until the lead over the newest media stands where the unmoved start
   had it (capped at the 2 s rebuffer resume lead); without one the audio read before that keyframe is
   dropped. A stream that flags no keyframe keeps its old start after 3 s.
+- **A display that never raises its EDR headroom keeps its HDR / Dolby Vision label across engines
+  and on the software host (AE#459).** An Apple TV 4K (1st gen, tvOS 26.6) read a headroom of 1.00
+  through every HDR session, so the only proof it gave was AVFoundation accepting an HDR master, and
+  that proof was neither remembered nor shared: a host that builds an engine per item lost it at every
+  load, and the Dolby Vision FEL route, which has no master to accept, labelled every session SDR
+  while the panel showed Dolby Vision. An accepted HDR master now latches the same proof a headroom
+  reading does, and the proof belongs to the process. It is read only while `eligibleForHDRPlayback`
+  holds, and forgotten when the app leaves for the background (observed process-wide, with or without
+  an engine alive) and when a display refuses an HDR master (AE#588's rule), since either can mean the
+  output configuration changed.
 
 ## [7.46.0] - 2026-10-22
 

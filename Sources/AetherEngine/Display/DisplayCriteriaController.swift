@@ -30,15 +30,45 @@ final class DisplayCriteriaController {
     /// which on unobservable-DV panels otherwise burns the full ~3s waitForSwitch cap on every channel change.
     private var lastApplied: AppliedCriteria?
 
-    /// Has a criteria write ever demonstrably driven THIS display into HDR (headroom observed above 1.0)?
+    /// Has this display demonstrably engaged HDR (headroom observed above 1.0, or an HDR master accepted)?
     ///
-    /// Deliberately never cleared, not by `reset()` and not by a switch that ends at headroom 1.0. The
-    /// headroom collapses while HDR video is on the screen (see `panelPresentsHDR`), so its absence at
-    /// exactly the moment a load asks proves nothing, and any invalidation rule built on it would re-arm
-    /// the very false negative this exists to answer. A display change cannot strand it either:
+    /// Never cleared by `reset()` or by a switch that ends at headroom 1.0. The headroom collapses while
+    /// HDR video is on the screen (see `panelPresentsHDR`), so its absence at exactly the moment a load asks
+    /// proves nothing, and any invalidation rule built on it would re-arm the very false negative this
+    /// exists to answer. Only an event that can mean a changed output configuration clears it: leaving for
+    /// the background or a refused HDR master (`forgetPanelProof`). A display change cannot strand it either:
     /// `effectiveVideoFormat` clamps to `displayCapabilities` before `apply()`, so an SDR route writes SDR
     /// criteria and never consults the proof.
-    private var panelProvenToEngageHDR: Bool = false
+    ///
+    /// Process-wide, like the display it describes: a host that builds an engine per item gets a fresh
+    /// controller for every load, and an instance flag lost the proof at every one, so an Apple TV whose
+    /// headroom never moves read `provenHDR=no` on the next title moments after AVFoundation had
+    /// accepted an HDR master on it. Readable for the tests; set only through `notePanelEngagedHDR`,
+    /// a headroom reading, and cleared by `forgetPanelProof`.
+    private static var panelProvenToEngageHDRInProcess = false {
+        didSet { if panelProvenToEngageHDRInProcess { observeProofInvalidation() } }
+    }
+    private(set) var panelProvenToEngageHDR: Bool {
+        get { Self.panelProvenToEngageHDRInProcess }
+        set { Self.panelProvenToEngageHDRInProcess = newValue }
+    }
+
+    #if os(iOS) || os(tvOS)
+    /// Installed once, the first time the proof latches, and kept for the process: the proof outlives
+    /// every engine (and every engine's lifecycle observers), so its invalidation must too.
+    private static var proofInvalidationObserver: NSObjectProtocol?
+
+    private static func observeProofInvalidation() {
+        guard proofInvalidationObserver == nil else { return }
+        proofInvalidationObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { forgetPanelProof("leaving for the background") }
+        }
+    }
+    #else
+    private static func observeProofInvalidation() {}
+    #endif
 
     #if os(tvOS)
     /// #339: armed at the criteria write, not when the play gate opens, so an engine-written switch is
@@ -288,9 +318,10 @@ final class DisplayCriteriaController {
     /// from the same `UIScreen`. That is not a sampling-time problem, it is a property tvOS does not
     /// maintain. There is no mode read-back; do not go looking for one here again (Sodalite#49).
     ///
-    /// The residual risk is the reverse: Match Dynamic Range switched off in Settings after a proven session,
-    /// without the app being killed. That offers one master to an SDR panel, which the reactive master-to-media
-    /// fallback (#98) and the startup-readiness gate (#35) already recover from. Trading a rare, self-healing
+    /// The residual risk is the reverse: the output configuration changed after a proven session without the
+    /// app leaving the foreground (Settings itself is only reachable by leaving, which clears the proof). That
+    /// offers one master to an SDR panel, which the reactive master-to-media fallback (#98) and the
+    /// startup-readiness gate (#35) already recover from, and the refusal clears the proof. Trading a rare, self-healing
     /// fallback for a silent permanent HDR loss on every replay is the point of this function.
     nonisolated static func panelPresentsHDR(
         headroomAboveOne: Bool,
@@ -1210,7 +1241,9 @@ final class DisplayCriteriaController {
         return Self.panelPresentsHDR(
             headroomAboveOne: observeHeadroom(window.screen),
             attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
-            panelProvenToEngageHDR: panelProvenToEngageHDR
+            // A proof from an earlier session is about this display's HDR mode; a display that cannot
+            // play HDR now (another TV, HDR switched off) has nothing for it to vouch for.
+            panelProvenToEngageHDR: panelProvenToEngageHDR && AVPlayer.eligibleForHDRPlayback
         )
         #else
         return false
@@ -1276,6 +1309,27 @@ final class DisplayCriteriaController {
     }
     #endif
 
+    /// AE#459's other proof: AVFoundation accepted an HDR master, which a display presenting SDR refuses.
+    /// It answers the same question the headroom does, so it latches the same proof. Without it a display
+    /// whose headroom never moves (an Apple TV 4K 1st generation on tvOS 26.6 read 1.00 throughout HDR and
+    /// Dolby Vision playback) proves HDR only on the AVPlayer route, and every later session on a path with
+    /// no master to accept (the software host, the Dolby Vision FEL route) kept its SDR label.
+    func notePanelEngagedHDR(_ evidence: String) {
+        guard !panelProvenToEngageHDR else { return }
+        EngineLog.emit("[DisplayCriteria] panel proven to engage HDR (\(evidence)); later sessions trust an accepted HDR write even without a headroom reading", category: .engine)
+        panelProvenToEngageHDR = true
+    }
+
+    /// AE#588's rule applied to the proof: it describes an output configuration, which the user changes in
+    /// Settings (only reachable by leaving the app) or by swapping the TV, so leaving for the background
+    /// forgets it (observed process-wide, with or without an engine alive), and so does an HDR master the
+    /// display refused. The next HDR session on the AVPlayer route proves it again.
+    static func forgetPanelProof(_ reason: String) {
+        guard panelProvenToEngageHDRInProcess else { return }
+        panelProvenToEngageHDRInProcess = false
+        EngineLog.emit("[DisplayCriteria] \(reason) clears the panel's HDR proof; the next session asks the display again",
+                       category: .engine)
+    }
     /// Nil-out preferredDisplayCriteria to return the panel to default. No-op when apply() was never called this session (suppressed host) to avoid racing AVKit's in-flight criteria management.
     func reset() {
         #if os(tvOS)

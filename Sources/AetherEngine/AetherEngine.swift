@@ -2945,6 +2945,9 @@ public final class AetherEngine: ObservableObject {
                 displaySwitchInProgress: switching,
                 panelEngagesHDROnDemand: HLSVideoEngine.builtInPanelEngagesOnDemand) {
                 Self.panelRefusedHDRMaster = true
+                // A display that refused an HDR master no longer vouches for the HDR proof either. Cleared
+                // here, before the fallback below reloads, so that session cannot read the proof.
+                DisplayCriteriaController.forgetPanelProof("a refused HDR master")
                 EngineLog.emit(
                     "[DisplayCriteria] panel refused an HDR master (code=\(rejection.code)); this process "
                     + "routes HDR sources media-direct until it returns from the background (#588)",
@@ -7132,6 +7135,7 @@ public final class AetherEngine: ObservableObject {
                     && self.nativeVideoSession?.servedSourceIsHDR == true,
                 fellBackToMedia: self.masterFallbackUsed,
                 sessionIsPlaying: self.state == .playing) {
+                self.displayCriteria.notePanelEngagedHDR("AVFoundation accepted the HDR master")
                 self.republishPanelPresentsHDR(
                     effectiveFormat: effectiveFormat,
                     because: "AVFoundation accepted the HDR master, which a display presenting SDR "

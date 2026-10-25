@@ -1076,8 +1076,10 @@ public final class Demuxer: @unchecked Sendable {
         reclassifyAttachedPictures(ctx)
         boundProbeForDeclaredDiscTitle(ctx)
         let parked = parkUnresolvableAudio(ctx)
+        let parkedPGS = parkPGSSubtitles(ctx)
         let findRet = avformat_find_stream_info(ctx, nil)
         unparkUnresolvableAudio(ctx, parked)
+        unparkPGSSubtitles(ctx, parkedPGS)
         guard findRet >= 0 else {
             emitOpenTimings(outcome: "find_stream_info failed (\(findRet))")
             throw DemuxerError.streamInfoFailed(code: findRet)
@@ -1173,6 +1175,43 @@ public final class Demuxer: @unchecked Sendable {
     private func unparkUnresolvableAudio(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
         for i in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        }
+    }
+
+    /// Whether `find_stream_info` would chase this stream for a parameter playback never reads. (#858)
+    ///
+    /// `has_codec_parameters` fails a PGS stream until it knows a width, and only a decoded
+    /// presentation composition segment carries one. PGS is sparse (the first cue of a film can sit
+    /// minutes in), so a single such track holds the probe to its whole byte ceiling: 50 MiB and
+    /// ~14 s on the reported remote Matroska source with four of them. Nothing downstream needs that
+    /// width from the probe: `EmbeddedSubtitleDecoder` takes the canvas from the PCS it decodes and
+    /// falls back to the video size, the same footing the subtitle side reader has stood on since
+    /// it stopped probing at all (#87). The codec must already be known; `AV_CODEC_ID_NONE` is a
+    /// stream still being identified.
+    static func subtitleNeedsNoProbe(codecID: AVCodecID, codecType: AVMediaType) -> Bool {
+        codecType == AVMEDIA_TYPE_SUBTITLE && codecID == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+    }
+
+    /// Park PGS tracks as ATTACHMENT for the duration of the probe, the lever `parkUnresolvableAudio`
+    /// uses, so the pass stops once audio and video are known. The restore follows the probe because
+    /// `find_stream_info` writes its context back over `codecpar`; the caller sees the same track it
+    /// would have after a full-budget probe that never met a cue, width 0. (#858)
+    private func parkPGSSubtitles(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> [Int] {
+        var parked: [Int] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let codecpar = ctx.pointee.streams[i]?.pointee.codecpar,
+                  Self.subtitleNeedsNoProbe(codecID: codecpar.pointee.codec_id,
+                                            codecType: codecpar.pointee.codec_type)
+            else { continue }
+            codecpar.pointee.codec_type = AVMEDIA_TYPE_ATTACHMENT
+            parked.append(i)
+        }
+        return parked
+    }
+
+    private func unparkPGSSubtitles(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
+        for i in parked where i < Int(ctx.pointee.nb_streams) {
+            ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
         }
     }
 

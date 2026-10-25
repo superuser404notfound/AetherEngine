@@ -248,21 +248,15 @@ struct VideoPrerollTests {
     @Test("A decoder still producing frames holds the clock past the plain timeout", .timeLimit(.minutes(1)))
     func decoderProgressHoldsPastTheTimeout() async throws {
         let output = AudioOutput()
-        let gate = Gate()
         let progress = Progress()
-        output.videoPrerollSatisfied = { _ in gate.isOpen }
-        output.videoPrerollProgress = { progress.value }
+        // Both run in the hold's own poll, off the cooperative pool: a loop of `Task.sleep` ticks
+        // starved past `prerollTimeout` on CI's one-thread pool and read as a decoder that stopped.
+        let opensAt = CACurrentMediaTime() + AudioOutput.prerollTimeout + 0.5
+        output.videoPrerollSatisfied = { _ in CACurrentMediaTime() >= opensAt }
+        output.videoPrerollProgress = { progress.tick(); return progress.value }
         let transitions = Transitions()
         output.onPrerollTransition = { transitions.append($0) }
         output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
-        let deadline = Date().addingTimeInterval(AudioOutput.prerollTimeout + 0.5)
-        while Date() < deadline {
-            progress.tick()
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        #expect(output.synchronizer.rate == 0, "the decoder is still working toward the target")
-        #expect(output.prerollPending)
-        gate.set(true)
         // The release is reported right after the start, so waiting on the rate can read between them.
         try await waitFor { transitions.events.count == 2 }
         #expect(output.synchronizer.rate == 1)
