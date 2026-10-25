@@ -24,6 +24,17 @@ struct Issue834AtmosActivatorRouteTests {
         #expect(!AtmosOutputActivator.routeTakesActivator(outputPortTypes: []))
     }
 
+    @Test("the software host's transport as the activator reads it")
+    func softwareTransportTruthTable() {
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.playing) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.seeking) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.loading) == true)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.paused) == false)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.idle) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.ended) == nil)
+        #expect(AetherEngine.softwareAtmosOutputPlaying(.error("failed")) == nil)
+    }
+
     #if os(iOS) || os(tvOS)
     @Test("the spelled-out port type is the session's own")
     func portTypeMatchesTheSession() {
