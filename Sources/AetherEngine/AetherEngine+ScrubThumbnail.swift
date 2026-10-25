@@ -157,11 +157,14 @@ extension AetherEngine {
     /// `scrubThumbnailExtractors` (teardown and the stale-generation clear already cover that list).
     nonisolated static let localSoftwareStillKey = -1
 
-    /// True when a software VOD session plays a local file. Such a session keeps no packet cache,
-    /// because re-reading the file is a page-cache hit, so its stills are decoded from the file by a
-    /// `FrameExtractor`. That opens no connection to any origin, which is what the cache exists to avoid.
+    /// True when a software VOD session plays a local file whose frames can become stills. Such a
+    /// session keeps no packet cache, because re-reading the file is a page-cache hit, so its stills
+    /// are decoded from the file by a `FrameExtractor`. That opens no connection to any origin, which
+    /// is what the cache exists to avoid. False for a Dolby Vision Profile 5 / 10.0 file without the
+    /// `DolbyVisionStillReshaping` trait, which `FrameDecodeContext` refuses every still of.
     var softwareStillsFromLocalFile: Bool {
-        guard let softwareHost, !isLive, !isCustomSource, loadedURL?.isFileURL == true else { return false }
+        guard let softwareHost, !isLive, !isCustomSource, loadedURL?.isFileURL == true,
+              softwareHost.videoYieldsStills else { return false }
         return !softwareHost.servesPacketCacheStills
     }
 

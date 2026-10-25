@@ -14,10 +14,11 @@ struct SoftwareLocalScrubStillTests {
     /// The 4 s fixture, built once per process and left for the temporary directory to reclaim.
     private static let fixture = Task { try await ItemSwapStillTests.fixtureURL() }
 
-    private func loadSoftware(_ file: URL) async throws -> AetherEngine {
+    private func loadSoftware(_ file: URL, dolbyVisionHandling: DolbyVisionHandling = .automatic) async throws -> AetherEngine {
         let engine = try AetherEngine()
         var options = LoadOptions()
         options.preferredDecodePath = .software
+        options.dolbyVisionHandling = dolbyVisionHandling
         _ = try await engine.load(url: file, options: options)
         #expect(engine.playbackBackend == .software)
         return engine
@@ -86,5 +87,24 @@ struct SoftwareLocalScrubStillTests {
         engine.stop()
         #expect(engine.scrubThumbnailExtractors.isEmpty)
         #expect(!engine.supportsCacheBackedStills)
+    }
+
+    @Test("a Dolby Vision Profile 5 file advertises stills only where its frames can become one")
+    func profile5FollowsTheStillVerdict() async throws {
+        // A Profile 5 record over an HDR10 VUI: the one Profile 5 the software path plays, as its base
+        // layer (`.baseLayerOnly`). Every still decode still reads the record and refuses the stream.
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("software-p5-still-\(UUID().uuidString).mp4")
+        try SupersededProbeGeometryTests.dolbyVisionProfile5OverHDR10().write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let engine = try await loadSoftware(file, dolbyVisionHandling: .baseLayerOnly)
+        defer { engine.stop() }
+        // Without the reshaping trait `FrameDecodeContext` refuses every still of this stream, so the
+        // capability must say so instead of promising previews that never come.
+        let yields = FrameDecodeContext.yieldsStill(dolbyVisionNoBaseLayer: true)
+        #expect(engine.supportsCacheBackedStills == yields)
+        if !yields {
+            #expect(await engine.scrubThumbnail(atSeconds: 0, maxWidth: 64) == nil)
+        }
     }
 }

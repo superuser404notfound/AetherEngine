@@ -396,9 +396,9 @@ typed fact rather than as something to reconstruct (AE#462).
 | --- | --- |
 | `.none` | no session |
 | `.noAudioInSource` | the source carries no audio track |
-| `.streamCopy` | the source bitstream is muxed into fMP4 unchanged (Atmos, DTS-HD and everything else reach the renderer as authored) |
-| `.bridged` | decoded and re-encoded for the fMP4 pipeline: by the channel bridge to FLAC or E-AC-3, lossless for the bed channels with object metadata lost in the PCM intermediate, or under `objectAudioRendering` in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default) rendered with its objects and heights into a speaker bed and encoded as APAC (lossy) |
-| `.decoded` | libavcodec decodes and the engine renders it (the software path, the FFmpeg audio-only host) |
+| `.streamCopy` | the source bitstream reaches the renderer unchanged: muxed into fMP4 (Atmos, DTS-HD and everything else as authored), or on the software host under `objectAudioRendering` an E-AC-3 JOC track handed to the sample-buffer renderer compressed |
+| `.bridged` | decoded and re-encoded for the fMP4 pipeline: by the channel bridge to FLAC or E-AC-3, lossless for the bed channels with object metadata lost in the PCM intermediate, or under `objectAudioRendering` in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default) rendered with its objects and heights into a speaker bed and encoded as APAC (lossy), on the loopback route and on the software host alike |
+| `.decoded` | libavcodec decodes to PCM and the engine renders it (the software path without an object-audio route, the FFmpeg audio-only host) |
 | `.droppedNoPipeline` | the source HAS audio and none of it could be delivered: no decoder for it in this build, the bridge could not be built or could not write its header, the probe left its parameters empty so no stream could be picked, or (live only) the bridge was built and its decoder produced nothing, after which the engine rebuilds the session without the track (AE#641). The session plays video-only and silently |
 | `.playerManaged` | AVFoundation owns the audio (the remote-HLS bypass, the native audio-only host). The engine has no pipeline of its own to classify and does not answer on AVFoundation's behalf |
 

@@ -1,4 +1,7 @@
 import Testing
+#if os(iOS) || os(tvOS)
+import AVFoundation
+#endif
 @testable import AetherEngine
 
 /// F3: a renderer path pauses when the route it was playing to is removed, as AVPlayer does. The
@@ -14,15 +17,36 @@ struct RouteRemovalPauseTests {
         return engine
     }
 
-    @Test("decision: only old-device-unavailable of an external output pauses")
+    @Test("decision: only old-device-unavailable of a removable output pauses")
     func decision() {
         let removed = AetherEngine.routeChangeReasonOldDeviceUnavailableRaw
-        #expect(AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputsWereExternal: true))
-        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputsWereExternal: false))
-        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: 1, previousOutputsWereExternal: true))   // newDeviceAvailable
-        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: 3, previousOutputsWereExternal: true))   // categoryChange
-        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: nil, previousOutputsWereExternal: true))
+        for port in ["Headphones", "BluetoothA2DPOutput", "BluetoothLE", "BluetoothHFP", "AirPlay", "USBAudio"] {
+            #expect(AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: [port]), "\(port)")
+        }
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: ["Speaker"]))
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: ["Receiver"]))
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: []))
+        let headphones = ["Headphones"]
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: 1, previousOutputPortTypes: headphones))   // newDeviceAvailable
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: 3, previousOutputPortTypes: headphones))   // categoryChange
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: nil, previousOutputPortTypes: headphones))
     }
+
+    @Test("an HDMI route going away does not pause: an ARC / eARC receiver toggling on an Apple TV is not a removal")
+    func hdmiDoesNotPause() {
+        let removed = AetherEngine.routeChangeReasonOldDeviceUnavailableRaw
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: ["HDMIOutput"]))
+        #expect(!AetherEngine.routeRemovalShouldPause(reasonRaw: removed, previousOutputPortTypes: ["HDMIOutput", "LineOut"]))
+    }
+
+    #if os(iOS) || os(tvOS)
+    @Test("the spelled-out port types are the session's own")
+    func portTypesMatchTheSession() {
+        let ports: [AVAudioSession.Port] = [.headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .airPlay, .usbAudio]
+        #expect(Set(ports.map(\.rawValue)) == AetherEngine.routeRemovalPausingPortTypes)
+        #expect(!AetherEngine.routeRemovalPausingPortTypes.contains(AVAudioSession.Port.HDMI.rawValue))
+    }
+    #endif
 
     @Test("a playing software session pauses")
     func pausesWhilePlaying() throws {

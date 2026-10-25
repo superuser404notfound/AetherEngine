@@ -62,6 +62,8 @@ public final class AetherEngine: ObservableObject {
             recomputePlaybackPhase()
             resolveLoadingStashedSeek(from: oldValue)
             settleOwedBackgroundAction()
+            // A renderer path has no player for the Atmos output activator to observe; it follows this.
+            atmosOutputActivator?.refresh()
             if let logTag { EngineLog.emit("[AetherEngine:\(logTag)] state=\(state)", category: .engine) }
         }
     }
@@ -5648,7 +5650,8 @@ public final class AetherEngine: ObservableObject {
                 // label claimed one for a session that had dropped its audio and gone video-only.
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
                     audioTracks: probedAudioTracks,
-                    activeIndex: softwareHost?.audioStreamIndex ?? -1
+                    activeIndex: softwareHost?.audioStreamIndex ?? -1,
+                    route: softwareHost?.audioRoute ?? .pcm
                 )
                 presentCurrentLayer()
                 // The play gate the native branch below also runs. The pre-flight above gives up on an HDR
@@ -5863,6 +5866,9 @@ public final class AetherEngine: ObservableObject {
         if state == .paused || state == .loading {
             state = .playing
         }
+        // A resume that leaves `state` at `.playing` (the end of an audio interruption) restarts the
+        // renderer without a state change; the Atmos output activator follows the renderer, so tell it.
+        atmosOutputActivator?.refresh()
         clampLiveResumeIfBehindWindow()
     }
 
@@ -7589,6 +7595,8 @@ public final class AetherEngine: ObservableObject {
             return
         }
         activeTransportHost?.setRate(clamped)
+        // A rate of zero parks the renderer path without a state change; the activator follows it.
+        atmosOutputActivator?.refresh()
     }
 
     // MARK: - Audio / subtitle track selection
@@ -8472,7 +8480,7 @@ public final class AetherEngine: ObservableObject {
         let action = Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
+            softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state
@@ -8604,7 +8612,7 @@ public final class AetherEngine: ObservableObject {
         return Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
-            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
+            softwareHostHasAudio: softwareHost?.deliversAudio == true,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state

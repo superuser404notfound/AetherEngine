@@ -4,9 +4,9 @@ import Foundation
 // F3: pause when the audio route a renderer path was playing to goes away.
 //
 // AVPlayer pauses itself when the output it was playing to is removed (headphones unplugged, a
-// Bluetooth device disconnecting, a receiver switching off). The renderer paths (software and audio
-// hosts) play into a sample-buffer renderer that keeps going on whatever route is left, so a viewer
-// who pulled the headphones would hear the film on the speakers. The public contract is
+// Bluetooth device disconnecting). The renderer paths (software and audio hosts) play into a
+// sample-buffer renderer that keeps going on whatever route is left, so a viewer who pulled the
+// headphones would hear the film on the speakers. The public contract is
 // `AVAudioSession.routeChangeNotification` with reason `.oldDeviceUnavailable`; the previous route
 // tells what went away. The native AVPlayer path does this on its own and is not touched.
 // iOS and tvOS only: macOS has no audio session, so there is no equivalent notification to observe.
@@ -16,10 +16,22 @@ extension AetherEngine {
     /// decision compiles and is tested on every platform.
     nonisolated static let routeChangeReasonOldDeviceUnavailableRaw: UInt = 2
 
-    /// Pure decision. A removal of the built-in speaker or receiver is not a loss the viewer chose
-    /// to make audible, anything else (headphones, Bluetooth, HDMI, AirPlay, USB) is.
-    nonisolated static func routeRemovalShouldPause(reasonRaw: UInt?, previousOutputsWereExternal: Bool) -> Bool {
-        reasonRaw == routeChangeReasonOldDeviceUnavailableRaw && previousOutputsWereExternal
+    /// The outputs whose removal pauses, as `AVAudioSession.Port` raw values (spelled out so the
+    /// decision is testable where there is no session): headphones, Bluetooth (A2DP, LE, HFP),
+    /// AirPlay and USB, the outputs a viewer takes away and AVPlayer's documented auto-pause covers.
+    /// HDMI is left out on purpose: an Apple TV has no built-in output, so every route change there
+    /// is an HDMI one, and an ARC / eARC soundbar or receiver switching on or off, or re-asserting
+    /// hotplug from standby, would pause the session. What the native path does on such a swap has
+    /// not been measured on a device; until it has, the renderer paths do not pause on it.
+    nonisolated static let routeRemovalPausingPortTypes: Set<String> = [
+        "Headphones", "BluetoothA2DPOutput", "BluetoothLE", "BluetoothHFP", "AirPlay", "USBAudio",
+    ]
+
+    /// Pure decision: an old-device-unavailable change whose previous route had one of
+    /// `routeRemovalPausingPortTypes` among its outputs.
+    nonisolated static func routeRemovalShouldPause(reasonRaw: UInt?, previousOutputPortTypes: [String]) -> Bool {
+        reasonRaw == routeChangeReasonOldDeviceUnavailableRaw
+            && previousOutputPortTypes.contains(where: routeRemovalPausingPortTypes.contains)
     }
 
     /// The reaction. Only a renderer path that is playing: a paused session has nothing to stop, and
@@ -42,10 +54,8 @@ extension AetherEngine {
             let info = note.userInfo ?? [:]
             let reasonRaw = info[AVAudioSessionRouteChangeReasonKey] as? UInt
             let previous = info[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription
-            let external = previous?.outputs.contains {
-                $0.portType != .builtInSpeaker && $0.portType != .builtInReceiver
-            } ?? false
-            guard Self.routeRemovalShouldPause(reasonRaw: reasonRaw, previousOutputsWereExternal: external) else { return }
+            let portTypes = previous?.outputs.map(\.portType.rawValue) ?? []
+            guard Self.routeRemovalShouldPause(reasonRaw: reasonRaw, previousOutputPortTypes: portTypes) else { return }
             Task { @MainActor in self?.noteOutputRouteRemoved() }
         }
         retainLifecycleObserver(observer)

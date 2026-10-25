@@ -52,6 +52,46 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         return .apac(layout)
     }
 
+    /// Why `route` kept a TrueHD or DTS track on the PCM decode although object rendering was asked
+    /// for, for the session log; nil for any other codec, for `.off` and for a track `route` renders.
+    /// The E-AC-3 side has its own reason (`SoftwareEAC3Passthrough.Probe.pcmReason`).
+    static func apacRefusal(
+        codecID: AVCodecID,
+        profile: Int32,
+        sampleRate: Int32,
+        rendering: ObjectAudioRendering,
+        osSupportsAPAC: Bool = ObjectAudioRendering.isAvailable
+    ) -> String? {
+        guard let layout = rendering.layout, codecID == AV_CODEC_ID_TRUEHD || codecID == AV_CODEC_ID_DTS else {
+            return nil
+        }
+        guard let source = HLSVideoEngine.objectAudioSource(codecID: codecID, profile: profile) else {
+            return codecID == AV_CODEC_ID_TRUEHD
+                ? "TrueHD not marked Atmos (profile=\(profile))"
+                : "DTS is not DTS-HD Master Audio (profile=\(profile))"
+        }
+        if !source.isBuiltIn { return "\(source.name) not built in (\(source.traitName) trait off)" }
+        if !osSupportsAPAC { return "no APAC encoder on this OS" }
+        if sampleRate != 0, sampleRate != Int32(ObjectAudioRendering.sampleRate) {
+            return "\(source.name) at \(sampleRate) Hz, rendered at 48 kHz only"
+        }
+        if source == .dtsHDMasterAudio, !layout.carriesDTSXOneToOne {
+            return "DTS:X is rendered into 7.1.4 or 9.1.6 only, not \(layout.rawValue)"
+        }
+        return nil
+    }
+
+    /// Whether the renderer receives Dolby Atmos on this route, so `AtmosOutputActivator` may bring the
+    /// receiver to Dolby Atmos: compressed E-AC-3 JOC and TrueHD Atmos rendered to APAC are, DTS:X
+    /// rendered to APAC is not.
+    func carriesDolbyAtmos(sourceCodec: AVCodecID) -> Bool {
+        switch self {
+        case .pcm: return false
+        case .compressedEAC3JOC: return true
+        case .apac: return sourceCodec == AV_CODEC_ID_TRUEHD
+        }
+    }
+
     /// Packets of the source's head the JOC check may look at, and the bytes it may hold. The check
     /// needs one E-AC-3 access unit, which a muxed file interleaves within the first few packets;
     /// the byte budget keeps a late-starting track in a 4K remux from pinning the video before it.

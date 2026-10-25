@@ -181,6 +181,26 @@ struct AudioDeliveryClassificationTests {
                 == "libavcodec AC3 → CoreAudio")
         #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: tracks, activeIndex: -1) == nil)
     }
+
+    /// On a device the Dolby Vision FEL route's details read "libavcodec TRUEHD → CoreAudio" and
+    /// "Decoded" while the log said the TrueHD Atmos track went to the renderer as APAC 7.1.4.
+    @Test("the software host's Atmos routes report what reaches the renderer")
+    func atmosRoutesReportTheirDelivery() {
+        #expect(SoftwarePlaybackHost.audioDelivery(resolvedAudioIndex: 1, decoderOpened: true,
+                                                   sourceCarriesAudio: true, route: .apac(.l714)) == .bridged)
+        #expect(SoftwarePlaybackHost.audioDelivery(resolvedAudioIndex: 1, decoderOpened: true,
+                                                   sourceCarriesAudio: true, route: .compressedEAC3JOC) == .streamCopy)
+        #expect(SoftwarePlaybackHost.audioDelivery(resolvedAudioIndex: 1, decoderOpened: false,
+                                                   sourceCarriesAudio: true, route: .apac(.l714)) == .droppedNoPipeline)
+        let trueHD = [TrackInfo(id: 1, name: "English", codec: "truehd", language: "eng", channels: 8, isDefault: true)]
+        let dts = [TrackInfo(id: 1, name: "English", codec: "dts", language: "eng", channels: 8, isDefault: true)]
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: trueHD, activeIndex: 1, route: .apac(.l714))
+                == "TRUEHD Atmos → APAC 7.1.4")
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: dts, activeIndex: 1, route: .apac(.l916))
+                == "DTS:X → APAC 9.1.6")
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: trueHD, activeIndex: 1)
+                == "libavcodec TRUEHD → CoreAudio")
+    }
 }
 
 /// Engine-level wiring: the published fact is derived from `playbackBackend`, the session options and

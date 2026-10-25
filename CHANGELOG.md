@@ -33,7 +33,9 @@ the public-API contract.
   base layer for a dual-layer title, with no extra connection and through the same calls the
   AVPlayer path answers: `scrubPreviewFrame` honours `isCancelled` and the 750 ms / 900 packet bound
   and reports the decoded frame's own time. A file on a network mount opens a second file handle.
-  Remote software sessions already served stills from the packet cache.
+  A Dolby Vision Profile 5 / 10.0 file without the `DolbyVisionStillReshaping` trait keeps
+  `supportsCacheBackedStills` false, since none of its frames can become a still. Remote software
+  sessions already served stills from the packet cache.
 - **The software host follows the system caption style.** Subtitles composited into software-path
   PiP frames now use the user's Settings > Accessibility > Subtitles & Captioning choices (font,
   size, text colour and opacity, background and window colour and opacity, edge style) the way
@@ -44,10 +46,23 @@ the public-API contract.
 - **The software playback host keeps Atmos.** On the software host (the Dolby Vision FEL route and
   video the hardware decoder cannot play), E-AC-3 JOC is handed to the audio renderer compressed,
   with the decoder primed once per process, and TrueHD Atmos and DTS:X are rendered to APAC under the
-  existing `objectAudioRendering` option. Other audio, live streams and `.off` still decode to PCM.
-  The automatic audio pick now prefers a TrueHD Atmos or DTS:X track on the software host too. A
-  renderer error on these routes is logged in release builds. `aetherctl play` gains
-  `--atmos-bed <layout>`.
+  existing `objectAudioRendering` option (DTS:X into 7.1.4 or 9.1.6 only, and a TrueHD track whose
+  profile the probe missed read from its own major sync, as on the loopback route). Other audio,
+  live streams and `.off` still decode to PCM, and a TrueHD or DTS track kept on PCM says why in the
+  log. The automatic audio pick now prefers a TrueHD Atmos or DTS:X track on the software host too. A
+  renderer error on these routes is logged in release builds. On tvOS the Atmos output activator
+  runs on HDMI beside the routes that carry Dolby Atmos (TrueHD Atmos as APAC and compressed E-AC-3
+  JOC, not DTS:X), as it does beside the loopback route's TrueHD APAC, so a sink that needs it shows
+  Atmos for the software host too. `audioDelivery` reports them as `.bridged` (APAC) and
+  `.streamCopy` (compressed E-AC-3 JOC), and `activeAudioDecoder` names them (for example
+  "TRUEHD Atmos → APAC 7.1.4"); the PCM decode stays `.decoded`. The clock's "audio is not
+  recovering" fallback waits for the APAC route's first buffer (about 100 TrueHD access units) instead
+  of anchoring every TrueHD load on video after 50 packets.
+- **The renderer paths pause when a removable audio output goes away.** On iOS and tvOS the software
+  host and the audio host now pause, as AVPlayer does, when headphones, a Bluetooth device (A2DP, LE,
+  HFP), an AirPlay output or a USB output is removed while playing or seeking. HDMI is not one of
+  them: an ARC / eARC soundbar or receiver switching on or off on an Apple TV keeps playing. The
+  native path is unchanged.
 
 ### Changed
 
@@ -75,6 +90,8 @@ the public-API contract.
   size, snap, zone masks, screen anchoring and the elevation switch, as before 7.40.0. `BedSplitter`
   and the `TrueHDReferenceRender` measurement trait are gone. The trait stays opt-in, and the
   integrator remains responsible for the licensing of what it enables.
+- `setRate(0)` disarms the resume after an audio-session interruption on every path, as `pause()`
+  does: a session the host set to rate 0 stays paused when the interruption ends.
 
 ### Fixed
 

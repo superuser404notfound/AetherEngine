@@ -29,13 +29,36 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
     private var closed = false
     private let lock = NSLock()
     private var loggedFeedError = false
+    /// Serializes a feed with `flush()`, so the epoch check and the bridge feed are one step: a packet
+    /// read before a seek can no longer reach the bridge after the seek's `startSegment` and become
+    /// the new run's `originFrame`, which would stamp the whole post-seek run at the old position.
+    /// Held across the bridge feed, which `startSegment` already waits for on the bridge's own lock.
+    private let feedLock = NSLock()
+    private var _feedEpoch: UInt64 = 0
 
     init(bridge: SpatialAudioBridge, stream: UnsafeMutablePointer<AVStream>) {
         self.bridge = bridge
         self.stream = stream
     }
 
+    var feedEpoch: UInt64 { feedLock.withLock { _feedEpoch } }
+
+    /// The bridge's first packet needs the bed splitter's latency and an encode chunk behind it, about
+    /// 4096 frames, which is some 100 TrueHD access units (one per packet), plus up to another 100 while
+    /// the decoder waits for a major sync after a mid-stream start. The demux loop's default of 50 sent
+    /// every TrueHD load to the video-anchored clock; the bridge's own dead-decoder bound is the budget.
+    var firstBufferPacketBudget: Int { SpatialAudioBridge.silentFeedPacketThreshold }
+
     func decode(packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
+        feedLock.withLock { feed(packet) }
+    }
+
+    func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64) -> [CMSampleBuffer] {
+        feedLock.withLock { epoch == _feedEpoch ? feed(packet) : [] }
+    }
+
+    /// Caller holds `feedLock`.
+    private func feed(_ packet: UnsafeMutablePointer<AVPacket>) -> [CMSampleBuffer] {
         let packets: [UnsafeMutablePointer<AVPacket>]
         do {
             packets = try bridge.feed(packet: packet)
@@ -91,7 +114,10 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
     }
 
     func flush() {
-        bridge.startSegment()
+        feedLock.withLock {
+            _feedEpoch &+= 1
+            bridge.startSegment()
+        }
         lock.lock()
         let tap = tapDecoder
         lock.unlock()

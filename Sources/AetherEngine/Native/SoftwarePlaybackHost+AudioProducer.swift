@@ -41,6 +41,18 @@ extension SoftwarePlaybackHost {
             }.value
             try stillLive()
         }
+        // #838 on this host: a TrueHD track the probe never decoded a frame of keeps an unknown
+        // profile, which reads as "not Atmos" to the route; its own major sync says whether it is.
+        // Peeked at the head of the file like the JOC check, and only when rendering is asked for.
+        if HLSVideoEngine.needsTrueHDMajorSyncVerdict(
+            codecID: par.pointee.codec_id, profile: par.pointee.profile, rendering: objectAudioRendering) {
+            let peek = await BlockingWork.detached(priority: .userInitiated) {
+                HLSVideoEngine.trueHDMajorSyncVerdict(demuxer: dem, streamIndex: streamIndex)
+            }.value
+            try stillLive()
+            if peek.isAtmos == true { par.pointee.profile = AV_PROFILE_TRUEHD_ATMOS }
+            EngineLog.emit("[SWHost] audio: \(peek.summary)", category: .swPlayback)
+        }
         let joc = probe.entry
         let route = SoftwareAtmosRoute.route(
             codecID: par.pointee.codec_id, profile: par.pointee.profile,
@@ -52,6 +64,10 @@ extension SoftwarePlaybackHost {
             if par.pointee.codec_id == AV_CODEC_ID_EAC3 {
                 EngineLog.emit("[SWHost] audio: E-AC-3 stays PCM (\(probe.pcmReason(channels: par.pointee.ch_layout.nb_channels)))",
                                category: .swPlayback)
+            } else if let reason = SoftwareAtmosRoute.apacRefusal(
+                codecID: par.pointee.codec_id, profile: par.pointee.profile,
+                sampleRate: par.pointee.sample_rate, rendering: objectAudioRendering) {
+                EngineLog.emit("[SWHost] audio: stays PCM (\(reason))", category: .swPlayback)
             }
             return try pcm()
         case .compressedEAC3JOC:

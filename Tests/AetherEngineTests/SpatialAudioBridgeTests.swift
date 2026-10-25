@@ -831,5 +831,56 @@ extension SpatialAudioBridgeTests {
         #expect(bridge.encoderCodecpar?.pointee.ch_layout.nb_channels == 2)
         #expect(bridge.servedChannelCount == layout.channelCount)
     }
+
+    /// Feed the software host's APAC producer the way `feed` feeds the bridge, with the epoch the demux
+    /// thread read before the read, and return the buffers' presentation times in seconds.
+    @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+    private func feedProducer(
+        _ producer: SoftwareAPACProducer, startMs: Int64, count: Int, epoch: UInt64
+    ) -> [Double] {
+        var out: [Double] = []
+        var payload = [UInt8](repeating: 0, count: 24)
+        for i in 0..<count {
+            guard let pkt = av_packet_alloc() else { continue }
+            defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+            payload.withUnsafeMutableBytes { raw in
+                _ = av_new_packet(pkt, 24)
+                pkt.pointee.data.update(from: raw.bindMemory(to: UInt8.self).baseAddress!, count: 24)
+            }
+            pkt.pointee.pts = startMs + Int64(i) * 20
+            pkt.pointee.dts = pkt.pointee.pts
+            out += producer.decode(packet: pkt, epoch: epoch).map { CMSampleBufferGetPresentationTimeStamp($0).seconds }
+        }
+        return out
+    }
+
+    /// PR #808 review, item 3: the demux loop checks the seek generation and then feeds. A seek whose
+    /// flush (`startSegment`) lands between the two used to let the pre-seek packet become the new
+    /// run's anchor, and the bridge stamps the whole run from it: here the audio after the seek to 60 s
+    /// would have been stamped from 1 s, 59 s in the past, and dropped as late until the next seek.
+    @Test("a packet read before a seek's flush cannot anchor the run after it")
+    func stalePacketDoesNotAnchorThePostSeekRun() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714, decoder: ClickDecoder(clickFrame: .max))
+        let stream = UnsafeMutablePointer<AVStream>.allocate(capacity: 1)
+        stream.initialize(to: AVStream())
+        defer { stream.deallocate() }
+        let producer = SoftwareAPACProducer(bridge: bridge, stream: stream)
+        defer { producer.close() }
+
+        _ = feedProducer(producer, startMs: 0, count: 50, epoch: producer.feedEpoch)
+        // The demux thread reads the epoch and a packet at 1 s; the seek's flush lands before the feed.
+        let staleEpoch = producer.feedEpoch
+        producer.flush()
+        #expect(feedProducer(producer, startMs: 1000, count: 1, epoch: staleEpoch).isEmpty)
+
+        // The post-seek run anchors on its own first packet, at 60 s: the first buffer is the encoder's
+        // priming, presented `encoderLeadingFrames` before the anchor so the first content frame plays on it.
+        let after = feedProducer(producer, startMs: 60_000, count: 50, epoch: producer.feedEpoch)
+        let first = try #require(after.first)
+        let expected = 60.0 - Double(bridge.encoderLeadingFrames) / Double(SpatialAudioBridge.sampleRate)
+        #expect(abs(first - expected) < 0.001, "first buffer at \(first) s, expected \(expected) s")
+    }
 }
 #endif

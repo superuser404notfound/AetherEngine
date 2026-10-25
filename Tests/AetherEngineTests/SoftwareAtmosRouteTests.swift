@@ -55,12 +55,25 @@ struct SoftwareAtmosRouteTests {
     func apacRoutes() {
         // Without a codec's object-audio trait the renderer is not built in and the track keeps the PCM decode.
         let trueHD: SoftwareAtmosRoute = AetherEngine.OptionalComponent.trueHDObjectAudio.isBuiltIn ? .apac(.l714) : .pcm
-        let dtsx: SoftwareAtmosRoute = AetherEngine.OptionalComponent.dtsxObjectAudio.isBuiltIn ? .apac(.l512) : .pcm
+        let dtsx: SoftwareAtmosRoute = AetherEngine.OptionalComponent.dtsxObjectAudio.isBuiltIn ? .apac(.l714) : .pcm
         #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, channels: 8, frame: 0)
                 == trueHD)
         #expect(route(codec: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS_HD_MA, channels: 8, frame: 0,
-                      rendering: .apac(.l512)) == dtsx)
+                      rendering: .apac(.l714)) == dtsx)
         #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, apacOS: false) == .pcm)
+    }
+
+    @Test("DTS:X renders only into a bed that carries its channels one to one, and TrueHD Atmos into any")
+    func dtsxNeedsAOneToOneBed() {
+        // DTS:X's 7.1 bed and four heights map onto 7.1.4 and 9.1.6 only (`carriesDTSXOneToOne`);
+        // a smaller bed keeps the PCM decode, where TrueHD Atmos is rendered into whatever bed is asked.
+        for layout in SpatialSpeakerLayout.allCases where !layout.carriesDTSXOneToOne {
+            #expect(route(codec: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS_HD_MA, channels: 8, frame: 0,
+                          rendering: .apac(layout)) == .pcm, "\(layout.rawValue)")
+            let trueHD: SoftwareAtmosRoute = AetherEngine.OptionalComponent.trueHDObjectAudio.isBuiltIn ? .apac(layout) : .pcm
+            #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, channels: 8, frame: 0,
+                          rendering: .apac(layout)) == trueHD, "\(layout.rawValue)")
+        }
     }
 
     @Test("TrueHD without Atmos, lossy DTS and a rate other than 48 kHz stay PCM")
@@ -69,6 +82,14 @@ struct SoftwareAtmosRouteTests {
         #expect(route(codec: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS) == .pcm)
         #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, rate: 96_000) == .pcm)
         #expect(route(codec: AV_CODEC_ID_AAC) == .pcm)
+    }
+
+    @Test("only Dolby Atmos reaches the receiver as Dolby Atmos: TrueHD Atmos as APAC and JOC E-AC-3, not DTS:X")
+    func dolbyAtmosRoutes() {
+        #expect(SoftwareAtmosRoute.apac(.l714).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_TRUEHD))
+        #expect(SoftwareAtmosRoute.compressedEAC3JOC.carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_EAC3))
+        #expect(!SoftwareAtmosRoute.apac(.l714).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_DTS))
+        #expect(!SoftwareAtmosRoute.pcm.carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_TRUEHD))
     }
 
     // MARK: - dec3
