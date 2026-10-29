@@ -1,0 +1,52 @@
+name: Xcode 26 compatibility
+
+# Best effort, not a gate. The supported toolchain is Xcode 27 (README, ci.yml), but hosts still
+# pinned to Xcode 26.3 broke on 7.43.0 to 7.48.0 without anything here noticing (#883: a captured
+# closure under Swift 6.2's sendability rules, an integer literal in the `stri` box, and a `+`
+# chain the 6.2 type checker gave up on). Running this on every PR would add a fourth macOS runner
+# to each CI run and force 6.2-only rewrites into ordinary changes, so it runs weekly and by hand
+# before a release tag (`gh workflow run xcode26-compat.yml`). A red run is a heads-up for the
+# release notes, not a reason to hold one.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/xcode26-compat.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: xcodebuild (tvOS + iOS, Xcode 26.3)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Select Xcode 26.3
+        run: |
+          xcode=$(ls -d /Applications/Xcode_26.3*.app | sort | tail -n 1)
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          swift --version
+
+      - name: Build for tvOS
+        run: |
+          xcodebuild build \
+            -scheme AetherEngine \
+            -destination 'generic/platform=tvOS' \
+            -derivedDataPath .build/xcode26-tvos \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build for iOS
+        run: |
+          xcodebuild build \
+            -scheme AetherEngine \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath .build/xcode26-ios \
+            CODE_SIGNING_ALLOWED=NO

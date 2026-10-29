@@ -22,6 +22,9 @@ the public-API contract.
 ### Changed
 
 - **FFmpegBuild 3.10.2.** Only the privacy manifests above; the FFmpeg code is byte-identical to 3.10.1.
+- **A weekly Xcode 26.3 build (#883).** A best-effort workflow builds the package for tvOS and iOS with Xcode 26.3
+  (Swift 6.2) every Monday and by hand before a release, so a host still on Xcode 26 hears about a break before the
+  release does. It is not a required check and the supported toolchain stays Xcode 27.
 
 ### Fixed
 
