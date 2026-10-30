@@ -717,6 +717,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if ptsKey != Int64.min {
             // In decode order, here, so every frame carries concrete parameters by the time it pairs:
             // compose time runs in completion order, which is not stream order.
+            DoviDmPassthroughProbe.shared.noteSource(key: ptsKey, rpu: layers.rpuData)
             recordSideData(key: ptsKey, params: layers.rpuParams, dmNAL: layers.convertedRpu, baseLayerNAL: layers.baseLayerRpu,
                            usesPrevious: layers.usesPreviousMapping, disableResidual: layers.disableResidual)
         }

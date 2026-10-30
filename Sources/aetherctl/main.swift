@@ -115,6 +115,7 @@ func printUsage() {
       aetherctl disc-inspect <disc.iso>
       aetherctl dovitest [--out PATH.hevc] <file>
       aetherctl feltest [--frames N] <file>   (DualLayerDolbyVision trait)
+      aetherctl dmpass [--frames N] [--out PATH.jsonl] <file>   (display-metadata passthrough check; DualLayerDolbyVision trait)
       aetherctl dvsurvey [--frames N] [--list K] <file>
       aetherctl extract [--at <sec>] [--preview|--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio [--seconds N] <url>
@@ -503,6 +504,26 @@ if first == "dovitest" {
     rest.removeAll { $0 == urlArg }
     rejectStrayFlags(rest, subcommand: "dovitest")
     exit(runDoviTest(url: parseSourceURL(urlArg), outputPath: outPath))
+}
+
+// Per-frame display-metadata passthrough check on the FEL route: source RPU vs the RPU attached to the frame.
+if first == "dmpass" {
+    var rest = Array(args.dropFirst(2))
+    let frames = takeIntFlag("--frames", from: &rest) ?? 300
+    let outPath = takeStringFlag("--out", from: &rest)
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("ERROR: dmpass requires a <file> argument")
+        print("Usage: aetherctl dmpass [--frames N] [--out PATH.jsonl] <file>")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    rejectStrayFlags(rest, subcommand: "dmpass")
+    #if DualLayerDolbyVision
+    exit(runDmPass(url: parseSourceURL(urlArg), maxFrames: frames, out: outPath))
+    #else
+    print("ERROR: dmpass needs the DualLayerDolbyVision trait (swift build --traits DualLayerDolbyVision)")
+    exit(64)
+    #endif
 }
 
 // Dolby Vision Profile 7 FEL dual-layer Metal reconstruction test.

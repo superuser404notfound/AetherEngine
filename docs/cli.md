@@ -947,6 +947,16 @@ swift run aetherctl smbtest "smb://user:pass@host/share/path/to/file.mkv" --read
 
 `--reads N` sets the random-seek count (default 64). Credentials default to guest when omitted from the URL; URL-encode special characters in the password.
 
+## dmpass
+
+Measures whether the Dolby Vision Profile 7 FEL route keeps the source's display-management metadata when it converts the RPU to Profile 8.1 and attaches it to the composed frame. For every composed frame the source RPU (as the demuxer delivered it) is read with libdovi, the RPU is read back from the pixel buffer attachment at the hand-off point, and the two are compared field by field: the header, a summary of the mapping, the display-management scalars and every level (L1 to L6, L8 to L11, L254, L255), plus the Content Mapping version (v4.0 when an L254 block is present, else v2.9). Fields the profile conversion is defined to change (the profile and enhancement-layer labels, the two residual flags, the mapping) are listed as expected; any other difference fails the run. Mode 2 also resets the YCC to RGB matrix and offsets, the RGB to LMS matrix and the signal colour space to the Profile 8.1 values: that is reported as a separate "normalised" category (the frame still passes, the field names and counts are printed), and shows nothing when the source already carries those values. Needs the `DualLayerDolbyVision` trait.
+
+```bash
+swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp/dm.jsonl /path/to/p7.mkv
+```
+
+`--frames N` (default 300) is the packet count to feed. `--out PATH.jsonl` writes one JSON object per frame with both readings and both RPU byte strings in hex, for an independent cross-check with `dovi_tool`. `AETHER_DM_PRINT=1` (or `hex`) echoes the per-frame `[dm-digest]` lines; the exit code is 0 when every frame passes. The same digest runs inside any host when `AETHER_DM_DIGEST` is `1`, `log` or `hex` (the last adds both RPU byte strings to each line); `AETHER_DM_DIGEST_FILE` appends the JSON form to a file. All of it exists only with the `DualLayerDolbyVision` trait. It is off by default and costs nothing then.
+
 ## Fixtures
 
 For repeatable runs, `Scripts/fetch-fixtures.sh` generates a small set of synthetic FFmpeg test clips in `./Fixtures/` (H.264 SDR, HEVC HDR10, AV1, VP9) covering both the native AVPlayer path and the software fallback. Real-world DV / Atmos / multichannel sources go in `./Fixtures/user/` (gitignored).
