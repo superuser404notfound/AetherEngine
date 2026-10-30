@@ -30,7 +30,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Twenty-four subcommands plus the bare-URL `serve` alias.
+Twenty-seven subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -530,6 +530,30 @@ Walks a title's RPUs with no decoders and no GPU, converts each to Profile 8.1 e
 
 ```bash
 swift run aetherctl dvsurvey --frames 6000 <p7-source>
+```
+
+## eltype
+
+Reads `label<TAB>url` lines from stdin and prints, for each source, whether its Dolby Vision Profile 7 enhancement layer is FEL or MEL (`AetherEngine.probeDolbyVisionEnhancementLayer`, no decode). Needs the `DualLayerDolbyVision` trait. `--parallel N` (default 8) bounds the sources open at once; the work runs on `concurrentPerform`, so the effective width is also capped by the core count.
+
+```bash
+printf 'title\t/path/to/p7.mkv\n' | swift run aetherctl eltype --parallel 4
+```
+
+## elsurvey
+
+Reads `label<TAB>url` lines from stdin and measures what each title's enhancement layer does to its picture at sampled keyframes (`AetherEngine.doviResidualSurvey`): per title the mean and p99 residual in 12-bit codes, the share of pixels moved by a 10-bit step or more, and the nits change at the average and peak levels, taken before the composer's range clamp. A TSV row prints as each title finishes. Needs the `DualLayerDolbyVision` trait. `--points N` (default 48) is the keyframes sampled per title; `--parallel N` (default 8) bounds the titles measured at once, capped by the core count like `eltype`.
+
+```bash
+swift run aetherctl elsurvey --points 24 --parallel 4 < titles.tsv
+```
+
+## elframe
+
+Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and without its residual, and writes the full-precision P010 planes (`fel_y.bin`, `fel_uv.bin`, `mel_y.bin`, `mel_uv.bin`, little-endian 16-bit words, the 10-bit code in the top bits and the finer bits below) and `frame.json` to a directory. `--at SECONDS` picks the keyframe at or before that time and `--out DIR` the destination. Prints a note, and sets `residual_disabled_by_rpu` in `frame.json`, when the RPU itself switches the residual off for the frame (FEL and MEL are then identical). Needs the `DualLayerDolbyVision` trait.
+
+```bash
+swift run aetherctl elframe --at 600 --out /tmp/elframe <p7-source>
 ```
 
 ## pktdump

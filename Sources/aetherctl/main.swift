@@ -117,6 +117,9 @@ func printUsage() {
       aetherctl feltest [--frames N] <file>   (DualLayerDolbyVision trait)
       aetherctl dmpass [--frames N] [--out PATH.jsonl] <file>   (display-metadata passthrough check; DualLayerDolbyVision trait)
       aetherctl dvsurvey [--frames N] [--list K] <file>
+      aetherctl eltype [--parallel N]      (label<TAB>url lines on stdin; DualLayerDolbyVision trait)
+      aetherctl elsurvey [--parallel N] [--points N]   (label<TAB>url lines on stdin; DualLayerDolbyVision trait)
+      aetherctl elframe --at SECONDS --out DIR <url>   (DualLayerDolbyVision trait)
       aetherctl extract [--at <sec>] [--preview|--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio [--seconds N] <url>
       aetherctl audiotap [--duration S] [--out PATH.wav] [--remote | --software] [--dialogue] <url>
@@ -586,6 +589,44 @@ if first == "dvsurvey" {
     rest.removeAll { $0 == urlArg }
     rejectStrayFlags(rest, subcommand: "dvsurvey")
     exit(runDvSurvey(url: parseSourceURL(urlArg), maxFrames: frames, listFrames: list))
+}
+
+#if DualLayerDolbyVision
+// One FEL frame composed with and without its residual, as raw planes: elframe --at SECONDS --out DIR <url>.
+if first == "elframe" {
+    var rest = Array(args.dropFirst(2))
+    let at = takeDoubleFlag("--at", from: &rest) ?? 0
+    guard let outIdx = rest.firstIndex(of: "--out"), outIdx + 1 < rest.count else {
+        print("Usage: aetherctl elframe --at SECONDS --out DIR <url>")
+        exit(64)
+    }
+    let out = URL(fileURLWithPath: rest[outIdx + 1])
+    rest.removeSubrange(outIdx...(outIdx + 1))
+    guard let urlArg = rest.first(where: { !$0.hasPrefix("--") }) else {
+        print("Usage: aetherctl elframe --at SECONDS --out DIR <url>")
+        exit(64)
+    }
+    rest.removeAll { $0 == urlArg }
+    rejectStrayFlags(rest, subcommand: "elframe")
+    exit(runElFrame(url: parseSourceURL(urlArg), seconds: at, outDir: out))
+}
+
+// What each title's enhancement layer does to its picture, measured at sampled keyframes: `label<TAB>url` lines on stdin.
+if first == "elsurvey" {
+    var rest = Array(args.dropFirst(2))
+    let parallel = takeIntFlag("--parallel", from: &rest) ?? 8
+    let points = takeIntFlag("--points", from: &rest) ?? 48
+    rejectStrayFlags(rest, subcommand: "elsurvey")
+    exit(runElSurvey(parallel: parallel, points: points))
+}
+#endif
+
+// FEL / MEL for many sources at once: `label<TAB>url` lines on stdin.
+if first == "eltype" {
+    var rest = Array(args.dropFirst(2))
+    let parallel = takeIntFlag("--parallel", from: &rest) ?? 8
+    rejectStrayFlags(rest, subcommand: "eltype")
+    exit(runElType(parallel: parallel))
 }
 
 // #93 post-recovery judder: raw video packet timing per demuxer open profile.

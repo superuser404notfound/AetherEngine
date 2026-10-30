@@ -512,7 +512,10 @@ the decoder's lock, and each call is O(K):
   Metal's completion queue.
 - **Pipelines** are compiled once per process, lazily on first composition (a shared `MTLLibrary` and
   pipeline states), so a MEL or bypassed stream never compiles and a second decoder instance does not
-  recompile.
+  recompile. A cold compile is about 300 ms on an M4 Pro (almost all of it source to library; the
+  pipeline states take a millisecond or two), then about 0.4 ms from Metal's shader cache. A host takes
+  it off the first frame with `AetherEngine.prewarmDualLayerDolbyVision()` at launch or on selecting a
+  Profile 7 title; it fills the same shared cache.
 - **Kernels:** a per-frame 1024-entry luma prediction table replaces piece selection and polynomial
   evaluation per pixel whenever luma is polynomial (it is a pure function of the 10-bit base code);
   residual evaluation is skipped per component when that component's NLQ is inactive; threadgroup sizes
