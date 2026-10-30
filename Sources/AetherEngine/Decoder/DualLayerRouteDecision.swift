@@ -20,8 +20,9 @@ enum DualLayerRouteDecision: Equatable {
         case preferenceOff
         /// The package was built without the `DualLayerDolbyVision` trait, so there is no composer.
         case notBuiltIn
-        /// The enhancement layer is not in the video packets: a UHD Blu-ray's lives on its own PID and the demuxer
-        /// folds in only its RPUs (`BluRayDolbyVisionLayers`), so there is nothing to compose.
+        /// The enhancement layer is not in the video packets: it lives on its own PID or track and the demuxer folds
+        /// in only its RPUs (`BluRayDolbyVisionLayers`), so there is nothing to compose. A source whose layers the
+        /// demuxer can join (`Demuxer.enableDolbyVisionEnhancementLayerJoin`) never reaches this.
         case enhancementLayerNotInPackets
         case baseLayerOnlyHandling
         case liveOrNotSeekable

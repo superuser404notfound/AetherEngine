@@ -424,9 +424,26 @@ public final class Demuxer: @unchecked Sendable {
     // Forward-only custom sources report false.
     var isSourceSeekable: Bool { avioProvider?.isSeekable ?? true }
 
-    /// True when the source is a UHD Blu-ray clip whose Dolby Vision RPUs are folded in from the enhancement-layer
-    /// PID (`BluRayDolbyVisionLayers`): the video packets carry the RPU but not the enhancement layer itself.
+    /// True when the source carries its Dolby Vision enhancement layer as a stream of its own, a UHD Blu-ray clip's
+    /// second PID (`BluRayDolbyVisionLayers`) or a second video track (`SeparateDolbyVisionLayers`): the video packets
+    /// carry the RPU, folded in from the enhancement layer, but not the enhancement layer itself.
     private(set) var foldsBluRayDolbyVisionLayers = false
+
+    /// Whether the enhancement layer can be joined into the video packets for the dual-layer route
+    /// (`enableDolbyVisionEnhancementLayerJoin`): a split source whose enhancement layer is no larger than its base layer.
+    var canJoinDolbyVisionEnhancementLayer: Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return doviLayers != nil
+    }
+
+    /// True once `enableDolbyVisionEnhancementLayerJoin` switched the video packets from the folded RPU to the joined
+    /// single-track unit.
+    var joinsDolbyVisionEnhancementLayer: Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        return doviJoinsEnhancement
+    }
 
     /// True when libavformat opened the source itself, which it does only for a local path
     /// (`openLocal`). Every network, disc and custom source is read through an `AVIOProvider`.
@@ -530,12 +547,24 @@ public final class Demuxer: @unchecked Sendable {
     /// #651: one assembler per stream `declareDiscSubpictureStreams` created, keyed by stream index.
     /// Those streams have no libavformat parser, so their fragments are joined here. Under `accessLock`.
     private var subpictureAssemblers: [Int32: DVDSubpictureAssembler] = [:]
-    /// A UHD Blu-ray clip's two Dolby Vision layers, folded into one Profile 7 stream as they are read
-    /// (`BluRayDolbyVisionLayers`); nil for every other source.
-    private var doviLayers: BluRayDolbyVisionLayers?
+    /// A split source's two Dolby Vision layers (a UHD Blu-ray clip's PIDs, or a file's two tracks), folded or joined
+    /// into one Profile 7 stream as they are read (`SeparateDolbyVisionLayers`); nil for every other source.
+    private var doviLayers: SeparateDolbyVisionLayers?
+    /// How each layer's packets frame their NAL units, and the enhancement layer's own parameter sets.
+    private var doviBaseFraming: VideoNALFraming = .annexB
+    private var doviEnhancementFraming: VideoNALFraming = .annexB
+    private var doviEnhancementParameterSets: [[UInt8]] = []
+    /// The dual-layer route joins the enhancement layer into the packets instead of folding in its RPUs.
+    private var doviJoinsEnhancement = false
+    /// The base layer's own Annex-B record, kept while the join replaces it with an hvcC.
+    private var doviOriginalBaseExtradata: [UInt8]?
+    private var doviJoin = DolbyVisionLayerJoin<UnsafeMutablePointer<AVPacket>>()
+    /// The next joined unit is the first after a (re)start of the join: the enhancement layer's parameter sets go in.
+    private var doviJoinNeedsParameterSets = true
     /// Base-layer packets waiting for the enhancement-layer unit with their PTS, and RPUs that came before their
     /// picture. The enhancement unit usually follows its base unit, sometimes a picture or two later.
-    private var doviPairing = DolbyVisionLayerPairing<UnsafeMutablePointer<AVPacket>>()
+    private var doviPairing = DolbyVisionLayerPairing<UnsafeMutablePointer<AVPacket>>(
+        tolerance: DolbyVisionLayerJoin<UnsafeMutablePointer<AVPacket>>.timeToleranceMicros)
     /// Base-layer pictures that went out without an RPU (no matching enhancement unit), for the log.
     private var doviUnpairedBase = 0
 
@@ -1346,20 +1375,107 @@ public final class Demuxer: @unchecked Sendable {
         }
     }
 
-    /// A UHD Blu-ray clip with its Dolby Vision enhancement layer on PID 0x1015: the base layer is declared
-    /// Profile 7 and `readPacketLocked` hands it out with each picture's RPU appended (`BluRayDolbyVisionLayers`).
+    /// A split Dolby Vision source: a UHD Blu-ray clip with its enhancement layer on PID 0x1015, or a file with the
+    /// enhancement layer as a second video track. The base layer is declared Profile 7 and `readPacketLocked` hands it
+    /// out with each picture's RPU appended (`BluRayDolbyVisionLayers`), or, once the dual-layer route asks for it
+    /// (`enableDolbyVisionEnhancementLayerJoin`), with the whole enhancement layer joined in.
     private func armBluRayDolbyVisionLayers(_ ctx: UnsafeMutablePointer<AVFormatContext>) {
         dropHeldDolbyVisionBaseLocked()
-        doviLayers = BluRayDolbyVisionLayers.detect(ctx)
+        doviJoinsEnhancement = false
+        doviLayers = SeparateDolbyVisionLayers.detect(ctx)
         foldsBluRayDolbyVisionLayers = doviLayers != nil
-        guard let layers = doviLayers, let base = ctx.pointee.streams[Int(layers.base)] else { return }
-        let declared = BluRayDolbyVisionLayers.declareProfile7(base)
+        guard let layers = doviLayers, let base = ctx.pointee.streams[Int(layers.base)],
+              let enhancement = ctx.pointee.streams[Int(layers.enhancement)] else { return }
+        doviBaseFraming = SeparateDolbyVisionLayers.framing(of: base)
+        doviEnhancementFraming = SeparateDolbyVisionLayers.framing(of: enhancement)
+        doviEnhancementParameterSets = SeparateDolbyVisionLayers.parameterSets(of: enhancement)
+        let declared = SeparateDolbyVisionLayers.declareSingleTrackProfile7(base)
+        switch layers.carriage {
+        case .transportPID:
+            EngineLog.emit(
+                "[Demuxer] Blu-ray Dolby Vision: base layer stream=\(layers.base) (PID 0x1011), enhancement layer "
+                + "stream=\(layers.enhancement) (PID 0x1015); RPUs folded into the base layer, "
+                + (declared ? "declared Profile 7" : "record already present"),
+                category: .demux
+            )
+        case .track:
+            EngineLog.emit(
+                "[Demuxer] Dolby Vision dual track: base layer stream=\(layers.base), enhancement layer "
+                + "stream=\(layers.enhancement); RPUs folded into the base layer, "
+                + (declared ? "declared Profile 7" : "record kept"),
+                category: .demux
+            )
+        }
+    }
+
+    /// Switches a split Dolby Vision source from folding the enhancement layer's RPUs into the base layer to joining
+    /// the whole enhancement layer in, the single-track unit the dual-layer decoder reads. The video packets become
+    /// four-byte length-prefixed units, so a transport stream's base layer also gets the hvcC its Annex-B parameter
+    /// sets imply. Returns false (and stays folding) when the source is not split, or is a transport stream whose
+    /// parameter sets cannot be made into a record. Call before the first packet of the session is read; the join
+    /// starts at the next read. `disableDolbyVisionEnhancementLayerJoin` undoes it.
+    @discardableResult
+    func enableDolbyVisionEnhancementLayerJoin() -> Bool {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard let layers = doviLayers, let ctx = formatContext,
+              let base = ctx.pointee.streams[Int(layers.base)], let par = base.pointee.codecpar else { return false }
+        if doviJoinsEnhancement { return true }
+        // `compose` writes four-byte lengths and the decoder reads them as such: a base layer whose record declares
+        // another length size would be misread on every joined unit, so it keeps folding.
+        guard SeparateDolbyVisionLayers.canJoin(baseFraming: doviBaseFraming) else {
+            EngineLog.emit(
+                "[Demuxer] Dolby Vision: enhancement layer not joined, the base layer frames its NAL units with "
+                + "\(doviBaseFraming) (the join needs four-byte lengths or Annex-B)", category: .demux)
+            return false
+        }
+        var original: [UInt8]?
+        if doviBaseFraming == .annexB {
+            // The dual-layer decoder opens from an hvcC; an Annex-B stream's parameter sets become one.
+            guard let ed = par.pointee.extradata, par.pointee.extradata_size > 0 else { return false }
+            let bytes = [UInt8](UnsafeBufferPointer(start: ed, count: Int(par.pointee.extradata_size)))
+            let source = VideoConfigRecord.canonicalizeAnnexBHEVCConfigRecord(bytes) ?? bytes
+            guard let record = VideoConfigRecord.fromAnnexB(
+                    source, codecID: par.pointee.codec_id, width: par.pointee.width, height: par.pointee.height),
+                  Self.replaceExtradata(of: par, with: record) else { return false }
+            original = bytes
+        }
+        dropHeldDolbyVisionBaseLocked()
+        doviJoinsEnhancement = true
+        doviOriginalBaseExtradata = original
         EngineLog.emit(
-            "[Demuxer] Blu-ray Dolby Vision: base layer stream=\(layers.base) (PID 0x1011), enhancement layer "
-            + "stream=\(layers.enhancement) (PID 0x1015); RPUs folded into the base layer, "
-            + (declared ? "declared Profile 7" : "record already present"),
+            "[Demuxer] Dolby Vision: enhancement layer stream=\(layers.enhancement) joined into the base layer "
+            + "(\(layers.carriage == .transportPID ? "transport PID" : "track") carriage, dual-layer route)",
             category: .demux
         )
+        return true
+    }
+
+    /// Returns a joined split source to folding: the route was not taken after all. The base layer's own record comes
+    /// back, so the 8.1 path sees the stream it always did.
+    func disableDolbyVisionEnhancementLayerJoin() {
+        accessLock.lock()
+        defer { accessLock.unlock() }
+        guard doviJoinsEnhancement else { return }
+        dropHeldDolbyVisionBaseLocked()
+        doviJoinsEnhancement = false
+        if let original = doviOriginalBaseExtradata, let layers = doviLayers, let ctx = formatContext,
+           let par = ctx.pointee.streams[Int(layers.base)]?.pointee.codecpar {
+            _ = Self.replaceExtradata(of: par, with: original)
+        }
+        doviOriginalBaseExtradata = nil
+    }
+
+    private static func replaceExtradata(of par: UnsafeMutablePointer<AVCodecParameters>, with bytes: [UInt8]) -> Bool {
+        let pad = Int(AV_INPUT_BUFFER_PADDING_SIZE)
+        guard let buf = av_malloc(bytes.count + pad) else { return false }
+        let typed = buf.assumingMemoryBound(to: UInt8.self)
+        bytes.withUnsafeBufferPointer { if let b = $0.baseAddress { memcpy(typed, b, bytes.count) } }
+        memset(typed + bytes.count, 0, pad)
+        av_freep(&par.pointee.extradata)
+        par.pointee.extradata = typed
+        par.pointee.extradata_size = Int32(bytes.count)
+        return true
     }
 
     /// Frees the base-layer packets still waiting for their enhancement units (a seek, a reopen, close).
@@ -1368,36 +1484,126 @@ public final class Demuxer: @unchecked Sendable {
             var packet: UnsafeMutablePointer<AVPacket>? = held
             trackedPacketFree(&packet)
         }
+        for held in doviJoin.reset() {
+            var packet: UnsafeMutablePointer<AVPacket>? = held
+            trackedPacketFree(&packet)
+        }
+        doviJoinNeedsParameterSets = true
     }
 
     /// The oldest waiting base-layer packet, once its RPU is in, or once too many wait behind it (it goes without
     /// one), or at the end of the source; nil while it may still be completed.
     private func releaseDolbyVisionBaseLocked(atEnd: Bool = false) -> UnsafeMutablePointer<AVPacket>? {
+        if doviJoinsEnhancement { return releaseJoinedDolbyVisionLocked(atEnd: atEnd) }
         guard let out = doviPairing.release(atEnd: atEnd) else { return nil }
         if !out.paired { noteUnpairedBase() }
         return out.unit
     }
 
-    /// One packet through the Blu-ray Dolby Vision fold. A base-layer packet waits in `doviPairing` until the
+    /// The next joined single-track unit the join can decide, freeing the units it retires on the way.
+    private func releaseJoinedDolbyVisionLocked(atEnd: Bool) -> UnsafeMutablePointer<AVPacket>? {
+        while true {
+            for retired in doviJoin.takeRetired() {
+                var packet: UnsafeMutablePointer<AVPacket>? = retired
+                trackedPacketFree(&packet)
+            }
+            guard let step = doviJoin.next(atEnd: atEnd) else { return nil }
+            switch step {
+            case .discard(let unit):
+                var packet: UnsafeMutablePointer<AVPacket>? = unit
+                trackedPacketFree(&packet)
+            case let .pair(base, enhancement):
+                if enhancement == nil { noteUnpairedBase() }
+                if let joined = composeJoinedLocked(base: base, enhancement: enhancement) { return joined }
+            }
+        }
+    }
+
+    /// The single-track packet for a base unit and its enhancement unit (consumed either way); nil if it could not be
+    /// built, in which case the base unit is lost.
+    private func composeJoinedLocked(base: UnsafeMutablePointer<AVPacket>,
+                                     enhancement: UnsafeMutablePointer<AVPacket>?) -> UnsafeMutablePointer<AVPacket>? {
+        var baseOwned: UnsafeMutablePointer<AVPacket>? = base
+        var enhancementOwned: UnsafeMutablePointer<AVPacket>? = enhancement
+        defer { trackedPacketFree(&baseOwned); trackedPacketFree(&enhancementOwned) }
+        let baseFraming = doviBaseFraming
+        let enhancementIRAP = enhancement.map {
+            DolbyVisionLayerUnits.isIRAP(UnsafeRawBufferPointer(start: $0.pointee.data, count: Int(max(0, $0.pointee.size))),
+                                         framing: doviEnhancementFraming)
+        } ?? false
+        let bytes = DolbyVisionLayerUnits.compose(
+            base: UnsafeRawBufferPointer(start: base.pointee.data, count: Int(max(0, base.pointee.size))),
+            baseFraming: baseFraming,
+            enhancement: enhancement.map { UnsafeRawBufferPointer(start: $0.pointee.data, count: Int(max(0, $0.pointee.size))) },
+            enhancementFraming: doviEnhancementFraming,
+            parameterSets: doviEnhancementParameterSets,
+            injectParameterSets: doviJoinNeedsParameterSets || enhancementIRAP)
+        if enhancement != nil { doviJoinNeedsParameterSets = false }
+        guard let size = Int32(exactly: bytes.count), size > 0, let joined = trackedPacketAlloc() else { return nil }
+        var out: UnsafeMutablePointer<AVPacket>? = joined
+        guard av_new_packet(joined, size) >= 0, av_packet_copy_props(joined, base) >= 0 else {
+            trackedPacketFree(&out)
+            return nil
+        }
+        bytes.withUnsafeBufferPointer { _ = memcpy(joined.pointee.data, $0.baseAddress!, bytes.count) }
+        joined.pointee.stream_index = base.pointee.stream_index
+        return joined
+    }
+
+    /// One packet through the split-layer handling. Folding: a base-layer packet waits in `doviPairing` until the
     /// enhancement unit with its PTS brings the RPU (appended to it); an enhancement unit that comes first leaves its
-    /// RPU there for it. Enhancement packets never leave the demuxer. Returns the packet to hand out (other
-    /// streams pass straight through, a step or two ahead of the picture being completed), nil to read on.
+    /// RPU there for it. Joining: both layers queue in `doviJoin`, which pairs them in decode order. Enhancement
+    /// packets never leave the demuxer. Returns the packet to hand out (other streams pass straight through, a step or
+    /// two ahead of the picture being completed), nil to read on.
     private func foldDolbyVisionLayersLocked(_ read: UnsafeMutablePointer<AVPacket>,
-                                             _ layers: BluRayDolbyVisionLayers) -> UnsafeMutablePointer<AVPacket>? {
+                                             _ layers: SeparateDolbyVisionLayers) -> UnsafeMutablePointer<AVPacket>? {
+        if doviJoinsEnhancement { return joinDolbyVisionLayersLocked(read, layers) }
+        let baseFraming = doviBaseFraming
         switch read.pointee.stream_index {
         case layers.enhancement:
             var packet: UnsafeMutablePointer<AVPacket>? = read
             defer { trackedPacketFree(&packet) }
-            guard let rpu = BluRayDolbyVisionLayers.rpu(inAnnexB: UnsafeRawBufferPointer(
-                start: read.pointee.data, count: Int(max(0, read.pointee.size)))) else { return nil }
-            doviPairing.addRPU(rpu, pts: read.pointee.pts) { BluRayDolbyVisionLayers.append($1, to: $0) }
+            guard let rpu = DolbyVisionLayerUnits.rpu(in: UnsafeRawBufferPointer(
+                start: read.pointee.data, count: Int(max(0, read.pointee.size))), framing: doviEnhancementFraming)
+            else { return nil }
+            doviPairing.addRPU(rpu, pts: layerMicros(of: read)) { DolbyVisionLayerUnits.append($1, to: $0, framing: baseFraming) }
             return nil
         case layers.base:
-            doviPairing.addBase(read, pts: read.pointee.pts) { BluRayDolbyVisionLayers.append($1, to: $0) }
+            doviPairing.addBase(read, pts: layerMicros(of: read)) { DolbyVisionLayerUnits.append($1, to: $0, framing: baseFraming) }
             return nil
         default:
             return read
         }
+    }
+
+    /// A split-layer packet's presentation time (its decode time when it has none) in microseconds, whichever stream
+    /// time base it counts in: the two tracks of an MP4 can have different timescales, and a transport stream counts
+    /// 90 kHz ticks while Matroska counts milliseconds. `Int64.min` when the packet has no time.
+    private func layerMicros(of packet: UnsafeMutablePointer<AVPacket>) -> Int64 {
+        let stamp = packet.pointee.pts != Int64.min ? packet.pointee.pts : packet.pointee.dts
+        guard stamp != Int64.min, let ctx = formatContext, packet.pointee.stream_index >= 0,
+              packet.pointee.stream_index < Int32(ctx.pointee.nb_streams),
+              let stream = ctx.pointee.streams[Int(packet.pointee.stream_index)] else { return Int64.min }
+        return av_rescale_q(stamp, stream.pointee.time_base, AVRational(num: 1, den: 1_000_000))
+    }
+
+    /// Queues one base or enhancement packet in the join; other streams pass straight through.
+    private func joinDolbyVisionLayersLocked(_ read: UnsafeMutablePointer<AVPacket>,
+                                             _ layers: SeparateDolbyVisionLayers) -> UnsafeMutablePointer<AVPacket>? {
+        let isBase = read.pointee.stream_index == layers.base
+        guard isBase || read.pointee.stream_index == layers.enhancement else { return read }
+        guard let ctx = formatContext, ctx.pointee.streams[Int(read.pointee.stream_index)] != nil else {
+            var packet: UnsafeMutablePointer<AVPacket>? = read
+            trackedPacketFree(&packet)
+            return nil
+        }
+        let micros = layerMicros(of: read)
+        let framing = isBase ? doviBaseFraming : doviEnhancementFraming
+        let irap = DolbyVisionLayerUnits.isIRAP(
+            UnsafeRawBufferPointer(start: read.pointee.data, count: Int(max(0, read.pointee.size))), framing: framing)
+        let entry = DolbyVisionLayerJoin<UnsafeMutablePointer<AVPacket>>.Entry(unit: read, pts: micros, isIRAP: irap)
+        if isBase { doviJoin.addBase(entry) } else { doviJoin.addEnhancement(entry) }
+        return nil
     }
 
     private func noteUnpairedBase() {
@@ -1590,7 +1796,7 @@ public final class Demuxer: @unchecked Sendable {
     /// Clamped: av_find_best_stream returns AVERROR_STREAM_NOT_FOUND (-1381258232)
     /// on failure, not -1; normalize to -1 to avoid garbage in logs.
     var videoStreamIndex: Int32 {
-        answeredFromStreams(\.videoStreamIndex) { Self.bestStreamIndex($0, AVMEDIA_TYPE_VIDEO) }
+        answeredFromStreams(\.videoStreamIndex) { self.bestVideoStreamIndexLocked($0) }
     }
 
     /// True if `index` names a video stream. Live producer uses this to detect
@@ -1651,6 +1857,14 @@ public final class Demuxer: @unchecked Sendable {
         max(-1, av_find_best_stream(ctx, type, -1, -1, nil, 0))
     }
 
+    /// The best video stream; for a split Dolby Vision source always the base layer, which libavformat's own score
+    /// can give to the enhancement track when both declare the same disposition. Caller holds `accessLock`.
+    private func bestVideoStreamIndexLocked(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> Int32 {
+        let best = Self.bestStreamIndex(ctx, AVMEDIA_TYPE_VIDEO)
+        if let layers = doviLayers, best == layers.enhancement { return layers.base }
+        return best
+    }
+
     private static func firstAudioStreamIndexByType(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> Int32 {
         for i in 0..<Int(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[i],
@@ -1705,7 +1919,7 @@ public final class Demuxer: @unchecked Sendable {
     private func buildTrackSnapshotLocked() -> TrackSnapshot {
         guard let ctx = formatContext else { return TrackSnapshot() }
         return TrackSnapshot(
-            videoStreamIndex: Self.bestStreamIndex(ctx, AVMEDIA_TYPE_VIDEO),
+            videoStreamIndex: bestVideoStreamIndexLocked(ctx),
             audioStreamIndex: Self.bestStreamIndex(ctx, AVMEDIA_TYPE_AUDIO),
             firstAudioStreamIndexByType: Self.firstAudioStreamIndexByType(ctx),
             audioTracks: trackInfos(in: ctx, ofType: AVMEDIA_TYPE_AUDIO),
@@ -3311,6 +3525,8 @@ public final class Demuxer: @unchecked Sendable {
         dropPeekedPacketsLocked()
         dropHeldDolbyVisionBaseLocked()
         doviLayers = nil
+        doviJoinsEnhancement = false
+        doviOriginalBaseExtradata = nil
         foldsBluRayDolbyVisionLayers = false
         if formatContext != nil {
             avformat_close_input(&formatContext)

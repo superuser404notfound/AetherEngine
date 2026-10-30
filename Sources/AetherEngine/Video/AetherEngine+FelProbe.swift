@@ -63,6 +63,7 @@ extension AetherEngine {
         // An `hev1` file with in-band parameter sets has an empty hvcC; the load path completes it
         // from the head of the stream before routing, and the probe must open the decoders on the
         // same record or it reports a failure the real route does not have. Seeks back to 0.
+        demuxer.enableDolbyVisionEnhancementLayerJoin()
         VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: demuxer, streamIndex: videoIdx)
         guard let stream = demuxer.stream(at: videoIdx) else {
             throw AetherEngineError.noVideoStream

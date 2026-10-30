@@ -59,6 +59,27 @@ struct BluRayDolbyVisionLayerFoldTests {
         #expect(pairing.heldCount == 0)
     }
 
+    @Test("With a tolerance, times that differ by rounding pair; further apart or unknown ones never do")
+    func toleranceMatchesRoundedTimes() throws {
+        var pairing = Pairing(tolerance: 2_000)
+        // The base track counts 1/16000 s, the enhancement track 1/24000: the same picture lands 1 us and 1.3 ms apart.
+        pairing.addBase(Picture(41_708), pts: 41_708, attach: Self.attach)
+        pairing.addRPU(Self.rpu(1), pts: 41_709, attach: Self.attach)
+        pairing.addRPU(Self.rpu(2), pts: 83_417 + 1_300, attach: Self.attach)
+        pairing.addBase(Picture(83_417), pts: 83_417, attach: Self.attach)
+        let first = try #require(Self.next(&pairing)), second = try #require(Self.next(&pairing))
+        #expect(first.paired && first.unit.rpu == Self.rpu(1))
+        #expect(second.paired && second.unit.rpu == Self.rpu(2))
+        // Further than the tolerance, or without a time: no pair.
+        pairing.addBase(Picture(125_000), pts: 125_000, attach: Self.attach)
+        pairing.addRPU(Self.rpu(3), pts: 125_000 + 3_000, attach: Self.attach)
+        pairing.addBase(Picture(Int64.min), pts: Int64.min, attach: Self.attach)
+        pairing.addRPU(Self.rpu(4), pts: Int64.min, attach: Self.attach)
+        #expect(Self.next(&pairing) == nil)
+        let rest = pairing.drain()
+        #expect(rest.count == 2 && rest.allSatisfy { $0.rpu == nil })
+    }
+
     @Test("An RPU that comes before its picture is attached when the picture arrives")
     func rpuBeforeItsPicture() throws {
         var pairing = Pairing()

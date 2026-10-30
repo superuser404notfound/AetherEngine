@@ -116,31 +116,49 @@ struct BluRayDolbyVisionLayers {
 /// Pairs each base-layer picture with the RPU of the enhancement unit that has its PTS, in read order. A base
 /// picture waits until its RPU is in; an RPU that comes first waits for its picture. Generic over the held unit so
 /// the demuxer holds its packets and the tests hold plain values.
+///
+/// Times are compared within `tolerance` (0 by default: equal). A caller whose two layers keep their own time bases
+/// (the tracks of an MP4 can differ in timescale and rounding) rescales both to one unit first and passes the
+/// tolerance the join uses; an unknown time (`Int64.min`) pairs with nothing.
 struct DolbyVisionLayerPairing<Unit> {
     /// How many base pictures may wait before the oldest goes out without an RPU.
     static var holdLimit: Int { 8 }
 
+    let tolerance: Int64
+
+    init(tolerance: Int64 = 0) { self.tolerance = tolerance }
+
     private var held: [(unit: Unit, pts: Int64, ready: Bool)] = []
-    private var earlyRPUs: [Int64: [UInt8]] = [:]
+    private var earlyRPUs: [(pts: Int64, rpu: [UInt8])] = []
 
     var heldCount: Int { held.count }
+
+    private func same(_ a: Int64, _ b: Int64) -> Bool {
+        guard a != Int64.min, b != Int64.min else { return false }
+        let (d, overflow) = a.subtractingReportingOverflow(b)
+        return !overflow && abs(d) <= tolerance
+    }
 
     /// A base-layer picture. `attach` appends an RPU to it and returns whether that worked.
     mutating func addBase(_ unit: Unit, pts: Int64, attach: (Unit, [UInt8]) -> Bool) {
         var ready = false
-        if let rpu = earlyRPUs.removeValue(forKey: pts) { ready = attach(unit, rpu) }
+        if let i = earlyRPUs.firstIndex(where: { same($0.pts, pts) }) {
+            ready = attach(unit, earlyRPUs.remove(at: i).rpu)
+        }
         held.append((unit, pts, ready))
     }
 
     /// An enhancement unit's RPU: completes the waiting base picture with its PTS, or waits for it. The early
     /// RPUs are bounded too, the lowest PTS goes first.
     mutating func addRPU(_ rpu: [UInt8], pts: Int64, attach: (Unit, [UInt8]) -> Bool) {
-        if let i = held.firstIndex(where: { !$0.ready && $0.pts == pts }) {
+        if let i = held.firstIndex(where: { !$0.ready && same($0.pts, pts) }) {
             held[i].ready = attach(held[i].unit, rpu)
             return
         }
-        if earlyRPUs.count >= Self.holdLimit * 2, let oldest = earlyRPUs.keys.min() { earlyRPUs[oldest] = nil }
-        earlyRPUs[pts] = rpu
+        if earlyRPUs.count >= Self.holdLimit * 2, let oldest = earlyRPUs.indices.min(by: { earlyRPUs[$0].pts < earlyRPUs[$1].pts }) {
+            earlyRPUs.remove(at: oldest)
+        }
+        earlyRPUs.append((pts, rpu))
     }
 
     /// The oldest base picture, once its RPU is in, once more than `holdLimit` wait, or at the end of the source;
@@ -153,7 +171,7 @@ struct DolbyVisionLayerPairing<Unit> {
 
     /// Everything still waiting, for the caller to free (a seek, a reopen, close).
     mutating func drain() -> [Unit] {
-        defer { held = []; earlyRPUs = [:] }
+        defer { held = []; earlyRPUs = [] }
         return held.map(\.unit)
     }
 }
