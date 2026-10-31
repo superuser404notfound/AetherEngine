@@ -675,32 +675,68 @@ kernel void dovi_compose_chroma_422(
 // 4:4:4 has the luma's full size: each sample is the mean of the 4:2:0 sites around it (one site on
 // a site, two between two, four in a cell's middle), rounded once. Experimental: the reconstruction
 // has no 4:4:4 form in the spec, so this only steps the 4:2:0 composition up.
+//
+// A threadgroup covers a DOVI_444_TILE x DOVI_444_TILE block of output samples. The block's 4:2:0
+// sites, plus the one site past it that the odd samples on its far edge average with, are composed
+// once into threadgroup memory, then every output sample reads its one to four sites from there. The
+// per-sample form composed every site four times for each of the four samples around it, sixteen
+// evaluations per site; this does 81 per 256 samples. The sites are the same `dovi_output_site`
+// values, clamped to the same edge, and the mean and the write are unchanged, so the output is bit
+// for bit what the per-sample form gave. The kernel must be dispatched in threadgroups of exactly
+// DOVI_444_TILE x DOVI_444_TILE threads: the block's origin is the threadgroup index.
+#define DOVI_444_TILE   16u
+#define DOVI_444_SITES  ((DOVI_444_TILE / 2u) + 1u)
+
+[[max_total_threads_per_threadgroup(256)]]
 kernel void dovi_compose_chroma_444(
     texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
     texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
     texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
     texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
     constant struct DoviMetalParams&       params        [[buffer(0)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+    uint2                                  gid           [[thread_position_in_grid]],
+    uint2                                  tid           [[thread_position_in_threadgroup]],
+    uint2                                  tgid          [[threadgroup_position_in_grid]],
+    uint2                                  tg_dim        [[threads_per_threadgroup]])
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
     uint uv_height = (params.bl_height + 1u) / 2u;
+
+    threadgroup int tile_cb[DOVI_444_SITES * DOVI_444_SITES];
+    threadgroup int tile_cr[DOVI_444_SITES * DOVI_444_SITES];
+
+    // Every thread of the group takes part in filling the tile and reaches the barrier, including
+    // threads past the edge of the picture when the grid is rounded up to whole threadgroups.
+    uint site_x0 = tgid.x * (DOVI_444_TILE / 2u);
+    uint site_y0 = tgid.y * (DOVI_444_TILE / 2u);
+    uint lane = tid.y * tg_dim.x + tid.x;
+    uint lanes = tg_dim.x * tg_dim.y;
+    for (uint i = lane; i < DOVI_444_SITES * DOVI_444_SITES; i += lanes) {
+        uint2 site = uint2(min(site_x0 + i % DOVI_444_SITES, uv_width - 1u),
+                           min(site_y0 + i / DOVI_444_SITES, uv_height - 1u));
+        DoviChromaSite s = dovi_output_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+        tile_cb[i] = s.cb;
+        tile_cr[i] = s.cr;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (gid.x >= params.bl_width || gid.y >= params.bl_height) {
         return;
     }
 
-    uint site_x = gid.x / 2u;
-    uint site_y = gid.y / 2u;
-    uint other_x = (gid.x & 1u) != 0u ? min(site_x + 1u, uv_width - 1u) : site_x;
-    uint other_y = (gid.y & 1u) != 0u ? min(site_y + 1u, uv_height - 1u) : site_y;
-    DoviChromaSite a = dovi_output_site(uint2(site_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-    DoviChromaSite b = dovi_output_site(uint2(other_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-    DoviChromaSite c = dovi_output_site(uint2(site_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-    DoviChromaSite d = dovi_output_site(uint2(other_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    // Local site (column, row) of the cell this sample is in, and the one it averages with. The tile
+    // already holds the far neighbour clamped to the last site, as the per-sample form clamped it.
+    uint sx = tid.x / 2u;
+    uint sy = tid.y / 2u;
+    uint ox = (tid.x & 1u) != 0u ? sx + 1u : sx;
+    uint oy = (tid.y & 1u) != 0u ? sy + 1u : sy;
+    uint ia = sy * DOVI_444_SITES + sx;
+    uint ib = sy * DOVI_444_SITES + ox;
+    uint ic = oy * DOVI_444_SITES + sx;
+    uint id = oy * DOVI_444_SITES + ox;
     dovi_write_chroma(out_uv_tex, gid,
-                      (a.cb + b.cb + c.cb + d.cb + 2) >> 2,
-                      (a.cr + b.cr + c.cr + d.cr + 2) >> 2, params);
+                      (tile_cb[ia] + tile_cb[ib] + tile_cb[ic] + tile_cb[id] + 2) >> 2,
+                      (tile_cr[ia] + tile_cr[ib] + tile_cr[ic] + tile_cr[id] + 2) >> 2, params);
 }
 
 /* ============================================================================

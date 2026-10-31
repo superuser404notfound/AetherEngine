@@ -916,7 +916,7 @@ final class DoviFelComposer: @unchecked Sendable {
             encoder.setTexture(outUvTex, index: 3)
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
             dispatch(encoder, width: outCW, height: outCH,
-                     threadgroup: threadgroupSize(for: chromaPipeline))
+                     threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaPipeline))
         }
 
         if inPlace {
@@ -1179,6 +1179,10 @@ final class DoviFelComposer: @unchecked Sendable {
             ptr[code] = pred
         }
     }
+
+    /// The 4:4:4 kernel composes each 4:2:0 site once per threadgroup tile and so needs threadgroups of exactly
+    /// this size (`DOVI_444_TILE` in the shader).
+    static let chroma444Threadgroup = MTLSize(width: 16, height: 16, depth: 1)
 
     /// Sizes threadgroups using the pipeline's execution width (dolby-vision-fel.md §5.6).
     private func threadgroupSize(for pipeline: MTLComputePipelineState) -> MTLSize {
