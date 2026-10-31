@@ -5103,8 +5103,15 @@ public final class AetherEngine: ObservableObject {
                 && (probe.stream(at: resolvedInitialAudio).map {
                     FLACStreamInfo.coreMediaRejectsSource(UnsafePointer($0.pointee.codecpar))
                 } ?? false)
-            let useNativeAudio = !isCustomSource && Self.avPlayerCanDecodeAudio(audioCodecID) && !flacBlocksTooSmall
-            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")", category: .engine)
+            let useNativeAudio = Self.audioOnlyUsesAVPlayer(
+                codecID: audioCodecID, isCustomSource: isCustomSource,
+                flacBlocksTooSmall: flacBlocksTooSmall, preferred: options.preferredDecodePath)
+            // Named only when it decided the route (AVPlayer otherwise), so a host can tell its
+            // preference arrived.
+            let hostAskedSoftware = !useNativeAudio && Self.audioOnlyUsesAVPlayer(
+                codecID: audioCodecID, isCustomSource: isCustomSource,
+                flacBlocksTooSmall: flacBlocksTooSmall, preferred: .automatic)
+            EngineLog.emit("[AetherEngine] audio dispatch: codec=\(audioCodecID.rawValue) -> \(useNativeAudio ? "AVPlayer" : "FFmpeg")\(flacBlocksTooSmall ? " (FLAC min_blocksize below CoreMedia's floor)" : "")\(hostAskedSoftware ? " (host asked for the software path, #461)" : "")", category: .engine)
             // A preserved video NativeAVPlayerHost from a native->native reload must be released before an audio
             // session; otherwise the old AVPlayer stays alive in currentAVPlayer and the volume setter writes into it.
             if nativeHost != nil {
@@ -7598,7 +7605,8 @@ public final class AetherEngine: ObservableObject {
     #if os(tvOS) || os(iOS)
     /// MPNowPlayingSession for the active AVPlayer audio path, or nil. The host registers transport commands
     /// and writes metadata here to stay the active Now-Playing app across a background pause (tvOS drops a
-    /// paused bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost.
+    /// paused bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost. Nil on
+    /// the FFmpeg audio host (`audioOnlyUsesAVPlayer` false), which has no session of its own.
     public var audioNowPlayingSession: MPNowPlayingSession? {
         audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
     }
@@ -7627,8 +7635,8 @@ public final class AetherEngine: ObservableObject {
     /// and AVKit owns Now-Playing itself there through private MediaRemote: WWDC22's guidance is not
     /// to bring an `MPNowPlayingSession` when using AVKit, and doing so costs the host AVKit's card,
     /// its `externalMetadata`, and its working transport commands. Only a host with custom UI should
-    /// set this. The audio path has no such fork (always a bare AVPlayer) and owns its session
-    /// unconditionally.
+    /// set this. The audio path's AVPlayer host has no such fork (always a bare AVPlayer) and owns its
+    /// session unconditionally.
     ///
     /// Read when a native host is created, so set it before `load()`. A host preserved across a
     /// native->native reload (issue #15) keeps whatever it was created with; the change takes effect

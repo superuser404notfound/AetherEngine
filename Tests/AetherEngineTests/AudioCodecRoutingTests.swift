@@ -18,4 +18,35 @@ struct AudioCodecRoutingTests {
             #expect(AetherEngine.avPlayerCanDecodeAudio(id) == false)
         }
     }
+
+    @Test("an automatic audio-only load of a whitelisted URL source goes to AVPlayer")
+    func automaticKeepsAVPlayer() {
+        for id in [AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC, AV_CODEC_ID_AAC, AV_CODEC_ID_MP3] {
+            #expect(AetherEngine.audioOnlyUsesAVPlayer(
+                codecID: id, isCustomSource: false, flacBlocksTooSmall: false, preferred: .automatic))
+        }
+    }
+
+    /// The preference used to reach only the video routing: an audio-only FLAC asked onto
+    /// `.software` still opened on `AudioAVPlayerHost`, the host whose clock ran past the end of
+    /// 24-bit FLAC streamed over HTTP.
+    @Test("software sends a codec AVPlayer could play to the FFmpeg host")
+    func softwareOverridesAVPlayer() {
+        for id in [AV_CODEC_ID_FLAC, AV_CODEC_ID_ALAC, AV_CODEC_ID_AAC, AV_CODEC_ID_MP3] {
+            #expect(AetherEngine.audioOnlyUsesAVPlayer(
+                codecID: id, isCustomSource: false, flacBlocksTooSmall: false, preferred: .software) == false)
+        }
+    }
+
+    @Test("what already ruled AVPlayer out still does, whatever the preference")
+    func existingRulesHold() {
+        for preferred in DecodePath.allCases {
+            #expect(AetherEngine.audioOnlyUsesAVPlayer(
+                codecID: AV_CODEC_ID_OPUS, isCustomSource: false, flacBlocksTooSmall: false, preferred: preferred) == false)
+            #expect(AetherEngine.audioOnlyUsesAVPlayer(
+                codecID: AV_CODEC_ID_FLAC, isCustomSource: true, flacBlocksTooSmall: false, preferred: preferred) == false)
+            #expect(AetherEngine.audioOnlyUsesAVPlayer(
+                codecID: AV_CODEC_ID_FLAC, isCustomSource: false, flacBlocksTooSmall: true, preferred: preferred) == false)
+        }
+    }
 }

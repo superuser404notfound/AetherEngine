@@ -10,7 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`preferredDecodePath = .software` now reaches an audio-only session.** The audio-only dispatch
+  read only the codec whitelist, the custom-source flag and the FLAC block floor (AE#764), so the
+  preference was silently dropped and every whitelisted codec still went to `AudioAVPlayerHost`. A
+  music host that had seen AVPlayer mistime a stream had no way onto `AudioPlaybackHost` except
+  wrapping the URL in a custom `IOReader`. Seen on an iPhone 18 Pro Max (iOS 27.0.1) with 24-bit
+  FLAC streamed over HTTP from a Plex server (about 3,000 kbps; 203.5 s by its STREAMINFO and by
+  Plex): through AVPlayer the reported time ran past the track's length and kept going while
+  audio played on (3:50 of 3:23, even in another AVPlayer-based app on the same file), on the engine's
+  own `AudioAVPlayerHost` as well as on a bare `AVQueuePlayer`. The same files on the FFmpeg host
+  end at their length. `.software` on an `audioOnly` load now routes there, and the audio dispatch
+  log line says when the host's preference decided it. Opt-in: `preferredDecodePath` defaults to
+  `.automatic`, which routes exactly as before, so a host that does not set it sees no change.
 
 ## [7.53.1] - 2026-10-31
 

@@ -662,6 +662,21 @@ extension AetherEngine {
         }
     }
 
+    /// Whether an audio-only session goes to AVPlayer (`AudioAVPlayerHost`) rather than libavcodec
+    /// (`AudioPlaybackHost`). AVPlayer needs a URL it can read and a codec on the whitelist, and
+    /// takes neither a FLAC whose blocks are under CoreMedia's floor (AE#764) nor a session the host
+    /// asked onto `.software`. That last one was ignored here before: `preferredDecodePath` only
+    /// reached the video routing, so a host that had watched AVPlayer mistime a stream (hi-res FLAC
+    /// over HTTP whose clock ran past the track's length) had no way onto the FFmpeg host.
+    nonisolated static func audioOnlyUsesAVPlayer(
+        codecID: AVCodecID,
+        isCustomSource: Bool,
+        flacBlocksTooSmall: Bool,
+        preferred: DecodePath
+    ) -> Bool {
+        !isCustomSource && avPlayerCanDecodeAudio(codecID) && !flacBlocksTooSmall && preferred != .software
+    }
+
     // MARK: - Audio track selection (#72)
 
     /// Resolve the audio stream index selected by an explicit host `override` or, failing that, the
