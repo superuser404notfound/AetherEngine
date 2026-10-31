@@ -118,6 +118,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var timingResidency = SoftwarePacketResidency()
     private let cacheTiming: (any SoftwarePacketCacheTimingSource)?
     private var cacheTimingInvalid = false
+    /// AV1 through dav1d (`SWKeyframeSnap`): a hit restores to the last retained keyframe at or before
+    /// the target, not to the one before it. An AV1 keyframe opens on its own (no leading pictures, and
+    /// a forward key frame is flagged only when it refreshes every reference, #931), so the earlier
+    /// keyframe only made dav1d decode a whole GOP more: on an Apple TV 4K (A15) a hit onto a
+    /// keyframe of 4K AV1 held the clock 1.8 to 2.5 s, and 0.13 to 0.18 s restored to that keyframe.
+    private let anchorsOnLastKeyframe: Bool
     private var calibrationPressure = false
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
@@ -126,9 +132,11 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
          videoReorderDepth: Int? = nil,
          cacheTiming: (any SoftwarePacketCacheTimingSource)? = nil,
          coverageRangeCap: Int = 4096,
+         anchorsOnLastKeyframe: Bool = false,
          beforeConsumerOperation: (@Sendable () -> Void)? = nil,
          readSource: @escaping @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?) {
         self.cacheTiming = cacheTiming
+        self.anchorsOnLastKeyframe = anchorsOnLastKeyframe
         self.video = video
         self.audio = audio
         self.byteBudget = max(1, byteBudget)
@@ -174,6 +182,13 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                         generation: generation, seeking: seeking, sourceEnded: ended,
                         sourceEpoch: sourceEpoch, cacheSeekHits: cacheSeekHits,
                         cacheSeekMisses: cacheSeekMisses)
+    }
+
+    /// The retained video keyframes in source seconds, from the packets' own keyframe flags: where a
+    /// cached seek can start (`SWKeyframeSnap`). Copied under the short state lock, like `snapshot`.
+    var retainedKeyframeSeconds: [Double] {
+        condition.lock(); defer { condition.unlock() }
+        return keyframes.map(\.seconds)
     }
 
     /// Called only by a background sampler. Copy bounded metadata under the short state lock;
@@ -288,8 +303,10 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             && seconds.isFinite && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let candidates = hasCoverage ? keyframes.filter { $0.seconds <= seconds }
             .sorted { $0.seconds < $1.seconds } : []
-        // A previous recovery/key picture supplies open-GOP/audio preroll when still retained.
-        let anchor = candidates.isEmpty ? nil : candidates[max(0, candidates.count - 2)]
+        // A previous recovery/key picture supplies open-GOP/audio preroll when still retained, except
+        // where a keyframe needs none (`anchorsOnLastKeyframe`).
+        let anchor = candidates.isEmpty ? nil
+            : candidates[max(0, candidates.count - (anchorsOnLastKeyframe ? 1 : 2))]
         condition.unlock()
 
         if let anchor {

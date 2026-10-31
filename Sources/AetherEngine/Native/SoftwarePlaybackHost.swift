@@ -422,6 +422,11 @@ final class SoftwarePlaybackHost {
     private var videoTimeBaseSeconds: Double = 0
     private var audioTimeBaseSeconds: Double = 0
 
+    /// dav1d decoding AV1, set per session: seeks land on the nearest indexed keyframe (`SWKeyframeSnap`),
+    /// out of the index's keyframes in source seconds as `refreshSnapKeyframes` last read them.
+    private var snapsSeeksToKeyframes = false
+    private var snapKeyframeSeconds: [Double] = []
+
     // MARK: - Live / DVR
 
     /// #544: decodes a scrub still out of `dvrRing`. Built beside the playback decoder so it never
@@ -1573,6 +1578,11 @@ final class SoftwarePlaybackHost {
         self.audioOutput?.onPrerollTransition = { [weak self] transition in
             self?.onClockHoldTransition?(transition)
         }
+        // dav1d decoding AV1: seeks land on keyframes (`SWKeyframeSnap`).
+        snapsSeeksToKeyframes = SWKeyframeSnap.enabled && videoDecoder is SoftwareVideoDecoder
+            && vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_AV1
+        snapKeyframeSeconds = []
+        refreshSnapKeyframes()
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
         // it a silent software session on a long-latency route and an audible one on HDMI log the same.
         if let route = AudioRouteDescription.current() {
@@ -1639,6 +1649,7 @@ final class SoftwarePlaybackHost {
                 } : nil
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
+            let anchorsOnLastKeyframe = snapsSeeksToKeyframes
             let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                 guard let (fifo, bytes, claim) = try Self.makePacketStore(
@@ -1648,7 +1659,8 @@ final class SoftwarePlaybackHost {
                     video: video, audio: audio, byteBudget: bytes,
                     forwardSeconds: Double(segments) * 4,
                     initialSourceClock: initialSourceClock, fifo: fifo,
-                    videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming
+                    videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming,
+                    anchorsOnLastKeyframe: anchorsOnLastKeyframe
                 ) { isCurrent in
                     guard let packet = try dem.readPacket(isCurrent: isCurrent) else { return nil }
                     defer { av_packet_unref(packet); av_packet_free_safe(packet) }
@@ -2303,6 +2315,28 @@ final class SoftwarePlaybackHost {
         lastRate = rate
     }
 
+    /// Reads the index's video keyframes for `SWKeyframeSnap` off the main actor and keeps them for the
+    /// next seek. Never read at the seek itself: `indexedKeyframes` takes the demuxer's access lock,
+    /// which a slow remote read holds (#254). Matroska reads its Cues only when the demuxer
+    /// repositions, so the list is read again after every landing; until then the packet cache's
+    /// retained keyframes are the ones a seek can snap to (`SWKeyframeSnap.candidates`).
+    private func refreshSnapKeyframes() {
+        guard snapsSeeksToKeyframes, let dem = demuxer else { return }
+        let streamIndex = videoStreamIndex
+        let timeBase = videoTimeBaseSeconds
+        Task { [weak self] in
+            let keys = await BlockingWork.detached(priority: .utility) {
+                dem.indexedKeyframes(streamIndex: streamIndex).map { Double($0) * timeBase }.sorted()
+            }.value
+            guard let self, self.demuxer === dem else { return }
+            if keys.count != self.snapKeyframeSeconds.count {
+                EngineLog.emit("[SWHost] keyframe-snapped seeks: \(keys.count) indexed keyframes",
+                               category: .swPlayback)
+            }
+            self.snapKeyframeSeconds = keys
+        }
+    }
+
     /// #254: the demuxer reposition is awaited off the main actor. It used to run inline here, and
     /// because `Demuxer.readPacket` holds the access lock across the whole `av_read_frame`, a seek
     /// issued while the demux loop sat in a slow remote read parked the main thread for the length of
@@ -2327,10 +2361,21 @@ final class SoftwarePlaybackHost {
         // already makes with `sessionStartPts`. For a zero-based source the two
         // axes coincide and this is the identity, which is why the omission only
         // ever showed on a mid-stream-joined one.
-        let sourceSeconds = SWClockAnchorPolicy.sourceSeconds(
+        var sourceSeconds = SWClockAnchorPolicy.sourceSeconds(
             forSession: seconds,
             sessionZeroSeconds: clockSessionZero
         )
+        var seconds = seconds
+        if snapsSeeksToKeyframes, !isLive,
+           let snapped = SWKeyframeSnap.snappedSeconds(
+               target: sourceSeconds, current: sourceClockSeconds,
+               keyframes: SWKeyframeSnap.candidates(retained: packetSource?.retainedKeyframeSeconds ?? [],
+                                                    indexed: snapKeyframeSeconds)) {
+            EngineLog.emit("[SWHost] seek snapped to keyframe target_s=\(String(format: "%.3f", sourceSeconds)) "
+                           + "keyframe_s=\(String(format: "%.3f", snapped))", category: .swPlayback)
+            seconds += snapped - sourceSeconds
+            sourceSeconds = snapped
+        }
         let cacheGeneration = packetSource?.beginSeek(to: sourceSeconds)
         // #292: inside another seek's window `isPlaying` is that seek's parked flag, not the transport's
         // intent. Inherit what it captured, and hand the same value on to whoever supersedes this one.
@@ -2473,6 +2518,7 @@ final class SoftwarePlaybackHost {
         // reads from here belongs to this position. Closing the window releases the loop.
         noteSeekSettled(generation)
         if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: sourceSeconds) }
+        refreshSnapKeyframes()
         return outcome
     }
 

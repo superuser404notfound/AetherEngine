@@ -315,6 +315,9 @@ decoded-cushion fallback still applies.
 
 A cached seek restores a retained keyframe cursor, including an earlier keyframe
 for available preroll, and keeps the producer at its existing source frontier.
+AV1 through dav1d restores to the last keyframe at or before the target instead
+(`anchorsOnLastKeyframe`): an AV1 keyframe opens on its own, and the earlier one
+only cost dav1d a whole GOP of decode before the picture came back.
 A cache miss clears coverage and repositions the demuxer; discarding the spool
 is the worker's job, not the seek's, because removing every retained chunk costs
 more the longer the session has kept them and no seek waits on that work.
@@ -602,6 +605,7 @@ Sources/AetherEngine/
 │   ├── RemoteHLSReadinessDeadline.swift     The terminal state the bypass never had: an origin that answers everything while AVFoundation can build no track from what it serves, which no failure signal ever reports (#334)
 │   ├── RerouteVerdictMemory.swift           Bounded, expiring memory of master URLs whose carriage watchdog fired, so a retune after an ingest death relands on the working path instead of re-paying a full mount plus grace (#199)
 │   ├── SWClockAnchorPolicy.swift            Where the SW demux loop anchors the synchronizer clock on the first decoded sample: verbatim for files and resumes (intrinsic A/V lead-in survives), at the sample for a mid-stream-joined source (#107); a sample BEHIND the anchor is resume preroll and never moves it (AE#724)
+│   ├── SWKeyframeSnap.swift                 Where a seek on the software host's AV1 through dav1d lands: the keyframe nearest its target, within 10 s and never across the playhead, out of the packet cache's retained keyframes and the container's index, exact when neither reaches the target (Matroska Cues arrive only with a demuxer reposition); `AetherEngine.snapsAV1SeeksToKeyframes` switches it off for comparisons
 │   ├── SeekResumeIntent.swift               Whether a seek on a demuxer-driven host re-arms the clock at `lastRate` or parks it at 0, for the second seek issued inside the window its predecessor cleared (#292)
 │   ├── SoftwareBufferFrontier.swift         How far ahead of the clock the software path is actually holding decoded video, and how that folds into the `bufferedPosition` a host reads (#303)
 │   ├── SoftwarePiPSource.swift              Everything a host needs to build an `AVPictureInPictureController` content source around the software path without AVKit entering the engine: the layer plus the four transport answers behind the sample-buffer delegate
