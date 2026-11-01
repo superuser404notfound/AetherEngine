@@ -1679,7 +1679,9 @@ extension SubtitleCue: Equatable {
     }
 }
 
-/// Decoded PGS / HDMV PGS / DVB / DVD bitmap subtitle. CGImage is fully rendered (RGBA, premultiplied alpha). Position is [0, 1] against the source video frame; multiply by the on-screen video rect to place it.
+/// Decoded PGS / HDMV PGS / DVB / DVD bitmap subtitle. CGImage carries the rendered image and
+/// alpha metadata; its provider may defer pixel expansion. Draw it rather than assuming a raw
+/// premultiplied RGBA provider layout. Position is [0, 1] against the source video frame.
 public struct SubtitleImage: @unchecked Sendable {
     public let cgImage: CGImage
     public let position: CGRect
@@ -1692,12 +1694,18 @@ public struct SubtitleImage: @unchecked Sendable {
     /// AV_SUBTITLE_FLAG_FORCED from the decoded rect (#146): the disc authored this object as a
     /// forced caption (sign / foreign-dialogue overlay shown even with subtitles off).
     public let isForced: Bool
+    /// Known compressed provider storage, when the decoder retains a lossless encoded image.
+    /// Excludes ImageIO/CGImage overhead, temporary drawing pixels and decoded pixels retained
+    /// by a renderer. This diagnostic count is not a process-footprint measurement or memory bound.
+    public let encodedBackingBytes: Int?
 
-    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero, isForced: Bool = false) {
+    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero, isForced: Bool = false,
+                encodedBackingBytes: Int? = nil) {
         self.cgImage = cgImage
         self.position = position
         self.canvasSize = canvasSize
         self.isForced = isForced
+        self.encodedBackingBytes = encodedBackingBytes
     }
 }
 

@@ -10,6 +10,23 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`SubtitleImage.encodedBackingBytes` reports known compressed provider storage.**
+  The optional count excludes ImageIO/CGImage overhead, temporary drawing pixels and decoded
+  pixels a renderer retains. It is a diagnostic count, not a process-footprint measurement or
+  a memory budget.
+
+### Changed
+
+- **`SubtitleImage.cgImage` no longer guarantees a premultiplied RGBA data-provider layout.**
+  Bitmap subtitle history retains lossless PNG-backed images. Hosts that inspect provider bytes
+  must draw into an explicitly configured bitmap context instead of interpreting them as raw
+  RGBA. Authored pixels, alpha, crop, placement, forced flags and cue lifetime are preserved.
+  PNG encoding runs on the subtitle worker; pixel decoding follows the consumer's rendering
+  path. Core Animation may decode during a main-thread commit and retain decoded pixels for
+  the image's lifetime, so encoded backing alone does not bound post-presentation memory.
+
 ### Fixed
 
 - **An SDR start that changes the panel's refresh rate waits for the switch to end before playing**
