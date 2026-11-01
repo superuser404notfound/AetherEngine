@@ -1580,3 +1580,13 @@ Direct `HLSVideoEngine` users may call `sessionCacheStatus()` off the main threa
 ### Host-managed renderer audio activation
 
 `rendererAudioSessionActivationEnabled` defaults to `true`. Set it to `false` before loading when the host coordinates audible focus and owns `AVAudioSession.setActive(true)` across multiple players. Software and audio-renderer loads, track reloads and interruption recovery then skip engine-driven activation and channel preference changes. The host must activate the session before audible playback. The category and multichannel support are still declared off-main by the first load in the process, shared by concurrent engines and never repeated after a success, so a host that changes the mode afterwards keeps it. A session the host already put on `.playback` before that first load keeps its mode and policy. Native AVKit activation is unchanged. If the host also owns deactivation, leave `deactivatesAudioSessionOnStop` false (its default).
+
+### Whole-session segment storage admission
+
+LoadOptions.sessionCacheHardLimitBytes optionally bounds resident plus staging bytes
+for a loopback segment session. LoadOptions.sessionCacheFreeReserveBytes reserves
+free volume space independently. Both default to legacy behavior (nil/zero).
+Forward-window backpressure waits observe producer cancellation and cache closure;
+SessionCacheStatus.currentDiskBytes, stagingBytes, hardLimitBytes, freeDiskReserveBytes
+and rejectedDiskWrites expose admission and reservation diagnostics.
+These segment limits do not bound the process memory or unrelated app caches.

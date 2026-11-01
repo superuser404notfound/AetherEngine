@@ -919,7 +919,9 @@ extension AetherEngine {
             heldSourceConnection: loadedOptions.heldSourceConnection,
             declaredDurationSeconds: loadedOptions.declaredDurationSeconds,
             forwardBufferSegments: loadedOptions.forwardBufferSegments,
-            sessionCacheByteBudget: loadedOptions.sessionCacheByteBudget
+            sessionCacheByteBudget: loadedOptions.sessionCacheByteBudget,
+            sessionCacheHardLimitBytes: loadedOptions.sessionCacheHardLimitBytes,
+            sessionCacheFreeReserveBytes: loadedOptions.sessionCacheFreeReserveBytes
         )
         sessionCacheStatusToken &+= 1
         let cacheStatusToken = sessionCacheStatusToken

@@ -2239,6 +2239,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 audioMoovPrimeFrame: audioMoovPrimeFrame,
                 audioDelaySeconds: audioDelaySeconds,
                 onStorageExhausted: { [cache] in cache.noteStorageExhausted() },
+                admitStagingBytes: { [weak self, cache] path, bytes in
+                    cache.admitStagingWrite(path: path, bytes: bytes, waitForConsumer: true,
+                        shouldStop: { [weak self] in self?.checkShouldStop() ?? true })
+                },
+                discardStaging: { [cache] path in cache.discardStagingReservation(path: path) },
                 onInitCaptured: { [weak self] initBytes in
                     guard let self = self else { return }
                     if versionedInit {
