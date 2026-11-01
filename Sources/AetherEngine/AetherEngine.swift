@@ -1000,6 +1000,10 @@ public final class AetherEngine: ObservableObject {
     /// the keepalive policy + pause-safety read it.
     public var pictureInPictureActive = false {
         didSet {
+            #if os(macOS)
+            updatePictureInPictureTracking()
+            #endif
+            updatePictureFit()
             nativeHost?.pictureInPictureActive = pictureInPictureActive
             // SW-PiP Phase C: flip the frame compositor with the PiP state so subtitles appear in the
             // window and never double-draw under the fullscreen host overlay.
@@ -1008,11 +1012,19 @@ public final class AetherEngine: ObservableObject {
             #if os(tvOS)
             // PiP window closed while backgrounded: nothing keeps the app running anymore, so the
             // wedge-safe teardown is due before idle suspension (mirrors the iOS pause-while-backgrounded path).
-            if oldValue && !pictureInPictureActive {
+            if closingPictureInPictureOwesBackgroundDecision(wasActive: oldValue) {
                 settleBackgroundDecisionAfterPictureInPictureClosed()
             }
             #endif
         }
+    }
+    /// True while `stopInternal` clears `pictureInPictureActive` itself.
+    var isResettingPictureInPictureForStop = false
+    /// Whether the PiP flag going false is a window closing that owes the background decision. Not when
+    /// `stopInternal` is the one clearing it: that is the teardown the decision would schedule, and it
+    /// is half done at that point.
+    func closingPictureInPictureOwesBackgroundDecision(wasActive: Bool) -> Bool {
+        wasActive && !pictureInPictureActive && !isResettingPictureInPictureForStop
     }
     /// #127: seconds a PAUSED session survives backgrounding (iOS) before the wedge-safe teardown runs,
     /// held under a background-task assertion so a quick app switch resumes without a pipeline rebuild.
@@ -1166,7 +1178,22 @@ public final class AetherEngine: ObservableObject {
     /// against it, and it is cleared with the session so the next source cannot be laid out against
     /// this one's rectangle. The native and bypass paths mount an `AVPlayerLayer`, which measures its
     /// own `videoRect` and carries `AVPlayerItem.presentationSize`; this stays nil there.
-    @Published public internal(set) var softwareDisplaySize: CGSize?
+    @Published public internal(set) var softwareDisplaySize: CGSize? {
+        didSet {
+            updatePictureFit()
+            #if os(macOS)
+            updatePictureInPictureAspect()
+            #endif
+        }
+    }
+    #if os(macOS)
+    /// macOS: the content size of the system PiP window while a software session is in it, nil
+    /// otherwise. The display layer is laid out to it (AE#810).
+    var pictureInPictureArea: CGSize? {
+        didSet { if oldValue != pictureInPictureArea { updatePictureFit() } }
+    }
+    var pictureInPictureAreaTracker: PictureInPictureAreaTracker?
+    #endif
 
     /// #846: what the low-resolution upscale stage (`LoadOptions.upscalesLowResolutionVideo`) does for this
     /// session. Published on the first upscaled frame, not when the load decides the route, and again with
@@ -1804,6 +1831,8 @@ public final class AetherEngine: ObservableObject {
             // Still correct for hosts that use the engine's layer directly and for the SW displayLayer.
             nativeHost?.playerLayer.videoGravity = newValue
             softwareHost?.displayLayer.videoGravity = newValue
+            // The PiP fit depends on the gravity and no layout pass follows a change.
+            if softwareHost != nil { boundView?.refreshHostedLayerFrame() }
         }
     }
     var _videoGravity: AVLayerVideoGravity = .resizeAspect
@@ -2071,9 +2100,43 @@ public final class AetherEngine: ObservableObject {
         presentCurrentLayer()
     }
 
+    /// While PiP is active the bound view shapes the software layer to the picture so the window does
+    /// not inherit the view's aspect; otherwise it fills the view.
+    func updatePictureFit() {
+        boundView?.setPictureFit(pictureInPictureActive && softwareHost != nil ? softwareDisplaySize : nil)
+        #if os(macOS)
+        boundView?.setPictureArea(pictureInPictureActive && softwareHost != nil ? pictureInPictureArea : nil)
+        #endif
+    }
+
+    #if os(macOS)
+    /// The picture's size arrived or changed: let the window tracker match against its aspect.
+    func updatePictureInPictureAspect() {
+        guard pictureInPictureActive, softwareHost != nil,
+              let size = softwareDisplaySize, size.width > 0, size.height > 0 else { return }
+        pictureInPictureAreaTracker?.updateAspect(size.width / size.height)
+    }
+
+    /// macOS: follow the system PiP window while a software session is in it, see
+    /// `PictureInPictureAreaTracker`. Stopped (and the area cleared) when PiP ends.
+    func updatePictureInPictureTracking() {
+        if pictureInPictureActive && softwareHost != nil {
+            if pictureInPictureAreaTracker == nil {
+                pictureInPictureAreaTracker = PictureInPictureAreaTracker { [weak self] in self?.pictureInPictureArea = $0 }
+            }
+            let aspect = softwareDisplaySize.flatMap { $0.width > 0 && $0.height > 0 ? $0.width / $0.height : nil }
+            pictureInPictureAreaTracker?.start(known: softwarePiPSource?.windowsBeforeController ?? .weakObjects(),
+                                               host: boundView?.window, aspect: aspect)
+        } else {
+            pictureInPictureAreaTracker?.stop()
+        }
+    }
+    #endif
+
     /// Attaches nativeHost.playerLayer or softwareHost.displayLayer to the bound view. No-op when no host.
     func presentCurrentLayer() {
         guard let view = boundView else { return }
+        defer { updatePictureFit() }
         if let host = nativeHost {
             view.attach(host.playerLayer)
         } else if let host = softwareHost {
@@ -8299,6 +8362,15 @@ public final class AetherEngine: ObservableObject {
         decodedVideoFormat = nil
         // #314: same detach on the software path, where the outgoing renderer's decode thread is what
         // can still hand a frame over while the next host comes up.
+        // The window shows this session's layer: close it while the host still feeds that layer, and
+        // drop the host-set flag so the keepalive policy does not treat a gone window as live (a host
+        // that drops its controller with the source never sees a did-stop).
+        if let pipSource = softwarePiPSource {
+            pipSource.endPictureInPicture()
+            isResettingPictureInPictureForStop = true
+            pictureInPictureActive = false
+            isResettingPictureInPictureForStop = false
+        }
         softwareHost?.setVideoFrameTimeObserver(nil)
         softwareHost?.stop()
         softwarePiPSource = nil
