@@ -1008,6 +1008,10 @@ public struct LoadOptions: Sendable, Equatable {
 
     /// Optional temporary session-cache budget. Nil retains automatic sizing; zero keeps only the working window.
     public var sessionCacheByteBudget: Int? = nil
+    /// Opt-in hard total for resident AND in-flight fMP4 bytes. Unlike retention, this is not raised to the old hard window.
+    public var sessionCacheHardLimitBytes: Int? = nil
+    /// Free volume headroom preserved before every admitted disk write.
+    public var sessionCacheFreeReserveBytes: Int = 0
     /// Compressed-packet storage for seekable software VOD; automatic retains platform defaults.
     public var softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic
 
@@ -1171,6 +1175,8 @@ public struct LoadOptions: Sendable, Equatable {
         initialSubtitleTrackID: Int? = nil,
         forwardBufferSegments: Int? = nil,
         sessionCacheByteBudget: Int? = nil,
+        sessionCacheHardLimitBytes: Int? = nil,
+        sessionCacheFreeReserveBytes: Int = 0,
         softwarePacketCacheStorage: SoftwarePacketCacheStorage = .automatic,
         progressiveSegmentDelivery: Bool = false,
         autoplay: Bool = true,
@@ -1236,6 +1242,8 @@ public struct LoadOptions: Sendable, Equatable {
         self.initialSubtitleTrackID = initialSubtitleTrackID
         self.forwardBufferSegments = forwardBufferSegments
         self.sessionCacheByteBudget = sessionCacheByteBudget
+        self.sessionCacheHardLimitBytes = sessionCacheHardLimitBytes
+        self.sessionCacheFreeReserveBytes = max(0, sessionCacheFreeReserveBytes)
         self.softwarePacketCacheStorage = softwarePacketCacheStorage
         self.progressiveSegmentDelivery = progressiveSegmentDelivery
         self.autoplay = autoplay

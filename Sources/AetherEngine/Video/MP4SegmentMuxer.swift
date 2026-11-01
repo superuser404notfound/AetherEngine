@@ -287,7 +287,10 @@ final class MP4SegmentMuxer {
 
     /// The span since the last call, nil when the segment carried no audio packet. Consumes it.
     func takeSegmentSoundSpan() -> (first: Int64, last: Int64)? {
-        defer { segmentSoundFirstPts = Int64.min; segmentSoundLastPts = Int64.min }
+        defer {
+            segmentSoundFirstPts = Int64.min
+            segmentSoundLastPts = Int64.min
+        }
         guard segmentSoundFirstPts != Int64.min else { return nil }
         return (segmentSoundFirstPts, segmentSoundLastPts)
     }
@@ -318,6 +321,8 @@ final class MP4SegmentMuxer {
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioDelaySeconds: Double = 0,
         onStorageExhausted: (@Sendable () -> Void)? = nil,
+        admitStagingBytes: (@Sendable (URL, Int) -> Bool)? = nil,
+        discardStaging: (@Sendable (URL) -> Void)? = nil,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
         self.currentSegmentIndex = initialSegmentIndex
@@ -362,6 +367,10 @@ final class MP4SegmentMuxer {
         // Ref-typed counter shared with the splitter closure (closure can't capture self during init).
         let counter = ByteCounter()
         counter.fd = firstFd
+        counter.currentPath = firstPath
+        counter.ownedPaths.insert(firstPath)
+        counter.admitStagingBytes = admitStagingBytes
+        counter.discardStaging = discardStaging
         counter.onStorageExhausted = onStorageExhausted
         self.byteCounter = counter
 
@@ -391,6 +400,10 @@ final class MP4SegmentMuxer {
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
+                if let path = counter.currentPath, let admit = counter.admitStagingBytes, !admit(path, count) {
+                    counter.writeFailed = true
+                    return
+                }
                 var written = 0
                 while written < count {
                     let n = write(counter.fd, ptr.advanced(by: written), count - written)
@@ -941,6 +954,7 @@ final class MP4SegmentMuxer {
             return
         }
         byteCounter.bytesWrittenCurrentSegment = 0
+        byteCounter.discardStaging?(currentStagingPath)
     }
 
     /// Finalize the current segment and rotate fd to a fresh staging file for `nextIdx`.
@@ -996,6 +1010,8 @@ final class MP4SegmentMuxer {
             self.currentStagingPath = nextPath
             self.currentSegmentIndex = nextIdx
             byteCounter.fd = nextFd
+            byteCounter.currentPath = nextPath
+            byteCounter.ownedPaths.insert(nextPath)
         } catch {
             if Self.isOutOfSpace(error) { byteCounter.onStorageExhausted?() }
             // isWedged: splitter would silently discard next fragment bytes until the pump failed a cut later.
@@ -1019,8 +1035,12 @@ final class MP4SegmentMuxer {
         // cannot write moov either, so it would only emit two more -22s and a truncated file; there is nothing
         // to salvage (no moov means no playable segment).
         guard let ctx = formatContext, headerWritten,
-              !(audioNeedsParsedPacketForMoov && !audioPacketWritten && !moovFlushed) else {
-            if fd >= 0 { close(fd); fd = -1 }
+            !(audioNeedsParsedPacketForMoov && !audioPacketWritten && !moovFlushed)
+        else {
+            if fd >= 0 {
+                close(fd)
+                fd = -1
+            }
             try? FileManager.default.removeItem(at: currentStagingPath)
             return nil
         }
@@ -1062,7 +1082,10 @@ final class MP4SegmentMuxer {
             guard let p = ptr else { return [] }
             var arr = [CChar]()
             var i = 0
-            while p[i] != 0 { arr.append(p[i]); i += 1 }
+            while p[i] != 0 {
+                arr.append(p[i])
+                i += 1
+            }
             arr.append(0)
             return arr
         }
@@ -1107,10 +1130,13 @@ final class MP4SegmentMuxer {
     }
 
     deinit {
-        if fd >= 0 {
-            close(fd)
-        }
+        byteCounter.writeFailed = true  // cleanup must not append to an abandoned staging file.
         cleanup()
+        if fd >= 0 { close(fd) }
+        for path in byteCounter.ownedPaths {
+            try? FileManager.default.removeItem(at: path)  // adopted paths were renamed and no longer exist here.
+            byteCounter.discardStaging?(path)
+        }
     }
 
     // MARK: - AVIO
@@ -1320,6 +1346,10 @@ final class MP4SegmentMuxer {
 /// Ref-typed mutable state shared between the FragmentSplitter closures and the muxer
 /// (closures can't capture self during init).
 private final class ByteCounter {
+    var currentPath: URL?
+    var ownedPaths: Set<URL> = []
+    var admitStagingBytes: (@Sendable (URL, Int) -> Bool)?
+    var discardStaging: (@Sendable (URL) -> Void)?
     var fd: Int32 = -1
     var bytesWrittenCurrentSegment: Int = 0
     var writeFailed: Bool = false
