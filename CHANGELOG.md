@@ -20,6 +20,16 @@ the public-API contract.
 
 ### Fixed
 
+- **A source connection that trickles far below playback rate while a read waits is ended and replaced.** The
+  delivery-gap watchdog judged only the time since the last delivery, so a drip defeated it: on an Apple TV playing a
+  4K HDR10 MKV from a debrid origin over a held connection, a fresh generation delivered 256 KB every 40 to 100 s for
+  three minutes, every drip reset the clock (and woke the read loop's forward wait), no watchdog line fired, and
+  AVPlayer stalled for 25 s once the forward buffer drained. The watchdog now also judges volume: a consumer starved on
+  forward data for one stall period (across as many 256 KB AVIO reads as that takes), with a read blocked now and less
+  than 2 MiB delivered in the last 20 s, ends the generation exactly as a silent one is ended. A paused player, a full
+  window and a healthy stream are never judged. `TrickleWatchdogTests` covers the drip, AVIO-sized reads, healthy and
+  parked streams, and parity with the gap path.
+
 - **A subtitle side reader on a Matroska source no longer stops at second 0 after a deadline-cut positioning
   (#944).** When the timestamp seek ran out of budget, libavformat's generic fallback read into the cut and the
   matroska demuxer latched end of stream in its private `done` flag, which only its own `read_seek` cleared. The

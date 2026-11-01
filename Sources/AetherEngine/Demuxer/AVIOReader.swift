@@ -728,6 +728,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     // CDN stall threshold: no bytes for this long triggers reconnect. Instance-captured (see
     // `connStallTimeout`) so tests can shorten it; the shipped value is this one.
     private static let connStallTimeoutDefault: TimeInterval = 20
+    /// Trickle floor at `connStallTimeoutDefault`: fewer bytes than this over one stall period
+    /// while a read waits is a connection that is not carrying playback. 2 MiB per 20 s is about
+    /// 0.8 Mbit/s, far below any video bitrate and far above the field case's 256 KB per 40-100 s.
+    /// A reader with a shorter `connStallTimeout` scales it by the same ratio (see the init).
+    static let trickleFloorBytesDefault: Int64 = 2 * 1024 * 1024
     /// #450: fraction of the stall threshold at which a generation that has seen no first byte is
     /// REPORTED. Derived from the threshold rather than set beside it so the invariant holds at
     /// every value of the threshold, the shortened ones tests run with included: the witness speaks
@@ -897,6 +902,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// The delivery gap the watchdog would judge right now. A test reads it to state the invariant
     /// the field case turns on: a stretch with no read outstanding does not accumulate against the
     /// read that follows it.
+    /// How many generations the trickle watchdog has ended on this reader.
+    var trickleEndCountForTesting: Int {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return trickleEnds
+    }
+
     var deliveryGapSecondsForTesting: Double {
         winCond.lock()
         defer { winCond.unlock() }
@@ -997,6 +1009,24 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// 4.5 minutes across a pause). The transport does not fill that gap either, since the
     /// persistent request runs with `timeoutInterval = 0` on purpose. winCond-guarded.
     private var lastDeliveryAt = DispatchTime.now()
+
+    /// Trickle watchdog inputs, winCond-guarded. `genDeliveredBytes` counts what the current
+    /// generation appended; `trickleSamples` are (time, count) marks taken at each watchdog tick so
+    /// the tick can read the volume of the last `connStallTimeout`. Both reset with the generation.
+    private var genDeliveredBytes: Int64 = 0
+    private var trickleSamples: [(at: DispatchTime, bytes: Int64)] = []
+    /// Starved-since clock: when the consumer first blocked in the forward wait, and at which
+    /// offset. It survives consecutive reads, because FFmpeg reads at most one AVIO buffer
+    /// (256 KB) at a time, and a drip of 256 KB every 15 s finishes every read inside
+    /// `connStallTimeout`: a per-read clock restarts with each one and never reaches the verdict.
+    /// Cleared when a read is served without waiting (the window had the bytes), when a
+    /// generation starts (a seek, a refill, a replacement), and on a full window.
+    private var forwardWaitSince: DispatchTime?
+    private var forwardWaitOffset: Int64 = 0
+    /// True only while a read is blocked in the forward wait right now, so a consumer that has
+    /// stopped reading (a paused player) is never judged on a clock it left running.
+    private var forwardWaitActive = false
+    private var trickleEnds = 0
 
     /// #309: earliest time the read loop may replace a FAULTED connection from the serve path.
     /// The failure ladder there cannot sleep (see `chargeFaultedRunwayRefill`), so its backoff is
@@ -1254,6 +1284,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// load. It is not a `LoadOptions` field either: #272 measured that a shorter threshold is worse
     /// under CPU starvation, and that conclusion is unchanged.
     private let connStallTimeout: TimeInterval
+    /// Bytes per `connStallTimeout` below which a connection a read is waiting on is ended as a
+    /// trickle. `trickleFloorBytesDefault` scaled to this reader's stall threshold unless a caller
+    /// overrides it.
+    private let trickleFloorBytes: Int64
     /// #450: when this reader reports a generation that is on the link with nothing delivered.
     private var firstByteWitnessDelay: TimeInterval {
         min(Self.firstByteWitnessMaxSeconds, connStallTimeout * Self.firstByteWitnessFraction)
@@ -1288,7 +1322,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// AE#927: grows a controlled probe's sequential ranges. Demux thread only, like `position`.
     private var probeRangeGrowth: ProbeRangeGrowth?
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, probeRangeCeiling: Int? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget, persistentRequestSession: URLSession? = nil, diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context, routesDiscMediaType: Bool = false) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, trickleFloorBytes: Int64? = nil, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, probeRangeCeiling: Int? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget, persistentRequestSession: URLSession? = nil, diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context, routesDiscMediaType: Bool = false) {
         self.diagnosticContext = diagnosticContext
         self.routesDiscMediaType = routesDiscMediaType
         self.sourceOpenPolicy = sourceOpenPolicy
@@ -1314,6 +1348,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         self.pinIdleSeconds = pinIdleSeconds
         self.liveRefusalRetryBudgetSeconds = liveRefusalRetryBudget
         self.connStallTimeout = max(0.05, connStallTimeout)
+        self.trickleFloorBytes = max(1, trickleFloorBytes ?? Int64(
+            Double(Self.trickleFloorBytesDefault) * self.connStallTimeout / Self.connStallTimeoutDefault))
         self.winHighWater = max(1, windowHighWater
             ?? (isLive ? Self.liveWinHighWaterDefault : Self.winHighWaterDefault))
         self.streamHighWater = max(1, streamHighWater ?? Self.streamHighWaterDefault)
@@ -2468,6 +2504,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let diagGenAtStart = connGeneration
         let diagDropsAtStart = staleGenDroppedBytes
         winCond.unlock()
+        var enteredForwardWait = false
+        defer {
+            winCond.lock()
+            forwardWaitActive = false
+            if !enteredForwardWait { forwardWaitSince = nil }
+            winCond.unlock()
+        }
         defer {
             let elapsedMs = msSince(readStart)
             if elapsedMs >= diag.thresholdMs {
@@ -2834,6 +2877,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 // Wait for the live connection to fill forward. A false return
                 // means connStallTimeout elapsed with no data (socket stall).
                 let waitStart = DispatchTime.now()
+                if forwardWaitSince == nil {
+                    forwardWaitSince = waitStart
+                    forwardWaitOffset = curPosition
+                    // No mark from before the starvation began may be judged: one taken ahead of a
+                    // full-window park would fold the park's zero delivery into the span.
+                    trickleSamples = [(waitStart, genDeliveredBytes)]
+                }
+                enteredForwardWait = true
+                forwardWaitActive = true
                 let signaled = winCond.wait(until: min(Date(timeIntervalSinceNow: connStallTimeout), readDeadline))
                 winCond.unlock()
                 diag.recordStallWait(ms: msSince(waitStart), signaled: signaled)
@@ -3670,6 +3722,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         connStartedAt = DispatchTime.now()   // #93: time-to-first-data per generation
         connFirstDataSeen = false
         lastDeliveryAt = connStartedAt       // #309: the gap is measured from here until data lands
+        genDeliveredBytes = 0
+        trickleSamples = [(connStartedAt, 0)]
+        forwardWaitSince = nil
         // `nextFaultedRefillAt` is deliberately NOT reset here. The faulted-refill ladder sets it
         // just before authorising this very reconnect, so a reset on connection start erased the
         // pacing it had just announced — every "next attempt in Ns" fired as fast as the consumer
@@ -3880,11 +3935,18 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // what is left of one, because once the gap has outgrown the timeout that remainder is
             // 20 ms and this would re-arm at 50 Hz for the length of the park.
             lastDeliveryAt = DispatchTime.now()
+            // Same for the trickle marks: a park is not a slow stretch.
+            trickleSamples = [(lastDeliveryAt, genDeliveredBytes)]
+            forwardWaitSince = nil   // a full window is not a starved consumer
             winCond.unlock()
             armDeliveryGapWatchdog(generation: generation, after: connStallTimeout)
             return
         }
         if gap < connStallTimeout {
+            if let trickle = trickleVerdictLocked() {
+                endTrickleLocked(generation: generation, transfer: transfer, verdict: trickle)
+                return
+            }
             winCond.unlock()
             // Data landed since this closure was scheduled; wait out what is left of the window.
             armDeliveryGapWatchdog(generation: generation, after: max(0.02, connStallTimeout - gap))
@@ -3905,6 +3967,65 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             "[AVIOReader] \(label) gen=\(generation) no delivery for \(String(format: "%.1f", gap))s"
             + " at offset \(frontier) (\(ahead / 1024)KB read-ahead held,"
             + " \(sawData ? "had delivered" : "never delivered") data); ending it",
+            category: .demux)
+    }
+
+    /// What `checkDeliveryGap` logs when it ends a trickling generation.
+    private struct TrickleVerdict {
+        let bytes: Int64
+        let span: Double
+        let waited: Double
+        let offset: Int64
+    }
+
+    /// The gap watchdog measures only the time since the LAST delivery, so a drip defeats it: in the
+    /// field (4K HDR over a debrid origin, held connection) a fresh generation delivered 256 KB every
+    /// 40 to 100 s, each drip reset `lastDeliveryAt`, and for three minutes one read after another
+    /// waited while no `no delivery` line ever fired and the forward buffer drained into a 25 s
+    /// AVPlayer stall. The read loop's forward wait has the same blind spot (every drip signals it).
+    /// This judges VOLUME instead: a consumer starved on forward data for `connStallTimeout` (across
+    /// as many AVIO-sized reads as that takes), with a read blocked now and fewer than
+    /// `trickleFloorBytes` delivered over the last `connStallTimeout`, ends the generation.
+    /// Caller holds `winCond`; records this tick's mark either way.
+    private func trickleVerdictLocked() -> TrickleVerdict? {
+        let now = DispatchTime.now()
+        let bytes = genDeliveredBytes
+        trickleSamples.append((now, bytes))
+        func seconds(since t: DispatchTime) -> Double {
+            Double(now.uptimeNanoseconds - t.uptimeNanoseconds) / 1_000_000_000
+        }
+        // Keep the newest mark that is at least one period old, and everything after it.
+        if let keep = trickleSamples.lastIndex(where: { seconds(since: $0.at) >= connStallTimeout }), keep > 0 {
+            trickleSamples.removeFirst(keep)
+        }
+        guard forwardWaitActive, let since = forwardWaitSince, seconds(since: since) >= connStallTimeout,
+              let mark = trickleSamples.first, mark.at.uptimeNanoseconds >= since.uptimeNanoseconds,
+              seconds(since: mark.at) >= connStallTimeout else {
+            return nil
+        }
+        let span = seconds(since: mark.at)
+        let delivered = bytes - mark.bytes
+        // Normalised to one period, so a mark older than a period cannot pass a trickle as healthy.
+        guard Double(delivered) * connStallTimeout / span < Double(trickleFloorBytes) else { return nil }
+        return TrickleVerdict(bytes: delivered, span: span, waited: seconds(since: since),
+                              offset: forwardWaitOffset)
+    }
+
+    /// Ends a trickling generation exactly as the gap path ends a silent one: the read loop then
+    /// replaces it through its ordinary ended-connection handling. Called with `winCond` held,
+    /// returns with it released.
+    private func endTrickleLocked(generation: Int, transfer: any PersistentTransfer, verdict: TrickleVerdict) {
+        connEnded = true
+        activeTransfer = nil
+        trickleEnds += 1
+        winCond.broadcast()
+        winCond.unlock()
+        transfer.cancelTransfer()
+        transfer.releaseOriginTicket()   // #377: a trickling connection must not hold the slot
+        EngineLog.emit(
+            "[AVIOReader] \(label) gen=\(generation) trickle: \(verdict.bytes / 1024) KB in "
+            + "\(String(format: "%.1f", verdict.span))s while a read waited "
+            + "\(String(format: "%.1f", verdict.waited))s at offset \(verdict.offset); ending it",
             category: .demux)
     }
 
@@ -3950,6 +4071,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
         lastDeliveryAt = DispatchTime.now()   // #309: the delivery-gap watchdog's only input
+        genDeliveredBytes += Int64(data.count)
         var firstDataMs: Double? = nil
         if !connFirstDataSeen {
             connFirstDataSeen = true
