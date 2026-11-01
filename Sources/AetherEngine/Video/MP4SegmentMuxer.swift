@@ -205,6 +205,8 @@ final class MP4SegmentMuxer {
     /// lands in the sample entry, and the AE#561 sanitizer walks every video sample with it.
     private let videoNALLengthPrefixSize: Int?
     /// Latched from `VideoConfig.convertsAnnexBSamples`.
+    private let isHEVCVideo: Bool
+    private var shortHEVCHeadersRemoved = 0
     private let convertsAnnexBVideoSamples: Bool
     /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
     /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
@@ -328,6 +330,7 @@ final class MP4SegmentMuxer {
             audio.map { Self.audioNeedsParsedPacketForMoov($0.codecpar.pointee.codec_id) } ?? false
         self.videoNALFraming = video.nalFramingLatch ?? NALFramingLatch()
         self.convertsAnnexBVideoSamples = video.convertsAnnexBSamples
+        self.isHEVCVideo = video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
         // AE#561: the override, when there is one, is the record that reaches the sample entry. Both
         // carry the same width (the #19 rebuild keeps the source header's first 22 bytes), so this
         // only matters for a source whose own extradata is missing or Annex B.
@@ -776,6 +779,46 @@ final class MP4SegmentMuxer {
                 return (0, .none)
             }
             av_shrink_packet(packet, Int32(complete))
+        }
+
+        if streamIndex == videoOutputStreamIndex, isHEVCVideo,
+            !Self.nalChainSanitizerDisabled, let width = videoNALLengthPrefixSize,
+            let data = packet.pointee.data, packet.pointee.size > 0
+        {
+            let ranges = NALUnitChain.shortHEVCHeaderRanges(
+                UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size)),
+                lengthPrefixSize: width,
+                framingConfirmed: convertsAnnexBVideoSamples || videoNALFraming.isConfirmed)
+            if !ranges.isEmpty {
+                let result = av_packet_make_writable(packet)
+                guard result >= 0, let writable = packet.pointee.data else { return (result, .none) }
+                let count = Int(packet.pointee.size)
+                var read = 0
+                var write = 0
+                for range in ranges {
+                    let kept = range.lowerBound - read
+                    if kept > 0 {
+                        memmove(writable + write, writable + read, kept)
+                        write += kept
+                    }
+                    read = range.upperBound
+                }
+                if read < count {
+                    memmove(writable + write, writable + read, count - read)
+                    write += count - read
+                }
+                shortHEVCHeadersRemoved += ranges.count
+                if shortHEVCHeadersRemoved <= 5 || shortHEVCHeadersRemoved % 100 == 0 {
+                    EngineLog.emit(
+                        "[MP4SegmentMuxer] removed \(ranges.count) incomplete HEVC NAL header(s) "
+                            + "at dts=\(packet.pointee.dts), preserving \(write) sample bytes", category: .session)
+                }
+                av_shrink_packet(packet, Int32(write))
+                if write == 0 {
+                    av_packet_unref(packet)
+                    return (0, .none)
+                }
+            }
         }
 
         // The packet is consumed by the write below.
