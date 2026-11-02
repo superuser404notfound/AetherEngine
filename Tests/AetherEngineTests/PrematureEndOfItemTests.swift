@@ -176,4 +176,13 @@ struct PrematureEndOfItemTests {
         #expect(AetherEngine.prematureEndPlayhead(read: boundary, peak: boundary - 0.1, peakAgeSeconds: 0.1) == boundary)
         #expect(AetherEngine.prematureEndPlayhead(read: boundary, peak: nil, peakAgeSeconds: nil) == boundary)
     }
+
+    // AE#962: the reporter's session sat behind a black picture for over two minutes on an in-place
+    // re-seek that never landed. The seek is bounded; what happens after it is decided here.
+    @Test("A re-seek that lands resumes, one that does not accepts the end, a newer seek owns the transport")
+    func recoveryOutcome() {
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: true, superseded: false) == .resume)
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: false) == .acceptEnd)
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: true) == .yield)
+    }
 }

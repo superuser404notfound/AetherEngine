@@ -3828,6 +3828,25 @@ public final class AetherEngine: ObservableObject {
         return true
     }
 
+    /// How long the #287 in-place re-seek may take before the end is accepted (AE#962). The seek
+    /// targets a position whose segments are resident, so it lands in well under a second when it can
+    /// land at all; the reporter's session waited on one for over two minutes behind a black picture.
+    nonisolated static let prematureEndRecoverySeekDeadlineSeconds: Double = 20
+
+    enum PrematureEndRecoveryOutcome: Equatable {
+        /// The re-seek landed: resume playback into the tail.
+        case resume
+        /// A newer seek replaced it: that seek owns the transport, and the item has not ended.
+        case yield
+        /// It timed out or did not reach the target: the end stands, one bounded seek later.
+        case acceptEnd
+    }
+
+    nonisolated static func prematureEndRecoveryOutcome(landed: Bool, superseded: Bool) -> PrematureEndRecoveryOutcome {
+        if superseded { return .yield }
+        return landed ? .resume : .acceptEnd
+    }
+
     /// How recently the published clock must have reached its peak for `prematureEndPlayhead` to
     /// trust it over AVPlayer's reading (AE#962). The snap-back it guards against lands two observer
     /// ticks (0.2 s) before the end notification.

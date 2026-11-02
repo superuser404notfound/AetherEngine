@@ -1993,10 +1993,28 @@ final class NativeAVPlayerHost {
             + "AVPlayer reported, re-seeking in place (attempt \(prematureEndRecoveryAttempts))",
             category: .engine)
         let sid = sessionID
-        await seek(to: playhead)
+        // The seek bumps the generation before it suspends, so a different one afterwards is a newer seek.
+        let recoveryGeneration = seekGeneration &+ 1
+        let landed = await seek(to: playhead,
+                                deadlineSeconds: AetherEngine.prematureEndRecoverySeekDeadlineSeconds)
         // The session may have been handed over while the seek was in flight; a retired session
         // must not restart the player under its successor.
         guard sessionID == sid else { return true }
+        let outcome = AetherEngine.prematureEndRecoveryOutcome(
+            landed: landed, superseded: seekGeneration != recoveryGeneration)
+        if outcome != .resume {
+            prematureEndRecoveryInFlight = false
+            waitingReason = avPlayer.reasonForWaitingToPlay
+            timeControlStatus = avPlayer.timeControlStatus
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sessionID) AE#287 re-seek "
+                + (outcome == .yield
+                    ? "superseded by a newer seek; leaving the transport to it"
+                    : "did not land within \(Int(AetherEngine.prematureEndRecoverySeekDeadlineSeconds))s; "
+                      + "accepting the end"),
+                category: .engine)
+            return outcome == .yield
+        }
         avPlayer.play()
         prematureEndRecoveryInFlight = false
         waitingReason = avPlayer.reasonForWaitingToPlay
