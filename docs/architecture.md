@@ -264,6 +264,25 @@ DVR viewer to the live edge. In-place item replacement preserves the repair budg
 rearms after sustained healthy presentation. Encoded long-GOP H.264/AAC replay tests decode both
 admitted software packets and remuxed fragments and compare every picture with the original.
 
+## Software Live without DVR
+
+Ordinary Live software playback with audio uses `DirectLiveAudioReadAhead` on the existing
+Demuxer connection. Its forward-only memory FIFO lets audio advance past a full video renderer,
+while bounded compressed video parking and short consumer waits keep already-read video runnable
+when source I/O waits. Video decoding yields between packets so it cannot drain a whole parked
+batch before available audio gets a turn. The Live clock never adopts VOD pause/rebuffer behavior,
+and the audio lead target is a ceiling, not a startup prefill requirement.
+
+The session allowance covers the source store, memory-allocation slack, parked packets, replay
+quarantine and transient envelopes. Packet cost includes referenced buffer capacity and side data;
+an oversized packet fails explicitly. Consumed records create no seek history or public DVR window.
+The allowance remains reserved until the source worker and parked-packet consumer both retire.
+Replay filtering precedes recording and decode. Per-packet generation checks, first-keyframe audio
+admission and the unarmed-video clock fallback still apply. Sessions with a DVR or cushion feeder
+keep their separate route. Standard `[SWDiag]` audio-lead and parked-depth reporting includes this
+path (AE#934). Entering background audio-only mode retires parked video before evaluating
+the read gate, including a queue that was already full, and uses audio-renderer backpressure.
+
 ## Software VOD compressed packet cache
 
 Seekable software VOD read through one of the engine's byte readers has a

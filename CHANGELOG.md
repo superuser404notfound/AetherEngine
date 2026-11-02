@@ -25,6 +25,11 @@ the public-API contract.
 
 ### Fixed
 
+- **Software Live audio keeps advancing when video backpressures (AE#934).** Sessions without a
+  DVR feeder read ahead on the existing source connection and park compressed video within a
+  shared byte allowance. Ready video can drain while source I/O waits; the Live clock, keyframe
+  admission and DVR routing remain unchanged.
+
 - **An origin that answers byte ranges with other bytes is caught instead of played (AE#958).** IPTV timeshift
   archives answer every `Range: bytes=X-` with a `206` whose `Content-Range` names X while the body starts on the
   origin's own chunk boundary. Undeclared, that played as audio that looped and drifted out of sync on the native
