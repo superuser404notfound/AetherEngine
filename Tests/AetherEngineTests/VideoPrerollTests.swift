@@ -180,8 +180,7 @@ struct VideoPrerollTests {
 
     @Test("On a buffered route the opened gate starts the clock without the lead", .timeLimit(.minutes(3)))
     func highLatencyRouteSkipsTheLead() async throws {
-        let output = AudioOutput()
-        output.outputLatency = { 2.0 }
+        let output = AudioOutput(outputLatency: { 2.0 })
         output.videoPrerollSatisfied = { _ in true }
         output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
         #expect(output.synchronizer.rate == 1)

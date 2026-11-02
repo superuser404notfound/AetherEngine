@@ -50,7 +50,8 @@ final class AudioOutput: @unchecked Sendable {
         return _epoch
     }
 
-    init() {
+    init(outputLatency: @escaping @Sendable () -> Double = AudioOutput.sessionOutputLatency) {
+        self.outputLatency = outputLatency
         renderer = AVSampleBufferAudioRenderer()
         synchronizer = AVSampleBufferRenderSynchronizer()
         synchronizer.addRenderer(renderer)
@@ -653,7 +654,9 @@ final class AudioOutput: @unchecked Sendable {
     }
 
     /// The route's output latency, read per start: the route can change inside a session.
-    var outputLatency: @Sendable () -> Double = {
+    private let outputLatency: @Sendable () -> Double
+
+    static let sessionOutputLatency: @Sendable () -> Double = {
         #if os(iOS) || os(tvOS)
         AVAudioSession.sharedInstance().outputLatency
         #else
