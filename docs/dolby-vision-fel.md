@@ -243,12 +243,10 @@ memory watermark sampling on every emitted frame. They show the direction and th
 memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of
 ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
 
-### 4.7 Chroma options and in-place compose on the A12
+### 4.7 4:4:4 chroma compose on the A12
 
-Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control. The build kind is
-given per row. The 4:2:2 and in-place figures come from a later development tree with other
-unmerged changes, among them a memory change and a different enhancement-layer chroma filter, so
-read the difference between arms, not the absolute numbers.
+Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control, running the
+4:4:4 kernel described in §5.6. The build kind is given per row.
 
 | | Before | After |
 |---|---|---|
@@ -261,19 +259,6 @@ read the difference between arms, not the absolute numbers.
   textures, and the cause of the rise is not measured. 4:4:4 takes the pool path while the 4:2:0
   control composes in place, and its chroma planes are larger; the split between the two is not
   measured.
-- **4:2:2 costs memory.** Six 6-minute soaks with 14 seeks (Release, three per arm): 4:2:2 peaks at
-  741 to 767 MB against 542 to 553 MB for 4:2:0 (about +200 MB at the peak, about +160 MB at the end; these
-  formats take the pool path while the 4:2:0 control composes in place, and their chroma planes are
-  larger; the split between the two is not measured), with equal throughput (23.4 composed per second in both) and no compose
-  failure. Seek-landing drops were 8, 8 and 10 against 0, 3 and 7, so slightly more.
-- **In-place compose.** Three 1 to 1.5 minute runs per arm (Release): median drops 0 in both, peak
-  footprint 351 MB in place against 477 MB through the pool, no compose failure.
-- **Vertical siting.** Both 4:2:2 and 4:4:4 place chroma site r on luma row 2r, which is co-sited with the
-  base layer's top-left siting. The chroma-location label copied from the base layer (`Left`) puts the
-  sample half a luma row lower, between rows 2r and 2r+1. On the Mac, one frame of a synthetic clip,
-  4:2:2 against a vertically centred reconstruction of the same data: ΔE ITP about 0.6 to 0.9 on
-  gradients and bars, 1 to 2 on coloured text and lines, 11 to 16 on gratings and zone plates; against
-  co-sited siting 0.01. Not judged by eye. 4:4:4 has the same siting by construction.
 
 ---
 
@@ -481,7 +466,9 @@ the decoder's lock, and each call is O(K):
   clamping and dither as before, so the output is byte-identical to the per-sample version. That is 81
   site evaluations per 256 samples instead of 1024 (0.32 per sample against 4, and 0.25 for 4:2:0). The
   Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms, and the A12 numbers are in §4.7. Both
-  take the pool path, since in-place composition is 4:2:0 only. 4:4:4 is experimental: the spec has no
+  take the pool path, since in-place composition is 4:2:0 only. The kernel needs threadgroups of exactly
+  16 x 16, so a pipeline that allows fewer than 256 threads refuses the frame with a logged compose
+  failure; the per-window GPU time line carries the limit it saw. 4:4:4 is experimental: the spec has no
   4:4:4 reconstruction.
 - **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
