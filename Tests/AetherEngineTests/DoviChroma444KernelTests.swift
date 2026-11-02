@@ -176,5 +176,42 @@ struct DoviChroma444KernelTests {
         let pipelines = try DoviFelComposer.SharedPipelines.getOrCreate(device: device)
         #expect(pipelines.chroma444Pipeline.maxTotalThreadsPerThreadgroup >= 256)
     }
+
+    @Test("a 4:4:4 pipeline limit under 256 threads is refused, 256 and over is not")
+    func refusalBoundary() {
+        #expect(DoviFelComposer.chroma444Refusal(threadLimit: 256) == nil)
+        #expect(DoviFelComposer.chroma444Refusal(threadLimit: 1024) == nil)
+        let refusal = DoviFelComposer.chroma444Refusal(threadLimit: 255)
+        #expect(refusal?.contains("256") == true)
+        #expect(refusal?.contains("255") == true)
+    }
+
+    @Test("a device whose 4:4:4 pipeline allows too few threads fails the 4:4:4 compose and leaves 4:2:0 alone")
+    func smallThreadLimitFailsOnly444() throws {
+        let composer = try #require(DoviFelComposer())
+        let (bl, el) = try #require(Fixture.makeBaseAndEnhancement(width: 64, height: 32, seed: 1))
+        let params = Fixture.params(dither: .none, residual: true, chroma: .polynomial)
+        composer.forcedChroma444ThreadLimit.withLock { $0 = 255 }
+
+        composer.chromaFormat = .yuv444
+        #expect(composer.compose(baseBuffer: bl, enhancementBuffer: el, params: params, frameIndex: 0) == nil)
+        #expect(!composer.hasOutputPool, "the refusal comes before a pool buffer is rented")
+
+        composer.chromaFormat = .yuv420
+        #expect(composer.compose(baseBuffer: bl, enhancementBuffer: el, params: params, frameIndex: 0) != nil)
+
+        composer.forcedChroma444ThreadLimit.withLock { $0 = nil }
+        composer.chromaFormat = .yuv444
+        #expect(composer.compose(baseBuffer: bl, enhancementBuffer: el, params: params, frameIndex: 0) != nil)
+    }
+
+    @Test("the GPU time line carries the 4:4:4 thread limit only when one was checked")
+    func gpuTimeLineCarriesTheLimit() {
+        let plain = DoviFelComposer.gpuTimeLine(mean: 3.8, frames: 120, chroma444ThreadLimit: nil)
+        #expect(plain == "[DoviFelComposer] gpu 3.8ms/frame over 120 frames")
+        let with444 = DoviFelComposer.gpuTimeLine(mean: 3.8, frames: 120, chroma444ThreadLimit: 256)
+        #expect(with444.hasPrefix(plain))
+        #expect(with444.contains("256 threads per threadgroup"))
+    }
 }
 #endif
