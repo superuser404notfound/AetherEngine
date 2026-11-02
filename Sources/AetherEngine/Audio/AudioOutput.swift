@@ -78,6 +78,26 @@ final class AudioOutput: @unchecked Sendable {
         synchronizer.rate
     }
 
+    /// The rate this output last handed the synchronizer, scheduled starts included. Its own `rate`
+    /// reads back asynchronously, so it cannot say whether a start was already issued.
+    private var commandedRate: Float = 0  // guarded by lock
+
+    private func repeatsCommandedRate(_ rate: Float) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return rate == commandedRate
+    }
+
+    /// Every rate write goes through here. Called with `lock` held.
+    private func commandRate(_ rate: Float, time: CMTime, atHostTime host: CMTime? = nil) {
+        commandedRate = rate
+        if let host {
+            synchronizer.setRate(rate, time: time, atHostTime: host)
+        } else {
+            synchronizer.setRate(rate, time: time)
+        }
+    }
+
     /// AE#395: the renderer's own view of its queue, for the diagnostic line: `status/sufficient/error`.
     /// A session that is silent on one route while its clock runs at 1.00 has nothing else that could
     /// say whether the renderer is playing what it was given, and the renderer error was only ever
@@ -227,7 +247,7 @@ final class AudioOutput: @unchecked Sendable {
         let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
         // Unconditional: `synchronizer.rate` reads back asynchronously, and a start issued just
         // before this can still read 0 here. Skipping the stop on that read let it commit later.
-        synchronizer.setRate(0, time: at)
+        commandRate(0, time: at)
         lock.unlock()
         EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", sourceSeconds)) (host transport disabled)",
                        category: .swPlayback)
@@ -239,6 +259,12 @@ final class AudioOutput: @unchecked Sendable {
         // A host resumes right after it arms the clock; while a preroll waits, that rate is the one
         // the preroll starts at, not a start of its own.
         if rate > 0, updatePrerollRate(rate, ifRevision: revision) { return }
+        // A host that repeats the rate after play() (NowSeen does) would start a clock a second time
+        // while the first start is still in flight: `synchronizer.rate` can read 0 right after it, so
+        // only this output's own record can tell. On an AirPlay route the doubled start left the
+        // synchronizer reporting a time 43 s stale, and the next pause stopped the clock there. A
+        // clock that stopped on its own is restarted by play() (AE#549), not by a repeated rate.
+        if rate > 0, repeatsCommandedRate(rate) { return }
         // A clock that stands still starts through the preroll on a session that has one: a seek
         // landed while paused anchors at rate 0 and never asks the gate, so the play that follows
         // would otherwise start it with nothing queued.
@@ -255,7 +281,7 @@ final class AudioOutput: @unchecked Sendable {
         endPreroll()
         let at = synchronizer.currentTime()
         let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
-        synchronizer.setRate(rate, time: at)
+        commandRate(rate, time: at)
         lock.unlock()
         EngineLog.emit("[AudioOutput] setRate \(rate) at t=\(String(format: "%.3f", sourceSeconds))", category: .swPlayback)
     }
@@ -267,7 +293,7 @@ final class AudioOutput: @unchecked Sendable {
         endPreroll()
         let at = synchronizer.currentTime()
         let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
-        synchronizer.setRate(0.0, time: at)
+        commandRate(0.0, time: at)
         lock.unlock()
         EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", sourceSeconds))", category: .swPlayback)
     }
@@ -282,7 +308,7 @@ final class AudioOutput: @unchecked Sendable {
         let now = timeline.sourceTime(forRenderer: synchronizer.currentTime())
         let seconds = SoftwareEndOfMediaClock.parkSeconds(clockSeconds: CMTimeGetSeconds(now), notAfter: latest)
         let at = seconds.map { CMTime(seconds: $0, preferredTimescale: 90000) } ?? now
-        synchronizer.setRate(0.0, time: timeline.rendererTime(forSource: at))
+        commandRate(0.0, time: timeline.rendererTime(forSource: at))
         lock.unlock()
         EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", at.seconds))", category: .swPlayback)
     }
@@ -485,8 +511,9 @@ final class AudioOutput: @unchecked Sendable {
         // Hosts discard the output after stop. An already-paused clock needs no time reset;
         // its native rate is updated synchronously even while the timebase settles.
         if synchronizer.rate != 0 {
-            synchronizer.setRate(0.0, time: .zero)
+            commandRate(0.0, time: .zero)
         }
+        commandedRate = 0
         renderer.flush()
     }
 
@@ -506,11 +533,11 @@ final class AudioOutput: @unchecked Sendable {
         endPreroll()
         switch rate > 0 ? preroll : nil {
         case nil:
-            synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time))
+            commandRate(rate, time: timeline.rendererTime(forSource: time))
         case true?:
             startAfterPreroll(rate: rate, time: time)
         case false?:
-            synchronizer.setRate(0, time: timeline.rendererTime(forSource: time))
+            commandRate(0, time: timeline.rendererTime(forSource: time))
             let gen = prerollGeneration
             prerollRate = rate
             let started = CACurrentMediaTime()
@@ -671,12 +698,12 @@ final class AudioOutput: @unchecked Sendable {
         guard Self.prerollStartsAtHostTime(outputLatency: latency) else {
             EngineLog.emit("[AudioOutput] route latency \(String(format: "%.0f", latency * 1000)) ms exceeds the "
                            + "preroll lead; starting unscheduled", category: .swPlayback)
-            synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time))
+            commandRate(rate, time: timeline.rendererTime(forSource: time))
             return
         }
         let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
         let host = CMTimeAdd(hostNow, CMTime(seconds: Self.prerollStartLead, preferredTimescale: 1_000_000_000))
-        synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time), atHostTime: host)
+        commandRate(rate, time: timeline.rendererTime(forSource: time), atHostTime: host)
     }
 
     /// Retires the current preroll chain, and reports a hold that was still waiting as cancelled.

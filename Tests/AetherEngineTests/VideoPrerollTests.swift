@@ -189,6 +189,26 @@ struct VideoPrerollTests {
         #expect(output.synchronizer.currentTime().seconds > 5.05)
     }
 
+    @Test("A host repeating the rate after play leaves the scheduled start alone")
+    func repeatedRateAfterScheduledStartIsNoOp() {
+        let output = AudioOutput(outputLatency: { 0.08 })
+        output.videoPrerollSatisfied = { _ in true }
+        output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
+        let revision = output.clockCommandRevision
+        output.setRate(1)
+        #expect(output.clockCommandRevision == revision, "no second start was issued")
+    }
+
+    @Test("A pause and play still restart the clock with the rate unchanged")
+    func pauseThenSameRateRestarts() {
+        let output = AudioOutput()
+        output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
+        output.pause()
+        #expect(output.synchronizer.rate == 0)
+        output.setRate(1)
+        #expect(output.synchronizer.rate == 1)
+    }
+
     @Test("A rate set while the preroll waits is the rate it starts at", .timeLimit(.minutes(3)))
     func setRateDuringPrerollIsTheStartRate() async throws {
         let output = AudioOutput()
