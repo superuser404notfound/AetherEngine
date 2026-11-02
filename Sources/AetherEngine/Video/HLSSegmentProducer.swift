@@ -2464,6 +2464,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
         // the NEW producer's position. Cutting on it would adopt this pump's partial segment under
         // its full index; the teardown rule decides what happens to the in-flight segment instead.
         if checkShouldStop() { return nil }
+        // AE#962: a video packet held for its successor's dts goes out with the segment it was routed
+        // to. After the last video packet of a title nothing but audio follows, so the successor never
+        // comes, and the EOF flush put the final picture into the last segment of an audio-only tail,
+        // a minute of item time after it; a session joining that tail placed its whole item by that
+        // one sample. Its duration falls back to one frame, as the EOF flush's always did. A video
+        // packet that opens a later segment itself is routed past this muxer and stays held.
+        if !isLive, let pending = pendingVideoPkt, pendingVideoSegIndex <= currentMuxerSegmentIndex {
+            pendingVideoPkt = nil
+            if (pending.pointee.flags & AV_PKT_FLAG_KEY) != 0,
+               firstSyncItemPtsBySegment[currentMuxerSegmentIndex] == nil {
+                firstSyncItemPtsBySegment[currentMuxerSegmentIndex] =
+                    planBoundaryAxis.timestamp(dts: pending.pointee.dts, pts: pending.pointee.pts)
+            }
+            finalizeAndWriteVideo(pending, nextDts: nil, muxer: muxer)
+            bumpPacketsWritten()
+        }
         switch muxer.cutFragmentForNextSegment(newIdx) {
         case .completed(let path, let bytesWritten):
             EngineLog.emit(

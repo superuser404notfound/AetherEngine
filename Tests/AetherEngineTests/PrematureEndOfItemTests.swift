@@ -152,4 +152,37 @@ struct PrematureEndOfItemTests {
             attemptsUsed: AetherEngine.prematureEndRecoveryMaxAttempts,
             lastAttemptPlayhead: nil))
     }
+
+    // AE#962: a session that joined inside the audio-only tail never loaded a video sample. At the
+    // REAL end AVPlayer publishes its clock back at the end of the video track (126.9 s, then 60.000
+    // and 60.008, still at rate 1.0, then didPlayToEndTime), and every reading agrees with it: the
+    // item, the player, the observer. Read alone, that is a premature end, and the tail played twice.
+    @Test("A clock that just reached the end outranks the position AVPlayer snaps back to")
+    func freshPeakOutranksSnappedPlayhead() {
+        let playhead = AetherEngine.prematureEndPlayhead(read: 60.008, peak: 126.9, peakAgeSeconds: 0.2)
+        #expect(playhead == 126.9)
+        #expect(!AetherEngine.prematureEndRecoveryQualifies(
+            isLive: false, duration: 127.039, playhead: playhead, seekableEnd: 127.039,
+            attemptsUsed: 0, lastAttemptPlayhead: nil))
+    }
+
+    @Test("A peak left behind by an earlier backward scrub is not a witness")
+    func stalePeakIsIgnored() {
+        #expect(AetherEngine.prematureEndPlayhead(read: boundary, peak: 1480, peakAgeSeconds: 600) == boundary)
+    }
+
+    @Test("The premature end itself keeps its reading")
+    func prematureEndKeepsReading() {
+        #expect(AetherEngine.prematureEndPlayhead(read: boundary, peak: boundary - 0.1, peakAgeSeconds: 0.1) == boundary)
+        #expect(AetherEngine.prematureEndPlayhead(read: boundary, peak: nil, peakAgeSeconds: nil) == boundary)
+    }
+
+    // AE#962: the reporter's session sat behind a black picture for over two minutes on an in-place
+    // re-seek that never landed. The seek is bounded; what happens after it is decided here.
+    @Test("A re-seek that lands resumes, one that does not accepts the end, a newer seek owns the transport")
+    func recoveryOutcome() {
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: true, superseded: false) == .resume)
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: false) == .acceptEnd)
+        #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: true) == .yield)
+    }
 }
