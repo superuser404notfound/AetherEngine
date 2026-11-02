@@ -10,7 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The 4:4:4 FEL output composes each chroma site once per 16 x 16 block.** The output is
+  byte-identical and the A12 holds the clip's frame rate. Colour not yet judged on a TV.
 
 ## [7.49.0] - 2026-10-27
 

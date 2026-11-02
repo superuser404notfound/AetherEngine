@@ -246,28 +246,34 @@ memory should be re-measured on a release build. Footprint went from a flat ~390
 ### 4.7 Chroma options and in-place compose on the A12
 
 Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control. The build kind is
-given per row. The 4:2:2 and in-place memory figures below come from a tree that also carries an unrelated memory change,
-so read the difference between arms, not the absolute peaks.
+given per row. The 4:2:2 and in-place figures come from a later development tree with other
+unmerged changes, among them a memory change and a different enhancement-layer chroma filter, so
+read the difference between arms, not the absolute numbers.
 
 | | Before | After |
 |---|---|---|
 | 4:4:4 compose rate, 65 s clip (Debug) | about 12.8 per second, video falling 30 s or more behind the clock | about 23.9 per second, the clip's rate; 4:2:0 control 24.1 per second; video lead 0.2 to 0.3 s, 0 drops |
-| 4:4:4 compose rate, 65 s clip (Release) | not measured | 24.0 per second, 1555 frames composed, 4:2:0 control 24.0 per second and 1577 frames; video lead up to 0.25 s, 0 drops, 0 compose failures |
+| 4:4:4 compose rate, 65 s clip (Release) | not measured | 24.0 per second, 1555 frames composed (last totals line; it prints at most every 10 s), 4:2:0 control 24.0 per second and 1577 frames; video lead up to 0.25 s, 0 drops, 0 compose failures |
 
-- **4:4:4 costs memory.** On the Release runs above, peak footprint is 792 MB against 436 MB for 4:2:0 on
-  this code, without the unrelated memory change.
+- **4:4:4 costs memory.** On the Release runs above, footprint (sampled at 30 s and 60 s) is 792 MB
+  against 436 MB for 4:2:0 on this code. In Debug builds of the same clip, 4:4:4 was 618 MB before
+  this kernel and 762 MB with it; 4:2:0 was 429 MB and 424 to 430 MB. The kernel allocates no new
+  textures, and the cause of the rise is not measured. 4:4:4 takes the pool path while the 4:2:0
+  control composes in place, and its chroma planes are larger; the split between the two is not
+  measured.
 - **4:2:2 costs memory.** Six 6-minute soaks with 14 seeks (Release, three per arm): 4:2:2 peaks at
-  741 to 767 MB against 542 to 553 MB for 4:2:0 (about +200 MB, +120 MB at the end, the extra chroma
-  planes and their pools), with equal throughput (23.4 composed per second in both) and no compose
+  741 to 767 MB against 542 to 553 MB for 4:2:0 (about +200 MB at the peak, about +160 MB at the end; these
+  formats take the pool path while the 4:2:0 control composes in place, and their chroma planes are
+  larger; the split between the two is not measured), with equal throughput (23.4 composed per second in both) and no compose
   failure. Seek-landing drops were 8, 8 and 10 against 0, 3 and 7, so slightly more.
 - **In-place compose.** Three 1 to 1.5 minute runs per arm (Release): median drops 0 in both, peak
   footprint 351 MB in place against 477 MB through the pool, no compose failure.
 - **Vertical siting.** Both 4:2:2 and 4:4:4 place chroma site r on luma row 2r, which is co-sited with the
   base layer's top-left siting. The chroma-location label copied from the base layer (`Left`) puts the
-  sample half a luma row lower, between rows 2r and 2r+1. Measured on 4:2:2 against a vertically centred
-  reconstruction of the same data, the difference is small on smooth content and visible only in
-  structures one chroma row high (fine gratings, zone plates); against co-sited siting it is 0.01 ΔE.
-  Half a luma row is tiny at 4K.
+  sample half a luma row lower, between rows 2r and 2r+1. On the Mac, one frame of a synthetic clip,
+  4:2:2 against a vertically centred reconstruction of the same data: ΔE ITP about 0.6 to 0.9 on
+  gradients and bars, 1 to 2 on coloured text and lines, 11 to 16 on gratings and zone plates; against
+  co-sited siting 0.01. Not judged by eye. 4:4:4 has the same siting by construction.
 
 ---
 
@@ -512,7 +518,7 @@ the decoder's lock, and each call is O(K):
 - **Kernels:** a per-frame 1024-entry luma prediction table replaces piece selection and polynomial
   evaluation per pixel whenever luma is polynomial (it is a pure function of the 10-bit base code);
   residual evaluation is skipped per component when that component's NLQ is inactive; threadgroup sizes
-  come from `threadExecutionWidth`. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
+  come from `threadExecutionWidth`, except the 4:4:4 chroma pass, which needs exactly 16 x 16. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
 
 ### 5.7 Delivery
 
