@@ -688,8 +688,10 @@ final class SegmentCache: @unchecked Sendable {
 
     /// `fetch` for the loopback server. With `progressive`, a segment that is being written is
     /// answered at once with a reader over its staging file, so AVPlayer receives each fragment as
-    /// the muxer flushes it instead of the whole segment after its cut.
-    func fetchSource(index: Int, timeout: TimeInterval, progressive: Bool) -> SegmentSource? {
+    /// the muxer flushes it instead of the whole segment after its cut. With `whileTarget`, the wait
+    /// also ends as soon as the declared target is no longer `index`.
+    func fetchSource(index: Int, timeout: TimeInterval, progressive: Bool,
+                     whileTarget: Bool = false) -> SegmentSource? {
         let deadline = Date().addingTimeInterval(timeout)
         condition.lock()
         while true {
@@ -697,7 +699,7 @@ final class SegmentCache: @unchecked Sendable {
                 condition.unlock()
                 return readOrDrop(index: index, url: url).map { .data($0) }
             }
-            if closed {
+            if closed || (whileTarget && currentTargetIndex != index) {
                 condition.unlock()
                 return nil
             }

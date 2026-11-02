@@ -906,6 +906,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return trickleEnds
     }
 
+    /// How many generations the delivery-gap watchdog has ended on this reader.
+    var deliveryGapEndCountForTesting: Int {
+        winCond.lock()
+        defer { winCond.unlock() }
+        return deliveryGapEnds
+    }
+
     /// The delivery gap the watchdog would judge right now. A test reads it to state the invariant
     /// the field case turns on: a stretch with no read outstanding does not accumulate against the
     /// read that follows it.
@@ -1027,6 +1034,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// stopped reading (a paused player) is never judged on a clock it left running.
     private var forwardWaitActive = false
     private var trickleEnds = 0
+    private var deliveryGapEnds = 0
 
     /// #309: earliest time the read loop may replace a FAULTED connection from the serve path.
     /// The failure ladder there cannot sleep (see `chargeFaultedRunwayRefill`), so its backoff is
@@ -4031,6 +4039,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
         connEnded = true
         activeTransfer = nil
+        deliveryGapEnds += 1
         let frontier = winStart + Int64(window.count)
         let ahead = window.count - max(0, Int(position - winStart))
         let sawData = connFirstDataSeen

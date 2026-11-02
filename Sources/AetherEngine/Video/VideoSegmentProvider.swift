@@ -885,7 +885,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let decidesForwardWaitByMarchRate: Bool
     /// How long a restart decision for a burst press waits for a newer target before it fires, so the
     /// presses after the first restart once, at the last one. Longer than a remote's repeat gap.
-    private let marchRateSettleSeconds: TimeInterval
+    /// Read per press, so a test can hold the earlier presses of a burst without a deadline and
+    /// settle only the last one. Guarded by stateLock.
+    private var _marchRateSettleSeconds: TimeInterval
     /// A jump this soon after a jump to another index is a burst press, and only such a jump settles.
     /// A lone jump restarts at once: settling every restart cost 0.4 to 0.9 s per +10 min seek.
     private let marchRateBurstWindowSeconds: TimeInterval
@@ -1165,7 +1167,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.producerFinished = producerFinished
         self.sourceBytesFetched = sourceBytesFetched
         self.decidesForwardWaitByMarchRate = decidesForwardWaitByMarchRate
-        self.marchRateSettleSeconds = marchRateSettleSeconds
+        self._marchRateSettleSeconds = marchRateSettleSeconds
         self.marchRateBurstWindowSeconds = marchRateBurstWindowSeconds
         self._lastRestartIndex = initialRestartIndex
         self.repositionWaitSlice = repositionWaitSlice
@@ -2094,6 +2096,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Restart budget before a restart cost has been measured in this session.
     static let marchRateDefaultBudgetSeconds = 3.0
 
+    func setMarchRateSettleSecondsForTesting(_ seconds: TimeInterval) {
+        stateLock.lock(); _marchRateSettleSeconds = seconds; stateLock.unlock()
+    }
+
     /// `time` is uptime seconds; tests pass their own to shape a march without sleeping.
     func recordMarchStore(index: Int, bytes: Int, parkedBefore: Bool = false, time: Double? = nil) {
         let now = time ?? Double(DispatchTime.now().uptimeNanoseconds) / 1e9
@@ -2113,7 +2119,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (eta > budgetSeconds, eta)
     }
 
-    /// The march-rate decision; a restart for a burst press is first held for `marchRateSettleSeconds`. The
+    /// The march-rate decision; a restart for a burst press is first held for `_marchRateSettleSeconds`. The
     /// segment arriving meanwhile is served; a newer target arriving meanwhile cancels the restart, so
     /// a burst of presses fires once, for the press that stayed the newest.
     private func marchRateDecision(index: Int, front: Int, branch: String)
@@ -2138,12 +2144,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stateLock.lock()
         let previous = _lastJump
         if previous?.index != index { _lastJump = (index, now) }
+        let settle = _marchRateSettleSeconds
         stateLock.unlock()
         guard let previous, previous.index != index, now - previous.time <= marchRateBurstWindowSeconds else {
             return (true, nil)
         }
-        if let source = cache.fetchSource(index: index, timeout: marchRateSettleSeconds,
-                                          progressive: fetchesProgressively) {
+        if let source = cache.fetchSource(index: index, timeout: settle,
+                                          progressive: fetchesProgressively, whileTarget: true) {
             EngineLog.emit("[HLSVideoEngine] seg\(index): march-rate arrived while settling branch=\(branch)", category: .session)
             return (false, source)
         }

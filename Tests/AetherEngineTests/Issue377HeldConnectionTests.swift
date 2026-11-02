@@ -488,10 +488,17 @@ struct Issue377HeldReaderTests {
         reader.playIntentProvider = { true }
         try reader.open()
 
+        let parkStarted = DispatchTime.now()
         try await Task.sleep(for: .seconds(5))
+        // What a red run needs to be read: CI failed this once (2026-11-02, 32.7 s for a 5 s park)
+        // and no loaded local run reproduced it, so the messages say who ended the connection.
+        let parked = Double(DispatchTime.now().uptimeNanoseconds - parkStarted.uptimeNanoseconds) / 1e9
+        let ends = "park \(String(format: "%.1f", parked))s, gap ends \(reader.deliveryGapEndCountForTesting), "
+            + "trickle ends \(reader.trickleEndCountForTesting), backpressure end \(reader.windowDiagnostics.parked), "
+            + "window \(reader.windowDiagnostics.windowBytes / 1024)KB"
         #expect(dataRanges(server, totalSize: totalSize).count == 1,
-                "the parked stretch itself asked for nothing: \(dataRanges(server, totalSize: totalSize))")
-        #expect(reader.hasLiveConnectionForTesting, "the park must not have ended the connection")
+                "the parked stretch itself asked for nothing: \(dataRanges(server, totalSize: totalSize)); \(ends)")
+        #expect(reader.hasLiveConnectionForTesting, "the park must not have ended the connection; \(ends)")
 
         // The invariant, stated where a loopback can state it without a race: the watchdog judges an
         // OUTSTANDING read, the park had none, so the park does not accumulate. Left accumulating it
@@ -501,7 +508,7 @@ struct Issue377HeldReaderTests {
         // wide; on loopback the delivery wins it, which is why the count alone cannot say this.
         let parkedGap = reader.deliveryGapSecondsForTesting
         #expect(parkedGap < 3,
-                "a stretch with no read outstanding accumulated \(parkedGap)s of delivery gap, and the read that follows it is judged on that")
+                "a stretch with no read outstanding accumulated \(parkedGap)s of delivery gap, and the read that follows it is judged on that; \(ends)")
 
         let more = 8 * 1024 * 1024
         #expect(drain(reader, bytes: more) >= more, "the reader did not deliver after the parked stretch")
