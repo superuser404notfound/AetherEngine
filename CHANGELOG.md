@@ -17,6 +17,11 @@ the public-API contract.
 
 ### Changed
 
+- **A remote-burst press that a newer press supersedes stops settling at once.** During a burst of seek presses
+  on a slow source, each press after the first waited out the whole settle (0.7 s) before it noticed a newer
+  target had replaced it, which held that request's loader thread for the full settle. It now returns as soon
+  as the next press declares its target. Which press restarts the producer is unchanged: the first, then
+  only the last.
 - **The 4:4:4 FEL output composes each chroma site once per 16 x 16 block.** With `AETHER_FEL_CHROMA=444` the
   A12 composed about 12.8 frames per second and video fell 30 s or more behind the clock; it now holds 24
   frames per second. The output is byte-identical. It applies only with the `DualLayerDolbyVision` trait. A

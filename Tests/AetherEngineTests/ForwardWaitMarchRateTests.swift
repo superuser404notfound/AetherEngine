@@ -65,10 +65,10 @@ struct ForwardWaitMarchRateTests {
     /// Feeds `indices` to the march tracker as completions `slowSegmentSeconds` apart, the last one
     /// `endingAgo` seconds before now.
     private func recordSlowMarch(_ provider: VideoSegmentProvider, _ indices: ClosedRange<Int>,
-                                 endingAgo: Double = 0) {
+                                 endingAgo: Double = 0, segmentSeconds: Double = slowSegmentSeconds) {
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9 - endingAgo
         for (k, i) in indices.enumerated() {
-            let age = Double(indices.count - 1 - k) * Self.slowSegmentSeconds
+            let age = Double(indices.count - 1 - k) * segmentSeconds
             provider.recordMarchStore(index: i, bytes: 34_500_000, time: now - age)
         }
     }
@@ -274,20 +274,22 @@ struct ForwardWaitMarchRateTests {
     /// requests are the device burst's (62, 65, 67, 70, 72). Each press is sent once the one before
     /// has declared its target, never on a timer: two presses that swapped under a full parallel run made
     /// the earlier index a backward jump, which restarts on its own.
+    ///
+    /// Nothing here is timed. The earlier presses settle without a deadline and end because the next
+    /// press supersedes them; only the last one is given a settle that runs out. The march is slow
+    /// enough that the time the run takes never brings it within the restart budget. Both used to be
+    /// wall-clock windows the test had to finish inside, and a stalled runner (40.8 s, 2026-11-02)
+    /// outran them.
     @Test("a burst restarts for its first press and then only for the last target",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func burstRestartsOnlyForTheLastTarget() async throws {
         let cache = makeCache()
         defer { cache.close() }
         for i in 0...60 { cache.store(index: i, data: Data(repeating: 0xAD, count: 8)) }
         let recorder = Recorder()
-        // The settle and the burst window outlast the whole burst, so every later press is still settling
-        // when the next arrives, and a press delayed by a loaded runner still counts as part of the burst.
-        // A 2 s settle ran out between two presses on CI (65 restarted); the presses settle in parallel,
-        // so the longer settle costs the run about one settle.
         let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
-                                    settle: 10.0, burstWindow: 60.0)
-        recordSlowMarch(provider, 53...60)
+                                    settle: 3600, burstWindow: 3600)
+        recordSlowMarch(provider, 53...60, segmentSeconds: 600)
         _ = provider.mediaSegment(at: 60)
 
         let finished = Recorder()
@@ -301,10 +303,15 @@ struct ForwardWaitMarchRateTests {
         }
         press(62)
         try await waitFor { finished.all.contains(62) }  // the lone first press has restarted
-        for index in [65, 67, 70, 72] {
+        for index in [65, 67, 70] {
             press(index)
             try await waitFor { cache.targetIndex == index }
         }
+        try await waitFor { finished.all.contains(65) && finished.all.contains(67) }
+        #expect(recorder.all == [62], "a superseded press restarted")
+
+        provider.setMarchRateSettleSecondsForTesting(0.2)
+        press(72)
         try await waitFor { finished.all.count == 5 }
 
         #expect(recorder.all == [62, 72])
