@@ -2013,6 +2013,7 @@ final class NativeAVPlayerHost {
                     : "did not land within \(Int(AetherEngine.prematureEndRecoverySeekDeadlineSeconds))s; "
                       + "accepting the end"),
                 category: .engine)
+            if outcome == .acceptEnd { currentTime = playhead }
             return outcome == .yield
         }
         avPlayer.play()
