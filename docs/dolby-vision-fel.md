@@ -246,14 +246,16 @@ memory should be re-measured on a release build. Footprint went from a flat ~390
 ### 4.7 Chroma options and in-place compose on the A12
 
 Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control. The build kind is
-given per row. The memory figures below come from a tree that also carries an unrelated memory change, so
-read the difference between arms, not the absolute peaks.
+given per row. The 4:2:2 and in-place memory figures below come from a tree that also carries an unrelated memory change,
+so read the difference between arms, not the absolute peaks.
 
 | | Before | After |
 |---|---|---|
 | 4:4:4 compose rate, 65 s clip (Debug) | about 12.8 per second, video falling 30 s or more behind the clock | about 23.9 per second, the clip's rate; 4:2:0 control 24.1 per second; video lead 0.2 to 0.3 s, 0 drops |
-| 4:4:4 compose rate (Release) | not measured | 23.9 per second, 1521 frames composed, 0 compose failures |
+| 4:4:4 compose rate, 65 s clip (Release) | not measured | 24.0 per second, 1555 frames composed, 4:2:0 control 24.0 per second and 1577 frames; video lead up to 0.25 s, 0 drops, 0 compose failures |
 
+- **4:4:4 costs memory.** On the Release runs above, peak footprint is 792 MB against 436 MB for 4:2:0 on
+  this code, without the unrelated memory change.
 - **4:2:2 costs memory.** Six 6-minute soaks with 14 seeks (Release, three per arm): 4:2:2 peaks at
   741 to 767 MB against 542 to 553 MB for 4:2:0 (about +200 MB, +120 MB at the end, the extra chroma
   planes and their pools), with equal throughput (23.4 composed per second in both) and no compose
