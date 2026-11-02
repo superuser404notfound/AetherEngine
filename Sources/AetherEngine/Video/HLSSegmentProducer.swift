@@ -2438,7 +2438,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 audioDelaySeconds: audioDelaySeconds,
                 onStorageExhausted: { [cache] in cache.noteStorageExhausted() },
                 admitStagingBytes: { [weak self, cache] path, bytes in
-                    cache.admitStagingWrite(path: path, bytes: bytes, waitForConsumer: true,
+                    cache.stagingWriteAdmission(path: path, bytes: bytes, waitForConsumer: true,
                         shouldStop: { [weak self] in self?.checkShouldStop() ?? true })
                 },
                 discardStaging: { [cache] path in cache.discardStagingReservation(path: path) },

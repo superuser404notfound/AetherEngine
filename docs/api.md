@@ -2269,6 +2269,11 @@ These are per-session limits, not a process-wide total.
 admission waits. `diskAdmissionWaiting` is separate from `producerParked`, which
 describes forward-window backpressure.
 
+A writer blocked by the hard cap waits for consumer advancement and observes
+cancellation and cache closure. Impossible admissions and reserve denials surface
+as `PlaybackErrorKind.storageExhausted`; cancellation does not latch a storage
+failure. Other processes can consume free space after a capacity measurement.
+
 ## Optional components
 
 Five parts of the engine are compiled only with their package trait, all off by default ([Installation › Optional components](installation.md#optional-components)). The options that ask for them stay in the API and do nothing without the trait. So a host compiles the same either way, and asks at run time whether a setting would do anything:

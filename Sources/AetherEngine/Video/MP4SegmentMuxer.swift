@@ -287,10 +287,7 @@ final class MP4SegmentMuxer {
 
     /// The span since the last call, nil when the segment carried no audio packet. Consumes it.
     func takeSegmentSoundSpan() -> (first: Int64, last: Int64)? {
-        defer {
-            segmentSoundFirstPts = Int64.min
-            segmentSoundLastPts = Int64.min
-        }
+        defer { segmentSoundFirstPts = Int64.min; segmentSoundLastPts = Int64.min }
         guard segmentSoundFirstPts != Int64.min else { return nil }
         return (segmentSoundFirstPts, segmentSoundLastPts)
     }
@@ -321,7 +318,7 @@ final class MP4SegmentMuxer {
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioDelaySeconds: Double = 0,
         onStorageExhausted: (@Sendable () -> Void)? = nil,
-        admitStagingBytes: (@Sendable (URL, Int) -> Bool)? = nil,
+        admitStagingBytes: (@Sendable (URL, Int) -> SegmentWriteAdmission)? = nil,
         discardStaging: (@Sendable (URL) -> Void)? = nil,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
@@ -400,9 +397,13 @@ final class MP4SegmentMuxer {
             },
             onFragmentBytes: { ptr, count in
                 guard !counter.writeFailed, counter.fd >= 0 else { return }
-                if let path = counter.currentPath, let admit = counter.admitStagingBytes, !admit(path, count) {
-                    counter.writeFailed = true
-                    return
+                if let path = counter.currentPath, let admit = counter.admitStagingBytes {
+                    let admission = admit(path, count)
+                    guard admission == .admitted else {
+                        if admission == .storageExhausted { counter.onStorageExhausted?() }
+                        counter.writeFailed = true
+                        return
+                    }
                 }
                 var written = 0
                 while written < count {
@@ -1035,12 +1036,8 @@ final class MP4SegmentMuxer {
         // cannot write moov either, so it would only emit two more -22s and a truncated file; there is nothing
         // to salvage (no moov means no playable segment).
         guard let ctx = formatContext, headerWritten,
-            !(audioNeedsParsedPacketForMoov && !audioPacketWritten && !moovFlushed)
-        else {
-            if fd >= 0 {
-                close(fd)
-                fd = -1
-            }
+              !(audioNeedsParsedPacketForMoov && !audioPacketWritten && !moovFlushed) else {
+            if fd >= 0 { close(fd); fd = -1 }
             try? FileManager.default.removeItem(at: currentStagingPath)
             return nil
         }
@@ -1082,10 +1079,7 @@ final class MP4SegmentMuxer {
             guard let p = ptr else { return [] }
             var arr = [CChar]()
             var i = 0
-            while p[i] != 0 {
-                arr.append(p[i])
-                i += 1
-            }
+            while p[i] != 0 { arr.append(p[i]); i += 1 }
             arr.append(0)
             return arr
         }
@@ -1348,7 +1342,7 @@ final class MP4SegmentMuxer {
 private final class ByteCounter {
     var currentPath: URL?
     var ownedPaths: Set<URL> = []
-    var admitStagingBytes: (@Sendable (URL, Int) -> Bool)?
+    var admitStagingBytes: (@Sendable (URL, Int) -> SegmentWriteAdmission)?
     var discardStaging: (@Sendable (URL) -> Void)?
     var fd: Int32 = -1
     var bytesWrittenCurrentSegment: Int = 0
