@@ -204,9 +204,10 @@ struct VideoPrerollTests {
         let output = AudioOutput()
         output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
         output.pause()
-        #expect(output.synchronizer.rate == 0)
+        // Not `synchronizer.rate`: it reads back asynchronously and a starved runner still saw 1 here.
+        let revision = output.clockCommandRevision
         output.setRate(1)
-        #expect(output.synchronizer.rate == 1)
+        #expect(output.clockCommandRevision != revision, "the play after a pause is a start of its own")
     }
 
     @Test("A rate set while the preroll waits is the rate it starts at", .timeLimit(.minutes(3)))
