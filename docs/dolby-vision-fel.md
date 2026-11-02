@@ -243,6 +243,30 @@ memory watermark sampling on every emitted frame. They show the direction and th
 memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of
 ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
 
+### 4.7 Chroma options and in-place compose on the A12
+
+Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control. The build kind is
+given per row. The memory figures below come from a tree that also carries an unrelated memory change, so
+read the difference between arms, not the absolute peaks.
+
+| | Before | After |
+|---|---|---|
+| 4:4:4 compose rate, 65 s clip (Debug) | about 12.8 per second, video falling 30 s or more behind the clock | about 23.9 per second, the clip's rate; 4:2:0 control 24.1 per second; video lead 0.2 to 0.3 s, 0 drops |
+| 4:4:4 compose rate (Release) | not measured | 23.9 per second, 1521 frames composed, 0 compose failures |
+
+- **4:2:2 costs memory.** Six 6-minute soaks with 14 seeks (Release, three per arm): 4:2:2 peaks at
+  741 to 767 MB against 542 to 553 MB for 4:2:0 (about +200 MB, +120 MB at the end, the extra chroma
+  planes and their pools), with equal throughput (23.4 composed per second in both) and no compose
+  failure. Seek-landing drops were 8, 8 and 10 against 0, 3 and 7, so slightly more.
+- **In-place compose.** Three 1 to 1.5 minute runs per arm (Release): median drops 0 in both, peak
+  footprint 351 MB in place against 477 MB through the pool, no compose failure.
+- **Vertical siting.** Both 4:2:2 and 4:4:4 place chroma site r on luma row 2r, which is co-sited with the
+  base layer's top-left siting. The chroma-location label copied from the base layer (`Left`) puts the
+  sample half a luma row lower, between rows 2r and 2r+1. Measured on 4:2:2 against a vertically centred
+  reconstruction of the same data, the difference is small on smooth content and visible only in
+  structures one chroma row high (fine gratings, zone plates); against co-sited siting it is 0.01 ΔE.
+  Half a luma row is tiny at 4K.
+
 ---
 
 ## 5. Design
@@ -441,11 +465,16 @@ the decoder's lock, and each call is O(K):
 - **Chroma sampling (experimental switch).** The composition is defined on the 4:2:0 sites, where the base
   layer's chroma sits, and 4:2:0 is the output unless `AETHER_FEL_CHROMA` says otherwise. `422` and `444`
   step that result up by co-sited means: a copy on a site, and the mean of the sites either side between
-  them (the four around a sample in 4:4:4). Each step-up site is composed again from its neighbours, so
-  4:2:2 does about four times the chroma work of 4:2:0 and 4:4:4 about sixteen times; a pass that composes
-  the 4:2:0 sites once into a scratch texture would remove that. Both take the pool path, since in-place
-  composition is 4:2:0 only. 4:4:4 is experimental: the spec has no 4:4:4 reconstruction. Neither format is
-  checked on a TV yet.
+  them (the four around a sample in 4:4:4). 4:2:2 composes each step-up site again from its neighbours,
+  so it does about four times the chroma work of 4:2:0; a pass that composes the 4:2:0 sites once into a
+  scratch texture would remove that, and it has not been done. 4:4:4 does not recompute: its kernel works
+  on 16 x 16 blocks of output samples, composes the 9 x 9 sites a block needs once into threadgroup
+  memory, and every sample then takes the mean of its one to four stored sites with the same rounding,
+  clamping and dither as before, so the output is byte-identical to the per-sample version. That is 81
+  site evaluations per 256 samples instead of 1024 (0.32 per sample against 4, and 0.25 for 4:2:0). The
+  Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms, and the A12 numbers are in §4.7. Both
+  take the pool path, since in-place composition is 4:2:0 only. 4:4:4 is experimental: the spec has no
+  4:4:4 reconstruction.
 - **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is
