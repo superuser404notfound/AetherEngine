@@ -22,6 +22,7 @@
 #   cue-axis-bframes.mkv/.mp4     - one HEVC B-pyramid stream in both containers (AE#561)
 #   long-first-gop-{aac,pcm}.mkv  - 11 s first GOP, then 2 s GOPs; passthrough and bridged audio
 #   bridge-eac3-51.mkv            - 5.1 PCM in MKV, drives the EAC3 audio bridge (AE#561 follow-up)
+#   audio-tail.mkv                - 6 s of video, 70 s of audio, interleaved by time (AE#962)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -415,6 +416,20 @@ for AUDIO in aac pcm; do
         -g 1000 -sc_threshold 0 -force_key_frames "0,11,13,15,17,19,21,23,25,27,29" \
         -c:a "$CODEC" -ac 2 -f matroska "$FIXTURES_DIR/long-first-gop-$AUDIO.mkv"
 done
+
+# AE#962: audio that outlasts the video by more than the 60 s an index may stop short of the
+# duration, so the plan is the uniform stride and the audio-only tail is cut into 4 s segments.
+# Remuxed with `-max_interleave_delta 0` so the file is interleaved strictly by time; the encoder's
+# own output parks the last GOP next to much later audio, which is a different shape.
+echo "→ audio-tail.mkv (video 0-6 s, audio 0-70 s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=size=320x180:rate=24:duration=6" \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=70" \
+    -map 0:v -map 1:a -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k \
+    -g 48 -sc_threshold 0 -c:a aac -ac 2 -f matroska "$FIXTURES_DIR/audio-tail-raw.mkv"
+ffmpeg -hide_banner -loglevel error -y -i "$FIXTURES_DIR/audio-tail-raw.mkv" -c copy \
+    -max_interleave_delta 0 "$FIXTURES_DIR/audio-tail.mkv"
+rm -f "$FIXTURES_DIR/audio-tail-raw.mkv"
 
 echo ""
 echo "Done. Try:"
