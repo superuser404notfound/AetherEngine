@@ -57,11 +57,16 @@ struct SegmentDiskAdmissionTests {
         cache.declareTarget(0)
         for i in 0...2 { #expect(cache.store(index: i, data: Data(count: 100))) }
         let path = cache.sessionDir.appendingPathComponent("staging-wait.tmp")
-        let writer = Task.detached {
-            cache.admitStagingWrite(path: path, bytes: 100, waitForConsumer: true)
+        let writer = Task {
+            await withCheckedContinuation { continuation in
+                Thread.detachNewThread {
+                    continuation.resume(returning: cache.admitStagingWrite(path: path, bytes: 100, waitForConsumer: true))
+                }
+            }
         }
-        try await waitFor { status(cache).producerParked }
-        #expect(status(cache).producerParked)
+        try await waitFor { status(cache).diskAdmissionWaiting }
+        #expect(status(cache).diskAdmissionWaiting)
+        #expect(!status(cache).producerParked)
         cache.declareTarget(1)
         #expect(await writer.value)
         #expect(status(cache).currentDiskBytes == 300)
@@ -75,11 +80,15 @@ struct SegmentDiskAdmissionTests {
         cache.declareTarget(0)
         #expect(cache.store(index: 0, data: Data(count: 100)))
         let path = cache.sessionDir.appendingPathComponent("staging-close.tmp")
-        let writer = Task.detached {
-            cache.admitStagingWrite(path: path, bytes: 1, waitForConsumer: true)
+        let writer = Task {
+            await withCheckedContinuation { continuation in
+                Thread.detachNewThread {
+                    continuation.resume(returning: cache.admitStagingWrite(path: path, bytes: 1, waitForConsumer: true))
+                }
+            }
         }
-        try await waitFor { status(cache).producerParked }
-        #expect(status(cache).producerParked)
+        try await waitFor { status(cache).diskAdmissionWaiting }
+        #expect(status(cache).diskAdmissionWaiting)
         cache.close()
         #expect(await writer.value == false)
         #expect(!FileManager.default.fileExists(atPath: cache.sessionDir.path))
@@ -109,14 +118,19 @@ struct SegmentDiskAdmissionTests {
         #expect(cache.store(index: 0, data: Data(count: 100)))
         let stop = StopFlag()
         let path = cache.sessionDir.appendingPathComponent("staging-cancel.tmp")
-        let writer = Task.detached {
-            cache.admitStagingWrite(path: path, bytes: 1, waitForConsumer: true, shouldStop: stop.value)
+        let writer = Task {
+            await withCheckedContinuation { continuation in
+                Thread.detachNewThread {
+                    continuation.resume(returning: cache.admitStagingWrite(path: path, bytes: 1, waitForConsumer: true, shouldStop: stop.value))
+                }
+            }
         }
-        try await waitFor { status(cache).producerParked }
-        #expect(status(cache).producerParked)
+        try await waitFor { status(cache).diskAdmissionWaiting }
+        #expect(status(cache).diskAdmissionWaiting)
         stop.stop()
         cache.wakeWaiters()
         #expect(await writer.value == false)
+        #expect(!cache.storageExhausted)
         #expect(cache.peek(index: 0)?.count == 100)
         #expect(status(cache).stagingBytes == 0)
     }
@@ -181,6 +195,40 @@ struct SegmentDiskAdmissionTests {
         }
         #expect(admitted == 3)
         #expect(status(cache).currentDiskBytes == 90)
+    }
+
+    @Test("A reserve works without a hard limit, including the live-session cache shape")
+    func reserveWithoutHardLimit() {
+        let cache = SegmentCache(freeDiskReserveBytes: 900, availableVolumeBytes: { _ in 1_000 })
+        defer { cache.close() }
+        let path = cache.sessionDir.appendingPathComponent("staging-reserve.tmp")
+        #expect(cache.hardDiskLimitBytes == nil)
+        #expect(cache.stagingWriteAdmission(path: path, bytes: 101) == .storageExhausted)
+        #expect(cache.stagingWriteAdmission(path: path, bytes: 100) == .admitted)
+        #expect(status(cache).stagingBytes == 100)
+        #expect(status(cache).rejectedDiskWrites == 1)
+    }
+
+    @Test("An unknown capacity fails closed only when a reserve is requested")
+    func unknownCapacityAndOptOut() {
+        let reserved = SegmentCache(freeDiskReserveBytes: 1, availableVolumeBytes: { _ in nil })
+        let legacy = SegmentCache(availableVolumeBytes: { _ in nil })
+        defer { reserved.close(); legacy.close() }
+        #expect(reserved.stagingWriteAdmission(path: reserved.sessionDir.appendingPathComponent("x"), bytes: 1) == .storageExhausted)
+        #expect(legacy.stagingWriteAdmission(path: legacy.sessionDir.appendingPathComponent("x"), bytes: 1) == .admitted)
+        #expect(!status(reserved).diskAdmissionWaiting && !status(reserved).producerParked)
+    }
+
+    @Test("Cancellation is not a capacity failure, and oversized arithmetic cannot overflow")
+    func cancelledAndOversizedAdmission() {
+        let cache = SegmentCache(freeDiskReserveBytes: Int.max, availableVolumeBytes: { _ in Int64.max })
+        defer { cache.close() }
+        let path = cache.sessionDir.appendingPathComponent("x")
+        #expect(cache.stagingWriteAdmission(path: path, bytes: 1, shouldStop: { true }) == .cancelled)
+        #expect(!cache.storageExhausted)
+        #expect(status(cache).rejectedDiskWrites == 0)
+        #expect(cache.stagingWriteAdmission(path: path, bytes: 1) == .storageExhausted)
+        #expect(status(cache).stagingBytes == 0)
     }
 
 }

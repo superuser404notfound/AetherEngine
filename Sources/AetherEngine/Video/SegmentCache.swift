@@ -1,6 +1,14 @@
 import Darwin
 import Foundation
 
+/// A cancelled producer must not be reported as a full volume.
+enum SegmentWriteAdmission: Sendable, Equatable {
+    case admitted
+    case cancelled
+    case storageExhausted
+    case invalidRequest
+}
+
 /// Sliding-window disk-backed cache for HLS-fMP4 segments. Bytes go to
 /// <NSTemporaryDirectory>/aether-segments/<uuid>/seg-N-G.m4s; only URLs stay in RAM.
 /// Reads use .alwaysMapped (kernel pages in/out under memory pressure). Window:
@@ -38,6 +46,7 @@ final class SegmentCache: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
+    private let availableVolumeBytes: @Sendable (URL) -> Int64?
     private let onResidentSetChanged: (@Sendable () -> Void)?
 
     private let forwardWindow: Int
@@ -183,6 +192,7 @@ final class SegmentCache: @unchecked Sendable {
         retentionBudgetBytes: Int = 0,
         hardDiskLimitBytes: Int? = nil,
         freeDiskReserveBytes: Int = 0,
+        availableVolumeBytes: @escaping @Sendable (URL) -> Int64? = SegmentCache.availableVolumeBytes,
         baseDirectory: URL? = nil,
         sessionID: String = UUID().uuidString,
         now: Date = Date(),
@@ -194,6 +204,7 @@ final class SegmentCache: @unchecked Sendable {
         self.retentionBudgetBytes = retentionBudgetBytes
         self.hardDiskLimitBytes = hardDiskLimitBytes.map { max(1, $0) }
         self.freeDiskReserveBytes = max(0, freeDiskReserveBytes)
+        self.availableVolumeBytes = availableVolumeBytes
         self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.onResidentSetChanged = onResidentSetChanged
 
@@ -565,63 +576,87 @@ final class SegmentCache: @unchecked Sendable {
     /// History and old seek tails are expendable; the active fetch sequence is not.
     func admitStagingWrite(path: URL, bytes: Int, waitForConsumer: Bool = false,
                            shouldStop: () -> Bool = { false }) -> Bool {
-        guard let limit = hardDiskLimitBytes else { return true }
+        let result = stagingWriteAdmission(path: path, bytes: bytes,
+                                          waitForConsumer: waitForConsumer, shouldStop: shouldStop)
+        if result == .storageExhausted { noteStorageExhausted() }
+        return result == .admitted
+    }
+
+    /// Uses the same volume capacity as the native and software playback paths.
+    static func availableVolumeBytes(at url: URL) -> Int64? {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+            .volumeAvailableCapacity.map(Int64.init)
+    }
+
+    func stagingWriteAdmission(path: URL, bytes: Int, waitForConsumer: Bool = false,
+                               shouldStop: () -> Bool = { false }) -> SegmentWriteAdmission {
+        guard !shouldStop() else { return .cancelled }
+        guard hardDiskLimitBytes != nil || freeDiskReserveBytes > 0 else { return .admitted }
         guard bytes >= 0, path.deletingLastPathComponent().standardizedFileURL == sessionDir.standardizedFileURL
-        else { return false }
+        else { return .invalidRequest }
+        let limit = hardDiskLimitBytes ?? Int.max
         while !shouldStop() {
             condition.lock()
-            guard !closed else { condition.unlock(); return false }
+            guard !closed else { condition.unlock(); return .cancelled }
             let staged = stagingReservations.values.reduce(0, +)
             let own = stagingReservations[path] ?? 0
             guard bytes <= limit, own <= limit - bytes else {
                 hardDiskRejectedWrites += 1
                 condition.unlock()
-                return false // A single segment larger than the total cap cannot be admitted.
+                return .storageExhausted // A segment larger than the cap can never make progress.
             }
-            let need = max(0, _totalBytes + staged + bytes - limit)
+            let need = max(0, _totalBytes + staged - (limit - bytes))
             let doomed = evictHardDiskHistoryLocked(bytesNeeded: need)
             let hasRoom = _totalBytes + staged <= limit - bytes
             condition.unlock()
             for url in doomed { try? FileManager.default.removeItem(at: url) }
             if !doomed.isEmpty { onResidentSetChanged?() }
             if hasRoom {
-                // Real free space includes other caches, files still open by HTTP readers and
-                // other apps. Keep an independent reserve, rather than trusting our byte ledger.
-                let free = (try? FileManager.default.attributesOfFileSystem(forPath: sessionDir.path)[.systemFreeSize]) as? NSNumber
-                if freeDiskReserveBytes > 0 && free == nil {
-                    condition.lock(); hardDiskRejectedWrites += 1; condition.unlock()
-                    return false // An unknown volume capacity must not disable the requested reserve.
-                }
-                if let free, free.int64Value < Int64(freeDiskReserveBytes) + Int64(bytes) {
-                    let deficit = Int64(freeDiskReserveBytes) + Int64(bytes) - free.int64Value
-                    condition.lock()
-                    let more = evictHardDiskHistoryLocked(bytesNeeded: Int(min(Int64(Int.max), deficit)))
-                    if more.isEmpty { hardDiskRejectedWrites += 1 }
-                    condition.unlock()
-                    for url in more { try? FileManager.default.removeItem(at: url) }
-                    if more.isEmpty { return false }
-                    onResidentSetChanged?()
-                    continue // Measure actual volume again; an open reader may still own an unlinked file.
+                if freeDiskReserveBytes > 0 {
+                    // An unknown capacity does not silently disable an explicitly requested reserve.
+                    guard let free = availableVolumeBytes(sessionDir), free >= 0 else {
+                        return rejectedForStorage(shouldStop: shouldStop)
+                    }
+                    let (required, overflow) = Int64(freeDiskReserveBytes).addingReportingOverflow(Int64(bytes))
+                    guard !overflow else { return rejectedForStorage(shouldStop: shouldStop) }
+                    if free < required {
+                        condition.lock()
+                        let more = evictHardDiskHistoryLocked(bytesNeeded: Int(required - free))
+                        condition.unlock()
+                        for url in more { try? FileManager.default.removeItem(at: url) }
+                        if more.isEmpty { return rejectedForStorage(shouldStop: shouldStop) }
+                        onResidentSetChanged?()
+                        continue // An open reader may still own an unlinked file: measure again.
+                    }
                 }
                 condition.lock()
                 let stillFits = !closed && _totalBytes + stagingReservations.values.reduce(0, +) <= limit - bytes
                 if stillFits {
                     stagingReservations[path, default: 0] += bytes
                     condition.unlock()
-                    return true
+                    return .admitted
                 }
                 condition.unlock()
             }
-            guard waitForConsumer else { return false }
+            guard waitForConsumer else { return rejectedForStorage(shouldStop: shouldStop) }
             condition.lock()
-            guard !closed else { condition.unlock(); return false }
+            guard !closed else { condition.unlock(); return .cancelled }
             hardDiskWaiters += 1
+            _parkedSinceStore = true
             _ = condition.wait(until: Date().addingTimeInterval(0.1))
             hardDiskWaiters -= 1
             condition.unlock()
-            // Cancellation is checked outside the cache lock, including while playback is paused.
         }
-        return false
+        return .cancelled
+    }
+
+    private func rejectedForStorage(shouldStop: () -> Bool) -> SegmentWriteAdmission {
+        guard !shouldStop() else { return .cancelled }
+        condition.lock()
+        guard !closed else { condition.unlock(); return .cancelled }
+        hardDiskRejectedWrites += 1
+        condition.unlock()
+        return .storageExhausted
     }
 
     func discardStagingReservation(path: URL) {
@@ -915,7 +950,7 @@ final class SegmentCache: @unchecked Sendable {
     var producerParked: Bool {
         condition.lock()
         defer { condition.unlock() }
-        return _producerParked || hardDiskWaiters > 0
+        return _producerParked
     }
 
     var lastCleanupReason: SessionCacheCleanupReason? {
@@ -958,7 +993,7 @@ final class SegmentCache: @unchecked Sendable {
             currentForwardBytes: currentForwardBytes(),
             forwardWindowSegments: forwardWindow,
             backwardWindowSegments: backwardWindow,
-            producerParked: _producerParked || hardDiskWaiters > 0,
+            producerParked: _producerParked,
             evictionCount: _evictionCount,
             hardWindowFloorExceeded: hardFloor > baseEffectiveBudgetBytes,
             cleanupReason: _lastCleanupReason,
@@ -967,7 +1002,8 @@ final class SegmentCache: @unchecked Sendable {
             hardLimitBytes: hardDiskLimitBytes,
             stagingBytes: stagingReservations.values.reduce(0, +),
             freeDiskReserveBytes: freeDiskReserveBytes,
-            rejectedDiskWrites: hardDiskRejectedWrites
+            rejectedDiskWrites: hardDiskRejectedWrites,
+            diskAdmissionWaiting: hardDiskWaiters > 0
         )
     }
 

@@ -61,7 +61,10 @@ public struct SessionCacheStatus: Sendable, Equatable {
     public let currentForwardBytes: Int
     public let forwardWindowSegments: Int
     public let backwardWindowSegments: Int
+    /// The producer is waiting for the forward fetch window (not for disk admission).
     public let producerParked: Bool
+    /// A staging writer is waiting for consumer advancement to make disk space admissible.
+    public let diskAdmissionWaiting: Bool
     public let evictionCount: Int
     public let hardWindowFloorExceeded: Bool
     public let cleanupReason: SessionCacheCleanupReason?
@@ -89,7 +92,8 @@ public struct SessionCacheStatus: Sendable, Equatable {
         hardLimitBytes: Int? = nil,
         stagingBytes: Int = 0,
         freeDiskReserveBytes: Int = 0,
-        rejectedDiskWrites: Int = 0
+        rejectedDiskWrites: Int = 0,
+        diskAdmissionWaiting: Bool = false
     ) {
         self.hardLimitBytes = hardLimitBytes
         self.stagingBytes = stagingBytes
@@ -107,6 +111,7 @@ public struct SessionCacheStatus: Sendable, Equatable {
         self.forwardWindowSegments = forwardWindowSegments
         self.backwardWindowSegments = backwardWindowSegments
         self.producerParked = producerParked
+        self.diskAdmissionWaiting = diskAdmissionWaiting
         self.evictionCount = evictionCount
         self.hardWindowFloorExceeded = hardWindowFloorExceeded
         self.cleanupReason = cleanupReason

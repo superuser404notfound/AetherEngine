@@ -1592,10 +1592,16 @@ Direct `HLSVideoEngine` users may call `sessionCacheStatus()` off the main threa
 
 ### Whole-session segment storage admission
 
-LoadOptions.sessionCacheHardLimitBytes optionally bounds resident plus staging bytes
-for a loopback segment session. LoadOptions.sessionCacheFreeReserveBytes reserves
-free volume space independently. Both default to legacy behavior (nil/zero).
-Forward-window backpressure waits observe producer cancellation and cache closure;
-SessionCacheStatus.currentDiskBytes, stagingBytes, hardLimitBytes, freeDiskReserveBytes
-and rejectedDiskWrites expose admission and reservation diagnostics.
-These segment limits do not bound the process memory or unrelated app caches.
+`LoadOptions.sessionCacheHardLimitBytes` optionally bounds resident plus staging bytes for each
+loopback segment session. It is a per-session limit: N concurrent engines may use N times that
+limit; this is not a process-wide disk quota. `LoadOptions.sessionCacheFreeReserveBytes` independently
+keeps headroom on the volume, including live sessions where the hard limit is disabled. Both default
+to legacy behavior (nil/zero). Capacity is measured with `volumeAvailableCapacityKey`, consistently
+with the other engine paths; other processes can change it after a measurement.
+
+A writer blocked by the hard limit waits for consumer advancement and observes cancellation/cache
+closure. An impossible admission or a reserve denial reports `PlaybackErrorKind.storageExhausted`
+instead of exhausting muxer revives as a source/audio failure. Cancellation does not latch a storage
+error. `SessionCacheStatus.diskAdmissionWaiting` describes that disk wait; `producerParked` retains
+its existing forward-window meaning. `currentDiskBytes`, `stagingBytes`, `hardLimitBytes`,
+`freeDiskReserveBytes` and `rejectedDiskWrites` expose the admission/reservation diagnostics.
