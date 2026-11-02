@@ -50,11 +50,17 @@ struct Issue281ColdStartRoundTripTests {
 
     /// The half that removes a whole round trip on the reporter's source: the trailing object is
     /// read without the reader ever connecting to it.
+    ///
+    /// Budgets pinned for the reason given on the in-flight test below: against loopback the derived
+    /// wait is its 250 ms floor, and a starved run spent it before the landed body reached its
+    /// delegate (2026-11-02, the read reconnected at `tailStart + 1024`).
     @Test("a read inside the prefetched tail costs no additional request")
     func tailReadIsServedFromThePrefetch() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: fileSize))
         defer { server.stop() }
-        let reader = makeReader(server)
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                detourFetchBudget: 90)
+        reader.tailPrefetchWaitBudgetForTesting = 90
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         _ = read(reader, 64 * 1024)   // head, as a demuxer walking the box chain would
