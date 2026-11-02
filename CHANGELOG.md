@@ -39,6 +39,20 @@ the public-API contract.
 
 ### Fixed
 
+- **Native end recovery preserves the clock observed before a slow AVFoundation read (AE#962).** A fresh
+  end-of-playback peak no longer expires while the reading is suspended, avoiding replay of an
+  already-completed audio tail. A reading superseded by a new session or seek is ignored.
+
+- **Software Live audio keeps advancing when video backpressures (AE#934).** Sessions without a
+  DVR feeder read ahead on the existing source connection and park compressed video within a
+  memory-only byte budget independent of disk-cache settings. Large packets remain playable;
+  ready video can drain while source I/O waits, and an empty video queue waits for source data
+  without polling. The Live clock, keyframe admission and DVR routing remain unchanged.
+
+- **Software playback keeps audio moving when entering background with a full video queue.**
+  Both Live and VOD retire parked video before applying the background read gate, so an
+  off-screen renderer cannot prevent the demux loop from reaching subsequent audio.
+
 - **An origin that answers byte ranges with other bytes is caught instead of played (AE#958).** IPTV timeshift
   archives answer every `Range: bytes=X-` with a `206` whose `Content-Range` names X while the body starts on the
   origin's own chunk boundary. Undeclared, that played as audio that looped and drifted out of sync on the native

@@ -4,8 +4,9 @@ import AetherLibavcodec
 import AetherLibavutil
 
 /// Demux-thread-only admission before software clock folding, recording, and DVR storage.
-/// Owns quarantined packets; the caller owns each returned packet.
-final class LiveReplayPacketReader {
+/// Owns quarantined packets; the caller owns each returned packet. A single source worker owns
+/// every operation; unchecked Sendable permits transferring that ownership to its read closure.
+final class LiveReplayPacketReader: @unchecked Sendable {
     enum Failure: LocalizedError {
         case interruptedReplay
         var errorDescription: String? { "Live source ended or diverged during verified replay." }

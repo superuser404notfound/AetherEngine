@@ -81,6 +81,12 @@ When a restart does run, it must reproduce segments on the SAME media timeline t
 
 The video track's output time base is normally the source's, which movenc scales up to at least 10000 (Matroska's 1/1000 becomes 1/16000). That keeps whatever quantization the container has, and on a constant-rate track it is not harmless: 23.976 fps on 1 ms ticks reaches AVPlayer as 41 and 42 ms steps, and at a 59.94 Hz output every second frame sits exactly on a refresh boundary, where half a millisecond of rounding decides which vsync shows it (AE#886). `CFRFrameGrid` therefore gives a VOD track whose source tick is 0.1 ms or coarser, and whose rate probes as exactly a standard rate that the tick cannot hold, a time base with one frame in whole ticks (1/24000 and 1001 ticks for 23.976, 1/24000 and 1000 for 24), anchored at the stream's start time. `HLSSegmentProducer` puts each packet whose source-axis PTS lies within one source tick of a slot onto that slot (DTS onto its own slot, never past the PTS), and rescales everything else as before. The grid is derived from stream fields only, never from observed packets, so every producer of a session writes the same `init.mp4` timescale and a restarted segment still matches its continuous twin.
 
+Native end-of-item recovery captures the published clock peak and its freshness before awaiting
+AVFoundation's off-main reading. The delay of that reading cannot invalidate an end witness and
+cause an already-completed audio tail to replay. Before applying the result, the host checks both
+the session and seek generation; an intervening replacement or seek owns the transport and the
+old end notification is suppressed.
+
 ### Software decoder pipeline (AV1 + VP9 + VP8 + legacy fallback)
 
 Demux the source, run video packets through libavcodec (dav1d for AV1, VideoToolbox with a libavcodec fallback for VP9, FFmpeg's native decoder for VP8 / MPEG-4 Part 2 / MPEG-2 / VC-1) into `CVPixelBuffer`s, run audio through libavcodec into `CMSampleBuffer`s, render via `AVSampleBufferDisplayLayer` + `AVSampleBufferAudioRenderer` with `AVSampleBufferRenderSynchronizer` as the master clock. Used for codecs AVPlayer's HLS-fMP4 pipeline doesn't accept: AV1 (no Apple TV currently ships an AV1 hardware decoder, and Apple bundles dav1d only on iOS / macOS, so AV1 always routes here today; the engine still registers the supplemental VideoToolbox AV1 decoder and gates on `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`), so a future Apple TV chip with HW AV1 is picked up automatically), VP9 / VP8 (AVPlayer parses the HLS manifest, sees `vp09` / `vp08` in the CODECS attribute, then silently stops fetching. `item.status` never leaves `.unknown`. VideoToolbox HW-decodes VP9 fine, but only outside the HLS pipeline), and legacy MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, and VC-1 (none of `mp4v.20.X` / `mp2v` / `vc-1` are in Apple's HLS Authoring Spec CODECS list). Interlaced H.264 also routes here (`VideoRoutingPolicy`, keyed on the declared field order), because AVPlayer does not deinterlace and 1080i / 576i broadcast would comb; the SW path runs it through `DeinterlaceFilter` (#107). On seekable VOD that declaration is verified against decoded frames first (`InterlaceProbe`, #232): the filter engages on `AV_FRAME_FLAG_INTERLACED` alone, so a sample in which that flag never appears proves the detour would be a no-op and the stream goes back to the native path.
@@ -263,6 +269,29 @@ resident buffer and an attached foreground surface; it does not reset source his
 DVR viewer to the live edge. In-place item replacement preserves the repair budget, which only
 rearms after sustained healthy presentation. Encoded long-GOP H.264/AAC replay tests decode both
 admitted software packets and remuxed fragments and compare every picture with the original.
+
+## Software Live without DVR
+
+Ordinary Live software playback with audio uses `DirectLiveAudioReadAhead` on the existing
+Demuxer connection. Its forward-only memory FIFO lets audio advance past a full video renderer,
+while bounded compressed video parking and short consumer waits keep already-read video runnable
+when source I/O waits. Those timed waits apply only while video is parked; otherwise the consumer
+sleeps until source data, EOF, a failure or cancellation wakes it. Video decoding yields between packets so it cannot drain a whole parked
+batch before available audio gets a turn. The Live clock never adopts VOD pause/rebuffer behavior,
+and the audio lead target is a ceiling, not a startup prefill requirement.
+
+The forward store and parked-video queue use fixed in-memory pacing budgets, independent of
+`sessionCacheByteBudget`, free disk space and disk-retention claims. These are queue thresholds,
+not total allocation ceilings: one indivisible packet may exceed a threshold. The forward producer
+then waits for consumption; parked video drains before an oversized packet is admitted alone.
+Packet cost includes referenced buffer capacity and side data. Consumed records create no seek
+history or public DVR window. If read-ahead setup is unavailable, playback retains the direct loop.
+Replay filtering precedes recording and decode, using its existing admission and quarantine limits. Per-packet generation checks, first-keyframe audio
+admission and the unarmed-video clock fallback still apply. Sessions with a DVR or cushion feeder
+keep their separate route. Standard `[SWDiag]` audio-lead and parked-depth reporting includes this
+path (AE#934). For both Live and VOD, entering background audio-only mode retires parked video
+before evaluating the read gate, including a queue that was already full, and uses audio-renderer
+backpressure.
 
 ## Software VOD compressed packet cache
 
