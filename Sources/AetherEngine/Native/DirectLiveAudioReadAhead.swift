@@ -8,25 +8,21 @@ import AetherLibavutil
 final class DirectLiveAudioReadAhead: @unchecked Sendable {
     /// Compressed source packets, admitted through replay filtering before reaching the consumer.
     let packets: SoftwarePacketReadAhead
-    /// Maximum retained compressed video cost, including packet envelopes and side data.
-    let parkedByteLimit: Int
-    /// Maximum admitted packet cost; bounds source-read overshoot and transient copies.
-    let packetByteLimit: Int
-    /// Shared allowance retained by this consumer owner and independently by the producer.
-    private let claim: RetentionClaims.Claim
+    /// Pauses further source consumption after parked video reaches this in-memory cost.
+    /// One valid packet may cross the bound; packet envelopes and side data count toward it.
+    let parkedByteLimit = 4 << 20
 
     // Failure modes:
-    // - No usable tracks or allowance: fail before starting a worker.
-    // - Oversized packet or replay quarantine: fail explicitly, never discard valid media to fit.
-    // - Stop during source I/O: keep the reservation until producer and consumer both retire.
-    /// Reserves a bounded compressed reservoir off-main before starting any source reads.
-    /// The reservation includes memory-store packing slack, parked video, replay and packet copies.
+    // - No usable audio/video tracks: fail before starting a worker.
+    // - A packet crosses the pacing bound: deliver it, then pause until consumption resumes.
+    // - Stop during source I/O: the worker retains its source until the read unwinds.
+    /// Creates independent in-memory forward and parked-video pacing bounds.
+    /// Large packets may cross a bound once; disk capacity and DVR allowances do not apply.
+    /// - Throws: `Failure.unavailable` when either selected stream is unavailable.
     init(
         demuxer: Demuxer,
         videoIndex: Int32,
-        audioIndex: Int32,
-        requestedBytes: Int?,
-        retentionClaims: RetentionClaims = .shared
+        audioIndex: Int32
     ) throws {
         guard
             let vb = demuxer.withStream(at: videoIndex, { $0.pointee.time_base }),
@@ -34,55 +30,24 @@ final class DirectLiveAudioReadAhead: @unchecked Sendable {
         else {
             throw Failure.unavailable
         }
-        let available = (try? FileManager.default.temporaryDirectory.resourceValues(
-            forKeys: [.volumeAvailableCapacityKey]
-        ))?.volumeAvailableCapacity.map(Int64.init)
-        let claim = retentionClaims.claim(volumeAvailableBytes: available) {
-            min(64 << 20, SoftwarePlaybackHost.packetCacheBudgetBytes(
-                requestedBytes: requestedBytes, availableBytes: $0, capRelaxed: false
-            ))
-        }
-        // Each partition must cover at least sixteen VM pages. The whole reservation stays
-        // unwritten in the ledger: memory allocation does not reduce free volume capacity.
-        let unit = claim.bytes / 16
-        guard unit >= 16 * Int(getpagesize()) else {
-            claim.release()
-            throw Failure.unavailable
-        }
-        self.claim = claim
-        parkedByteLimit = unit
-        packetByteLimit = unit
         let admission = LiveReplayPacketReader(
             videoIndex: videoIndex, audioIndex: audioIndex,
-            videoTimeBase: av_q2d(vb), audioTimeBase: av_q2d(ab),
-            residentLimit: 2 * unit, retainedSize: Self.packetBytes
+            videoTimeBase: av_q2d(vb), audioTimeBase: av_q2d(ab)
         )
-        // The producer gate permits one record of overshoot. Memory-store allocated capacity
-        // is conservatively covered by four units plus two chunks (partially filled sealed
-        // chunks count too). One unit parks video, two hold replay, and six cover simultaneous
-        // AVPacket/Data/envelope copies. The remainder covers chunk/page overhead. The existing
-        // replay guard separately bounds its digest-only history; it retains no media payload.
+        // The producer parks after one record crosses its 4 MiB pacing bound. Consumed
+        // packets retain no seek history; replay admission keeps its existing quarantine policy.
         let fifo = SoftwarePacketMemoryFIFO(
             chunkTargetBytes: Int(getpagesize()), historyCapBytes: 0
         )
         packets = SoftwarePacketReadAhead(
             video: .init(index: videoIndex, numerator: vb.num, denominator: vb.den),
             audio: .init(index: audioIndex, numerator: ab.num, denominator: ab.den),
-            byteBudget: unit, forwardSeconds: AudioLookaheadPolicy.targetLeadSeconds,
+            byteBudget: 4 << 20, forwardSeconds: AudioLookaheadPolicy.targetLeadSeconds,
             initialSourceClock: demuxer.resolvedSourceStartOrigin, fifo: fifo,
             forwardOnly: true
-        ) { [claim] isCurrent in
-            defer { withExtendedLifetime(claim) {} }
+        ) { isCurrent in
             guard let packet = try admission.read(isCurrent: isCurrent, from: {
-                guard let packet = try demuxer.readPacket(isCurrent: isCurrent) else { return nil }
-                do {
-                    try Self.validatePacketSize(packet, limit: unit)
-                } catch {
-                    var oversized = Optional(packet)
-                    av_packet_free(&oversized)
-                    throw error
-                }
-                return packet
+                try demuxer.readPacket(isCurrent: isCurrent)
             }) else { return nil }
             defer { av_packet_unref(packet); av_packet_free_safe(packet) }
             return try SoftwareStoredPacket(copying: packet)
@@ -104,38 +69,17 @@ final class DirectLiveAudioReadAhead: @unchecked Sendable {
         return bytes
     }
 
-    /// Rejects a packet whose referenced allocation cannot fit the source's compressed allowance.
-    /// Ownership stays with the caller on success and failure, so the source can retire it once.
-    /// - Throws: `Failure.packetTooLarge` with the required and permitted allocation sizes.
-    static func validatePacketSize(
-        _ packet: UnsafePointer<AVPacket>,
-        limit: Int
-    ) throws {
-        let bytes = packetBytes(packet)
-        if bytes > limit {
-            throw Failure.packetTooLarge(bytes: bytes, limit: limit)
-        }
-    }
-
     /// Retires the FIFO worker; host Demuxer.close interrupts any outstanding source read.
-    /// Does not release the reservation while either producer or parked-video consumer owns it.
     func close() { packets.close() }
 
-    /// Actionable resource failures for this forward-only path.
+    /// Actionable stream-selection failures for this forward-only path.
     enum Failure: Error, LocalizedError {
-        /// A usable audio/video pair and minimum bounded allowance could not be obtained.
+        /// The selected audio/video stream pair is unavailable in the open demuxer.
         case unavailable
-        /// A packet cannot fit the compressed allowance without violating its bound.
-        case packetTooLarge(bytes: Int, limit: Int)
 
-        /// Explains which resource prevented playback and how the host can recover.
+        /// Explains which source prerequisite prevented playback.
         var errorDescription: String? {
-            switch self {
-            case .unavailable:
-                return "Live audio read-ahead requires usable audio/video tracks and a cache allowance. Increase the session allowance or free storage and retry."
-            case .packetTooLarge(let bytes, let limit):
-                return "A compressed Live packet needs \(bytes) bytes, exceeding its \(limit)-byte allowance. Increase the session cache allowance and retry."
-            }
+            "Live audio read-ahead requires usable audio and video tracks. Reopen the source and retry."
         }
     }
 }

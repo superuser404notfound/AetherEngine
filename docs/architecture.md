@@ -275,19 +275,23 @@ admitted software packets and remuxed fragments and compare every picture with t
 Ordinary Live software playback with audio uses `DirectLiveAudioReadAhead` on the existing
 Demuxer connection. Its forward-only memory FIFO lets audio advance past a full video renderer,
 while bounded compressed video parking and short consumer waits keep already-read video runnable
-when source I/O waits. Video decoding yields between packets so it cannot drain a whole parked
+when source I/O waits. Those timed waits apply only while video is parked; otherwise the consumer
+sleeps until source data, EOF, a failure or cancellation wakes it. Video decoding yields between packets so it cannot drain a whole parked
 batch before available audio gets a turn. The Live clock never adopts VOD pause/rebuffer behavior,
 and the audio lead target is a ceiling, not a startup prefill requirement.
 
-The session allowance covers the source store, memory-allocation slack, parked packets, replay
-quarantine and transient envelopes. Packet cost includes referenced buffer capacity and side data;
-an oversized packet fails explicitly. Consumed records create no seek history or public DVR window.
-The allowance remains reserved until the source worker and parked-packet consumer both retire.
-Replay filtering precedes recording and decode. Per-packet generation checks, first-keyframe audio
+The forward store and parked-video queue use fixed in-memory pacing budgets, independent of
+`sessionCacheByteBudget`, free disk space and disk-retention claims. These are queue thresholds,
+not total allocation ceilings: one indivisible packet may exceed a threshold. The forward producer
+then waits for consumption; parked video drains before an oversized packet is admitted alone.
+Packet cost includes referenced buffer capacity and side data. Consumed records create no seek
+history or public DVR window. If read-ahead setup is unavailable, playback retains the direct loop.
+Replay filtering precedes recording and decode, using its existing admission and quarantine limits. Per-packet generation checks, first-keyframe audio
 admission and the unarmed-video clock fallback still apply. Sessions with a DVR or cushion feeder
 keep their separate route. Standard `[SWDiag]` audio-lead and parked-depth reporting includes this
-path (AE#934). Entering background audio-only mode retires parked video before evaluating
-the read gate, including a queue that was already full, and uses audio-renderer backpressure.
+path (AE#934). For both Live and VOD, entering background audio-only mode retires parked video
+before evaluating the read gate, including a queue that was already full, and uses audio-renderer
+backpressure.
 
 ## Software VOD compressed packet cache
 

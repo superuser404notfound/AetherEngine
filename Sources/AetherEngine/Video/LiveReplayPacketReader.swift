@@ -9,16 +9,7 @@ import AetherLibavutil
 final class LiveReplayPacketReader: @unchecked Sendable {
     enum Failure: LocalizedError {
         case interruptedReplay
-        /// Retaining this packet would exceed the caller's compressed-packet reservation.
-        case retentionExceeded
-        var errorDescription: String? {
-            switch self {
-            case .interruptedReplay:
-                return "Live source ended or diverged during verified replay."
-            case .retentionExceeded:
-                return "Live replay exceeds the session's compressed allowance. Increase the cache allowance and retry."
-            }
-        }
+        var errorDescription: String? { "Live source ended or diverged during verified replay." }
     }
     private struct Pending {
         let packet: UnsafeMutablePointer<AVPacket>
@@ -26,8 +17,6 @@ final class LiveReplayPacketReader: @unchecked Sendable {
         let seconds: Double
         let duplicate: Bool
         var untimedBoundaryVideo = false
-        /// Cost charged exactly once while this entry belongs to pending or ready storage.
-        var retainedBytes = 0
     }
     private var guardState = LivePacketReplayGuard()
     private var pending: [Pending] = []
@@ -42,25 +31,8 @@ final class LiveReplayPacketReader: @unchecked Sendable {
     private let videoTimeBase: Double
     private let audioTimeBase: Double
     private var videoProgress = VideoPacketProgress()
-    /// Optional shared-session bound; nil preserves the existing replay admission policy.
-    private let residentLimit: Int?
-    /// Sum of charged entries in pending and unread ready storage, owned by the source worker.
-    private var residentBytes = 0
-    /// Measures retained allocation and side data independently of replay payload signatures.
-    private let retainedSize: ((UnsafePointer<AVPacket>) -> Int)?
 
-    /// Creates source admission; the optional byte limit bounds quarantine, not forwarded packets.
-    /// The caller can include referenced allocation capacity and side data in `retainedSize`.
-    init(
-        videoIndex: Int32,
-        audioIndex: Int32,
-        videoTimeBase: Double,
-        audioTimeBase: Double,
-        residentLimit: Int? = nil,
-        retainedSize: ((UnsafePointer<AVPacket>) -> Int)? = nil
-    ) {
-        self.residentLimit = residentLimit.map { max(0, $0) }
-        self.retainedSize = retainedSize
+    init(videoIndex: Int32, audioIndex: Int32, videoTimeBase: Double, audioTimeBase: Double) {
         self.videoIndex = videoIndex
         self.audioIndex = audioIndex
         self.videoTimeBase = videoTimeBase
@@ -71,7 +43,6 @@ final class LiveReplayPacketReader: @unchecked Sendable {
 
     private func free(_ packets: [Pending]) {
         for entry in packets {
-            residentBytes -= entry.retainedBytes
             var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
             av_packet_free(&packet)
         }
@@ -130,7 +101,6 @@ final class LiveReplayPacketReader: @unchecked Sendable {
             if readyIndex < ready.count {
                 let entry = ready[readyIndex]
                 readyIndex += 1
-                residentBytes -= entry.retainedBytes
                 if readyIndex == ready.count { ready.removeAll(keepingCapacity: true); readyIndex = 0 }
                 admit(entry)
                 return entry.packet
@@ -177,22 +147,12 @@ final class LiveReplayPacketReader: @unchecked Sendable {
                 continue
             }
             let untimedBoundaryVideo = guardState.isHoldingDamagedBoundary && signature == nil && index == videoIndex
-            var entry = Pending(packet: packet, signature: signature, seconds: seconds,
+            let entry = Pending(packet: packet, signature: signature, seconds: seconds,
                                 duplicate: decision?.drop ?? false, untimedBoundaryVideo: untimedBoundaryVideo)
             if guardState.isDroppingReplay || decision?.holdDamagedBoundary == true || decision?.event != nil
                 || (!pending.isEmpty && (!guardState.isHoldingDamagedBoundary || untimedBoundaryVideo)) {
                 if signature == nil, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 {
                     guardState.noteDamagedPacket()
-                }
-                if let residentLimit {
-                    let heldBytes = max(0, retainedSize?(UnsafePointer(packet)) ?? Int(packet.pointee.size))
-                    if heldBytes > residentLimit - residentBytes {
-                        var excess = Optional(packet)
-                        av_packet_free(&excess)
-                        throw Failure.retentionExceeded
-                    }
-                    entry.retainedBytes = heldBytes
-                    residentBytes += heldBytes
                 }
                 pending.append(entry); pendingBytes += max(0, Int(packet.pointee.size))
                 switch decision?.event {

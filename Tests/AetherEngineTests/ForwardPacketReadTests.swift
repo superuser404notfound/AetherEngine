@@ -10,7 +10,7 @@ struct ForwardPacketReadTests {
     // Failure modes:
     // - An idle source is mistaken for EOF or consumes the next available packet.
     // - Cancellation is reported as idle and leaves a worker waiting indefinitely.
-    // - Live forwarding retains seek metadata or exceeds replay's compressed allowance.
+    // - Live forwarding retains seek metadata or rejects a packet larger than its pacing bound.
 
     /// An idle poll leaves the source open and subsequently returns the original envelope once.
     @Test
@@ -176,81 +176,89 @@ struct ForwardPacketReadTests {
         #expect(source.residentRanges.isEmpty)
     }
 
-    /// Packet admission includes payload and side data, accepting the exact allocation boundary.
-    @Test(arguments: [0, 4096])
-    func test_packetAdmission_oversizedAllocationFails(sideDataBytes: Int) throws {
-        // Arrange — use real FFmpeg allocation capacity rather than a fabricated byte estimate.
-        let packet = try #require(av_packet_alloc())
-        defer { var owned = Optional(packet); av_packet_free(&owned) }
-        try #require(av_new_packet(packet, 1024) == 0)
-        if sideDataBytes > 0 {
-            _ = try #require(av_packet_new_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, sideDataBytes))
-        }
-        let cost = DirectLiveAudioReadAhead.packetBytes(packet)
+    /// The real direct-live producer preserves packets whose payload or metadata crosses its bound.
+    @Test(arguments: [false, true])
+    func test_directLiveSource_oversizedPacketDeliversIntact(sideDataOversized: Bool) async throws {
+        // Arrange — enlarge a demuxer-owned peek packet before its sole producer starts (AE#963).
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        let (source, expected) = try await BlockingWork.detached {
+            try demuxer.open(
+                reader: ProbeRecordingReader(data: LongGOPTransportStreamFixture.data()),
+                formatHint: "mpegts",
+                isLive: true
+            )
+            var peeked: UnsafeMutablePointer<AVPacket>?
+            try demuxer.peekPackets(maxPackets: 1) { packet in
+                peeked = packet
+                return true
+            }
+            let packet = try #require(peeked)
+            if sideDataOversized {
+                let sideData = try #require(
+                    av_packet_new_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, 5 << 20)
+                )
+                sideData.initialize(repeating: 7, count: 5 << 20)
+            } else {
+                let originalSize = Int(packet.pointee.size)
+                try #require(av_grow_packet(packet, Int32(5 << 20)) == 0)
+                packet.pointee.data.advanced(by: originalSize).initialize(repeating: 7, count: 5 << 20)
+            }
+            let expected = try SoftwareStoredPacket(copying: packet)
+            let source = try DirectLiveAudioReadAhead(
+                demuxer: demuxer,
+                videoIndex: demuxer.videoStreamIndex,
+                audioIndex: demuxer.audioStreamIndex
+            )
+            return (source, expected)
+        }.value
+        defer { source.close() }
 
-        // Act — the exact limit admits this packet, while one byte less rejects it.
-        try DirectLiveAudioReadAhead.validatePacketSize(packet, limit: cost)
-        var rejected = false
-        do {
-            try DirectLiveAudioReadAhead.validatePacketSize(packet, limit: cost - 1)
-        } catch DirectLiveAudioReadAhead.Failure.packetTooLarge(let bytes, let limit) {
-            rejected = true
-            #expect(bytes == cost)
-            #expect(limit == cost - 1)
-        }
+        // Act — cross replay admission and packet serialization through the real producer.
+        source.packets.start()
+        let consumer = ProbeTestJob { try source.packets.read() }
+        let result = try await consumer.outcome()
 
-        // Assert — admission has preserved caller ownership and the allocation remains intact.
-        #expect(rejected)
-        #expect(packet.pointee.size == 1024)
-        #expect(DirectLiveAudioReadAhead.packetBytes(packet) == cost)
+        // Assert — neither a large payload nor side data becomes a terminal size rejection.
+        #expect(try result.get() == expected)
     }
 
-    /// A side-data-heavy damaged packet cannot enter quarantine on its tiny payload cost alone.
+    /// A valid packet larger than the forward window remains deliverable and parks further reads.
     @Test
-    func test_replay_sideDataExceedingAllowanceFails() throws {
-        // Arrange — establish a valid frontier before introducing a damaged video boundary.
-        let reader = LiveReplayPacketReader(
-            videoIndex: 0,
-            audioIndex: 1,
-            videoTimeBase: 0.1,
-            audioTimeBase: 0.1,
-            residentLimit: 1024,
-            retainedSize: { packet in
-                var bytes = Int(packet.pointee.size)
-                for index in 0..<Int(packet.pointee.side_data_elems) {
-                    bytes += Int(packet.pointee.side_data[index].size)
-                }
-                return bytes
-            }
-        )
-        var index = 0
-
-        // Act — quarantine a one-byte damaged payload carrying 4 KiB of side data.
-        #expect(throws: LiveReplayPacketReader.Failure.retentionExceeded) {
-            while let packet = try reader.read(from: {
-                if index > 80 { return nil }
-                let packet = try #require(av_packet_alloc())
-                try #require(av_new_packet(packet, 1) == 0)
-                packet.pointee.stream_index = Int32(index % 2)
-                packet.pointee.pts = Int64(index / 2)
-                packet.pointee.dts = packet.pointee.pts
-                packet.pointee.data[0] = 1
-                if index == 80 {
-                    packet.pointee.flags |= AV_PKT_FLAG_CORRUPT
-                    _ = try #require(av_packet_new_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, 4096))
-                }
-                index += 1
-                return packet
-            }) {
-                var owned = Optional(packet)
-                av_packet_free(&owned)
-            }
+    func test_forwardSource_oversizedPacketDeliversAndConsumptionResumes() async throws {
+        // Arrange — one untimed packet alone exceeds the direct-live 4 MiB pacing bound (AE#963).
+        let calls = ProbeTestBox(0)
+        let packet = Self.packet(pts: Int64.min, payloadByteCount: 5 << 20)
+        let source = SoftwarePacketReadAhead(
+            video: .init(index: 0, numerator: 1, denominator: 25),
+            audio: nil,
+            byteBudget: 4 << 20,
+            forwardSeconds: 4,
+            initialSourceClock: 0,
+            fifo: SoftwarePacketMemoryFIFO(chunkTargetBytes: 4096, historyCapBytes: 0),
+            forwardOnly: true
+        ) { _ in
+            calls.update { $0 += 1 }
+            return calls.value <= 2 ? packet : nil
         }
+        defer { source.close() }
+        source.start()
+        try await waitFor { source.producerParkedForTesting }
+        #expect(calls.value == 1)
+        #expect(source.snapshot.packetCount == 1)
 
-        // Assert — the rejected packet was reached and explicit reset remains usable.
-        #expect(index == 81)
-        reader.reset()
-        #expect(try reader.read(from: { nil }) == nil)
+        // Act — consuming the overshoot must let the next intact packet enter the reservoir.
+        #expect(try source.read(maximumWait: 0) == packet)
+        try await waitFor { calls.value == 2 && source.producerParkedForTesting }
+        #expect(source.snapshot.packetCount == 1)
+        #expect(try source.read(maximumWait: 0) == packet)
+        try await waitFor { source.snapshot.sourceEnded }
+
+        // Assert — both packets arrived once, followed by real EOF without retained seek history.
+        #expect(calls.value == 3)
+        #expect(try source.read(maximumWait: 0) == nil)
+        #expect(source.retainedKeyframeSeconds.isEmpty)
+        #expect(source.residentRanges.isEmpty)
     }
 
     /// A deterministic keyframe envelope includes timing and side data that must survive polling.

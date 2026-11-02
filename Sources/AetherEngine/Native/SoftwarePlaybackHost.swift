@@ -1105,6 +1105,17 @@ final class SoftwarePlaybackHost {
         ) == .stop
     }
 
+    /// Waits for space before parking another packet. An indivisible oversized packet is admitted
+    /// alone, then the normal read gate stops further accumulation until it drains.
+    nonisolated static func shouldWaitForLivePacketCapacity(
+        parkedBytes: Int,
+        packetBytes: Int,
+        byteLimit: Int
+    ) -> Bool {
+        if parkedBytes == 0 { return false }
+        return packetBytes > byteLimit || parkedBytes > byteLimit - packetBytes
+    }
+
     /// How long the parked demux loop waits before it re-checks the renderer, in seconds. The renderer
     /// drains at frame cadence and the audio lead shrinks with the clock, and nothing signals either,
     /// so this is a timed wait (audit PERF-110: the fixed 5 ms sleep was 200 wakeups a second in every
@@ -1690,16 +1701,22 @@ final class SoftwarePlaybackHost {
         if isLive, dvrRing == nil, audioDecoder != nil {
             let videoIndex = videoStreamIndex
             let audioIndex = audioStreamIndex
-            let requestedBytes = sessionCacheByteBudget
-            let source = try await BlockingWork.detached(priority: .userInitiated) {
+            let result = await BlockingWork.detached(priority: .userInitiated) {
                 try DirectLiveAudioReadAhead(
-                    demuxer: dem, videoIndex: videoIndex, audioIndex: audioIndex,
-                    requestedBytes: requestedBytes
+                    demuxer: dem, videoIndex: videoIndex, audioIndex: audioIndex
                 )
-            }.value
-            guard !stopRequested, !Task.isCancelled else { source.close(); return }
+            }.result
+            let source: DirectLiveAudioReadAhead?
+            switch result {
+            case .success(let readAhead):
+                source = readAhead
+            case .failure:
+                EngineLog.emit("[SWHost] live read-ahead unavailable; retaining direct playback", category: .swPlayback)
+                source = nil
+            }
+            guard !stopRequested, !Task.isCancelled else { source?.close(); return }
             directLiveReadAhead = source
-            source.packets.start()
+            source?.packets.start()
         }
 
         // The Atmos decoder registration started when the route was chosen and has run alongside the
@@ -3836,8 +3853,6 @@ final class SoftwarePlaybackHost {
         keyframeLedger: SWKeyframeLedger? = nil,
         noteRebuffering: @Sendable (Bool) -> Void = { _ in }
     ) {
-        // Optimized ARC must not release the allowance before the final parked-packet cleanup.
-        defer { withExtendedLifetime(directLiveSource) {} }
         // The video packet's time on the clock's axis and whether it is a keyframe, for `keyframeLedger`.
         func keyframeTime(of packet: UnsafeMutablePointer<AVPacket>) -> (pts: Double, isKey: Bool)? {
             let pts = packet.pointee.pts
@@ -4047,7 +4062,13 @@ final class SoftwarePlaybackHost {
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
                         clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
                 case .packetCapacity(let bytes):
-                    return directLiveSource.map { parkedVideoBytes > $0.parkedByteLimit - bytes } ?? false
+                    return directLiveSource.map {
+                        Self.shouldWaitForLivePacketCapacity(
+                            parkedBytes: parkedVideoBytes,
+                            packetBytes: bytes,
+                            byteLimit: $0.parkedByteLimit
+                        )
+                    } ?? false
                 case .drainAll:
                     return !parkedVideo.isEmpty
                 }
@@ -4227,9 +4248,16 @@ final class SoftwarePlaybackHost {
             do {
                 if let readAhead {
                     let readyVideo = parkedVideo.first.map { mayDecodeVideoPacket($0) } ?? false
+                    if directLiveSource != nil {
+                        // The empty-source wait may last indefinitely; publish the final drain
+                        // before sleeping so SWDiag does not retain an already-consumed packet.
+                        diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
+                                     rebuffering: false, generation: diagAudioPtsGeneration)
+                    }
                     packet = try readAhead.read(
                         isCurrent: { admitsRead(genBeforeRead) },
-                        maximumWait: directLiveSource == nil ? nil : (readyVideo ? 0 : 0.01)
+                        maximumWait: directLiveSource == nil || parkedVideo.isEmpty
+                            ? nil : (readyVideo ? 0 : 0.01)
                     )?.makeAVPacket()
                 } else {
                     if replayGeneration != genBeforeRead {
@@ -4450,18 +4478,8 @@ final class SoftwarePlaybackHost {
                 if decoupleAudio {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
-                    if let directLiveSource {
+                    if directLiveSource != nil {
                         let bytes = DirectLiveAudioReadAhead.packetBytes(packet)
-                        if bytes > directLiveSource.parkedByteLimit {
-                            av_packet_unref(packet)
-                            av_packet_free_safe(packet)
-                            if terminalGeneration.record(genBeforeRead) {
-                                onError(DirectLiveAudioReadAhead.Failure.packetTooLarge(
-                                    bytes: bytes, limit: directLiveSource.parkedByteLimit
-                                ).localizedDescription, genBeforeRead)
-                            }
-                            return false
-                        }
                         waitForRenderer(.packetCapacity(bytes))
                         // A capacity wait can cross stop, foreground or generation changes.
                         guard admitsRead(genBeforeRead), !backgroundAudioOnly() else {

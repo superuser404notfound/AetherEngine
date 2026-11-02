@@ -77,6 +77,13 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         return producerParked
     }
     private var consumerWaitEvents: UInt64 = 0
+    #if DEBUG
+    /// Captures active waits and completed wakeups under the source condition for idle-loop tests.
+    var consumerWaitStateForTesting: (waiting: Int, completed: UInt64) {
+        condition.lock(); defer { condition.unlock() }
+        return (waitingConsumers, consumerWaitEvents)
+    }
+    #endif
     private var consumerBlockedSeconds: Double = 0
     private var lastStarvationLog: DispatchTime?
     private var generation: UInt64 = 0
