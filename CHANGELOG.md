@@ -10,8 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.55.0] - 2026-11-02
+
 ### Added
 
+- **`LoadOptions.skipsContainerAttachments` (AE#956).** Opens a Matroska source without reading its attached files,
+  the fonts of its ASS subtitles: tens of megabytes on anime releases, which the demuxer read in full before the
+  first packet (about 11 s for a remux with 23 MB of fonts over a WAN address). `fontAttachments` then stays empty
+  and a Matroska cover image is not reported; tracks and packets are unchanged. Off by default. Independently of
+  the option, every side reader and reopen of the same source (embedded subtitles, scrub stills, I-frames, the
+  Atmos and Dolby Vision passes, audio switch, live and HLS-producer reopens) now passes over the attachments,
+  which only the first open surfaces. Needs FFmpegBuild 3.12.0's `skip_attachments`. `aetherctl play` gains
+  `--skip-attachments`.
 - **`PlaybackErrorKind.sourceFabricatesRanges` (AE#958).** The origin answered a byte range with bytes from
   somewhere else. See Fixed.
 
@@ -39,6 +51,34 @@ the public-API contract.
 
 ### Fixed
 
+- **Software playback over a wireless AirPlay route keeps its sound after a seek.** Every prerolled clock start was
+  scheduled 250 ms out with `setRate(_:time:atHostTime:)`, a lead tuned on HDMI. An AirPlay route reports 2000 ms of
+  output latency, a start it cannot meet: from the second start of a session on, the audio renderer held its queue
+  (`hasSufficientMediaDataForReliablePlaybackStart` stayed true) and played nothing while the clock and the picture
+  ran, until a pause and play. A route whose latency exceeds the lead now starts the clock unscheduled, so the
+  synchronizer holds it until the route sounds. Measured on an Apple TV 4K (A15) with a Sonos over AirPlay and the
+  software path forced: silent after every seek before, audible at start and after every seek now, the picture held
+  1 to 4 s for the route latency and in sync from there. HDMI keeps the scheduled start.
+- **A rate a host repeats right after `play()` no longer starts the software clock a second time.** It reached the
+  output while the first start was still in flight, and since the synchronizer's rate reads back asynchronously it
+  either took the preroll branch again or re-anchored the running clock at a time read back mid-change. The output
+  now records the rate it last commanded, and a repeated one is a no-op. The one stale pause seen (a reporter's
+  AirPlay speaker stopped the clock at 75.616 while it stood at 118.52) followed such a double start; 35 double
+  starts on a Sonos over AirPlay did not reproduce it, so this is hardening, not a proven cause.
+- **Bitmap subtitles show on an AirPlay receiver (#955).** A wireless receiver is a display the host overlay cannot
+  reach, so the engine now requests the native rendition there when the host left it unasked, and withdraws only
+  its own request when the receiver lets go (a host that calls `setNativeSubtitleRendering(_:)` sees no change; the
+  remote-HLS bypass is left out, its renditions are the origin's). Two defects kept the OCR rendition from selecting:
+  the forward prefetcher never noted end of file, so inside the last `subtitleOCRLeadSeconds` of a film the window
+  never read as covered, and every subtitle pick, a re-pick of the same track included, restarted recognition.
+  Measured on a three-PGS MKV: no selection after 60 s before, selected in 2.8 s now.
+- **A native session that joined inside an audio-only tail ends where it ends (AE#962).** The last video packet of a
+  title was flushed into the last segment of the audio tail, a minute of item time late, so a join inside the tail
+  placed the item a minute late and ended it at once; it now goes out with its own segment. At the real end AVPlayer
+  publishes its clock back at the end of the video track, which the #287 recovery read as a premature end and replayed
+  the whole tail: the host now judges an end by the highest clock published since the last seek. The in-place
+  re-seek of that recovery waits at most 20 s, then accepts the end on the playhead it measured, instead of leaving
+  a black picture with the UI on Playing.
 - **Native end recovery preserves the clock observed before a slow AVFoundation read (AE#962).** A fresh
   end-of-playback peak no longer expires while the reading is suspended, avoiding replay of an
   already-completed audio tail. A reading superseded by a new session or seek is ignored.
