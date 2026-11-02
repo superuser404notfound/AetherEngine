@@ -517,6 +517,10 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var summaryBypassNoELDecoder: Int = 0
     private var summaryBypassEndOfStream: Int = 0
     private var summaryBypassNoRPU: Int = 0
+    /// Frames whose mapping-preserving RPU could not be made, so a bypass would carry the composed
+    /// (mapping-stripped) one. The first per decoder also logs at info level. Guarded by `lock`.
+    private var summaryMappingFallback: Int = 0
+    private var loggedMappingFallback = false
     private var summaryDropStaleEL: Int = 0
     private var summaryPrunedEL: Int = 0
     private var summaryMaxObservedSkew: Int = 0
@@ -999,6 +1003,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// the composed one, as it carried before.
     private func resolveDisplayMetadata(key: Int64) -> (composed: [UInt8]?, baseLayer: [UInt8]?) {
         let forms = sideDataRing.removeDisplayMetadataForms(key: key)
+        if forms.baseLayer == nil, forms.composed != nil {
+            summaryMappingFallback += 1
+            if !loggedMappingFallback {
+                loggedMappingFallback = true
+                EngineLog.emit("[DualLayerVideoDecoder] no mapping-preserving RPU for key=\(key); a bypassed frame carries the composed one", category: .swPlayback, level: .info)
+            }
+        }
         return (forms.composed, forms.baseLayer ?? forms.composed)
     }
 
@@ -1639,6 +1650,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let noELDecoder = summaryBypassNoELDecoder
         let endOfStream = summaryBypassEndOfStream
         let noRPU = summaryBypassNoRPU
+        let mappingFallback = summaryMappingFallback
         let staleEL = summaryDropStaleEL
         let prunedEL = summaryPrunedEL
         let borrowedParams = summaryBorrowedParams
@@ -1650,6 +1662,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         summaryBypassNoELDecoder = 0
         summaryBypassEndOfStream = 0
         summaryBypassNoRPU = 0
+        summaryMappingFallback = 0
         summaryDropStaleEL = 0
         summaryPrunedEL = 0
         summaryBorrowedParams = 0
@@ -1677,7 +1690,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let gpuMs = activeComposer?.meanGPUTimeMs
         let pendingPeak = orderedDelivery.takePeakPendingCount()
         let gpuStr = gpuMs.map { String(format: "%.1f", $0) } ?? "n/a"
-        let line = "[DualLayerVideoDecoder] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoELInAU=\(noELInAU), bypassDeadline=\(deadline), bypassHeldWall=\(heldWall), bypassBackstop=\(backstop), bypassNoELDecoder=\(noELDecoder), bypassEndOfStream=\(endOfStream), bypassNoRPU=\(noRPU), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), inPlaceTotal=\(inPlaceTotal), inPlaceDropped=\(inPlaceDropped), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
+        let line = "[DualLayerVideoDecoder] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoELInAU=\(noELInAU), bypassDeadline=\(deadline), bypassHeldWall=\(heldWall), bypassBackstop=\(backstop), bypassNoELDecoder=\(noELDecoder), bypassEndOfStream=\(endOfStream), bypassNoRPU=\(noRPU), mappingFallback=\(mappingFallback), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), inPlaceTotal=\(inPlaceTotal), inPlaceDropped=\(inPlaceDropped), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
         // Once a second is a trace, not an event: it goes to OSLog's debug level only. An interval in
         // which a composition failed is the exception, so the failure reaches the default level and the
         // host handler.
@@ -1844,6 +1857,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         summaryBypassNoELDecoder = 0
         summaryBypassEndOfStream = 0
         summaryBypassNoRPU = 0
+        summaryMappingFallback = 0
         summaryDropStaleEL = 0
         summaryPrunedEL = 0
         summaryBorrowedParams = 0
@@ -1987,6 +2001,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         summaryBypassNoELDecoder = 0
         summaryBypassEndOfStream = 0
         summaryBypassNoRPU = 0
+        summaryMappingFallback = 0
+        loggedMappingFallback = false
         summaryDropStaleEL = 0
         summaryPrunedEL = 0
         summaryBorrowedParams = 0
