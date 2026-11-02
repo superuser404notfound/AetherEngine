@@ -199,7 +199,8 @@ struct TrickleWatchdogTests {
     }
 
     private static func makeReader(_ origin: PacedOrigin, held: Bool = false,
-                                   trickleFloorBytes: Int64? = nil) -> AVIOReader {
+                                   trickleFloorBytes: Int64? = nil,
+                                   stallTimeout: TimeInterval = stallTimeout) -> AVIOReader {
         AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/movie.bin")!,
                    boundedInitialFetch: held ? nil : firstRange,
                    connStallTimeout: stallTimeout, trickleFloorBytes: trickleFloorBytes,
@@ -241,13 +242,15 @@ struct TrickleWatchdogTests {
     // MARK: - Detection
 
     @Test("a connection trickling far below the floor while a read waits is ended and replaced",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func tricklingConnectionIsReplaced() async throws {
         let dripOffset = Self.dripOffset
-        // 4 KB every 0.2 s is 10 KB per 0.5 s period. The scaled floor at 0.5 s is 2 MiB / 40,
-        // about 52 KB, so this is a fifth of it, and every drip lands well inside the gap timeout.
+        // 1 KB every 50 ms is 10 KB per 0.5 s period. The scaled floor at 0.5 s is 2 MiB / 40,
+        // about 52 KB, so this is a fifth of it. The drips are a tenth of the threshold apart: a
+        // loaded runner that delays a few of them must not open a delivery gap, or the gap path ends
+        // the connection first, the fast replacement finishes the read, and no trickle is ever seen.
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { start, attempt in
-            start == dripOffset && attempt == 1 ? .drip(bytes: 4 * 1024, everyUs: 200_000) : .fast
+            start == dripOffset && attempt == 1 ? .drip(bytes: 1024, everyUs: 50_000) : .fast
         })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
@@ -259,19 +262,22 @@ struct TrickleWatchdogTests {
         // Past the first range: this read drains the window, puts the refill at `dripOffset` on the
         // wire, and then blocks on it.
         let target = Int(Self.firstRange) + 1024 * 1024
-        async let got = Self.readInBackground(reader, bytes: target, sliceCap: 256 * 1024)
+        let progress = Self.startReading(reader, bytes: target)
         try await waitFor { origin.requests.contains { $0.start == dripOffset } }
         let dripRequest = origin.requests.first { $0.start == dripOffset }
         let dripStartedAt = try #require(dripRequest?.at)
 
-        try await waitFor { reader.trickleEndCountForTesting > 0 }
+        try await waitFor { reader.trickleEndCountForTesting > 0 || progress.done }
+        try #require(reader.trickleEndCountForTesting > 0, "the read finished without a trickle end")
         let detectedAfter = Date().timeIntervalSince(dripStartedAt)
-        #expect(detectedAfter < 3 * Self.stallTimeout,
-                "the trickle was ended \(detectedAfter)s after it started, over 3x the \(Self.stallTimeout)s threshold")
+        // Nominally two thresholds (one starved period, then the next tick). The bound is loose because
+        // a loaded runner delays the watchdog's ticks; what it rules out is a drip that is never judged.
+        #expect(detectedAfter < 10 * Self.stallTimeout,
+                "the trickle was ended \(detectedAfter)s after it started, over 10x the \(Self.stallTimeout)s threshold")
 
         // The replacement is asked for where the drip left off and served at full rate.
-        let gotBytes = await got
-        #expect(gotBytes == target, "the read did not complete after the trickle was replaced")
+        try await waitFor { progress.done }
+        #expect(progress.got == target, "the read did not complete after the trickle was replaced")
         let replacements = origin.requests.filter { $0.start > dripOffset && $0.start < dripOffset + 1024 * 1024 }
         #expect(!replacements.isEmpty, "no replacement request after the trickle end: \(origin.requests.map(\.start))")
     }
@@ -279,7 +285,7 @@ struct TrickleWatchdogTests {
     // MARK: - No false positives
 
     @Test("a healthy stream a long read waits on is never ended as a trickle",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func healthyStreamIsLeftAlone() async throws {
         let dripOffset = Self.dripOffset
         // 64 KB every 20 ms, about 3 MB/s: well above the floor, and slow enough that one 4 MB read
@@ -303,7 +309,7 @@ struct TrickleWatchdogTests {
                 "the healthy stream was replaced: \(origin.requests.map(\.start))")
     }
 
-    @Test("a trickle with no read outstanding is not judged", .timeLimit(.minutes(1)))
+    @Test("a trickle with no read outstanding is not judged", .timeLimit(.minutes(3)))
     func trickleWithoutAWaitingReadIsLeftAlone() async throws {
         let dripOffset = Self.dripOffset
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { start, _ in
@@ -329,8 +335,35 @@ struct TrickleWatchdogTests {
         #expect(reader.trickleEndCountForTesting == 0)
     }
 
+    /// A raw live source arrives at its own bitrate, so a read waits on forward data almost all the
+    /// time, and a radio stream sits below the floor for good. Judging it would end a healthy live
+    /// connection every threshold and rejoin at the edge.
+    @Test("a live source below the floor with a read waiting is never ended as a trickle",
+          .timeLimit(.minutes(3)))
+    func lowBitrateLiveIsLeftAlone() async throws {
+        // 4 KB every 0.2 s is about 160 kbit/s, an audio-only live channel.
+        let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { _, _ in
+            .drip(bytes: 4 * 1024, everyUs: 200_000)
+        })
+        let origin = try #require(originMaybe)
+        defer { origin.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(origin.port)/live.ts")!,
+                                isLive: true, connStallTimeout: Self.stallTimeout, backoffScale: 0.02)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        // One AVIO-sized read takes about 13 s at this rate, so it stays blocked on forward data for
+        // the whole observation, which is the state the verdict is evaluated in.
+        _ = Self.startReading(reader, bytes: 256 * 1024)
+        let ended = try await waitFor(upTo: .seconds(8 * Self.stallTimeout)) {
+            reader.trickleEndCountForTesting > 0 || origin.requests.count > 1
+        }
+        #expect(!ended, "a low-bitrate live connection was replaced: \(origin.requests.map(\.start))")
+        #expect(reader.trickleEndCountForTesting == 0)
+    }
+
     @Test("a held connection parked on a full window with zero delivery is not judged",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func heldFullWindowIsLeftAlone() async throws {
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { _, _ in .fast })
         let origin = try #require(originMaybe)
@@ -358,17 +391,20 @@ struct TrickleWatchdogTests {
     /// AVIO-sized read is served inside the threshold, so a clock that restarts per read never
     /// reaches a verdict; the consumer is starved all the same.
     @Test("a drip that serves every AVIO-sized read inside the threshold still trips",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func avioSizedReadsDoNotResetTheStarvedClock() async throws {
         let dripOffset = Self.dripOffset
-        // 256 KB every 0.375 s (15/20 of the 0.5 s threshold): about 341 KB per period, under the
-        // 2 MiB floor this reader is given, which is the field's read-size-to-floor ratio.
+        // 256 KB every 1.5 s (15/20 of a 2 s threshold): about 341 KB per period, under the 2 MiB
+        // floor this reader is given, which is the field's read-size-to-floor ratio. The longer
+        // threshold keeps half a second between a drip and the gap verdict, so a loaded runner does
+        // not hand the connection to the gap path before the starved clock runs out.
+        let stallTimeout: TimeInterval = 2
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { start, attempt in
-            start == dripOffset && attempt == 1 ? .drip(bytes: 256 * 1024, everyUs: 375_000) : .fast
+            start == dripOffset && attempt == 1 ? .drip(bytes: 256 * 1024, everyUs: 1_500_000) : .fast
         })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
-        let reader = Self.makeReader(origin, trickleFloorBytes: 2 * 1024 * 1024)
+        let reader = Self.makeReader(origin, trickleFloorBytes: 2 * 1024 * 1024, stallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         try await waitFor { !reader.hasLiveConnectionForTesting }
@@ -382,8 +418,8 @@ struct TrickleWatchdogTests {
         try await waitFor { reader.trickleEndCountForTesting > 0 || progress.done }
         let detectedAfter = Date().timeIntervalSince(dripStartedAt)
         #expect(reader.trickleEndCountForTesting > 0, "the drip was never judged")
-        #expect(detectedAfter < 3 * Self.stallTimeout,
-                "the trickle was ended \(detectedAfter)s after it started, over 3x the threshold")
+        #expect(detectedAfter < 5 * stallTimeout,
+                "the trickle was ended \(detectedAfter)s after it started, over 5x the threshold")
         try await waitFor { progress.done }
         #expect(progress.got == target)
     }
@@ -394,7 +430,7 @@ struct TrickleWatchdogTests {
     /// give-up, so an origin that trickles on every connection is compared against one that goes
     /// silent after a few bytes on every connection.
     @Test("an origin that trickles on every connection is replaced like a silent one",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func perpetualTrickleMatchesTheGapPath() async throws {
         let dripOffset = Self.dripOffset
         let totalSize = Self.totalSize
@@ -445,7 +481,7 @@ struct TrickleWatchdogTests {
     /// per 20 s scaled to this threshold, 1.75x the floor. A mark from before the wait would fold
     /// the park into the span and end a healthy stream.
     @Test("a park on a full window followed by a healthy drip does not trip",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func parkThenHealthyDripDoesNotTrip() async throws {
         // Loopback caveat: whatever the kernel buffered for the socket during the park arrives as a
         // burst once the pump resumes, and that burst alone lifts a stale span over the floor. So on

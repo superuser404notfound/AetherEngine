@@ -27,8 +27,9 @@ the public-API contract.
   AVPlayer stalled for 25 s once the forward buffer drained. The watchdog now also judges volume: a consumer starved on
   forward data for one stall period (across as many 256 KB AVIO reads as that takes), with a read blocked now and less
   than 2 MiB delivered in the last 20 s, ends the generation exactly as a silent one is ended. A paused player, a full
-  window and a healthy stream are never judged. `TrickleWatchdogTests` covers the drip, AVIO-sized reads, healthy and
-  parked streams, and parity with the gap path.
+  window, a healthy stream and a live source (which arrives at its own bitrate, so a radio channel sits below the floor
+  by design) are never judged. `TrickleWatchdogTests` covers the drip, AVIO-sized reads, healthy, parked and
+  low-bitrate live streams, and parity with the gap path.
 
 - **A subtitle side reader on a Matroska source no longer stops at second 0 after a deadline-cut positioning
   (#944).** When the timestamp seek ran out of budget, libavformat's generic fallback read into the cut and the

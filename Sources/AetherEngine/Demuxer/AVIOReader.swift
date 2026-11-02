@@ -899,9 +899,6 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         window.count - max(0, Int(position - winStart))
     }
 
-    /// The delivery gap the watchdog would judge right now. A test reads it to state the invariant
-    /// the field case turns on: a stretch with no read outstanding does not accumulate against the
-    /// read that follows it.
     /// How many generations the trickle watchdog has ended on this reader.
     var trickleEndCountForTesting: Int {
         winCond.lock()
@@ -909,6 +906,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return trickleEnds
     }
 
+    /// The delivery gap the watchdog would judge right now. A test reads it to state the invariant
+    /// the field case turns on: a stretch with no read outstanding does not accumulate against the
+    /// read that follows it.
     var deliveryGapSecondsForTesting: Double {
         winCond.lock()
         defer { winCond.unlock() }
@@ -3943,7 +3943,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             return
         }
         if gap < connStallTimeout {
-            if let trickle = trickleVerdictLocked() {
+            // Live is never judged: a raw live source arrives at its own bitrate, so the read waits
+            // on forward data by design, and a radio or SD channel sits below the floor for good.
+            if !isLive, let trickle = trickleVerdictLocked() {
                 endTrickleLocked(generation: generation, transfer: transfer, verdict: trickle)
                 return
             }
