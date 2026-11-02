@@ -132,6 +132,8 @@ final class NativeAVPlayerHost {
     /// duration, and publishing that transient would bounce the engine through `.paused` and back for
     /// what the viewer must not even notice; the real status is republished when the recovery settles.
     private var prematureEndRecoveryInFlight = false
+    /// AE#962: the highest clock the observer published since the last seek, and when (uptime ns).
+    private var publishedClockPeak: (seconds: Double, uptimeNanos: UInt64)?
     /// Mirrors avPlayer.timeControlStatus so the engine can reconcile when AVKit's transport bar, Control Center, or hardware buttons toggle the player externally (without this, engine state goes stale and play/pause presses are swallowed).
     @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
     /// Mirrors avPlayer.reasonForWaitingToPlay. Written before `timeControlStatus` on a status edge, so a
@@ -946,6 +948,9 @@ final class NativeAVPlayerHost {
                 // seekInFlight suppresses currentTime: AVPlayer still reports pre-seek clock until physical landing (issue #37).
                 guard !self.seekInFlight else { return }
                 self.currentTime = value
+                if value >= (self.publishedClockPeak?.seconds ?? -.infinity) {
+                    self.publishedClockPeak = (value, DispatchTime.now().uptimeNanoseconds)
+                }
                 self.observeVideoPresentation(clock: value)
             }
         }
@@ -1957,7 +1962,11 @@ final class NativeAVPlayerHost {
         // `seekableRangeEndSeconds`) is not the cheap thing it looks like: the reporter measured a
         // single such read holding the main thread for 13.3 s.
         let reading = await prematureEndReading()
-        let playhead = reading.playhead
+        let peak = publishedClockPeak
+        let playhead = AetherEngine.prematureEndPlayhead(
+            read: reading.playhead,
+            peak: peak?.seconds,
+            peakAgeSeconds: peak.map { Double(DispatchTime.now().uptimeNanoseconds &- $0.uptimeNanos) / 1e9 })
         let seekEnd = reading.seekableEnd
         guard AetherEngine.prematureEndRecoveryQualifies(
             isLive: isLiveSession,
@@ -1966,7 +1975,11 @@ final class NativeAVPlayerHost {
             seekableEnd: seekEnd,
             attemptsUsed: prematureEndRecoveryAttempts,
             lastAttemptPlayhead: lastPrematureEndRecoveryPlayhead
-        ) else { return false }
+        ) else {
+            // AE#962: the end stands at where playback was, not where AVPlayer's clock snapped back to.
+            if playhead > reading.playhead { currentTime = playhead }
+            return false
+        }
 
         prematureEndRecoveryAttempts += 1
         lastPrematureEndRecoveryPlayhead = playhead
@@ -2037,6 +2050,7 @@ final class NativeAVPlayerHost {
         seekGeneration &+= 1
         let gen = seekGeneration
         seekInFlight = true
+        publishedClockPeak = nil
         // AE#629: this seek's own landing publishes the clock from here on.
         mountSeekPending = false
         latestSeekRenderedTimePublished = false
@@ -2476,6 +2490,7 @@ final class NativeAVPlayerHost {
         prematureEndRecoveryAttempts = 0
         lastPrematureEndRecoveryPlayhead = nil
         prematureEndRecoveryInFlight = false
+        publishedClockPeak = nil
         didSampleSettledRoute = false
         // #168: a reused host must not report the prior session's dynamic range before the new item resolves.
         detectedVideoFormat = nil

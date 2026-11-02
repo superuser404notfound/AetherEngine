@@ -3828,6 +3828,24 @@ public final class AetherEngine: ObservableObject {
         return true
     }
 
+    /// How recently the published clock must have reached its peak for `prematureEndPlayhead` to
+    /// trust it over AVPlayer's reading (AE#962). The snap-back it guards against lands two observer
+    /// ticks (0.2 s) before the end notification.
+    nonisolated static let prematureEndPeakMaxAgeSeconds: Double = 1.0
+
+    /// The playhead a `didPlayToEndTime` is judged at (AE#962). A session that joined inside an
+    /// audio-only tail never loaded a video sample, and at the REAL end AVPlayer publishes its clock
+    /// back at the end of the video track (measured: 126.9 s, then 60.000 and 60.008 at rate 1.0, then
+    /// the notification), so the item, the player and the observer all read a position a whole tail
+    /// short of the end. `peak` is the highest clock published since the last seek: reached moments
+    /// ago, it is where playback actually was. A peak from before an external backward scrub is old
+    /// by the time the item ends, and is ignored.
+    nonisolated static func prematureEndPlayhead(read: Double, peak: Double?, peakAgeSeconds: Double?) -> Double {
+        guard let peak, let peakAgeSeconds, peak.isFinite, peak > read,
+              peakAgeSeconds <= prematureEndPeakMaxAgeSeconds else { return read }
+        return peak
+    }
+
     /// Complete a native VOD that parked a hair short of its advertised duration because the final
     /// segment's video is exhausted (AetherEngine#169): the final segment's EXTINF, derived from the
     /// container duration, overshoots the last real video sample, so AVPlayer sits in
