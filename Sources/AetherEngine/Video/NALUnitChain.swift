@@ -1,6 +1,6 @@
+import Foundation
 import AetherLibavcodec
 import AetherLibavutil
-import Foundation
 
 /// Audit BIT-104: whether a video sample of the session's track has walked exactly as a
 /// length-prefixed chain (BIT-1). Held by the session rather than by one muxer, because every seek,

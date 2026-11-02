@@ -643,6 +643,10 @@ _Nothing yet._
 
 ### Fixed
 
+- **A complete HEVC length chain with an incomplete two-byte NAL header no longer poisons an fMP4
+  segment** (#960). The muxer removes only short headers, preserves the surrounding pictures/RPUs and
+  timestamps, and drops a sample consisting entirely of short headers. Packet compaction is copy-on-write.
+
 - **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
   streams use the existing successor-PTS model with depth one, avoiding millisecond holes
   from rounded Matroska durations. Disk and memory stores share the qualification; missing/late

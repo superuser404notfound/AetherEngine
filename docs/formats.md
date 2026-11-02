@@ -428,6 +428,11 @@ AVPlayer sees nothing before that. So the routing read happens no earlier than i
 
 H.264 gets the same rebuild (#938). An `avcC` with zero SPS or zero PPS (mkvmerge writes the 7-byte `01 64 00 20 ff e0 00` for such a track) is rebuilt from the first in-band SPS and PPS. movenc does the rebuild, so the High-profile extension comes out right, and the source's NAL length size is kept. Shipped verbatim, it fails differently from HEVC and more quietly: the item reaches `readyToPlay`, the clock runs and audio plays, but no frame is ever ready for display.
 
+A chain can also walk exactly while a unit contains only one byte of HEVC's two-byte header
+(for example a truncated EOS). In confirmed length-prefixed HEVC samples the muxer removes those
+units, retaining valid pictures and any following Dolby Vision RPU. Shared packets are made writable
+before compaction; a sample with no complete header left is not written (#960).
+
 ### Dolby Vision signaling
 
 For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord` (the Dolby Vision config record). The route depends on the profile's base layer: whether it has one, and which format it is compatible with.
