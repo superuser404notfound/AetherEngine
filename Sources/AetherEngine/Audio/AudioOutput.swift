@@ -641,8 +641,36 @@ final class AudioOutput: @unchecked Sendable {
         _onPrerollTransition?(PrerollTransition(generation: wait.gen, event: .released(release)))
     }
 
-    /// Starts the clock `prerollStartLead` from now. Called with `lock` held.
+    /// Whether a prerolled start is scheduled on the host clock or handed to the synchronizer at once.
+    /// The lead covers the display path's notice of a rate change on a route that plays within it
+    /// (HDMI, 80 to 138 ms). A buffered AirPlay route reports 2000 ms: a start scheduled 250 ms out on
+    /// it is one the receiver cannot meet, and from the second start of a session on its renderer then
+    /// holds the queue and plays nothing while the clock and the picture run (measured on a Sonos and
+    /// on a reporter's AirPlay speaker: silent after every seek, audible again after pause and play).
+    /// An unscheduled start lets the synchronizer hold the clock until the route sounds.
+    static func prerollStartsAtHostTime(outputLatency: Double) -> Bool {
+        outputLatency <= prerollStartLead
+    }
+
+    /// The route's output latency, read per start: the route can change inside a session.
+    var outputLatency: @Sendable () -> Double = {
+        #if os(iOS) || os(tvOS)
+        AVAudioSession.sharedInstance().outputLatency
+        #else
+        0
+        #endif
+    }
+
+    /// Starts the clock `prerollStartLead` from now, or at once on a route that plays later than the
+    /// lead. Called with `lock` held.
     private func startAfterPreroll(rate: Float, time: CMTime) {
+        let latency = outputLatency()
+        guard Self.prerollStartsAtHostTime(outputLatency: latency) else {
+            EngineLog.emit("[AudioOutput] route latency \(String(format: "%.0f", latency * 1000)) ms exceeds the "
+                           + "preroll lead; starting unscheduled", category: .swPlayback)
+            synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time))
+            return
+        }
         let hostNow = CMClockGetTime(CMClockGetHostTimeClock())
         let host = CMTimeAdd(hostNow, CMTime(seconds: Self.prerollStartLead, preferredTimescale: 1_000_000_000))
         synchronizer.setRate(rate, time: timeline.rendererTime(forSource: time), atHostTime: host)

@@ -171,6 +171,25 @@ struct VideoPrerollTests {
         #expect(output.synchronizer.currentTime().seconds <= 5 + ran + 0.02)
     }
 
+    @Test("A buffered route starts the clock unscheduled, a direct one on the host clock")
+    func highLatencyRouteStartsUnscheduled() {
+        #expect(AudioOutput.prerollStartsAtHostTime(outputLatency: 0.080), "HDMI")
+        #expect(AudioOutput.prerollStartsAtHostTime(outputLatency: AudioOutput.prerollStartLead))
+        #expect(!AudioOutput.prerollStartsAtHostTime(outputLatency: 2.0), "AirPlay")
+    }
+
+    @Test("On a buffered route the opened gate starts the clock without the lead", .timeLimit(.minutes(3)))
+    func highLatencyRouteSkipsTheLead() async throws {
+        let output = AudioOutput()
+        output.outputLatency = { 2.0 }
+        output.videoPrerollSatisfied = { _ in true }
+        output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
+        #expect(output.synchronizer.rate == 1)
+        // A start scheduled `prerollStartLead` out would still stand at 5 here.
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(output.synchronizer.currentTime().seconds > 5.05)
+    }
+
     @Test("A rate set while the preroll waits is the rate it starts at", .timeLimit(.minutes(3)))
     func setRateDuringPrerollIsTheStartRate() async throws {
         let output = AudioOutput()
