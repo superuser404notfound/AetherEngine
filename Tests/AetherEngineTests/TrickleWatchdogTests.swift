@@ -19,7 +19,9 @@ struct TrickleWatchdogTests {
     private static let totalSize: Int64 = 256 * 1024 * 1024
     /// The open's bounded range. Its completion puts the next request at `dripOffset`.
     private static let firstRange: Int64 = 2 * 1024 * 1024
-    private static var dripOffset: Int64 { firstRange }
+    // AE#958: the refill at the frontier re-reads the held bytes before it to check the origin, so the
+    // request the origin sees starts that much earlier.
+    private static var dripOffset: Int64 { firstRange - Int64(AVIOReader.rangeCheckBytes) }
     private static let stallTimeout: TimeInterval = 0.5
 
     /// How one response body is written.

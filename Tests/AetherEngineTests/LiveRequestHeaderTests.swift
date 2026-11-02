@@ -49,7 +49,9 @@ struct LiveRequestHeaderTests {
         let firstRange: Int64 = 256 * 1024
         // The last refusal the ladder still retries after: the reader is mid-ladder, on the stale
         // token, when the renewal lands.
-        let gate = TokenGate(lapsesAt: firstRange, renewsAtRefusal: AVIOReader.credentialRefusalMaxStreak)
+        // AE#958: the refill asks `rangeCheckBytes` early, which is where the lapse has to bite.
+        let gate = TokenGate(lapsesAt: firstRange - Int64(AVIOReader.rangeCheckBytes),
+                             renewsAtRefusal: AVIOReader.credentialRefusalMaxStreak)
         let originMaybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024,
                                                 respond: { index, offset, _ in gate.answer(index, offset: offset) })
         let origin = try #require(originMaybe)

@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
+// AE#958: a refill at a held frontier asks `AVIOReader.rangeCheckBytes` early to check the origin,
+// so the origin below keys on the request the reader actually sends, `firstRange - rangeCheckBytes`.
+
 /// The reader pins the post-redirect URL after the first 200/206 (#12) and previously
 /// dropped the pin only for auth-expiry statuses (401/403/404/410). An aggregator whose
 /// redirect targets expire per connection answers every later range with a hard 5xx from
@@ -85,7 +88,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange && attempts.next(for: offset) == 1
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) && attempts.next(for: offset) == 1
                     ? .status(500) : .serve206
             }
         )
@@ -120,10 +123,10 @@ struct ResolvedURLInvalidationTests {
         // The pin sent the refill straight to the CDN (first attempt, 500), and the fix
         // must send the RETRY through the source URL again — visible as a source-server
         // request at the boundary offset, which only exists if the pin was dropped.
-        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(!sourceHitsAtBoundary.isEmpty,
                 "retry never fell back to the source URL: \(source.requestLog)")
-        let cdnAttemptsAtBoundary = cdn.requestLog.filter { $0.start == firstRange }.count
+        let cdnAttemptsAtBoundary = cdn.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }.count
         #expect(cdnAttemptsAtBoundary >= 2,
                 "the CDN should see the failed attempt plus the redirected retry")
     }
@@ -142,7 +145,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange && attempts.next(for: offset) <= 2
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) && attempts.next(for: offset) <= 2
                     ? .status(503) : .serve206
             }
         )
@@ -173,7 +176,7 @@ struct ResolvedURLInvalidationTests {
         }
         #expect(got == target, "read stopped at \(got) of \(target); the 503s were terminal")
 
-        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(sourceHitsAtBoundary.isEmpty,
                 "a metered refill re-resolved through the source: \(source.requestLog)")
     }
@@ -193,7 +196,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange && attempts.next(for: offset) <= 2
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) && attempts.next(for: offset) <= 2
                     ? .status(509) : .serve206
             }
         )
@@ -224,7 +227,7 @@ struct ResolvedURLInvalidationTests {
         }
         #expect(got == target, "read stopped at \(got) of \(target); the 509s were terminal")
 
-        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(sourceHitsAtBoundary.isEmpty,
                 "a 509 refill re-resolved through the source: \(source.requestLog)")
     }
@@ -243,7 +246,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange ? .status(509) : .serve206
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) ? .status(509) : .serve206
             }
         )
         let cdn = try #require(cdnMaybe)
@@ -273,14 +276,14 @@ struct ResolvedURLInvalidationTests {
         #expect(got == Int(firstRange),
                 "everything before the metered boundary must still be served (got \(got))")
 
-        let boundaryAttempts = cdn.requestLog.filter { $0.start == firstRange }.count
+        let boundaryAttempts = cdn.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }.count
         #expect(boundaryAttempts >= 2, "the ladder must retry a metered origin")
         #expect(boundaryAttempts <= 7,
                 "509 must give up at the bounded rate-limit cap, not grind: \(boundaryAttempts) attempts")
         // The keep-pin grace holds for the first attempts, then the rung spends the
         // re-resolve: some retries reach the source, but bounded by the ladder — never
         // the hard-5xx shape of one portal round trip per attempt at zero backoff.
-        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(!sourceHitsAtBoundary.isEmpty,
                 "a 509 outliving the grace must re-resolve through the source: \(source.requestLog)")
         #expect(sourceHitsAtBoundary.count <= 4,
@@ -304,7 +307,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, path in
-                guard offset == firstRange else { return .serve206 }
+                guard offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) else { return .serve206 }
                 return leases.isStale(path: path) ? .status(509) : .serve206
             }
         )
@@ -339,12 +342,12 @@ struct ResolvedURLInvalidationTests {
 
         // 1 free replacement of the planned range end + the grace attempts, all against the
         // dead lease; the rung's attempt is the one that goes through the source.
-        let boundaryAttempts = cdn.requestLog.filter { $0.start == firstRange }.count
+        let boundaryAttempts = cdn.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }.count
         #expect(boundaryAttempts == AVIOReader.rateLimitRepinStreak + 1,
                 "expected the grace against the pin plus one healed attempt, got \(boundaryAttempts)")
         #expect(leases.mintsAfterFault == 1,
                 "healing must cost exactly one source resolve, spent \(leases.mintsAfterFault): \(source.requestLog)")
-        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == firstRange }
+        let sourceHitsAtBoundary = source.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(sourceHitsAtBoundary.count == 1,
                 "the re-resolve carries the boundary range once: \(source.requestLog)")
     }
@@ -400,7 +403,7 @@ struct ResolvedURLInvalidationTests {
         #expect(got == target, "read stopped at \(got) of \(target); the cut was terminal")
 
         // The refused attempt against the pin plus the healed one, both at the cut offset.
-        let attemptsAtTheCut = cdn.requestLog.filter { $0.start == cutAfter }.count
+        let attemptsAtTheCut = cdn.requestLog.filter { $0.start == cutAfter - Int64(AVIOReader.rangeCheckBytes) }.count
         #expect(attemptsAtTheCut == 2,
                 "expected one refusal, then the re-resolved attempt, got \(attemptsAtTheCut): \(cdn.requestLog)")
         #expect(leases.mintsAfterFault == 1,
@@ -420,7 +423,7 @@ struct ResolvedURLInvalidationTests {
         let cdnMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange ? .status(509) : .serve206
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) ? .status(509) : .serve206
             }
         )
         let cdn = try #require(cdnMaybe)
@@ -446,7 +449,7 @@ struct ResolvedURLInvalidationTests {
         #expect(got == Int(firstRange),
                 "everything before the metered boundary must still be served (got \(got))")
         #expect(result == -1, "a permanently refused source must fail the read, not hang")
-        let boundaryAttempts = cdn.requestLog.filter { $0.start == firstRange }.count
+        let boundaryAttempts = cdn.requestLog.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }.count
         #expect(boundaryAttempts >= 3, "the ladder must retry a metered origin")
         #expect(boundaryAttempts <= 7,
                 "served reads reset the streak: \(boundaryAttempts) attempts at the boundary")

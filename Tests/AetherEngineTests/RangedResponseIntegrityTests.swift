@@ -56,7 +56,9 @@ struct RangedResponseIntegrityTests {
         // without one the window still holds no more than the range.
         let tail = Int64(512 * 1024 * 1024) - Int64(AVIOReader.tailPrefetchBytes)
         let refills = server.requestLog.map(\.start).filter { $0 > 1 && $0 != tail }
-        #expect(refills.allSatisfy { $0 == firstRange }, "refills at \(refills), the range ended at \(firstRange)")
+        // AE#958: a refill starts the overlap check's worth of held bytes before the frontier.
+        let refillStart = firstRange - Int64(AVIOReader.rangeCheckBytes)
+        #expect(refills.allSatisfy { $0 == refillStart }, "refills at \(refills), the range ended at \(firstRange)")
         if refills.isEmpty {
             #expect(reader.windowBytesForTesting <= Int(firstRange),
                     "the window held \(reader.windowBytesForTesting)B of a \(firstRange)B range")

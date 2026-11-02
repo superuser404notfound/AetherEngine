@@ -1064,6 +1064,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// did, and the checks that need the REQUESTED offset (a 200 that ignored Range, the size
     /// derived from a from-zero response) must not read the window's start instead. winCond-guarded.
     private var connRequestedOffset: Int64 = 0
+    /// AE#958: the overlap check riding on the current generation, when its request was moved into
+    /// bytes already held (see `RangeHonestyProbe`). winCond-guarded.
+    private var rangeProbe: RangeHonestyProbe?
+    /// AE#958: latched once a ranged answer carried bytes other than the ones it claimed. Every
+    /// read fails from there: nothing this origin sends past byte 0 can be placed. winCond-guarded.
+    private var rangeAnswersFabricated = false
+    /// AE#958: how much of a ranged reconnect is spent re-reading bytes already held.
+    static let rangeCheckBytes = 4096
     /// #331: latched once a live origin answers 416 to a nonzero offset, i.e. proves it has no
     /// byte addresses to resume at. From there every live request is the join shape (`bytes=0-`).
     /// Latched rather than unconditional because the two live origin shapes want opposite things:
@@ -1160,6 +1168,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// seek time, because `trimWindowLocked` has dropped the head long before a seek asks for it.
     /// winCond-guarded.
     private var headSpan: Data = Data()
+    /// AE#958: the last `rangeCheckBytes` of the head, kept when the head itself is dropped, so the
+    /// reconnect at its end can still be checked. winCond-guarded.
+    private var headSpanCheckTail: ResidentSpan?
 
     /// Speculative tail bytes fetched alongside `open()`. winCond-guarded: the fetch completes on a
     /// URLSession queue while the demux thread reads.
@@ -2238,6 +2249,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // #281: both spans hold real bytes (up to headSpanMaxBytes + tailPrefetchBytes), so they
         // are released with the window rather than living until the reader is deallocated.
         headSpan = Data()
+        headSpanCheckTail = nil
         tailSpan = nil
         openPhaseActive = false
         let tailTask = tailPrefetchTask
@@ -2543,6 +2555,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             let lockWaitStart = DispatchTime.now()
             winCond.lock()
             diag.recordLockWait(ms: msSince(lockWaitStart))
+            if rangeAnswersFabricated {
+                winCond.unlock()
+                return totalRead > 0 ? Int32(totalRead) : FFmpegErr.eio
+            }
 
             // #281: bytes already in hand beat every network path below, so this is checked before
             // any of them, and before the reconnect decision that a dead connection would force.
@@ -2561,6 +2577,11 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // playback asks for exactly those bytes.
             if !openPhaseActive, !indexPassActive, !headSpan.isEmpty,
                spanPos < 0 || spanPos >= Int64(headSpan.count) {
+                // AE#958: the read that drops the head is usually the one about to reconnect at its
+                // end, the first request that can show a fabricated range. Its last bytes stay.
+                let n = min(Self.rangeCheckBytes, headSpan.count)
+                headSpanCheckTail = ResidentSpan(start: Int64(headSpan.count - n),
+                                                 data: Data(headSpan.suffix(n)))
                 headSpan = Data()
             }
             if !windowCanServe, !headSpan.isEmpty || tailSpan != nil,
@@ -3651,16 +3672,67 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return nil
     }
 
+    /// AE#958: where the fabricated body really came from, when the retained head holds it, which
+    /// turns "these are other bytes" into the origin's actual chunk offset for a report. Caller holds
+    /// `winCond`.
+    private func fabricatedBodyNoteLocked(_ received: Data) -> String {
+        let needle = received.prefix(256)
+        guard needle.count == 256, let hit = headSpan.range(of: needle) else { return "" }
+        return " (the body is byte \(hit.lowerBound - headSpan.startIndex) of the source)"
+    }
+
+    /// AE#958: `count` bytes from `start` out of whatever still holds them whole (the window, the
+    /// retained head, the tail prefetch), or nil. Caller holds `winCond`.
+    private func heldBytesLocked(from start: Int64, count: Int) -> Data? {
+        guard count > 0, start >= 0 else { return nil }
+        let end = start + Int64(count)
+        if start >= winStart, end <= winStart + Int64(window.count) {
+            var bytes = Data(count: count)
+            bytes.withUnsafeMutableBytes { raw in
+                if let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) {
+                    window.copyBytes(to: base, from: Int(start - winStart), count: count)
+                }
+            }
+            return bytes
+        }
+        if end <= Int64(headSpan.count) {
+            let from = headSpan.startIndex + Int(start)
+            return headSpan.subdata(in: from..<(from + count))
+        }
+        if let kept = headSpanCheckTail, start >= kept.start, end <= kept.end {
+            let from = kept.data.startIndex + Int(start - kept.start)
+            return kept.data.subdata(in: from..<(from + count))
+        }
+        if let tail = tailSpan, start >= tail.start, end <= tail.end {
+            let from = tail.data.startIndex + Int(start - tail.start)
+            return tail.data.subdata(in: from..<(from + count))
+        }
+        return nil
+    }
+
     // MARK: - Persistent Connection (lifecycle + delegate callbacks)
 
     /// Open a fresh Range: bytes=<offset>- connection (live: always `bytes=0-`, see the
     /// request construction below). Bumps generation so late callbacks from the old
     /// connection are ignored.
-    private func startPersistentConnection(at offset: Int64, boundedTo: Int64? = nil, openEnded: Bool = false) {
+    private func startPersistentConnection(at target: Int64, boundedTo: Int64? = nil, openEnded: Bool = false) {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
         connHeaderRevision = requestHeaderStore?.revision ?? 0
+        // AE#958: ask a few KB early when those KB are already held, so the answer can be checked
+        // against them before any of it is kept. Live is exempt: its offsets are bookkeeping.
+        var offset = target
+        rangeProbe = nil
+        // Never down to byte 0: that is the one offset every origin answers truthfully, so it would
+        // check nothing and turn a forward request into a restart from the head.
+        if !isLive, target > Int64(Self.rangeCheckBytes), !rangeAnswersFabricated {
+            let n = Self.rangeCheckBytes
+            if let held = heldBytesLocked(from: target - Int64(n), count: n) {
+                offset = target - Int64(n)
+                rangeProbe = RangeHonestyProbe(generation: generation, start: offset, expected: held)
+            }
+        }
         // #220: VOD asks for a fixed amount at a time, and anything an origin delivers past it is
         // dropped at the append (audit DMX-1), so the window is bounded by the ask. Two
         // cases keep the open-ended form: live, where the material is produced in real time so
@@ -3696,11 +3768,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // The truncating case is the narrow race where the old connection appended past the
         // frontier the read loop computed before it unlocked; those bytes are re-delivered by the
         // new range, which is correct if slightly wasteful, and never leaves a hole.
-        if offset >= winStart, offset <= winStart + Int64(window.count) {
-            let keep = Int(offset - winStart)
+        // AE#958: on the TARGET, not on the request: the overlap a checked request re-reads is
+        // dropped once it matched, so the window is laid out as if the request had started there.
+        if target >= winStart, target <= winStart + Int64(window.count) {
+            let keep = Int(target - winStart)
             if keep < window.count { window.truncate(to: keep) }
         } else {
-            winStart = offset
+            winStart = target
             window.removeAll()
         }
         connRequestedOffset = offset
@@ -3711,7 +3785,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         postEndDeliveryBytes = 0
         postEndOvershootLogged = false
         let skippedConnStarts = connStartLogGate.admit(
-            continuesPrevious: connRangeEnd.map { offset == $0 + 1 } ?? false,
+            continuesPrevious: connRangeEnd.map { target == $0 + 1 } ?? false,
             now: TimeInterval(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000)
         connRangeEnd = resolvedBound.map { offset + $0 - 1 }
         connStatus = 0
@@ -3827,7 +3901,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // hundred milliseconds, so contiguous ranges are summarised (see ConnStartLogGate).
         guard let skippedConnStarts else { return }
         EngineLog.emit(
-            "[AVIOReader] \(label) conn start gen=\(generation) offset=\(offset)"
+            "[AVIOReader] \(label) conn start gen=\(generation) offset=\(target)"
+            + (offset < target ? " check=\(target - offset)B" : "")
             + (resolvedBound.map { " len=\($0 / 1024 / 1024)MB" } ?? " open-ended")
             + " reader=\(openDiagnosticID) slot_ms=\(Int(ticket?.waitedMs ?? 0))"
             + (heldConnectionEnabled ? " held" : "")
@@ -4058,12 +4133,45 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             settleTextNotice(held, generation: generation)
             return
         }
+        // AE#958: nothing of a checked generation is kept until its first bytes matched the held ones.
+        var incoming = delivered
+        if var probe = rangeProbe, probe.generation == generation {
+            switch probe.absorb(delivered) {
+            case .pending:
+                rangeProbe = probe
+                lastDeliveryAt = DispatchTime.now()
+                winCond.unlock()
+                return
+            case .honoured(let released):
+                rangeProbe = nil
+                incoming = released
+            case .fabricated(let received):
+                rangeProbe = nil
+                rangeAnswersFabricated = true
+                connEnded = true
+                let transfer = activeTransfer
+                activeTransfer = nil
+                let note = fabricatedBodyNoteLocked(received)
+                winCond.broadcast()
+                winCond.unlock()
+                transfer?.cancelTransfer()
+                transfer?.releaseOriginTicket()
+                FabricatedRangeOrigins.record(url)
+                EngineLog.emit(
+                    "[AVIOReader] \(label) gen=\(generation) the 206 for bytes=\(probe.start)- carries other "
+                    + "bytes than the \(probe.expected.count) B already held there\(note); this origin "
+                    + "fabricates ranges, only byte 0 is addressable. Failing reads; the host should "
+                    + "load it with LoadOptions.sequentialOrigin (AE#958)",
+                    category: .demux)
+                return
+            }
+        }
         // Audit DMX-1: the range is the bound only if bytes past its end are refused. A 200 that
         // ignored Range at offset 0, or a 206 wider than asked, otherwise kept appending under
         // `connEnded`, which also disarms the high-water end below, so the rest of the file
         // streamed into the window. The excess is dropped and the transfer ended; the frontier
         // refill asks for it properly.
-        var data = delivered
+        var data = incoming
         var overDelivered = false
         if let end = connRangeEnd {
             let room = end + 1 - (winStart + Int64(window.count))
@@ -4269,6 +4377,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 "[AVIOReader] \(label) the warm said \(adopted)B, this connection says \(total)B; "
                 + "dropping the prewarmed bytes (#551)", category: .demux)
             headSpan = Data()
+            headSpanCheckTail = nil
             tailSpan = nil
             fileSize = 0
             adoptedWarmSize = nil

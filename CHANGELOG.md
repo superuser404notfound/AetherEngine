@@ -10,6 +10,11 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`PlaybackErrorKind.sourceFabricatesRanges` (AE#958).** The origin answered a byte range with bytes from
+  somewhere else. See Fixed.
+
 ### Changed
 
 - **With the `DolbyVisionStillReshaping` trait, a Dolby Vision Profile 5 / 10.0 session scrubs through the
@@ -19,6 +24,16 @@ the public-API contract.
   changes: previews and the held picture still go through the system compositor.
 
 ### Fixed
+
+- **An origin that answers byte ranges with other bytes is caught instead of played (AE#958).** IPTV timeshift
+  archives answer every `Range: bytes=X-` with a `206` whose `Content-Range` names X while the body starts on the
+  origin's own chunk boundary. Undeclared, that played as audio that looped and drifted out of sync on the native
+  path, a PTS step of tens of seconds on the software path, or a source given up after a native scrub. A ranged
+  reconnect that starts inside bytes the reader already holds (the frontier refill, the return to the retained head)
+  now asks 4 KB early and holds delivery back until those 4 KB match; a mismatch latches the reader into failing
+  reads, the native producer skips its byte-offset revives, and every route reports
+  `sourceFabricatesRanges`, which asks the host to load the source with `sequentialOrigin`. An honest origin pays
+  4 KB per reconnect. `FabricatedRangeOriginTests` covers both origins, the probe and the classification.
 
 - **A source connection that trickles far below playback rate while a read waits is ended and replaced.** The
   delivery-gap watchdog judged only the time since the last delivery, so a drip defeated it: on an Apple TV playing a

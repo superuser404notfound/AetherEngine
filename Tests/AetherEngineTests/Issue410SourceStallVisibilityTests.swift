@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
+// AE#958: a refill at a held frontier asks `AVIOReader.rangeCheckBytes` early to check the origin,
+// so the origin below keys on the request the reader actually sends, `firstRange - rangeCheckBytes`.
+
 /// #410, the reader half. The phase axis a host reads for "is my source down" was cleared by two things
 /// that are not deliveries: the ladder's own exit (`.flowing` on the way out, so the reopen window read as
 /// a healthy source) and every serve out of memory (draining read-ahead while the origin refuses every
@@ -43,7 +46,7 @@ struct Issue410SourceStallVisibilityTests {
         let firstRange: Int64 = 8 * 1024 * 1024
         let serverMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
-            respond: { _, offset, _ in offset < firstRange ? .serve206 : .status(500) }
+            respond: { _, offset, _ in offset < (firstRange - Int64(AVIOReader.rangeCheckBytes)) ? .serve206 : .status(500) }
         )
         let server = try #require(serverMaybe)
         defer { server.stop() }
@@ -84,7 +87,7 @@ struct Issue410SourceStallVisibilityTests {
         let serverMaybe = ThrottledOriginServer(
             totalSize: 8 * 1024 * 1024,
             respond: { _, offset, _ in
-                guard offset >= firstRange else { return .serve206 }
+                guard offset >= (firstRange - Int64(AVIOReader.rangeCheckBytes)) else { return .serve206 }
                 return refusals.bumpAndGet() <= 1 ? .status(500) : .serve206
             }
         )

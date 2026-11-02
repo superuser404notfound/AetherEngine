@@ -815,7 +815,10 @@ public struct LoadOptions: Sendable, Equatable {
     /// chunk boundary rather than byte X (IPTV timeshift/catch-up archives are the motivating
     /// case; a device trace showed ~1.9 s of content lost at every 32 MB range rotation, heard
     /// as a once-a-minute audio desync). Headers cannot expose the lie, so this is a caller
-    /// declaration, not a probe. Only byte 0 is addressable: the reader runs its forward-only
+    /// declaration. Undeclared, the bytes expose it: the first ranged reconnect that starts inside
+    /// bytes the reader holds re-reads 4 KB of them, and a mismatch fails the session as
+    /// `PlaybackErrorKind.sourceFabricatesRanges`, which asks for a load with this set (AE#958).
+    /// Only byte 0 is addressable: the reader runs its forward-only
     /// streaming mode on one long-lived unranged GET - no bounded-range windowing, no
     /// suffix/tail probes, no detour fills, no byte-offset reconnects - and the demuxer's pb is
     /// non-seekable, so byte seeking is unavailable and a dropped connection surfaces as a read

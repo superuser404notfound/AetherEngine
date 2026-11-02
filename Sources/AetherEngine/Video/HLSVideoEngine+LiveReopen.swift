@@ -514,6 +514,17 @@ extension HLSVideoEngine {
             handleCredentialRefusedReadError(code, refusal: refusal, deadProducer: deadProducer)
             return
         }
+        // AE#958: a revive reopens and re-seeks by byte offset, which is exactly what this origin
+        // answers with other bytes. Nothing to retry.
+        if FabricatedRangeOrigins.caughtRecently(sourceURL, within: Self.rateLimitVerdictWindowSeconds) {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#958 VOD read failed on an origin caught fabricating a range; "
+                + "no revive, the session needs a sequential-origin load",
+                category: .session)
+            surfaceVODSourceFailure(code, "Source origin answers byte ranges with other bytes",
+                                    kind: .sourceFabricatesRanges)
+            return
+        }
         let metered = OriginRequestBudget.shared.refusedRecently(
             sourceURL, within: Self.rateLimitVerdictWindowSeconds)
 

@@ -176,7 +176,8 @@ struct RangeIgnoringOriginTests {
         }
         #expect(read >= 36 * Int64(mb))
         #expect(server.rangeHeaderPresence.allSatisfy { $0 }, "a ranged source asked for an unranged GET")
-        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) },
+        // AE#958: the refill re-reads the held bytes before the boundary to check the origin.
+        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) - Int64(AVIOReader.rangeCheckBytes) },
                 "the refill at the 32 MB boundary never asked for its range")
         #expect(!server.requestLog.contains { $0.start == 1 && $0.end == 1 },
                 "an honoured range needs no confirmation")
@@ -211,7 +212,8 @@ struct RangeIgnoringOriginTests {
             read += Int64(n)
         }
         #expect(read >= 36 * Int64(mb))
-        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) },
+        // AE#958: the refill re-reads the held bytes before the boundary to check the origin.
+        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) - Int64(AVIOReader.rangeCheckBytes) },
                 "the refill at the 32 MB boundary never asked for its range")
         #expect(!server.requestLog.contains { $0.start == 1 && $0.end == 1 },
                 "an honoured range needs no confirmation")
