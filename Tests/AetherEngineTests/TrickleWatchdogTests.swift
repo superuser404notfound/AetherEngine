@@ -274,10 +274,13 @@ struct TrickleWatchdogTests {
         try await waitFor { reader.trickleEndCountForTesting > 0 || progress.done }
         try #require(reader.trickleEndCountForTesting > 0, "the read finished without a trickle end")
         let detectedAfter = Date().timeIntervalSince(dripStartedAt)
-        // Nominally two thresholds (one starved period, then the next tick); the slack is for a loaded
-        // runner delaying the watchdog's ticks. What it rules out is a drip that is never judged.
-        #expect(detectedAfter < 5 * stallTimeout,
-                "the trickle was ended \(detectedAfter)s after it started, over 5x the \(stallTimeout)s threshold")
+        // Nominally two thresholds (one starved period, then the next tick). The bound is what the
+        // drip would need to finish the read on its own, halved: a multiple of the threshold was
+        // a wall-clock budget, and a runner that froze every test for a second spent it (10.97 s
+        // against 10, 2026-11-02). A stall freezes the origin's drip too, so this one cannot be spent.
+        let dripAlone = Double(target - Int(dripOffset)) / (1024 / 0.05)
+        #expect(detectedAfter < dripAlone / 2,
+                "the trickle was ended \(detectedAfter)s after it started, the drip alone needs \(dripAlone)s")
 
         // The replacement is asked for where the drip left off and served at full rate.
         try await waitFor { progress.done }

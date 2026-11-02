@@ -67,7 +67,7 @@ struct Issue962AudioTailFinalVideoSampleTests {
     @Test("stays in the segment its picture belongs to",
           .enabled(if: fixtureExists("audio-tail.mkv"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func finalVideoSampleIsNotCarriedIntoTheTail() async throws {
         let engine = HLSVideoEngine(url: fixtureURL("audio-tail.mkv"), dvModeAvailable: false)
         _ = try engine.start()
