@@ -282,6 +282,11 @@ Non-DV HEVC derives its primary `CODECS` string from the source `hvcC` profile_t
 
 Whatever the profile, the `hvcC` shipped in `init.mp4` must carry the parameter sets out of band. Sources authored with in-band VPS/SPS/PPS only (`hev1`, `numOfArrays = 0`, what `MP4Box ...:xps_inband` and the common Dolby Vision MP4 recipes produce) are normalized at load by scanning the head of the stream for the parameter sets and rebuilding the record; a record that arrives with extra non-parameter-set arrays (libx265's user-data SEI) is stripped down to VPS/SPS/PPS instead. Shipping the source record verbatim in either case leaves AVPlayer with no usable format description: it buffers the whole forward window and never renders a frame. H.264 gets the same rebuild (#938): an `avcC` with zero SPS or zero PPS (mkvmerge writes the 7-byte `01 64 00 20 ff e0 00` for such a track) is rebuilt from the first in-band SPS and PPS, by movenc so the High-profile extension comes out right, with the source's NAL length size kept. Shipped verbatim it fails differently from HEVC and more quietly: the item reaches `readyToPlay`, the clock runs and audio plays, and no frame is ever ready for display.
 
+A chain can also walk exactly while a unit contains only one byte of HEVC's two-byte header
+(for example a truncated EOS). In confirmed length-prefixed HEVC samples the muxer removes those
+units, retaining valid pictures and any following Dolby Vision RPU. Shared packets are made writable
+before compaction; a sample with no complete header left is not written (#960).
+
 ### Dolby Vision signaling
 
 For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationRecord`, and the route depends on the profile's base-layer compatibility:

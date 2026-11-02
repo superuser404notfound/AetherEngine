@@ -204,9 +204,9 @@ final class MP4SegmentMuxer {
     /// length-prefixed at all. Latched at init: it is a property of the configuration record that
     /// lands in the sample entry, and the AE#561 sanitizer walks every video sample with it.
     private let videoNALLengthPrefixSize: Int?
-    /// Latched from `VideoConfig.convertsAnnexBSamples`.
     private let isHEVCVideo: Bool
     private var shortHEVCHeadersRemoved = 0
+    /// Latched from `VideoConfig.convertsAnnexBSamples`.
     private let convertsAnnexBVideoSamples: Bool
     /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
     /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
