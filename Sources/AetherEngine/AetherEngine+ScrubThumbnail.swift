@@ -46,8 +46,13 @@ extension AetherEngine {
         let source = await BlockingWork.detached(priority: .utility) { [session] in
             session.scrubThumbnailSource(atSeconds: output)
         }.value
-        guard let source, let carried = source.carriedOffset,
-              gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
+        guard gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
+        guard let source else {
+            guard !live else { return nil }
+            return await ladderPreviewFrame(session: session, outputSeconds: output, planOrigin: planOrigin,
+                                            maxWidth: maxWidth, generation: gen, isCancelled: isCancelled)
+        }
+        guard let carried = source.carriedOffset else { return nil }
         let extractor: FrameExtractor
         if let index = scrubThumbnailExtractors.firstIndex(where: { $0.segmentIndex == source.segmentIndex }) {
             let hit = scrubThumbnailExtractors.remove(at: index)
@@ -79,6 +84,51 @@ extension AetherEngine {
         let rangeStart = live ? source.startSeconds + liveShift : source.startSeconds + planOrigin
         return ScrubFrame(image: frame.image, actualSeconds: actual, refined: frame.refined,
                          validRange: rangeStart..<(rangeStart + source.durationSeconds))
+    }
+
+    /// The answer for a VOD position nothing resident covers: the nearest keyframe the still ladder
+    /// read while the link was idle (`KeyframeStillLadder`). Its `actualSeconds` and `validRange` name
+    /// the rung's own segment, so a host can tell it from a frame at the target. Never reads the source.
+    private func ladderPreviewFrame(session: HLSVideoEngine, outputSeconds: Double, planOrigin: Double,
+                                    maxWidth: Int, generation gen: UInt64,
+                                    isCancelled: @escaping @Sendable () -> Bool) async -> ScrubFrame? {
+        let rung = await BlockingWork.detached(priority: .utility) { [session] in
+            session.stillLadderFrame(atSeconds: outputSeconds)
+        }.value
+        guard let rung, gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
+        let key = Self.ladderStillKey(segmentIndex: rung.segmentIndex)
+        let extractor: FrameExtractor
+        if let index = scrubThumbnailExtractors.firstIndex(where: { $0.segmentIndex == key }) {
+            let hit = scrubThumbnailExtractors.remove(at: index)
+            scrubThumbnailExtractors.append(hit)
+            extractor = hit.extractor
+        } else {
+            extractor = FrameExtractor(residentReader: rung.makeReader(), formatHint: "mp4",
+                                       identity: "ladder:\(rung.segmentIndex)")
+            scrubThumbnailExtractors.append((key, extractor))
+            trimScrubThumbnailExtractors()
+        }
+        guard let frame = await extractor.residentPreview(rawTarget: 0, refined: false, maxWidth: maxWidth,
+                                                          isCancelled: isCancelled),
+              gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
+        let start = rung.startSeconds + planOrigin
+        return ScrubFrame(image: frame.image, actualSeconds: start, refined: false,
+                          validRange: start..<(start + rung.durationSeconds))
+    }
+
+    /// Ladder stills share the extractor LRU with resident segments under keys no segment carries
+    /// (below `localSoftwareStillKey`).
+    nonisolated static func ladderStillKey(segmentIndex: Int) -> Int { -2 - segmentIndex }
+
+    /// Engine half of the ladder's 1 Hz tick: the session decides, this hands it the playhead and
+    /// the contiguous buffer ahead of it. Skipped while a seek is pending, when both point at a
+    /// position the picture has not reached.
+    func tickKeyframeStillLadder() {
+        guard !isLive, pendingRecoverySeekClockTarget == nil,
+              let session = nativeVideoSession, let host = nativeHost else { return }
+        let playhead = host.renderedTime
+        let ahead = session.contiguousForwardReadAheadSeconds(playlistSeconds: playhead)
+        session.stillLadderTick(playheadPlaylistSeconds: playhead, forwardBufferSeconds: ahead)
     }
 
     /// Cache-backed scrub still for the active native session (live or VOD). Decodes from

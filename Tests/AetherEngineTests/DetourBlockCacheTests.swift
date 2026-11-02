@@ -256,7 +256,7 @@ struct DetourBlockCacheTests {
 
 /// AE#909, through the reader: a demuxer reading twelve regions behind the streaming window, the way a
 /// flat MP4 with one region per subtitle track is read during playback. Contributed by @oxyc in #911.
-@Suite("Detour cache grows to the reader's working set")
+@Suite("Detour cache grows to the reader's working set", .offCooperativePool)
 struct DetourCacheWorkingSetReaderTests {
 
     private static let chunk = 256 * 1024

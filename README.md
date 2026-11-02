@@ -52,6 +52,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 - [GiVo Stream](https://givostreamapp.com): media player for iPhone, iPad and Apple TV with bring-your-own playlists, live timeshift, DVR and VOD.
 - [LillyPlayer](https://lillyplayer.com): The all-in-one IPTV and media player for Apple TV, iPhone and iPad (live TV, EPG, replay, Jellyfin, Plex, SMB...).
 - [Plozz](https://plozz.app): Free forever open source native app for iPhone, iPad, and Apple TV. Supports Jellyfin, Plex, Emby, Silo, IPTV, SMB, WebDAV and more.
+- [Crivid IPTV Player](https://apps.apple.com/app/id6783083716): IPTV player for M3U and Xtream on Apple TV.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
@@ -69,7 +70,8 @@ A scannable summary; the depth for each row lives in **[docs/formats.md](docs/fo
 | Video (SW) | AV1 (dav1d) without HW, and AV1 High / Professional (4:4:4, 4:2:2, 12-bit) everywhere, VP9 (VideoToolbox hardware when supported, otherwise libavcodec) / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, QuickTime RLE, the Flash tail (Sorenson Spark, On2 VP6), RealVideo 1-4, H.263, Theora and anything else the FFmpeg build carries a decoder for (software is the default route; only HEVC, H.264 and HW-decodable AV1 go native), H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext where VideoToolbox has no HW decoder (Intel Macs, older chips), interlaced H.264 (AVPlayer does not deinterlace; on VOD the declared field order is verified against decoded frames, so progressive-in-interlaced-carriage keeps hardware decode); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
 | HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 on the native route as single-layer 8.1 (HDR10 base layer on a display without Dolby Vision), or composed dual-layer on Metal with per-frame DV metadata for FEL when `preferDualLayerDolbyVision` is set, the `DualLayerDolbyVision` trait is on and VideoToolbox decodes HEVC in hardware, P8.1, P8.4, AV1 P10.x), HLG (declared, or named by an alternative transfer SEI as broadcast HLG is), HDR Vivid (played on its HLG / PQ base, CUVA metadata reported by `probe`) |
 | Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / LPCM (incl. Blu-ray, G.711) / WMA (Standard, Pro, Lossless, Voice) / Nellymoser / ADPCM-SWF / Speex / RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8) / AMR-NB / AMR-WB / DVD LPCM bridge to EAC3 5.1 (default) or lossless FLAC |
-| Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) except the opt-in Profile 7 FEL dual-layer route (`preferDualLayerDolbyVision`, `DualLayerDolbyVision` trait), which runs on the software host and plays an E-AC-3 JOC track as its 5.1 / 7.1 bed without the objects unless `LoadOptions.objectAudioRendering` is set (then the objects are kept: compressed JOC to the renderer, TrueHD Atmos and DTS:X as APAC, in a build with the object-audio traits). No container reliably declares JOC pre-decode, so an honest `TrackInfo.isAtmos` needs a bounded decode: `AetherEngine.probeDetectingAtmos(url:/source:)` answers for a details screen without starting playback, and `LoadOptions.confirmAtmos` has the running session confirm its own tracks in the background and republish `audioTracks`. Both are opt-in and neither sits on the playback-start path. TrueHD Atmos keeps its heights too, opt-in through `LoadOptions.objectAudioRendering` in a build with the `TrueHDObjectAudio` trait ([Optional components](#optional-components)): the engine decodes the Atmos objects, renders them into a speaker bed and delivers Apple Positional Audio, which tvOS sends to an Atmos receiver as Dolby MAT and iOS plays as Spatial Audio ([details](docs/formats.md#truehd-atmos-with-heights)). DTS:X takes the same route with the `DTSXObjectAudio` trait, its four heights unfolded from the compatible 7.1 into 7.1.4 or 9.1.6 ([details](docs/formats.md#dtsx-with-heights)) |
+| Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) except the opt-in Profile 7 FEL dual-layer route (`preferDualLayerDolbyVision`, `DualLayerDolbyVision` trait), which runs on the software host and plays an E-AC-3 JOC track as its 5.1 / 7.1 bed without the objects unless `LoadOptions.objectAudioRendering` is set (then the objects are kept: compressed JOC to the renderer, TrueHD and DTS:X object audio as a rendered bed, in a build with the object-audio traits). No container reliably declares JOC pre-decode, so an honest `TrackInfo.isAtmos` needs a bounded decode: `AetherEngine.probeDetectingAtmos(url:/source:)` answers for a details screen without starting playback, and `LoadOptions.confirmAtmos` has the running session confirm its own tracks in the background and republish `audioTracks`. Both are opt-in and neither sits on the playback-start path. TrueHD Atmos keeps its heights too, opt-in through `LoadOptions.objectAudioRendering` in a build with the `TrueHDObjectAudio` trait ([Optional components](#optional-components)): the engine decodes the Atmos objects, renders them into a speaker bed and delivers Apple Positional Audio, which tvOS sends to an Atmos receiver as Dolby MAT and iOS plays as Spatial Audio ([details](docs/formats.md#truehd-atmos-with-heights)). DTS:X takes the same route with the `DTSXObjectAudio` trait, its four heights unfolded from the compatible 7.1 into 7.1.4 or 9.1.6 ([details](docs/formats.md#dtsx-with-heights)) |
+| Height channels | TrueHD and DTS:X object audio rendered into a speaker bed (5.1.2 up to 9.1.6) and delivered as lossless 24-bit PCM, or APAC when the route plays over AirPlay (`objectAudioRendering`, optional components) |
 | Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
 | Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
 | Background audio | Audio keeps playing when the app backgrounds on iOS: native AVPlayer stays alive, the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`); a paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs. tvOS tears down immediately (wedge-safe) unless a PiP window is active, which keeps the pipeline and loopback server alive; with PiP the software path keeps decoding video too (the window needs frames). Hosts gate corrective actions on the published `isSessionReady` |
@@ -96,7 +98,8 @@ On Apple platforms the real choice is between AVPlayer, with deep OS integration
 | **Container & codec breadth** | Wide, FFmpeg demux | Wide, FFmpeg demux | Narrow, Apple's set | Wide | Wide |
 | **Hardware decode** | VideoToolbox, dav1d SW fallback | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
 | **Dolby Vision** | P5, P7 as 8.1 (or opt-in FEL dual-layer), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
-| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial); TrueHD Atmos and DTS:X rendered to APAC, heights kept (optional components) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
+| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
+| **TrueHD / DTS:X heights** | Objects and height channels rendered into a speaker bed (up to 9.1.6), delivered as lossless 24-bit PCM, APAC on AirPlay (optional components) | 7.1 core (FFmpeg decode) | Not played | 7.1 core | 7.1 core |
 | **HDR on tvOS** | Native Match Content switch | Native Match Content on AVPlayer path, else Metal tone-map | Native Match Content | Software tone-mapping | Software tone-mapping |
 | **Rendering & UI** | OS-native, you ship SwiftUI | Own Metal renderer, bundled controls | OS-native, you ship UI | Own renderer, bundled controls | Own renderer, bundled OSC |
 | **Apple TV / App Store** | Yes, LGPL plus store exception | Free build GPL, paid LGPL tier for AV1 hardware decode and the full decoder set | Yes | Yes, LGPL | Not practical, GPL, no tvOS |
@@ -388,7 +391,7 @@ Subtitle cues land in raw source PTS; render the overlay against `player.sourceT
 Install via Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.49.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.54.0")
 ```
 
 Three samples ship in `Examples/`:
@@ -641,10 +644,10 @@ Browse all of this as a searchable site at **[aetherengine.superuser404.de](http
 AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.49.0")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.54.0")
 ```
 
-Pin to `.upToNextMinor(from: "7.49.0")` for stricter teams that prefer to opt into minor bumps explicitly.
+Pin to `.upToNextMinor(from: "7.54.0")` for stricter teams that prefer to opt into minor bumps explicitly.
 
 ## Requirements
 
@@ -658,8 +661,12 @@ Pin to `.upToNextMinor(from: "7.49.0")` for stricter teams that prefer to opt in
 | Xcode | 27.0 |
 
 The Swift and Xcode rows are the supported toolchain CI builds and tests with (GitHub's
-`xcode-27` image). Older toolchains are not tested or supported; the deployment floor above
-stays iOS / tvOS 18 and macOS 15, with newer calls behind `#available`.
+`xcode-27` image): every change runs the tests on macOS and builds the test target for the iOS and
+tvOS Simulator, and a nightly job (`ci-extended.yml`, also run before each release) builds Release,
+visionOS and the device SDKs with every optional component. Older toolchains are not supported; the deployment floor above
+stays iOS / tvOS 18 and macOS 15, with newer calls behind `#available`. A weekly best-effort job
+(`xcode26-compat.yml`, also run before each release) builds the package for tvOS and iOS with
+Xcode 26.3 (Swift 6.2), so a break there is known before a release ships, but it does not block one.
 
 Supplemental AV1/VP9 registration also has a narrow compile-time guard around
 `VTRegisterSupplementalVideoDecoderIfAvailable`, first declared by the mobile SDKs in Xcode 26.2.
@@ -668,6 +675,8 @@ stock Xcode 26.0/26.1 while leaving hardware queries and software fallback intac
 establish that the rest of the package builds there or lower the supported toolchain above.
 A separately installed newer Swift toolchain paired with an older SDK is not covered by this
 proxy. The existing macOS registration path is unchanged.
+
+**Privacy manifest.** The engine ships a `PrivacyInfo.xcprivacy` in its resource bundle for the required-reason APIs it calls (#920): system boot time (35F9.1, `systemUptime` for elapsed time), disk space (E174.1, checked before packets spool to disk) and file timestamp (C617.1 for its own temp and cache files, 3B52.1 for local media the host opens). The FFmpeg frameworks carry their own from FFmpegBuild 3.10.2 on. Neither tracks or collects anything, so an app embedding the engine has nothing of the engine's to add to its own manifest.
 
 The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
 
@@ -689,7 +698,7 @@ These components may be subject to third-party patent licensing. Integrators who
 To enable them, list the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.49.0",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.54.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
 ```
 

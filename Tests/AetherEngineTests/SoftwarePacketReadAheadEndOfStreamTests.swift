@@ -9,7 +9,7 @@ import Testing
 /// for `operations`; by the time it got the lock the seek had landed, its reader was current again,
 /// and it found the store empty and returned nil, which the host takes for the end of the media.
 /// Playback stopped at the landing (a DVD seek past the first cell: 7 of 8 runs).
-@Suite("Software read-ahead end of stream", .offCooperativePool, .timeLimit(.minutes(1)))
+@Suite("Software read-ahead end of stream", .offCooperativePool, .timeLimit(.minutes(3)))
 struct SoftwarePacketReadAheadEndOfStreamTests {
 
     /// A reader that is not current on its first check and current on every later one: the

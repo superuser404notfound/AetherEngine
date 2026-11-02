@@ -120,10 +120,10 @@ struct DVDCellTimelineTests {
     func cellTimeline() throws {
         let ifo = Self.vtsIFO(pgcs: [Self.pgc(Self.threeCells)], timeMaps: [(unit: 4, sectors: [10, 20, 30])])
         let (spans, map) = DiscReader.dvdCellTimeline(ifo)
-        #expect(spans.map(\.concatByteStart) == [0, 1000 * 2048, 3000 * 2048])
-        #expect(spans.map(\.cumulativeBeforeSec) == [0, 600, 1800])
-        #expect(spans.map(\.predictedShiftSec) == [0, -600, -1800])
-        #expect(map == DVDTimeMap(unitSec: 4, titleStartByte: 0, byteOffsets: [10 * 2048, 20 * 2048, 30 * 2048]))
+        #expect(spans.map(\.concatByteStart) == [0, 1000 * 2048, 3000 * 2048] as [Int64])
+        #expect(spans.map(\.cumulativeBeforeSec) == [0, 600, 1800] as [Double])
+        #expect(spans.map(\.predictedShiftSec) == [0, -600, -1800] as [Double])
+        #expect(map == DVDTimeMap(unitSec: 4, titleStartByte: 0, byteOffsets: [10 * 2048, 20 * 2048, 30 * 2048] as [Int64]))
     }
 
     @Test("a title outside the common shape is left as it was read", arguments: [

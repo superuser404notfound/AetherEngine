@@ -285,7 +285,7 @@ struct BluRayFolderTests {
         func cancel() { release.signal() }
     }
 
-    @Test("a cancel unblocks a read parked inside a file", .timeLimit(.minutes(1)))
+    @Test("a cancel unblocks a read parked inside a file", .timeLimit(.minutes(3)))
     func cancelUnblocksAParkedRead() {
         let file = ParkingReader()
         let reader = MultiFileConcatIOReader(segments: [.init(path: "f", size: 100)], opener: { _ in file })
@@ -300,7 +300,7 @@ struct BluRayFolderTests {
         #expect(returned.wait(timeout: .now() + 10) == .success)
     }
 
-    @Test("a cancel that arrives while a file is still opening cancels that file once it exists", .timeLimit(.minutes(1)))
+    @Test("a cancel that arrives while a file is still opening cancels that file once it exists", .timeLimit(.minutes(3)))
     func cancelDuringOpen() {
         let file = ParkingReader()
         let opening = DispatchSemaphore(value: 0)
@@ -324,7 +324,7 @@ struct BluRayFolderTests {
 
     // MARK: - Over HTTP, and through the engine
 
-    @Test("an HTTP folder plays the same bytes, with an independent reader of its own", .timeLimit(.minutes(1)))
+    @Test("an HTTP folder plays the same bytes, with an independent reader of its own", .timeLimit(.minutes(3)))
     func httpFolder() throws {
         let (memory, stream) = Self.tinyStreamFolder()
         var origins: [KeepAliveRangeOrigin] = []

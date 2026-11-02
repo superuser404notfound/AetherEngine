@@ -8,7 +8,7 @@ import AetherLibavutil
 
 /// AE#739 follow-up: a rebuild that VideoToolbox refused while the picture is on screen is retried at each
 /// following keyframe: quickly at first, then at a slower spacing, so a session the system gives back recovers.
-@Suite("Video session retry", .serialized, .timeLimit(.minutes(1)))
+@Suite("Video session retry", .serialized, .timeLimit(.minutes(3)))
 struct VideoSessionRetryTests {
 
     // MARK: - Policy

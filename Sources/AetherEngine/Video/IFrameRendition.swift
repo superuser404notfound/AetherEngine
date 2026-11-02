@@ -101,6 +101,12 @@ final class IFrameRendition: IFrameSegmentSource, @unchecked Sendable {
         }
     }
 
+    /// A keyframe already read, without the queue: a scrub must not wait behind a read in flight.
+    func cachedKeyframePayload(at index: Int) -> Data? {
+        guard !shutDown, entries.indices.contains(index) else { return nil }
+        return cache.payload(for: index)
+    }
+
     /// Reads and caches one keyframe. nil when the origin has no room for it, teardown interrupted
     /// it, or the read failed.
     private func readLocked(at index: Int) -> Data? {

@@ -183,7 +183,7 @@ struct AtmosDetectionOptionsTests {
         TrackInfo(
             id: id, name: name, codec: "eac3", language: "eng", channels: 6, bitrate: 768_000,
             isDefault: true, isForced: false, isHearingImpaired: false, isCommentary: false,
-            isAtmos: isAtmos, assHeader: assHeader, isExternal: false
+            isVisualImpaired: true, isAtmos: isAtmos, assHeader: assHeader, isExternal: false
         )
     }
 
@@ -256,6 +256,7 @@ struct AtmosDetectionOptionsTests {
         #expect(after.isForced == before.isForced)
         #expect(after.isHearingImpaired == before.isHearingImpaired)
         #expect(after.isCommentary == before.isCommentary)
+        #expect(after.isVisualImpaired == before.isVisualImpaired)
         #expect(after.assHeader == before.assHeader)
         #expect(after.isExternal == before.isExternal)
     }

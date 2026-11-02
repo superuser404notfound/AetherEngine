@@ -15,6 +15,20 @@ struct ExternalSubtitleTrackTests {
         #expect(ExternalSubtitleTrack.codecName(url: URL(string: "https://s/x.vtt")!, formatHint: nil) == "webvtt")
     }
 
+    @Test("#921: a .sup sidecar is a PGS bitmap track, not subrip")
+    func supIsPGS() {
+        let sup = ExternalSubtitleTrack(url: URL(string: "https://s/Subtitles/3/0/Stream.sup")!)
+        #expect(ExternalSubtitleTrack.codecName(url: sup.url, formatHint: nil) == "pgssub")
+        #expect(ExternalSubtitleTrack.codecName(url: URL(string: "https://s/x?f=1")!, formatHint: "SUP") == "pgssub")
+        #expect(AetherEngine.isBitmapSubtitleCodec(sup.makeTrackInfo(id: 100_000, fallbackNumber: 1).codec))
+        #expect(!sup.isTextFormat)
+        // Load-declared, it joins the OCR entries instead of the text renditions.
+        let info = sup.makeTrackInfo(id: 100_000, fallbackNumber: 1)
+        let entries = AetherEngine.bitmapOCRSubtitleEntries(from: [info], isLive: false)
+        #expect(entries.count == 1)
+        #expect(entries.first?.externalID == 100_000)
+    }
+
     @Test("formatHint beats the extension; unknown falls back to subrip")
     func codecFromHint() {
         #expect(ExternalSubtitleTrack.codecName(url: URL(string: "https://s/x?format=json")!, formatHint: "ass") == "ass")

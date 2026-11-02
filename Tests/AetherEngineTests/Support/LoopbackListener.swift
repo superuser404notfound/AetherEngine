@@ -21,27 +21,9 @@ final class LoopbackListener: @unchecked Sendable {
     private var closed = false
 
     init?(backlog: Int32 = 32) {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        var one: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = 0
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        guard let (fd, port) = LoopbackPort.listen(backlog: backlog) else { return nil }
         var wake: [Int32] = [-1, -1]
-        guard bound == 0, listen(fd, backlog) == 0,
-              withUnsafeMutablePointer(to: &address, {
-                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
-              }) == 0,
-              pipe(&wake) == 0,
-              fcntl(wake[1], F_SETFL, O_NONBLOCK) == 0 else {
+        guard pipe(&wake) == 0, fcntl(wake[1], F_SETFL, O_NONBLOCK) == 0 else {
             close(fd)
             for pipeFD in wake where pipeFD >= 0 { close(pipeFD) }
             return nil
@@ -49,7 +31,7 @@ final class LoopbackListener: @unchecked Sendable {
         listenFD = fd
         wakeRead = wake[0]
         wakeWrite = wake[1]
-        port = UInt16(bigEndian: address.sin_port)
+        self.port = port
     }
 
     /// Runs the accept loop on its own thread. `onAccept` gets every accepted descriptor, already set
@@ -105,5 +87,60 @@ final class LoopbackListener: @unchecked Sendable {
             }
             if !onAccept(fd) { return }
         }
+    }
+}
+
+/// The ports this process has handed to a test origin, so none is handed out twice.
+///
+/// The engine keeps per-origin state for the life of the process (`OriginRequestBudget`,
+/// `SuffixRangeSupport`), keyed by scheme, host and port, and every suite runs in one process. The kernel recycles a freed ephemeral port, so a suite that got an origin throttled
+/// with 429s could hand its learned budget to a later suite's origin on the same number. That suite
+/// then saw its speculative requests skipped for no reason it could see: the #378 suite waited 120 s
+/// for a tail prefetch the inherited budget had declined to send.
+enum LoopbackPort {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var issued: Set<UInt16> = []
+
+    /// Records `port` as taken. False when an earlier origin in this process already had it.
+    static func claim(_ port: UInt16) -> Bool {
+        lock.withLock { issued.insert(port).inserted }
+    }
+
+    /// A listening 127.0.0.1 socket on a port no earlier test origin in this process had. A recycled
+    /// port is held open while the next one is drawn, so the kernel cannot offer it again.
+    static func listen(backlog: Int32) -> (fd: Int32, port: UInt16)? {
+        var recycled: [Int32] = []
+        defer { for fd in recycled { close(fd) } }
+        for _ in 0..<64 {
+            guard let (fd, port) = bindEphemeral(backlog: backlog) else { return nil }
+            if claim(port) { return (fd, port) }
+            recycled.append(fd)
+        }
+        return nil
+    }
+
+    private static func bindEphemeral(backlog: Int32) -> (fd: Int32, port: UInt16)? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        guard bound == 0, Darwin.listen(fd, backlog) == 0,
+              withUnsafeMutablePointer(to: &address, {
+                  $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+              }) == 0 else {
+            close(fd)
+            return nil
+        }
+        return (fd, UInt16(bigEndian: address.sin_port))
     }
 }

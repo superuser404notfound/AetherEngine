@@ -11,15 +11,17 @@ import AetherLibavcodec
 /// - E-AC-3 JOC is stream-copied there. Here the compressed packets go to the audio renderer, which
 ///   decodes Atmos once the process has registered the system's Atmos decoder
 ///   (`AtmosDecoderPrimer`).
-/// - TrueHD Atmos and DTS:X are rendered into a speaker bed and encoded as APAC, as for
-///   `ObjectAudioRendering.apac`, and the APAC packets go to the renderer.
+/// - TrueHD Atmos and DTS:X are rendered into a speaker bed, as on the AVPlayer path, and the bed goes
+///   to the renderer as APAC packets or as PCM in the bed's layout (`SpatialBedFormat`).
 ///
-/// The host opts in with `ObjectAudioRendering.apac`, the engine's one setting for object-audio
-/// delivery; `.off` keeps the PCM decode on every codec.
+/// The host opts in with `ObjectAudioRendering`, the engine's one setting for object-audio delivery;
+/// `.off` keeps the PCM decode on every codec.
 enum SoftwareAtmosRoute: Equatable, Sendable {
     case pcm
     case compressedEAC3JOC
     case apac(SpatialSpeakerLayout)
+    /// The rendered bed as PCM in its own layout, as opposed to `.pcm`, the source's decode.
+    case pcmBed(SpatialSpeakerLayout)
 
     /// The route for a track. `confirmedJOC` is whether the first E-AC-3 packets carry the JOC flag
     /// (a container does not declare it reliably, so the host reads it off the stream).
@@ -35,7 +37,8 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         isLive: Bool,
         rendering: ObjectAudioRendering,
         confirmedJOC: Bool,
-        osSupportsAPAC: Bool = ObjectAudioRendering.isAvailable
+        osSupportsAPAC: Bool = ObjectAudioRendering.isAvailable,
+        routeFormat: @autoclosure () -> SpatialBedFormat = SpatialBedFormat.forCurrentRoute()
     ) -> SoftwareAtmosRoute {
         guard let layout = rendering.layout, !isLive else { return .pcm }
         if codecID == AV_CODEC_ID_EAC3 {
@@ -49,7 +52,7 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
               HLSVideoEngine.spatialRenderingLayout(
                 rendering: .apac(layout), codecID: codecID, profile: profile, sampleRate: sampleRate) != nil
         else { return .pcm }
-        return .apac(layout)
+        return rendering.bedFormat(routeFormat: routeFormat()) == .lpcm ? .pcmBed(layout) : .apac(layout)
     }
 
     /// Why `route` kept a TrueHD or DTS track on the PCM decode although object rendering was asked
@@ -82,13 +85,13 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
     }
 
     /// Whether the renderer receives Dolby Atmos on this route, so `AtmosOutputActivator` may bring the
-    /// receiver to Dolby Atmos: compressed E-AC-3 JOC and TrueHD Atmos rendered to APAC are, DTS:X
-    /// rendered to APAC is not.
+    /// receiver to Dolby Atmos: compressed E-AC-3 JOC and TrueHD Atmos rendered into a bed are, DTS:X
+    /// rendered into a bed is not.
     func carriesDolbyAtmos(sourceCodec: AVCodecID) -> Bool {
         switch self {
         case .pcm: return false
         case .compressedEAC3JOC: return true
-        case .apac: return sourceCodec == AV_CODEC_ID_TRUEHD
+        case .apac, .pcmBed: return sourceCodec == AV_CODEC_ID_TRUEHD
         }
     }
 

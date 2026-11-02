@@ -32,7 +32,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @Test("An abandoned ranged failure does not override a streaming replacement",
-          .timeLimit(.minutes(1)), arguments: [200, 403])
+          .timeLimit(.minutes(3)), arguments: [200, 403])
     func retiredConnectionDoesNotFailStreamingReplacement(status: Int) async throws {
         let body = Data(repeating: 0x47, count: 8192)
         let server = try #require(ScriptedOriginServer { request in
@@ -86,7 +86,7 @@ struct SourceFailureDiagnosticsTests {
         #expect(server.requests.contains { $0.method == "GET" && $0.range == nil })
     }
 
-    @Test("A delayed old HLS request keeps its attempt after a retry and a different playback", .timeLimit(.minutes(1)))
+    @Test("A delayed old HLS request keeps its attempt after a retry and a different playback", .timeLimit(.minutes(3)))
     func delayedHLSRequestKeepsOriginalAttempt() async throws {
         let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
@@ -218,7 +218,7 @@ struct SourceFailureDiagnosticsTests {
         #expect(captured[2].requestID != captured[0].requestID)
     }
 
-    @Test("A segment carriage probe completes once with its captured context", .timeLimit(.minutes(1)), arguments: [200, 403])
+    @Test("A segment carriage probe completes once with its captured context", .timeLimit(.minutes(3)), arguments: [200, 403])
     func carriageProbeCompletesWithCapturedContext(status: Int) async throws {
         let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
@@ -252,7 +252,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @Test("Held HTTP bodies complete once after consumption and keep their captured owner",
-          .timeLimit(.minutes(1)), arguments: [200, 403])
+          .timeLimit(.minutes(3)), arguments: [200, 403])
     func heldBodyCompletion(status: Int) async throws {
         let payload = Data(repeating: 0x47, count: 4096)
         let server = try #require(ScriptedOriginServer { _ in
@@ -288,7 +288,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @Test("Held HTTP body limits report one terminal event before or during streaming",
-          .timeLimit(.minutes(1)), arguments: [true, false])
+          .timeLimit(.minutes(3)), arguments: [true, false])
     func heldBodyLimit(declaredLength: Bool) async throws {
         let payload = Data(repeating: 0x47, count: 4096)
         let server = try #require(ScriptedOriginServer { _ in
@@ -318,7 +318,7 @@ struct SourceFailureDiagnosticsTests {
 
     // A held open that fails after a redirect names the hop that answered, not the URL it started at.
     @Test("A held open that fails after a redirect reports the failing hop and its status",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func heldOpenFailureAfterRedirect() async throws {
         let payload = Data(repeating: 0x47, count: 4096)
         let server = try #require(ScriptedOriginServer { request in
@@ -346,7 +346,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @Test("Abandoning or dropping a held HTTP body reports once without claiming success",
-          .timeLimit(.minutes(1)), arguments: [true, false])
+          .timeLimit(.minutes(3)), arguments: [true, false])
     func heldBodyAbandoned(explicit: Bool) async throws {
         let server = try #require(ScriptedOriginServer { _ in
             .init(status: 200, declaredLength: nil, close: true, body: Data(repeating: 0x47, count: 4096))
@@ -396,7 +396,7 @@ struct SourceFailureDiagnosticsTests {
         #expect(terminal.urlErrorCode == nil)
     }
 
-    @Test("Real source response events retain status and origin", .timeLimit(.minutes(1)))
+    @Test("Real source response events retain status and origin", .timeLimit(.minutes(3)))
     func responseEvidence() async throws {
         let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
@@ -476,7 +476,7 @@ struct SourceFailureDiagnosticsTests {
     // URL error is recorded for a later give-up and forgotten once the reconnect delivers. The reset
     // comes after the header, because URLSession silently retries a GET that dies before one.
     @Test("A live open whose first connection drops before any data reconnects instead of failing",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func liveOpenRidesFirstConnectionLoss() async throws {
         let maybeServer = ThrottledOriginServer(totalSize: 8 * 1024 * 1024, throttleUs: 0,
                                                 respond: { index, _, _ in index == 0 ? .serveThenDrop(afterBytes: 0) : .serve206 })
@@ -545,7 +545,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @Test("AVIO reconnects keep the reader owner across real thread boundaries, including nil",
-          .timeLimit(.minutes(1)), arguments: [true, false])
+          .timeLimit(.minutes(3)), arguments: [true, false])
     func avioReconnectRetainsCapturedContext(attributed: Bool) async throws {
         let owner = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
         let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())

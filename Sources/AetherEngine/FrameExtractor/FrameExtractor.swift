@@ -44,7 +44,7 @@ public actor FrameExtractor {
     /// work instead of lazily reopening a closed context.
     private var isShutDown = false
 
-    private let idleInterval: Duration = .seconds(10)
+    private var idleInterval: Duration = .seconds(10)
     private var idleTask: Task<Void, Never>?
     private var residentApproximation: (width: Int, frame: ScrubFrame)?
     nonisolated let residentIdentity: String?
@@ -366,6 +366,12 @@ public actor FrameExtractor {
                 continuation.resume(returning: work())
             }
         }
+    }
+
+    /// Tests that wait for the idle close shorten it, so a starved runner does not spend the
+    /// suite's time limit on a fixed ten-second sleep.
+    func setIdleIntervalForTesting(_ interval: Duration) {
+        idleInterval = interval
     }
 
     /// Restart the idle countdown (called after every request). After `idleInterval`

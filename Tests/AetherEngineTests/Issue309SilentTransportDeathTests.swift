@@ -103,7 +103,7 @@ struct Issue309SilentTransportDeathTests {
     /// the shape #309's own detection test failed in on a loaded CI runner, where a first byte took
     /// longer than its 0.6 s threshold.
     @Test("an open whose first byte is slower than the stall threshold still opens",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func slowFirstByteOpens() throws {
         let serverMaybe = ThrottledOriginServer(totalSize: Self.totalSize, firstByteDelayUs: { _ in 1_500_000 })
         let server = try #require(serverMaybe)

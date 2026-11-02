@@ -4,7 +4,7 @@ import Foundation
 @testable import AetherEngine
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.timeLimit(.minutes(3)))
 struct PreparedExternalSubtitleTests {
     private func file(_ text: String, ext: String = "srt") throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

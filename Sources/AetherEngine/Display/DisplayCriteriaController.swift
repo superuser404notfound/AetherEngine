@@ -76,7 +76,15 @@ final class DisplayCriteriaController {
     private let observation = SwitchObservation()
     /// DEC-105: what is left of the observed-end wait for the armed switch (`observedEndCap`).
     private var observedEndBudget: ObservedEndBudget?
+    /// AE#950: the panel's cadence read up to the criteria write, started by `beginPreWriteCadence()`.
+    private var preWriteCadence: DisplayLinkSampler?
     #endif
+
+    /// AE#950: how the panel's cadence just before a write related to the rate that write asked for, keyed
+    /// by the arm generation of that write so a later gate without a write of its own cannot read it.
+    private var preWriteRelation: (armGeneration: Int, relation: PanelRateRelation)?
+    /// AE#950: which load the running pre-write reading belongs to (`beginPreWriteCadence`).
+    private var preWriteCadenceToken = 0
 
     /// The arm generation whose record has been spent. Only a gate that ends the load's wait spends it, so
     /// both gates of one load see the same evidence while a later, unarmed gate sees none
@@ -601,10 +609,21 @@ final class DisplayCriteriaController {
     /// frozen picture on a panel that was demonstrably presenting throughout. The `mode check (native)`
     /// line a few seconds later is the witness for the residue: it reads the panel again, so a switch
     /// that did arrive late is visible in the same capture rather than assumed away.
+    ///
+    /// AE#950 narrows both readings to a panel that did not have to change rate. When the panel read
+    /// something else just before the write (`preWrite` is `.different`), the display link reports the new
+    /// cadence as soon as the compositor runs at it, well before the HDMI sink has re-locked: on an LG C2
+    /// the gate released 50 to 135 ms after the switch started, tvOS reports such switches ending after
+    /// ~2.5 s, and half the starts flashed pink noise over the black in between. A reading reached by
+    /// switching says only that the switch began, so that write waits for the end, the in-progress flag or
+    /// the cap, as an HDR write does. The #449 panel read the requested rate before the write, which keeps
+    /// its fast exit; a missing pre-write reading changes nothing.
     nonisolated static func rateOnlySwitchIsSettled(attribution: CriteriaAttribution,
                                                     relation: PanelRateRelation,
-                                                    heldForMs: Int) -> Bool {
+                                                    heldForMs: Int,
+                                                    preWrite: PanelRateRelation? = nil) -> Bool {
         guard attribution == .engineRateOnly else { return false }
+        if case .different = preWrite { return false }
         switch relation {
         case .exact: return true
         case .multiple: return heldForMs >= panelMultipleDwellMs
@@ -790,6 +809,7 @@ final class DisplayCriteriaController {
         // Reset up front so a skipped apply (Match Content off, no window)
         // can't leave a prior HDR session's flag for waitForSwitch to read.
         lastCriteriaWasHDR = false
+        defer { endPreWriteCadence() }
 
         guard let window = resolveWindow() else {
             EngineLog.emit("[DisplayCriteria] skipped: no window", category: .engine)
@@ -880,10 +900,15 @@ final class DisplayCriteriaController {
 
         // Always pass the real rate; tvOS uses it when Match Frame Rate is on, ignores it otherwise (dynamic-range switch still fires).
         let criteria = AVDisplayCriteria(refreshRate: effectiveRate, formatDescription: desc)
+        // AE#950: read before the write, which is what makes the reading say where the panel came from.
+        let preWrite = Self.panelRateRelation(
+            requestedRate: effectiveRate,
+            panelNominalRate: preWriteCadence?.nominalRateNow(freshWithinMs: Self.panelCadenceFreshnessMs))
         // #339: arm before the write. The switch this triggers can start and finish while the AVPlayerItem
         // is being built, and observers registered at gate entry miss both notifications; that is why two of
         // three device runs in Sodalite#49 never saw an end for a switch that was already over.
         observation.arm()
+        preWriteRelation = (observation.snapshot().generation, preWrite)
         displayManager.preferredDisplayCriteria = criteria
         didApply = true
         lastCriteriaWasHDR = isHDR
@@ -892,7 +917,8 @@ final class DisplayCriteriaController {
         EngineLog.emit(
             "[DisplayCriteria] SET: format=\(format) codec=\(fourccString(codecType)) "
             + "rate=\(frameRate.map { String(format: "%.3f", $0) } ?? "default(24)") "
-            + "extensions=\(extensions != nil ? "HDR" : "none")",
+            + "extensions=\(extensions != nil ? "HDR" : "none") "
+            + "before write: \(preWrite.logDescription)",
             category: .engine
         )
         // SDR rate-only switches are sub-second; only HDR criteria need the waitForSwitch delay.
@@ -912,6 +938,39 @@ final class DisplayCriteriaController {
         #if os(tvOS)
         guard resolveWindow() != nil else { return }
         observation.arm()
+        #endif
+    }
+
+    /// AE#950: start reading the panel's cadence ahead of a criteria write the engine is about to make, so
+    /// `apply()` can tell a panel already at the requested rate from one that has to switch to it. Called
+    /// at the start of a load, before the probe whose result decides the rate: a display link needs a tick
+    /// before it says anything, and the write itself follows the probe without a pause. `apply()` stops it.
+    ///
+    /// Returns the token the load hands back to `endPreWriteCadence(token:)`. A newer load replaces the
+    /// reading of one it superseded, so the older load's exit cannot stop the reading the newer one needs.
+    @discardableResult
+    func beginPreWriteCadence() -> Int {
+        preWriteCadenceToken &+= 1
+        #if os(tvOS)
+        preWriteCadence?.invalidate()
+        preWriteCadence = nil
+        if let window = resolveWindow() {
+            let sampler = DisplayLinkSampler()
+            sampler.start(screen: window.screen)
+            preWriteCadence = sampler
+        }
+        #endif
+        return preWriteCadenceToken
+    }
+
+    /// Stop the pre-write reading. Idempotent. A load calls it with its token on every exit, so one that
+    /// never writes criteria (audio only, a host that owns them) does not leave it running; `apply()`
+    /// calls it without one, because the write is what the reading was for.
+    func endPreWriteCadence(token: Int? = nil) {
+        if let token, token != preWriteCadenceToken { return }
+        #if os(tvOS)
+        preWriteCadence?.invalidate()
+        preWriteCadence = nil
         #endif
     }
 
@@ -1127,6 +1186,11 @@ final class DisplayCriteriaController {
         // #449 round 2: the unbroken run of the same panel reading, so a cadence that only settles a
         // multiple after a dwell can be asked how long it has actually held it.
         var cadenceHistory = PanelCadenceHistory()
+        // AE#950: where the panel came from, for the write this gate is settling and no other.
+        let preWrite = preWriteRelation.flatMap {
+            $0.armGeneration == gateSnapshot.generation ? $0.relation : nil
+        }
+        var reportedSwitchedReading = false
         while !Self.isBudgetSpent(elapsedMs: Self.elapsedMs(since: stage2Entry), budgetMs: capMs) {
             guard await Self.gateTick(milliseconds: 50, isCurrent: isCurrent) else {
                 EngineLog.emit("[DisplayCriteria] gate abandoned while waiting for the end (\(timing())): the load it held was cancelled or superseded", category: .engine)
@@ -1144,9 +1208,17 @@ final class DisplayCriteriaController {
             // the notifications never finish reporting has nothing left to do. Named with the cap it did
             // not spend, because that is the number the fix has to be verified against, and with the dwell
             // where one was required, because a multiple settles on having HELD the reading.
+            let attribution = Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR)
+            if !reportedSwitchedReading, attribution == .engineRateOnly, let preWrite,
+               Self.rateOnlySwitchIsSettled(attribution: attribution, relation: relation, heldForMs: heldMs),
+               !Self.rateOnlySwitchIsSettled(attribution: attribution, relation: relation, heldForMs: heldMs,
+                                             preWrite: preWrite) {
+                reportedSwitchedReading = true
+                EngineLog.emit("[DisplayCriteria] #950: \(relation.logDescription) after \(stage2Ms)ms of the wait, but before the write it read \(preWrite.logDescription); the panel switched to it and the sink may still be re-locking, so waiting for the end", category: .engine)
+            }
             if Self.rateOnlySwitchIsSettled(
-                attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
-                relation: relation, heldForMs: heldMs) {
+                attribution: attribution,
+                relation: relation, heldForMs: heldMs, preWrite: preWrite) {
                 let dwell: String = {
                     guard case .multiple = relation else { return "" }
                     return ", held unbroken for \(heldMs)ms"
@@ -1352,6 +1424,7 @@ final class DisplayCriteriaController {
         window.avDisplayManager.preferredDisplayCriteria = nil
         didApply = false
         lastApplied = nil   // #133: a RESET returns the panel to default; the next apply must re-establish it.
+        preWriteRelation = nil
         EngineLog.emit("[DisplayCriteria] RESET", category: .engine)
         #endif
     }

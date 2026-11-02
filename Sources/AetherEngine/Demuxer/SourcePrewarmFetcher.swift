@@ -272,15 +272,16 @@ private final class RangeFetchDelegate: NSObject, URLSessionDataDelegate, @unche
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
                     completionHandler: @escaping (URLRequest?) -> Void) {
-        if let from = task.originalRequest?.url, let to = request.url {
-            OriginRequestBudget.shared.noteRedirect(from: from, to: to)
-        }
         // Credential headers do not follow a redirect to another host (#126 cross-origin replay).
-        completionHandler(RedirectHeaderPolicy.redirectRequest(
+        let next = RedirectHeaderPolicy.redirectRequest(
             request,
             originalURL: task.originalRequest?.url,
             originalRange: task.originalRequest?.value(forHTTPHeaderField: "Range"),
-            extraHeaders: extraHeaders))
+            extraHeaders: extraHeaders)
+        if let from = task.originalRequest?.url, let to = next.url {
+            OriginRequestBudget.shared.noteRedirect(from: from, to: to)
+        }
+        completionHandler(next)
     }
 
     func urlSession(_ session: URLSession,

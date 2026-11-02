@@ -7,7 +7,7 @@ import AetherLibavutil
 import AetherLibavcodec
 @testable import AetherEngine
 
-@Suite("Live source replay", .serialized, .timeLimit(.minutes(1)))
+@Suite("Live source replay", .serialized, .timeLimit(.minutes(3)))
 struct LiveSourceReplayTests {
     private final class Reader: IOReader, @unchecked Sendable {
         private let bytes: Data

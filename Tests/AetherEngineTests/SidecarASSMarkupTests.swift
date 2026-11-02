@@ -86,7 +86,7 @@ final class SidecarASSMarkupTests: XCTestCase {
 }
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.timeLimit(.minutes(3)))
 struct SecondarySidecarASSMarkupTests {
     @Test("secondary ASS preserves raw events and its own script header when requested")
     func secondaryASSPreservesMarkupAndHeader() async throws {

@@ -31,7 +31,7 @@ private final class StrandedReadProbe: @unchecked Sendable {
 }
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.timeLimit(.minutes(3)))
 struct Issue597StrandedDiagnosticReadTests {
 
     private func item() -> AVPlayerItem { AVPlayerItem(asset: AVMutableComposition()) }

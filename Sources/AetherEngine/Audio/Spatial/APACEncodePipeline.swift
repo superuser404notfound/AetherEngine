@@ -19,41 +19,10 @@ import Foundation
 /// position plus k·1024. A failed encode resets the encoder and drops the chunk, so the next run
 /// starts on the next chunk's own position and nothing after the failure moves.
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
-final class APACEncodePipeline: @unchecked Sendable {
+final class APACEncodePipeline: SpatialBedSink, @unchecked Sendable {
 
-    struct StampedPacket {
-        let data: Data
-        let isSync: Bool
-        /// Output time base: 48 kHz frames.
-        let pts: Int64
-    }
-
-    /// Planar float planes, one per bed channel, that grow on demand. Owned by one side at a time:
-    /// the caller between `acquire` and `submit`, the worker until it puts the buffer back.
-    final class PlaneBuffer: @unchecked Sendable {
-        private(set) var planes: [UnsafeMutablePointer<Float>]
-        private(set) var capacity: Int
-
-        init(channels: Int, capacity: Int) {
-            self.capacity = capacity
-            planes = (0..<channels).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: capacity) }
-        }
-
-        deinit { planes.forEach { $0.deallocate() } }
-
-        /// Room for `frames`, keeping the first `keeping` frames of every plane.
-        func ensureCapacity(_ frames: Int, keeping: Int) {
-            guard frames > capacity else { return }
-            let grown = max(frames, capacity * 2)
-            for c in planes.indices {
-                let plane = UnsafeMutablePointer<Float>.allocate(capacity: grown)
-                plane.update(from: planes[c], count: keeping)
-                planes[c].deallocate()
-                planes[c] = plane
-            }
-            capacity = grown
-        }
-    }
+    typealias StampedPacket = SpatialBedPacket
+    typealias PlaneBuffer = SpatialBedBuffer
 
     let leadingFrames: Int
     let magicCookie: Data
@@ -210,7 +179,8 @@ final class APACEncodePipeline: @unchecked Sendable {
         for packet in packets {
             stamped.append(StampedPacket(
                 data: packet.data, isSync: packet.isSync,
-                pts: start + packetsInRun * Int64(APACEncoder.framesPerPacket)))
+                pts: start + packetsInRun * Int64(APACEncoder.framesPerPacket),
+                frames: APACEncoder.framesPerPacket))
             packetsInRun += 1
         }
         cond.lock()

@@ -72,11 +72,14 @@ struct EngineSessionRedirectCredentialTests {
         expectScrubbed(seen)
     }
 
-    @Test("a same-origin hop and an http to https upgrade keep the credentials, a downgrade loses them",
+    @Test("a same-origin hop and an http to https upgrade keep the credentials, a local downgrade loses them, a public one is upgraded",
           arguments: [
               ("https://media.example/a.m3u8", "https://media.example/b.m3u8", true),
               ("http://media.example:8096/a.m3u8", "https://media.example:8920/a.m3u8", true),
-              ("https://media.example/a.m3u8", "http://media.example/a.m3u8", false),
+              // A local name keeps the downgrade as sent; a public one is asked for over https
+              // (`RedirectHeaderPolicy.upgradedDowngrade`), which makes it the same origin again.
+              ("https://media.local/a.m3u8", "http://media.local/a.m3u8", false),
+              ("https://media.example/a.m3u8", "http://media.example/a.m3u8", true),
               ("https://media.example/a.m3u8", "https://cdn.other/a.m3u8", false),
               ("https://media.example/a.m3u8", "https://media.example:8443/a.m3u8", false),
           ])

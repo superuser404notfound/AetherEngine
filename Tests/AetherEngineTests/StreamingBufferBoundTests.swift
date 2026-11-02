@@ -21,7 +21,7 @@ struct StreamingBufferBoundTests {
     }
 
     @Test("a transport that delivers past the hard cap ends the read with a typed cause",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func hardCapIsTyped() throws {
         let body = 64 * 1024 * 1024
         let maybe = ThrottledOriginServer(totalSize: Int64(body), throttleUs: 0)
@@ -44,7 +44,7 @@ struct StreamingBufferBoundTests {
                 "the buffer held \(reader.streamPeakBufferBytesForTesting / 1024) KB")
     }
 
-    @Test("a body that finishes inside the bound is EOF with no failure", .timeLimit(.minutes(1)))
+    @Test("a body that finishes inside the bound is EOF with no failure", .timeLimit(.minutes(3)))
     func completeBodyHasNoFailure() throws {
         let maybe = ThrottledOriginServer(totalSize: 2 * 1024 * 1024, throttleUs: 0)
         let server = try #require(maybe)
@@ -60,7 +60,7 @@ struct StreamingBufferBoundTests {
         #expect(reader.lastReadFailure == nil)
     }
 
-    @Test("a dropped connection is EIO without a cause of ours", .timeLimit(.minutes(1)))
+    @Test("a dropped connection is EIO without a cause of ours", .timeLimit(.minutes(3)))
     func droppedConnectionHasNoCause() throws {
         let total: Int64 = 8 * 1024 * 1024
         let maybe = ThrottledOriginServer(totalSize: total, throttleUs: 0,

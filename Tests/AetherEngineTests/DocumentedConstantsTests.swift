@@ -473,6 +473,13 @@ final class DocumentedConstantsTests: XCTestCase {
         return text
     }
 
+    // MARK: - Keyframe-snapped seeks (docs/api.md, seek(to:))
+
+    func testKeyframeSnapReachMatchesDocumentation() throws {
+        XCTAssertEqual(SWKeyframeSnap.reachSeconds, 10)
+        assertDocumented("lands on the keyframe nearest the target, within 10 s", try documentation())
+    }
+
     // MARK: - Picture-order pairing (docs/dolby-vision-fel.md §5.3)
 
     #if DualLayerDolbyVision

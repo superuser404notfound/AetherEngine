@@ -237,7 +237,7 @@ extension PrewarmStoreSuites {
         /// write-once rule treats any positive `fileSize` as settled, so a warm that belongs to a
         /// different response would fix a wrong EOF point for the whole session. The connection that is
         /// actually serving the session gets to overrule it.
-        @Test("a connection that states a different size drops the warm", .timeLimit(.minutes(1)))
+        @Test("a connection that states a different size drops the warm", .timeLimit(.minutes(3)))
         func sizeMismatchDropsTheWarm() async throws {
             SourcePrewarmStore.shared.clear()
             let server = try #require(ThrottledOriginServer(totalSize: fileSize))

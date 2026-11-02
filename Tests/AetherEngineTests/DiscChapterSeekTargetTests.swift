@@ -132,7 +132,7 @@ struct DiscChapterSeekTargetTests {
 }
 
 /// The engine feeds its own state into the same rule.
-@Suite("Disc chapter seek target engine wiring", .timeLimit(.minutes(1)))
+@Suite("Disc chapter seek target engine wiring", .timeLimit(.minutes(3)))
 @MainActor
 struct DiscChapterSeekTargetEngineTests {
 

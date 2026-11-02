@@ -235,10 +235,11 @@ extension AetherEngine {
         return closed
     }
 
-    /// #88 external .sup path: fill the needsOCR ordinal's store from the overlay sidecar
-    /// decode's OWN image cues (no second download); markFinished so the PiP pre-fill and the
-    /// whole-file .vtt handler see complete coverage.
-    func startSidecarOCRFillIfNeeded(externalTrackID: Int?, cues: [SubtitleCue]) {
+    /// #88 external .sup path: fill the needsOCR ordinal's store from the overlay sidecar's OWN
+    /// packets (no second download); markFinished so the PiP pre-fill and the whole-file .vtt
+    /// handler see complete coverage. #921: decoded a batch at a time on its own decoder, so each
+    /// picture lives only as long as its recognition.
+    func startSidecarOCRFillIfNeeded(externalTrackID: Int?, source: SidecarBitmapSource) {
         guard let id = externalTrackID,
               let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: id, in: nativeSubtitleTrackTable),
               nativeSubtitleTrackTable[ordinal].needsOCR,
@@ -246,9 +247,11 @@ extension AetherEngine {
               !store.isFinished else { return }
         let language = nativeSubtitleTrackTable[ordinal].language
         subtitleOCRSidecarFillTask?.cancel()
-        EngineLog.emit("[SubtitleOCR] sidecar fill starting: track=\(id) cues=\(cues.count)", category: .engine)
+        EngineLog.emit("[SubtitleOCR] sidecar fill starting: track=\(id) packets=\(source.packets.count)", category: .engine)
         subtitleOCRSidecarFillTask = BlockingWork.detached(priority: .utility) {
-            await SubtitleImageOCR.appendRecognized(cues: cues, language: language, to: store)
+            await source.forEachDecodedBatch(isCancelled: { Task.isCancelled }) { batch in
+                await SubtitleImageOCR.appendRecognized(cues: batch, language: language, to: store)
+            }
             if !Task.isCancelled { store.markFinished() }
         }
     }

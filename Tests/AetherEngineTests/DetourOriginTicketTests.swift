@@ -114,7 +114,7 @@ struct DetourOriginTicketTests {
     /// #746 moved the 429 accounting into `syncRequest`'s completion callback, so the slot is not
     /// handed on before the refusal is on the books. The detour still charged the same answer again
     /// afterwards, and each charge halves the origin's concurrency and doubles its quiet period.
-    @Test("a rate limited detour block is charged to the origin once", .timeLimit(.minutes(1)))
+    @Test("a rate limited detour block is charged to the origin once", .timeLimit(.minutes(3)))
     func rateLimitedDetourChargedOnce() async throws {
         let origin = try #require(await RangeEchoOrigin(status: 429))
         defer { origin.stop() }

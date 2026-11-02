@@ -64,6 +64,69 @@ extension VideoConfigRecord {
         return hvcC
     }
 
+    /// The H.264 counterpart (#938): an `avcC` that declares zero SPS or zero PPS, the parameter sets
+    /// travelling in every IDR instead (an mkvmerge remux writes the 7-byte `01 64 00 20 ff e0 00`).
+    /// AVPlayer does NOT recover from that one: the session reaches `readyToPlay`, the clock runs,
+    /// audio plays, and no frame ever becomes ready for display.
+    struct H264ParameterSets {
+        var sps: [UInt8]?
+        var pps: [UInt8]?
+
+        var isComplete: Bool { sps != nil && pps != nil }
+
+        mutating func collect(from data: UnsafePointer<UInt8>, size: Int, naluLengthSize: Int) {
+            var offset = 0
+            while offset + naluLengthSize <= size {
+                var nalLen = 0
+                for i in 0..<naluLengthSize {
+                    nalLen = (nalLen << 8) | Int(data[offset + i])
+                }
+                offset += naluLengthSize
+                if nalLen == 0 || offset + nalLen > size { break }
+                switch Int(data[offset]) & 0x1F {
+                case 7 where sps == nil: sps = Array(UnsafeBufferPointer(start: data + offset, count: nalLen))
+                case 8 where pps == nil: pps = Array(UnsafeBufferPointer(start: data + offset, count: nalLen))
+                default: break
+                }
+                offset += nalLen
+            }
+        }
+    }
+
+    /// Is this an `avcC` with no SPS or no PPS? Annex-B extradata fails the `configurationVersion`
+    /// check, so it never reaches the scan (the #365 normalizer owns that case).
+    static func avcRecordNeedsInBandRebuild(_ record: [UInt8]) -> Bool {
+        guard record.count >= 6, record[0] == 1 else { return false }
+        let spsCount = Int(record[5] & 0x1F)
+        if spsCount == 0 { return true }
+        var cursor = 6
+        for _ in 0..<spsCount {
+            guard cursor + 2 <= record.count else { return true }
+            cursor += 2 + (Int(record[cursor]) << 8 | Int(record[cursor + 1]))
+        }
+        return cursor >= record.count || record[cursor] == 0
+    }
+
+    /// NAL length size the `avcC` header states (`lengthSizeMinusOne`, byte 4, low 2 bits); nil for
+    /// the illegal 3.
+    static func avcNALULengthSize(_ record: [UInt8]) -> Int? {
+        guard record.count >= 5, record[0] == 1 else { return nil }
+        let size = Int(record[4] & 0x03) + 1
+        return size == 3 ? nil : size
+    }
+
+    /// The `avcC` movenc builds for one SPS and PPS (`fromAnnexB`, so the High-profile chroma and
+    /// bit-depth extension comes out right), with the source's `lengthSizeMinusOne` put back: movenc
+    /// always states 4, and the samples are copied with whatever length the source uses.
+    static func avcRecord(sps: [UInt8], pps: [UInt8], naluLengthSize: Int, width: Int32, height: Int32) -> [UInt8]? {
+        guard var record = fromAnnexB(
+            H264SPS.annexBExtradata(sps: sps, pps: pps),
+            codecID: AV_CODEC_ID_H264, width: width, height: height
+        ), record.count > 6, record[0] == 1 else { return nil }
+        record[4] = (record[4] & 0xFC) | UInt8(naluLengthSize - 1)
+        return record
+    }
+
     /// Input the in-band scan may read in total, foreign streams included. Parameter sets sit at the
     /// first IRAP, so a few packets find them; this only caps a stream that never carries any.
     static let inBandScanByteBudget = 16 * 1024 * 1024

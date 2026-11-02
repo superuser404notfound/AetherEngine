@@ -6,7 +6,7 @@ import Foundation
 /// blocks until 8 MB of it had gone by, which is the parse-read policy (#69), not playback's. A
 /// restart now tells the reader, and the first backward read it cannot serve from memory anchors the
 /// streaming connection at the landing.
-@Suite("AE#782 restart re-anchors at the landing")
+@Suite("AE#782 restart re-anchors at the landing", .offCooperativePool)
 struct Issue782RestartReanchorTests {
 
     private static let chunk = 256 * 1024

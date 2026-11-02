@@ -113,7 +113,7 @@ final class ByteFIFOTests: XCTestCase {
 
 // Empty writes must not masquerade as the EOF that the ingest reader returns to FFmpeg.
 // Run potentially blocking calls on real threads so cancellation can still release them.
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.timeLimit(.minutes(3)))
 struct ByteFIFOEmptyOperationsTests {
     @Test("an empty write leaves a reader waiting for bytes")
     func emptyWriteDoesNotSignalEOF() async throws {

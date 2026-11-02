@@ -8,7 +8,7 @@ import Foundation
 /// then the rescue reconnect anchored at the same place. Field trace (Kitchen, 1080p MKV): seg0 4 s
 /// late, first frame 11.0 s instead of ~5 s. The cursor reset after the index pass is a playback
 /// reposition, so the first miss anchors the connection there, as a producer restart's does (AE#782).
-@Suite("Playback's first read after the cue prewarm anchors, not detours")
+@Suite("Playback's first read after the cue prewarm anchors, not detours", .offCooperativePool)
 struct StartAfterCuePrewarmTests {
 
     private static let chunk = 256 * 1024

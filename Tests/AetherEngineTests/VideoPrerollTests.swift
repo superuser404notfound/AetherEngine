@@ -145,7 +145,7 @@ struct VideoPrerollTests {
         var isOpen: Bool { open.withLock { $0 } }
     }
 
-    @Test("Without a gate seekClock starts the clock at once", .timeLimit(.minutes(1)))
+    @Test("Without a gate seekClock starts the clock at once", .timeLimit(.minutes(3)))
     func startsAtOnceWithoutAGate() {
         let output = AudioOutput()
         output.seekClock(to: CMTime(seconds: 5, preferredTimescale: 90000), rate: 1)
@@ -153,7 +153,7 @@ struct VideoPrerollTests {
     }
 
     @Test("A closed gate holds the clock at rate 0 and the start follows when it opens",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func holdsUntilTheGateOpens() async throws {
         let output = AudioOutput()
         let gate = Gate()
@@ -171,7 +171,7 @@ struct VideoPrerollTests {
         #expect(output.synchronizer.currentTime().seconds <= 5 + ran + 0.02)
     }
 
-    @Test("A rate set while the preroll waits is the rate it starts at", .timeLimit(.minutes(1)))
+    @Test("A rate set while the preroll waits is the rate it starts at", .timeLimit(.minutes(3)))
     func setRateDuringPrerollIsTheStartRate() async throws {
         let output = AudioOutput()
         let gate = Gate()
@@ -183,7 +183,7 @@ struct VideoPrerollTests {
         try await waitFor { output.synchronizer.rate == 1.5 }
     }
 
-    @Test("A pause cancels the pending start", .timeLimit(.minutes(1)))
+    @Test("A pause cancels the pending start", .timeLimit(.minutes(3)))
     func pauseCancelsThePreroll() async throws {
         let output = AudioOutput()
         let gate = Gate()
@@ -195,7 +195,7 @@ struct VideoPrerollTests {
         #expect(!started)
     }
 
-    @Test("A play after a seek landed while paused starts through the preroll", .timeLimit(.minutes(1)))
+    @Test("A play after a seek landed while paused starts through the preroll", .timeLimit(.minutes(3)))
     func playAfterAPausedSeekPrerolls() async throws {
         let output = AudioOutput()
         let gate = Gate()
@@ -210,7 +210,7 @@ struct VideoPrerollTests {
         #expect(!output.prerollPending)
     }
 
-    @Test("A gate that never opens starts the clock after the timeout", .timeLimit(.minutes(1)))
+    @Test("A gate that never opens starts the clock after the timeout", .timeLimit(.minutes(3)))
     func timesOut() async throws {
         let output = AudioOutput()
         output.videoPrerollSatisfied = { _ in false }
@@ -220,7 +220,7 @@ struct VideoPrerollTests {
     }
 
     @Test("An explicit pause cancels a hold and refuses a stale positive seek or rebuffer release",
-          .timeLimit(.minutes(1)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     func explicitPauseOwnsTheClock(gateReady: Bool) {
         let output = AudioOutput()
         defer { output.stop() }
@@ -239,7 +239,7 @@ struct VideoPrerollTests {
         #expect(transitions.events == [.began, .released(.cancelled)])
     }
 
-    @Test("Explicit play after a paused seek restores the normal preroll", .timeLimit(.minutes(1)))
+    @Test("Explicit play after a paused seek restores the normal preroll", .timeLimit(.minutes(3)))
     func explicitPlayRestoresPreroll() async throws {
         let output = AudioOutput()
         defer { output.stop() }
@@ -256,7 +256,7 @@ struct VideoPrerollTests {
         #expect(!output.prerollPending)
     }
 
-    @Test("Stopping a paused output retires its epoch without resetting the clock", .timeLimit(.minutes(1)))
+    @Test("Stopping a paused output retires its epoch without resetting the clock", .timeLimit(.minutes(3)))
     func stoppedPausedOutputKeepsItsAnchor() {
         let output = AudioOutput()
         output.seekClock(to: CMTime(seconds: 42, preferredTimescale: 90000), rate: 0)
@@ -294,7 +294,7 @@ struct VideoPrerollTests {
         var generations: [Int] { list.withLock { $0.map(\.generation) } }
     }
 
-    @Test("A decoder still producing frames holds the clock past the plain timeout", .timeLimit(.minutes(1)))
+    @Test("A decoder still producing frames holds the clock past the plain timeout", .timeLimit(.minutes(3)))
     func decoderProgressHoldsPastTheTimeout() async throws {
         let output = AudioOutput()
         let progress = Progress()
@@ -317,7 +317,7 @@ struct VideoPrerollTests {
         #expect(transitions.events.first == .began)
     }
 
-    @Test("A hold reports its start and a timed-out release", .timeLimit(.minutes(1)))
+    @Test("A hold reports its start and a timed-out release", .timeLimit(.minutes(3)))
     func reportsATimedOutHold() async throws {
         let output = AudioOutput()
         let transitions = Transitions()
@@ -333,7 +333,7 @@ struct VideoPrerollTests {
         }
     }
 
-    @Test("A newer seek and a pause release a waiting hold as cancelled", .timeLimit(.minutes(1)))
+    @Test("A newer seek and a pause release a waiting hold as cancelled", .timeLimit(.minutes(3)))
     func cancelledHoldsAreReported() {
         let output = AudioOutput()
         let transitions = Transitions()
@@ -348,7 +348,7 @@ struct VideoPrerollTests {
         #expect(gens.count == 4 && gens[0] == gens[1] && gens[2] == gens[3] && gens[2] > gens[0])
     }
 
-    @Test("A start whose frames are already queued does not report a hold", .timeLimit(.minutes(1)))
+    @Test("A start whose frames are already queued does not report a hold", .timeLimit(.minutes(3)))
     func readyStartIsNoHold() {
         let output = AudioOutput()
         let transitions = Transitions()

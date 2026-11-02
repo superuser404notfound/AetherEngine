@@ -346,7 +346,8 @@ extension HLSVideoEngine {
                 #endif
             }
             bridge = try SpatialAudioBridge(
-                srcTimeBase: audioStream.pointee.time_base, layout: layout, decoder: decoder)
+                srcTimeBase: audioStream.pointee.time_base, layout: layout, decoder: decoder,
+                format: objectAudioRendering.bedFormat(routeFormat: SpatialBedFormat.forCurrentRoute()) ?? .apac)
         } catch {
             EngineLog.emit(
                 "[HLSVideoEngine] ERROR: \(source.name) rendering unavailable (\(error)); keeping the channel bridge",
@@ -380,12 +381,13 @@ extension HLSVideoEngine {
             let producer = try makeProducer(baseIndex: initialProducerBaseIndex)
             audioHLSCodecs = bridge.hlsCodecs
             // Short on purpose: hosts append it to a track title in one-line stats rows.
+            let bed = "\(bridge.format == .lpcm ? "PCM" : "APAC") \(layout.rawValue)"
             audioPipelineDescription = source == .trueHDAtmos
-                ? "\(sourceCodecLabel) Atmos → APAC \(layout.rawValue)"
-                : "DTS:X → APAC \(layout.rawValue)"
+                ? "\(sourceCodecLabel) Atmos → \(bed)"
+                : "DTS:X → \(bed)"
             audioDelivery = .bridged
-            audioIsAPAC = true
-            audioAPACIsFromDolbyAtmos = source == .trueHDAtmos
+            audioIsRenderedBed = true
+            audioBedIsFromDolbyAtmos = source == .trueHDAtmos
             let rendering: String
             switch source {
             case .trueHDAtmos:
@@ -394,13 +396,14 @@ extension HLSVideoEngine {
                 rendering = "bed and heights routed one to one into \(layout.rawValue)"
             }
             EngineLog.emit(
-                "[HLSVideoEngine] \(source.name): \(rendering), delivered as \(bridge.hlsCodecs) (lossy)",
+                "[HLSVideoEngine] \(source.name): \(rendering), delivered as \(bridge.hlsCodecs) "
+                + "(\(bridge.format == .lpcm ? "lossless 24-bit PCM" : "lossy"))",
                 category: .session
             )
             return producer
         } catch {
             EngineLog.emit(
-                "[HLSVideoEngine] APAC producer header write failed (\(error)); keeping the channel bridge",
+                "[HLSVideoEngine] \(bridge.format == .lpcm ? "PCM" : "APAC") producer header write failed (\(error)); keeping the channel bridge",
                 category: .session
             )
             savedAudioConfig = nil

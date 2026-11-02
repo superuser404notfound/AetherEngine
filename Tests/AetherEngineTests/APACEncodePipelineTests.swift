@@ -6,7 +6,7 @@ import Foundation
 /// (#731). What reaches the muxer must be what a synchronous encode on the producer thread
 /// produced: the same packets, in the same order, on the same timestamps, through restarts,
 /// resets and failures.
-@Suite("APAC encode pipeline")
+@Suite("APAC encode pipeline", .offCooperativePoolOneLane)
 struct APACEncodePipelineTests {
 
     private static let layout = SpatialSpeakerLayout.l714

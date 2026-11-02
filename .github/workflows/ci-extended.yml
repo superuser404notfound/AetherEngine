@@ -1,0 +1,145 @@
+name: CI (extended)
+
+# The builds that moved out of the per-push gate (ci.yml) because they only check that a further
+# configuration still compiles, and break rarely: Release aetherctl, the device SDKs with every
+# optional component, visionOS, and the device harnesses under Probes/. Nightly against main, and by
+# hand before every release tag (`gh workflow run ci-extended.yml`), so a break is found the next
+# morning at the latest and never ships. A PR that touches this file runs it too.
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/ci-extended.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Every other Swift step in CI is Debug, and aetherctl is not a product, so no consumer compiles
+  # it either: a DEBUG-only engine hook called without a guard kept Release broken from 7.6.0 to
+  # 7.14.0 without anything noticing (AE#610).
+  release-macos:
+    name: swift build -c release (aetherctl) + probes
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
+
+      - name: swift build -c release (aetherctl)
+        run: swift build -c release --product aetherctl
+
+      - name: swift build -c release (aetherctl, all traits)
+        run: swift build -c release --enable-all-traits --product aetherctl --scratch-path .build-release-alltraits
+
+      # The transport probe is a device harness and runs nowhere in CI, so nothing else would keep
+      # it compiling. A harness that stopped building is discovered by the person who needed it.
+      - name: build the transport probe (AE#377)
+        run: swift build --build-tests --package-path Probes/TransportProbe
+
+      # The pulse test's scripts are Python, shell and Swift nobody runs in CI; a syntax error in one is found
+      # at the television. Compiling them is all that can be checked without a phone recording.
+      - name: Compile the Dolby Vision pulse scripts
+        run: |
+          python3 -m py_compile Probes/DolbyVisionPulse/Scripts/*.py
+          zsh -n Probes/DolbyVisionPulse/Scripts/build.sh
+          zsh -n Probes/DolbyVisionPulse/Scripts/run_tv.sh
+          swiftc -typecheck Probes/DolbyVisionPulse/Scripts/dump_attachments.swift
+
+  devices-tvos:
+    name: xcodebuild (tvOS devices, visionOS, harnesses)
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
+
+      # The transport probe also builds as an app-hosted test bundle, because a SwiftPM test target
+      # is tool-hosted and tool-hosted testing does not exist on device destinations. That project
+      # runs nowhere in CI either, and the person who discovers it stopped building is the one who
+      # needed it that evening.
+      - name: Build the transport probe's device harness (AE#377)
+        run: |
+          xcodebuild build-for-testing \
+            -project Probes/TransportProbe/Device/TransportProbe.xcodeproj \
+            -scheme TransportProbe \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-probe \
+            CODE_SIGNING_ALLOWED=NO
+
+      # The Dolby Vision pulse host is the other device harness, and the one that links the engine
+      # itself, so it is also the one that breaks when a public API it uses moves. It plays clips on an
+      # Apple TV that someone films, runs nowhere in CI, and would otherwise be found out by the person
+      # who needed a measurement that evening. It links the engine through PulseEngine/, which enables the
+      # DualLayerDolbyVision trait the host measures. EXCLUDED_ARCHS because a generic simulator
+      # destination builds both slices and `libdovi.a` ships arm64 only.
+      - name: Build the Dolby Vision pulse host (Probes/DolbyVisionPulse)
+        run: |
+          xcodebuild build \
+            -project Probes/DolbyVisionPulse/Device/DolbyVisionPulse.xcodeproj \
+            -scheme DolbyVisionPulse \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-pulse \
+            EXCLUDED_ARCHS=x86_64 \
+            CODE_SIGNING_ALLOWED=NO
+
+      # xcodebuild has no flag for a package's traits, so the opt-in components reach the device SDKs
+      # through Probes/AllTraits, a consumer package that enables all of them the way a host does.
+      - name: Build with every optional component for tvOS
+        working-directory: Probes/AllTraits
+        run: |
+          xcodebuild build \
+            -scheme AetherEngineAllTraits \
+            -destination 'generic/platform=tvOS' \
+            -derivedDataPath ../../.build/xcode-alltraits-tvos \
+            CODE_SIGNING_ALLOWED=NO
+
+      # #344: the package has declared visionOS since 6.0.0 and nothing here compiled for it, so an
+      # availability list that named tvOS/iOS/macOS and then fell through to `*` broke the visionOS
+      # build silently. `*` resolves to the declared visionOS floor (1.0), so any API newer than that
+      # is a compile error on visionOS and on no other platform. Nobody here owns a Vision Pro, which
+      # makes this step the only place the platform is exercised at all.
+      - name: Build for visionOS Simulator
+        run: |
+          xcodebuild build \
+            -scheme AetherEngine \
+            -destination 'generic/platform=visionOS Simulator' \
+            -derivedDataPath .build/xcode-visionos \
+            CODE_SIGNING_ALLOWED=NO
+
+  devices-ios:
+    name: xcodebuild (iOS device, every optional component)
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
+
+      # See the tvOS job: the opt-in components for the iOS device SDK, through a consumer package.
+      - name: Build with every optional component for iOS
+        working-directory: Probes/AllTraits
+        run: |
+          xcodebuild build \
+            -scheme AetherEngineAllTraits \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ../../.build/xcode-alltraits-ios \
+            CODE_SIGNING_ALLOWED=NO

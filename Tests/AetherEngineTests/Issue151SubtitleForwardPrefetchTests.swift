@@ -107,6 +107,30 @@ struct Issue151SubtitleForwardPrefetchTests {
         #expect(pts == [2, 30, 55, 90, 120])
     }
 
+    /// AE#955: a run that reaches EOF has read through the end of the program, not just through its
+    /// last coverage step. The OCR pre-fill asks for a window clamped to the duration, so near the
+    /// end of a film it asked about ground past the last packet and never got a yes.
+    @Test("a run that reaches EOF reads as read through the end of the program", .timeLimit(.minutes(3)))
+    func endOfFileCoversTheTail() async throws {
+        let fixture = MatroskaSubtitleFixture.make(
+            durationMs: 130_000,
+            events: [(ms: 2_000, durationMs: 1_000), (ms: 90_000, durationMs: 1_000)])
+        let demuxer = Demuxer()
+        try demuxer.open(reader: DataIOReader(data: fixture), formatHint: "matroska")
+        defer { demuxer.close() }
+
+        let store = SubtitlePacketStore()
+        store.noteHarvestAnchor(.prefetch, at: 0)
+        let outcome = await SubtitleForwardPrefetcher.run(
+            demuxer: demuxer, store: store,
+            streamIndices: [0], assemblyIndices: [],
+            pacingIndex: -1,
+            leadSeconds: 1_000, parkPollNanoseconds: 10_000_000,
+            playhead: { 0 })
+        #expect(outcome.exit == .endOfFile)
+        #expect(store.hasReadSpan(from: 0, through: 130))
+    }
+
     /// A vanished playhead provider (engine torn down mid-read) ends the loop instead of spinning.
     @Test("prefetch aborts when the playhead provider returns nil")
     func prefetchAbortsOnNilPlayhead() async throws {
@@ -155,6 +179,13 @@ struct Issue151SubtitleForwardPrefetchTests {
             originPaced: false, originSerial: true))
         #expect(SubtitleForwardPrefetcher.shouldHold(
             originPaced: true, originSerial: true))
+    }
+
+    @Test("native subtitle readers stay off a one-request origin unless the source is custom (AE#937)")
+    func nativeReadersRespectSerialOrigin() {
+        #expect(AetherEngine.nativeSubtitleReadersAllowed(isCustomSource: false, originSerial: false))
+        #expect(!AetherEngine.nativeSubtitleReadersAllowed(isCustomSource: false, originSerial: true))
+        #expect(AetherEngine.nativeSubtitleReadersAllowed(isCustomSource: true, originSerial: true))
     }
 
     /// A drain-tick jump (seek) re-anchors the prefetcher; a fresh selection (no cursor yet) does

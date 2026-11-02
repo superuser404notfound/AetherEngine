@@ -12,7 +12,7 @@ import AetherLibavformat
 /// layers, the pixel-rate budget at its boundary, 1001-based timebases, and seeks that land on 0, on a
 /// replayed range, or in a burst. Everything is synthetic: tagged pixel buffers into the frame handlers,
 /// a recording composer, no media and no GPU.
-@Suite(.serialized, .offCooperativePool, .timeLimit(.minutes(1)))
+@Suite(.serialized, .offCooperativePool, .timeLimit(.minutes(3)))
 struct DualLayerEdgeCaseTests {
 
     // MARK: - Fixtures

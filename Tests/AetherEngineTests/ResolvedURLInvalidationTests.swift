@@ -349,6 +349,64 @@ struct ResolvedURLInvalidationTests {
                 "the re-resolve carries the boundary range once: \(source.requestLog)")
     }
 
+    /// The keep-pin grace answers a slot WE just released. When the edge cuts the delivering
+    /// connection mid-range and then refuses the pin, nothing of ours is lingering: the edge has
+    /// revoked the pinned session, and only a fresh redirect heals (StreamX on 7.50.0: a CDN cut at
+    /// 16 of 32 MB, three 509s against the pin across 9 s, then the source-resolved target answered
+    /// 206 on its first try, a 12 s visible stall). The first refusal must spend the re-resolve.
+    @Test("a pin refused right after the edge cut its connection re-resolves on the first refusal",
+          .timeLimit(.minutes(2)))
+    func cutConnectionDropsThePinOnTheFirstRefusal() async throws {
+
+        let totalSize: Int64 = 64 * 1024 * 1024
+        let cutAfter: Int64 = 1024 * 1024
+        let leases = LeaseLatch()
+        let opens = AttemptCounter()
+        let cdnMaybe = ThrottledOriginServer(
+            totalSize: totalSize,
+            respond: { _, offset, path in
+                if offset == 0, opens.next(for: 0) == 1 { return .serveThenDrop(afterBytes: cutAfter) }
+                guard offset > 0, offset < totalSize - 64 * 1024 else { return .serve206 }
+                return leases.isStale(path: path) ? .status(509) : .serve206
+            }
+        )
+        let cdn = try #require(cdnMaybe)
+        defer { cdn.stop() }
+        let cdnPort = cdn.port
+        let sourceMaybe = ThrottledOriginServer(
+            totalSize: totalSize,
+            respond: { _, _, _ in
+                .redirect(to: "http://127.0.0.1:\(cdnPort)/cdn/movie.bin?lease=\(leases.mint())")
+            }
+        )
+        let source = try #require(sourceMaybe)
+        defer { source.stop() }
+
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(source.port)/movie.bin")!,
+                                backoffScale: 0.02)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        let sliceCap = 128 * 1024
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: sliceCap)
+        defer { buf.deallocate() }
+        let target = Int(cutAfter) + 512 * 1024
+        var got = 0
+        while got < target {
+            let n = reader.read(into: buf, size: Int32(min(sliceCap, target - got)))
+            if n <= 0 { break }
+            got += Int(n)
+        }
+        #expect(got == target, "read stopped at \(got) of \(target); the cut was terminal")
+
+        // The refused attempt against the pin plus the healed one, both at the cut offset.
+        let attemptsAtTheCut = cdn.requestLog.filter { $0.start == cutAfter }.count
+        #expect(attemptsAtTheCut == 2,
+                "expected one refusal, then the re-resolved attempt, got \(attemptsAtTheCut): \(cdn.requestLog)")
+        #expect(leases.mintsAfterFault == 1,
+                "healing must cost exactly one source resolve, spent \(leases.mintsAfterFault): \(source.requestLog)")
+    }
+
     /// A consumer still being served from the window must not soften the ladder: window
     /// bytes are not network progress, so the streak keeps charging across served reads
     /// and both the re-resolve rung and the bounded give-up stay reachable. Before this

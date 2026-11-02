@@ -1,6 +1,7 @@
 import AVFoundation
 
-/// Keeps a tvOS HDMI route in Dolby Atmos while the engine plays an APAC track: through its `AVPlayer`,
+/// Keeps a tvOS HDMI route in Dolby Atmos while the engine plays a rendered object-audio bed (APAC or
+/// PCM, `SpatialBedFormat`), or compressed E-AC-3 JOC on the software host: through its `AVPlayer`,
 /// or through the software host's sample-buffer audio renderer (the Dolby Vision FEL route).
 ///
 /// tvOS hands APAC to the receiver as Dolby MAT, and some sinks show Dolby Atmos for that on their own.
@@ -231,7 +232,7 @@ extension AetherEngine {
             atmosOutputActivator = activator
             activator.attach(to: player) { [weak self] _ in
                 guard let session = self?.nativeVideoSession else { return false }
-                return session.audioIsAPAC && session.audioAPACIsFromDolbyAtmos
+                return session.audioIsRenderedBed && session.audioBedIsFromDolbyAtmos
             }
         } else if let host = softwareHost, host.audioRouteCarriesDolbyAtmos {
             let activator = atmosOutputActivator ?? AtmosOutputActivator()

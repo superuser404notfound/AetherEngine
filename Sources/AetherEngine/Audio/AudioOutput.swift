@@ -224,9 +224,9 @@ final class AudioOutput: @unchecked Sendable {
         endPreroll()
         let at = synchronizer.currentTime()
         let sourceSeconds = timeline.sourceSeconds(forRenderer: at.seconds)
-        if synchronizer.rate != 0 {
-            synchronizer.setRate(0, time: at)
-        }
+        // Unconditional: `synchronizer.rate` reads back asynchronously, and a start issued just
+        // before this can still read 0 here. Skipping the stop on that read let it commit later.
+        synchronizer.setRate(0, time: at)
         lock.unlock()
         EngineLog.emit("[AudioOutput] pause at t=\(String(format: "%.3f", sourceSeconds)) (host transport disabled)",
                        category: .swPlayback)

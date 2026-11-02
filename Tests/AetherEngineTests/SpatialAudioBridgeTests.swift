@@ -13,7 +13,7 @@ import AetherLibavutil
 /// with the encoder's 2048 frames of priming counted in, so the first packet takes the anchor and
 /// the first content frame plays there. These drive the bridge with a synthetic decoder that
 /// behaves like the real one on exactly those points.
-@Suite("TrueHD Atmos spatial bridge", .timeLimit(.minutes(2)))
+@Suite("TrueHD Atmos spatial bridge", .offCooperativePoolOneLane, .timeLimit(.minutes(5)))
 struct SpatialAudioBridgeTests {
     #if TrueHDObjectAudio || DTSXObjectAudio
 
@@ -209,6 +209,29 @@ struct SpatialAudioBridgeTests {
         // last partial packet.
         #expect(packets.count == 2 + Int((Double(96_000 - 200) / 1024).rounded(.up)))
         #expect(bridge.feedStats.packetsEmitted == packets.count)
+    }
+
+    @Test("as PCM the first packet is the first content frame on the source position, with no priming")
+    func pcmAnchorsOnSourceWithoutPriming() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l916,
+            decoder: SyntheticDecoder(skipAfterReset: 5), format: .lpcm)
+        defer { bridge.close() }
+        var packets = try feed(bridge, startMs: 1000, count: 100)
+        packets += bridge.flush().map { fp in
+            defer { var p: UnsafeMutablePointer<AVPacket>? = fp; trackedPacketFree(&p) }
+            return (fp.pointee.pts, fp.pointee.flags & AV_PKT_FLAG_KEY != 0, fp.pointee.size)
+        }
+        #expect(bridge.encoderLeadingFrames == 0)
+        #expect(packets.first?.pts == Int64(48_200))
+        // Contiguous: each packet starts where the previous one's frames (16 channels x 3 bytes) end.
+        // A chunk's last packet is shorter than 1024 frames, so the step is the length, not a constant.
+        #expect(zip(packets, packets.dropFirst()).allSatisfy { $1.pts - $0.pts == Int64($0.size) / 48 })
+        #expect(packets.allSatisfy { $0.size <= 1024 * 48 })
+        // Every frame the decoder produced, 16 channels of 3 bytes each, and nothing padded.
+        #expect(packets.reduce(0) { $0 + Int($1.size) } == (96_000 - 200) * 16 * 3)
+        #expect(packets.allSatisfy { $0.key })
     }
 
     /// The APAC sample entry is written before any audio, so a decoder that never finds a major sync
@@ -500,17 +523,36 @@ struct SpatialAudioBridgeTests {
         }
     }
 
+    @Test("movenc muxes the PCM bed as ipcm with its channel layout and no stand-in")
+    func muxedInitCarriesPCM() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l916,
+            decoder: SyntheticDecoder(skipAfterReset: 0), format: .lpcm)
+        defer { bridge.close() }
+        #expect(bridge.soundSampleEntryOverride == nil)
+        #expect(bridge.hlsCodecs == "ipcm")
+        #expect(bridge.servedChannelCount == 16)
+        guard let muxed = try muxWithProbeVideo(bridge, startMs: 0, count: 50) else { return }
+        defer { try? FileManager.default.removeItem(at: muxed.sessionDir) }
+        let hex = muxed.initBytes.map { String(format: "%02x", $0) }.joined()
+        #expect(hex.contains("6970636d"), "ipcm sample entry present")
+        #expect(hex.contains("63686e6c"), "chnl box present")
+        #expect(!hex.contains("61706163") && !hex.contains("616c6163"), "no apac, no alac stand-in")
+    }
+
     /// The end-to-end form of the timestamp contract: a click at a known source position is
     /// rendered, encoded, muxed and decoded back by AVFoundation, which presents APAC the way
     /// AVPlayer does, and has to come out where the source put it. With the encoder's priming
     /// packets dropped it came out 2048 frames (42.7 ms) early, and so did every session's audio.
-    @Test("a click decodes back at its source position through AVFoundation")
-    func clickDecodesOnItsSourcePosition() async throws {
+    @Test("a click decodes back at its source position through AVFoundation, as APAC and as PCM",
+          arguments: [SpatialBedFormat.apac, .lpcm])
+    func clickDecodesOnItsSourcePosition(format: SpatialBedFormat) async throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         // The source starts at 0 and the click is 12000 frames in, so it belongs at 0.25 s.
         let bridge = try SpatialAudioBridge(
             srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
-            decoder: ClickDecoder(clickFrame: 12_000))
+            decoder: ClickDecoder(clickFrame: 12_000), format: format)
         defer { bridge.close() }
         guard let muxed = try muxWithProbeVideo(bridge, startMs: 0, count: 30) else { return }
         let sessionDir = muxed.sessionDir

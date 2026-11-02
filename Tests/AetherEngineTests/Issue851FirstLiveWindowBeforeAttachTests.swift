@@ -64,7 +64,10 @@ final class Issue851FirstLiveWindowBeforeAttachTests: XCTestCase {
         defer { cache.close() }
         let capture = EngineLogCapture()
         defer { capture.end() }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { provider.cancelWaiters() }
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            provider.cancelWaiters()
+        }
         let started = DispatchTime.now()
         await AetherEngine.awaitFirstLiveWindow(provider)
         let waited = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000_000

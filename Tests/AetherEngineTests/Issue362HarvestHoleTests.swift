@@ -98,11 +98,13 @@ struct Issue362HarvestHoleTests {
             resumeFrom: nil, notBefore: 231) == nil)
     }
 
-    @Test("a hole behind the playhead is history and is decoded straight across")
+    @Test("a hole whose far side the playhead has reached is decoded straight across")
     func holeBehindThePlayheadIsNotHeld() {
-        // Waiting there delays the landing line for content the viewer has already passed, which is
-        // the one thing #143's reconstruction pass must never be made to do.
-        #expect(cut(playhead: 290) == nil)
+        // Waiting there delays content the viewer already needs, which is the one thing #143's
+        // reconstruction pass must never be made to do. #941: judged on the FAR side. A playhead
+        // between the two sides still has the unread ground ahead of it, and the hold stays.
+        #expect(cut(playhead: 296) == nil)
+        #expect(cut(playhead: 290)?.index == 2)
     }
 
     // MARK: - Resuming

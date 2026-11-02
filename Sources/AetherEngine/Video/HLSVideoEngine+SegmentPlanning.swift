@@ -569,6 +569,46 @@ extension HLSVideoEngine {
         return VideoConfigRecord.hevcRecord(header: extradata, vps: vps, sps: sps, pps: pps)
     }
 
+    /// `rebuildHEVCExtradataWithInBandParameterSets` for an `avcC` without SPS or PPS (#938). Same
+    /// scan, same budgets, same rewind contract.
+    func rebuildH264ExtradataWithInBandParameterSets(
+        demuxer: Demuxer,
+        videoStreamIndex: Int32,
+        codecpar: UnsafePointer<AVCodecParameters>,
+        rewindBeforeScan: Bool = true
+    ) -> [UInt8]? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_H264,
+              let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else { return nil }
+        let source = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
+        guard VideoConfigRecord.avcRecordNeedsInBandRebuild(source),
+              let naluLengthSize = VideoConfigRecord.avcNALULengthSize(source) else { return nil }
+
+        var sets = VideoConfigRecord.H264ParameterSets()
+        let packetBudget = 16
+        var packetsScanned = 0
+        let readBudget = 512
+
+        scanSourceHead(demuxer: demuxer, rewind: rewindBeforeScan, readBudget: readBudget) { pkt in
+            if pkt.pointee.stream_index != videoStreamIndex { return false }
+            packetsScanned += 1
+            guard let pktData = pkt.pointee.data else { return packetsScanned >= packetBudget }
+            sets.collect(from: pktData, size: Int(pkt.pointee.size), naluLengthSize: naluLengthSize)
+            return sets.isComplete || packetsScanned >= packetBudget
+        }
+
+        guard let sps = sets.sps, let pps = sets.pps else {
+            EngineLog.emit(
+                "[HLSVideoEngine] in-band H.264 parameter-set scan found none: "
+                + "packets=\(packetsScanned) sps=\(sets.sps != nil) pps=\(sets.pps != nil)",
+                category: .session
+            )
+            return nil
+        }
+        return VideoConfigRecord.avcRecord(
+            sps: sps, pps: pps, naluLengthSize: naluLengthSize,
+            width: codecpar.pointee.width, height: codecpar.pointee.height)
+    }
+
     /// Shows the packets at the head of the source to `inspect`, which returns true once it has seen
     /// enough, looking at no more than `readBudget` of them.
     ///

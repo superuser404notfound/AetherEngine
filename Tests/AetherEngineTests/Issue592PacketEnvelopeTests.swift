@@ -88,7 +88,7 @@ struct Issue592PacketEnvelopeTests {
     /// Reported, not asserted: a throughput floor pinned here would be a CI coin toss. The number is
     /// the deliverable, read off the run. Each round gets its own payload, so nothing is reused
     /// across iterations and a copy the encoder makes is a copy this measures.
-    @Test("throughput of the envelope, reported")
+    @Test("throughput of the envelope, reported", .offCooperativePoolOneLane)
     func throughputReport() throws {
         let rounds = 200
         var packets: [SoftwareStoredPacket] = []

@@ -77,7 +77,7 @@ func run() async -> Int32 {
             break
         }
         if ready { break }
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 200_000_000) // hygiene: allow standalone harness poll, bounded by its own timeout
     }
 
     guard ready else {

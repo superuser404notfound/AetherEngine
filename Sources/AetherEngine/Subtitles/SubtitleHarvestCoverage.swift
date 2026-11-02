@@ -112,9 +112,15 @@ struct SubtitleHarvestCoverage: Sendable, Equatable {
     /// Was every second between `from` and `through` read by some run? An empty or inverted span is
     /// trivially covered: there is nothing in it to have missed.
     func covers(from: Double, through: Double) -> Bool {
+        Self.covers(sortedSpans(), from: from, through: through)
+    }
+
+    /// `covers` over spans already sorted by start, for a caller asking many questions of one
+    /// snapshot (#941: one drain tick asks once per stored pair).
+    static func covers(_ spans: [Span], from: Double, through: Double) -> Bool {
         guard from.isFinite, through.isFinite, through > from else { return true }
         var cursor = from
-        for span in sortedSpans() {
+        for span in spans {
             guard span.from <= cursor + Self.seamSeconds else { return false }
             cursor = max(cursor, span.through)
             if cursor >= through { return true }

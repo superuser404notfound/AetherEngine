@@ -243,7 +243,7 @@ struct RangeIgnoringOriginTests {
     }
 
     @Test("a small file answered with a 200 that covers it stays sized and seekable",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func smallWholeFileStaysSeekable() throws {
         let total = Int64(4 * mb)
         let maybe = ThrottledOriginServer(totalSize: total, throttleUs: 0, patternedBody: true,

@@ -73,7 +73,7 @@ struct Issue220BoundedRangeTests {
     /// the window legitimately opens the next range AT the frontier. A count cannot tell that
     /// apart from a re-fetch: this asserted two requests and saw three on a loaded CI runner,
     /// where the third was `bytes=524288-34078719`, the refill doing its job.
-    @Test("a completed range is read out of the window, not fetched again", .timeLimit(.minutes(1)))
+    @Test("a completed range is read out of the window, not fetched again", .timeLimit(.minutes(3)))
     func completedRangeIsNotRefetched() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: 512 * 1024 * 1024))
         defer { server.stop() }

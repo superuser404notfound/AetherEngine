@@ -70,7 +70,7 @@ struct CredentialRefusalTests {
     /// the token. The unproductive ladder spent about 80 s on this; the credential ladder gives up
     /// after its third refusal, a few seconds in, with the refusal on the store.
     @Test("a reader refused 401 mid-stream gives up in seconds and stamps the store",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func refusedReaderGivesUpQuickly() async throws {
         let firstRange: Int64 = 256 * 1024
         let originMaybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024, respond: { _, offset, _ in

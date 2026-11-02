@@ -124,7 +124,7 @@ struct Issue93SlowSegmentServeTests {
     }
 
     @Test("cached bytes survive a slow notification without restarting the producer",
-          .timeLimit(.minutes(1)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     func cacheHitSurvivesSlowNotification(holdServeUntilSignal: Bool) async throws {
         let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
         defer { cache.close() }

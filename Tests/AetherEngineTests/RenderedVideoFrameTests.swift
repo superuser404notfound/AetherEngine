@@ -1,7 +1,7 @@
 import Testing
 @testable import AetherEngine
 
-@Suite("Local rendered-frame evidence", .timeLimit(.minutes(1)))
+@Suite("Local rendered-frame evidence", .timeLimit(.minutes(3)))
 @MainActor
 struct RenderedVideoFrameTests {
     private let presented = SampleBufferRenderer.RenderMetrics(

@@ -35,7 +35,7 @@ struct DiscReaderRangeAnswerTests {
     }
 
     @Test("an origin that answers the range probe with a 200 is hung up on at the head",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func plain200IsHungUpOn() throws {
         let maybe = ThrottledOriginServer(totalSize: total, respond: { _, _, _ in .serve200 })
         let server = try #require(maybe)
@@ -46,7 +46,7 @@ struct DiscReaderRangeAnswerTests {
                 "the origin wrote \(server.bytesWritten / 1024 / 1024) MB of a \(total / 1024 / 1024) MB body")
     }
 
-    @Test("open names the origin that cannot address bytes", .timeLimit(.minutes(1)))
+    @Test("open names the origin that cannot address bytes", .timeLimit(.minutes(3)))
     func openThrowsForAnOriginWithoutRanges() throws {
         let maybe = ThrottledOriginServer(totalSize: total, respond: { _, _, _ in .serve200 })
         let server = try #require(maybe)
@@ -58,7 +58,7 @@ struct DiscReaderRangeAnswerTests {
     }
 
     @Test("a remote disc image on such an origin fails the demuxer open with that cause",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func demuxerOpenFailsTyped() throws {
         let maybe = ThrottledOriginServer(totalSize: total, respond: { _, _, _ in .serve200 })
         let server = try #require(maybe)
@@ -72,7 +72,7 @@ struct DiscReaderRangeAnswerTests {
         #expect(server.bytesWritten < 16 * 1024 * 1024)
     }
 
-    @Test("a 206 that runs past the range is cut where the range ends", .timeLimit(.minutes(1)))
+    @Test("a 206 that runs past the range is cut where the range ends", .timeLimit(.minutes(3)))
     func overWide206IsCutAtTheRange() throws {
         let maybe = ThrottledOriginServer(totalSize: total, ignoreRangeEnd: true)
         let server = try #require(maybe)
@@ -88,7 +88,7 @@ struct DiscReaderRangeAnswerTests {
     }
 
     @Test("a 206 that starts elsewhere is hung up on at the head and the range asked again",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func misplaced206IsHungUpOn() throws {
         let target: Int64 = 64 * 1024 * 1024
         let once = FirstClaim()

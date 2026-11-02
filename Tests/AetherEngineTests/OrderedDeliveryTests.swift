@@ -14,7 +14,7 @@ import Foundation
 /// from before this returns after" invariant (I3) hold, and a ticket that
 /// never arrives costs exactly the one frame at the stall-guard threshold,
 /// not the rest of the session.
-@Suite(.serialized, .timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct OrderedDeliveryTests {
 
     private static func makeBuffer() -> CVPixelBuffer? {

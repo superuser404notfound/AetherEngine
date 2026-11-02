@@ -79,3 +79,61 @@ private func scrubPreviewRun(url: URL, positions: [Double], warmSeconds: Double,
     print("\(shown) of \(positions.count) positions showed a picture")
     return shown == positions.count ? 0 : 2
 }
+
+// MARK: - scrubpreview --stills
+
+/// `scrubPreviewFrame` at a list of positions after `--warm S` seconds of play: where each still
+/// came from (a resident segment or the keyframe still ladder) and the span it names. With
+/// `--max-concurrent-requests 1` the origin is the one-connection shape the ladder exists for.
+func runScrubStills(url: URL, positions: [Double], warmSeconds: Double,
+                    maxConcurrentRequests: Int?, forwardBufferSegments: Int?) -> Int32 {
+    print(EngineLog.redacted("aetherctl scrubpreview --stills: \(url.absoluteString)"))
+    EngineLog.handler = { print($0) }
+    let box = UncheckedBox<Int32?>(nil)
+    Task { @MainActor in
+        box.value = await scrubStillsRun(url: url, positions: positions, warmSeconds: warmSeconds,
+                                         maxConcurrentRequests: maxConcurrentRequests,
+                                         forwardBufferSegments: forwardBufferSegments)
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
+    CFRunLoopRun()
+    return box.value ?? 1
+}
+
+@MainActor
+private func scrubStillsRun(url: URL, positions: [Double], warmSeconds: Double,
+                            maxConcurrentRequests: Int?, forwardBufferSegments: Int?) async -> Int32 {
+    let engine: AetherEngine
+    do {
+        engine = try AetherEngine()
+        try await engine.load(url: url, options: LoadOptions(
+            maxConcurrentSourceRequests: maxConcurrentRequests,
+            forwardBufferSegments: forwardBufferSegments))
+    } catch {
+        print("load failed: \(error.localizedDescription)")
+        return 1
+    }
+    engine.play()
+    try? await Task.sleep(for: .seconds(warmSeconds))
+    print("backend=\(engine.playbackBackend.rawValue) cacheBackedStills=\(engine.supportsCacheBackedStills) "
+          + String(format: "t=%.1fs buffered=%.1fs duration=%.1fs",
+                   engine.currentTime, engine.bufferedPosition, engine.duration))
+    var shown = 0
+    for target in positions {
+        let resident = engine.residentRanges.contains { $0.contains(target) }
+        let started = ContinuousClock.now
+        let frame = await engine.scrubPreviewFrame(atSeconds: target, refined: false, isCancelled: { false })
+        let elapsed = ContinuousClock.now - started
+        let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
+        if frame != nil { shown += 1 }
+        let detail = frame.map { f in
+            String(format: "still at %.2f", f.actualSeconds)
+                + (f.validRange.map { String(format: " span %.2f..%.2f", $0.lowerBound, $0.upperBound) } ?? "")
+                + " \(f.image.width)x\(f.image.height)"
+        } ?? "nil"
+        print(String(format: "  t=%7.2f resident=%@ -> %@ in %.0f ms", target, resident ? "yes" : "no ", detail, ms))
+    }
+    engine.stop()
+    print("\(shown) of \(positions.count) positions showed a picture")
+    return shown == positions.count ? 0 : 2
+}

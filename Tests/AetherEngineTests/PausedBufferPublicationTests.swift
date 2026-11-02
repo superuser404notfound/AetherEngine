@@ -76,6 +76,33 @@ struct PausedBufferPublicationTests {
         #expect(host.renderedTime == 0)
     }
 
+    @Test("a pending seek measures the buffer from its target, not from the frame it left")
+    func pendingSeekAnchorsOnTarget() throws {
+        let (engine, host, cache) = try fixture()
+        defer { engine.setPendingRecoverySeekTarget(nil); engine.nativeVideoSession = nil; cache.close() }
+        for index in [0, 1] { cache.store(index: index, data: Data([0])) }
+        engine.refreshNativeBufferedPosition()
+        try #require(engine.bufferedPosition == 12)
+        engine.clock.currentTime = 20
+        engine.setPendingRecoverySeekTarget(20)
+        engine.refreshNativeBufferedPosition()
+        #expect(host.renderedTime == 0)
+        #expect(engine.bufferedPosition == 20)
+        cache.store(index: 3, data: Data([0]))
+        engine.refreshNativeBufferedPosition()
+        #expect(engine.bufferedPosition == 30)
+    }
+
+    @Test("the buffer never trails the published playhead")
+    func neverTrailsPlayhead() throws {
+        let (engine, _, cache) = try fixture()
+        defer { engine.nativeVideoSession = nil; cache.close() }
+        cache.store(index: 0, data: Data([0]))
+        engine.clock.currentTime = 9
+        engine.refreshNativeBufferedPosition()
+        #expect(engine.bufferedPosition == 9)
+    }
+
     @Test("teardown or absent host does not overwrite another path's buffer")
     func lifecycleGuards() throws {
         let (engine, _, cache) = try fixture()

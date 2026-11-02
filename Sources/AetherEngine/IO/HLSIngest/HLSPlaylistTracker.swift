@@ -146,7 +146,7 @@ struct HLSPlaylistTracker {
                 result[0] = HLSMediaSegment(
                     uri: first.uri, duration: first.duration,
                     discontinuityBefore: true, crypt: first.crypt,
-                    programDateTime: first.programDateTime
+                    programDateTime: first.programDateTime, byteRange: first.byteRange
                 )
             }
             return result

@@ -1,5 +1,25 @@
 import Foundation
 
+struct SoftwarePacketCacheTimingRecord: Sendable {
+    let pts: Int64
+    let duration: Int64
+    let key: Bool
+    let cursor: SoftwarePacketDiskFIFO.Cursor
+}
+struct SoftwarePacketCacheTimingBatch: Sendable {
+    let invalid: Bool
+    let records: [SoftwarePacketCacheTimingRecord]
+    var oldestUsableChunk: UInt64? = nil
+    var calibrationPressure = false
+}
+/// Foundation-only seam keeps the existing standalone cache tests independent of FFmpeg.
+protocol SoftwarePacketCacheTimingSource: AnyObject, Sendable {
+    func append(_ packet: SoftwareStoredPacket, cursor: SoftwarePacketDiskFIFO.Cursor, epoch: UInt64)
+    func drain(epoch: UInt64) -> SoftwarePacketCacheTimingBatch
+    func seconds(position: Int64, epoch: UInt64) -> Double?
+    func evict(before chunk: UInt64, epoch: UInt64)
+}
+
 /// Compressed VOD packet prefetch, independent of renderer pacing. The producer owns source reads;
 /// the consumer gets byte-identical packet envelopes from a bounded disk FIFO. No main-thread I/O.
 /// Cached seeks move only the consumer cursor. A source reposition has a separate epoch, so an
@@ -95,14 +115,28 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     private var keyframes: [Keyframe] = []
     private let maximumKeyframes = 65_536
     private var residency = SoftwarePacketResidency()
+    private var timingResidency = SoftwarePacketResidency()
+    private let cacheTiming: (any SoftwarePacketCacheTimingSource)?
+    private var cacheTimingInvalid = false
+    /// AV1 through dav1d (`SWKeyframeSnap`): a hit restores to the last retained keyframe at or before
+    /// the target, not to the one before it. An AV1 keyframe opens on its own (no leading pictures, and
+    /// a forward key frame is flagged only when it refreshes every reference, #931), so the earlier
+    /// keyframe only made dav1d decode a whole GOP more: on an Apple TV 4K (A15) a hit onto a
+    /// keyframe of 4K AV1 held the clock 1.8 to 2.5 s, and 0.13 to 0.18 s restored to that keyframe.
+    private let anchorsOnLastKeyframe: Bool
+    private var calibrationPressure = false
 
     /// Construct only off-main: creating the FIFO touches the temporary volume.
     init(video: Stream, audio: Stream?, byteBudget: Int, forwardSeconds: Double,
          initialSourceClock: Double, fifo: any SoftwarePacketStore,
          videoReorderDepth: Int? = nil,
+         cacheTiming: (any SoftwarePacketCacheTimingSource)? = nil,
          coverageRangeCap: Int = 4096,
+         anchorsOnLastKeyframe: Bool = false,
          beforeConsumerOperation: (@Sendable () -> Void)? = nil,
          readSource: @escaping @Sendable (@Sendable () -> Bool) throws -> SoftwareStoredPacket?) {
+        self.cacheTiming = cacheTiming
+        self.anchorsOnLastKeyframe = anchorsOnLastKeyframe
         self.video = video
         self.audio = audio
         self.byteBudget = max(1, byteBudget)
@@ -142,11 +176,19 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
 
     var snapshot: Snapshot {
         condition.lock(); defer { condition.unlock() }
+        applyCacheTimingLocked()
         return Snapshot(packetCount: count, bytes: bytes, residentBytes: residentBytes,
                         frontier: sourceRepositioning || closed ? nil : frontierLocked(),
                         generation: generation, seeking: seeking, sourceEnded: ended,
                         sourceEpoch: sourceEpoch, cacheSeekHits: cacheSeekHits,
                         cacheSeekMisses: cacheSeekMisses)
+    }
+
+    /// The retained video keyframes in source seconds, from the packets' own keyframe flags: where a
+    /// cached seek can start (`SWKeyframeSnap`). Copied under the short state lock, like `snapshot`.
+    var retainedKeyframeSeconds: [Double] {
+        condition.lock(); defer { condition.unlock() }
+        return keyframes.map(\.seconds)
     }
 
     /// Called only by a background sampler. Copy bounded metadata under the short state lock;
@@ -165,6 +207,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             operations.unlock()
         }
         condition.lock()
+        applyCacheTimingLocked()
         // Fixed numeric state only, emitted on edges by this background sampler. No URLs,
         // error descriptions or packet content. Bits: closed/reposition/reset/failure,
         // nonretaining/invalid-video/EOF/empty-audio/no-keyframe/unknown-floor,
@@ -175,7 +218,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         if resetPending { flags |= 4 }
         if failure != nil { flags |= 8 }
         if !fifo.retainsConsumedPackets { flags |= 16 }
-        if presentationCoverage?.isInvalidated == true { flags |= 32 }
+        if presentationCoverage?.isInvalidated == true || cacheTimingInvalid { flags |= 32 }
         if ended { flags |= 64 }
         if audio != nil && audioCoverage.rangeCount == 0 { flags |= 128 }
         if keyframes.isEmpty { flags |= 256 }
@@ -187,12 +230,12 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
             if changed { EngineLog.emit("[SWCacheCoverage] flags=\(flags)", category: .swPlayback) }
         }
         guard !closed, !sourceRepositioning, !resetPending, retainedPacketsUsableLocked,
-              fifo.retainsConsumedPackets else { condition.unlock(); return [] }
+              fifo.retainsConsumedPackets, !cacheTimingInvalid else { condition.unlock(); return [] }
         let videoCoverage = self.videoCoverage
         let presentationCoverage = self.presentationCoverage
         let audioCoverage = self.audioCoverage
         let keyframes = self.keyframes
-        let videoFloor = residency.videoFloor
+        let videoFloor = cacheTiming == nil ? residency.videoFloor : timingResidency.videoFloor
         let audioFloor = residency.audioFloor
         condition.unlock()
         let videoRanges = presentationCoverage?.rangesSeconds ?? videoCoverage.rangesSeconds(
@@ -255,12 +298,15 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard token == generation, seeking, !closed else {
             condition.unlock(); throw ReadError.interrupted
         }
+        applyCacheTimingLocked()
         let hasCoverage = !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && seconds.isFinite && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let candidates = hasCoverage ? keyframes.filter { $0.seconds <= seconds }
             .sorted { $0.seconds < $1.seconds } : []
-        // A previous recovery/key picture supplies open-GOP/audio preroll when still retained.
-        let anchor = candidates.isEmpty ? nil : candidates[max(0, candidates.count - 2)]
+        // A previous recovery/key picture supplies open-GOP/audio preroll when still retained, except
+        // where a keyframe needs none (`anchorsOnLastKeyframe`).
+        let anchor = candidates.isEmpty ? nil
+            : candidates[max(0, candidates.count - (anchorsOnLastKeyframe ? 1 : 2))]
         condition.unlock()
 
         if let anchor {
@@ -319,6 +365,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         guard seconds.isFinite, maxPackets > 0, isCancelled?() != true else { return nil }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         condition.lock()
+        applyCacheTimingLocked()
         let eligible = !closed && !sourceRepositioning && !resetPending && retainedPacketsUsableLocked
             && (frontierLocked(at: seconds).map { $0 > seconds } ?? false)
         let anchor = eligible
@@ -435,7 +482,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         }
         condition.unlock()
         guard let data = try fifo.pop() else { throw ReadError.corruptFIFO }
-        let packet = try SoftwareStoredPacket.decode(data)
+        var packet = try SoftwareStoredPacket.decode(data)
         // Equality parks the producer too. Reclaim an eligible consumed chunk at the exact ceiling,
         // otherwise it can remain asleep with unread packets until the queue drains completely.
         try fifo.trimConsumed(toByteBudget: max(0, byteBudget - 1))
@@ -444,14 +491,24 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         defer { condition.unlock() }
         guard !closed, !seeking, token == generation, isCurrent() else { throw ReadError.interrupted }
         copyDiskStateLocked(state)
-        if packet.streamIndex == video.index, let seconds = videoSeconds(pts: packet.pts) {
-            consumedVideoSeconds = seconds
+        applyCacheTimingLocked()
+        if packet.streamIndex == video.index {
+            if cacheTiming != nil { packet.cacheTimingEpoch = sourceEpoch }
+            if let seconds = cacheTiming?.seconds(position: packet.position, epoch: sourceEpoch)
+                ?? (cacheTiming == nil ? videoSeconds(pts: packet.pts) : nil) {
+                consumedVideoSeconds = seconds
+            } else if cacheTiming != nil, !cacheTimingInvalid {
+                // Old metadata can expire before its retained bytes. The render clock still
+                // bounds elective read-ahead; it never fabricates coverage or a seek anchor.
+                consumedVideoSeconds = sourceClock
+            }
         }
         condition.broadcast()
         return packet
     }
 
     private func frontierLocked(at seconds: Double? = nil) -> Double? {
+        guard !cacheTimingInvalid else { return nil }
         let clock = seconds ?? sourceClock
         let videoEnd: Double?
         if let presentationCoverage {
@@ -491,6 +548,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         storedVideoSeconds = nil; consumedVideoSeconds = nil
         keyframes.removeAll(keepingCapacity: true)
         residency = SoftwarePacketResidency()
+        timingResidency = SoftwarePacketResidency(); cacheTimingInvalid = false; calibrationPressure = false
     }
 
     /// Presentation seconds of a stored packet, or nil when this stream cannot express them.
@@ -507,6 +565,8 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         if let floor = state.oldestRetainedChunkID {
             keyframes.removeAll { $0.cursor.chunkID < floor }
             residency.evict(before: floor)
+            timingResidency.evict(before: floor)
+            cacheTiming?.evict(before: floor, epoch: sourceEpoch)
         } else { keyframes.removeAll(keepingCapacity: true) }
     }
 
@@ -583,16 +643,19 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                     try fifo.trimConsumed(toByteBudget: byteBudget - recordReservation)
                     let cursor = try fifo.append(data)
                     let state = fifo.snapshot
+                    if packet.streamIndex == video.index {
+                        cacheTiming?.append(packet, cursor: cursor, epoch: token)
+                    }
                     condition.lock()
                     if token == sourceEpoch, !closed, !sourceRepositioning {
                         copyDiskStateLocked(state)
-                        if packet.streamIndex == video.index || packet.streamIndex == audio?.index {
+                        if (packet.streamIndex == video.index && cacheTiming == nil) || packet.streamIndex == audio?.index {
                             let stream = packet.streamIndex == video.index ? video : audio!
                             residency.insert(chunkID: cursor.chunkID, pts: packet.pts,
                                 duration: packet.duration, numerator: stream.numerator,
                                 denominator: stream.denominator, isVideo: packet.streamIndex == video.index)
                         }
-                        if packet.streamIndex == video.index {
+                        if packet.streamIndex == video.index, cacheTiming == nil {
                             if presentationCoverage != nil {
                                 if presentationCoverage?.isFull == true, let tick = playheadTick(video) {
                                     presentationCoverage?.prune(before: tick)
@@ -618,6 +681,7 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
                             audioCoverage.insert(pts: packet.pts, duration: packet.duration, byteCount: packet.bytes.count)
                         }
                     }
+                    applyCacheTimingLocked()
                     condition.broadcast()
                     condition.unlock()
                 } catch { recordFailure(error, token: token, origin: .storage) }
@@ -626,11 +690,57 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
         } catch { recordFailure(error, token: token, origin: failureOrigin) }
     }
 
+    /// Only bounded metadata work under condition; parser and media I/O have already finished.
+    private func applyCacheTimingLocked() {
+        guard !closed, !sourceRepositioning, !resetPending, let cacheTiming else { return }
+        let batch = cacheTiming.drain(epoch: sourceEpoch)
+        if calibrationPressure != batch.calibrationPressure {
+            calibrationPressure = batch.calibrationPressure
+            condition.broadcast()
+        }
+        if let floor = batch.oldestUsableChunk {
+            keyframes.removeAll { $0.cursor.chunkID < floor }
+            timingResidency.evict(before: floor)
+        }
+        if batch.invalid {
+            cacheTimingInvalid = true
+            keyframes.removeAll(keepingCapacity: true)
+            videoCoverage.reset(); presentationCoverage?.reset()
+            storedVideoSeconds = nil; consumedVideoSeconds = nil
+            return
+        }
+        guard !cacheTimingInvalid else { return }
+        for record in batch.records {
+            timingResidency.insert(chunkID: record.cursor.chunkID, pts: record.pts,
+                duration: record.duration, numerator: video.numerator,
+                denominator: video.denominator, isVideo: true)
+            if presentationCoverage != nil {
+                if presentationCoverage?.isFull == true, let tick = playheadTick(video) {
+                    presentationCoverage?.prune(before: tick)
+                }
+                presentationCoverage?.insert(pts: record.pts)
+            } else {
+                if videoCoverage.isFull, let tick = playheadTick(video) { videoCoverage.prune(before: tick) }
+                videoCoverage.insert(pts: record.pts, duration: record.duration)
+            }
+            if let seconds = videoSeconds(pts: record.pts) {
+                storedVideoSeconds = seconds
+                if record.key {
+                    keyframes.append(Keyframe(seconds: seconds, cursor: record.cursor))
+                    if keyframes.count > maximumKeyframes { keyframes.removeFirst(min(1024, keyframes.count)) }
+                }
+            }
+        }
+    }
+
     private func shouldParkLocked() -> Bool {
         // One source record can cross the budget. A consumed active chunk cannot be deleted before
         // cursor rollover, so residency also includes bounded protected chunk slack (not an
         // unbounded batch). Unknown time coverage is never guessed from bitrate.
         guard count > 0 else { return false }
+        // Keep the unqualified GOP available to the decoder even when the source outruns it.
+        // An empty reservoir always reads again: a very long GOP cannot deadlock qualification.
+        if calibrationPressure { return true }
         if residentBytes >= byteBudget { return true }
         // The forward limit is measured on the RESERVOIR, from the packet the consumer last took
         // to the newest one stored, because that is what the producer is actually building and it

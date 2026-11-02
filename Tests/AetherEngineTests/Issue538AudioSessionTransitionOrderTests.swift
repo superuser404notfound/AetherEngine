@@ -24,7 +24,7 @@ struct Issue538AudioSessionTransitionOrderTests {
 
         let activation = engine.enqueueAudioSessionTransition {
             await journal.note("activation begins")
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .milliseconds(100)) // hygiene: allow one-shot delay inside the transition under test, not a wait
             await journal.note("activation ends")
         }
         let release = engine.enqueueAudioSessionTransition {
@@ -43,7 +43,7 @@ struct Issue538AudioSessionTransitionOrderTests {
         let journal = Journal()
 
         _ = engine.enqueueAudioSessionTransition {
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .milliseconds(100)) // hygiene: allow one-shot delay inside the transition under test, not a wait
             await journal.note("previous activation")
         }
         let release = engine.enqueueAudioSessionTransition {

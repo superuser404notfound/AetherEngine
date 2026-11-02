@@ -1,5 +1,10 @@
 name: CI
 
+# The gate every push and PR waits for: the tests on macOS with and without the optional components,
+# and the test target for the two simulator SDKs, as four parallel jobs. Everything that only builds
+# a further configuration (Release aetherctl, the device SDKs with every component, visionOS, the
+# probes) runs in `ci-extended.yml`, nightly and by hand before a release tag. The single macOS job
+# that ran all of this in sequence took ~21 minutes per change; this split is ~10.
 on:
   push:
     branches: [main]
@@ -7,9 +12,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A PR gets its newest commit tested, so a push supersedes the run before it. On main every commit
+# keeps its run: cancelling a merge's run when the next push lands left 27 of 100 runs cancelled and a
+# red one that could not be traced back to the commit that caused it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # One toolchain: GitHub's `xcode-27` image (macOS 27.0, default Xcode 27.0 27A266a), the same
@@ -21,21 +29,29 @@ jobs:
   # Its flaky `swift test` runs of mid-September were on a beta macOS 27 base with Xcode 27
   # beta 6; the image moved to macOS 27 on 2026-09-16. If it turns unstable again, that shows as
   # a lane red for its image, which is the signal to wait for the GA label, not to lower the bar.
-  # All three macOS jobs use it, which stays within the account's concurrent macOS runners.
+  # The four macOS jobs stay within the account's five concurrent macOS runners.
   test-macos:
     name: swift test (macOS)
     runs-on: xcode-27
-    timeout-minutes: 50
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # SwiftPM's shared clone cache. Fetching FFmpegBuild alone took ~45 s per job; a cached clone
+      # only fetches what changed. A miss or a failed restore costs nothing but that fetch.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
 
       - name: Show toolchain
         run: |
           swift --version
           xcodebuild -version
 
-      - name: swift build
-        run: swift build
+      - name: swift build --build-tests
+        run: swift build --build-tests
 
       # A test process that dies mid-run reads as exit 1 with no ✘, no backtrace and no swift-testing
       # summary: `swift test` collapses every abnormal child exit to a plain 1, and a signal takes the
@@ -43,8 +59,12 @@ jobs:
       # as started but never finished. Three such deaths were an unguarded socket write raising
       # SIGPIPE from a test origin server (see the SO_NOSIGPIPE note in Issue177IngestPrefetchTests),
       # so nothing hangs and no time limit would have caught it.
+      #
+      # `swift test` runs XCTest and then Swift Testing, and the Swift Testing summary line says
+      # nothing about the XCTest half: a red XCTest case leaves that line green and the step exits 1.
+      # `grep "error: -\["` finds the XCTest failure.
       - name: swift test
-        run: swift test
+        run: swift test --skip-build
 
       # The same Swift Testing suite on a ONE-thread cooperative pool. Anything that blocks a pool
       # thread (a sync read, a semaphore, a `Task.detached` around engine I/O) starves every other
@@ -55,21 +75,10 @@ jobs:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
         run: swift test --skip-build --disable-xctest
 
-      # The optional components (TrueHDObjectAudio, DTSXObjectAudio, DualLayerDolbyVision) are off by
-      # default, so every step above builds and tests without them. This build and run keep the opt-in
-      # code compiling and its tests running. Steps in this job rather than a job of their own, to stay
-      # within the account's concurrent macOS runners.
-      - name: swift build (all traits)
-        run: swift build --enable-all-traits --build-tests --scratch-path .build-alltraits
-
-      - name: swift test (all traits)
-        run: swift test --enable-all-traits --skip-build --scratch-path .build-alltraits
-
-      - name: swift test (all traits, one-thread cooperative pool)
-        env:
-          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
-        run: swift test --enable-all-traits --skip-build --disable-xctest --scratch-path .build-alltraits
-
+      # Standalone swiftc builds. They link FFmpegBuild out of `.build/checkouts`, so they ride in the
+      # job that resolved it. Each script compiles a hand-picked file list, so a new reference in a
+      # file under test breaks it: add the real file to the list, never a stub (a build with shims
+      # compiles a different file).
       - name: Software VOD packet-cache regressions
         run: |
           bash Scripts/test-software-packet-coverage.sh
@@ -84,26 +93,45 @@ jobs:
           command -v ffmpeg >/dev/null || brew install ffmpeg
           bash Scripts/test-h264-partial-composition-controls.sh
 
-      # The transport probe is a device harness and runs nowhere in CI, so nothing else would keep
-      # it compiling. A harness that stopped building is discovered by the person who needed it.
-      - name: build the transport probe (AE#377)
-        run: swift build --build-tests --package-path Probes/TransportProbe
-
-      # The pulse test's scripts are Python, shell and Swift nobody runs in CI; a syntax error in one is found
-      # at the television. Compiling them is all that can be checked without a phone recording.
-      - name: Compile the Dolby Vision pulse scripts
-        run: |
-          python3 -m py_compile Probes/DolbyVisionPulse/Scripts/*.py
-          zsh -n Probes/DolbyVisionPulse/Scripts/build.sh
-          zsh -n Probes/DolbyVisionPulse/Scripts/run_tv.sh
-          swiftc -typecheck Probes/DolbyVisionPulse/Scripts/dump_attachments.swift
-
-  build-tvos:
-    name: xcodebuild (tvOS + visionOS Simulator)
+  # The optional components (TrueHDObjectAudio, DTSXObjectAudio, DualLayerDolbyVision) are off by
+  # default, so the job above builds and tests without them. This one keeps the opt-in code compiling
+  # and its tests running, in parallel instead of after the default run.
+  test-macos-all-traits:
+    name: swift test (macOS, all traits)
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
+
+      - name: swift build --build-tests (all traits)
+        run: swift build --enable-all-traits --build-tests
+
+      - name: swift test (all traits)
+        run: swift test --enable-all-traits --skip-build
+
+      - name: swift test (all traits, one-thread cooperative pool)
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
+        run: swift test --enable-all-traits --skip-build --disable-xctest
+
+  build-tvos:
+    name: xcodebuild (tvOS Simulator)
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
 
       # The test target is the only place a platform gate in TEST code is ever checked. `swift test`
       # on macOS compiles the macOS side of every `#if`, so a gate put around a helper instead of
@@ -126,66 +154,18 @@ jobs:
             EXCLUDED_ARCHS=x86_64 \
             CODE_SIGNING_ALLOWED=NO
 
-      # The transport probe also builds as an app-hosted test bundle, because a SwiftPM test target
-      # is tool-hosted and tool-hosted testing does not exist on device destinations. That project
-      # runs nowhere in CI either, and the person who discovers it stopped building is the one who
-      # needed it that evening.
-      - name: Build the transport probe's device harness (AE#377)
-        run: |
-          xcodebuild build-for-testing \
-            -project Probes/TransportProbe/Device/TransportProbe.xcodeproj \
-            -scheme TransportProbe \
-            -destination 'generic/platform=tvOS Simulator' \
-            -derivedDataPath .build/xcode-probe \
-            CODE_SIGNING_ALLOWED=NO
-
-      # The Dolby Vision pulse host is the other device harness, and the one that links the engine
-      # itself, so it is also the one that breaks when a public API it uses moves. It plays clips on an
-      # Apple TV that someone films, runs nowhere in CI, and would otherwise be found out by the person
-      # who needed a measurement that evening. It links the engine through PulseEngine/, which enables the
-      # DualLayerDolbyVision trait the host measures. EXCLUDED_ARCHS for the reason given above: an app cannot
-      # link the x86_64 slice.
-      - name: Build the Dolby Vision pulse host (Probes/DolbyVisionPulse)
-        run: |
-          xcodebuild build \
-            -project Probes/DolbyVisionPulse/Device/DolbyVisionPulse.xcodeproj \
-            -scheme DolbyVisionPulse \
-            -destination 'generic/platform=tvOS Simulator' \
-            -derivedDataPath .build/xcode-pulse \
-            EXCLUDED_ARCHS=x86_64 \
-            CODE_SIGNING_ALLOWED=NO
-
-      # xcodebuild has no flag for a package's traits, so the opt-in components reach the device SDKs
-      # through Probes/AllTraits, a consumer package that enables all of them the way a host does.
-      - name: Build with every optional component for tvOS
-        working-directory: Probes/AllTraits
-        run: |
-          xcodebuild build \
-            -scheme AetherEngineAllTraits \
-            -destination 'generic/platform=tvOS' \
-            -derivedDataPath ../../.build/xcode-alltraits-tvos \
-            CODE_SIGNING_ALLOWED=NO
-
-      # #344: the package has declared visionOS since 6.0.0 and nothing here compiled for it, so an
-      # availability list that named tvOS/iOS/macOS and then fell through to `*` broke the visionOS
-      # build silently. `*` resolves to the declared visionOS floor (1.0), so any API newer than that
-      # is a compile error on visionOS and on no other platform. Nobody here owns a Vision Pro, which
-      # makes this step the only place the platform is exercised at all. It rides in this job so CI
-      # stays within the account's concurrent macOS runners instead of queueing a sixth job.
-      - name: Build for visionOS Simulator
-        run: |
-          xcodebuild build \
-            -scheme AetherEngine \
-            -destination 'generic/platform=visionOS Simulator' \
-            -derivedDataPath .build/xcode-visionos \
-            CODE_SIGNING_ALLOWED=NO
-
   build-ios:
-    name: xcodebuild (iOS Simulator) + release aetherctl
+    name: xcodebuild (iOS Simulator)
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
 
       # The other half of the gate check above; see the tvOS job for why the test target needs its
       # own build and why x86_64 is excluded.
@@ -196,25 +176,6 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath .build/xcode-ios \
             EXCLUDED_ARCHS=x86_64 \
-            CODE_SIGNING_ALLOWED=NO
-
-      # Every other Swift step in CI is Debug, and aetherctl is not a product, so no consumer compiles
-      # it either: a DEBUG-only engine hook called without a guard kept Release broken from 7.6.0 to
-      # 7.14.0 without anything noticing (AE#610). Off the `swift test` job's critical path.
-      - name: swift build -c release (aetherctl)
-        run: swift build -c release --product aetherctl
-
-      - name: swift build -c release (aetherctl, all traits)
-        run: swift build -c release --enable-all-traits --product aetherctl --scratch-path .build-release-alltraits
-
-      # See the tvOS job: the opt-in components for the iOS device SDK, through a consumer package.
-      - name: Build with every optional component for iOS
-        working-directory: Probes/AllTraits
-        run: |
-          xcodebuild build \
-            -scheme AetherEngineAllTraits \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath ../../.build/xcode-alltraits-ios \
             CODE_SIGNING_ALLOWED=NO
 
   # The docs site (aetherengine-website) validates every heading anchor at build time, but it
@@ -232,3 +193,8 @@ jobs:
 
       - name: Validate relative links and heading anchors in the published docs
         run: python3 Scripts/check-doc-links.py
+
+      # The two waiting rules in CONTRIBUTING.md that a grep can check, each written after a red main
+      # (a 30 minute hang with its log discarded, and rounds of starved waiters).
+      - name: Test hygiene (no swallowed cancellation, no parked work on the global pool)
+        run: python3 Scripts/check-test-hygiene.py

@@ -12,8 +12,9 @@ import Foundation
 /// Every teardown route carries one of these, so the line names the caller's intent rather than
 /// the mechanism they share.
 enum SubtitleDrainStopReason: String, Sendable {
-    /// The primary selection moved to an external / sidecar track, which holds a whole file and
-    /// needs neither the drainer nor the prefetcher. The common one in the field.
+    /// The primary selection moved to an external / sidecar track, which is read whole and needs
+    /// no prefetcher. A bitmap one brings the drainer back for its own packets (#921). The common
+    /// one in the field.
     case sidecarSelected
     /// Same for the secondary companion channel.
     case secondarySidecarSelected
@@ -26,6 +27,8 @@ enum SubtitleDrainStopReason: String, Sendable {
     case injectedRenditionSelected
     /// A live rendition playlist feeds the overlay directly.
     case liveRenditionSelected
+    /// #921: a bitmap sidecar's packets were dropped, whatever the selection moves to next.
+    case sidecarReleased
     /// Subtitles off.
     case subtitlesCleared
     /// The session itself is going away (`stopInternal`), so nothing is expected to survive.

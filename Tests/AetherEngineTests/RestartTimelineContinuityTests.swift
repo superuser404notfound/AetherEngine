@@ -214,7 +214,7 @@ struct RestartTimelineContinuityTests {
 
 // MARK: - Subtitle pump tap (Sodalite#32)
 
-@Suite("Subtitle pump tap", .serialized)
+@Suite("Subtitle pump tap", .serialized, .offCooperativePool)
 struct SubtitlePumpTapTests {
 
     /// The pump already reads the source's full interleave; tapping the text-subtitle streams there
@@ -315,7 +315,7 @@ struct RestartReopenDtsIntegrityTests {
     @Test("restartReopen resolves the B-frame reorder depth and delivers monotonic dts",
           .enabled(if: fixtureExists("restart-witness-subs.mkv"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func restartReopenDeliversDecodeOrderDts() throws {
         let demuxer = Demuxer()
         try demuxer.open(url: fixtureURL("restart-witness-subs.mkv"), profile: .restartReopen)

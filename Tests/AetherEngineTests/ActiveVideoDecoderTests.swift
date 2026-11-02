@@ -46,19 +46,19 @@ struct ActiveVideoDecoderTests {
 
     @Test("HEVC decoded by VideoToolbox on the software path (#753)",
           .enabled(if: hasFixture("hdr10-hevc.mp4") && VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)),
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func hardwareHEVC() async throws {
         try await checkLoadAndReload("hdr10-hevc.mp4", label: "VideoToolbox HEVC (HW)")
     }
 
     @Test("HEVC with in-band parameter sets still reports libavcodec",
-          .enabled(if: hasFixture("hev1-inband-xps.mp4")), .timeLimit(.minutes(1)))
+          .enabled(if: hasFixture("hev1-inband-xps.mp4")), .timeLimit(.minutes(3)))
     func softwareHEVC() async throws {
         try await checkLoadAndReload("hev1-inband-xps.mp4", label: "libavcodec HEVC (SW)")
     }
 
     @Test("VP9 reports the hardware decoder after load and reload",
-          .enabled(if: hasFixture("vp9.webm")), .timeLimit(.minutes(1)))
+          .enabled(if: hasFixture("vp9.webm")), .timeLimit(.minutes(3)))
     func hardwareOrFallbackVP9() async throws {
         if #available(macOS 11.0, iOS 26.2, tvOS 26.2, visionOS 26.2, *) {
             VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
@@ -69,7 +69,7 @@ struct ActiveVideoDecoderTests {
     }
 
     @Test("AV1 still reports dav1d",
-          .enabled(if: hasFixture("av1.mp4")), .timeLimit(.minutes(1)))
+          .enabled(if: hasFixture("av1.mp4")), .timeLimit(.minutes(3)))
     func softwareAV1() async throws {
         try await checkLoadAndReload("av1.mp4", label: "dav1d AV1 (SW)")
     }

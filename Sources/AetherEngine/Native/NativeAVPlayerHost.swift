@@ -275,7 +275,9 @@ final class NativeAVPlayerHost {
     private var videoFrameSummaryAt: Double?
     private var videoPresentation = VideoPresentationProgress()
     private var hasPresentedVideo = false
-    private var loadedVideoRanges: [(Double, Double)] = []
+    /// Item-axis mirror of `loadedTimeRanges`, kept by KVO so it also moves while paused. The
+    /// remote-HLS route publishes its buffer frontier from it (AE#935).
+    @Published private(set) var loadedVideoRanges: [(Double, Double)] = []
     private var loadedVideoObservation: NSKeyValueObservation?
     private var videoHealthSummaryAt: Double?
     var onVideoPresentationRecovery: ((VideoPresentationProgress.Action, Double) -> Void)?

@@ -18,6 +18,7 @@
 #   restart-witness-subs.mkv      - same as MKV with an embedded SRT track (pump tap)
 #   a53-captions.mp4              - H.264 with in-picture A/53 CEA-608 SEI (#131, #259)
 #   hev1-inband-xps.mp4           - HEVC with in-band VPS/SPS/PPS and an empty hvcC
+#   h264-inband-avcc.mkv          - H.264 with in-band SPS/PPS and a 7-byte avcC (#938)
 #   cue-axis-bframes.mkv/.mp4     - one HEVC B-pyramid stream in both containers (AE#561)
 #   long-first-gop-{aac,pcm}.mkv  - 11 s first GOP, then 2 s GOPs; passthrough and bridged audio
 #   bridge-eac3-51.mkv            - 5.1 PCM in MKV, drives the EAC3 audio bridge (AE#561 follow-up)
@@ -280,6 +281,35 @@ replacement = bytearray()
 replacement += (8 + len(emptied)).to_bytes(4, 'big') + b'hvcC' + emptied
 replacement += freed.to_bytes(4, 'big') + b'free' + bytes(freed - 8)
 data[start:start + size] = replacement
+open(path, 'wb').write(bytes(data))
+PY
+
+# #938: the H.264 counterpart, an mkvmerge-style CodecPrivate with zero SPS and zero PPS
+# (`01 64 00 20 ff e0 00`), the parameter sets repeated in-band at every IDR. The freed bytes become
+# an EBML Void so no offset in the file moves.
+echo "→ h264-inband-avcc.mkv (H.264 with in-band SPS/PPS, 7-byte avcC)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=320x240:rate=25 -t 6 \
+    -c:v libx264 -profile:v high -level 3.2 -pix_fmt yuv420p -g 50 -bf 3 \
+    -x264-params repeat-headers=1 "$FIXTURES_DIR/h264-inband-avcc.mkv"
+python3 - "$FIXTURES_DIR/h264-inband-avcc.mkv" <<'PY'
+import sys
+
+path = sys.argv[1]
+data = bytearray(open(path, 'rb').read())
+i = data.find(b'\x63\xa2')                       # CodecPrivate
+while i >= 0:
+    sz = data[i + 2]
+    if sz & 0x80 and data[i + 3] == 1:          # 1-byte size, avcC v1
+        total = 3 + (sz & 0x7f)
+        new = b'\x63\xa2\x87' + bytes(data[i + 3:i + 7]) + b'\xff\xe0\x00'
+        pad = total - len(new)
+        assert pad >= 2, f'avcC too small to empty in place: {total}'
+        data[i:i + total] = new + b'\xec' + bytes([0x80 | (pad - 2)]) + bytes(pad - 2)
+        break
+    i = data.find(b'\x63\xa2', i + 1)
+else:
+    sys.exit('no avcC CodecPrivate found')
 open(path, 'wb').write(bytes(data))
 PY
 

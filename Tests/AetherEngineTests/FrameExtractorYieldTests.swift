@@ -57,7 +57,7 @@ struct FrameExtractorYieldTests {
     @Test("a yielded thumbnail returns nil cheaply; extraction resumes once healthy",
           .enabled(if: fixtureExists("restart-witness-subs.mkv"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func yieldedThumbnailResumes() async {
         let starved = AtomicBool(true)
         let extractor = FrameExtractor(

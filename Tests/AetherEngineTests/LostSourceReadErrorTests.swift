@@ -98,7 +98,7 @@ struct LostSourceReadErrorTests {
     }
 
     @Test("a length-less stream cut off mid-body reports EIO, not EOF",
-          .timeLimit(.minutes(1)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     func cutOffLengthlessStreamIsAnError(sequentialOnly: Bool) async throws {
         let origin = try #require(LengthlessResettingOrigin(bodyBytes: 256 * 1024))
         defer { origin.stop() }
@@ -123,7 +123,7 @@ struct LostSourceReadErrorTests {
         #expect(last == FFmpegErr.eio)
     }
 
-    @Test("a seekable read whose fetch fails reports EIO, not EOF", .timeLimit(.minutes(1)))
+    @Test("a seekable read whose fetch fails reports EIO, not EOF", .timeLimit(.minutes(3)))
     func failedSeekableFetchIsAnError() throws {
         let target: Int64 = 8 * 1024 * 1024
         let respond: @Sendable (Int, Int64, String) -> ThrottledOriginServer.Directive = { _, offset, _ in

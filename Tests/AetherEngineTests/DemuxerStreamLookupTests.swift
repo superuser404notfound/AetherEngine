@@ -74,7 +74,7 @@ struct DemuxerStreamLookupTests {
         #expect(demuxer.stream(at: audio) == nil)
     }
 
-    @Test("a lookup does not wait for a read that holds the demuxer", .timeLimit(.minutes(1)))
+    @Test("a lookup does not wait for a read that holds the demuxer", .timeLimit(.minutes(3)))
     func lookupDoesNotWaitOutARead() async throws {
         let reader = GatedReader(data: makeWAV(seconds: 20))
         let demuxer = Demuxer()

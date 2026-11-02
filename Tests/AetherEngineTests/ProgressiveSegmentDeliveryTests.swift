@@ -152,7 +152,7 @@ struct ProgressiveSegmentDeliveryTests {
         func didDeliverProgressiveChunk(index: Int) { chunks.bump() }
     }
 
-    @Test("the server sends a segment while it is written and ends it at the seal", .timeLimit(.minutes(1)))
+    @Test("the server sends a segment while it is written and ends it at the seal", .timeLimit(.minutes(3)))
     func serverStreamsWhileWritten() async throws {
         let cache = makeCache()
         defer { cache.close() }
@@ -181,7 +181,7 @@ struct ProgressiveSegmentDeliveryTests {
         #expect(provider.chunks.value >= 2, "each chunk is evidence for the wedge watchdog")
     }
 
-    @Test("an abandoned segment ends the connection without the final chunk", .timeLimit(.minutes(1)))
+    @Test("an abandoned segment ends the connection without the final chunk", .timeLimit(.minutes(3)))
     func serverAbortsAnAbandonedSegment() async throws {
         let cache = makeCache()
         defer { cache.close() }

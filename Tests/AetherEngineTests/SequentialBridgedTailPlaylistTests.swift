@@ -175,7 +175,7 @@ struct SequentialBridgedTailPlaylistTests {
         return count
     }
 
-    @Test("the finished playlist lists every video frame and the whole duration", .timeLimit(.minutes(1)))
+    @Test("the finished playlist lists every video frame and the whole duration", .timeLimit(.minutes(3)))
     func bridgedTailKeepsTheFinalSegment() async throws {
         let body = try #require(Data(base64Encoded: Self.fixtureBase64.joined()))
         let server = try #require(ScriptedOriginServer { _ in

@@ -45,11 +45,37 @@ extension SoftwareStoredPacket {
                 }
                 side.bytes.copyBytes(to: target, count: side.bytes.count)
             }
+            if let cacheTimingEpoch {
+                SoftwarePacketCacheIdentity.attach(epoch: cacheTimingEpoch, position: position, to: packet)
+            }
             return packet
         } catch {
             av_packet_unref(packet)
             av_packet_free_safe(packet)
             throw error
         }
+    }
+}
+
+/// The (source epoch, packet position) a stored video packet carries through the decoder for
+/// `SoftwarePacketCacheTiming`. Ref-counted private observation metadata, never serialized and never
+/// used to schedule frames. Kept apart from the timing class so this file still compiles on its own
+/// (`Scripts/test-software-stored-packet.sh`).
+enum SoftwarePacketCacheIdentity {
+    static func attach(epoch: UInt64, position: Int64, to packet: UnsafeMutablePointer<AVPacket>) {
+        guard packet.pointee.opaque_ref == nil, let buffer = av_buffer_alloc(24),
+              let data = buffer.pointee.data else { return }
+        var values = [UInt64(0x434143484554494d), epoch, UInt64(bitPattern: position)]
+        values.withUnsafeMutableBytes { data.update(from: $0.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 24) }
+        packet.pointee.opaque_ref = buffer
+    }
+
+    static func identity(_ frame: UnsafeMutablePointer<AVFrame>) -> (UInt64, Int64)? {
+        guard let buffer = frame.pointee.opaque_ref, buffer.pointee.size == 24,
+              let data = buffer.pointee.data else { return nil }
+        let raw = UnsafeRawPointer(data)
+        guard raw.loadUnaligned(as: UInt64.self) == 0x434143484554494d else { return nil }
+        return (raw.loadUnaligned(fromByteOffset: 8, as: UInt64.self),
+                Int64(bitPattern: raw.loadUnaligned(fromByteOffset: 16, as: UInt64.self)))
     }
 }

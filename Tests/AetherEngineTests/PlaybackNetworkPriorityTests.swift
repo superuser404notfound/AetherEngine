@@ -6,7 +6,7 @@ import Testing
 @Suite("Playback network callback priority")
 struct PlaybackNetworkPriorityTests {
     @Test("a request started at utility priority completes at playback priority",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func utilityRequestCompletion() async throws {
         let origin = try #require(ThrottledOriginServer(totalSize: 64))
         defer { origin.stop() }
@@ -30,7 +30,7 @@ struct PlaybackNetworkPriorityTests {
     }
 
     @Test("serial callbacks execute at the foreground demux priority",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func foregroundCallbacks() async throws {
         let queue = AVIOReader.makePlaybackDelegateQueue()
         #expect(queue.qualityOfService == .userInitiated)

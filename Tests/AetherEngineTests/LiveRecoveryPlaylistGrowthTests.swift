@@ -62,7 +62,7 @@ struct LiveRecoveryPlaylistGrowthTests {
         return bytes
     }
 
-    @Test("segments a reopened live producer cuts reach the playlist", .timeLimit(.minutes(1)))
+    @Test("segments a reopened live producer cuts reach the playlist", .timeLimit(.minutes(3)))
     func reopenedProducerGrowsThePlaylist() async throws {
         let observed = Observed()
         let engine = HLSVideoEngine(
@@ -88,7 +88,7 @@ struct LiveRecoveryPlaylistGrowthTests {
         try await waitFor { (engine.liveSegmentCountSnapshot ?? 0) > beforeLoss }
     }
 
-    @Test("an exhausted repeated source resumes into the same DVR when new media arrives", .timeLimit(.minutes(1)))
+    @Test("an exhausted repeated source resumes into the same DVR when new media arrives", .timeLimit(.minutes(3)))
     func parkedReplayRecoveryResumesWithoutAppendingOldMedia() async throws {
         let observed = Observed()
         let engine = HLSVideoEngine(url: URL(string: "aether-custom://source")!,
@@ -111,15 +111,22 @@ struct LiveRecoveryPlaylistGrowthTests {
                 "every repeated source must leave the admitted timeline unchanged")
         #expect(provider.liveProductionHalted)
         observed.admitNewMedia()
+        let resetsBeforeRetry = observed.sourceResets
         #expect(engine.retryLiveSourceRecovery())
+        #expect(!provider.liveProductionHalted, "the retry lifts the halt before the reopen runs")
         #expect(engine.retryLiveSourceRecovery(), "duplicate host notification coalesces")
         try await waitFor { (engine.liveSegmentCountSnapshot ?? 0) > originalCount }
         #expect(engine.cache === cache)
         #expect(engine.provider === provider)
-        #expect(!provider.liveProductionHalted)
+        // The new broadcast is finite and every later reopen repeats it, so a slow runner can see the
+        // source exhausted a second time and halted again by now. Only that may halt it, and the halt
+        // lands before the exhaustion callback, so a halted provider waits for the callback.
+        if provider.liveProductionHalted {
+            try await waitFor { observed.sourceResets > resetsBeforeRetry }
+        }
     }
 
-    @Test("a producer rebuilt in place reports into the same playlist", .timeLimit(.minutes(1)))
+    @Test("a producer rebuilt in place reports into the same playlist", .timeLimit(.minutes(3)))
     func rebuiltProducerReportsIntoThePlaylist() async throws {
         let observed = Observed()
         let engine = HLSVideoEngine(

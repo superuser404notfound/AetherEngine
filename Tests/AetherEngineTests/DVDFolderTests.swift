@@ -46,8 +46,8 @@ struct DVDFolderTests {
         let ifo = DVDCellTimelineTests.vtsIFO(pgcs: [DVDCellTimelineTests.pgc(DVDCellTimelineTests.threeCells)],
                                               timeMaps: [(unit: 4, sectors: [10, 20])])
         let info = try #require(try DiscReader.wrap(Self.folder(vts1IFO: ifo)))
-        #expect(info.clipTimeline.map(\.concatByteStart) == [0, 1000 * 2048, 3000 * 2048])
-        #expect(info.dvdTimeMap?.byteOffsets == [10 * 2048, 20 * 2048])
+        #expect(info.clipTimeline.map(\.concatByteStart) == [0, 1000 * 2048, 3000 * 2048] as [Int64])
+        #expect(info.dvdTimeMap?.byteOffsets == [10 * 2048, 20 * 2048] as [Int64])
         #expect(info.titles.first?.durationTicks == UInt64(2100 * discTickRate))
     }
 

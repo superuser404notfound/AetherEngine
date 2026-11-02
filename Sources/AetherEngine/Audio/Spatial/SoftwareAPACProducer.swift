@@ -8,8 +8,8 @@ import AetherLibavcodec
 import AetherLibavutil
 
 /// TrueHD Atmos or DTS:X for the software host: the same render-and-encode bridge the AVPlayer route
-/// uses (`SpatialAudioBridge`), with its APAC packets handed to the audio renderer as sample buffers
-/// where the HLS route muxes them into fMP4.
+/// uses (`SpatialAudioBridge`), with its APAC or PCM packets handed to the audio renderer as sample
+/// buffers where the HLS route muxes them into fMP4.
 ///
 /// The bridge stamps packet k of an encoder run at the run's anchor plus k * 1024, priming packets
 /// included, because AVFoundation's HLS path presents an APAC packet's audio `encoderLeadingFrames`
@@ -69,7 +69,7 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
             loggedFeedError = true
             lock.unlock()
             if first {
-                EngineLog.emit("[SWHost] ERROR: APAC bridge refused a packet (\(error)); later ones are not logged",
+                EngineLog.emit("[SWHost] ERROR: object-audio bridge refused a packet (\(error)); later ones are not logged",
                                category: .swPlayback)
             }
             return []
@@ -98,7 +98,8 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
                let sample = Self.sampleBuffer(
                 bytes: UnsafeRawBufferPointer(start: data, count: Int(encoded.pointee.size)),
                 seconds: Double(encoded.pointee.pts - leading) / sampleRate,
-                formatDescription: bridge.packetFormatDescription) {
+                formatDescription: bridge.packetFormatDescription,
+                pcmFrames: bridge.format == .lpcm ? Int(encoded.pointee.duration) : nil) {
                 buffers.append(sample)
             }
             var owned: UnsafeMutablePointer<AVPacket>? = encoded
@@ -107,11 +108,29 @@ final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
         return buffers
     }
 
-    /// One APAC packet as a one-sample buffer.
+    /// One APAC packet as a one-sample buffer, or with `pcmFrames` one PCM packet as a buffer of that
+    /// many frames (PCM is described per frame, without packet descriptions).
     static func sampleBuffer(
-        bytes: UnsafeRawBufferPointer, seconds: Double, formatDescription: CMAudioFormatDescription
+        bytes: UnsafeRawBufferPointer, seconds: Double, formatDescription: CMAudioFormatDescription,
+        pcmFrames: Int? = nil
     ) -> CMSampleBuffer? {
-        SoftwareEAC3Passthrough.sampleBuffer(bytes: bytes, seconds: seconds, formatDescription: formatDescription)
+        guard let pcmFrames else {
+            return SoftwareEAC3Passthrough.sampleBuffer(bytes: bytes, seconds: seconds, formatDescription: formatDescription)
+        }
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: bytes.count,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+            dataLength: bytes.count, flags: 0, blockBufferOut: &block) == noErr, let block,
+              CMBlockBufferReplaceDataBytes(
+                with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0,
+                dataLength: bytes.count) == noErr else { return nil }
+        var sample: CMSampleBuffer?
+        guard CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: formatDescription,
+            sampleCount: pcmFrames, presentationTimeStamp: CMTime(seconds: seconds, preferredTimescale: 90_000),
+            packetDescriptions: nil, sampleBufferOut: &sample) == noErr else { return nil }
+        return sample
     }
 
     func flush() {

@@ -202,7 +202,10 @@ final class Issue684JoinBoundSealTests: XCTestCase {
         let (provider, cache) = makeProvider(upstream, cutTarget: 4.0, boundedStart: false)
         defer { cache.close() }
         append(provider, count: 7, each: 4.0)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { upstream.joinSpent = true }
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.2)
+            upstream.joinSpent = true
+        }
         var served = false
         let waited = seconds { served = provider.waitForFirstLiveSegment(timeout: 5) }
         XCTAssertTrue(served)

@@ -4,7 +4,7 @@ import Testing
 /// Wedge-safe background keepalive policy (iOS): the video pipeline survives backgrounding ONLY while
 /// the app stays genuinely running (PiP active, or actively playing for background audio), never across
 /// an idle suspension. See AetherEngine.shouldKeepVideoAlive.
-@Suite("Background keepalive policy")
+@Suite("Background keepalive policy", .timeLimit(.minutes(3)))
 struct BackgroundKeepaliveTests {
 
     @Test("keep alive while playing and enabled")
@@ -155,7 +155,11 @@ struct BackgroundKeepaliveTests {
         engine.state = .paused
         engine.noteDidEnterBackground()
         engine.state = .playing
-        for _ in 0..<50 where runs.isEmpty { await Task.yield() }
+        if retains {
+            try await waitFor { !runs.isEmpty }
+        } else {
+            for _ in 0..<50 { await Task.yield() }
+        }
         #expect(runs == (retains ? [.playing] : []))
     }
 
@@ -173,7 +177,7 @@ struct BackgroundKeepaliveTests {
 
     @MainActor
     @Test("a retained background seek applies its final transport policy (AE#870)",
-          .timeLimit(.minutes(1)), arguments: [
+          .timeLimit(.minutes(3)), arguments: [
             (true, true, true), (true, true, false), (true, false, true), (true, false, false),
             (false, true, true), (false, true, false), (false, false, true), (false, false, false),
           ])

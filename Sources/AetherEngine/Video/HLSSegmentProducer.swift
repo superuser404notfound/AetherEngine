@@ -229,6 +229,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// AE#684: the sound a finalized live segment carries (index, first and last audio packet on the
     /// output axis, seconds). Fired just before `onLiveSegmentFinalized` for the same index.
     var onLiveSegmentSound: (@Sendable (Int, Double, Double) -> Void)?
+    /// AE#936: the presentation time of every live video packet read, on the `onLiveSegmentFinalized`
+    /// start axis, so the first-serve gate can tell a drained burst from one still arriving.
+    var onLiveReadHead: (@Sendable (Double) -> Void)?
     /// Keyed by segment index; a nil value is a segment cut with no audio packet in it.
     private var liveSegmentSoundByIndex: [Int: (first: Double, last: Double)?] = [:]
     /// AE#684: set for the length of one merged read, so a second reader thread trips the assertion there.
@@ -1716,6 +1719,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             liveSegmentDiscontinuousByIndex[liveCurrentSegmentIndex] = pendingDiscontinuityFlag
             pendingDiscontinuityFlag = false
         }
+        onLiveReadHead?(ptsSeconds)
         return liveCurrentSegmentIndex
     }
 

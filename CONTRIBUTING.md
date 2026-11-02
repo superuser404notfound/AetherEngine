@@ -44,6 +44,12 @@ gets a real thread (`Thread.detachNewThread`), never `DispatchQueue.global().asy
 192 pool workers blocked, which is what a full parallel run of this suite produces, the queue had
 not started the block after 35 seconds while a detached thread ran in 3 milliseconds.
 
+CI enforces the two mechanical halves of this with `Scripts/check-test-hygiene.py`: no
+`try? await Task.sleep` and no `DispatchQueue.global().async` (or `asyncAfter`) anywhere under
+`Tests/`. A line that is a real exception says why, with `// hygiene: allow <reason>` on it. The
+same script rejects a `.timeLimit` under two minutes: a green run has hundreds of tests above 60 s,
+so a one minute limit reported healthy tests as hangs. Use `.minutes(3)`.
+
 **A blocking syscall in a test is unreachable for the `.timeLimit` trait, so it may not sit on the
 test's own thread.** Cancellation in Swift is cooperative: a test parked in `read`, `accept` or
 `waitUntilExit` never observes it, the trait never reports, and the job dies at its own

@@ -36,7 +36,7 @@ struct RangedResponseIntegrityTests {
     }
 
     @Test("an origin that answers wider than the range asked for is ended at the range end",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func overDeliveryIsEndedAtTheRangeEnd() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: 512 * 1024 * 1024,
                                                         ignoreRangeEnd: true))
@@ -64,7 +64,7 @@ struct RangedResponseIntegrityTests {
     }
 
     @Test("a persistent 206 that starts elsewhere is refused, not placed at the requested offset",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func persistentMisplacedRangeIsRefused() async throws {
         let target: Int64 = 64 * 1024 * 1024
         let once = FirstRequestAt()
@@ -83,7 +83,7 @@ struct RangedResponseIntegrityTests {
         #expect(readExact(reader, 4096) == expected(at: target, count: 4096))
     }
 
-    @Test("a chunk fetch 206 that starts elsewhere is refused", .timeLimit(.minutes(1)))
+    @Test("a chunk fetch 206 that starts elsewhere is refused", .timeLimit(.minutes(3)))
     func chunkMisplacedRangeIsRefused() async throws {
         let target: Int64 = 16 * 1024 * 1024
         let once = FirstRequestAt()

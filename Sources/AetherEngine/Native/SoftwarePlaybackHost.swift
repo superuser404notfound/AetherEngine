@@ -210,6 +210,13 @@ final class SoftwarePlaybackHost {
     /// Opt-in to full dual-layer Dolby Vision (Profile 7 FEL) decoding and Metal GPU composition over single-layer fallback.
     var preferDualLayerDolbyVision: Bool = false
 
+    /// #846: set by the load before `load(demuxer:...)`; non-nil runs the upscale stage on every decoded frame.
+    var upscalePlan: UpscalePlan?
+
+    /// The stage built for the current plan (a `FrameUpscaler`), nil when none was.
+    /// Typed loosely because the class does not exist in simulator builds or before OS 26.
+    private(set) var frameUpscaler: AnyObject?
+
     /// Forwarded Dolby Vision profile number (e.g. 7, 8) if detected from bitstream or container
     var configuredDVProfile: Int?
 
@@ -293,6 +300,13 @@ final class SoftwarePlaybackHost {
     /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
     /// the renderer as Atmos instead of as the PCM decode of their core.
     var objectAudioRendering: ObjectAudioRendering = .off
+
+    /// AE#923: the host's audio shaping. Active shaping keeps the track on the PCM decode, past both
+    /// Atmos routes, and the decoder carries it. Set before the decoder opens.
+    var audioShaping = AudioShaping()
+
+    /// AE#923: whether the producer this host built carries `audioShaping`.
+    private(set) var audioShapingApplied = false
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
@@ -407,6 +421,11 @@ final class SoftwarePlaybackHost {
 
     private var videoTimeBaseSeconds: Double = 0
     private var audioTimeBaseSeconds: Double = 0
+
+    /// dav1d decoding AV1, set per session: seeks land on the nearest indexed keyframe (`SWKeyframeSnap`),
+    /// out of the index's keyframes in source seconds as `refreshSnapKeyframes` last read them.
+    private var snapsSeeksToKeyframes = false
+    private var snapKeyframeSeconds: [Double] = []
 
     // MARK: - Live / DVR
 
@@ -1018,7 +1037,7 @@ final class SoftwarePlaybackHost {
         switch route {
         case .pcm: return .decoded
         case .compressedEAC3JOC: return .streamCopy
-        case .apac: return .bridged
+        case .apac, .pcmBed: return .bridged
         }
     }
 
@@ -1161,6 +1180,26 @@ final class SoftwarePlaybackHost {
         } else {
             return SoftwareVideoDecoder()
         }
+    }
+
+    /// #846: `handler` wrapped in the upscale stage when a plan is set and a stage builds, else unchanged.
+    /// Never for the dual-layer decoder (FEL sources are HDR and refused upstream).
+    func upscaledFrameHandler(
+        _ handler: @escaping DecodedFrameHandler,
+        decoder: any VideoDecodingPipeline,
+        frameRate: Double?
+    ) -> DecodedFrameHandler {
+        frameUpscaler = nil
+        guard let plan = upscalePlan, !Self.isDualLayer(decoder) else { return handler }
+        #if !targetEnvironment(simulator)
+        if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
+            let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval) else { return handler }
+            frameUpscaler = stage
+            return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
+        }
+        #endif
+        return handler
     }
 
     // MARK: - Load
@@ -1320,6 +1359,25 @@ final class SoftwarePlaybackHost {
             )
         }
 
+        // The parser is lazy and producer-owned; this copies only stream configuration. The
+        // observer must be installed before open so libavcodec propagates opaque identities.
+        let cacheTiming: SoftwarePacketCacheTiming?
+        if !isLive, !dem.readsSourceDirectly, dem.isSourceSeekable,
+           dem.usesAVIMPEG4CacheTiming(at: videoStreamIndex),
+           let software = videoDecoder as? SoftwareVideoDecoder {
+            let p = vStream.pointee.codecpar?.pointee
+            let extra = p.flatMap { par -> Data? in
+                guard par.extradata_size > 0, let bytes = par.extradata else { return nil }
+                return Data(bytes: bytes, count: Int(par.extradata_size))
+            } ?? Data()
+            let timing = SoftwarePacketCacheTiming(numerator: vtb.num, denominator: vtb.den, extradata: extra)
+            software.onCacheTiming = { epoch, position, pts in timing.observe(epoch: epoch, position: position, pts: pts) }
+            cacheTiming = timing
+        } else {
+            (videoDecoder as? SoftwareVideoDecoder)?.onCacheTiming = nil
+            cacheTiming = nil
+        }
+
         // Audit PERF-104: only the VideoToolbox decoders emit out of presentation order. That includes the
         // DualLayerVideoDecoder: OrderedDelivery keeps its frames in the order the base layer came out of
         // VideoToolbox, which is decode order (measured on the real fixtures, `DoviFelRealFileTests`). It gets
@@ -1351,7 +1409,7 @@ final class SoftwarePlaybackHost {
         // Applied here (not init) so it also covers a decoder replaced above.
         (videoDecoder as? SoftwareVideoDecoder)?.deinterlaceConfig = deinterlaceConfig
 
-        let onFrame: DecodedFrameHandler = { [weak self] pixelBuffer, pts, hdr10PlusData in
+        let baseOnFrame: DecodedFrameHandler = { [weak self] pixelBuffer, pts, hdr10PlusData in
             guard let self else { return }
             // AE#491: a frame decoded from a pre-seek packet is not late, it is from somewhere else.
             guard self.decodeGeneration == self.seekGeneration else { return }
@@ -1376,6 +1434,9 @@ final class SoftwarePlaybackHost {
                 )
             }
         }
+
+        let onFrame = upscaledFrameHandler(
+            baseOnFrame, decoder: videoDecoder, frameRate: AetherEngine.detectFrameRate(stream: vStream))
 
         if vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_VP9 {
             let opened = try VideoDecoderOpener.openPreferredOrFallback(
@@ -1445,6 +1506,7 @@ final class SoftwarePlaybackHost {
                 // A stop() can land on the suspension above, as on the ones below.
                 guard !stopRequested else { made.producer.close(); return }
                 self.audioDecoder = made.producer
+                self.audioShapingApplied = audioShaping.isActive && made.route == .pcm
                 self.audioRoute = made.route
                 self.audioRouteCarriesDolbyAtmos = made.route.carriesDolbyAtmos(sourceCodec: acp.pointee.codec_id)
                 self.audioStreamIndex = resolvedAudioIdx
@@ -1516,6 +1578,11 @@ final class SoftwarePlaybackHost {
         self.audioOutput?.onPrerollTransition = { [weak self] transition in
             self?.onClockHoldTransition?(transition)
         }
+        // dav1d decoding AV1: seeks land on keyframes (`SWKeyframeSnap`).
+        snapsSeeksToKeyframes = SWKeyframeSnap.enabled && videoDecoder is SoftwareVideoDecoder
+            && vStream.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_AV1
+        snapKeyframeSeconds = []
+        refreshSnapKeyframes()
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
         // it a silent software session on a long-latency route and an audible one on HDMI log the same.
         if let route = AudioRouteDescription.current() {
@@ -1582,6 +1649,7 @@ final class SoftwarePlaybackHost {
                 } : nil
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
+            let anchorsOnLastKeyframe = snapsSeeksToKeyframes
             let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim?)? in
                 let segments = HLSVideoEngine.clampedForwardWindow(forwardBufferSegments)
                 guard let (fifo, bytes, claim) = try Self.makePacketStore(
@@ -1591,7 +1659,8 @@ final class SoftwarePlaybackHost {
                     video: video, audio: audio, byteBudget: bytes,
                     forwardSeconds: Double(segments) * 4,
                     initialSourceClock: initialSourceClock, fifo: fifo,
-                    videoReorderDepth: videoReorderDepth
+                    videoReorderDepth: videoReorderDepth, cacheTiming: cacheTiming,
+                    anchorsOnLastKeyframe: anchorsOnLastKeyframe
                 ) { isCurrent in
                     guard let packet = try dem.readPacket(isCurrent: isCurrent) else { return nil }
                     defer { av_packet_unref(packet); av_packet_free_safe(packet) }
@@ -2246,6 +2315,43 @@ final class SoftwarePlaybackHost {
         lastRate = rate
     }
 
+    /// Reads the index's video keyframes for `SWKeyframeSnap` off the main actor and keeps them for the
+    /// next seek. Never read at the seek itself: `indexedKeyframes` takes the demuxer's access lock,
+    /// which a slow remote read holds (#254). Matroska reads its Cues only when the demuxer
+    /// repositions, so the list is read again after every landing; until then the packet cache's
+    /// retained keyframes are the ones a seek can snap to (`SWKeyframeSnap.candidates`).
+    private func refreshSnapKeyframes() {
+        guard snapsSeeksToKeyframes, let dem = demuxer else { return }
+        let streamIndex = videoStreamIndex
+        let timeBase = videoTimeBaseSeconds
+        Task { [weak self] in
+            let keys = await BlockingWork.detached(priority: .utility) {
+                dem.indexedKeyframes(streamIndex: streamIndex).map { Double($0) * timeBase }.sorted()
+            }.value
+            guard let self, self.demuxer === dem else { return }
+            if keys.count != self.snapKeyframeSeconds.count {
+                EngineLog.emit("[SWHost] keyframe-snapped seeks: \(keys.count) indexed keyframes",
+                               category: .swPlayback)
+            }
+            self.snapKeyframeSeconds = keys
+        }
+    }
+
+    /// Where a seek to `seconds` (session axis) lands for `SWKeyframeSnap`, nil to keep it exact. Asked
+    /// by the engine before it notes the subtitle harvest anchor and publishes the landing, so both
+    /// describe the keyframe the pump restarts from rather than the requested position.
+    func keyframeLanding(forSession seconds: Double) -> Double? {
+        guard snapsSeeksToKeyframes, !isLive else { return nil }
+        let sourceSeconds = SWClockAnchorPolicy.sourceSeconds(forSession: seconds, sessionZeroSeconds: clockSessionZero)
+        guard let snapped = SWKeyframeSnap.snappedSeconds(
+            target: sourceSeconds, current: sourceClockSeconds,
+            keyframes: SWKeyframeSnap.candidates(retained: vodPacketReadAhead?.retainedKeyframeSeconds ?? [],
+                                                 indexed: snapKeyframeSeconds)) else { return nil }
+        EngineLog.emit("[SWHost] seek snapped to keyframe target_s=\(String(format: "%.3f", sourceSeconds)) "
+                       + "keyframe_s=\(String(format: "%.3f", snapped))", category: .swPlayback)
+        return seconds + snapped - sourceSeconds
+    }
+
     /// #254: the demuxer reposition is awaited off the main actor. It used to run inline here, and
     /// because `Demuxer.readPacket` holds the access lock across the whole `av_read_frame`, a seek
     /// issued while the demux loop sat in a slow remote read parked the main thread for the length of
@@ -2416,6 +2522,7 @@ final class SoftwarePlaybackHost {
         // reads from here belongs to this position. Closing the window releases the loop.
         noteSeekSettled(generation)
         if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: sourceSeconds) }
+        refreshSnapKeyframes()
         return outcome
     }
 

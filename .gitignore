@@ -3,6 +3,8 @@
 # sub-packages (e.g. Examples/DemoPlayerMac) don't accidentally commit
 # their build artifacts + checkout mirrors.
 .build/
+# The all-traits scratch path CLAUDE.md and CI use (`--scratch-path .build-alltraits`).
+.build-*/
 Packages/
 .swiftpm/
 xcuserdata/

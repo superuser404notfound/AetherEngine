@@ -46,21 +46,24 @@ public struct ExternalSubtitleTrack: Sendable, Equatable {
     }
 
     /// libavcodec decoder name for `TrackInfo.codec`, so host codec checks (ASS styling, text/bitmap
-    /// classification) treat external tracks like embedded ones. Unknown formats fall back to
-    /// "subrip"; `SubtitleDecoder.decodeFile` sniffs the real format at decode time anyway.
+    /// classification) treat external tracks like embedded ones. A `.sup` is a PGS bitmap sidecar
+    /// (#921): labelled "subrip" it joined the text renditions and missed the bitmap OCR path.
+    /// Unknown formats fall back to "subrip"; `SubtitleDecoder.decodeFile` sniffs the real format
+    /// at decode time anyway.
     public static func codecName(url: URL, formatHint: String?) -> String {
         let ext = (formatHint ?? url.pathExtension).lowercased()
         switch ext {
         case "srt", "subrip": return "subrip"
         case "ass", "ssa": return "ass"
         case "vtt", "webvtt": return "webvtt"
+        case "sup": return "pgssub"
         default: return "subrip"
         }
     }
 
-    /// Text formats the engine can turn into a WebVTT rendition (#316). `codecName` deliberately falls
-    /// back to subrip for anything it does not recognise, which is a fine host label but would promise a
-    /// rendition for a `.sup` bitmap sidecar; those stay on the overlay (and Phase D's OCR).
+    /// Text formats the engine can turn into a WebVTT rendition (#316). `codecName` falls back to
+    /// subrip for anything it does not recognise, which is a fine host label but would promise a
+    /// rendition for a bitmap sidecar it cannot name; those stay on the overlay (and Phase D's OCR).
     var isTextFormat: Bool {
         ["srt", "subrip", "ass", "ssa", "vtt", "webvtt"]
             .contains((formatHint ?? url.pathExtension).lowercased())
