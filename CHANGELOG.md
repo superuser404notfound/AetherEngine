@@ -22,6 +22,10 @@ the public-API contract.
   that enables it gets `scrubThumbnail` stills, the keyframe still ladder and the I-frame rendition for those
   sources like for any other, and the held picture keeps using the same reshaping. Without the trait nothing
   changes: previews and the held picture still go through the system compositor.
+- **Dual-layer Dolby Vision logs when a frame has no mapping-preserving RPU (AE#913).** A frame whose
+  mapping-kept RPU could not be made carries the composed one if it is bypassed. That now counts as
+  `mappingFallback=` in the `DualLayerVideoDecoder` summary, and the first one per decoder logs at info level, so a
+  device log shows whether the fallback is ever reached. Only with the `DualLayerDolbyVision` trait.
 
 ### Fixed
 
