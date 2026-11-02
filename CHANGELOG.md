@@ -17,6 +17,11 @@ the public-API contract.
 
 ### Changed
 
+- **The 4:4:4 FEL output composes each chroma site once per 16 x 16 block.** With `AETHER_FEL_CHROMA=444` the
+  A12 composed about 12.8 frames per second and video fell 30 s or more behind the clock; it now holds 24
+  frames per second. The output is byte-identical. It applies only with the `DualLayerDolbyVision` trait. A
+  device whose 4:4:4 pipeline cannot run the 16 x 16 threadgroup now logs a compose failure for 4:4:4
+  instead of failing in the encoder. Colour not yet judged on a TV.
 - **With the `DolbyVisionStillReshaping` trait, a Dolby Vision Profile 5 / 10.0 session scrubs through the
   reshaped still path again.** `scrubPreviewDrawsInView` is now true only in a build without the trait, so a host
   that enables it gets `scrubThumbnail` stills, the keyframe still ladder and the I-frame rendition for those

@@ -243,6 +243,23 @@ memory watermark sampling on every emitted frame. They show the direction and th
 memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of
 ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
 
+### 4.7 4:4:4 chroma compose on the A12
+
+Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control, running the
+4:4:4 kernel described in §5.6. The build kind is given per row.
+
+| | Before | After |
+|---|---|---|
+| 4:4:4 compose rate, 65 s clip (Debug) | about 12.8 per second, video falling 30 s or more behind the clock | about 23.9 per second, the clip's rate; 4:2:0 control 24.1 per second; video lead 0.2 to 0.3 s, 0 drops |
+| 4:4:4 compose rate, 65 s clip (Release) | not measured | 24.0 per second, 1555 frames composed (last totals line; it prints at most every 10 s), 4:2:0 control 24.0 per second and 1577 frames; video lead up to 0.25 s, 0 drops, 0 compose failures |
+
+- **4:4:4 costs memory.** On the Release runs above, footprint (sampled at 30 s and 60 s) is 792 MB
+  against 436 MB for 4:2:0 on this code. In Debug builds of the same clip, 4:4:4 was 618 MB before
+  this kernel and 762 MB with it; 4:2:0 was 429 MB and 424 to 430 MB. The kernel allocates no new
+  textures, and the cause of the rise is not measured. 4:4:4 takes the pool path while the 4:2:0
+  control composes in place, and its chroma planes are larger; the split between the two is not
+  measured.
+
 ---
 
 ## 5. Design
@@ -441,11 +458,18 @@ the decoder's lock, and each call is O(K):
 - **Chroma sampling (experimental switch).** The composition is defined on the 4:2:0 sites, where the base
   layer's chroma sits, and 4:2:0 is the output unless `AETHER_FEL_CHROMA` says otherwise. `422` and `444`
   step that result up by co-sited means: a copy on a site, and the mean of the sites either side between
-  them (the four around a sample in 4:4:4). Each step-up site is composed again from its neighbours, so
-  4:2:2 does about four times the chroma work of 4:2:0 and 4:4:4 about sixteen times; a pass that composes
-  the 4:2:0 sites once into a scratch texture would remove that. Both take the pool path, since in-place
-  composition is 4:2:0 only. 4:4:4 is experimental: the spec has no 4:4:4 reconstruction. Neither format is
-  checked on a TV yet.
+  them (the four around a sample in 4:4:4). 4:2:2 composes each step-up site again from its neighbours,
+  so it does about four times the chroma work of 4:2:0; a pass that composes the 4:2:0 sites once into a
+  scratch texture would remove that, and it has not been done. 4:4:4 does not recompute: its kernel works
+  on 16 x 16 blocks of output samples, composes the 9 x 9 sites a block needs once into threadgroup
+  memory, and every sample then takes the mean of its one to four stored sites with the same rounding,
+  clamping and dither as before, so the output is byte-identical to the per-sample version. That is 81
+  site evaluations per 256 samples instead of 1024 (0.32 per sample against 4, and 0.25 for 4:2:0). The
+  Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms, and the A12 numbers are in §4.7. Both
+  take the pool path, since in-place composition is 4:2:0 only. The kernel needs threadgroups of exactly
+  16 x 16, so a pipeline that allows fewer than 256 threads refuses the frame with a logged compose
+  failure; the per-window GPU time line carries the limit it saw. 4:4:4 is experimental: the spec has no
+  4:4:4 reconstruction.
 - **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is
@@ -481,7 +505,7 @@ the decoder's lock, and each call is O(K):
 - **Kernels:** a per-frame 1024-entry luma prediction table replaces piece selection and polynomial
   evaluation per pixel whenever luma is polynomial (it is a pure function of the 10-bit base code);
   residual evaluation is skipped per component when that component's NLQ is inactive; threadgroup sizes
-  come from `threadExecutionWidth`. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
+  come from `threadExecutionWidth`, except the 4:4:4 chroma pass, which needs exactly 16 x 16. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
 
 ### 5.7 Delivery
 

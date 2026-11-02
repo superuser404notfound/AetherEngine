@@ -236,6 +236,31 @@ final class DoviFelComposer: @unchecked Sendable {
         return p
     }
 
+    /// The thread limit the last 4:4:4 frame was checked against; nil until one has been encoded.
+    /// Kept apart from `lock` because the GPU time line reads it from a command buffer completion handler,
+    /// which must not take a lock a caller may hold.
+    private let chroma444ThreadLimitForLog = OSAllocatedUnfairLock<Int?>(initialState: nil)
+
+    /// Test seam: stands in for the 4:4:4 pipeline's `maxTotalThreadsPerThreadgroup`, so a test can drive the
+    /// refusal a GPU with a smaller limit would cause. Nil uses the pipeline's own value.
+    let forcedChroma444ThreadLimit = OSAllocatedUnfairLock<Int?>(initialState: nil)
+
+    /// Why a 4:4:4 pipeline that allows `limit` threads per threadgroup cannot run the kernel, which needs
+    /// threadgroups of exactly ``chroma444Threadgroup``; nil when it can.
+    static func chroma444Refusal(threadLimit limit: Int) -> String? {
+        let needed = chroma444Threadgroup.width * chroma444Threadgroup.height
+        guard limit < needed else { return nil }
+        return "4:4:4 kernel needs \(needed) threads per threadgroup but its pipeline allows \(limit); refusing to compose 4:4:4"
+    }
+
+    /// The per-window GPU time line. In 4:4:4 it also carries the 4:4:4 pipeline's thread limit, so a device
+    /// run shows what the guard saw.
+    static func gpuTimeLine(mean: Double, frames: Int, chroma444ThreadLimit: Int?) -> String {
+        var line = String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames", mean, frames)
+        if let chroma444ThreadLimit { line += ", 4:4:4 pipeline allows \(chroma444ThreadLimit) threads per threadgroup" }
+        return line
+    }
+
     #if DEBUG
     var lumaPipelineForTesting: MTLComputePipelineState? {
         ensurePipelines()?.lumaPipeline
@@ -797,6 +822,19 @@ final class DoviFelComposer: @unchecked Sendable {
         if inPlace, format != .yuv420 { return nil }
         let (outCW, outCH) = format.chromaSize(width: blW, height: blH)
 
+        // The 4:4:4 kernel needs a full 16 x 16 threadgroup. A device whose pipeline allows fewer threads
+        // would fail the encoder or its validation without saying why, so refuse the frame here, before a
+        // buffer is rented: a logged compose failure, with the frame falling back like any other.
+        if format == .yuv444 {
+            guard let pipelines = ensurePipelines() else { return nil }
+            let limit = forcedChroma444ThreadLimit.withLock { $0 } ?? pipelines.chroma444Pipeline.maxTotalThreadsPerThreadgroup
+            chroma444ThreadLimitForLog.withLock { $0 = limit }
+            if let refusal = Self.chroma444Refusal(threadLimit: limit) {
+                Self.logOnce("[DoviFelComposer] \(refusal)")
+                return nil
+            }
+        }
+
         // The destination is either a buffer rented from the output pool, or the base-layer buffer itself.
         // In place the pool is not asked for, so it is not created unless a frame is refused for in-place
         // (for example a luma MMR curve).
@@ -916,7 +954,7 @@ final class DoviFelComposer: @unchecked Sendable {
             encoder.setTexture(outUvTex, index: 3)
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
             dispatch(encoder, width: outCW, height: outCH,
-                     threadgroup: threadgroupSize(for: chromaPipeline))
+                     threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaPipeline))
         }
 
         if inPlace {
@@ -1180,6 +1218,10 @@ final class DoviFelComposer: @unchecked Sendable {
         }
     }
 
+    /// The 4:4:4 kernel composes each 4:2:0 site once per threadgroup tile and so needs threadgroups of exactly
+    /// this size (`DOVI_444_TILE` in the shader).
+    static let chroma444Threadgroup = MTLSize(width: 16, height: 16, depth: 1)
+
     /// Sizes threadgroups using the pipeline's execution width (dolby-vision-fel.md §5.6).
     private func threadgroupSize(for pipeline: MTLComputePipelineState) -> MTLSize {
         let w = pipeline.threadExecutionWidth
@@ -1231,8 +1273,9 @@ final class DoviFelComposer: @unchecked Sendable {
         }
         gpuTimeLock.unlock()
         if let closed {
-            EngineLog.emit(String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames",
-                                  closed, Self.gpuTimeWindow), category: .swPlayback, level: .verbose)
+            EngineLog.emit(Self.gpuTimeLine(mean: closed, frames: Self.gpuTimeWindow,
+                                            chroma444ThreadLimit: chroma444ThreadLimitForLog.withLock { $0 }),
+                           category: .swPlayback, level: .verbose)
         }
     }
 
