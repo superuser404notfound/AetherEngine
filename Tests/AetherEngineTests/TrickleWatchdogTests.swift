@@ -245,16 +245,18 @@ struct TrickleWatchdogTests {
           .timeLimit(.minutes(3)))
     func tricklingConnectionIsReplaced() async throws {
         let dripOffset = Self.dripOffset
-        // 1 KB every 50 ms is 10 KB per 0.5 s period. The scaled floor at 0.5 s is 2 MiB / 40,
-        // about 52 KB, so this is a fifth of it. The drips are a tenth of the threshold apart: a
-        // loaded runner that delays a few of them must not open a delivery gap, or the gap path ends
-        // the connection first, the fast replacement finishes the read, and no trickle is ever seen.
+        // 1 KB every 50 ms is 40 KB per 2 s period. The scaled floor at 2 s is 2 MiB / 10, about
+        // 210 KB, so this is a fifth of it. The threshold is longer than the suite's because a loaded
+        // runner that stalls the origin for a whole threshold opens a delivery gap: the gap path then
+        // ends the connection first, the fast replacement finishes the read, and no trickle is seen
+        // (0.5 s lost that race at a load average of 24).
+        let stallTimeout: TimeInterval = 2
         let originMaybe = PacedOrigin(totalSize: Self.totalSize, pace: { start, attempt in
             start == dripOffset && attempt == 1 ? .drip(bytes: 1024, everyUs: 50_000) : .fast
         })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
-        let reader = Self.makeReader(origin)
+        let reader = Self.makeReader(origin, stallTimeout: stallTimeout)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
         try await waitFor { !reader.hasLiveConnectionForTesting }
@@ -270,10 +272,10 @@ struct TrickleWatchdogTests {
         try await waitFor { reader.trickleEndCountForTesting > 0 || progress.done }
         try #require(reader.trickleEndCountForTesting > 0, "the read finished without a trickle end")
         let detectedAfter = Date().timeIntervalSince(dripStartedAt)
-        // Nominally two thresholds (one starved period, then the next tick). The bound is loose because
-        // a loaded runner delays the watchdog's ticks; what it rules out is a drip that is never judged.
-        #expect(detectedAfter < 10 * Self.stallTimeout,
-                "the trickle was ended \(detectedAfter)s after it started, over 10x the \(Self.stallTimeout)s threshold")
+        // Nominally two thresholds (one starved period, then the next tick); the slack is for a loaded
+        // runner delaying the watchdog's ticks. What it rules out is a drip that is never judged.
+        #expect(detectedAfter < 5 * stallTimeout,
+                "the trickle was ended \(detectedAfter)s after it started, over 5x the \(stallTimeout)s threshold")
 
         // The replacement is asked for where the drip left off and served at full rate.
         try await waitFor { progress.done }
