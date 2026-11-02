@@ -25,6 +25,10 @@ the public-API contract.
 
 ### Fixed
 
+- **Native end recovery preserves the clock observed before a slow AVFoundation read.** A fresh
+  end-of-playback peak no longer expires while the reading is suspended, avoiding replay of an
+  already-completed audio tail. A reading superseded by a new session or seek is ignored.
+
 - **Software Live audio keeps advancing when video backpressures (AE#934).** Sessions without a
   DVR feeder read ahead on the existing source connection and park compressed video within a
   shared byte allowance. Ready video can drain while source I/O waits; the Live clock, keyframe

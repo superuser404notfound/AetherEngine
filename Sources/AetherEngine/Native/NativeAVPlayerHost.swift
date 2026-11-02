@@ -134,6 +134,45 @@ final class NativeAVPlayerHost {
     private var prematureEndRecoveryInFlight = false
     /// AE#962: the highest clock the observer published since the last seek, and when (uptime ns).
     private var publishedClockPeak: (seconds: Double, uptimeNanos: UInt64)?
+
+    #if DEBUG
+    /// Replaces only this host's asynchronous end reading without blocking a shared AVFoundation queue.
+    var prematureEndReadForTesting: (@MainActor () async -> PrematureEndReading)?
+    /// Monotonic time for deterministic read-latency regressions; nil uses the system uptime.
+    var prematureEndUptimeForTesting: UInt64?
+    /// Counts recovery seeks so end-notification tests can distinguish completion from replay.
+    var prematureEndAttemptsForTesting: Int { prematureEndRecoveryAttempts }
+
+    /// Models a playing item's published state without opening media or starting AVPlayer.
+    /// Each call advances the session identity, allowing a suspended end reading to be superseded.
+    func preparePrematureEndForTesting(
+        duration: Double,
+        playhead: Double,
+        peak: (seconds: Double, uptimeNanos: UInt64)?
+    ) {
+        sessionID += 1
+        self.duration = duration
+        currentTime = playhead
+        publishedClockPeak = peak
+        playIntent = true
+        didReachEnd = false
+        prematureEndRecoveryAttempts = 0
+        lastPrematureEndRecoveryPlayhead = nil
+    }
+
+    /// Runs the actual end recovery against the instance-owned reading and clock overrides.
+    func recoverFromPrematureEndForTesting() async -> Bool {
+        await recoverFromPrematureEnd()
+    }
+    #endif
+
+    /// Monotonic observation time for peak freshness, independent of the media clock.
+    private var prematureEndUptimeNanos: UInt64 {
+        #if DEBUG
+        if let prematureEndUptimeForTesting { return prematureEndUptimeForTesting }
+        #endif
+        return DispatchTime.now().uptimeNanoseconds
+    }
     /// Mirrors avPlayer.timeControlStatus so the engine can reconcile when AVKit's transport bar, Control Center, or hardware buttons toggle the player externally (without this, engine state goes stale and play/pause presses are swallowed).
     @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
     /// Mirrors avPlayer.reasonForWaitingToPlay. Written before `timeControlStatus` on a status edge, so a
@@ -1957,16 +1996,23 @@ final class NativeAVPlayerHost {
         // Only resume what the viewer was playing: an item that ends while the transport is parked
         // must stay parked.
         guard playIntent, !didReachEnd else { return false }
+        let sid = sessionID
+        let endSeekGeneration = seekGeneration
+        let peak = publishedClockPeak
+        // Freshness belongs to the end notification, not to completion of a slow media-server read.
+        let peakAgeSeconds = peak.map { Double(prematureEndUptimeNanos &- $0.uptimeNanos) / 1e9 }
         // AE#422: one batched off-main reading. A premature end IS a state where the media server is
         // misreporting, so "one read at a rare event" (the note that used to stand on
         // `seekableRangeEndSeconds`) is not the cheap thing it looks like: the reporter measured a
         // single such read holding the main thread for 13.3 s.
         let reading = await prematureEndReading()
-        let peak = publishedClockPeak
+        // Yield to a replacement or newer seek; returning false would let this stale notification
+        // complete the item after a same-session seek, whose session ID alone is still current.
+        guard sessionID == sid, seekGeneration == endSeekGeneration else { return true }
         let playhead = AetherEngine.prematureEndPlayhead(
             read: reading.playhead,
             peak: peak?.seconds,
-            peakAgeSeconds: peak.map { Double(DispatchTime.now().uptimeNanoseconds &- $0.uptimeNanos) / 1e9 })
+            peakAgeSeconds: peakAgeSeconds)
         let seekEnd = reading.seekableEnd
         guard AetherEngine.prematureEndRecoveryQualifies(
             isLive: isLiveSession,
@@ -1992,7 +2038,6 @@ final class NativeAVPlayerHost {
             + "\(String(format: "%.1f", duration - playhead))s of the presentation lies past the end "
             + "AVPlayer reported, re-seeking in place (attempt \(prematureEndRecoveryAttempts))",
             category: .engine)
-        let sid = sessionID
         // The seek bumps the generation before it suspends, so a different one afterwards is a newer seek.
         let recoveryGeneration = seekGeneration &+ 1
         let landed = await seek(to: playhead,
@@ -2030,6 +2075,9 @@ final class NativeAVPlayerHost {
 
     /// AE#422: the three figures the #287 recovery needs, read once and off the main actor.
     private func prematureEndReading() async -> PrematureEndReading {
+        #if DEBUG
+        if let prematureEndReadForTesting { return await prematureEndReadForTesting() }
+        #endif
         guard let item = playerItem else {
             return PrematureEndReading(playhead: 0, seekableEnd: nil, loadedEnd: nil)
         }

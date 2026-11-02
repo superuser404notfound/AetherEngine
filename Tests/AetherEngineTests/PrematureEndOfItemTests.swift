@@ -185,4 +185,124 @@ struct PrematureEndOfItemTests {
         #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: false) == .acceptEnd)
         #expect(AetherEngine.prematureEndRecoveryOutcome(landed: false, superseded: true) == .yield)
     }
+
+    // Failure modes:
+    // - A slow AVFoundation read ages a fresh end witness out and replays an already-finished tail.
+    // - A peak already stale at notification time incorrectly replaces the reported playhead.
+    // - A late read starts recovery or changes time after a session replacement or a newer seek.
+
+    /// Read latency cannot invalidate the peak that was fresh when this end was observed.
+    @Test(.timeLimit(.minutes(3)))
+    @MainActor
+    func test_endReading_freshPeakBeforeSlowRead_acceptsRealEnd() async throws {
+        // Arrange — the observer reached the real end 0.2 seconds before the notification.
+        let host = NativeAVPlayerHost()
+        defer {
+            host.prematureEndReadForTesting = nil
+            host.tearDown()
+        }
+        host.prematureEndUptimeForTesting = 100_000_000_000
+        host.preparePrematureEndForTesting(
+            duration: 127.039, playhead: 60.008,
+            peak: (seconds: 126.9, uptimeNanos: 99_800_000_000)
+        )
+        host.prematureEndReadForTesting = {
+            await Task.yield()
+            host.prematureEndUptimeForTesting = 113_300_000_000
+            return PrematureEndReading(playhead: 60.008, seekableEnd: 127.039, loadedEnd: 60)
+        }
+
+        // Act — use the actual host recovery after a simulated 13.3-second asynchronous read.
+        let suppressed = await host.recoverFromPrematureEndForTesting()
+
+        // Assert — accept the real end at its witnessed position, without seeking back into the tail.
+        #expect(!suppressed)
+        #expect(host.currentTime == 126.9)
+        #expect(host.prematureEndAttemptsForTesting == 0)
+    }
+
+    /// Capturing before the read must not revive a witness already stale when the end arrived.
+    @Test(.timeLimit(.minutes(3)))
+    @MainActor
+    func test_endReading_peakAlreadyStale_keepsReportedEnd() async throws {
+        // Arrange — this older peak belongs to playback before the current end boundary.
+        let host = NativeAVPlayerHost()
+        defer {
+            host.prematureEndReadForTesting = nil
+            host.tearDown()
+        }
+        host.prematureEndUptimeForTesting = 100_000_000_000
+        host.preparePrematureEndForTesting(
+            duration: 127.039, playhead: 60.008,
+            peak: (seconds: 126.9, uptimeNanos: 98_000_000_000)
+        )
+        host.prematureEndReadForTesting = {
+            await Task.yield()
+            host.prematureEndUptimeForTesting = 113_300_000_000
+            return PrematureEndReading(playhead: 60.008, seekableEnd: 60.008, loadedEnd: 60)
+        }
+
+        // Act — the source's seekable end agrees with its clock after the delayed reading.
+        let suppressed = await host.recoverFromPrematureEndForTesting()
+
+        // Assert — the old peak cannot move this end or authorize a recovery seek.
+        #expect(!suppressed)
+        #expect(host.currentTime == 60.008)
+        #expect(host.prematureEndAttemptsForTesting == 0)
+    }
+
+    /// An old notification cannot update or recover a replacement session after its read completes.
+    @Test(.timeLimit(.minutes(3)))
+    @MainActor
+    func test_endReading_sessionReplaced_yieldsWithoutMutatingReplacement() async throws {
+        // Arrange — replace the session while its asynchronous end reading is suspended.
+        let host = NativeAVPlayerHost()
+        defer {
+            host.prematureEndReadForTesting = nil
+            host.tearDown()
+        }
+        host.prematureEndUptimeForTesting = 100_000_000_000
+        host.preparePrematureEndForTesting(duration: 127.039, playhead: 60.008, peak: nil)
+        host.prematureEndReadForTesting = {
+            await Task.yield()
+            host.preparePrematureEndForTesting(duration: 200, playhead: 20, peak: nil)
+            return PrematureEndReading(playhead: 60.008, seekableEnd: 127.039, loadedEnd: 60)
+        }
+
+        // Act — resolve the retired session's reading against the live host object.
+        let suppressed = await host.recoverFromPrematureEndForTesting()
+
+        // Assert — suppress the retired event and preserve the replacement's transport state.
+        #expect(suppressed)
+        #expect(host.currentTime == 20)
+        #expect(host.prematureEndAttemptsForTesting == 0)
+        #expect(!host.didReachEnd)
+    }
+
+    /// A newer seek owns the transport even when the item and session identity stay the same.
+    @Test(.timeLimit(.minutes(3)))
+    @MainActor
+    func test_endReading_newerSeek_yieldsWithoutStartingRecovery() async throws {
+        // Arrange — an actual seek advances the host generation during the suspended reading.
+        let host = NativeAVPlayerHost()
+        defer {
+            host.prematureEndReadForTesting = nil
+            host.tearDown()
+        }
+        host.prematureEndUptimeForTesting = 100_000_000_000
+        host.preparePrematureEndForTesting(duration: 127.039, playhead: 60.008, peak: nil)
+        host.prematureEndReadForTesting = {
+            _ = await host.seek(to: 20, deadlineSeconds: 0.05)
+            return PrematureEndReading(playhead: 60.008, seekableEnd: 127.039, loadedEnd: 60)
+        }
+
+        // Act — resume the end recovery after the newer seek has taken ownership.
+        let suppressed = await host.recoverFromPrematureEndForTesting()
+
+        // Assert — suppress the old notification rather than seeking again or accepting its end.
+        #expect(suppressed)
+        #expect(host.prematureEndAttemptsForTesting == 0)
+        #expect(!host.didReachEnd)
+    }
+
 }
