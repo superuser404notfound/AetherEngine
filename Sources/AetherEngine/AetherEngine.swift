@@ -5898,7 +5898,7 @@ public final class AetherEngine: ObservableObject {
                 if !useSoftwarePath {
                     EngineLog.emit(
                         "[AetherEngine] sequential origin keeps the native path (linear read, "
-                        + "declared duration, seeks unavailable)",
+                        + "declared duration, seeks only inside the resident tail)",
                         category: .engine
                     )
                 }
@@ -6461,6 +6461,21 @@ public final class AetherEngine: ObservableObject {
     /// to a position it decided itself out of content the session served; it is not a scrub, so the
     /// live-only refusal below does not apply to it and its landing is measured against what the item
     /// holds rather than against what the session advertises.
+    /// AE#958: a loopback session on a sequential origin can seek inside the resident span that reaches the
+    /// producer's frontier. The cache keeps everything from the consumer's target up to the highest stored
+    /// segment, so every fetch from there on is served or produced next, never a restart (which the origin
+    /// cannot honour). An earlier, detached span would run into a segment that no longer exists.
+    nonisolated static func sequentialSeekStaysResident(
+        target: Double,
+        sequentialOrigin: Bool,
+        loopbackSession: Bool,
+        residentRanges: [ClosedRange<Double>]
+    ) -> Bool {
+        guard sequentialOrigin, loopbackSession, target.isFinite,
+              let frontier = residentRanges.max(by: { $0.upperBound < $1.upperBound }) else { return false }
+        return frontier.contains(target)
+    }
+
     func seek(to seconds: Double, origin: SeekOrigin, exact: Bool = false) async {
         // Guard: a host scrub racing stop() must not flip an idle/error engine to .seeking -> .playing.
         // .ended is terminal too: after end-of-media the host reloads to replay, it does not scrub a parked session.
@@ -6502,7 +6517,13 @@ public final class AetherEngine: ObservableObject {
                 return
             }
         }
-        if !isLive, loadedOptions.sequentialOrigin || isSourceSeekable == false {
+        if !isLive, loadedOptions.sequentialOrigin || isSourceSeekable == false,
+           !Self.sequentialSeekStaysResident(
+               target: seconds,
+               sequentialOrigin: loadedOptions.sequentialOrigin,
+               loopbackSession: nativeVideoSession != nil && softwareHost == nil,
+               residentRanges: residentRanges
+           ) {
             EngineLog.emit("[AetherEngine] seek(to:\(seconds)) rejected: source is forward-only", category: .engine)
             // A seek stashed during load must relinquish its optimistic clock as well.
             let wasDeferred = deferredSeekInFlight
@@ -8078,6 +8099,11 @@ public final class AetherEngine: ObservableObject {
 
     // MARK: - Audio / subtitle track selection
 
+    /// A VOD session on a sequential origin switches audio by a fresh load at the host's position.
+    nonisolated static func audioSwitchNeedsFreshLoad(isLive: Bool, sequentialOrigin: Bool) -> Bool {
+        !isLive && sequentialOrigin
+    }
+
     /// Switch the active audio track mid-playback. Rebuilds the pipeline at the current position;
     /// native audio handover retains the old item until replacement, but decoder readiness can still
     /// interrupt presentation. Software/forward-only sources cannot promise a seamless switch. Display-criteria handshake
@@ -8088,6 +8114,9 @@ public final class AetherEngine: ObservableObject {
     /// informational, the selection belongs to AVFoundation, and a pick is logged and ignored rather than
     /// turned into a reload the bypass has no audio override for. A host that wants another language on
     /// that route loads a URL that carries it.
+    ///
+    /// Not available on a sequential origin either (AE#958): the rebuild could only reopen it at byte 0,
+    /// which restarted the programme on the native route and failed the software route's reposition.
     public func selectAudioTrack(index: Int) {
         if videoRoute == .remoteBypass {
             EngineLog.emit(
@@ -8104,6 +8133,14 @@ public final class AetherEngine: ObservableObject {
                 "[AetherEngine] selectAudioTrack(\(index)) ignored: forward-only custom "
                 + "source cannot rebuild its pipeline (live ingest / demuxed-audio "
                 + "sessions switch tracks only via a fresh load)",
+                category: .engine
+            )
+            return
+        }
+        if Self.audioSwitchNeedsFreshLoad(isLive: isLive, sequentialOrigin: loadedOptions.sequentialOrigin) {
+            EngineLog.emit(
+                "[AetherEngine] selectAudioTrack(\(index)) ignored: a sequential origin can only "
+                + "reopen at byte 0; load the source again at the position with audioSourceStreamIndex",
                 category: .engine
             )
             return

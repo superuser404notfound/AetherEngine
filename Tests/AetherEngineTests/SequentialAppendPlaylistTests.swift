@@ -121,8 +121,46 @@ struct SequentialAppendPlaylistTests {
         // A published duration needs the NEXT segment's ledger open, so the old 2-segment demand
         // was really 3 segment opens (~12-18 s of media) through a possibly-stalling origin.
         let provider = makeProvider()
+        provider.sequentialStartupComfort = 0.05
         provider.appendSequentialSegmentDuration(index: 0, durationSeconds: 6.0)
         #expect(provider.waitForSequentialStartupSegments(timeout: 0.2))
+    }
+
+    @Test("a single entry shorter than the first reload interval holds for the comfort budget")
+    func startupGateHoldsShortSingleEntry() {
+        // AE#958: one 5.68 s entry under TARGETDURATION 6 ran dry 0.1 s before AVPlayer's reload.
+        let provider = makeProvider()
+        provider.sequentialStartupComfort = 0.3
+        provider.appendSequentialSegmentDuration(index: 0, durationSeconds: 5.68)
+        let start = Date()
+        #expect(provider.waitForSequentialStartupSegments(timeout: 5.0))
+        let waited = Date().timeIntervalSince(start)
+        #expect(waited >= 0.25, "one entry under the reload interval must not release at once")
+        #expect(waited < 2.0, "the comfort budget caps the hold, not the playlist timeout")
+    }
+
+    @Test("a second entry releases the held gate at once")
+    func startupGateReleasesWhenSecondEntryArrives() {
+        let provider = makeProvider()
+        provider.sequentialStartupComfort = 60
+        provider.appendSequentialSegmentDuration(index: 0, durationSeconds: 5.68)
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: 0.1)
+            provider.appendSequentialSegmentDuration(index: 1, durationSeconds: 4.0)
+        }
+        let start = Date()
+        #expect(provider.waitForSequentialStartupSegments(timeout: 120))
+        #expect(Date().timeIntervalSince(start) < 30,
+                "the second entry must release the wait, not the comfort budget")
+    }
+
+    @Test("advertised media must outlast the TARGETDURATION the entries imply")
+    func startupCoverageAgainstTargetDuration() {
+        #expect(!VideoSegmentProvider.sequentialStartupCoversFirstReload(advertisedSeconds: 5.68, longestSegment: 5.68))
+        #expect(!VideoSegmentProvider.sequentialStartupCoversFirstReload(advertisedSeconds: 6.0, longestSegment: 6.0))
+        #expect(VideoSegmentProvider.sequentialStartupCoversFirstReload(advertisedSeconds: 9.68, longestSegment: 5.68))
+        #expect(!VideoSegmentProvider.sequentialStartupCoversFirstReload(advertisedSeconds: 5.8, longestSegment: 5.7),
+                "two entries summing under the rounded-up target still run dry")
     }
 
     @Test("an empty session times out instead of blocking past its deadline")

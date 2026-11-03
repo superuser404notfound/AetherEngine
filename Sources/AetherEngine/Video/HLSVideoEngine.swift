@@ -2876,8 +2876,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let live = isLiveSession
         let cacheRef = cache
         let plan = segmentPlan
+        let sequentialProvider = sequentialOriginPinsProducerToZero ? provider : nil
         restartLock.unlock()
         guard !live, let cacheRef, !plan.isEmpty else { return [] }
+        // AE#958: a sequential session's items carry the muxed durations, not the plan's.
+        if let ranges = sequentialProvider?.sequentialResidentItemRanges(
+            residentIndexes: cacheRef.residentIndexRanges()) {
+            return ranges
+        }
         return cacheRef.residentIndexRanges().compactMap { indexes in
             guard indexes.lowerBound >= 0, indexes.upperBound < plan.count else { return nil }
             let lower = plan[indexes.lowerBound].startSeconds

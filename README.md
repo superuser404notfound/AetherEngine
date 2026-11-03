@@ -525,8 +525,10 @@ no byte-offset reconnects and no tail read, the demuxer's pb is non-seekable, an
 connection surfaces as a read error rather than end-of-media so the host can re-request. Such a
 source keeps the native path instead of being forced to software, and the session serves an
 append-only `EVENT` playlist carrying the durations actually muxed, completed with `ENDLIST` at
-true source EOF. Every producer reposition is refused by construction, so **seeking is
-unavailable**: re-request the archive with a shifted start timestamp instead. `aetherctl play`
+true source EOF. Every producer reposition is refused by construction, so a seek lands only
+inside what the session already holds (the resident span that reaches the producer's frontier,
+on the native path); for any other target, and for an audio track switch, re-request the archive
+with a shifted start timestamp, passing `audioSourceStreamIndex` for the chosen track (AE#958). `aetherctl play`
 gains `--sequential-origin` / `--declared-duration` for reproducing one from macOS.
 
 ## Host setup on tvOS
