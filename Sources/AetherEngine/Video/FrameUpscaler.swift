@@ -28,19 +28,19 @@ final class FrameUpscaler: @unchecked Sendable {
 
     /// Wall-clock milliseconds of one frame's steps; `metalGPU` is the command buffer's GPU time.
     struct StageTimes: Equatable, Sendable {
-        var copy = 0.0, ml = 0.0, clamp = 0.0, metal = 0.0, metalGPU = 0.0, attach = 0.0, total = 0.0
+        var copy = 0.0, ml = 0.0, edge = 0.0, metal = 0.0, metalGPU = 0.0, attach = 0.0, total = 0.0
 
         static func mean(_ all: [StageTimes]) -> StageTimes {
             guard !all.isEmpty else { return StageTimes() }
             let n = Double(all.count)
             func avg(_ k: KeyPath<StageTimes, Double>) -> Double { all.reduce(0) { $0 + $1[keyPath: k] } / n }
-            return StageTimes(copy: avg(\.copy), ml: avg(\.ml), clamp: avg(\.clamp), metal: avg(\.metal),
+            return StageTimes(copy: avg(\.copy), ml: avg(\.ml), edge: avg(\.edge), metal: avg(\.metal),
                               metalGPU: avg(\.metalGPU), attach: avg(\.attach), total: avg(\.total))
         }
 
         var breakdown: String {
-            String(format: "copy %.1f, ml %.1f, clamp %.1f, metal %.1f wall / %.1f gpu, attach %.1f",
-                   copy, ml, clamp, metal, metalGPU, attach)
+            String(format: "copy %.1f, ml %.1f, edge %.1f, metal %.1f wall / %.1f gpu, attach %.1f",
+                   copy, ml, edge, metal, metalGPU, attach)
         }
 
         func logLine(frames: Int, intervalMs: Double) -> String {
@@ -766,7 +766,13 @@ private final class MLScaler {
     private let processor = VTFrameProcessor()
     private let sourcePool: CVPixelBufferPool
     private let destinationPool: CVPixelBufferPool
+    /// Unpadded output, nil when there is no margin to crop.
+    private let croppedPool: CVPixelBufferPool?
     private let sourceFormat: OSType
+    /// Mirrored source samples per side; an axis without room in VT's size limits keeps 0.
+    private let pad: (x: Int, y: Int)
+    /// `pad` in output samples.
+    private let crop: (x: Int, y: Int)
     private var copiesInput = false
     private var ended = false
     private let abandoned = AbandonedPasses()
@@ -776,19 +782,38 @@ private final class MLScaler {
     var abandonedCount: Int { abandoned.count }
 
     init(width: Int, height: Int, scale: Float) throws {
-        let config = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: width, frameHeight: height, scaleFactor: scale)
+        pad = Self.padding(width: width, height: height, scale: scale)
+        crop = (Int((Float(pad.x) * scale).rounded()), Int((Float(pad.y) * scale).rounded()))
+        let paddedW = width + 2 * pad.x, paddedH = height + 2 * pad.y
+        let config = VTLowLatencySuperResolutionScalerConfiguration(frameWidth: paddedW, frameHeight: paddedH, scaleFactor: scale)
         let src = config.sourcePixelBufferAttributes
         let dst = config.destinationPixelBufferAttributes
-        outputWidth = (dst[kCVPixelBufferWidthKey as String] as? NSNumber)?.intValue ?? Int((Float(width) * scale).rounded())
-        outputHeight = (dst[kCVPixelBufferHeightKey as String] as? NSNumber)?.intValue ?? Int((Float(height) * scale).rounded())
+        let dstW = (dst[kCVPixelBufferWidthKey as String] as? NSNumber)?.intValue ?? Int((Float(paddedW) * scale).rounded())
+        let dstH = (dst[kCVPixelBufferHeightKey as String] as? NSNumber)?.intValue ?? Int((Float(paddedH) * scale).rounded())
+        outputWidth = dstW - 2 * crop.x
+        outputHeight = dstH - 2 * crop.y
         sourceFormat = (src[kCVPixelBufferPixelFormatTypeKey as String] as? NSNumber)?.uint32Value
             ?? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        sourcePool = try makePool(attributes: src, width: width, height: height)
-        destinationPool = try makePool(attributes: dst, width: outputWidth, height: outputHeight)
+        sourcePool = try makePool(attributes: src, width: paddedW, height: paddedH)
+        destinationPool = try makePool(attributes: dst, width: dstW, height: dstH)
+        croppedPool = pad.x == 0 && pad.y == 0 ? nil : try makePool(attributes: dst, width: outputWidth, height: outputHeight)
         try processor.startSession(configuration: config)
     }
 
     deinit { end() }
+
+    /// `mlEdgePad` on each axis whose padded size VT still takes at `scale`, preferring both, then the
+    /// taller margin's axis. A margin whose output size is odd would split a chroma sample, so it is left off.
+    static func padding(width: Int, height: Int, scale: Float) -> (x: Int, y: Int) {
+        let p = mlEdgePad
+        guard (Float(p) * scale).rounded() == Float(p) * scale, Int(Float(p) * scale) % 2 == 0 else { return (0, 0) }
+        let candidates = [(p, p), (0, p), (p, 0)].filter { width > 2 * $0.0 && height > 2 * $0.1 }
+        for (x, y) in candidates
+        where FrameUpscaler.mlScaleFactors(width + 2 * x, height + 2 * y).contains(scale) {
+            return (x, y)
+        }
+        return (0, 0)
+    }
 
     /// Off the decode thread: after timed-out passes VT may be wedged, and nothing waits for the session to end.
     func end() {
@@ -800,9 +825,10 @@ private final class MLScaler {
 
     func process(_ input: CVPixelBuffer, frameIndex: Int64, timeout: Double,
                  submit: FrameUpscaler.MLSubmit?, times: inout FrameUpscaler.StageTimes) throws -> CVPixelBuffer {
-        if !copiesInput, CVPixelBufferGetPixelFormatType(input) == sourceFormat, CVPixelBufferGetIOSurface(input) != nil {
+        if !copiesInput, croppedPool == nil, CVPixelBufferGetPixelFormatType(input) == sourceFormat,
+           CVPixelBufferGetIOSurface(input) != nil {
             do {
-                return try run(input, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
+                return try run(input, original: input, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
             } catch let error as MLTimeout {
                 throw error
             } catch where FrameUpscaler.isBackgroundRefusal(error) {
@@ -815,12 +841,12 @@ private final class MLScaler {
         }
         let t0 = DispatchTime.now().uptimeNanoseconds
         let copy = try pooledBuffer(sourcePool)
-        try copyPlanes(from: input, to: copy)
+        try copyPlanes(from: input, to: copy, mirroring: pad)
         times.copy += elapsedMs(since: t0)
-        return try run(copy, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
+        return try run(copy, original: input, frameIndex: frameIndex, timeout: timeout, submit: submit, times: &times)
     }
 
-    private func run(_ source: CVPixelBuffer, frameIndex: Int64, timeout: Double,
+    private func run(_ source: CVPixelBuffer, original: CVPixelBuffer, frameIndex: Int64, timeout: Double,
                      submit: FrameUpscaler.MLSubmit?, times: inout FrameUpscaler.StageTimes) throws -> CVPixelBuffer {
         let t0 = DispatchTime.now().uptimeNanoseconds
         var mlTimed = false
@@ -848,41 +874,66 @@ private final class MLScaler {
         times.ml += elapsedMs(since: t0)
         mlTimed = true
         let t1 = DispatchTime.now().uptimeNanoseconds
-        try clampBorder(destination, luma: mlBorderClamp)
-        times.clamp = elapsedMs(since: t1)
-        return destination
+        defer { times.edge = elapsedMs(since: t1) }
+        var output = destination
+        if let croppedPool {
+            output = try pooledBuffer(croppedPool)
+            try copyPlanes(from: destination, to: output, origin: crop)
+        }
+        if pad.x == 0 || pad.y == 0 {
+            try rescaleEdges(of: output, from: original, columns: pad.x == 0, rows: pad.y == 0)
+        }
+        return output
     }
 }
 
-/// VT super resolution rings at the frame edge (measured up to 39 code values), so this many outer luma
-/// samples are replaced by the nearest clean row or column.
-let mlBorderClamp = 12
+/// VT super resolution rings in the outer samples of its output, as if it padded the frame with zeros
+/// (measured up to 147 code values on a flat field at 1.5x). The source therefore gets this many mirrored
+/// samples on each side and the scaled margin is cropped off again, so the ringing falls in the discarded part.
+let mlEdgePad = 16
 
-/// Replicates row/column `luma` (and `luma / 2` in chroma) over the outer band on all four sides.
+/// Where VT's size limit leaves no room for the margin (1280 wide at 1.5x), this many outer output samples
+/// (half in chroma) are a bilinear scale of the source instead. Past it the ringing stays within 4 code values.
+let mlEdgeBand = 8
+
+/// Rewrites the `mlEdgeBand` outer columns and/or rows of `output` with a bilinear scale of `source`.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
-private func clampBorder(_ buffer: CVPixelBuffer, luma k: Int) throws {
-    CVPixelBufferLockBaseAddress(buffer, [])
-    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+private func rescaleEdges(of output: CVPixelBuffer, from source: CVPixelBuffer, columns: Bool, rows: Bool) throws {
+    CVPixelBufferLockBaseAddress(source, .readOnly)
+    CVPixelBufferLockBaseAddress(output, [])
+    defer {
+        CVPixelBufferUnlockBaseAddress(output, [])
+        CVPixelBufferUnlockBaseAddress(source, .readOnly)
+    }
     for plane in 0..<2 {
-        guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else {
-            throw UpscaleError("plane \(plane) has no base address")
-        }
-        let band = plane == 0 ? k : k / 2
-        let bytes = plane == 0 ? 1 : 2
-        let w = CVPixelBufferGetWidthOfPlane(buffer, plane), h = CVPixelBufferGetHeightOfPlane(buffer, plane)
-        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
-        guard band > 0, w > 2 * band, h > 2 * band else { continue }
-        let rowBytes = w * bytes
-        for row in 0..<band {
-            memcpy(base + row * stride, base + band * stride, rowBytes)
-            memcpy(base + (h - 1 - row) * stride, base + (h - 1 - band) * stride, rowBytes)
-        }
-        for row in 0..<h {
-            let line = base + row * stride
-            for x in 0..<band {
-                memcpy(line + x * bytes, line + band * bytes, bytes)
-                memcpy(line + (w - 1 - x) * bytes, line + (w - 1 - band) * bytes, bytes)
+        guard let s = CVPixelBufferGetBaseAddressOfPlane(source, plane)?.assumingMemoryBound(to: UInt8.self),
+              let d = CVPixelBufferGetBaseAddressOfPlane(output, plane)?.assumingMemoryBound(to: UInt8.self)
+        else { throw UpscaleError("plane \(plane) has no base address") }
+        let channels = plane == 0 ? 1 : 2
+        let band = plane == 0 ? mlEdgeBand : mlEdgeBand / 2
+        let sw = CVPixelBufferGetWidthOfPlane(source, plane), sh = CVPixelBufferGetHeightOfPlane(source, plane)
+        let w = CVPixelBufferGetWidthOfPlane(output, plane), h = CVPixelBufferGetHeightOfPlane(output, plane)
+        let sStride = CVPixelBufferGetBytesPerRowOfPlane(source, plane)
+        let dStride = CVPixelBufferGetBytesPerRowOfPlane(output, plane)
+        guard w > 2 * band, h > 2 * band else { continue }
+        let fx = Double(sw) / Double(w), fy = Double(sh) / Double(h)
+        func write(_ x: Int, _ y: Int) {
+            let sx = min(max((Double(x) + 0.5) * fx - 0.5, 0), Double(sw - 1))
+            let sy = min(max((Double(y) + 0.5) * fy - 0.5, 0), Double(sh - 1))
+            let x0 = Int(sx), y0 = Int(sy), x1 = min(x0 + 1, sw - 1), y1 = min(y0 + 1, sh - 1)
+            let ax = sx - Double(x0), ay = sy - Double(y0)
+            for c in 0..<channels {
+                func v(_ px: Int, _ py: Int) -> Double { Double(s[py * sStride + px * channels + c]) }
+                let top = v(x0, y0) + (v(x1, y0) - v(x0, y0)) * ax
+                let bottom = v(x0, y1) + (v(x1, y1) - v(x0, y1)) * ax
+                d[y * dStride + x * channels + c] = UInt8((top + (bottom - top) * ay).rounded())
             }
+        }
+        if rows {
+            for y in Array(0..<band) + Array((h - band)..<h) { for x in 0..<w { write(x, y) } }
+        }
+        if columns {
+            for y in 0..<h { for x in Array(0..<band) + Array((w - band)..<w) { write(x, y) } }
         }
     }
 }
@@ -1007,6 +1058,43 @@ private func copyPlanes(from src: CVPixelBuffer, to dst: CVPixelBuffer, origin: 
         let from = s + (origin.y >> shift) * sStride + (origin.x >> shift) * (plane == 0 ? 1 : 2)
         for row in 0..<CVPixelBufferGetHeightOfPlane(dst, plane) {
             memcpy(d + row * dStride, from + row * sStride, rowBytes)
+        }
+    }
+}
+
+/// `copyPlanes` into a buffer `pad` samples (even) larger on each side, the margin mirrored about the edge sample.
+@available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
+private func copyPlanes(from src: CVPixelBuffer, to dst: CVPixelBuffer, mirroring pad: (x: Int, y: Int)) throws {
+    guard pad.x != 0 || pad.y != 0 else { return try copyPlanes(from: src, to: dst) }
+    guard pad.x % 2 == 0, pad.y % 2 == 0,
+          CVPixelBufferGetWidth(dst) == CVPixelBufferGetWidth(src) + 2 * pad.x,
+          CVPixelBufferGetHeight(dst) == CVPixelBufferGetHeight(src) + 2 * pad.y,
+          CVPixelBufferGetPlaneCount(src) == 2, CVPixelBufferGetPlaneCount(dst) == 2
+    else { throw UpscaleError("mirrored copy between mismatched buffers") }
+    CVPixelBufferLockBaseAddress(src, .readOnly)
+    CVPixelBufferLockBaseAddress(dst, [])
+    defer {
+        CVPixelBufferUnlockBaseAddress(dst, [])
+        CVPixelBufferUnlockBaseAddress(src, .readOnly)
+    }
+    for plane in 0..<2 {
+        guard let s = CVPixelBufferGetBaseAddressOfPlane(src, plane),
+              let d = CVPixelBufferGetBaseAddressOfPlane(dst, plane)
+        else { throw UpscaleError("plane \(plane) has no base address") }
+        let bytes = plane == 0 ? 1 : 2
+        let px = plane == 0 ? pad.x : pad.x / 2, py = plane == 0 ? pad.y : pad.y / 2
+        let w = CVPixelBufferGetWidthOfPlane(src, plane), h = CVPixelBufferGetHeightOfPlane(src, plane)
+        let sStride = CVPixelBufferGetBytesPerRowOfPlane(src, plane)
+        let dStride = CVPixelBufferGetBytesPerRowOfPlane(dst, plane)
+        guard w > px, h > py else { throw UpscaleError("plane \(plane) smaller than its margin") }
+        for row in 0..<(h + 2 * py) {
+            let sy = row < py ? py - row : (row >= h + py ? 2 * (h - 1) - (row - py) : row - py)
+            let from = s + sy * sStride, to = d + row * dStride
+            memcpy(to + px * bytes, from, w * bytes)
+            for x in 0..<px {
+                memcpy(to + (px - 1 - x) * bytes, from + (x + 1) * bytes, bytes)
+                memcpy(to + (px + w + x) * bytes, from + (w - 2 - x) * bytes, bytes)
+            }
         }
     }
 }

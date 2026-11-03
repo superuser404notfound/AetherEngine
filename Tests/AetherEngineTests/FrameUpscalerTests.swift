@@ -115,7 +115,7 @@ struct FrameUpscalerTests {
     }
 
     /// MetalFX alone keeps every sample. VT's ML pass carries a +-1 texture (MetalFX sharpening lifts it a
-    /// little) and its edge ringing is clamped away, so the ML paths get +-4 with no border exemption.
+    /// little) and its edge ringing falls in a cropped margin, so the ML paths get +-4 with no border exemption.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func flatGreyStaysFlatGrey() throws {
@@ -137,28 +137,57 @@ struct FrameUpscalerTests {
         }
     }
 
-    /// The edge clamp is pinned on a vertical gradient: the outer 12 rows repeat row 12 (top) and row
-    /// h-13 (bottom), the outer 12 columns repeat column 12 / w-13.
+    /// The picture edge keeps the source's detail: on a wave across each axis (16-sample period, amplitude 60)
+    /// the outer output samples stay near a bilinear scale of the source, both where the source is padded
+    /// before the ML pass (720x480 at 2x, 720p rows) and where VT's size limit leaves no room for it (720p
+    /// columns). The margin is mirrored, so a wave cut mid-slope gets a kink there that the ML pass sharpens
+    /// (up to 13 off in the outer 4 samples, against 4 in the middle); a repeated row misses by 47 to 81.
+    @Test(.enabled(if: UpscalerGate.mlAvailable), arguments: [(720, 480, Float(2)), (1280, 720, Float(1.5))])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func mlOutputEdgeFollowsTheSource(width: Int, height: Int, scale: Float) throws {
+        let ow = Int((Float(width) * scale).rounded()), oh = Int((Float(height) * scale).rounded())
+        let up = try upscaler(try plan(width, height, display: CGSize(width: ow, height: oh), ml: [scale]))
+        func wave(_ i: Double) -> Double { 128 + 60 * sin(i * .pi / 8) }
+        for vertical in [false, true] {
+            let input = try TestFrames.nv12(width, height, y: 0, c: 128)
+            TestFrames.paintLuma(input) { x, y in UInt8(wave(Double(vertical ? y : x)).rounded()) }
+            let out = try #require(up.upscale(input))
+            #expect(CVPixelBufferGetWidth(out) == ow && CVPixelBufferGetHeight(out) == oh)
+            CVPixelBufferLockBaseAddress(out, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(out, .readOnly) }
+            let p = CVPixelBufferGetBaseAddressOfPlane(out, 0)!.assumingMemoryBound(to: UInt8.self)
+            let s = CVPixelBufferGetBytesPerRowOfPlane(out, 0)
+            let n = vertical ? height : width, on = vertical ? oh : ow
+            func expected(_ i: Int) -> Double {
+                let src = min(max((Double(i) + 0.5) * Double(n) / Double(on) - 0.5, 0), Double(n - 1))
+                let i0 = floor(src), a = src - i0
+                return wave(i0) + (wave(min(i0 + 1, Double(n - 1))) - wave(i0)) * a
+            }
+            func worst(_ band: [Int]) -> Double {
+                var worst = 0.0
+                for i in band {
+                    for j in stride(from: 32, to: (vertical ? ow : oh) - 32, by: 7) {
+                        let v = vertical ? p[i * s + j] : p[j * s + i]
+                        worst = max(worst, abs(Double(v) - expected(i)))
+                    }
+                }
+                return worst
+            }
+            let edge = worst(Array(0..<24) + Array((on - 24)..<on)), inner = worst(Array((on / 2 - 48)..<(on / 2 + 48)))
+            #expect(edge <= 16, "\(width)x\(height) \(vertical ? "rows" : "columns"): edge \(edge), interior \(inner)")
+            print("[FrameUpscalerTests] \(width)x\(height) \(vertical ? "rows" : "columns"): edge \(edge), interior \(inner)")
+        }
+    }
+
+    /// The worst flat field for VT's edge ringing (near white, 1.5x) stays flat to the last sample.
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func mlOutputBorderIsClamped() throws {
+    func brightFlatFieldHasNoEdgeRinging() throws {
         let up = try upscaler(try plan(1280, 720, display: CGSize(width: 1920, height: 1080), ml: [1.5]))
-        let out = try #require(up.upscale(try TestFrames.nv12(1280, 720, vertical: true)))
-        CVPixelBufferLockBaseAddress(out, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(out, .readOnly) }
-        let p = CVPixelBufferGetBaseAddressOfPlane(out, 0)!.assumingMemoryBound(to: UInt8.self)
-        let s = CVPixelBufferGetBytesPerRowOfPlane(out, 0)
-        let w = CVPixelBufferGetWidth(out), h = CVPixelBufferGetHeight(out)
-        func y(_ x: Int, _ r: Int) -> UInt8 { p[r * s + x] }
-        #expect(y(w / 2, 12) != y(w / 2, h - 13), "the input must not be flat")
-        var mismatches = 0
-        for r in 0..<12 {
-            for x in 0..<w where y(x, r) != y(x, 12) || y(x, h - 1 - r) != y(x, h - 13) { mismatches += 1 }
-        }
-        for r in 0..<h {
-            for x in 0..<12 where y(x, r) != y(12, r) || y(w - 1 - x, r) != y(w - 13, r) { mismatches += 1 }
-        }
-        #expect(mismatches == 0)
+        let out = try #require(up.upscale(try TestFrames.nv12(1280, 720, y: 235, c: 128)))
+        let r = TestFrames.planeRange(out)
+        #expect(r.y.lowerBound >= 231 && r.y.upperBound <= 239, "Y \(r.y)")
+        #expect(r.c.lowerBound >= 126 && r.c.upperBound <= 130, "C \(r.c)")
     }
 
     @Test(.enabled(if: UpscalerGate.mlAvailable))
@@ -233,7 +262,7 @@ struct FrameUpscalerTests {
         #expect(up.upscale(try TestFrames.nv12(720, 480)) != nil)
     }
 
-    /// The ladder: an over-budget ML + MetalFX stage first drops MetalFX and delivers the clamped ML output
+    /// The ladder: an over-budget ML + MetalFX stage first drops MetalFX and delivers the ML output
     /// at its own size with the source's pixel aspect; only the ML-only stage tripping again disables.
     @Test(.enabled(if: UpscalerGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
@@ -356,12 +385,12 @@ struct FrameUpscalerTests {
         let input = try TestFrames.nv12(720, 480, par: (8, 9))
         for _ in 0..<FrameUpscaler.budgetWindow { _ = try #require(up.upscale(input)) }
         let t = up.stats.stageMeanMs
-        for (name, v) in [("copy", t.copy), ("ml", t.ml), ("clamp", t.clamp), ("metal", t.metal),
+        for (name, v) in [("copy", t.copy), ("ml", t.ml), ("edge", t.edge), ("metal", t.metal),
                           ("metalGPU", t.metalGPU), ("attach", t.attach)] {
             #expect(v >= 0, "\(name) \(v)")
         }
         #expect(t.total > 0 && t.metal > 0)
-        let sum = t.copy + t.ml + t.clamp + t.metal + t.attach
+        let sum = t.copy + t.ml + t.edge + t.metal + t.attach
         #expect(abs(t.total - sum) <= max(1, 0.2 * t.total), "total \(t.total) vs sum \(sum)")
         print("[FrameUpscalerTests] \(t.logLine(frames: FrameUpscaler.budgetWindow, intervalMs: 1000.0 / 24))")
     }
@@ -597,6 +626,16 @@ private enum TestFrames {
             }
         }
         return pb
+    }
+
+    static func paintLuma(_ pb: CVPixelBuffer, _ value: (Int, Int) -> UInt8) {
+        CVPixelBufferLockBaseAddress(pb, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let p = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!.assumingMemoryBound(to: UInt8.self)
+        for y in 0..<CVPixelBufferGetHeight(pb) {
+            for x in 0..<CVPixelBufferGetWidth(pb) { p[y * stride + x] = value(x, y) }
+        }
     }
 
     static func paint(_ pb: CVPixelBuffer, rows: Range<Int>, y value: UInt8) {
