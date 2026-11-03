@@ -107,8 +107,8 @@ flowchart LR
 | Align | `DualLayerPictureAlignment.enhancementPTS` | demux, under the decoder's lock | each layer's display slot from its POC (`HEVCPictureOrderCount`); the EL packet takes the PTS of the BL picture in the same slot, so pairing by time pairs by picture order when the layers' GOPs differ. A layer whose sequence cannot be trusted (leading pictures of the opener, or more than 16 slots off its unit, or a seek before its next IRAP) keeps its access unit's PTS |
 | Decode | two `HardwareVideoDecoder`s | VideoToolbox output threads | asynchronous decode with temporal processing, P010 IOSurface buffers in decode order (the renderer's 4-frame reorder buffer restores display order, as for any VideoToolbox HEVC stream) |
 | Pair | `DualLayerVideoDecoder.handleBaseLayerFrame` / `handleEnhancementLayerFrame` | VideoToolbox output threads, under the decoder's recursive lock | match the other layer by 90 kHz canonical PTS within ±300 ticks; a base-layer frame takes its ticket at arrival and is bypassed under it by its display deadline when the decoder has a render clock (§5.5), or once K = 3 newer base-layer frames have arrived when it has none; waiting enhancement frames capped at 10; side data in a 32-entry ring; `hdr10Data` and the display-metadata NAL are resolved once here and travel with the ticket |
-| Compose | `DoviFelComposer.composeAsync` | caller, then Metal | wait for one of 3 in-flight slots, rent a P010 buffer (§5.6), copy colour attachments from the base layer, bind 6 texture-cache textures, serialize the parameter block, encode luma and chroma kernels in one concurrent encoder, commit |
-| Deliver | Metal completion handler → composer's `deliveryQueue` (composed frames) or the pairing call directly (a bypass) → `OrderedDelivery.fulfil` → `emit` | Metal's completion queue hands off immediately to the composer's own `.userInteractive` queue (§4.3's firewall, not an ordering mechanism), or the pairing thread for a bypass, then `OrderedDelivery`'s own `.userInteractive` queue — never the decoder lock | release the GPU slot inline, nothing else, on Metal's queue; everything else (error logging, GPU-time accounting, `completion`) hops off it first. Either path hands the frame to `OrderedDelivery` (§5.7): one serial queue orders composed and bypassed frames alike regardless of which queue called `fulfil`, drops anything tagged with an epoch a flush/close has since retired, and calls `onFrame` (renderer enqueue) with no decoder lock held |
+| Compose | `DoviFelComposer.acquireSlot(timeout:)`, `composeAsyncWithAcquiredSlot` | compose queue, then Metal | wait for one of 2 in-flight slots, rent a P010 buffer (§5.6), copy colour attachments from the base layer, bind 6 texture-cache textures, serialize the parameter block, encode luma and chroma kernels in one concurrent encoder, commit |
+| Deliver | Metal completion handler → composer's `deliveryQueue` (composed frames), or the compose queue (a bypass, or a frame sent out as the base layer while the GPU is stalled) → `OrderedDelivery.fulfil` → `emit` | Metal's completion queue hands off immediately to the composer's own `.userInteractive` queue (§4.3's firewall, not an ordering mechanism), or the compose queue for a bypass, then `OrderedDelivery`'s own `.userInteractive` queue, never the decoder lock | release the GPU slot inline, nothing else, on Metal's queue; everything else (error logging, GPU-time accounting, `completion`) hops off it first. Either path hands the frame to `OrderedDelivery` (§5.7): one serial queue orders composed and bypassed frames alike regardless of which queue called `fulfil`, drops anything tagged with an epoch a flush/close has since retired, and calls `onFrame` (renderer enqueue) with no decoder lock held |
 
 A frame bypasses composition, and goes out as its base layer with its own DV metadata, when the
 stream is not FEL, when MEL was detected, when no RPU parameters exist for its PTS, when its
@@ -119,10 +119,10 @@ with the mapping removed.
 
 **Kernels** (`DoviShaderSource.swift`). Luma: base code → piece selection → polynomial (evaluated in
 normalized float) or MMR when the luma curve uses MMR → plus the inverse-NLQ residual of the
-enhancement-layer luma, upsampled with one hardware-bilinear fetch →
+enhancement-layer luma, upsampled bilinearly from one gather of the 2x2 footprint with exact weights, the code rounded half up →
 12-bit clamp → dither → 10-bit. Chroma: base chroma plus the base luma at the chroma site ([1 2 1] around
-the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled with one
-hardware-bilinear fetch co-sited with the top-left luma sample (DoViBaker's phase) → dither.
+the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled with the
+ETSI GS CCM 001 Annex B.3 default filter (vertical centred, horizontal co-sited; integer arithmetic) → dither.
 
 **Parameter ABI.** `DoviShaderSource.sharedStructs` on the GPU side, `DoviMetalParams.serialize` on
 the Swift side. `DoviLayoutProbeTests` has the GPU read every sub-block back at the offset Swift wrote
@@ -214,7 +214,7 @@ reproduces the exact lock shape; against the old handler it hung past a 300 s ti
 
 | Symptom | Cause | Rule |
 |---|---|---|
-| Metal validation abort binding textures | integer kernel access on a Unorm texture | bind BL and output planes as `r16Uint` / `rg16Uint`, EL planes as `r16Unorm` / `rg16Unorm` so they can be filtered |
+| Metal validation abort binding textures | integer kernel access on a Unorm texture | bind BL and output planes as `r16Uint` / `rg16Uint`, EL planes as `r16Uint` / `rg16Uint` too (read with explicit texel fetches, no sampler filtering) |
 | Black picture with `COMPOSE SUCCESS` on every frame | 10-bit prediction treated as 12-bit | keep the whole reconstruction in one declared precision |
 | Green / purple picture | chroma curves with fewer than 2 pivots returned 0 | an absent curve is identity, not zero |
 | GPU reading freed memory | `CVMetalTexture` wrappers released before completion | keep textures *and* their source buffers alive until the command buffer retires (`ComposedFrame`) |
@@ -430,8 +430,8 @@ the decoder's lock, and each call is O(K):
   - *Held clock.* With no running clock there is no time to count down to. While a preroll waits on the
     renderer a frame waits the margin of wall time at most; for a pause, or before the clock is armed,
     it waits 2 s at most (this only bounds a layer that is lost for good).
-  - *Backstop.* With a clock, `maxDeadlineHoldFrames` = 7 newer arrivals release a frame in every mode.
-    It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 8 pending frames) at which
+  - *Backstop.* With a clock, `maxDeadlineHoldFrames` = 6 newer arrivals release a frame in every mode.
+    It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 7 pending frames) at which
     `OrderedDelivery`'s stall guard skips a ticket, so the frames queued behind a waiting one can never
     reach the guard, and it bounds the queue.
   - *Sweep.* A timer re-checks what waits (every 2 to 250 ms, only while something waits) and every
@@ -453,15 +453,54 @@ the decoder's lock, and each call is O(K):
 
 ### 5.6 Compose
 
-- **Acquire the in-flight slot outside the decoder lock**, on the VideoToolbox output thread that
-  produced the `compose` action, then encode and commit. Blocking that thread is the intended
-  backpressure: VideoToolbox stops emitting, the display layer stops draining, and the demux loop's
-  existing `mayEnqueueVideoFrame` gate (the renderer's queue readiness plus the look-ahead bound) holds.
+- **Acquire the in-flight slot on a compose queue, outside every lock.** The VideoToolbox output
+  thread that pairs a frame only records, pairs and enqueues it (`runCompose`); the slot wait, encode
+  and commit run on one serial `composeQueue`, in hand-off order. A callback that waited for the GPU
+  would stall that session's whole output, because VideoToolbox can call it on the submitting thread.
+  The queue waits with no lock held, so `flush()`, `close()` and the other layer's callback never wait
+  behind the GPU.
+- **Backpressure is the feed's.** `decode(packet:)` waits (`waitForComposeBacklog`) while
+  `maxComposesAwaitingSlot` (= the in-flight slots, 2) compositions are queued for a slot, which holds
+  the demux thread and, through `mayEnqueueVideoFrame`, the host's reads. The wait has no clock of its
+  own. It ends when the queue head gets a slot, is retired, or reaches the stall verdict below, or when
+  `flush()` or `close()` moves the epoch; in that last case the packet is refused, because it belongs to
+  the old feed. The backlog, and the buffers it holds, are therefore bounded whatever the GPU does.
+- **A stalled GPU is recoverable, and bounded.** The queue head waits for its slot in
+  `composeStallSlices` (4) slices of `composeStallTimeout / 4` (2 s by default). When all of them time out
+  in a row, the decoder enters *stall mode*; the verdict counts timed-out waits and never compares clock
+  readings, so a process suspension (a debugger, a background freeze) counts as at most one slice.
+  In stall mode each queued request takes a slot only if one is free right now and otherwise goes out as
+  its untouched base layer with the mapping-preserving RPU (the form a failed composition delivers),
+  in queue order, without waiting. Compositions already on the GPU are left alone: they deliver if they
+  complete, and `OrderedDelivery`'s stall guard (§5.7) skips their tickets if they never do. Stall mode
+  ends when a request gets a slot again (the GPU progressed) and on `flush()` or `close()`; the first
+  head after a seek then waits one full timeout before the mode can resume. It is logged on entry and
+  exit, counted (`composeStallCount`) and summarised (§5.11).
+- **The bound.** A stall that does not recover must not fall back to the base layer forever. Two counts,
+  both of frames and verdicts and never of clock time, end it in a reported stop: a single stall mode that
+  sends `maxComposeStallBypassFrames` (600, about 25 s at 24 fps) frames as the base layer without one slot
+  coming free, and `maxComposeStallEpisodes` (3) stall verdicts that were not separated by
+  `composeHealthyFramesToResetStalls` (240, about 10 s) compositions that got a slot; a flush resets the
+  per-stall count of base-layer frames, and only the episode count survives it, so every flush during a dead
+  GPU still costs one verdict and the 4th is reported. Past either, the compose queue reports `VideoDecoderError.composerStalled` once,
+  through `onFatalDecodeError` (the path a failed primary open uses; the software host turns it into
+  `softwarePipelineFailed`), and `fatalDecodeError` holds it; `decode(packet:)` refuses packets from then on.
+  The report is made on the compose queue with no decoder lock, backlog lock or counter lock held, so the
+  host's handler can call back into the decoder. Frames already queued still go out as the base layer.
+  Ending the session, rather than staying on the base layer, is deliberate: a base-layer picture on a
+  stream the host asked to be composed is a silent loss of the enhancement layer that looks like
+  success, and only a reported error lets the host act on it (retry, or choose another route). Whether
+  that is the right product behaviour is the maintainer's call; the bound is the two constants above.
+- **A bypass goes through the same queue** (`fulfilBypass`), behind every composition handed off
+  before it, so it cannot overtake queued compositions and push their tickets past the stall guard. The
+  price is that it can wait behind a head that is waiting for a slot, bounded by the first of: the next
+  slot release, the stall verdict, or (after a flush) one slice. The summary's `bypassQueueWaitMaxMs`
+  measures that wait on a device.
 - **Parameters** are written straight into one of `maxFramesInFlight` preallocated shared
   `MTLBuffer`s (`DoviMetalParams.serialize(into:)`), bound with `setBuffer` for both kernels. No `Data`,
   no heap arrays per frame.
 - **Output pool** gets `kCVPixelBufferPoolAllocationThresholdKey` = the renderer's FEL look-ahead (9)
-  + the frame on screen and the one the display layer retains (2) + the in-flight slots (3) + 1, so 15.
+  + the frame on screen and the one the display layer retains (2) + the in-flight slots (2) + 1, so 14.
   A refused buffer would put a base-layer frame on screen, a visible brightness step, so past the
   threshold a burst draws on a reserve of 3 more. Only with the reserve spent does the composer wait,
   for at most about 36 ms (a 300 ms wait stalled the VideoToolbox callback and starved audio into
@@ -487,8 +526,14 @@ the decoder's lock, and each call is O(K):
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is
   IOSurface-backed, in the 10-bit biplanar video-range format (`x420`), has even dimensions with the
-  luma and half-size chroma planes the output has, and the frame's luma curve is not MMR; anything else
-  takes the pool path unchanged. Setting `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
+  luma and half-size chroma planes the output has, the frame's luma curve is not MMR, and the device
+  binds the planes as `read_write` textures (`readWriteTextureSupport` is tier 2, which the 16-bit luma plane
+  needs; the chroma plane is bound as 32-bit texels, one Cb and Cr pair each, which tier 1 covers); anything
+  else takes the pool path unchanged. The in-place kernels are the pool kernels' bodies, with one `read_write`
+  binding per plane. They are compiled only on a tier 2 device, as a separate block of the shader source, so a
+  device below tier 2 builds no `read_write` text; if a tier 2 driver refuses either in-place pipeline, every frame
+  takes the pool path. The tier and whether in-place is on are logged once at the default level when the composer
+  is created. Setting `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
   - *Why no scratch buffer.* The chroma kernel reads the base-layer luma around each chroma sample
     (other threads' pixels) but only its own chroma sample. The luma kernel reads only its own luma sample.
     So chroma runs first, while all the luma is still the decoded base layer, and each thread overwrites
@@ -543,7 +588,7 @@ final class OrderedDelivery {
 ```
 
 - **Every** outgoing frame goes through `fulfil`: composed frames from the composer's relay queue
-  (after `slot.signal()`, see below), bypassed frames straight from the pairing call. One serial queue orders
+  (after `slot.signal()`, see below), bypassed frames from the compose queue (§5.6). One serial queue orders
   both, so no lock and no recursive re-entry are needed.
 - **The queue owns its state.** `emit`, which attaches the DV metadata and calls `onFrame`, runs on it
   with no decoder lock held, so the renderer's own lock is never nested inside ours.
@@ -573,7 +618,7 @@ the deadlock removing the hop would reopen: a `completion` that blocks on the ca
 on Metal's shared completion queue, stalls every later handler too, including the `inFlight.signal()` a
 different, currently-blocked caller needs. `deliveryQueue` carries no ordering responsibility of its
 own — `OrderedDelivery` reorders every frame by ticket regardless of which queue or thread calls
-`fulfil`, so a bypass arriving directly from a VideoToolbox thread and a composition arriving via this
+`fulfil`, so a bypass arriving from the compose queue and a composition arriving via this
 relay hop are indistinguishable once they reach it. This is a deliberate queue hop, not a second
 ordering mechanism. An `os_signpost` event in the Metal completion handler
 (`DoviFelComposer`'s "Compose" signpost) marks the instant Metal invoked it, separately from the
@@ -623,7 +668,8 @@ neither the epoch nor `nextToEmit` can move backwards.
 | Thread | Does | Holds | May block on |
 |---|---|---|---|
 | Demux | NAL split, one libdovi parse, side-data ring insert, VideoToolbox submit | decoder lock, O(1) | nothing |
-| VideoToolbox output (BL, EL) | pairing; for `compose`, slot acquisition then encode and commit | decoder lock for the pairing call only | a GPU slot, with no lock held |
+| VideoToolbox output (BL, EL) | pairing; for `compose`, hand-off to the compose queue | decoder lock for the pairing call only | nothing |
+| Compose queue (`composeQueue`, `.userInteractive`, serial) | slot wait with the stall verdict, encode and commit; bypasses and stall-mode base-layer frames to `fulfil` | none across the wait; `lock`, the backlog lock and the counter lock one at a time | a GPU slot, in slices, with no lock held |
 | Metal completion | `slot.signal()`, GPU time sample, hop to the composer's relay queue | none | never |
 | Composer relay queue (`deliveryQueue`, `.userInteractive`) | `completion` (= `delivery.fulfil` in production) | none | nothing (a slow `completion` queues up behind itself and never blocks Metal; see I7 in §5.12) |
 | Delivery queue (`.userInteractive`) | ordering, epoch check, DV attachment, `onFrame` | none of ours | the renderer's enqueue |
@@ -636,9 +682,9 @@ pictures and the display layer's queue are extra):
 
 | Holder | Bound |
 |---|---|
-| Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 7 with a render clock (K = 3 without one) → about 175 MB at 4K with the clock, 75 MB at K = 3. The 7 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds |
+| Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 6 with a render clock (K = 3 without one) → about 150 MB at 4K with the clock, 75 MB at K = 3. The 6 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds |
 | Enhancement-layer frames waiting | 10 → 62 MB |
-| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 15 + reserve 3 → 448 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR):** the composed frame is the decoded base-layer buffer, which VideoToolbox's own pool then keeps alive until the renderer lets go of it (the memory moves to the decoder's side rather than vanishing). Approximate: another aetherctl ran on the same machine during these runs, so the numbers are noisy. Mac, 4K, 200 s with 7 seeks, two runs each: our process plus the decoder service, median 841 and 903 MB before, 708 and 744 MB in place (about 147 MB less); peak 936 and 965 MB before, 761 and 817 MB in place (about 161 MB less). Our process alone falls by about 300 MB, the decoder service gains about 170 MB |
+| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 14 + reserve 3 → 423 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR):** the composed frame is the decoded base-layer buffer, which VideoToolbox's own pool then keeps alive until the renderer lets go of it (the memory moves to the decoder's side rather than vanishing). Approximate: another aetherctl ran on the same machine during these runs, so the numbers are noisy. Mac, 4K, 200 s with 7 seeks, two runs each: our process plus the decoder service, median 841 and 903 MB before, 708 and 744 MB in place (about 147 MB less); peak 936 and 965 MB before, 761 and 817 MB in place (about 161 MB less). Our process alone falls by about 300 MB, the decoder service gains about 170 MB |
 
 CPU per composed frame:
 
@@ -664,7 +710,7 @@ failures, base frames bypassed without an enhancement layer, split by the rule t
 clock; `bypassNoELDecoder`: no enhancement decoder; `bypassEndOfStream`: released at end of stream),
 bypassed without RPU, stale enhancement frames dropped, maximum
 observed layer skew in frames, peak GPU slots in use, output pool buffers allocated (0 in place), frames composed in place so far,
-frames dropped after a failed in-place composition, delivery pending peak, mean GPU ms. `[DoviFelComposer] gpu … ms/frame` is the same kind of line, once per 120 composed
+frames dropped after a failed in-place composition, frames sent out as the base layer in stall mode (`bypassComposeStalled`), the longest a bypass waited on the compose queue (`bypassQueueWaitMaxMs`), delivery pending peak, mean GPU ms. `[DoviFelComposer] gpu … ms/frame` is the same kind of line, once per 120 composed
 frames. Both are `.verbose`: they go to OSLog's debug level and never reach the host handler, so they
 cost nothing unless the category's debug level is on:
 
@@ -680,8 +726,11 @@ device run is judged from it. The software host's `[SWDiag]` line carries `skip=
 the arrival-order path discarded below a seek's threshold (the pictures of the landing GOP before the
 target, a decision rather than a loss), next to `lost=` and `layerDrop=`.
 
-The exception is a summary whose second counted a compose failure, which goes out at the default level
-so the failure is visible without that. `os_signpost` intervals around compose and delivery make the
+The exception is a summary whose second counted a compose failure, an in-place drop or a frame sent out in
+stall mode, which goes out at the default level so it is visible without that. Entering and leaving stall
+mode (`compose stalled: …`, `compose resumed after N base-layer frames`, `compose stall cleared by flush`, `compose stall cleared by close`)
+and the bound (`compose stalled for good (…); reporting a fatal decode error`)
+are default-level lines of their own. `os_signpost` intervals around compose and delivery make the
 pipeline readable in Instruments. Nothing else logs per frame; anything genuinely per-frame for
 debugging, such as the pairing, queueing and bypass traces, uses `EngineLog` level `.verbose` too.
 
@@ -699,6 +748,10 @@ debugging, such as the pairing, queueing and bypass traces, uses `EngineLog` lev
 | I8 | No lock is held across a blocking wait or a host callback | `DualLayerVideoDecoderTests.slowOnFrameDoesNotBlockDecoderOperations` (a blocked `onFrame` never stalls concurrent decoder work); `DualLayerGpuSlotWaitTests` for the GPU slot wait |
 | I9 | Stream classification changes only at open, flush or close | `DualLayerStreamClassificationTests` |
 | I10 | An in-place composition is bit-identical to the pool composition; a buffer is never composed twice or shown half composed | `DoviFelInPlaceComposeTests` (`inPlaceMatchesPool`, `sameBufferIsNotComposedTwice`, `failedInPlaceIsCorrupt`, `decoderDropsCorruptFrame`) |
+| I11 | A GPU stall does not refuse the feed or end playback by itself: queued frames go out as the base layer with their mapping RPU, and the next free slot ends the mode. It is bounded (I14) | `DualLayerGpuSlotWaitTests.stalledGpuSendsBaseLayerAndTheFeedGoesOn`, `aFreedSlotEndsStallMode`, `flushEndsStallMode`, `verdictRacingAFlushIsDropped`, `summaryCountsStalledBypasses`; `DoviComposeAsyncTests.timedSlotWaitGivesUpWithoutSideEffect` |
+| I12 | A seek or a stop never waits for the GPU: `flush()` and `close()` release a feed parked on the backlog, a feed of the old epoch is refused at once, and a retired head leaves within a slice | `flushReleasesBacklogWaiter`, `closeReleasesTheFeedQuietly`, `staleFeedDoesNotWait`, `closedDecoderHeadLeavesWithinASlice` (all in `DualLayerGpuSlotWaitTests`) |
+| I13 | Process suspension cannot cause a stall verdict: it is a count of timed-out waits, not an elapsed time | `DualLayerGpuSlotWaitTests.aLateWaitIsOneTimedOutWait`, `progressWithinTheSlicesIsNotAStall` |
+| I14 | A stall that does not recover ends in a reported stop, never an endless base-layer fallback: `composerStalled` is reported once, outside every lock, after `maxComposeStallBypassFrames` frames in one stall or more than `maxComposeStallEpisodes` verdicts without a healthy stretch; packets are refused afterwards | `DualLayerGpuSlotWaitTests.endlessStallIsReported`, `repeatedStallsAreReported`, `healthyStretchResetsTheEpisodeCount` |
 
 ---
 
@@ -756,18 +809,30 @@ streams and Dolby's prediction is not public.
 
 ### 6.2 What is and is not applied
 
-Applied: base layer (all planes, MMR luma reads base chroma), enhancement layer (bilinear upsampled, inverse
+Applied: base layer (all planes, MMR luma reads base chroma), enhancement layer (upsampled, inverse
 NLQ with offset, scale, threshold, shift, `vdr_in_max`), the per-component polynomial and MMR curves, the
 bit depths, and the display metadata (carried into the converted Profile 8.1 RPU).
 
-The enhancement-layer upsampler is one hardware-bilinear fetch, not DoViBaker's spline taps. The
-encoder's own filter is not carried in the RPU (`el_spatial_resampling_filter_flag` only says one was
-used), so no kernel inverts it exactly. Against the DoViBaker oracle on a fine-detail set (gratings, zone
-plate, band-limited noise) a 4-fetch Catmull-Rom lowered the per-pixel error sd by about 0.7% on luma and
-left chroma unchanged, for four times the enhancement-layer reads. `dovi_sample_el_1d` / `_2d` keep the
-texture size in their signature so a wider filter can replace bilinear without touching the callers.
-The phases are DoViBaker's: luma texel-centre aligned, chroma co-sited with the top-left luma sample in
-both axes (`DoviEnhancementUpsamplerTests`).
+Enhancement-layer chroma is upsampled with the default resampling filter of ETSI GS CCM 001 Annex B.3
+(`dovi_annexb_chroma`), when the enhancement layer is half the base layer's size in both axes: vertical first,
+centred, as `(64 a + 192 b + 128) >> 8` of the two nearest rows; then horizontal, co-sited, where an even
+output sample copies and an odd one is the 8-tap filter `22 94 -524 2456 2456 -524 94 22` over the
+samples either side (`+ 2048 >> 12`), edges replicated. The standard treats resampling as non-normative and
+the RPU does not carry the encoder's own filter (`el_spatial_resampling_filter_flag` only says one was
+used), but its default is the one reading that closes the gap: on a spec-written integer model of the whole
+composition, the composer's chroma is within one 12-bit code on every chroma sample of the corpus except 3 Cb
+samples of one test clip (largest error 2), and within one code everywhere at 10 bit, where the co-sited bilinear read it replaced reached 83 to 99% (83% / 90% Cb / Cr on
+a film clip with a large residual). An enhancement layer at the base layer's size is read texel for texel,
+and any other ratio still takes the exact-weight bilinear read co-sited with the top-left luma sample.
+
+Luma is still the centred exact-weight bilinear read (`dovi_upsample_el`). The Annex B luma filter (4 vertical
+by 8 horizontal taps) exists in DEBUG builds only, behind `DoviComposerFlags.debugAnnexBElLuma`, so its GPU
+cost can be measured on a device before anyone decides to ship it; it changes the picture on hard edges
+only (text, graphics). A DEBUG build can also read the chroma the old way (`debugCositedElChroma`) for A/B
+runs. Against the DoViBaker oracle on a fine-detail set (gratings, zone plate, band-limited noise) a 4-fetch
+Catmull-Rom lowered the per-pixel error sd by about 0.7% on luma and left chroma unchanged, for four times
+the enhancement-layer reads. The luma phase is texel-centre aligned (`DoviEnhancementUpsamplerTests`).
+The inverse-NLQ table and the MMR coefficients are read from per-frame tables bound at buffers 2 and 3 of every compose kernel (`nlq_lut`, `mmr_table`).
 
 - **Missing or CRC-failed RPU:** the frame borrows the previous real RPU's parameters for up to
   `maxBorrowedParamsRun` (3) frames in a row, then bypasses to the base layer. Reshaping and NLQ are constant

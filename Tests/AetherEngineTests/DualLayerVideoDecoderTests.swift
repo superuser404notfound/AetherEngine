@@ -413,6 +413,7 @@ extension HeavyDualLayerSuites {
                 return _flagsByBase[ObjectIdentifier(base)]
             }
             func acquireSlot() {}
+            func acquireSlot(timeout: DispatchTime) -> Bool { true }
             func releaseSlot() {}
             func flush() {}
             func composeAsync(baseBuffer: CVPixelBuffer, enhancementBuffer: CVPixelBuffer, params: DoviMetalParams,
@@ -1073,6 +1074,7 @@ extension HeavyDualLayerSuites {
         /// `OrderedDelivery`'s own queue (`waitFor`/`settle`).
         private final class ImmediateFakeComposer: FelComposing, @unchecked Sendable {
             func acquireSlot() {}
+            func acquireSlot(timeout: DispatchTime) -> Bool { true }
             func releaseSlot() {}
             func flush() {}
             func composeAsync(
@@ -1284,6 +1286,7 @@ extension HeavyDualLayerSuites {
         /// Fake composer whose every composition fails (completes with nil), as a GPU error does.
         private final class FailingFakeComposer: FelComposing, @unchecked Sendable {
             func acquireSlot() {}
+            func acquireSlot(timeout: DispatchTime) -> Bool { true }
             func releaseSlot() {}
             func flush() {}
             func composeAsync(
@@ -1316,6 +1319,7 @@ extension HeavyDualLayerSuites {
             private var calls = 0
             init(dropOnCall: Int) { self.dropOnCall = dropOnCall }
             func acquireSlot() {}
+            func acquireSlot(timeout: DispatchTime) -> Bool { true }
             func releaseSlot() {}
             func flush() {}
             func composeAsync(
@@ -2469,6 +2473,8 @@ extension HeavyDualLayerSuites {
 
             // Enhancement layer arrives at t = 10.0: pairs and composes
             decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(1))
+            // The composition runs on the compose queue: let it finish before the summary counts it.
+            decoder.quiesceForTesting()
 
             // Advance by 0.5s to 10.5: interval (1.0s) has not elapsed yet
             currentTime = 10.5
@@ -2544,6 +2550,7 @@ extension HeavyDualLayerSuites {
             decoder.seedRPUForTesting(pts: Self.pts(1), params: Self.params(), displayMetadataNAL: nil)
             decoder.handleBaseLayerFrame(baseBuffer: baseBuf, pts: Self.pts(1), hdr10Data: nil)
             decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(1))
+            decoder.quiesceForTesting()
 
             currentTime = 31.1
             decoder.maybeEmitSummary()
@@ -2579,6 +2586,8 @@ extension HeavyDualLayerSuites {
                 decoder.seedRPUForTesting(pts: Self.pts(n), params: Self.params(), displayMetadataNAL: nil)
                 decoder.handleBaseLayerFrame(baseBuffer: baseBuf, pts: Self.pts(n), hdr10Data: nil)
                 decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(n))
+                // The composition runs on the compose queue: the counters move once it has.
+                decoder.quiesceForTesting()
             }
             func count() -> Int {
                 logLock.lock()
@@ -2639,6 +2648,7 @@ extension HeavyDualLayerSuites {
             decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(1))
 
             // The frame is composed but no summary has run yet: a seek arrives first.
+            decoder.quiesceForTesting()
             decoder.flush()
 
             // The first call after the flush only records the baseline, the next one emits.

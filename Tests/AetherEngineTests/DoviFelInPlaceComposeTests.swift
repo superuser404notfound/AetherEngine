@@ -144,6 +144,9 @@ struct DoviFelInPlaceComposeTests {
             (320, 180, DoviDither.bayer8x8, true, ChromaCurves.mmrTwoPieces),
             (256, 128, DoviDither.fullPrecision, true, ChromaCurves.mmrTwoPieces),
             (1920, 1080, DoviDither.bayer8x8, true, ChromaCurves.mmrTwoPieces),
+            // The test-only raw-VDR output takes the other store branch of the shared kernel body.
+            (256, 128, DoviDither.debugRawVDR, true, ChromaCurves.polynomial),
+            (320, 180, DoviDither.debugRawVDR, false, ChromaCurves.mmrOnePiece),
           ])
     func inPlaceMatchesPool(width: Int, height: Int, dither: DoviDither, residual: Bool, chroma: ChromaCurves) async throws {
         let composer = try #require(DoviFelComposer())
@@ -251,6 +254,13 @@ struct DoviFelInPlaceComposeTests {
         var mmr = params
         mmr.flags.insert(.lumaMmr)
         #expect(composer.inPlaceDecision(baseBuffer: good, params: mmr) == .lumaMmr)
+
+        // The in-place kernels bind each plane as read_write: tier 2 only, so anything below it is the pool path.
+        #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: good, params: params, readWriteSupported: false) == .readWriteUnsupported)
+        #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: good, params: params, readWriteSupported: true) == nil)
+        #expect(DoviFelComposer.supportsInPlaceReadWrite(.tier2))
+        #expect(!DoviFelComposer.supportsInPlaceReadWrite(.tier1))
+        #expect(!DoviFelComposer.supportsInPlaceReadWrite(.tierNone))
 
         composer.inPlaceComposeEnabled = false
         #expect(composer.inPlaceDecision(baseBuffer: good, params: params) == .switchedOff)
@@ -389,6 +399,7 @@ struct DoviFelInPlaceComposeTests {
         private(set) var poolCalls = 0
         init(_ results: [DoviFelComposer.InPlaceResult]) { self.results = results }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() {}
         func canComposeInPlace(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> Bool { true }

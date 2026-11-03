@@ -200,6 +200,28 @@ struct SampleBufferRendererLookaheadTests {
     func poolFollowsCap() {
         #expect(DoviFelComposer.outputPoolAllocationThreshold == SampleBufferRenderer.felVideoLookaheadFrames + 2 + DoviFelComposer.maxFramesInFlight + 1)
     }
+
+    @Test("The pool threshold follows the in-flight limit; the reserve is independent of it")
+    func poolThresholdFollowsInFlightLimitAndReserveDoesNot() {
+        let inFlight = DoviFelComposer.maxFramesInFlight
+        let threshold = DoviFelComposer.outputPoolAllocationThreshold
+        // On screen, retained by the display layer, the in-flight compositions, one spare.
+        #expect(threshold == SampleBufferRenderer.felVideoLookaheadFrames + 2 + inFlight + 1)
+        // The reserve is sized from the measured burst shortfall, not from the slots.
+        #expect(DoviFelComposer.outputPoolReserve == 3)
+        // The pool's hard cap at the current constants: 9 look-ahead + 2 + 2 in flight + 1, plus the reserve of 3.
+        #expect(threshold + DoviFelComposer.outputPoolReserve == 17)
+    }
+
+    @Test("The compose check fires only when mean GPU time exceeds the frame interval")
+    func composeCannotKeepUpCheck() {
+        #expect(!DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 12.7, frameRate: 23.976))
+        #expect(!DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 41.0, frameRate: 23.976))
+        #expect(DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 42.0, frameRate: 23.976))
+        #expect(DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 17.0, frameRate: 60))
+        #expect(!DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 100, frameRate: nil))
+        #expect(!DualLayerVideoDecoder.composeCannotKeepUp(meanGpuMs: 100, frameRate: 0))
+    }
     #endif
 
     private func mayEnqueue(rate: Double?, pts: Double, clock: Double,
