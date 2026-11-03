@@ -286,6 +286,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         self.composer = composer
         let primary = HardwareVideoDecoder()
         primary.useCustomBlockSource = true
+        primary.allowsInPlaceOutputMetadata = true
         self.primaryDecoder = primary
     }
 
@@ -302,6 +303,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         self.composer = composer
         self.primaryDecoder = primaryDecoder
         (self.primaryDecoder as? HardwareVideoDecoder)?.useCustomBlockSource = true
+        (self.primaryDecoder as? HardwareVideoDecoder)?.allowsInPlaceOutputMetadata = true
         self.enhancementDecoder = enhancementDecoder
         (self.enhancementDecoder as? HardwareVideoDecoder)?.useCustomBlockSource = true
     }
@@ -2543,6 +2545,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         orderedDelivery.fulfil(
             ticket: ticket, epoch: epoch,
             DeliveredFrame(buffer: SendableBuffer(value: buffer), pts: pts, hdr10Data: nil, dmNAL: nil))
+    }
+    #endif
+
+    #if DEBUG
+    /// Whether a frame from the base-layer decoder would be modifiable with no flag from VideoToolbox.
+    var primaryOutputIsModifiableForTesting: Bool {
+        (primaryDecoder as? HardwareVideoDecoder)?.outputIsModifiable([]) ?? false
     }
     #endif
 
