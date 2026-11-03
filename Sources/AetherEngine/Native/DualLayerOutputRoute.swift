@@ -82,7 +82,10 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     /// How far ahead of the clock base-layer frames are taken from the video output.
     static let pullAheadSeconds = 0.15
     /// The enhancement layer is fed this many frame intervals beyond the pull window, so it is decoded
-    /// before its base frame arrives and never so far ahead that the decoder's queue prunes it.
+    /// before its base frame arrives. It can still be too far ahead: the decoder keeps at most
+    /// `maxEnhancementLayerQueueFrames` enhancement frames waiting, and where a seek lands the enhancement
+    /// layer can arrive well before the base layer, so the oldest is pruned and its base frame goes out
+    /// without the residual (one frame, in a few landings on the Mac).
     static let feedLeadFrames = 6.0
     /// A clock further than this from what was last fed is a seek even without the player's signal.
     static let jumpSeconds = 1.5
