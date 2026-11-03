@@ -88,7 +88,9 @@ final class EmbeddedSubtitleDecoder {
         }
 
         // Seed bitmap canvas from video dims; PCS overwrites once it arrives (probe can't always determine them upfront).
-        if Self.isBitmapCodec(id) {
+        // AE#971: not DVB. dvbsubdec takes its canvas from the DDS, or the EN 300 743 default of 720x576
+        // without one, only while the context has no size, so a seed overrode both.
+        if Self.isBitmapCodec(id), id != AV_CODEC_ID_DVB_SUBTITLE {
             if ctx.pointee.width == 0 { ctx.pointee.width = sourceVideoWidth }
             if ctx.pointee.height == 0 { ctx.pointee.height = sourceVideoHeight }
         }
@@ -209,6 +211,12 @@ final class EmbeddedSubtitleDecoder {
         // PCS-reported canvas; fall back to source video dims if missing.
         let canvasW = ctx.pointee.width > 0 ? ctx.pointee.width : sourceVideoWidth
         let canvasH = ctx.pointee.height > 0 ? ctx.pointee.height : sourceVideoHeight
+        // AE#971: a DVB display covers the whole picture whatever its pixel grid (720x576 SD pixels are not
+        // square on HD video), so hosts get the video frame as the canvas and stretch onto it, while the
+        // position stays normalized against the decoder's own canvas.
+        let reportedCanvas: CGSize? = ctx.pointee.codec_id == AV_CODEC_ID_DVB_SUBTITLE
+            && sourceVideoWidth > 0 && sourceVideoHeight > 0
+            ? CGSize(width: Int(sourceVideoWidth), height: Int(sourceVideoHeight)) : nil
 
         var bodies: [SubtitleCue.Body] = []
         var textLines: [String] = []
@@ -246,7 +254,8 @@ final class EmbeddedSubtitleDecoder {
                 } else if let image = Self.imageForSubtitleRect(
                     rect,
                     videoWidth: Int(canvasW),
-                    videoHeight: Int(canvasH)
+                    videoHeight: Int(canvasH),
+                    reportedCanvas: reportedCanvas
                 ) {
                     bodies.append(.image(image))
                 }
@@ -629,10 +638,12 @@ final class EmbeddedSubtitleDecoder {
     /// Render a PGS/DVB/HDMV bitmap rect into a CGImage with normalised position.
     /// Palette from libavcodec is 32-bit with alpha in the high byte and BGR below ([B,G,R,A] on little-endian);
     /// rewritten to RGBA for CGImage's premultipliedLast. Internal for unit tests (#146).
+    /// `reportedCanvas` replaces `canvasSize` when the plane's shape differs from its pixel grid (AE#971, DVB).
     static func imageForSubtitleRect(
         _ rect: UnsafeMutablePointer<AVSubtitleRect>,
         videoWidth: Int,
-        videoHeight: Int
+        videoHeight: Int,
+        reportedCanvas: CGSize? = nil
     ) -> SubtitleImage? {
         let r = rect.pointee
         guard r.type == SUBTITLE_BITMAP,
@@ -731,7 +742,7 @@ final class EmbeddedSubtitleDecoder {
         }
 
         return SubtitleImage(cgImage: cgImage, position: position,
-                             canvasSize: CGSize(width: Int(videoWidth), height: Int(videoHeight)),
+                             canvasSize: reportedCanvas ?? CGSize(width: Int(videoWidth), height: Int(videoHeight)),
                              isForced: (r.flags & AV_SUBTITLE_FLAG_FORCED) != 0)
     }
 }
