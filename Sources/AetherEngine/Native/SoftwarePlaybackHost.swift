@@ -1768,13 +1768,7 @@ final class SoftwarePlaybackHost {
         case .none:
             break
         }
-        if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoLayer(renderer.displayLayer)
-        }
-        if !demuxLoopStarted {
-            demuxLoopStarted = true
-            startDemuxLoop()
-        }
+        startLoopsIfNeeded()
         // Cold start: demux loop arms the clock on first decoded audio sample; don't eager-start.
         rate = lastRate
         isPlaying = true
@@ -1897,16 +1891,28 @@ final class SoftwarePlaybackHost {
         audioOutput?.setPlaybackEnabled(false)
         pausedByHost = true
         rate = 0
-        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
+        let startsLoops = PausedFirstFrame.startsLoopsForFirstFrame(
+            loaded: isReady && failure == nil, loopsStarted: demuxLoopStarted)
+        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued)
+            || startsLoops,
            !stopRequested {
             pausedBeforeFirstFrame = true
             EngineLog.emit(
-                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents",
+                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents"
+                + (startsLoops ? " (AE#973: started for it, nothing had played this host)" : ""),
                 category: .swPlayback
             )
         }
         isPlaying = false
         inFlightSeekResumeIntent = false
+        if startsLoops, !stopRequested { startLoopsIfNeeded() }
+    }
+
+    private func startLoopsIfNeeded() {
+        guard !demuxLoopStarted else { return }
+        audioOutput?.attachVideoLayer(renderer.displayLayer)
+        demuxLoopStarted = true
+        startDemuxLoop()
     }
 
     /// Sodalite#104 round 4: the first frame of a session paused before it is in. Moves the stopped clock
