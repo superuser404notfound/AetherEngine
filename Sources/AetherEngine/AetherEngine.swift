@@ -1194,7 +1194,17 @@ public final class AetherEngine: ObservableObject {
     /// next-episode handover (AE#158), but `stop()` tears the host down and the next `load()` builds
     /// a fresh layer. A host driving PiP must still set `pictureInPictureActive`, which arms both the
     /// keepalive policy and that in-place handover.
-    public var nativePlayerLayer: AVPlayerLayer? { nativeHost?.playerLayer }
+    ///
+    /// nil while `LoadOptions.dualLayerRoute == .avPlayerOutput` is running (a Profile 7 FEL session on the
+    /// AVPlayer-output route): AVPlayer's own picture is suppressed there and the composed picture is a
+    /// layer of the bound `AetherPlayerView`, so a Picture in Picture window built on this layer would be
+    /// blank. Picture in Picture is unavailable on that route.
+    public var nativePlayerLayer: AVPlayerLayer? {
+        #if DualLayerDolbyVision
+        if dualLayerOutputRoute != nil { return nil }
+        #endif
+        return nativeHost?.playerLayer
+    }
     /// True between didEnterBackground and didBecomeActive; gates the pause-while-backgrounded teardown
     /// (iOS) and the PiP-closed-while-backgrounded teardown (tvOS). Never set on macOS.
     private var isBackgrounded = false
@@ -1814,6 +1824,9 @@ public final class AetherEngine: ObservableObject {
             // Still correct for hosts that use the engine's layer directly and for the SW displayLayer.
             nativeHost?.playerLayer.videoGravity = newValue
             softwareHost?.displayLayer.videoGravity = newValue
+            #if DualLayerDolbyVision
+            dualLayerOutputRoute?.setVideoGravity(newValue)
+            #endif
         }
     }
     var _videoGravity: AVLayerVideoGravity = .resizeAspect
@@ -2086,7 +2099,9 @@ public final class AetherEngine: ObservableObject {
         guard let view = boundView else { return }
         if let host = nativeHost {
             view.attach(host.playerLayer)
+            view.attachOverlay(dualLayerOutputLayer)
         } else if let host = softwareHost {
+            view.attachOverlay(nil)
             view.attach(host.displayLayer)
         }
     }
@@ -2509,6 +2524,13 @@ public final class AetherEngine: ObservableObject {
     /// Host observer for per-frame presentation times (#260). Held here so it survives across loads and is
     /// re-installed on each new native session; see `setNativeVideoFrameTimeObserver`.
     var nativeVideoFrameTimeObserver: NativeVideoFrameTimeObserver?
+    /// Set by the load's route decision when a Profile 7 FEL source takes `DualLayerRoute.avPlayerOutput`:
+    /// the stream's frame rate (known and positive; the decision refuses the route otherwise). `loadNative`
+    /// starts the route for the session it builds.
+    var outputRouteFrameRate: Double?
+    #if DualLayerDolbyVision
+    var dualLayerOutputRoute: DualLayerOutputRoute?
+    #endif
 
     /// The software path's equivalent (#311), held for the same reason: a `load()` builds a fresh
     /// host, and the observer has to survive it. See `setSoftwareVideoFrameTimeObserver`.
@@ -5567,8 +5589,11 @@ public final class AetherEngine: ObservableObject {
         // that its size alone would refuse still pays the probe.
         var elType: String? = nil
         var dualLayerGeometry = DualLayerRouteDecision.Geometry(width: 0, height: 0, frameRate: nil)
+        // The output route splits the enhancement layer off hvcC-framed (length-prefixed) packets.
+        var dualLayerPacketsAreHVCCFramed = false
         if probeOpened, let vStream = probe.stream(at: probe.videoStreamIndex),
            let cp = vStream.pointee.codecpar {
+            dualLayerPacketsAreHVCCFramed = cp.pointee.extradata_size > 23 && cp.pointee.extradata?[0] == 1
             dualLayerGeometry = DualLayerRouteDecision.Geometry(
                 width: Int(cp.pointee.width), height: Int(cp.pointee.height),
                 frameRate: Self.detectFrameRate(stream: vStream))
@@ -5628,6 +5653,21 @@ public final class AetherEngine: ObservableObject {
         // software host the session reaches for another reason composes the dual layers.
         if !dualLayerDecision.isTaken { elType = nil }
         sourceElType = elType
+        // The AVPlayer-output route keeps the native route: AVPlayer plays the base layer, the enhancement
+        // layer is composed onto its frames. Everything that routes a Profile 7 FEL source to the software
+        // host reads `elType`, so the route hides it from the policy and keeps it in `sourceElType` for
+        // the fallback to the software host.
+        let runsOnAVPlayerOutput = DualLayerRouteDecision.runsOnAVPlayerOutput(
+            dualLayerDecision, route: options.dualLayerRoute, packetsAreHVCCFramed: dualLayerPacketsAreHVCCFramed,
+            frameRate: dualLayerGeometry.frameRate)
+        if options.dualLayerRoute == .avPlayerOutput, dualLayerDecision.isTaken, !runsOnAVPlayerOutput {
+            EngineLog.emit(
+                "[AetherEngine] DV P7 dual-layer: the AVPlayer-output route is not available here "
+                + "(it needs the DualLayerDolbyVision trait, hvcC-framed packets and a known frame rate); "
+                + "taking the software host",
+                category: .engine)
+        }
+        outputRouteFrameRate = runsOnAVPlayerOutput ? dualLayerGeometry.frameRate : nil
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
@@ -5638,7 +5678,7 @@ public final class AetherEngine: ObservableObject {
             dolbyVisionHandling: options.dolbyVisionHandling,
             preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
             canHardwareDecode: opensHardwareHEVC,
-            elType: elType
+            elType: runsOnAVPlayerOutput ? nil : elType
         )
         var requiresDeinterlaceWarmup = VideoRoutingPolicy.requiresDeinterlaceWarmup(
             codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
@@ -7534,6 +7574,10 @@ public final class AetherEngine: ObservableObject {
     }
 
     private func handleExternalPlaybackChange(active: Bool) {
+        // The AVPlayer-output FEL route draws the picture in a layer of this device; a screen that takes
+        // the picture does not show it. Hand the picture back to AVPlayer (the 8.1 base layer) first, so
+        // the reload or item swap below starts from a player that renders its own frames again.
+        if active { handDualLayerOutputRouteToPlayer() }
         // #227 (device log 2026-07-27): the reload started below tears down the very item the KVO watches, so
         // AVPlayer reports a transient `false` in the middle of it. Acting on that edge cleared `airPlayActive`
         // before `loadNative` read it, the rebuilt session served 127.0.0.1 again, the receiver re-engaged
@@ -8353,6 +8397,7 @@ public final class AetherEngine: ObservableObject {
         if diagnostics.sessionCacheStatus.route == .nativeRemoteHLS {
             diagnostics.sessionCacheStatus = .inactive
         }
+        stopDualLayerOutputRoute()
         nativeVideoSession?.stop(reason: cacheCleanupReason)
         nativeVideoSession = nil
         nativeSubtitleRenditionsServed = false

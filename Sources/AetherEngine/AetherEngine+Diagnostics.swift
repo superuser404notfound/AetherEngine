@@ -21,7 +21,7 @@ extension AetherEngine {
         switch playbackBackend {
         case .native:
             // A reused layer may still hold the outgoing item's picture until the next load mounts.
-            return hasFirstFrameReadyForDisplay && nativePlayerLayer?.isReadyForDisplay == true
+            return hasFirstFrameReadyForDisplay && nativeHost?.playerLayer.isReadyForDisplay == true
         case .software:
             guard let host = softwareHost else { return false }
             let generation = loadGeneration

@@ -590,6 +590,90 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         return canonicalKey(pts: pts)
     }
 
+    // MARK: - External base layer (AVPlayer output route)
+
+    /// The time base the external base-layer route stamps its packets in; nil on the software host,
+    /// where the base layer is decoded here. Guarded by `lock`.
+    private var externalBaseLayerTimeBase: AVRational?
+    /// Whether the external-base-layer route composes into the buffers the host handed in. Off by default:
+    /// those buffers belong to the host's player, and no API contract says they may be written. Guarded by
+    /// `lock`.
+    private var externalBaseLayerComposesInPlace = false
+
+    /// The stream's frame rate on the external-base-layer route; nil on the software host. Guarded by `lock`.
+    private var streamFrameRate: Double?
+
+    /// The software host always composes into its own decoder's buffers. The external-base-layer route does
+    /// only when it was opened with `composeInPlace`, since its buffers are the host player's. The caller
+    /// holds `lock`: it travels in the `ComposeRequest`, so nothing takes `lock` between pairing a frame and
+    /// its `fulfil`. A wait there is time for the frames behind it to reach `OrderedDelivery`'s stall guard,
+    /// which then gives up the ticket that is still on its way.
+    private var composesIntoBaseBuffers: Bool {
+        externalBaseLayerTimeBase == nil || externalBaseLayerComposesInPlace
+    }
+
+    /// True when the base layer is not decoded by this decoder: the host decodes it elsewhere (AVPlayer,
+    /// on the output route) and hands each decoded frame to `submitBaseLayerFrame`. Everything else is
+    /// unchanged: `decode(packet:)` still splits the enhancement layer and the RPU off the full source
+    /// packet, the enhancement layer still decodes here, and pairing, composition and ordered delivery are
+    /// the code the software host runs. Opened with `openExternalBaseLayer`. The packets are then
+    /// stamped by the host in `timeBase` (the served presentation time), the same axis the submitted
+    /// frames carry.
+    ///
+    /// `composeInPlace` writes the composition into the host's buffers instead of the output pool. It saves
+    /// the pool (129 to 195 MB measured for 4K) and is only safe when nothing else reads those buffers again, which
+    /// the host's player does not promise, so it is an opt-in for measurement and never the default.
+    func openExternalBaseLayer(
+        codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, frameRate: Double?,
+        composeInPlace: Bool = false,
+        onFrame: @escaping DecodedFrameHandler
+    ) throws {
+        lock.lock()
+        let closed = isClosed
+        let hasComposer = composer != nil
+        lock.unlock()
+        guard !closed else { throw VideoDecoderError.decoderClosed }
+        guard hasComposer else {
+            EngineLog.emit("[DualLayerVideoDecoder] No composer available; FEL composition disabled", category: .swPlayback)
+            throw VideoDecoderError.composerUnavailable
+        }
+        lock.lock()
+        declaredFormat = (ColorDescription(codecpar: codecpar), codecpar.pointee.codec_id, codecpar.pointee.profile)
+        lock.unlock()
+        self.onFrame = { [weak self] buffer, pts, extra in
+            self?.reportDecodedFormat(buffer)
+            onFrame(buffer, pts, extra)
+        }
+        lock.lock()
+        self.timeBase = timeBase
+        streamFrameRate = frameRate
+        if let frameRate, frameRate.isFinite, frameRate > 0 { deadlineFrameInterval = 1 / frameRate }
+        if codecpar.pointee.extradata_size > 23, let ed = codecpar.pointee.extradata, ed[0] == 1 {
+            pictureAlignment.seedBaseParameterSets(parseHVCCParameterSets(ed, Int(codecpar.pointee.extradata_size)))
+        }
+        externalBaseLayerTimeBase = timeBase
+        externalBaseLayerComposesInPlace = composeInPlace
+        // No primary session to open or to wait for: the host hands the decoded frames in.
+        primaryDecoderInitialized = true
+        lock.unlock()
+    }
+
+    /// One decoded base-layer frame from the host, in place of the primary decoder's output. The same
+    /// entry the primary decoder's callback uses.
+    ///
+    /// `epoch` is the `feedEpoch` the host read before it took the frame from its player. A flush in
+    /// between bumps the epoch, and a frame stamped with an older one belongs to the position the flush
+    /// left and is dropped here, so it cannot pair against the new position's enhancement layer.
+    func submitBaseLayerFrame(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Data: Data? = nil, epoch: UInt64? = nil) {
+        if let epoch {
+            lock.lock()
+            let stale = epoch != _feedEpoch
+            lock.unlock()
+            if stale { return }
+        }
+        handleBaseLayerFrame(baseBuffer: buffer, pts: pts, hdr10Data: hdr10Data)
+    }
+
     // MARK: - Lifecycle
 
     func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
@@ -792,8 +876,10 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // that landed after the entry gate must not reopen/feed a torn-down session.
         lock.lock()
         let closedBeforePrimary = isClosed
+        let hostDecodesBaseLayer = externalBaseLayerTimeBase != nil
         lock.unlock()
         guard !closedBeforePrimary else { return }
+        if hostDecodesBaseLayer { return }
         primaryDecoder.decode(packet: packet, epoch: epoch)
     }
 
@@ -988,6 +1074,21 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         return t
     }
 
+    /// The index the compose kernels dither on (they alternate the pattern on its parity). The software host
+    /// counts compositions. With the base layer delivered by the host the count would depend on which
+    /// frames reached the composer and when, so the pattern would differ between two runs of the same
+    /// clip; the frame's position in the stream (presentation time times frame rate) does not. The caller
+    /// holds `lock`.
+    private func nextComposeFrameIndex(pts: CMTime) -> UInt32 {
+        if externalBaseLayerTimeBase != nil,
+           let rate = streamFrameRate, rate > 0, pts.isNumeric {
+            frameIndex = UInt32(truncatingIfNeeded: Int64((pts.seconds * rate).rounded()))
+        } else {
+            frameIndex &+= 1
+        }
+        return frameIndex
+    }
+
     /// Looks up and removes this frame's Profile 8.1 display-metadata NAL,
     /// within the same jitter tolerance as the RPU cache. The caller holds
     /// `lock`.
@@ -1044,6 +1145,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let baseLayerNAL: [UInt8]?
         /// Which arrival path produced this, for the compose-failure log.
         let arrived: String
+        /// `composesIntoBaseBuffers`, read under `lock` when the frame was paired.
+        let composesIntoBase: Bool
     }
 
     private struct BypassRequest {
@@ -1088,7 +1191,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         // A measurement run (`AETHER_FEL_MEASURE`) composes the base layer a second and third time from
         // another queue, so the base buffer has to stay intact: those runs use the output pool.
-        let inPlace = FelResidualMeasure.stride == 0 && composer.canComposeInPlace(baseBuffer: req.base, params: req.params)
+        let inPlace = FelResidualMeasure.stride == 0 && req.composesIntoBase
+            && composer.canComposeInPlace(baseBuffer: req.base, params: req.params)
         if !inPlace, let concrete = composer as? DoviFelComposer {
             FelResidualMeasure.sampleIfDue(composer: concrete, base: req.base, enhancement: req.enhancement,
                                            params: req.params, frameIndex: req.frameIndex, pts: req.pts)
@@ -1108,10 +1212,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let arrived = req.arrived
         let delivery = orderedDelivery
         if inPlace {
-            // The decoded base-layer buffer is the compose target. Nothing else reads it from here until
-            // the completion: `req` is the only reference the pairing queues gave up, the renderer gets it
-            // only through `delivery`, and a failure after the GPU started writing drops the frame (the
-            // buffer holds half-composed pixels, so the base-layer fallback below would show them).
+            // The decoded base-layer buffer is the compose target. On the software host nothing else reads
+            // it from here until the completion: its own decoder produced it, `req` is the only reference
+            // the pairing queues gave up, the renderer gets it only through `delivery`, and a failure after
+            // the GPU started writing drops the frame (the buffer holds half-composed pixels, so the
+            // base-layer fallback below would show them). On the external-base-layer route the buffer is the
+            // host player's, so this holds only as far as that player never hands it out again, which it
+            // does not promise; the route reaches this branch only when it was opened with `composeInPlace`.
             composer.composeInPlaceAsyncWithAcquiredSlot(
                 baseBuffer: req.base,
                 enhancementBuffer: req.enhancement,
@@ -1252,9 +1359,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                     primary = .bypass(BypassRequest(ticket: ticket, epoch: epoch, buffer: baseBuffer, pts: pts, hdr10Data: hdr10Data, dmNAL: baseLayerNAL, reason: "missing-rpu"))
                     return (primary, collectDueBypassesAndRearm(clock: clock))
                 }
-                frameIndex &+= 1
+                let frameIndex = nextComposeFrameIndex(pts: pts)
                 noteSettledBaseLayer(key: key)
-                primary = .compose(ComposeRequest(ticket: ticket, epoch: epoch, base: baseBuffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, baseLayerNAL: baseLayerNAL, arrived: "base layer arrived last"))
+                primary = .compose(ComposeRequest(ticket: ticket, epoch: epoch, base: baseBuffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: pts, hdr10Data: hdr10Data, dmNAL: dmNAL, baseLayerNAL: baseLayerNAL, arrived: "base layer arrived last", composesIntoBase: composesIntoBaseBuffers))
             } else if absentInAU {
                 // Nothing queued and the access unit carried no enhancement layer: nothing is coming,
                 // so it goes out now.
@@ -1342,9 +1449,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                     noteSettledBaseLayer(key: mKey)
                     return .bypass(BypassRequest(ticket: waiting.ticket, epoch: epoch, buffer: waiting.buffer, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: waiting.side.baseLayerNAL, reason: "missing-rpu"))
                 }
-                frameIndex &+= 1
+                let frameIndex = nextComposeFrameIndex(pts: waiting.pts)
                 noteSettledBaseLayer(key: mKey)
-                return .compose(ComposeRequest(ticket: waiting.ticket, epoch: epoch, base: waiting.buffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: dmNAL, baseLayerNAL: waiting.side.baseLayerNAL, arrived: "enhancement layer arrived last"))
+                return .compose(ComposeRequest(ticket: waiting.ticket, epoch: epoch, base: waiting.buffer, enhancement: elBuffer, params: params, frameIndex: frameIndex, pts: waiting.pts, hdr10Data: waiting.side.hdr10Data, dmNAL: dmNAL, baseLayerNAL: waiting.side.baseLayerNAL, arrived: "enhancement layer arrived last", composesIntoBase: composesIntoBaseBuffers))
             } else {
                 // Base Layer frame has not arrived yet: queue EL frame under its own larger cap
                 EngineLog.emit("[DualLayerVideoDecoder] queued enhancement layer: pts=\(String(format: "%.3f", pts.seconds)) key=\(key), blCount=\(blFrameQueue.count)", category: .swPlayback, level: .verbose)

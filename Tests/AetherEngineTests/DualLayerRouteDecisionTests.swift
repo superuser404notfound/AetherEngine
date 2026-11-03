@@ -216,6 +216,66 @@ struct DualLayerRouteDecisionTests {
         #expect(refusal(from: automatic, to: automatic) == nil)
     }
 
+    // MARK: - AVPlayer-output route
+
+    @Test("the AVPlayer-output route runs only on a taken decision, with hvcC-framed packets and a known frame rate")
+    func outputRouteNeedsATakenDecisionAndHVCCPackets() {
+        let taken = decide()
+        // Built in with the trait on every platform the engine builds for (the suite itself needs the trait).
+        #expect(DualLayerRouteDecision.outputRouteIsBuiltIn)
+        func runs(_ decision: DualLayerRouteDecision, _ route: DualLayerRoute, hvcc: Bool = true,
+                  rate: Double? = 23.976) -> Bool {
+            DualLayerRouteDecision.runsOnAVPlayerOutput(decision, route: route, packetsAreHVCCFramed: hvcc, frameRate: rate)
+        }
+        #expect(runs(taken, .avPlayerOutput))
+        // The default route, an Annex B source, an unknown frame rate and every refused decision keep their route.
+        #expect(!runs(taken, .softwareHost))
+        #expect(!runs(taken, .avPlayerOutput, hvcc: false))
+        #expect(!runs(taken, .avPlayerOutput, rate: nil), "the pull step and the dither parity follow the rate")
+        #expect(!runs(taken, .avPlayerOutput, rate: 0))
+        #expect(!runs(taken, .avPlayerOutput, rate: .infinity))
+        #expect(!runs(decide(elType: "MEL"), .avPlayerOutput))
+        #expect(!runs(decide(prefer: false), .avPlayerOutput))
+        #expect(!runs(decide(profile: 8), .avPlayerOutput))
+        #expect(!runs(decide(live: true), .avPlayerOutput))
+    }
+
+    /// The reload an AirPlay edge starts rebuilds the session through the same entry as a load, so it asks
+    /// this again: another screen holding the picture means AVPlayer keeps it and the route stays off.
+    @Test("the route starts only while no other screen holds the picture, on a load and on every rebuild")
+    func outputRouteDefersToAnExternalScreen() {
+        func mayStart(rate: Double? = 24, external: Bool) -> Bool {
+            DualLayerRouteDecision.outputRouteMayStart(frameRate: rate, externalPlaybackHoldsThePicture: external)
+        }
+        #expect(mayStart(external: false))
+        #expect(!mayStart(external: true), "AirPlay or an external display: AVPlayer shows the 8.1 base layer")
+        #expect(!mayStart(rate: nil, external: false))
+        #expect(!mayStart(rate: 0, external: false))
+    }
+
+    @Test("changing dualLayerRoute on a custom Profile 7 session is refused only while the preference is on")
+    func customSourceRouteChangeIsRefused() {
+        var software = LoadOptions()
+        software.preferDualLayerDolbyVision = true
+        var output = software
+        output.dualLayerRoute = .avPlayerOutput
+        var offSoftware = software
+        offSoftware.preferDualLayerDolbyVision = false
+        var offOutput = offSoftware
+        offOutput.dualLayerRoute = .avPlayerOutput
+        func refusal(custom: Bool = true, from: LoadOptions, to: LoadOptions, profile: Int? = 7) -> SessionReloadRefusal? {
+            SessionOptionCorrection.dualLayerRouteRefusal(
+                isCustomSource: custom, current: from, proposed: to, dvProfile: profile)
+        }
+        #expect(refusal(from: software, to: output) == .dualLayerRouteNeedsFreshLoad)
+        #expect(refusal(from: output, to: software) == .dualLayerRouteNeedsFreshLoad)
+        // The route is not taken with the preference off, a URL source re-runs load(), other profiles route alike.
+        #expect(refusal(from: offSoftware, to: offOutput) == nil)
+        #expect(refusal(custom: false, from: software, to: output) == nil)
+        #expect(refusal(from: software, to: output, profile: 8) == nil)
+        #expect(refusal(from: output, to: output) == nil)
+    }
+
     /// A fatal decode error is the decoder session's, reported once; only a stopped host drops it, a
     /// seek in flight does not.
     @Test("a session failure is admitted across a seek and dropped only by a stop")
@@ -225,6 +285,15 @@ struct DualLayerRouteDecisionTests {
         // The per-seek admission it replaces rejects the same event once a seek has opened.
         #expect(!SoftwareReadAdmission.admits(readGeneration: 3, requestedGeneration: 4,
                                               settledGeneration: 3, stopRequested: false))
+    }
+
+    @Test("the forward-buffer window is capped on the output route only")
+    func forwardBufferWindowCap() {
+        let cap = DualLayerRouteDecision.maxForwardBufferSegments
+        #expect(DualLayerRouteDecision.forwardBufferSegments(requested: 2700, usesOutputRoute: true) == cap)
+        #expect(DualLayerRouteDecision.forwardBufferSegments(requested: 6, usesOutputRoute: true) == 6)
+        #expect(DualLayerRouteDecision.forwardBufferSegments(requested: nil, usesOutputRoute: true) == nil)
+        #expect(DualLayerRouteDecision.forwardBufferSegments(requested: 2700, usesOutputRoute: false) == 2700)
     }
 }
 #endif

@@ -182,6 +182,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Source video TB, carried to rescale timestamps (avformat_write_header rewrites the muxer's TB).
     private let sourceVideoTimeBase: AVRational
+    /// The source video stream's parameters, for `VideoPacketTap.begin`. The demuxer owns them and outlives the producer.
+    private let videoCodecparForTap: UnsafePointer<AVCodecParameters>
+    private var startedVideoPacketTap = false
     /// AE#886: `videoConfig.frameGrid` on VOD, nil on live. Pump-thread counters for the finish line.
     private let frameGrid: CFRFrameGrid?
     private var griddedVideoPackets = 0
@@ -1294,6 +1297,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// installs one mid-session reaches the running producer without a data race on a stored closure. Set
     /// before `start()`; nil leaves the emission out entirely.
     var nativeVideoFrameTimeObserverProvider: (@Sendable () -> NativeVideoFrameTimeObserver?)?
+    /// The in-process tap of `LoadOptions.dualLayerRoute == .avPlayerOutput`: sees each Profile 7 packet
+    /// before the 8.1 conversion and again once it is written. Nil on every other session.
+    var videoPacketTapProvider: (@Sendable () -> VideoPacketTap?)?
 
     /// Monotonic producer generation, reported with every frame time so a consumer can drop entries from an
     /// epoch whose segments a restart has since rewritten (#260).
@@ -1603,6 +1609,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.cache = cache
         self.baseIndex = baseIndex
         self.sourceVideoTimeBase = video.timeBase
+        self.videoCodecparForTap = video.codecpar
         self.frameGrid = isLive ? nil : video.frameGrid
         self.targetSegmentDurationSeconds = targetSegmentDurationSeconds
         self.segmentBoundaries = segmentBoundaries
@@ -4488,6 +4495,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         )
                     }
                     if convertP7Active {
+                        // The enhancement-route tap copies the packet while it still carries its
+                        // enhancement layer; the write below says when the stream shows it.
+                        if let tap = videoPacketTapProvider?() {
+                            if !startedVideoPacketTap {
+                                startedVideoPacketTap = true
+                                tap.begin(codecpar: videoCodecparForTap, timeBase: sourceVideoTimeBase, epoch: epoch)
+                            }
+                            tap.stash(sourceKey: packet.pointee.pts, packet: packet)
+                        }
                         // Probe the enhancement-layer type once (latching on the first RPU seen, before
                         // conversion strips it); a FEL source loses refinement in the P8.1 conversion.
                         if !loggedEnhancementLayerType,
@@ -5016,6 +5032,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             : Self.foldingShiftBack(packet.pointee.pts, shift: videoShiftPts)
         let frameIsKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
         let frameSegmentIndex = currentMuxerSegmentIndex
+        let tapSourceKey = packet.pointee.pts
+        let tapForWrite = convertP7Active ? videoPacketTapProvider?() : nil
 
         // AE#886: decided on the source time base, before the rescale rounds it away.
         let gridded = muxer.muxerVideoTimeBase.den == frameGrid?.outputTimeBase.den
@@ -5044,6 +5062,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             )
         }
         let written = write.written
+
+        if let tapForWrite, write.rc >= 0,
+           let item = Self.cmTime(ticks: written.pts, timeBase: muxer.muxerVideoTimeBase) {
+            let decode = Self.cmTime(ticks: written.dts, timeBase: muxer.muxerVideoTimeBase) ?? item
+            tapForWrite.commit(sourceKey: tapSourceKey, item: item, decode: decode, epoch: epoch, isKeyframe: frameIsKeyframe)
+        }
 
         if let frameObserver,
            let source = Self.cmTime(ticks: frameSourcePts, timeBase: sourceVideoTimeBase),
