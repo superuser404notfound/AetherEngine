@@ -39,7 +39,7 @@ struct SoftwarePiPSourceTests {
 }
 
 /// The transport answers the PiP window's delegate callbacks map onto.
-@Suite("Software PiP transport mapping")
+@Suite("Software PiP transport mapping", .timeLimit(.minutes(3)))
 @MainActor
 struct SoftwarePiPTransportTests {
     @Test("no software session: no PiP source to offer")
@@ -122,7 +122,6 @@ struct SoftwarePiPTransportTests {
         }
         // NaN interval: completes immediately, still exactly once.
         delegate.pictureInPictureController(controller, skipByInterval: .invalid) { done.bump() }
-        try await Task.sleep(nanoseconds: 200_000_000)
         #expect(done.value == 2)
 
         let orphan = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: try AetherEngine())
@@ -174,12 +173,9 @@ struct SoftwarePiPTransportTests {
         let source = SoftwarePiPSource(layer: AVSampleBufferDisplayLayer(), isLive: false, engine: engine)
         // The source starts out paused (the engine is idle), so only a refresh can make it "playing".
         engine.state = .playing
-        await Task.yield()
-        await Task.yield()
-        #expect(!source.snapshot.withLock { $0 }.isPaused)
+        try await waitFor { !source.snapshot.withLock { $0 }.isPaused }
         engine.duration = 600
-        await Task.yield()
-        await Task.yield()
+        try await waitFor { abs(source.snapshot.withLock { $0 }.range.duration.seconds - 600) < 0.001 }
         let snap = source.snapshot.withLock { $0 }
         #expect(!snap.isPaused)
         #expect(abs(snap.range.duration.seconds - 600) < 0.001)
@@ -413,8 +409,8 @@ struct SoftwarePiPTransportTests {
             var controller = try #require(source?.makePictureInPictureController())
             engine.state = .paused
             engine.duration = 600
-            await Task.yield()
-            await Task.yield()
+            let refreshed = try #require(source)
+            try await waitFor { abs(refreshed.snapshot.withLock { $0 }.range.duration.seconds - 600) < 0.001 }
             // Read the sink-refreshed snapshot directly: the main getters would refresh it live.
             let snap = try #require(source).snapshot.withLock { $0 }
             #expect(snap.isPaused)
