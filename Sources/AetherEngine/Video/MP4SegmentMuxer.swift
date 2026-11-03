@@ -408,7 +408,7 @@ final class MP4SegmentMuxer {
                     written += n
                 }
                 counter.bytesWrittenCurrentSegment += count
-                counter.lifetimeFragmentBytes += count
+                counter.noteFragmentBytes(count)
             }
         )
 
@@ -987,7 +987,7 @@ final class MP4SegmentMuxer {
             return .failed
         }
 
-        byteCounter.fragmentCuts += 1
+        byteCounter.noteFragmentCut()
 
         let nextPath = Self.stagingPath(forSegmentIndex: nextIdx, in: sessionDir)
         do {
@@ -1325,8 +1325,17 @@ private final class ByteCounter {
     var writeFailed: Bool = false
     /// Reports a staging write that hit a full volume to the session's cache.
     var onStorageExhausted: (@Sendable () -> Void)?
-    var lifetimeFragmentBytes: Int = 0
-    var fragmentCuts: Int = 0
+
+    /// The two lifetime totals are read by the diagnostics heartbeat while the pump writes them (AE#966).
+    private let diagnosticLock = NSLock()
+    private var _lifetimeFragmentBytes = 0
+    private var _fragmentCuts = 0
+
+    var lifetimeFragmentBytes: Int { diagnosticLock.withLock { _lifetimeFragmentBytes } }
+    var fragmentCuts: Int { diagnosticLock.withLock { _fragmentCuts } }
+
+    func noteFragmentBytes(_ count: Int) { diagnosticLock.withLock { _lifetimeFragmentBytes += count } }
+    func noteFragmentCut() { diagnosticLock.withLock { _fragmentCuts += 1 } }
 }
 
 // MARK: - C callback bridge

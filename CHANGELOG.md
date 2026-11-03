@@ -28,6 +28,11 @@ the public-API contract.
   scale of the source. Measured against reference frames, the edge band now matches the interior instead of
   losing 4 to 10 dB PSNR. The timing line's `clamp` step is now `edge`.
 
+- **Data race on the muxer's lifetime fragment counters (AE#966).** `MP4SegmentMuxer` bumped its fragment byte
+  and cut totals on the pump thread while the diagnostics heartbeat read them through
+  `muxerLifetimeFragmentBytes` / `muxerFragmentCuts` with no common lock. Both totals now sit behind their own
+  lock. Diagnostics only, no change to the fragments written.
+
 ## [7.55.0] - 2026-11-02
 
 ### Added
