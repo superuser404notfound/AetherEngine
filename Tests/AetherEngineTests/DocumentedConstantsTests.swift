@@ -91,9 +91,9 @@ final class DocumentedConstantsTests: XCTestCase {
         XCTAssertEqual(DualLayerVideoDecoder.maxEnhancementLayerQueueFrames, 10)
         XCTAssertEqual(FrameSideDataRing.capacity, 32)
         XCTAssertEqual(FrameSideDataRing.jitterToleranceTicks, 300)
-        XCTAssertEqual(DoviFelComposer.maxFramesInFlight, 3)
+        XCTAssertEqual(DoviFelComposer.maxFramesInFlight, 2)
         XCTAssertEqual(SampleBufferRenderer.felVideoLookaheadFrames, 9)
-        XCTAssertEqual(DoviFelComposer.outputPoolAllocationThreshold, 15)
+        XCTAssertEqual(DoviFelComposer.outputPoolAllocationThreshold, 14)
         XCTAssertEqual(DoviFelComposer.outputPoolReserve, 3)
         XCTAssertEqual(DualLayerVideoDecoder.maxBorrowedParamsRun, 3)
         XCTAssertEqual(SampleBufferRenderer.hardwareDecoderReorderDepth, 4)
@@ -112,34 +112,61 @@ final class DocumentedConstantsTests: XCTestCase {
         XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceFloor, 0.015)
         XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceCap, 0.05)
         XCTAssertEqual(DualLayerVideoDecoder.heldClockWallBound, 2)
-        XCTAssertEqual(DualLayerVideoDecoder.maxDeadlineHoldFrames, 7)
-        XCTAssertEqual(DoviFelComposer.maxFramesInFlight + DualLayerVideoDecoder.maxLayerSkewFrames + 2, 8)
+        XCTAssertEqual(DualLayerVideoDecoder.maxDeadlineHoldFrames, 6)
+        XCTAssertEqual(DoviFelComposer.maxFramesInFlight + DualLayerVideoDecoder.maxLayerSkewFrames + 2, 7)
         XCTAssertEqual(DualLayerVideoDecoder.minSweepDelay, 0.002)
         XCTAssertEqual(DualLayerVideoDecoder.maxSweepDelay, 0.25)
         XCTAssertEqual(DualLayerVideoDecoder.totalsLogIntervalSeconds, 10)
         assertDocumented("least 100 ms.", fel)
         assertDocumented("clamped to 15 to 50 ms", fel)
         assertDocumented("it waits 2 s at most", fel)
-        assertDocumented("`maxDeadlineHoldFrames` = 7 newer arrivals", fel)
-        assertDocumented("`maxFramesInFlight + maxLayerSkew + 2` = 8 pending frames", fel)
+        assertDocumented("`maxDeadlineHoldFrames` = 6 newer arrivals", fel)
+        assertDocumented("`maxFramesInFlight + maxLayerSkew + 2` = 7 pending frames", fel)
         assertDocumented("every 2 to 250 ms", fel)
         assertDocumented("at most every 10 s", fel)
-        assertDocumented("`maxDeadlineHoldFrames` = 7 with a render clock", fel)
+        assertDocumented("`maxDeadlineHoldFrames` = 6 with a render clock", fel)
         assertDocumented("waiting enhancement frames capped at 10", fel)
         assertDocumented("At most 10 enhancement frames wait", fel)
         assertDocumented("fixed capacity 32", fel)
         assertDocumented("within ±300 ticks", fel)
-        assertDocumented("wait for one of 3 in-flight slots", fel)
+        assertDocumented("wait for one of 2 in-flight slots", fel)
         assertDocumented("look-ahead (9)", fel)
-        assertDocumented("the in-flight slots (3) + 1, so 15", fel)
+        assertDocumented("the in-flight slots (2) + 1, so 14", fel)
         assertDocumented("a reserve of 3 more", fel)
-        assertDocumented("allocation threshold 15 + reserve 3", fel)
+        assertDocumented("allocation threshold 14 + reserve 3", fel)
         assertDocumented("`maxBorrowedParamsRun` (3)", fel)
         assertDocumented("the renderer's 4-frame reorder buffer", fel)
         assertDocumented("last 64\n  settled base-layer keys", fel)
         assertDocumented("for at most about 36 ms", fel)
         assertDocumented("Counters feed a 1 Hz summary", fel)
         _ = docs
+    }
+
+    /// The memory the deadline rule's queue can hold (dolby-vision-fel.md §5.10). Base-layer frames are
+    /// 10-bit 4:2:0 in 16-bit containers, which is 3 bytes a pixel: the composer accepts only
+    /// `420YpCbCr10BiPlanarVideoRange`. A 4K frame is about 25 MB, so six of them are about 150 MB.
+    func testDeadlineQueueMemoryMatchesDocumentation() throws {
+        let frameBytes = Double(3840 * 2160 * 3)
+        XCTAssertEqual(Double(DualLayerVideoDecoder.maxDeadlineHoldFrames) * frameBytes / 1_000_000, 150, accuracy: 1)
+        XCTAssertEqual(Double(DualLayerVideoDecoder.maxLayerSkewFrames) * frameBytes / 1_000_000, 75, accuracy: 1)
+        assertDocumented("about 150 MB at 4K with the clock, 75 MB at K = 3", try felDocument())
+    }
+
+    /// The compose stall numbers (dolby-vision-fel.md §5.6) and the output buffers they reserve.
+    func testComposeStallBoundsMatchDocumentation() throws {
+        XCTAssertEqual(DualLayerVideoDecoder.composeStallSlices, 4)
+        XCTAssertEqual(DualLayerVideoDecoder.defaultComposeStallTimeout, 2)
+        XCTAssertEqual(DualLayerVideoDecoder.maxComposeStallBypassFrames, 600)
+        XCTAssertEqual(DualLayerVideoDecoder.maxComposeStallEpisodes, 3)
+        XCTAssertEqual(DualLayerVideoDecoder.composeHealthyFramesToResetStalls, 240)
+        let fel = try felDocument()
+        assertDocumented("`composeStallSlices` (4) slices of `composeStallTimeout / 4` (2 s by default)", fel)
+        assertDocumented("`maxComposeStallBypassFrames` (600,", fel)
+        assertDocumented("`maxComposeStallEpisodes` (3)", fel)
+        assertDocumented("`composeHealthyFramesToResetStalls` (240,", fel)
+        // 14 + 3 buffers of a 4K 10-bit frame, 3 bytes a pixel.
+        XCTAssertEqual(Double(14 + 3) * Double(3840 * 2160 * 3) / 1_000_000, 423, accuracy: 1)
+        assertDocumented("allocation threshold 14 + reserve 3 → 423 MB", fel)
     }
     #endif
 

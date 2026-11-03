@@ -105,7 +105,7 @@ VideoToolbox decode callbacks can retain their image buffer as a reference pictu
 video decoder passes the callback's `imageBufferModifiable` flag into
 `VideoToolboxOutputMetadataNormalizer`: matching colour and pixel-aspect attachments leave the
 buffer untouched, a modifiable buffer is updated in place, and other updates use an owned pixel
-buffer from a format-keyed pool. A failed copy preserves the original output rather than mutating
+buffer from a format-keyed pool. The dual-layer base-layer decoder is the one exception (`allowsInPlaceOutputMetadata`): the composer writes the composed pixels into that decoded buffer, so the owned copy would only cost a second pool. The reference-picture risk this accepts (later frames decoding from composed pixels, seen as drift until the next IDR) was checked on the Mac only, 240 frames of two real FEL clips bit-identical with and without the copy; a long-GOP picture comparison on the Apple TV decoder is still open. A failed copy preserves the original output rather than mutating
 storage the decoder still owns. The same policy removes a stale pixel-aspect attachment when the
 current stream uses square pixels. The AV1 Dolby Vision RPU path reuses that owned output or makes
 its own copy before changing buffer and IOSurface metadata. If copying fails, it delivers the

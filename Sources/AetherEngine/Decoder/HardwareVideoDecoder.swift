@@ -131,6 +131,18 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// an `av_buffer_ref` and unrefs it on disposal (dolby-vision-fel.md §5.4).
     var useCustomBlockSource: Bool = false
 
+    /// Set by `DualLayerVideoDecoder` for its base-layer decoder. The composer is designed to write the
+    /// composed pixels into that decoded buffer, and the composed output measured bit-identical with and
+    /// without the normalizer's owned copy, so the copy (a second 4K pool, about 315 MB of IOSurface in
+    /// the app) only costs memory. Frames that go out as the base layer (bypass, refused compose) gain
+    /// the same colour and aspect attachments on every frame. Every other path keeps the copy unless
+    /// VideoToolbox grants `imageBufferModifiable`.
+    var allowsInPlaceOutputMetadata: Bool = false
+
+    func outputIsModifiable(_ infoFlags: VTDecodeInfoFlags) -> Bool {
+        allowsInPlaceOutputMetadata || infoFlags.contains(.imageBufferModifiable)
+    }
+
     #if DEBUG
     /// Called after a packet has been handed to VideoToolbox (whatever the status it returned), and
     /// not for one the epoch gate or a missing session refused.
@@ -900,7 +912,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // in place when the decoder explicitly grants permission; otherwise use an owned copy.
         var outputBuffer = outputMetadataNormalizer.applyingOutputMetadata(
             to: imageBuffer,
-            isModifiable: infoFlags.contains(.imageBufferModifiable),
+            isModifiable: outputIsModifiable(infoFlags),
             colorPrimaries: colorPrimaries,
             transferFunction: colorTransfer,
             yCbCrMatrix: colorMatrix,

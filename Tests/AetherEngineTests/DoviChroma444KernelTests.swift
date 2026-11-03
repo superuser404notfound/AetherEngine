@@ -22,9 +22,11 @@ struct DoviChroma444KernelTests {
     kernel void dovi_compose_chroma_444_reference(
         texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
         texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-        texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+        texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
         texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
         constant struct DoviMetalParams&       params        [[buffer(0)]],
+        device const int*                      nlq_lut       [[buffer(2)]],
+        device const float*                    mmr_table     [[buffer(3)]],
         uint2                                  gid           [[thread_position_in_grid]])
     {
         uint uv_width = (params.bl_width + 1u) / 2u;
@@ -36,10 +38,10 @@ struct DoviChroma444KernelTests {
         uint site_y = gid.y / 2u;
         uint other_x = (gid.x & 1u) != 0u ? min(site_x + 1u, uv_width - 1u) : site_x;
         uint other_y = (gid.y & 1u) != 0u ? min(site_y + 1u, uv_height - 1u) : site_y;
-        DoviChromaSite a = dovi_output_site(uint2(site_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-        DoviChromaSite b = dovi_output_site(uint2(other_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-        DoviChromaSite c = dovi_output_site(uint2(site_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-        DoviChromaSite d = dovi_output_site(uint2(other_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
+        DoviChromaSite a = dovi_output_site(uint2(site_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
+        DoviChromaSite b = dovi_output_site(uint2(other_x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
+        DoviChromaSite c = dovi_output_site(uint2(site_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
+        DoviChromaSite d = dovi_output_site(uint2(other_x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
         dovi_write_chroma(out_uv_tex, gid,
                           (a.cb + b.cb + c.cb + d.cb + 2) >> 2,
                           (a.cr + b.cr + c.cr + d.cr + 2) >> 2, params);
@@ -89,7 +91,7 @@ struct DoviChroma444KernelTests {
         let ew = CVPixelBufferGetWidthOfPlane(el, 0), eh = CVPixelBufferGetHeightOfPlane(el, 0)
         let blY = try texture(device, .r16Uint, width: w, height: h, words: Fixture.visibleWords(bl, plane: 0))
         let blUv = try texture(device, .rg16Uint, width: (w + 1) / 2, height: (h + 1) / 2, words: Fixture.visibleWords(bl, plane: 1))
-        let elUv = try texture(device, .rg16Unorm, width: (ew + 1) / 2, height: (eh + 1) / 2, words: Fixture.visibleWords(el, plane: 1))
+        let elUv = try texture(device, .rg16Uint, width: (ew + 1) / 2, height: (eh + 1) / 2, words: Fixture.visibleWords(el, plane: 1))
         let out = try texture(device, .rg16Uint, width: w, height: h, words: nil, write: true)
 
         var p = params
@@ -107,6 +109,12 @@ struct DoviChroma444KernelTests {
         enc.setTexture(blY, index: 0); enc.setTexture(blUv, index: 1)
         enc.setTexture(elUv, index: 2); enc.setTexture(out, index: 3)
         enc.setBuffer(buffer, offset: 0, index: 0)
+        var nlq = [Int32](repeating: 0, count: 3 * 1024)
+        nlq.withUnsafeMutableBufferPointer { DoviFelComposer.populateNlqLut(into: $0.baseAddress!, params: p) }
+        var mmr = [Float](repeating: 0, count: DoviFelComposer.mmrTableCount)
+        mmr.withUnsafeMutableBufferPointer { DoviFelComposer.populateMmrTable(into: $0.baseAddress!, params: p) }
+        enc.setBytes(nlq, length: nlq.count * MemoryLayout<Int32>.stride, index: 2)
+        enc.setBytes(mmr, length: mmr.count * MemoryLayout<Float>.stride, index: 3)
         let tw = pipeline.threadExecutionWidth
         enc.dispatchThreads(MTLSize(width: w, height: h, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: tw, height: max(1, min(pipeline.maxTotalThreadsPerThreadgroup / tw, 8)), depth: 1))

@@ -48,6 +48,7 @@ struct DualLayerDeadlineBypassTests {
         private var _pairs: [Pair] = []
         var pairs: [Pair] { lock.lock(); defer { lock.unlock() }; return _pairs }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() {}
         func composeAsync(baseBuffer: CVPixelBuffer, enhancementBuffer: CVPixelBuffer, params: DoviMetalParams,
@@ -165,7 +166,7 @@ struct DualLayerDeadlineBypassTests {
     func lagInsideMarginStaysPaired() async throws {
         let r = Self.rig()
         defer { r.decoder.close() }
-        // Clock at 10.0 s; frames 10.0 + 0.25 s ahead (6 frames), margin 3 frames.
+        // Clock at 10.0 s; frames 10.0 + 0.25 s ahead (6 frames), margin 100 ms (the floor; two frames are 83 ms at 24 fps).
         r.clocks.seconds = 10
         let first: Int64 = 240 + 6
         var bases: [CVPixelBuffer] = [], enhancements: [CVPixelBuffer] = []
@@ -464,7 +465,7 @@ struct DualLayerDeadlineBypassTests {
         #expect(r.deliveries.all.last?.buffer === alone)
     }
 
-    @Test("at 60 fps the margin is the time floor, not three frame intervals")
+    @Test("at 60 fps the margin is the time floor, not two frame intervals")
     func marginFloorAtHighFrameRate() async throws {
         let r = Self.rig(frameRate: 60)
         defer { r.decoder.close() }
@@ -476,7 +477,7 @@ struct DualLayerDeadlineBypassTests {
         r.clocks.uptime += Self.pastGrace
         r.decoder.runDeadlineSweep()
         #expect(r.decoder.stateSnapshotForTesting.blQueueCount == 1, "120 ms ahead: not due")
-        // 80 ms before the deadline: past the 50 ms three frames would give, inside the 100 ms floor.
+        // 80 ms before the deadline: past the 33 ms two frames would give, inside the 100 ms floor.
         r.clocks.seconds = Self.pts(n).seconds - 0.08
         r.decoder.runDeadlineSweep()
         try await waitFor { r.deliveries.count == 1 }

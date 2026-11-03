@@ -100,6 +100,7 @@ extension HeavyDualLayerSuites.DoviFelRealFileTests {
                                                params: params, frameIndex: frameIndex, completion: completion)
         }
         func acquireSlot() { inner.acquireSlot() }
+        func acquireSlot(timeout: DispatchTime) -> Bool { inner.acquireSlot(timeout: timeout) }
         func releaseSlot() { inner.releaseSlot() }
         func flush() { inner.flush() }
         func flushTextureCache() { inner.flushTextureCache() }

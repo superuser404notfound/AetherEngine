@@ -50,6 +50,7 @@ struct DualLayerEdgeCaseTests {
         var pairs: [Pair] { lock.lock(); defer { lock.unlock() }; return _pairs }
         var flushCount: Int { lock.lock(); defer { lock.unlock() }; return _flushes }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() { lock.lock(); _flushes += 1; lock.unlock() }
         func composeAsync(baseBuffer: CVPixelBuffer, enhancementBuffer: CVPixelBuffer, params: DoviMetalParams,
