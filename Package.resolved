@@ -20,6 +20,15 @@
       }
     },
     {
+      "identity" : "libtruehd",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/superuser404notfound/LibTrueHD",
+      "state" : {
+        "revision" : "73bee84d7ac7b8619db570e36490b92761fe91a6",
+        "version" : "3.1.0"
+      }
+    },
+    {
       "identity" : "smbclient",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/kishikawakatsumi/SMBClient",

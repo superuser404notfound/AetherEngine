@@ -315,18 +315,29 @@ struct DualLayerOutputRouteTests {
 
     // MARK: Teardown
 
+    /// `stop()` returns before the teardown queue is done; its completion lands on main, so the caller
+    /// awaits it instead of blocking main.
+    @MainActor static func finishStop(_ route: DualLayerOutputRoute) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in route.stop { done.resume() } }
+    }
+
+    /// A semaphore wait the async tests can call: blocking is the point here, the tick under test runs elsewhere.
+    static func wait(_ semaphore: DispatchSemaphore, seconds: Double) -> DispatchTimeoutResult {
+        semaphore.wait(timeout: .now() + seconds)
+    }
+
     @Test("stop closes the decoder, flushes the display layer and ends the ticks")
-    @MainActor func stopClosesTheDecoder() throws {
+    @MainActor func stopClosesTheDecoder() async throws {
         let rig = try Self.rig()
         Self.play(rig, from: 0, to: 1)
         let sinkFlushes = rig.sink.flushes
-        rig.route.stop()
+        await Self.finishStop(rig.route)
         #expect(rig.decoder.closed)
         #expect(rig.sink.flushes == sinkFlushes + 1)
     }
 
     @Test("stop does not wait for ever on a tick blocked in the decoder")
-    @MainActor func stopDoesNotWaitForeverOnABlockedTick() throws {
+    @MainActor func stopDoesNotWaitForeverOnABlockedTick() async throws {
         let rig = try Self.rig()
         Self.play(rig, from: 0, to: 1)
         // The composition runs on the caller's thread, so a pull tick can sit in `submitBaseLayerFrame`
@@ -339,16 +350,20 @@ struct DualLayerOutputRouteTests {
         rig.route.clockDidJump()
         rig.route.start(player: AVPlayer())
         defer { for _ in 0..<16 { release.signal() } }
-        #expect(entered.wait(timeout: .now() + 10) == .success, "a pull tick reached the decoder and blocks there")
+        #expect(Self.wait(entered, seconds: 10) == .success, "a pull tick reached the decoder and blocks there")
         let started = ProcessInfo.processInfo.systemUptime
-        rig.route.stop()
+        let teardown = AsyncStream<Void>.makeStream()
+        rig.route.stop { teardown.continuation.finish() }
+        let returned = ProcessInfo.processInfo.systemUptime - started
+        #expect(returned < 0.2, "stop returned to main without waiting for the tick (\(returned) s)")
+        for await _ in teardown.stream {}
         let waited = ProcessInfo.processInfo.systemUptime - started
         #expect(rig.decoder.closed)
-        #expect(waited < 5, "stop returned after its own bound (\(waited) s) instead of waiting for the tick")
+        #expect(waited < 5, "the teardown ended after its own bound (\(waited) s) instead of waiting for the tick")
     }
 
     @Test("a fallback tick released after stop hands nothing to the display layer")
-    @MainActor func lateFallbackTickAfterStopHandsNothingOn() throws {
+    @MainActor func lateFallbackTickAfterStopHandsNothingOn() async throws {
         // The history has a hole from 3.0 s to 4.5 s, so frames in it go out as AVPlayer's own frame (the
         // fallback path, no composer) once the packet has been missing for a moment.
         let rig = try Self.rig(packetsUntil: 20, skipping: 3.0...4.5)
@@ -367,11 +382,13 @@ struct DualLayerOutputRouteTests {
         }
         ticks.start()
         defer { for _ in 0..<16 { release.signal() } }
-        #expect(entered.wait(timeout: .now() + 10) == .success, "a pull tick took a fallback frame and blocks before delivering it")
-        rig.route.stop()
+        #expect(Self.wait(entered, seconds: 10) == .success, "a pull tick took a fallback frame and blocks before delivering it")
+        let teardown = AsyncStream<Void>.makeStream()
+        rig.route.stop { teardown.continuation.finish() }
         let framesAtStop = rig.sink.frames.count
         for _ in 0..<16 { release.signal() }
-        #expect(ticksDone.wait(timeout: .now() + 10) == .success, "the released ticks ended")
+        #expect(Self.wait(ticksDone, seconds: 10) == .success, "the released ticks ended")
+        for await _ in teardown.stream {}
         #expect(rig.sink.frames.count == framesAtStop, "the released tick hands nothing to the display layer")
     }
 }

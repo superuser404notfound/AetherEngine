@@ -257,8 +257,12 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         pull.resume()
     }
 
+    /// Detaches the route on main and returns; closing the decoder and waiting for the ticks run on
+    /// `teardownQueue`, so a pull tick waiting for a GPU slot cannot park main (#735 was a teardown hang
+    /// there). The display layer is flushed back on main once that is done; it is already off screen,
+    /// because the engine detaches the overlay before calling this. `completion` runs on main after it.
     @MainActor
-    func stop() {
+    func stop(completion: (@MainActor () -> Void)? = nil) {
         lock.lock()
         stopped = true
         let item = self.item, output = self.output
@@ -273,33 +277,43 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         if let item, let output { item.remove(output) }
         tap.discardPending()
-        // The decoder first, so a tick still inside it finds it closed and hands nothing on. A composition
-        // runs on the thread that hands the decoder the frame: the pull thread, or VideoToolbox's callback
-        // thread when the enhancement layer arrives last. A pull tick can be waiting for a free GPU slot, a
-        // wait that ends when the GPU completes one and that closing the decoder does not cut short. Only
-        // the wait for the ticks below is bounded; closing the decoder itself still waits for the
-        // enhancement-layer session, as on the software host, so a GPU that never completes can still hold it.
-        decoder.close()
-        waitForTicksToEnd()
-        let line = summary
-        // The counters are logged at once; the display layer's own report (frames it was given, dropped,
-        // corrupted: the presented pipeline, not AVPlayer's suppressed one) follows when it answers.
-        EngineLog.emit("[DualLayerOutputRoute] \(line)", category: .engine)
-        if let renderer {
-            Task { @MainActor in
-                let metrics = await renderer.loadRenderMetrics()
-                EngineLog.emit("[DualLayerOutputRoute] presented: "
-                               + (metrics.map { "total=\($0.total) dropped=\($0.dropped) corrupted=\($0.corrupted) "
-                                  + "delaySeconds=\(String(format: "%.3f", $0.accumulatedDelay))" } ?? "unavailable"),
-                               category: .engine)
+        Self.teardownQueue.async { [self] in
+            // The decoder first, so a tick still inside it finds it closed and hands nothing on. A composition
+            // runs on the thread that hands the decoder the frame: the pull thread, or VideoToolbox's callback
+            // thread when the enhancement layer arrives last. A pull tick can be waiting for a free GPU slot, a
+            // wait that ends when the GPU completes one and that closing the decoder does not cut short. Only
+            // the wait for the ticks below is bounded; closing the decoder itself still waits for the
+            // enhancement-layer session, as on the software host, so a GPU that never completes can still hold
+            // this queue, not main.
+            decoder.close()
+            waitForTicksToEnd()
+            // The counters are logged at once; the display layer's own report (frames it was given, dropped,
+            // corrupted: the presented pipeline, not AVPlayer's suppressed one) follows when it answers.
+            EngineLog.emit("[DualLayerOutputRoute] \(summary)", category: .engine)
+            DispatchQueue.main.async { [self] in
+                MainActor.assumeIsolated {
+                    if let renderer {
+                        Task { @MainActor in
+                            let metrics = await renderer.loadRenderMetrics()
+                            EngineLog.emit("[DualLayerOutputRoute] presented: "
+                                           + (metrics.map { "total=\($0.total) dropped=\($0.dropped) corrupted=\($0.corrupted) "
+                                              + "delaySeconds=\(String(format: "%.3f", $0.accumulatedDelay))" } ?? "unavailable"),
+                                           category: .engine)
+                        }
+                    }
+                    sink.flushOutput(removingDisplayedImage: true)
+                    if let layer = renderer?.displayLayer { layer.controlTimebase = nil }
+                    completion?()
+                }
             }
         }
-        sink.flushOutput(removingDisplayedImage: true)
-        if let layer = renderer?.displayLayer { layer.controlTimebase = nil }
     }
 
+    private static let teardownQueue = DispatchQueue(label: "com.aetherengine.fel-output.teardown", qos: .userInitiated)
+
     /// How long `stop()` waits for a tick that is still running on a timer queue.
-    var stopWaitSeconds = 2.0
+    static let defaultStopWaitSeconds = 2.0
+    var stopWaitSeconds = defaultStopWaitSeconds
 
     /// Waits until the feed and pull queues have finished the tick they are in, up to `stopWaitSeconds`
     /// in all. A tick that outlasts that is left to finish by itself: the decoder is closed, so it hands

@@ -4752,6 +4752,7 @@ public final class AetherEngine: ObservableObject {
         dolbyVisionConversion = nil
         sourceCarriesHDR10PlusMetadata = false
         sourceElType = nil
+        outputRouteFrameRate = nil
         sourceUpscalePlan = nil
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
@@ -7321,6 +7322,7 @@ public final class AetherEngine: ObservableObject {
         dolbyVisionConversion = nil
         sourceCarriesHDR10PlusMetadata = false
         sourceElType = nil
+        outputRouteFrameRate = nil
         sourceUpscalePlan = nil
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false

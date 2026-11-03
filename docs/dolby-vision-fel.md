@@ -428,7 +428,7 @@ software host holds its clock for this. What it gets: AVPlayer's audio routes (t
 does not apply), the native seek and rate behaviour, and no software-host audio pipeline. Memory is higher
 than on the software host (about 1.6 GB against 0.7 GB for the player and the system's decoder service together on a 4K Profile 7 clip on the Mac, measured with the pool as the compose target).
 
-A composition runs on the thread that hands the decoder the frame: the route's pull thread, or VideoToolbox's callback thread when the enhancement layer arrives last (on the software host it always runs on the decoder's callback thread). A pull tick can therefore wait for a free GPU slot, a wait that ends when the GPU completes one. `stop()` waits at most 2 s for a pull or feed tick. Closing the decoder itself still waits for the enhancement-layer session, as on the software host, so a GPU that never completes can still hold it.
+A composition runs on the thread that hands the decoder the frame: the route's pull thread, or VideoToolbox's callback thread when the enhancement layer arrives last (on the software host it always runs on the decoder's callback thread). A pull tick can therefore wait for a free GPU slot, a wait that ends when the GPU completes one. `stop()` detaches the route on the main thread and returns; closing the decoder and waiting for the ticks run on a teardown queue, which waits at most 2 s for a pull or feed tick. Closing the decoder itself still waits for the enhancement-layer session, as on the software host, so a GPU that never completes can still hold that queue, but not the main thread.
 
 ### 5.3 Packet split
 

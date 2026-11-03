@@ -74,6 +74,21 @@ extension AetherEngine {
         #endif
     }
 
+    /// The running route as an opaque object, for `stopDualLayerOutputRoute(ifStill:)`; nil without one.
+    var dualLayerOutputRouteObject: AnyObject? {
+        #if DualLayerDolbyVision
+        return dualLayerOutputRoute
+        #else
+        return nil
+        #endif
+    }
+
+    /// Stops the route only while it is still `route`, so a load that gives up cannot stop a newer load's.
+    func stopDualLayerOutputRoute(ifStill route: AnyObject?) {
+        guard let route, route === dualLayerOutputRouteObject else { return }
+        stopDualLayerOutputRoute()
+    }
+
     func stopDualLayerOutputRoute() {
         #if DualLayerDolbyVision
         guard let route = dualLayerOutputRoute else { return }

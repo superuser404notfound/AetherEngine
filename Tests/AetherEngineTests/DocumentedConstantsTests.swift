@@ -516,6 +516,22 @@ final class DocumentedConstantsTests: XCTestCase {
     }
     #endif
 
+    // MARK: - AVPlayer-output route (docs/dolby-vision-fel.md §5.2.4)
+
+    #if DualLayerDolbyVision
+    func testOutputRouteConstantsMatchDocumentation() throws {
+        let fel = try felDocument()
+        XCTAssertEqual(DualLayerRouteDecision.maxForwardBufferSegments, 10)
+        XCTAssertEqual(DualLayerOutputRoute.pullAheadSeconds, 0.15)
+        XCTAssertEqual(VideoPacketHistory.defaultCapacityBytes, 1 << 30)
+        XCTAssertEqual(DualLayerOutputRoute.defaultStopWaitSeconds, 2.0)
+        assertDocumented("capped at 10 segments (the default) on this route", fel)
+        assertDocumented("Frames are taken 0.15 s ahead of the item clock", fel)
+        assertDocumented("1 GiB at most", fel)
+        assertDocumented("which waits at most 2 s for a pull or feed tick", fel)
+    }
+    #endif
+
     // MARK: - Split-layer join repair (docs/dolby-vision-fel.md)
 
     func testLayerJoinRepairRunMatchesDocumentation() throws {
