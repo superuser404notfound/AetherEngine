@@ -783,7 +783,7 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     /// packed samples as plain ones and show a wrong picture on every frame.
     ///
     /// A refusal (the conversion pool is at its limit, so every buffer in it is held by the compositions
-    /// in flight) is backpressure and heals when they finish; it is not a conversion fault. A conversion
+    /// in flight or the display layer) is backpressure and heals when they finish; it is not a conversion fault. A conversion
     /// that fails (no session, no pool, a transfer error) with no success for `conversionFailureSeconds` of
     /// the clock is: the route hands the picture back to AVPlayer. Runs on the pull queue.
     private func readableBaseLayer(_ buffer: CVPixelBuffer, clock: Double) -> CVPixelBuffer? {
@@ -811,7 +811,7 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
                     refusalRunsLogged += 1
                     let conversion = baseLayerConverter.statistics
                     EngineLog.emit("[DualLayerOutputRoute] the conversion pool is full (every buffer is held downstream); "
-                                   + "frames are skipped until one is released (refused=\(conversion.refused + 1) "
+                                   + "frames are skipped until one is released (refused=\(conversion.refused) "
                                    + "converted=\(conversion.converted) peakLive=\(conversion.peakLive))", category: .engine)
                 }
             }

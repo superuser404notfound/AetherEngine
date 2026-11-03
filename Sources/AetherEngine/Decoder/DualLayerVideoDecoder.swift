@@ -720,7 +720,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     ///
     /// `composeInPlace` writes the composition into the host's buffers instead of the output pool. It saves
     /// the pool (129 to 195 MB measured for 4K) and is only safe when nothing else reads those buffers again, which
-    /// the host's player does not promise, so it is an opt-in for measurement and never the default.
+    /// the host's player does not promise. The AVPlayer-output route passes it by default, on the converter's buffer (a frame already in `x420` is the player's own buffer, which nothing is known to read again).
     func openExternalBaseLayer(
         codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, frameRate: Double?,
         composeInPlace: Bool = false,
@@ -1576,8 +1576,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // the pairing queues gave up, the renderer gets it only through `delivery`, and a failure after
             // the GPU started writing drops the frame (the buffer holds half-composed pixels, so the
             // base-layer fallback below would show them). On the external-base-layer route the buffer is the
-            // host player's, so this holds only as far as that player never hands it out again, which it
-            // does not promise; the route reaches this branch only when it was opened with `composeInPlace`.
+            // converter's, which hands it to one frame, or the host player's own when the frame was already
+            // `x420` and nothing was converted; that case holds only as far as the player never hands the buffer out
+            // again, which it does not promise. The route reaches this branch only when it was opened with `composeInPlace`.
             composer.composeInPlaceAsyncWithAcquiredSlot(
                 baseBuffer: req.base,
                 enhancementBuffer: req.enhancement,

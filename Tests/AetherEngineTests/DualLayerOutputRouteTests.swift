@@ -663,7 +663,8 @@ struct DualLayerOutputRouteTests {
         engine.handBackOnDecoderFailure(of: failing)
         let fire = try #require(failingRig.decoder.onFatalDecodeError)
         fire(VideoDecoderError.composerStalled)
-        while engine.dualLayerOutputRoute != nil { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while engine.dualLayerOutputRoute != nil, ContinuousClock.now < deadline { await Task.yield() }
         #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
 
         // A report of a route that is no longer the engine's stops nothing.
@@ -686,7 +687,8 @@ struct DualLayerOutputRouteTests {
         engine.handBackOnConversionFailure(of: failing)
         let report = try #require(failing.onConversionFailure)
         report("scripted")
-        while engine.dualLayerOutputRoute != nil { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while engine.dualLayerOutputRoute != nil, ContinuousClock.now < deadline { await Task.yield() }
         #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
 
         // A report of a route that is no longer the engine's stops nothing.

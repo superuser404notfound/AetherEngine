@@ -29,7 +29,8 @@ struct BaseLayerConversionStatistics: Equatable, Sendable {
     var converted = 0
     var refused = 0
     var failed = 0
-    /// The most pool buffers alive at once (rented and not yet released downstream).
+    /// The most pool buffers alive at once (rented and not yet released by the compositions in flight and the
+    /// display layer).
     var peakLive = 0
 }
 
@@ -52,8 +53,8 @@ protocol BaseLayerConverting: AnyObject, Sendable {
 /// `VTPixelTransferSession` (public API), on the thread that pulled the frame.
 ///
 /// The pool limit is sized from the frame rate and the buffers that can be alive at once (`poolLimit(frameRate:)`),
-/// not from one clip. It gives its idle buffers back when no frame was converted for a second (a paused
-/// player holds none), and the converter is torn down with the route on its off-main stop path.
+/// not from one clip. It gives its idle buffers back when no frame was converted for a second (with the
+/// composition in place, the frames the display layer still holds stay out of the pool), and the converter is torn down with the route on its off-main stop path.
 ///
 /// Two locks, so a reader of the counters never waits on a transfer: `lock` guards the session and the pool
 /// and is held across the pixel transfer and the bounded wait for a buffer (up to about 36 ms); `statsLock`

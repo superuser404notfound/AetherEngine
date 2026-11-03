@@ -72,7 +72,7 @@ the public-API contract.
   AVPlayer's own conversion of each frame for the video output.
 - **The AVPlayer-output route takes the player's own frame format.** Its video output no longer names `x420`,
   which keeps the system's decoder service from holding a second set of buffers (689 MB instead of 1007 MB in
-  the service on a 4K clip on the Mac, 170 to 185 MB less in all, measured with release builds, two runs each).
+  the service on a 4K clip on the Mac, 170 to 185 MB less by the sum of the two footprints, which counts the shared pool twice, and about 140 MB less counted once; release builds, two runs each, decimal MB).
   A frame already in `x420` goes to the composer untouched; any other format is transferred into a pool of
   `x420` buffers sized from the frame rate, and the composer writes into that buffer in place. A frame whose
   conversion is refused or fails is skipped and never composed unconverted, the first of each run of refusals
