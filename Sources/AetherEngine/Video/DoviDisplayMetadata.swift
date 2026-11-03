@@ -31,8 +31,10 @@ import CoreVideo
 ///
 /// That is precisely what `DoviRpuConverter.separateDualLayers` already produces: libdovi
 /// converts the stream's Profile 7 RPU to Profile 8.1 with
-/// `dovi_convert_rpu_with_mode(rpu, 2)`, which preserves the full DM payload (L1/L2/L5/L8/L9/L11)
-/// and only rewrites the profile-specific container. The consumer on Apple platforms is the
+/// `dovi_convert_rpu_with_mode(rpu, 2)`, which preserves every display-management level
+/// (L1 to L11, L254, L255) and rewrites the profile-specific container. Mode 2 also resets the YCC to RGB and
+/// RGB to LMS matrices and the signal colour space to the Profile 8.1 values (a source that already carries them,
+/// as every measured clip does, is unchanged). The consumer on Apple platforms is the
 /// private `HDRProcessing.framework` (`DolbyVisionComposer`, `DolbyVisionDisplayManagement`,
 /// destination display types `…DolbyVisionTV` / `…LowLatencyDolbyVisionTV`).
 ///
