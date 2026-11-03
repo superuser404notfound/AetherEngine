@@ -35,7 +35,7 @@ struct DualLayerOutputRouteTests {
     }
 
     private final class RecordingDecoder: OutputRouteDecoder, @unchecked Sendable {
-        struct Submit { let pts: Double; let epoch: UInt64?; let accepted: Bool }
+        struct Submit { let pts: Double; let epoch: UInt64?; let accepted: Bool; let buffer: CVPixelBuffer }
         private let lock = NSLock()
         private var _epoch: UInt64 = 1
         private(set) var decoded: [Double] = []
@@ -53,7 +53,7 @@ struct DualLayerOutputRouteTests {
         func submitBaseLayerFrame(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Data: Data?, epoch: UInt64?) {
             lock.lock()
             // The real decoder drops a frame stamped with an older epoch than its own.
-            submits.append(Submit(pts: pts.seconds, epoch: epoch, accepted: epoch == nil || epoch == _epoch))
+            submits.append(Submit(pts: pts.seconds, epoch: epoch, accepted: epoch == nil || epoch == _epoch, buffer: buffer))
             lock.unlock()
             onSubmit?()
         }
@@ -69,12 +69,13 @@ struct DualLayerOutputRouteTests {
     private final class RecordingSink: OutputRouteSink, @unchecked Sendable {
         private let lock = NSLock()
         private(set) var frames: [Double] = []
+        private(set) var buffers: [CVPixelBuffer] = []
         private(set) var flushes = 0
         func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?) {
-            lock.lock(); frames.append(pts.seconds); lock.unlock()
+            lock.lock(); frames.append(pts.seconds); buffers.append(pixelBuffer); lock.unlock()
         }
         func flushOutput(removingDisplayedImage: Bool) { lock.lock(); flushes += 1; lock.unlock() }
-        func clearRecords() { lock.lock(); frames = []; lock.unlock() }
+        func clearRecords() { lock.lock(); frames = []; buffers = []; lock.unlock() }
     }
 
     /// AVPlayer's video output in miniature: frame `n` shows `n / 24` s, is "new" once until the player
@@ -87,8 +88,10 @@ struct DualLayerOutputRouteTests {
         private let buffer: CVPixelBuffer
         init() throws {
             var out: CVPixelBuffer?
+            // IOSurface-backed, as the player's buffers are: the route passes only those on untouched.
             guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                      nil, &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
+                                      [kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
+                                      &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
             buffer = out
         }
         private func index(_ time: CMTime) -> Int { Int((time.seconds * DualLayerOutputRouteTests.fps + 1e-6).rounded(.down)) }
@@ -118,13 +121,14 @@ struct DualLayerOutputRouteTests {
     }
 
     private static func rig(packetsUntil seconds: Double = 60, skipping skipped: ClosedRange<Double>? = nil,
-                            historyBytes: Int = 1 << 20) throws -> Rig {
+                            historyBytes: Int = 1 << 20, converter: BaseLayerConverting? = nil) throws -> Rig {
         let history = try #require(VideoPacketHistory(capacityBytes: historyBytes))
         let decoder = RecordingDecoder()
         let sink = RecordingSink()
         let clock = ClockBox()
         let route = DualLayerOutputRoute(decoder: decoder, sink: sink, history: history, frameRate: fps,
-                                         clock: { clock.sample() })
+                                         clock: { clock.sample() },
+                                         baseLayerConverter: converter ?? BaseLayerFormatConverter())
         let frames = try ScriptedFrames()
         route.attachFrameSource(frames)
         let rig = Rig(route: route, decoder: decoder, sink: sink, frames: frames, clock: clock)
@@ -390,6 +394,168 @@ struct DualLayerOutputRouteTests {
         #expect(Self.wait(ticksDone, seconds: 10) == .success, "the released ticks ended")
         for await _ in teardown.stream {}
         #expect(rig.sink.frames.count == framesAtStop, "the released tick hands nothing to the display layer")
+    }
+
+    // MARK: Conversion of the player's frames
+
+    /// A converter whose answer the test sets: hand the buffer on as it is, hand a given one on, refuse, or fail.
+    private final class ScriptedConverter: BaseLayerConverting, @unchecked Sendable {
+        enum Mode { case passThrough, replace(CVPixelBuffer), refuse, fail }
+        private let lock = NSLock()
+        private var _mode: Mode
+        private var _prepared = 0, _trims = 0, _tornDown = 0
+        init(_ mode: Mode) { _mode = mode }
+        var mode: Mode {
+            get { lock.lock(); defer { lock.unlock() }; return _mode }
+            set { lock.lock(); _mode = newValue; lock.unlock() }
+        }
+        var prepared: Int { lock.lock(); defer { lock.unlock() }; return _prepared }
+        var trims: Int { lock.lock(); defer { lock.unlock() }; return _trims }
+        var tornDown: Int { lock.lock(); defer { lock.unlock() }; return _tornDown }
+        func prepare(_ buffer: CVPixelBuffer) -> BaseLayerPreparation {
+            lock.lock(); _prepared += 1; let mode = _mode; lock.unlock()
+            switch mode {
+            case .passThrough: return .ready(buffer)
+            case .replace(let other): return .ready(other)
+            case .refuse: return .refused
+            case .fail: return .failed("scripted")
+            }
+        }
+        func trimIfIdle() { lock.lock(); _trims += 1; lock.unlock() }
+        func tearDown() { lock.lock(); _tornDown += 1; lock.unlock() }
+        var statistics: BaseLayerConversionStatistics { BaseLayerConversionStatistics() }
+    }
+
+    private static func makeBuffer() throws -> CVPixelBuffer {
+        var out: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                                  [kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
+                                  &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
+        return out
+    }
+
+    @Test("the composer is handed the converted buffer, never the player's",
+          arguments: [false, true])
+    func composerGetsTheConvertedBuffer(uncovered: Bool) throws {
+        let converted = try Self.makeBuffer()
+        let rig = try Self.rig(packetsUntil: uncovered ? 0 : 60, converter: ScriptedConverter(.replace(converted)))
+        Self.play(rig, from: 0, to: 2)
+        let handedOn = uncovered ? rig.sink.buffers : rig.decoder.submits.map(\.buffer)
+        #expect(handedOn.count >= 20, "frames went on")
+        #expect(handedOn.allSatisfy { $0 === converted }, "every frame handed on is the converter's output")
+    }
+
+    @Test("a frame that cannot be converted never reaches the composer or the display layer, and the route hands back once",
+          arguments: [false, true])
+    func failedConversionHandsNothingOnAndHandsBack(uncovered: Bool) throws {
+        let converter = ScriptedConverter(.fail)
+        // Uncovered: no packets at all, so every frame is the fallback path that goes to the display layer.
+        let rig = try Self.rig(packetsUntil: uncovered ? 0 : 60, converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(reports.count == 0, "a failure run shorter than the bound hands nothing back")
+        Self.play(rig, from: 0.5, to: 3)
+        #expect(converter.prepared >= 40, "the conversion was tried on the frames")
+        #expect(rig.decoder.submits.isEmpty, "the composer was handed nothing")
+        #expect(rig.sink.frames.isEmpty, "the display layer was handed nothing")
+        #expect(reports.count == 1, "handed back once, not once per frame")
+    }
+
+    @Test("a refusal of the conversion pool skips the frame and never hands the route back")
+    func refusalIsBackpressureNotAFault() throws {
+        let converter = ScriptedConverter(.refuse)
+        let rig = try Self.rig(converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        // Far longer than the failure bound.
+        Self.play(rig, from: 0, to: 3)
+        #expect(rig.decoder.submits.isEmpty)
+        #expect(reports.count == 0)
+        // The pool frees up: the route composes again with no help.
+        converter.mode = .passThrough
+        Self.play(rig, from: 3, to: 4)
+        #expect(rig.decoder.accepted.count >= 15)
+        #expect(reports.count == 0)
+    }
+
+    @Test("two failure runs, each shorter than the bound, with a success between them hand nothing back")
+    func successEndsAFailureRun() throws {
+        let converter = ScriptedConverter(.fail)
+        let rig = try Self.rig(converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(rig, from: 0, to: 0.6)
+        converter.mode = .passThrough
+        Self.play(rig, from: 0.6, to: 0.7)
+        converter.mode = .fail
+        Self.play(rig, from: 0.7, to: 1.3)
+        #expect(reports.count == 0)
+        // The same failure without the success in between is a run of 1.4 s.
+        Self.play(rig, from: 1.3, to: 2.4)
+        #expect(reports.count == 1)
+    }
+
+    @Test("a failure run is cut off by a seek")
+    func seekEndsAFailureRun() throws {
+        let converter = ScriptedConverter(.fail)
+        let failing = try Self.rig(converter: converter)
+        let reports = Counter()
+        failing.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(failing, from: 0, to: 0.6)
+        failing.frames.redeliver()
+        failing.clock.seconds = 30
+        failing.route.clockDidJump()
+        Self.play(failing, from: 30, to: 30.6)
+        #expect(reports.count == 0, "0.6 s before the seek and 0.6 s after are two runs, not one of 1.2 s")
+    }
+
+    @Test("the pull tick lets the converter give back idle buffers")
+    func pullTickTrimsTheConverter() throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(converter.trims >= 20)
+    }
+
+    @Test("the stop path tears the converter down once, after the ticks have ended")
+    @MainActor func stopTearsTheConverterDown() async throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(converter.tornDown == 0)
+        await Self.finishStop(rig.route)
+        #expect(converter.tornDown == 1)
+    }
+
+    @Test("the engine hands the picture back to AVPlayer when the conversion fails, and only for its own route")
+    @MainActor func engineHandsBackOnConversionFailure() async throws {
+        let engine = try AetherEngine()
+        let failing = try Self.rig().route
+        engine.dualLayerOutputRoute = failing
+        engine.handBackOnConversionFailure(of: failing)
+        let report = try #require(failing.onConversionFailure)
+        report("scripted")
+        while engine.dualLayerOutputRoute != nil { await Task.yield() }
+        #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
+
+        // A report of a route that is no longer the engine's stops nothing.
+        let old = try Self.rig().route
+        engine.handBackOnConversionFailure(of: old)
+        let successor = try Self.rig().route
+        engine.dualLayerOutputRoute = successor
+        let staleReport = try #require(old.onConversionFailure)
+        staleReport("scripted")
+        await Task { @MainActor in }.value
+        #expect(engine.dualLayerOutputRoute === successor)
+        engine.stopDualLayerOutputRoute()
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        func bump() { lock.lock(); value += 1; lock.unlock() }
     }
 }
 #endif

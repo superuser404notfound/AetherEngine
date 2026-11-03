@@ -37,6 +37,7 @@ extension AetherEngine {
             return
         }
         dualLayerOutputRoute = route
+        handBackOnConversionFailure(of: route)
         route.setVideoGravity(_videoGravity)
         session.setVideoPacketTap(route.tap)
         EngineLog.emit("[AetherEngine] DV P7 dual-layer: AVPlayer-output route (AVPlayer plays the base layer "
@@ -44,6 +45,20 @@ extension AetherEngine {
                        + (inPlace ? ", in place" : "") + ")", category: .engine)
         #endif
     }
+
+    #if DualLayerDolbyVision
+    /// The hand-back when the player's frames cannot be made readable for the composer: the route reports it
+    /// once, and the engine stops it and leaves AVPlayer the picture, only while the route is still its own.
+    func handBackOnConversionFailure(of route: DualLayerOutputRoute) {
+        route.onConversionFailure = { [weak self, weak route] reason in
+            Task { @MainActor [weak self, weak route] in
+                guard let self, let route, self.dualLayerOutputRoute === route else { return }
+                self.handDualLayerOutputRouteToPlayer(
+                    reason: "converting the player's frames failed (\(reason))")
+            }
+        }
+    }
+    #endif
 
     /// The forward-buffer window the session is built with. On the AVPlayer-output route the producer's
     /// lead over the playhead is also the lead of the enhancement-layer ring's newest packet, and the ring
@@ -103,12 +118,16 @@ extension AetherEngine {
     /// the route, so AVPlayer's own picture, the 8.1 base layer the engine serves, is what the receiver
     /// gets. The route is decided again at the next load or rebuild of the session.
     func handDualLayerOutputRouteToPlayer() {
+        handDualLayerOutputRouteToPlayer(reason: "another screen took the picture (AirPlay or an external display)")
+    }
+
+    /// The same hand-back for any other reason the route cannot go on with.
+    func handDualLayerOutputRouteToPlayer(reason: String) {
         #if DualLayerDolbyVision
         guard dualLayerOutputRoute != nil else { return }
         stopDualLayerOutputRoute()
-        EngineLog.emit("[DualLayerOutputRoute] another screen took the picture (AirPlay or an external display); "
-                       + "the route stopped and AVPlayer shows the 8.1 base layer, without the enhancement layer, "
-                       + "until the session is rebuilt", category: .engine)
+        EngineLog.emit("[DualLayerOutputRoute] \(reason); the route stopped and AVPlayer shows the 8.1 base layer, "
+                       + "without the enhancement layer, until the session is rebuilt", category: .engine)
         #endif
     }
 }

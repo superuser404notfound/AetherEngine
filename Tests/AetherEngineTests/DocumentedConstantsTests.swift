@@ -530,6 +530,21 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("1 GiB at most", fel)
         assertDocumented("which waits at most 2 s for a pull or feed tick", fel)
     }
+
+    func testOutputRouteConversionBoundsMatchDocumentation() throws {
+        let docs = try felDocument()
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit, 6)
+        assertDocumented("The pool hands out at most 6 buffers at once", docs)
+        XCTAssertEqual(BaseLayerFormatConverter.idleTrimSeconds, 1.0)
+        assertDocumented("when no frame was converted for 1 s, again every idle second", docs)
+        XCTAssertEqual(DualLayerOutputRoute.conversionFailureSeconds, 0.75)
+        XCTAssertEqual(DualLayerOutputRoute.staleBehindSeconds, 0.75)
+        assertDocumented("fail for 0.75 s of playback without one success", docs)
+        // The wait for a buffer is the composer's own bound for its output pool, about 36 ms.
+        XCTAssertEqual(Double(DoviFelComposer.outputPoolAttempts - 1) * DoviFelComposer.outputPoolRetryInterval,
+                       0.036, accuracy: 1e-9)
+        assertDocumented("waits at most about 36 ms for a buffer", docs)
+    }
     #endif
 
     // MARK: - Split-layer join repair (docs/dolby-vision-fel.md)

@@ -88,6 +88,15 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     static let jumpSeconds = 1.5
     /// A base-layer frame that has waited this long for its enhancement-layer packet goes out as it is.
     static let lateFrameSeconds = 0.1
+    /// A base-layer frame this far behind the clock, or further, belongs to another position (left over from
+    /// before a seek) and is dropped.
+    static let staleBehindSeconds = 0.75
+    /// How long the conversion of the player's frames may fail without one success before the route hands
+    /// the picture back to AVPlayer. It is the route's own continuity bound: a frame this far behind the
+    /// clock is already one the route drops as belonging to another position, so after a failure run this
+    /// long the layer shows a picture the clock can no longer continue from. A success or a seek starts the
+    /// count again. A pool refusal is not a failure (`readableBaseLayer`).
+    static let conversionFailureSeconds = staleBehindSeconds
     static let activeTick: DispatchTimeInterval = .milliseconds(5)
     static let idleTick: DispatchTimeInterval = .milliseconds(100)
     /// Seconds after the last activity (a seek, an item change, playback) before the timers slow down.
@@ -122,6 +131,8 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     private let frameInterval: Double
     private let composeInPlace: Bool
     private let clockOverride: (@Sendable () -> OutputRouteClockSample?)?
+    /// Makes the player's buffers readable for the composer (a pass-through when they already are).
+    private let baseLayerConverter: BaseLayerConverting
 
     private let lock = NSLock()
     /// Serialises the pull side's direct hand-over of a base-layer frame against a resync's flush, so an
@@ -171,6 +182,11 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     private var composedSubmitted = 0
     private var fallbackCount = 0
     private var staleDropped = 0
+    /// Pull-queue state of the conversion: when the current run of failed conversions began (clock
+    /// seconds), and whether the first buffer's format was logged. Reported once, under `lock`.
+    private var conversionFailingSince: Double?
+    private var baseLayerFormatLogged = false
+    private var conversionFailureReported = false
 
     private let feedQueue = DispatchQueue(label: "com.aetherengine.fel-output.feed", qos: .userInteractive)
     private let pullQueue = DispatchQueue(label: "com.aetherengine.fel-output.pull", qos: .userInteractive)
@@ -183,7 +199,9 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     /// production initialiser below builds the real ones. A decoder that is not a `DualLayerVideoDecoder`
     /// needs no open call, so the route counts it as opened.
     init(decoder: OutputRouteDecoder, sink: OutputRouteSink, history: VideoPacketHistory, frameRate: Double,
-         composeInPlace: Bool = false, clock: (@Sendable () -> OutputRouteClockSample?)? = nil) {
+         composeInPlace: Bool = false, clock: (@Sendable () -> OutputRouteClockSample?)? = nil,
+         baseLayerConverter: BaseLayerConverting = BaseLayerFormatConverter()) {
+        self.baseLayerConverter = baseLayerConverter
         self.decoder = decoder
         self.concreteDecoder = decoder as? DualLayerVideoDecoder
         self.sink = sink
@@ -195,6 +213,15 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         self.opened = concreteDecoder == nil
         self.tap = VideoPacketTap(receiver: self)
     }
+
+    /// The conversion of the player's frames failed for good (`conversionFailureSeconds`). Told once, so the
+    /// owner hands the picture back to AVPlayer (the 8.1 base layer) instead of leaving the layer waiting for
+    /// frames that never come. A route that has been stopped reports nothing.
+    var onConversionFailure: (@Sendable (String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onConversionFailure }
+        set { lock.lock(); _onConversionFailure = newValue; lock.unlock() }
+    }
+    private var _onConversionFailure: (@Sendable (String) -> Void)?
 
     /// `frameRate` must be known and positive: the dither parity of the composition and the pull step both
     /// follow it, so a guessed rate would skew them.
@@ -287,6 +314,10 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             // this queue, not main.
             decoder.close()
             waitForTicksToEnd()
+            // The converter goes after the ticks (or after the bounded wait for them): a tick that outlasted the
+            // wait finds it closed, and `prepare` then fails the frame without touching the released session
+            // or pool. The summary below reads its counters, which stay readable.
+            baseLayerConverter.tearDown()
             // The counters are logged at once; the display layer's own report (frames it was given, dropped,
             // corrupted: the presented pipeline, not AVPlayer's suppressed one) follows when it answers.
             EngineLog.emit("[DualLayerOutputRoute] \(summary)", category: .engine)
@@ -329,10 +360,14 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
 
     /// One line for the end of a session: what the route did, and whether it ever fell back.
     var summary: String {
+        let conversion = baseLayerConverter.statistics
         lock.lock(); defer { lock.unlock() }
         return "summary: fed=\(fedCount) pulled=\(pulledCount) composed=\(composedSubmitted) "
             + "baseLayerOnly=\(fallbackCount) resyncs=\(resyncCount) stale=\(staleDropped) "
-            + "history=\(history.count) failedWrites=\(history.failedWrites)"
+            + "history=\(history.count) failedWrites=\(history.failedWrites) "
+            + "passedThrough=\(conversion.passedThrough) converted=\(conversion.converted) "
+            + "conversionRefused=\(conversion.refused) conversionFailed=\(conversion.failed) "
+            + "conversionPeakLive=\(conversion.peakLive)"
     }
 
     /// Counters for tests and probes.
@@ -391,11 +426,10 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         lock.unlock()
         guard !isStopped, let player, let current = player.currentItem else { return }
         if attached !== current {
-            let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [String: String](),
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-            ])
+            // No attributes: the player hands out its own buffer format, and the system's decoder service does
+            // not keep the second set of buffers that naming `x420` here costs. `BaseLayerFormatConverter`
+            // makes whatever arrives readable for the composer.
+            let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
             // Public API: AVPlayer decodes and times the item but does not draw it.
             output.suppressesPlayerRendering = true
             current.add(output)
@@ -631,6 +665,7 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     func pullTick() {
         guard let sample = readClock() else { return }
         adaptCadence(timer: pullTimer, fast: &pullFast, rate: sample.rate)
+        baseLayerConverter.trimIfIdle()
         lock.lock()
         let source = frameSource
         let gen = generation
@@ -642,6 +677,7 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             cursor = nil
             waitingSince = nil
             degraded = false
+            conversionFailingSince = nil
         }
         let clock = sample.seconds
         let limit = clock + Self.pullAheadSeconds
@@ -674,19 +710,77 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             guard let (buffer, display) = source.copyFrame(at: time) else { return }
             let seconds = display.seconds
             if let cursor, seconds <= cursor { continue }
-            if seconds < clock - 0.75 || seconds > clock + 1.5 {
+            if seconds < clock - Self.staleBehindSeconds || seconds > clock + 1.5 {
                 // Left over from before a seek: it belongs to another position.
                 lock.lock(); staleDropped += 1; lock.unlock()
                 continue
             }
             cursor = seconds
+            // The frame is taken from the player either way, so a conversion that does not happen costs this
+            // frame and nothing else: the cursor has moved past it, and the composer and the display layer
+            // are not handed a buffer they cannot read.
+            guard let ready = readableBaseLayer(buffer, clock: clock) else { continue }
             if composes {
                 lock.lock(); pulledCount += 1; composedSubmitted += 1; lock.unlock()
-                decoder.submitBaseLayerFrame(buffer, pts: display, hdr10Data: nil, epoch: epoch)
+                decoder.submitBaseLayerFrame(ready, pts: display, hdr10Data: nil, epoch: epoch)
             } else {
-                deliverBaseLayer(buffer, display: display, generation: gen)
+                deliverBaseLayer(ready, display: display, generation: gen)
             }
         }
+    }
+
+    /// The player's buffer in the format the composer reads, or nil when there is none to hand on: the frame
+    /// is skipped and counted (`summary`). Unconverted data never goes on, since the composer would read
+    /// packed samples as plain ones and show a wrong picture on every frame.
+    ///
+    /// A refusal (the conversion pool is at its limit, so every buffer in it is held by the compositions
+    /// in flight) is backpressure and heals when they finish; it is not a conversion fault. A conversion
+    /// that fails (no session, no pool, a transfer error) with no success for `conversionFailureSeconds` of
+    /// the clock is: the route hands the picture back to AVPlayer. Runs on the pull queue.
+    private func readableBaseLayer(_ buffer: CVPixelBuffer, clock: Double) -> CVPixelBuffer? {
+        if !baseLayerFormatLogged {
+            baseLayerFormatLogged = true
+            let format = CVPixelBufferGetPixelFormatType(buffer)
+            let decision = BaseLayerFormatConverter.decision(for: buffer)
+            EngineLog.emit("[DualLayerOutputRoute] the player hands out base-layer frames as '\(Self.fourCharacterCode(format))' "
+                           + "(\(CVPixelBufferGetWidth(buffer))x\(CVPixelBufferGetHeight(buffer))): "
+                           + (decision == .passThrough ? "they go to the composer as they are"
+                              : "each is transferred into a pool of x420 buffers first"), category: .engine)
+        }
+        switch baseLayerConverter.prepare(buffer) {
+        case .ready(let readable):
+            conversionFailingSince = nil
+            return readable
+        case .refused:
+            conversionFailingSince = nil
+            return nil
+        case .failed(let reason):
+            if let since = conversionFailingSince, clock < since { conversionFailingSince = nil }
+            let since = conversionFailingSince ?? clock
+            conversionFailingSince = since
+            if clock - since >= Self.conversionFailureSeconds { reportConversionFailure(reason) }
+            return nil
+        }
+    }
+
+    private func reportConversionFailure(_ reason: String) {
+        lock.lock()
+        let report = !stopped && !conversionFailureReported
+        if report { conversionFailureReported = true }
+        let handler = _onConversionFailure
+        lock.unlock()
+        guard report else { return }
+        let conversion = baseLayerConverter.statistics
+        EngineLog.emit("[DualLayerOutputRoute] converting the player's frames has failed for "
+                       + "\(String(format: "%.2f", Self.conversionFailureSeconds)) s of playback (\(reason); "
+                       + "converted=\(conversion.converted) failed=\(conversion.failed) refused=\(conversion.refused)); "
+                       + "the route hands the picture back to AVPlayer", category: .engine)
+        handler?(reason)
+    }
+
+    private static func fourCharacterCode(_ code: OSType) -> String {
+        let bytes = [UInt8((code >> 24) & 0xff), UInt8((code >> 16) & 0xff), UInt8((code >> 8) & 0xff), UInt8(code & 0xff)]
+        return bytes.allSatisfy { $0 >= 0x20 && $0 < 0x7f } ? String(decoding: bytes, as: UTF8.self) : String(code)
     }
 
     /// Hands AVPlayer's own frame to the display layer. Its attachments are the player's: the 8.1 RPU of the

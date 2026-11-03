@@ -67,6 +67,12 @@ the public-API contract.
   them with the composer the software host uses and presents the result in a display layer on the item's
   timebase. The dither parity of the compose kernels now follows the frame's position in the stream on this
   route, so a run composes the same bits however its frames arrived. The default route is unchanged.
+- **The AVPlayer-output route takes the player's own frame format.** Its video output no longer names `x420`,
+  which keeps the system's decoder service from holding a second set of buffers (about 220 MB less in all on
+  a 4K clip on the Mac, measured on an earlier base and not repeated). A frame already in `x420` goes to the
+  composer untouched; any other format is transferred into a small pool of `x420` buffers first, a frame whose
+  conversion is refused or fails is skipped and never composed unconverted, and a conversion that keeps failing
+  hands the picture back to AVPlayer. One clip, macOS only; tvOS has not been run.
 
 ### Changed
 
