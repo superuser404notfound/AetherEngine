@@ -533,8 +533,21 @@ final class DocumentedConstantsTests: XCTestCase {
 
     func testOutputRouteConversionBoundsMatchDocumentation() throws {
         let docs = try felDocument()
-        XCTAssertEqual(BaseLayerFormatConverter.poolLimit, 6)
-        assertDocumented("The pool hands out at most 6 buffers at once", docs)
+        // The pool limit is the frames taken ahead of the clock, the two the display holds, the compositions
+        // in flight and a spare.
+        XCTAssertEqual(DualLayerOutputRoute.pullAheadSeconds, 0.15)
+        XCTAssertEqual(BaseLayerFormatConverter.displayHeldFrames, 2)
+        XCTAssertEqual(DoviFelComposer.maxFramesInFlight, 2)
+        XCTAssertEqual(BaseLayerFormatConverter.spareBuffers, 1)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 24), 9)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 23.976), 9)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 30), 10)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 60), 14)
+        XCTAssertEqual(DoviFelComposer.outputPoolAllocationThreshold, 14)
+        XCTAssertEqual(DoviFelComposer.outputPoolReserve, 3)
+        assertDocumented("the 2 the display layer holds (the one on screen and the one it retains), the 2 compositions in flight and 1 spare, so 9 buffers at 24 fps, 10 at 30 and 14 at 60", docs)
+        assertDocumented("the composer's own output pool is 14 plus 3", docs)
+        XCTAssertEqual(DualLayerOutputRoute.refusalRunLogLimit, 5)
         XCTAssertEqual(BaseLayerFormatConverter.idleTrimSeconds, 1.0)
         assertDocumented("when no frame was converted for 1 s, again every idle second", docs)
         XCTAssertEqual(DualLayerOutputRoute.conversionFailureSeconds, 0.75)
