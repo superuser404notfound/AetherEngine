@@ -27,7 +27,10 @@ the public-API contract.
   cannot be joined, the enhancement layer's RPUs are folded into the base layer (Profile 8.1): that is the path
   as before for Blu-ray PIDs, and new for two-track Matroska / MP4 files, which used to play the base layer
   alone (HDR10 when the RPUs sit in the enhancement track). The fold pairs the layers on times converted to
-  microseconds, so tracks with different timescales pair too.
+  microseconds, so tracks with different timescales pair too. A base picture now waits up to 128 pictures or
+  2 s of presentation time for its RPU (was 8 pictures) before it goes out without one, Blu-ray PIDs included,
+  so a whole chunk of a chunk-interleaved MP4 pairs: a source whose enhancement layer is missing or broken
+  hands out its video up to 2 s behind the other streams.
 
 ### Fixed
 
