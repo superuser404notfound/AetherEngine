@@ -17,6 +17,14 @@ enum PausedFirstFrame {
         loopsStarted && framesEnqueued == 0
     }
 
+    /// AE#973: whether a pause starts loops that never ran. Only `play()` started them, so a host that
+    /// was loaded and then only paused (a session rebuilt at the playhead while paused, a paused
+    /// mount) never decoded a frame and stayed black until the viewer pressed play. A host still
+    /// loading leaves them to whichever transport call follows the load.
+    static func startsLoopsForFirstFrame(loaded: Bool, loopsStarted: Bool) -> Bool {
+        loaded && !loopsStarted
+    }
+
     /// Whether the loops may read and decode.
     static func loopsMayRun(isPlaying: Bool, pausedBeforeFirstFrame: Bool) -> Bool {
         isPlaying || pausedBeforeFirstFrame
