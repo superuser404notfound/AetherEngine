@@ -539,6 +539,10 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("when no frame was converted for 1 s, again every idle second", docs)
         XCTAssertEqual(DualLayerOutputRoute.conversionFailureSeconds, 0.75)
         XCTAssertEqual(DualLayerOutputRoute.staleBehindSeconds, 0.75)
+        XCTAssertEqual(DualLayerOutputRoute.lateFrameSeconds, 0.1)
+        XCTAssertEqual(DualLayerOutputRoute.clockJumpSeconds, 0.5)
+        assertDocumented("the wait starts again after a seek (a clock that moves more than 0.5 s between two pull ticks)", docs)
+        assertDocumented("waits 0.1 s and then", docs)
         assertDocumented("fail for 0.75 s of playback without one success", docs)
         // The wait for a buffer is the composer's own bound for its output pool, about 36 ms.
         XCTAssertEqual(Double(DoviFelComposer.outputPoolAttempts - 1) * DoviFelComposer.outputPoolRetryInterval,
