@@ -30,6 +30,9 @@ import SwiftUI
 public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
 
     private var hostedLayer: CALayer?
+    /// A layer drawn over `hostedLayer` with the same frame (the AVPlayer-output FEL route's composed picture
+    /// over AVPlayer's suppressed one).
+    private var overlayLayer: CALayer?
     /// AE#711 follow-up: the picture held over an in-place item swap, above `hostedLayer`.
     private let presenter = HeldStillPresenter()
     private var stillLayer: CALayer? { presenter.layer ?? presenter.playerLayer }
@@ -205,6 +208,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         hostedLayer?.frame = hostedFrame
+        overlayLayer?.frame = bounds
         presenter.layout(bounds)
         CATransaction.commit()
     }
@@ -244,11 +248,32 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         CATransaction.commit()
     }
 
+    /// Engine-internal. Draws `layer` over the hosted layer, or removes the overlay with nil. Same frame as
+    /// the hosted layer, no implicit animations.
+    func attachOverlay(_ layer: CALayer?) {
+        if overlayLayer === layer { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let old = overlayLayer, old.superlayer === self.layer { old.removeFromSuperlayer() }
+        overlayLayer = layer
+        if let layer {
+            #if canImport(UIKit)
+            if let still = stillLayer { self.layer.insertSublayer(layer, below: still) } else { self.layer.addSublayer(layer) }
+            #elseif canImport(AppKit)
+            if let still = stillLayer { self.layer?.insertSublayer(layer, below: still) } else { self.layer?.addSublayer(layer) }
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+            #endif
+            layer.frame = bounds
+        }
+        CATransaction.commit()
+    }
+
     /// Engine-internal. Remove the current hosted layer without
     /// replacement (used on unbind / teardown). Same ownership rule as
     /// `attach`: a layer that has moved to another surface stays there.
     func detach() {
         clearStill()
+        attachOverlay(nil)
         // The PiP layout belongs to the engine that set it; a view bound again later starts clean.
         pictureFit = nil
         pictureArea = nil

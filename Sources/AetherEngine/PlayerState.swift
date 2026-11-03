@@ -394,6 +394,16 @@ public enum DecodePath: String, Sendable, Equatable, CaseIterable {
     case software
 }
 
+/// The route that composes a Profile 7 FEL picture, see `LoadOptions.dualLayerRoute`.
+public enum DualLayerRoute: String, Sendable, Hashable, CaseIterable {
+    /// The software host decodes both layers and presents the composed picture (the default).
+    case softwareHost
+    /// AVPlayer decodes and times the base layer and the audio; the engine composes the enhancement layer
+    /// onto its frames and presents them in a display layer on the item's timebase. Selectable on macOS,
+    /// iOS and tvOS; only the Mac has run it.
+    case avPlayerOutput
+}
+
 /// Which layer of a Dolby Vision source a session presents. See `LoadOptions.dolbyVisionHandling`.
 /// For Profile 7, FEL (Full Enhancement Layer, `el_type == 'FEL'`) is reconstructed from both layers
 /// on the software host with `DualLayerVideoDecoder` only when `LoadOptions.preferDualLayerDolbyVision`
@@ -515,6 +525,24 @@ public struct LoadOptions: Sendable, Equatable {
     /// where the native route would hand it to AVPlayer unchanged. TrueHD behaves as on the native route,
     /// which also decodes it and loses the objects. Not engineered around.
     public var preferDualLayerDolbyVision: Bool = false
+
+    /// Which route composes the Profile 7 FEL picture once `preferDualLayerDolbyVision` has chosen the
+    /// dual-layer route. Default `.softwareHost`, the route described above. `.avPlayerOutput` is the
+    /// second route: AVPlayer plays the base layer and the audio from the engine's loopback HLS
+    /// stream and owns the clock, the engine composes the enhancement layer onto AVPlayer's decoded
+    /// frames with the same composer and presents the result in a display layer that follows the item's
+    /// timebase. It changes nothing unless `preferDualLayerDolbyVision` is on and the route decision takes
+    /// the dual-layer route; anywhere else (a MEL or non-Profile 7 source, a build without the
+    /// `DualLayerDolbyVision` trait, a source that is not hvcC-framed or whose frame rate is unknown) the
+    /// session loads as it would with `.softwareHost`. It is built for macOS, iOS and tvOS; only the Mac has
+    /// run it, and the tvOS and iOS builds have not played a Profile 7 title on a device. The picture is a
+    /// layer of the bound `AetherPlayerView`, so a host that shows `currentAVPlayer` in its own player
+    /// view controller gets no picture from it. While another screen holds the picture (AirPlay, an
+    /// external display) the route stops and AVPlayer shows the 8.1 base layer; Picture in Picture is
+    /// unavailable on it (`AetherEngine.nativePlayerLayer` is nil). Audio is AVPlayer's on this route, so
+    /// the Atmos trade-off above does not apply.
+    /// A tuning field, with the same fresh-load rule for a custom source as `preferDualLayerDolbyVision`.
+    public var dualLayerRoute: DualLayerRoute = .softwareHost
 
     /// Opt in to upscaling SDR video below 1080p (coded width under 1920 and height under 1080) to the
     /// display's native pixel size (#846). Such a source routes through `SoftwarePlaybackHost`, where every
@@ -1096,6 +1124,7 @@ public struct LoadOptions: Sendable, Equatable {
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         preferDualLayerDolbyVision: Bool = false,
+        dualLayerRoute: DualLayerRoute = .softwareHost,
         upscalesLowResolutionVideo: Bool = false,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
@@ -1159,6 +1188,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling
         self.preferDualLayerDolbyVision = preferDualLayerDolbyVision
+        self.dualLayerRoute = dualLayerRoute
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode

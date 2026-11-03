@@ -22,6 +22,8 @@ struct LoadOptionsTests {
         #expect(opts.audioOnly == false)
         // Dual-layer FEL composition is opt-in.
         #expect(opts.preferDualLayerDolbyVision == false)
+        // The software host stays the Profile 7 FEL route unless a host asks for the AVPlayer-output one.
+        #expect(opts.dualLayerRoute == .softwareHost)
         // #68: probe-budget overrides default to nil so the engine keeps the
         // built-in .playback budget (50 MB / 60 s) unless a caller opts in.
         #expect(opts.probesize == nil)

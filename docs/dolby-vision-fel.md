@@ -378,6 +378,58 @@ checked against the code:
 A host that needs any of these for a Profile 7 title leaves the flag off for it, as for the Atmos
 trade-off of §3.1.
 
+### 5.2.4 The AVPlayer-output route
+
+`LoadOptions.dualLayerRoute == .avPlayerOutput` composes the same picture without the software host.
+It is opt-in (the default is `.softwareHost`), needs the `DualLayerDolbyVision` trait and applies only when
+the route decision above took the dual-layer route and the stream has a usable frame rate; anywhere else the
+session loads as with `.softwareHost` and the log says why. It compiles on macOS, tvOS and iOS. It was run
+on macOS only: tvOS and iOS compile and are selectable, and nothing of it ran on a device.
+
+| Part | What it does | Code it reuses |
+|---|---|---|
+| Base layer and audio | `AVPlayer` plays the engine's loopback HLS stream: the base layer with the RPU converted to Profile 8.1 and the enhancement layer dropped, as on the native route, plus the audio. The item owns the clock. The forward-buffer window of the session is capped at 10 segments (the default) on this route, see the ring below. | the native route, unchanged |
+| Base-layer frames | An `AVPlayerItemVideoOutput` asks for biplanar 10-bit (`x420`) buffers with no colour conversion and the player's own picture is hidden with `suppressesPlayerRendering` (public API). Frames are taken 0.15 s ahead of the item clock, one per frame interval, never replaced by a later one. | |
+| Enhancement layer | `VideoPacketTap` sees each source packet in the segment producer's single read, before the 8.1 conversion strips the enhancement layer, and again once the segment muxer has written it, with the instant the stream shows it. No second connection and no second demuxer. The packets go to a bounded on-disk ring (`VideoPacketHistory`, 1 GiB at most, unlinked at once so nothing outlives the process) that keeps the newest bytes, so a seek back into content the ring still holds finds its enhancement layer; the feed restarts at the nearest held keyframe at or before the clock whenever the clock jumps. The producer runs up to the forward-buffer window ahead of the playhead, and that lead is spent from the ring first, which is why the window is capped: a lead longer than the ring would leave the playhead without an enhancement layer. | the producer's read |
+| Pairing, composition, metadata | `DualLayerVideoDecoder.openExternalBaseLayer(...)` takes frames from the host instead of decoding the base layer, and from there everything is the code the software host runs: the packet split, the enhancement-layer decoder, the pairing by presentation time, `DoviFelComposer` (the Metal kernels), the per-frame RPU and display metadata, the ordered delivery. The compose target is the engine's output pool by default (no API contract says the player's buffers are writable). Composing in place on the buffer the video output handed over is an opt-in for measurement (`AETHER_FEL_OUTPUT_INPLACE=1`); on the Mac it produced the same bits and saved memory, and nothing shows it is safe on another platform's buffers, so it is not on by default. | all of it |
+| Display | `SampleBufferRenderer` feeds an `AVSampleBufferDisplayLayer` whose control timebase is a child of the item's timebase, so a pause, a rate change or a seek of the item moves both. The layer is an overlay above the `AVPlayerLayer` in `AetherPlayerView`. | the software host's renderer |
+
+**Dither is the one difference from the software host.** The compose kernels dither on the parity of a frame
+index. The software host counts compositions; with the base layer delivered by AVPlayer that count would
+depend on which frames reached the composer and when, so on this route the index is the frame's position in
+the stream (presentation time times frame rate). With the host given the same index rule, the composed
+picture of a 91 s clip is bit-identical to this route's (0 of 2181 frames differ, every plane and every RPU
+attachment). Against the software host as committed, the two routes differ on about 58% of frames, by at
+most one 10-bit code in a sample, and the picture and the RPU differ in nothing else (the route's frames also carry a few extra player attachments) (23 raw frames sampled across the clip: 75.8 million of 286 million samples differ, all by exactly one code). So the two routes are not bit-identical; they
+share the maths and differ in the dither pattern.
+
+**Where there is no enhancement layer.** A position the history does not cover (a seek further back than it
+reaches, a packet it could not store) shows AVPlayer's own base-layer frame at once, so the screen never
+freezes while the audio plays. A base-layer frame whose enhancement packet is only late waits 0.1 s and then
+goes out as the base layer too. The composed picture resumes as soon as the layers pair again. After a seek
+beyond the ring the position stays on the base layer until the playhead reaches packets the ring holds,
+because the segment cache serves the segments without the producer reading them again. Every seek, forward or
+backward and of any length, resets the feed from the clock: the player's own time-jump notification is the
+signal, with a clock more than 1.5 s from the feed as a second net.
+
+**External screens and Picture in Picture.** When an AirPlay video receiver or an external display holds the
+picture (at load, or when the route changes during the session), the route is stopped and AVPlayer shows its
+own picture, the Profile 8.1 base layer without the enhancement layer; the log carries
+`[DualLayerOutputRoute] another screen ...`. The route is decided again at the next load or rebuild of the
+session, not when the receiver goes away. Picture in Picture is not offered while the route runs
+(`nativePlayerLayer` is nil, there is no `softwarePiPSource`): the composed picture is a layer of
+`AetherPlayerView`, so a window built on AVPlayer's own layer would be blank. Subtitles were not checked on
+this route. A host that draws video in its own `AVPlayerViewController` gets no picture from the route and
+should leave the option off.
+
+What it gives up against the software host: after a seek the clock runs while the enhancement layer is
+still decoding up to the target, so a few frames after a seek can go out as the base layer (up to 5 after one seek, and 0 to 9 in ten short seeks, forward and back, over four runs on the Mac); the
+software host holds its clock for this. What it gets: AVPlayer's audio routes (the Atmos trade-off of §3.1
+does not apply), the native seek and rate behaviour, and no software-host audio pipeline. Memory is higher
+than on the software host (about 1.6 GB against 0.7 GB for the player and the system's decoder service together on a 4K Profile 7 clip on the Mac, measured with the pool as the compose target).
+
+A composition runs on the thread that hands the decoder the frame: the route's pull thread, or VideoToolbox's callback thread when the enhancement layer arrives last (on the software host it always runs on the decoder's callback thread). A pull tick can therefore wait for a free GPU slot, a wait that ends when the GPU completes one. `stop()` waits at most 2 s for a pull or feed tick. Closing the decoder itself still waits for the enhancement-layer session, as on the software host, so a GPU that never completes can still hold it.
+
 ### 5.3 Packet split
 
 One walk over the access unit's NAL units, on the demux thread:

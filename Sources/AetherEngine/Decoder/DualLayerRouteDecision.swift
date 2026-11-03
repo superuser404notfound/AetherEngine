@@ -122,6 +122,52 @@ enum DualLayerRouteDecision: Equatable {
         return nil
     }
 
+    /// Whether the AVPlayer-output route is compiled in: the `DualLayerDolbyVision` trait, on every platform
+    /// the engine builds for (macOS, iOS, tvOS). Selectable on all of them; only the Mac has run it.
+    static var outputRouteIsBuiltIn: Bool {
+        #if DualLayerDolbyVision
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Whether a load whose decision is `decision` plays on `LoadOptions.dualLayerRoute == .avPlayerOutput`.
+    /// The option only chooses between the two ways of composing a taken route: it never turns a refused
+    /// one on. `packetsAreHVCCFramed` is the source's length-prefixed framing, which the enhancement-layer
+    /// split reads; `frameRate` must be known, since the pull step and the dither parity follow it.
+    static func runsOnAVPlayerOutput(_ decision: DualLayerRouteDecision, route: DualLayerRoute,
+                                     packetsAreHVCCFramed: Bool, frameRate: Double?) -> Bool {
+        route == .avPlayerOutput && decision.isTaken && outputRouteIsBuiltIn && packetsAreHVCCFramed
+            && Self.isUsableFrameRate(frameRate)
+    }
+
+    static func isUsableFrameRate(_ frameRate: Double?) -> Bool {
+        guard let frameRate else { return false }
+        return frameRate.isFinite && frameRate > 0
+    }
+
+    /// Whether the route may start for the session about to be built. A load decides it, and so does every
+    /// rebuild of the session (the reload an AirPlay or external-display edge starts): when another screen
+    /// holds the picture the overlay would draw on a layer nobody sees, so AVPlayer keeps the picture and
+    /// shows the 8.1 base layer.
+    static func outputRouteMayStart(frameRate: Double?, externalPlaybackHoldsThePicture: Bool) -> Bool {
+        isUsableFrameRate(frameRate) && !externalPlaybackHoldsThePicture
+    }
+
+    /// The most forward-buffer segments (about 4 s each) the session may run ahead of the playhead on the
+    /// AVPlayer-output route. The history keeps the newest bytes, so the lead has to stay well inside what it holds
+    /// (1 GiB is about 100 s of a 86 Mbps stream, about 65 s at 130 Mbps).
+    static let maxForwardBufferSegments = 10
+
+    /// The forward-buffer window a session on the AVPlayer-output route is built with: the request, capped at
+    /// `maxForwardBufferSegments` so the producer's lead stays inside the history ring.
+    /// A session that does not use the route keeps the request (nil stays nil).
+    static func forwardBufferSegments(requested: Int?, usesOutputRoute: Bool) -> Int? {
+        guard usesOutputRoute, let requested else { return requested }
+        return min(requested, maxForwardBufferSegments)
+    }
+
     /// The full decision. `elType` is the probe's answer ("FEL", "MEL", or nil when it found none).
     static func decide(
         codecID: AVCodecID,
