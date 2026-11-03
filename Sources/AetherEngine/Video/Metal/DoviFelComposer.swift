@@ -24,6 +24,9 @@ final class DoviFelComposer: @unchecked Sendable {
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
+    /// Whether the device reads and writes the in-place planes through one `read_write` binding. Read once at
+    /// creation, from `readWriteTextureSupport` (see ``supportsInPlaceReadWrite(_:)``).
+    private let inPlaceReadWrite: Bool
     private var textureCache: CVMetalTextureCache?
 
     /// Lazily compiled and process-shared compute pipelines (dolby-vision-fel.md §5.6).
@@ -138,6 +141,15 @@ final class DoviFelComposer: @unchecked Sendable {
         let chromaPipeline: MTLComputePipelineState
         let chroma422Pipeline: MTLComputePipelineState
         let chroma444Pipeline: MTLComputePipelineState
+        /// The in-place kernels: the same bodies over one `read_write` binding per plane. Only the in-place
+        /// dispatch uses them (see ``DoviFelComposer/inPlaceDecision(baseBuffer:params:)``). Both or neither:
+        /// nil on a device below tier 2, where their source is not compiled, and on a device whose driver
+        /// refused either one, which then composes through the output pool like any frame refused for in place.
+        let lumaInPlacePipeline: MTLComputePipelineState?
+        let chromaInPlacePipeline: MTLComputePipelineState?
+
+        /// Whether both in-place pipelines built.
+        var hasInPlacePipelines: Bool { lumaInPlacePipeline != nil && chromaInPlacePipeline != nil }
         let layoutProbePipeline: MTLComputePipelineState?
 
         init(
@@ -145,12 +157,16 @@ final class DoviFelComposer: @unchecked Sendable {
             chroma: MTLComputePipelineState,
             chroma422: MTLComputePipelineState,
             chroma444: MTLComputePipelineState,
+            lumaInPlace: MTLComputePipelineState?,
+            chromaInPlace: MTLComputePipelineState?,
             probe: MTLComputePipelineState?
         ) {
             self.lumaPipeline = luma
             self.chromaPipeline = chroma
             self.chroma422Pipeline = chroma422
             self.chroma444Pipeline = chroma444
+            self.lumaInPlacePipeline = lumaInPlace
+            self.chromaInPlacePipeline = chromaInPlace
             self.layoutProbePipeline = probe
         }
 
@@ -191,7 +207,11 @@ final class DoviFelComposer: @unchecked Sendable {
         static func getOrCreate(device: MTLDevice) throws -> SharedPipelines {
             try shared.resolve(device: device) {
                 do {
-                    return try compile(device: device, source: DoviShaderSource.source)
+                    // Below tier 2 the in-place kernels are not even compiled, so nothing about them can
+                    // take the pool pipelines down with it.
+                    let inPlace = DoviFelComposer.supportsInPlaceReadWrite(device.readWriteTextureSupport)
+                    return try compile(device: device, source: DoviShaderSource.source(includingInPlace: inPlace),
+                                       inPlace: inPlace)
                 } catch {
                     EngineLog.emit("[DoviFelComposer] Metal shader compilation error: \(error)", category: .swPlayback)
                     throw error
@@ -199,7 +219,10 @@ final class DoviFelComposer: @unchecked Sendable {
             }
         }
 
-        static func compile(device: MTLDevice, source: String) throws -> SharedPipelines {
+        /// Builds the pool pipelines from `source`, which must define them; they are required. With `inPlace`
+        /// the in-place pipelines are built as well, but they are optional: a source without them, or a driver
+        /// that refuses either, leaves both nil and is logged once, and the pool pipelines are unaffected.
+        static func compile(device: MTLDevice, source: String, inPlace: Bool = true) throws -> SharedPipelines {
             let library = try device.makeLibrary(source: source, options: nil)
             guard let lumaFn = library.makeFunction(name: "dovi_compose_luma"),
                   let chromaFn = library.makeFunction(name: "dovi_compose_chroma"),
@@ -211,6 +234,22 @@ final class DoviFelComposer: @unchecked Sendable {
             let chroma = try device.makeComputePipelineState(function: chromaFn)
             let chroma422 = try device.makeComputePipelineState(function: chroma422Fn)
             let chroma444 = try device.makeComputePipelineState(function: chroma444Fn)
+            var lumaInPlace: MTLComputePipelineState?
+            var chromaInPlace: MTLComputePipelineState?
+            if inPlace {
+                do {
+                    guard let lumaInPlaceFn = library.makeFunction(name: "dovi_compose_luma_in_place"),
+                          let chromaInPlaceFn = library.makeFunction(name: "dovi_compose_chroma_in_place") else {
+                        throw ComposerError.missingKernelFunction
+                    }
+                    lumaInPlace = try device.makeComputePipelineState(function: lumaInPlaceFn)
+                    chromaInPlace = try device.makeComputePipelineState(function: chromaInPlaceFn)
+                } catch {
+                    lumaInPlace = nil
+                    chromaInPlace = nil
+                    DoviFelComposer.logOnce("[DoviFelComposer] in-place pipelines did not build (\(error)); frames compose through the output pool")
+                }
+            }
             let probe: MTLComputePipelineState?
             if let probeFn = library.makeFunction(name: "dovi_layout_probe") {
                 probe = try? device.makeComputePipelineState(function: probeFn)
@@ -218,7 +257,8 @@ final class DoviFelComposer: @unchecked Sendable {
                 probe = nil
             }
 
-            return SharedPipelines(luma: luma, chroma: chroma, chroma422: chroma422, chroma444: chroma444, probe: probe)
+            return SharedPipelines(luma: luma, chroma: chroma, chroma422: chroma422, chroma444: chroma444,
+                                   lumaInPlace: lumaInPlace, chromaInPlace: chromaInPlace, probe: probe)
         }
 
         #if DEBUG
@@ -282,6 +322,7 @@ final class DoviFelComposer: @unchecked Sendable {
         }
         self.device = dev
         self.commandQueue = queue
+        self.inPlaceReadWrite = Self.supportsInPlaceReadWrite(dev.readWriteTextureSupport)
         self.supportsNonUniformThreadgroups = dev.supportsFamily(.apple4) || dev.supportsFamily(.mac2)
 
         var cache: CVMetalTextureCache?
@@ -312,6 +353,11 @@ final class DoviFelComposer: @unchecked Sendable {
         self.nlqLutBuffers = nlqBuffers
         self.mmrTableBuffers = mmrBuffers
         self.freeParamSlotIndices = Array(0..<Self.maxFramesInFlight)
+
+        // The tier decides in-place compose, and it is not otherwise visible: a device that reports a lower tier
+        // than expected would lose in-place with only the verbose summary to show it, which reads the same as the
+        // switch being off. One line at the default level says which it is.
+        Self.logOnce(Self.inPlaceStatusLine(tier: dev.readWriteTextureSupport, switchedOn: inPlaceEnabled))
     }
 
     deinit {
@@ -903,19 +949,25 @@ final class DoviFelComposer: @unchecked Sendable {
               let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Uint, width: elCW, height: elCH, keepAlive: &keepAliveTextures) else {
             return nil
         }
-        // In place the output planes are the base-layer planes: the same textures, bound a second time.
-        let outYTex: MTLTexture
-        let outUvTex: MTLTexture
-        if inPlace {
-            outYTex = blYTex
-            outUvTex = blUvTex
-        } else {
+        // The pool path writes its own output planes. In place it has none: the in-place kernels bind each
+        // base-layer plane once, as read_write, so the output is the input texture and nothing is bound twice.
+        var outPlanes: (y: MTLTexture, uv: MTLTexture)?
+        if !inPlace {
             guard let y = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
                   let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: outCW, height: outCH, keepAlive: &keepAliveTextures) else {
                 return nil
             }
-            outYTex = y
-            outUvTex = uv
+            outPlanes = (y, uv)
+        }
+
+        // The in-place chroma kernel binds the chroma plane as r32Uint: one 32-bit texel per Cb and Cr pair, which
+        // tier 1 allows as read_write. The 16-bit view stays for the pool path and for the luma pass, which must bind it.
+        var chromaBlUvTex = blUvTex
+        if inPlace {
+            guard let packed = makeTexture(from: baseBuffer, plane: 1, format: .r32Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures) else {
+                return nil
+            }
+            chromaBlUvTex = packed
         }
 
         var metalParams = params
@@ -934,7 +986,19 @@ final class DoviFelComposer: @unchecked Sendable {
         if inPlace, metalParams.flags.contains(.lumaMmr) { return nil }
 
         guard let pipelines = ensurePipelines() else { return nil }
-        let chromaPipeline = pipelines.pipeline(for: format)
+        let lumaKernel: MTLComputePipelineState
+        let chromaKernel: MTLComputePipelineState
+        if inPlace {
+            // Not reachable through `inPlaceDecision`, which refuses a frame whose pipelines did not build;
+            // a caller that skipped it gets an untouched base layer, like any other encode failure.
+            guard let lumaInPlace = pipelines.lumaInPlacePipeline,
+                  let chromaInPlace = pipelines.chromaInPlacePipeline else { return nil }
+            lumaKernel = lumaInPlace
+            chromaKernel = chromaInPlace
+        } else {
+            lumaKernel = pipelines.lumaPipeline
+            chromaKernel = pipelines.pipeline(for: format)
+        }
 
         guard let paramSlot = takeParamSlot() else { return nil }
         let paramBuffer = paramBuffers[paramSlot]
@@ -958,7 +1022,7 @@ final class DoviFelComposer: @unchecked Sendable {
         // Pool path: both passes go in one concurrent encoder. Luma reads BL luma + BL
         // chroma (a luma MMR curve would need it) and the EL luma; chroma reads
         // BL luma + BL chroma and the EL chroma. Neither reads what the other
-        // writes — `outYTex` and `outUvTex` are separate planes — so the barrier
+        // writes: `outPlanes.y` and `outPlanes.uv` are separate planes, so the barrier
         // Metal puts between two serial encoders buys nothing and costs a full
         // GPU sync point per frame.
         //
@@ -969,7 +1033,8 @@ final class DoviFelComposer: @unchecked Sendable {
         // base layer, and each chroma thread overwrites only the chroma sample it has just read. Luma goes
         // second, and each luma thread overwrites only the luma sample it has just read; nothing reads
         // luma any more. That needs no scratch buffer. The serial encoder and the barrier between
-        // the passes make the second wait for the first.
+        // the passes make the second wait for the first. Each in-place kernel binds its plane once, as
+        // read_write, so no kernel reads and writes the same texture through two bindings.
         let encoderType: MTLDispatchType = inPlace ? .serial : .concurrent
         guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: encoderType) else {
             returnParamSlot(paramSlot)
@@ -977,29 +1042,29 @@ final class DoviFelComposer: @unchecked Sendable {
         }
 
         func encodeLuma() {
-            encoder.setComputePipelineState(pipelines.lumaPipeline)
+            encoder.setComputePipelineState(lumaKernel)
             encoder.setTexture(blYTex, index: 0)
             encoder.setTexture(blUvTex, index: 1)
             encoder.setTexture(elYTex, index: 2)
-            encoder.setTexture(outYTex, index: 3)
+            if let outPlanes { encoder.setTexture(outPlanes.y, index: 3) }
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
             encoder.setBuffer(lutBuffer, offset: 0, index: 1)
             encoder.setBuffer(nlqBuffer, offset: 0, index: 2)
             encoder.setBuffer(mmrBuffer, offset: 0, index: 3)
             dispatch(encoder, width: blW, height: blH,
-                     threadgroup: threadgroupSize(for: pipelines.lumaPipeline))
+                     threadgroup: threadgroupSize(for: lumaKernel))
         }
         func encodeChroma() {
-            encoder.setComputePipelineState(chromaPipeline)
+            encoder.setComputePipelineState(chromaKernel)
             encoder.setTexture(blYTex, index: 0)
-            encoder.setTexture(blUvTex, index: 1)
+            encoder.setTexture(chromaBlUvTex, index: 1)
             encoder.setTexture(elUvTex, index: 2)
-            encoder.setTexture(outUvTex, index: 3)
+            if let outPlanes { encoder.setTexture(outPlanes.uv, index: 3) }
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
             encoder.setBuffer(nlqBuffer, offset: 0, index: 2)
             encoder.setBuffer(mmrBuffer, offset: 0, index: 3)
             dispatch(encoder, width: outCW, height: outCH,
-                     threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaPipeline))
+                     threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaKernel))
         }
 
         if inPlace {
@@ -1051,20 +1116,52 @@ final class DoviFelComposer: @unchecked Sendable {
         case switchedOff
         case tornDown
         case outputChroma
+        case readWriteUnsupported
+        /// The tier allows it but the in-place pipelines did not build.
+        case inPlacePipelinesUnavailable
         case notIOSurfaceBacked
         case notX420
         case planeLayout
         case lumaMmr
     }
 
+    /// Whether the device can bind the in-place planes as `read_write`, which the in-place kernels need. The luma
+    /// plane is 16-bit unsigned, and only tier 2 covers that format; the chroma plane is bound as 32-bit texels,
+    /// which tier 1 covers. So a device below tier 2 takes the pool path.
+    static func supportsInPlaceReadWrite(_ tier: MTLReadWriteTextureTier) -> Bool {
+        tier.rawValue >= MTLReadWriteTextureTier.tier2.rawValue
+    }
+
+    /// The line logged once at creation: the tier the device reports and whether in-place compose is on.
+    static func inPlaceStatusLine(tier: MTLReadWriteTextureTier, switchedOn: Bool) -> String {
+        let name: String
+        switch tier {
+        case .tierNone: name = "none"
+        case .tier1: name = "1"
+        case .tier2: name = "2"
+        @unknown default: name = "\(tier.rawValue)"
+        }
+        let state: String
+        if !supportsInPlaceReadWrite(tier) {
+            state = "off (needs tier 2; frames compose through the output pool)"
+        } else if !switchedOn {
+            state = "off (switched off by AETHER_FEL_INPLACE=0)"
+        } else {
+            state = "on"
+        }
+        return "[DoviFelComposer] read_write texture tier \(name); in-place compose \(state)"
+    }
+
     /// Decides whether `baseBuffer` can be the compose target. Pure apart from reading the buffer's
     /// description; nothing is changed.
     ///
-    /// All of these must hold: the switch is on; the buffer is IOSurface-backed (the GPU can only write
+    /// All of these must hold: the switch is on; the device supports `read_write` textures for the planes
+    /// (``supportsInPlaceReadWrite(_:)``); the buffer is IOSurface-backed (the GPU can only write
     /// those through a texture); its format is the 10-bit biplanar video-range layout the kernels write
     /// (`x420`, the same as a pool buffer); the planes are the luma size and the half-size interleaved chroma
     /// (even dimensions), which is what the composed output has; and the frame has no luma MMR curve (that
-    /// curve reads the chroma that the in-place order overwrites first). Anything else gets the pool path,
+    /// curve reads the chroma that the in-place order overwrites first); and the in-place pipelines built (a driver
+    /// may refuse them). Anything else gets the pool path,
     /// unchanged.
     func inPlaceDecision(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> InPlaceRefusal? {
         lock.lock()
@@ -1075,11 +1172,19 @@ final class DoviFelComposer: @unchecked Sendable {
         if !enabled { return .switchedOff }
         if torn { return .tornDown }
         if format != .yuv420 { return .outputChroma }
-        return Self.inPlaceRefusal(baseBuffer: baseBuffer, params: params)
+        if let refusal = Self.inPlaceRefusal(baseBuffer: baseBuffer, params: params, readWriteSupported: inPlaceReadWrite) {
+            return refusal
+        }
+        // The pipelines are resolved on first use anyway; asking here lets a driver that refused the in-place
+        // kernels send the frame to the pool path instead of failing it.
+        if let pipelines = ensurePipelines(), !pipelines.hasInPlacePipelines { return .inPlacePipelinesUnavailable }
+        return nil
     }
 
     /// The buffer-and-frame part of ``inPlaceDecision(baseBuffer:params:)``, without composer state.
-    static func inPlaceRefusal(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> InPlaceRefusal? {
+    static func inPlaceRefusal(baseBuffer: CVPixelBuffer, params: DoviMetalParams,
+                               readWriteSupported: Bool) -> InPlaceRefusal? {
+        guard readWriteSupported else { return .readWriteUnsupported }
         guard CVPixelBufferGetIOSurface(baseBuffer) != nil else { return .notIOSurfaceBacked }
         guard CVPixelBufferGetPixelFormatType(baseBuffer) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else {
             return .notX420

@@ -461,16 +461,19 @@ static inline int dovi_el_code(float v) {
 // nearest-neighbour from the 4:2:0 plane: the reshaping model is defined on 4:4:4
 // input, and reconstructing chroma to full resolution here would cost a separate
 // pass for a case that does not occur in practice.
-kernel void dovi_compose_luma(
-    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
-    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<ushort, access::sample>      el_y_tex      [[texture(2)]],
-    texture2d<ushort, access::write>       out_y_tex     [[texture(3)]],
-    constant struct DoviMetalParams&       params        [[buffer(0)]],
-    constant float*                        luma_lut      [[buffer(1)]],
-    device const int*                      nlq_lut       [[buffer(2)]],
-    device const float*                    mmr_table     [[buffer(3)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+// The luma body is one template over the luma textures, so the pool kernel and the in-place kernel
+// share it: the pool kernel reads and writes two planes, the in-place kernel one plane it both reads and writes.
+template <typename YIn, typename YOut>
+static inline void dovi_compose_luma_plane(
+    YIn                                    bl_y_tex,
+    texture2d<ushort, access::read>        bl_uv_tex,
+    texture2d<ushort, access::sample>       el_y_tex,
+    YOut                                   out_y_tex,
+    constant struct DoviMetalParams&       params,
+    constant float*                        luma_lut,
+    device const int*                      nlq_lut,
+    device const float*                    mmr_table,
+    uint2                                  gid)
 {
     if (gid.x >= params.bl_width || gid.y >= params.bl_height) {
         return;
@@ -516,6 +519,20 @@ kernel void dovi_compose_luma(
     out_y_tex.write(ushort4(ushort(out_y << 6), 0, 0, 0), gid);
 }
 
+kernel void dovi_compose_luma(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<ushort, access::sample>       el_y_tex      [[texture(2)]],
+    texture2d<ushort, access::write>       out_y_tex     [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    constant float*                        luma_lut      [[buffer(1)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_luma_plane(bl_y_tex, bl_uv_tex, el_y_tex, out_y_tex, params, luma_lut, nlq_lut, mmr_table, gid);
+}
+
 /* The composed chroma at one 4:2:0 site, before quantisation, as clamped VDR codes. The 4:2:0 kernel
    writes it on its own grid; the 4:2:2 and 4:4:4 kernels take their samples from these sites, so
    every chroma format is the same composition at the 4:2:0 sites, stepped up. */
@@ -524,13 +541,38 @@ struct DoviChromaSite {
     int cr;
 };
 
+// The chroma plane is read and written through one accessor per texture type, so the pool kernels
+// (16-bit texels) and the in-place kernel (32-bit texels, one Cb and Cr pair each) share one body.
+// The pool types are specialised here; the in-place type is specialised in the in-place block, which
+// is compiled only on devices that run the in-place kernels. The shared bodies below name the
+// accessor through the template, so they pick the specialisation at instantiation.
+template <typename Tex>
+struct dovi_uv_plane;
+
+template <>
+struct dovi_uv_plane<texture2d<ushort, access::read> > {
+    static ushort4 load(texture2d<ushort, access::read> tex, uint2 p)
+    {
+        return tex.read(p);
+    }
+};
+
+template <>
+struct dovi_uv_plane<texture2d<ushort, access::write> > {
+    static void store(texture2d<ushort, access::write> tex, ushort4 value, uint2 p)
+    {
+        tex.write(value, p);
+    }
+};
+
 // Chroma: both chroma planes in one pass, since an MMR curve for Cb and for Cr
 // reads the same three base-layer components.
+template <typename UVIn>
 static inline DoviChromaSite dovi_chroma_site(
     uint2                                  site,
     texture2d<ushort, access::read>        bl_y_tex,
-    texture2d<ushort, access::read>        bl_uv_tex,
-    texture2d<ushort, access::read>        el_uv_tex,
+    UVIn                                   bl_uv_tex,
+    texture2d<ushort, access::read>       el_uv_tex,
     constant struct DoviMetalParams        &params,
     device const int*                      nlq_lut,
     device const float*                    mmr_table)
@@ -557,7 +599,7 @@ static inline DoviChromaSite dovi_chroma_site(
     }
     bl_y = (bl_y + 1) >> 1;
 
-    ushort4 bl_uv = bl_uv_tex.read(site);
+    ushort4 bl_uv = dovi_uv_plane<UVIn>::load(bl_uv_tex, site);
     int bl_cb = int(bl_uv.r >> 6);
     int bl_cr = int(bl_uv.g >> 6);
 
@@ -603,8 +645,9 @@ static inline DoviChromaSite dovi_chroma_site(
     return out;
 }
 
+template <typename UVOut>
 static inline void dovi_write_chroma(
-    texture2d<ushort, access::write>       out_uv_tex,
+    UVOut                                  out_uv_tex,
     uint2                                  gid,
     int                                    vdr_cb,
     int                                    vdr_cr,
@@ -616,26 +659,30 @@ static inline void dovi_write_chroma(
                                dovi_dither(gid, params.frame_index, uint2(1u, 1u)), 64, 960);
 
     if (params.dither_mode == DOVI_DEBUG_RAW_VDR) {
-        out_uv_tex.write(ushort4(ushort(vdr_cb << 4), ushort(vdr_cr << 4), 0, 0), gid);
+        dovi_uv_plane<UVOut>::store(out_uv_tex, ushort4(ushort(vdr_cb << 4), ushort(vdr_cr << 4), 0, 0), gid);
         return;
     }
     if (params.dither_mode == DOVI_DITHER_FULL_PRECISION) {
-        out_uv_tex.write(ushort4(ushort(dovi_full_precision(vdr_cb, params.vdr_scale, 64, 960)),
-                                 ushort(dovi_full_precision(vdr_cr, params.vdr_scale, 64, 960)), 0, 0), gid);
+        dovi_uv_plane<UVOut>::store(out_uv_tex, ushort4(ushort(dovi_full_precision(vdr_cb, params.vdr_scale, 64, 960)),
+                                                           ushort(dovi_full_precision(vdr_cr, params.vdr_scale, 64, 960)), 0, 0), gid);
         return;
     }
-    out_uv_tex.write(ushort4(ushort(out_cb << 6), ushort(out_cr << 6), 0, 0), gid);
+    dovi_uv_plane<UVOut>::store(out_uv_tex, ushort4(ushort(out_cb << 6), ushort(out_cr << 6), 0, 0), gid);
 }
 
-kernel void dovi_compose_chroma(
-    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
-    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
-    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
-    constant struct DoviMetalParams&       params        [[buffer(0)]],
-    device const int*                      nlq_lut       [[buffer(2)]],
-    device const float*                    mmr_table     [[buffer(3)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+// The 4:2:0 chroma body, shared by the pool kernel and the in-place kernel. Each thread reads its own
+// chroma sample and writes it back, and reads base-layer luma only, so the in-place write cannot reach a
+// neighbour's read.
+template <typename UVIn, typename UVOut>
+static inline void dovi_compose_chroma_plane(
+    texture2d<ushort, access::read>        bl_y_tex,
+    UVIn                                   bl_uv_tex,
+    texture2d<ushort, access::read>       el_uv_tex,
+    UVOut                                  out_uv_tex,
+    constant struct DoviMetalParams&       params,
+    device const int*                      nlq_lut,
+    device const float*                    mmr_table,
+    uint2                                  gid)
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
     uint uv_height = (params.bl_height + 1u) / 2u;
@@ -646,6 +693,19 @@ kernel void dovi_compose_chroma(
 
     DoviChromaSite site = dovi_chroma_site(gid, bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
     dovi_write_chroma(out_uv_tex, gid, site.cb, site.cr, params);
+}
+
+kernel void dovi_compose_chroma(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<ushort, access::read>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_chroma_plane(bl_y_tex, bl_uv_tex, el_uv_tex, out_uv_tex, params, nlq_lut, mmr_table, gid);
 }
 
 // A 4:2:0 site as the output holds it: quantised and clamped to video range. The step-up kernels mean
@@ -893,9 +953,72 @@ kernel void dovi_layout_probe(
 }
 """
 
-    /// Runtime-compiled form: typedefs, struct block and kernels in one string.
-    static var source: String {
+    /// The in-place kernels, kept apart from ``kernels`` so a device that cannot bind `read_write` textures
+    /// (``DoviFelComposer/supportsInPlaceReadWrite(_:)``) never compiles any text that names them. The luma
+    /// kernel binds its 16-bit plane once, as `read_write`; the chroma kernel binds the interleaved plane once,
+    /// as 32-bit texels (one Cb and Cr pair each, Cb in the low half, as in the plane's bytes). Both reuse the
+    /// pool kernels' bodies; only the chroma accessor is specialised here.
+    static let inPlaceKernels = """
+// The in-place chroma accessor: a Cb and Cr pair packed in one 32-bit texel.
+template <>
+struct dovi_uv_plane<texture2d<uint, access::read_write> > {
+    static ushort4 load(texture2d<uint, access::read_write> tex, uint2 p)
+    {
+        uint pair = tex.read(p).r;
+        return ushort4(ushort(pair & 0xFFFFu), ushort(pair >> 16), 0, 0);
+    }
+
+    static void store(texture2d<uint, access::read_write> tex, ushort4 value, uint2 p)
+    {
+        tex.write(uint4(uint(value.r) | (uint(value.g) << 16), 0u, 0u, 0u), p);
+    }
+};
+
+// In place (the base-layer luma plane is the output): one binding, so the kernel reads
+// its own sample and writes it back through the same texture.
+kernel void dovi_compose_luma_in_place(
+    texture2d<ushort, access::read_write>  y_tex         [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<ushort, access::sample>      el_y_tex      [[texture(2)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    constant float*                        luma_lut      [[buffer(1)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_luma_plane(y_tex, bl_uv_tex, el_y_tex, y_tex, params, luma_lut, nlq_lut, mmr_table, gid);
+}
+
+// In place (the base-layer chroma plane is the output): one binding for the plane, as 32-bit texels.
+kernel void dovi_compose_chroma_in_place(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<uint, access::read_write>    uv_tex        [[texture(1)]],
+    texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    dovi_compose_chroma_plane(bl_y_tex, uv_tex, el_uv_tex, uv_tex, params, nlq_lut, mmr_table, gid);
+}
+"""
+
+    /// The source for a device that composes through the output pool only: typedefs, struct block and the pool
+    /// and step-up kernels. Contains no `read_write` binding.
+    static var poolSource: String {
         preamble + "\n" + sharedStructs + "\n" + kernels + "\n"
+    }
+
+    /// Runtime-compiled form for a device that also runs the in-place kernels: ``poolSource`` plus
+    /// ``inPlaceKernels``.
+    static var source: String {
+        poolSource + inPlaceKernels + "\n"
+    }
+
+    /// The source `DoviFelComposer` compiles on a device that does (`true`) or does not (`false`) support
+    /// the in-place kernels.
+    static func source(includingInPlace: Bool) -> String {
+        includingInPlace ? source : poolSource
     }
 }
 #endif

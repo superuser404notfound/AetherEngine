@@ -19,6 +19,63 @@ struct DoviShaderSyncTests {
         }
     }
 
+    @Test("The pool-only source has the pool kernels and names no read_write binding; the full source adds the in-place kernels")
+    func poolSourceHasNoReadWriteBinding() {
+        let pool = DoviShaderSource.poolSource
+        for kernel in ["dovi_compose_luma", "dovi_compose_chroma", "dovi_compose_chroma_422", "dovi_compose_chroma_444", "dovi_layout_probe"] {
+            #expect(pool.contains("kernel void \(kernel)("), "pool source is missing \(kernel)")
+        }
+        #expect(!pool.contains("read_write"), "a device below tier 2 must not compile any read_write text")
+        #expect(!pool.contains("_in_place"))
+        #expect(DoviShaderSource.source(includingInPlace: false) == pool)
+
+        let full = DoviShaderSource.source(includingInPlace: true)
+        #expect(full == DoviShaderSource.source)
+        for kernel in ["dovi_compose_luma_in_place", "dovi_compose_chroma_in_place"] {
+            #expect(full.contains("kernel void \(kernel)("), "full source is missing \(kernel)")
+        }
+        #expect(full.hasPrefix(pool))
+    }
+
+    @Test("the pool-only source builds the pool pipelines and leaves the in-place pipelines nil", .enabled(if: DoviShaderSyncTests.metalAvailable, "needs a Metal device"))
+    func poolSourceBuildsPoolPipelines() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        // `inPlace: false`: a device below tier 2, which never looks for the in-place kernels.
+        let below = try DoviFelComposer.SharedPipelines.compile(device: device, source: DoviShaderSource.poolSource, inPlace: false)
+        #expect(below.lumaInPlacePipeline == nil && below.chromaInPlacePipeline == nil)
+        #expect(!below.hasInPlacePipelines)
+        // `inPlace: true` over a source without the kernels: the in-place build fails and the pool pipelines
+        // still come back, so a failed in-place build cannot cost a device its pool path.
+        let missing = try DoviFelComposer.SharedPipelines.compile(device: device, source: DoviShaderSource.poolSource, inPlace: true)
+        #expect(missing.lumaInPlacePipeline == nil && missing.chromaInPlacePipeline == nil)
+        for format in [DoviFelChromaFormat.yuv420, .yuv422, .yuv444] {
+            #expect(below.pipeline(for: format).maxTotalThreadsPerThreadgroup > 0)
+            #expect(missing.pipeline(for: format).maxTotalThreadsPerThreadgroup > 0)
+        }
+        #expect(below.lumaPipeline.maxTotalThreadsPerThreadgroup > 0)
+        #expect(missing.lumaPipeline.maxTotalThreadsPerThreadgroup > 0)
+    }
+
+    static let tier2Available = MTLCreateSystemDefaultDevice().map { DoviFelComposer.supportsInPlaceReadWrite($0.readWriteTextureSupport) } ?? false
+
+    @Test("the full source builds the in-place pipelines on a tier 2 device", .enabled(if: DoviShaderSyncTests.tier2Available, "needs a tier 2 Metal device"))
+    func fullSourceBuildsInPlacePipelines() throws {
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let pipelines = try DoviFelComposer.SharedPipelines.compile(device: device, source: DoviShaderSource.source, inPlace: true)
+        #expect(pipelines.hasInPlacePipelines)
+    }
+
+    @Test("the tier line says the tier and whether in-place compose is on")
+    func tierStatusLine() {
+        let line2 = DoviFelComposer.inPlaceStatusLine(tier: .tier2, switchedOn: true)
+        #expect(line2 == "[DoviFelComposer] read_write texture tier 2; in-place compose on")
+        #expect(DoviFelComposer.inPlaceStatusLine(tier: .tier2, switchedOn: false).contains("tier 2; in-place compose off"))
+        let line1 = DoviFelComposer.inPlaceStatusLine(tier: .tier1, switchedOn: true)
+        #expect(line1.contains("tier 1; in-place compose off"))
+        #expect(line1.contains("needs tier 2"))
+        #expect(DoviFelComposer.inPlaceStatusLine(tier: .tierNone, switchedOn: true).contains("tier none; in-place compose off"))
+    }
+
     @Test("Serializing produces exactly the byte count the C struct occupies")
     func serializedSizeIsStable() {
         var params = DoviMetalParams()
