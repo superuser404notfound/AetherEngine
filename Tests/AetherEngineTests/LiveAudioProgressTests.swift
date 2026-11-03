@@ -21,13 +21,15 @@ struct LiveAudioProgressTests {
         options.sessionCacheByteBudget = budget
 
         // Act
+        engine.softwareHostLoadedForTesting = { host in
+            host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
+        }
         try await engine.load(
             source: .custom(ProbeRecordingReader(data: try LongGOPTransportStreamFixture.data()),
                             formatHint: "mpegts"),
             options: options
         )
         let host = try #require(engine.softwareHost)
-        host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
         engine.play()
         try await waitFor { delivered.value >= 24 || engine.errorInfo != nil }
 
@@ -82,13 +84,15 @@ struct LiveAudioProgressTests {
             ready.update { $0 = true }
             engine.stop()
         }
+        engine.softwareHostLoadedForTesting = { host in
+            host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
+            host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
+        }
         try await engine.load(
             source: .custom(reader, formatHint: "mpegts"),
             options: LoadOptions(isLive: true, autoplay: false, preferredDecodePath: .software)
         )
         let host = try #require(engine.softwareHost)
-        host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
-        host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
 
         // Act - audio must advance without changing the video gate.
         engine.play()
@@ -112,6 +116,10 @@ struct LiveAudioProgressTests {
             ready.update { $0 = true }
             engine.stop()
         }
+        engine.softwareHostLoadedForTesting = { host in
+            host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
+            host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
+        }
         try await engine.load(
             source: .custom(ProbeRecordingReader(data: try LongGOPTransportStreamFixture.data()),
                             formatHint: "mpegts"),
@@ -119,8 +127,6 @@ struct LiveAudioProgressTests {
         )
         let host = try #require(engine.softwareHost)
         try #require((host.directLiveReadAheadForTesting != nil) == isLive)
-        host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
-        host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
         engine.setRate(2)
         engine.play()
         try await waitFor { host.parkedVideoCountForTesting == 256 || engine.errorInfo != nil }
@@ -164,12 +170,14 @@ struct LiveAudioProgressTests {
             ready.update { $0 = true }
             engine.stop()
         }
+        engine.softwareHostLoadedForTesting = { host in
+            host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
+        }
         try await engine.load(
             source: .custom(reader, formatHint: "mpegts"),
             options: LoadOptions(isLive: true, autoplay: false, preferredDecodePath: .software)
         )
         let host = try #require(engine.softwareHost)
-        host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
         engine.play()
         try await waitFor { sourceGate.entered || engine.errorInfo != nil }
         try #require(engine.errorInfo == nil)
@@ -275,6 +283,9 @@ struct LiveAudioProgressTests {
         let engine = try AetherEngine()
         let delivered = ProbeTestBox(0)
         defer { engine.stop() }
+        engine.softwareHostLoadedForTesting = { host in
+            host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
+        }
         try await engine.load(
             source: .custom(
                 ProbeRecordingReader(data: try LongGOPTransportStreamFixture.data()),
@@ -288,7 +299,6 @@ struct LiveAudioProgressTests {
             )
         )
         let host = try #require(engine.softwareHost)
-        host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
 
         // Act - let the actual audio decoder and renderer process the offset session.
         engine.play()
@@ -369,6 +379,10 @@ struct LiveAudioProgressTests {
             ready.update { $0 = true }
             engine.stop()
         }
+        engine.softwareHostLoadedForTesting = { host in
+            host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
+            host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
+        }
         try await engine.load(
             source: .custom(ProbeRecordingReader(data: data), formatHint: "mpegts"),
             options: LoadOptions(isLive: true, autoplay: false, preferredDecodePath: .software)
@@ -376,8 +390,6 @@ struct LiveAudioProgressTests {
         let host = try #require(engine.softwareHost)
         try #require(host.audioDelivery == .decoded)
         try #require(host.directLiveReadAheadForTesting != nil)
-        host.videoRendererForTesting.readyForMoreMediaDataForTesting = { ready.value }
-        host.observeDeliveredAudioForTesting { delivered.update { $0 += 1 } }
 
         // Act - exhaust the source or parking allowance without a buffer that could arm audio.
         engine.play()
@@ -398,15 +410,17 @@ struct LiveAudioProgressTests {
         let engine = try AetherEngine()
         let deliveredPTS = ProbeTestBox<[Double]>([])
         defer { engine.stop() }
+        engine.softwareHostLoadedForTesting = { host in
+            host.audioTapSink = { buffer in
+                deliveredPTS.update { $0.append(CMSampleBufferGetPresentationTimeStamp(buffer).seconds) }
+            }
+        }
         try await engine.load(
             source: .custom(ProbeRecordingReader(data: fixture.data), formatHint: "mpegts"),
             options: LoadOptions(isLive: true, autoplay: false, preferredDecodePath: .software)
         )
         let host = try #require(engine.softwareHost)
         try #require(host.directLiveReadAheadForTesting != nil)
-        host.audioTapSink = { buffer in
-            deliveredPTS.update { $0.append(CMSampleBufferGetPresentationTimeStamp(buffer).seconds) }
-        }
 
         // Act - join through the new ringless source and the real audio decoder.
         engine.play()

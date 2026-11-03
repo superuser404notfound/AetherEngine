@@ -1569,6 +1569,9 @@ public final class AetherEngine: ObservableObject {
     /// lands on a newer serial and is dropped instead of clearing a later tick's in-flight slot.
     var subtitleDrainTickSerial: UInt64 = 0
     #if DEBUG
+    /// AE#973: runs on a software host that has loaded and not yet started its loops. A paused mount
+    /// starts them for the first frame, so a hook installed after `load` returns can miss it.
+    var softwareHostLoadedForTesting: (@MainActor (SoftwarePlaybackHost) -> Void)?
     /// AE#628: lets a test drive the drain tick with a real decoder but no playback session.
     var subtitleDrainDecoderFactoryForTesting: ((Int32) -> EmbeddedSubtitleDecoder?)?
     #endif
