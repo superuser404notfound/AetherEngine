@@ -1439,7 +1439,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         case .stalled:
             // No slot, nothing encoded: `req.base` is the intact decoded base layer (also on the in-place
             // path, where `inPlace` only picks the encode routine), so it goes out as `.baseIntact` does,
-            // with the RPU that keeps the mapping. The composed-RPU override applies to composed frames only.
+            // with the RPU that keeps the mapping.
             noteStalledBypass()
             orderedDelivery.fulfil(
                 ticket: req.ticket, epoch: req.epoch,

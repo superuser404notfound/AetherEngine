@@ -12,13 +12,23 @@ the public-API contract.
 
 ### Changed
 
+- **Dolby Vision FEL frames are composed on a queue of their own, and a GPU that stops completing is reported.**
+  The video callback only records, pairs and enqueues; a paired frame waits for its GPU slot on a compose queue,
+  with two compositions in flight and the output pool reserve independent of that limit. If the queue head waits
+  four slices in a row, queued frames go out as the base layer with the RPU that keeps their mapping, and a stall
+  that lasts 600 frames, or comes back four times without 240 healthy compositions between, is reported once as
+  `VideoDecoderError.composerStalled`. The inverse-NLQ table and the MMR coefficients are read from per-frame
+  tables, and the enhancement layer is upsampled with exact weights and rounded half up (the picture differs by at
+  most one code on 0.1 to 1% of samples, the exact ties). Only with the `DualLayerDolbyVision` trait.
+- **The dual-layer route composes into the decoded base layer without the output-metadata copy.** The copy only
+  cost memory there (about 315 MB of IOSurface in the app on the Mac); single-layer paths, the enhancement
+  decoders and the software host keep it.
 - **In-place Dolby Vision FEL compose binds each plane once, as `read_write`.** The in-place path wrote the
   composed frame into the decoded base-layer buffer by binding the same texture twice in one kernel, once to read
   it and once to write it, which Metal does not promise to be coherent. Luma is now one 16-bit `read_write`
   texture and chroma one 32-bit `read_write` texture (a Cb and Cr pair per texel), sharing the pool kernels'
   bodies, so the picture is unchanged (0 of 120 frames differ on two real FEL clips, in place against the pool).
-  `read_write` on a 16-bit plane needs read/write texture tier 2, so a device that reports a lower tier (Apple TV HD
-  and Apple TV 4K first generation) composes through the output pool, at the 110 to 240 MB of extra memory the
+  `read_write` on a 16-bit plane needs read/write texture tier 2, so a device that reports a lower tier composes through the output pool, at the roughly 150 MB of extra memory the
   in-place path saves; its in-place kernels are not even compiled. One default-level log line now gives the
   reported tier and whether in-place compose is on. Only with the `DualLayerDolbyVision` trait.
 

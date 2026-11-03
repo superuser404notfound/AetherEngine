@@ -1390,7 +1390,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// float(coef) * 2^-coef_shift, the value the kernel used to form per term per sample. The scale is a
     /// power of two, so it is exact and the kernels' sums are bit-identical; 1056 conversions on the CPU
     /// per frame replace an int-to-float conversion and a multiply per MMR term per GPU sample (UHD p010
-    /// about 0.045 ms per frame, measured on an M4 Pro with the fork's benchmark).
+    /// about 0.045 ms per frame, measured on an M4 Pro).
     static func populateMmrTable(into ptr: UnsafeMutablePointer<Float>, params: DoviMetalParams) {
         let piece = 1 + DoviMmrParams.coefficientsPerPiece
         for (component, mmr) in [params.mmrY, params.mmrCb, params.mmrCr].enumerated() {

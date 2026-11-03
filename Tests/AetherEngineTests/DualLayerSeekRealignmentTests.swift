@@ -285,7 +285,7 @@ extension HeavyDualLayerSuites {
             r.decoder.handleEnhancementLayerFrame(elBuffer: staleEL, pts: Self.pts(1))
             r.decoder.handleBaseLayerFrame(baseBuffer: staleBL, pts: Self.pts(1), hdr10Data: nil)
             // The handler hands the composition to the compose queue; wait until it is on the GPU.
-        try await waitFor { r.composer.pairs.count == 1 }
+            try await waitFor { r.composer.pairs.count == 1 }
 
             // The seek lands while it is there.
             r.decoder.flush()

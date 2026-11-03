@@ -119,10 +119,9 @@ with the mapping removed.
 
 **Kernels** (`DoviShaderSource.swift`). Luma: base code → piece selection → polynomial (evaluated in
 normalized float) or MMR when the luma curve uses MMR → plus the inverse-NLQ residual of the
-enhancement-layer luma, upsampled with one hardware-bilinear fetch →
+enhancement-layer luma, upsampled bilinearly from four explicit texel reads with exact weights, the code rounded half up →
 12-bit clamp → dither → 10-bit. Chroma: base chroma plus the base luma at the chroma site ([1 2 1] around
-the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled with one
-hardware-bilinear fetch co-sited with the top-left luma sample (DoViBaker's phase) → dither.
+the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled the same way, co-sited with the top-left luma sample (DoViBaker's phase) → dither.
 
 **Parameter ABI.** `DoviShaderSource.sharedStructs` on the GPU side, `DoviMetalParams.serialize` on
 the Swift side. `DoviLayoutProbeTests` has the GPU read every sub-block back at the offset Swift wrote
@@ -214,7 +213,7 @@ reproduces the exact lock shape; against the old handler it hung past a 300 s ti
 
 | Symptom | Cause | Rule |
 |---|---|---|
-| Metal validation abort binding textures | integer kernel access on a Unorm texture | bind BL and output planes as `r16Uint` / `rg16Uint`, EL planes as `r16Unorm` / `rg16Unorm` so they can be filtered |
+| Metal validation abort binding textures | integer kernel access on a Unorm texture | bind BL and output planes as `r16Uint` / `rg16Uint`, EL planes as `r16Uint` / `rg16Uint` too (read with explicit texel fetches, no sampler filtering) |
 | Black picture with `COMPOSE SUCCESS` on every frame | 10-bit prediction treated as 12-bit | keep the whole reconstruction in one declared precision |
 | Green / purple picture | chroma curves with fewer than 2 pivots returned 0 | an absent curve is identity, not zero |
 | GPU reading freed memory | `CVMetalTexture` wrappers released before completion | keep textures *and* their source buffers alive until the command buffer retires (`ComposedFrame`) |
@@ -419,8 +418,8 @@ the decoder's lock, and each call is O(K):
   - *Held clock.* With no running clock there is no time to count down to. While a preroll waits on the
     renderer a frame waits the margin of wall time at most; for a pause, or before the clock is armed,
     it waits 2 s at most (this only bounds a layer that is lost for good).
-  - *Backstop.* With a clock, `maxDeadlineHoldFrames` = 7 newer arrivals release a frame in every mode.
-    It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 8 pending frames) at which
+  - *Backstop.* With a clock, `maxDeadlineHoldFrames` = 6 newer arrivals release a frame in every mode.
+    It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 7 pending frames) at which
     `OrderedDelivery`'s stall guard skips a ticket, so the frames queued behind a waiting one can never
     reach the guard, and it bounds the queue.
   - *Sweep.* A timer re-checks what waits (every 2 to 250 ms, only while something waits) and every
@@ -662,7 +661,7 @@ pictures and the display layer's queue are extra):
 
 | Holder | Bound |
 |---|---|
-| Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 7 with a render clock (K = 3 without one) → about 175 MB at 4K with the clock, 75 MB at K = 3. The 7 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds |
+| Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 6 with a render clock (K = 3 without one) → about 150 MB at 4K with the clock, 75 MB at K = 3. The 6 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds |
 | Enhancement-layer frames waiting | 10 → 62 MB |
 | Composed output buffers (in flight, pending, idle in pool) | allocation threshold 14 + reserve 3 → 423 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR):** the composed frame is the decoded base-layer buffer, which VideoToolbox's own pool then keeps alive until the renderer lets go of it (the memory moves to the decoder's side rather than vanishing). Approximate: another aetherctl ran on the same machine during these runs, so the numbers are noisy. Mac, 4K, 200 s with 7 seeks, two runs each: our process plus the decoder service, median 841 and 903 MB before, 708 and 744 MB in place (about 147 MB less); peak 936 and 965 MB before, 761 and 817 MB in place (about 161 MB less). Our process alone falls by about 300 MB, the decoder service gains about 170 MB |
 
@@ -793,12 +792,13 @@ Applied: base layer (all planes, MMR luma reads base chroma), enhancement layer 
 NLQ with offset, scale, threshold, shift, `vdr_in_max`), the per-component polynomial and MMR curves, the
 bit depths, and the display metadata (carried into the converted Profile 8.1 RPU).
 
-The enhancement-layer upsampler is one hardware-bilinear fetch, not DoViBaker's spline taps. The
+The enhancement-layer upsampler is bilinear from four explicit texel reads with exact weights (`dovi_upsample_el`, the code rounded half up by `dovi_el_code`), not DoViBaker's spline taps and not the hardware sampler, whose fixed-point weights could land one code off the exact value. The
 encoder's own filter is not carried in the RPU (`el_spatial_resampling_filter_flag` only says one was
 used), so no kernel inverts it exactly. Against the DoViBaker oracle on a fine-detail set (gratings, zone
 plate, band-limited noise) a 4-fetch Catmull-Rom lowered the per-pixel error sd by about 0.7% on luma and
-left chroma unchanged, for four times the enhancement-layer reads. `dovi_sample_el_1d` / `_2d` keep the
-texture size in their signature so a wider filter can replace bilinear without touching the callers.
+left chroma unchanged, for four times the enhancement-layer reads. `dovi_upsample_el` keeps the
+texture size in its signature so a wider filter can replace bilinear without touching the callers.
+The inverse-NLQ table and the MMR coefficients are read from per-frame tables bound at buffers 2 and 3 of every compose kernel (`nlq_lut`, `mmr_table`).
 The phases are DoViBaker's: luma texel-centre aligned, chroma co-sited with the top-left luma sample in
 both axes (`DoviEnhancementUpsamplerTests`).
 

@@ -4,7 +4,7 @@ import VideoToolbox
 import Testing
 @testable import AetherEngine
 
-/// Upstream's output-metadata normalizer copies every base-layer frame whose `imageBufferModifiable`
+/// The output-metadata normalizer copies every base-layer frame whose `imageBufferModifiable`
 /// flag is absent into a 4K pool of its own (about 315 MB of IOSurface in the app). The dual-layer
 /// route composes into that same buffer, so the copy buys nothing there; only that route opts out.
 @Suite("Base-layer metadata copy opt-out")
