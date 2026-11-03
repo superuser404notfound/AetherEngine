@@ -10,6 +10,7 @@ import AetherLibswresample
 struct AudioTapChunk {
     let buffer: AVAudioPCMBuffer
     let ptsSeconds: Double
+    var channels: AudioTapChannels = .downmix
 }
 
 /// FFmpeg decoder for the audio tap (#95): compressed packets to mono Float32 48 kHz
@@ -33,6 +34,15 @@ final class AudioTapDecoder: @unchecked Sendable {
     /// What the current `swrContext` reads (#452). The tap outlives a live splice the same way the
     /// SW path does, and its output side is pinned to mono 48 kHz, so only the input can move.
     private var configuredInput = ResamplerInputParameters()
+
+    /// What the host asked for, and what the current `swrContext` delivers: `.dialogue` falls
+    /// back to `.downmix` on a layout without a centre channel (#908).
+    private let requestedChannels: AudioTapChannels
+    private var deliveredChannels: AudioTapChannels = .downmix
+
+    init(channels: AudioTapChannels = .downmix) {
+        requestedChannels = channels
+    }
 
     enum TapDecoderError: Error, CustomStringConvertible, LocalizedError {
         case noCodecParameters, unsupportedCodec, allocFailed, openFailed
@@ -107,8 +117,9 @@ final class AudioTapDecoder: @unchecked Sendable {
             if swrContext == nil, !initResampler(from: f) { continue }
             // A mid-stream input change (5.1 to stereo at a live program boundary) leaves the context
             // reading planes the frame no longer carries, which faults inside swr_convert (#452).
-            // The chunk accumulator is already in the fixed output format, so nothing has to be
-            // flushed first and the running clock counts output samples either way.
+            // The accumulator is already in the fixed output format and the running clock counts
+            // output samples either way; it is flushed only so one chunk never carries two channel
+            // selections (#908: a dialogue tap falls back to the downmix on the stereo side).
             if configuredInput.differ(from: f) {
                 EngineLog.emit(
                     "[AudioTap] input format changed mid-stream ("
@@ -116,6 +127,7 @@ final class AudioTapDecoder: @unchecked Sendable {
                     + " -> \(f.pointee.sample_rate)Hz/\(f.pointee.ch_layout.nb_channels)ch/fmt=\(f.pointee.format)"
                     + "); rebuilding resampler",
                     category: .engine)
+                if let tail = emitPending(force: true) { chunks.append(tail) }
                 swr_free(&swrContext)
                 if !initResampler(from: f) { continue }
             }
@@ -148,8 +160,21 @@ final class AudioTapDecoder: @unchecked Sendable {
             &inLayout, AVSampleFormat(rawValue: frame.pointee.format), frame.pointee.sample_rate,
             0, nil
         )
-        guard ret >= 0, swrContext != nil, swr_init(swrContext) >= 0 else {
+        guard ret >= 0, swrContext != nil else {
             if swrContext != nil { swr_free(&swrContext) }
+            return false
+        }
+        deliveredChannels = .downmix
+        if requestedChannels == .dialogue, let centre = Self.centreIndex(of: &inLayout) {
+            // One output row: the centre at unity, every other input channel at zero.
+            var matrix = [Double](repeating: 0, count: Int(inLayout.nb_channels))
+            matrix[centre] = 1
+            if swr_set_matrix(swrContext, matrix, inLayout.nb_channels) >= 0 {
+                deliveredChannels = .dialogue
+            }
+        }
+        guard swr_init(swrContext) >= 0 else {
+            swr_free(&swrContext)
             return false
         }
         // What this context reads; every later frame is compared against it (#452).
@@ -159,6 +184,25 @@ final class AudioTapDecoder: @unchecked Sendable {
             rate: frame.pointee.sample_rate
         )
         return true
+    }
+
+    /// Index of the front-centre channel in `layout`, nil when there is none or the layout is
+    /// the centre alone: a mono track is not a dialogue stem, and calling it `.dialogue` would
+    /// tell the host it got an isolation it did not. A layout that only states a count (AAC with
+    /// a program config element decodes this way) is read in the default order for that count,
+    /// which is what swresample itself assumes for it and what the software path's tag says.
+    static func centreIndex(of layout: UnsafePointer<AVChannelLayout>) -> Int? {
+        let count = layout.pointee.nb_channels
+        guard count > 1 else { return nil }
+        if layout.pointee.order == AV_CHANNEL_ORDER_UNSPEC {
+            var assumed = AVChannelLayout()
+            av_channel_layout_default(&assumed, count)
+            defer { av_channel_layout_uninit(&assumed) }
+            let idx = av_channel_layout_index_from_channel(&assumed, AV_CHAN_FRONT_CENTER)
+            return idx >= 0 ? Int(idx) : nil
+        }
+        let idx = av_channel_layout_index_from_channel(layout, AV_CHAN_FRONT_CENTER)
+        return idx >= 0 ? Int(idx) : nil
     }
 
     private func ingest(frame f: UnsafeMutablePointer<AVFrame>) {
@@ -212,64 +256,49 @@ final class AudioTapDecoder: @unchecked Sendable {
         pending.withUnsafeBufferPointer { src in
             buf.floatChannelData![0].update(from: src.baseAddress!, count: src.count)
         }
-        let chunk = AudioTapChunk(buffer: buf, ptsSeconds: pendingStartPTS)
+        let chunk = AudioTapChunk(buffer: buf, ptsSeconds: pendingStartPTS, channels: deliveredChannels)
         pendingStartPTS += Double(pending.count) / AudioTapDefaults.sampleRate
         pending.removeAll(keepingCapacity: true)
         return chunk
     }
 }
 
-/// Decodes one loopback fMP4 fragment (#95): composes init + segment in memory (the
+/// Decodes one loopback fMP4 fragment (#95): reads init + segment in place (the
 /// scrub-thumbnail precedent, see `DataIOReader`), demuxes, decodes the single audio track.
 /// A fresh demux + codec context per segment keeps it robust across producer restarts and
 /// track switches; the cost is negligible against 4-6 s of audio per segment.
 final class AudioTapSegmentDecoder: @unchecked Sendable {
-    func decode(initData: Data, segment: Data) -> [AudioTapChunk] {
-        var composed = Data(capacity: initData.count + segment.count)
-        composed.append(initData)
-        composed.append(segment)
-        let demuxer = Demuxer()
-        do {
-            try demuxer.open(reader: DataIOReader(data: composed))
-        } catch {
-            return []
-        }
-        defer { demuxer.close() }
-        let audioIdx = demuxer.audioStreamIndex
-        guard audioIdx >= 0, let stream = demuxer.stream(at: audioIdx) else { return [] }
-        let decoder = AudioTapDecoder()
-        do {
-            try decoder.open(stream: stream)
-        } catch {
-            return []
-        }
-        defer { decoder.close() }
+    private let channels: AudioTapChannels
 
-        var chunks: [AudioTapChunk] = []
-        while let packet = (try? demuxer.readPacket()) ?? nil {
-            var p: UnsafeMutablePointer<AVPacket>? = packet
-            defer { trackedPacketFree(&p) }
-            guard packet.pointee.stream_index == audioIdx else { continue }
-            chunks.append(contentsOf: decoder.decode(packet: packet))
-        }
-        chunks.append(contentsOf: decoder.drain())
-        return chunks
+    init(channels: AudioTapChannels = .downmix) {
+        self.channels = channels
+    }
+
+    func decode(initData: Data, segment: Data) -> [AudioTapChunk] {
+        decode(reader: DataIOReader(parts: [initData, segment]))
     }
 
     /// Decode a self-describing HLS segment (MPEG-TS or fMP4-with-inline-moof) whose container
     /// FFmpeg detects unaided. Used by the remote-HLS tap, where segments carry no separate init
     /// blob (unlike the loopback fMP4 fragments). Same fresh-demux-per-segment discipline.
     func decode(selfContainedSegment segment: Data) -> [AudioTapChunk] {
+        decode(reader: DataIOReader(data: segment))
+    }
+
+    private func decode(reader: DataIOReader) -> [AudioTapChunk] {
         let demuxer = Demuxer()
         do {
-            try demuxer.open(reader: DataIOReader(data: segment))
+            try demuxer.open(reader: reader)
         } catch {
             return []
         }
         defer { demuxer.close() }
         let audioIdx = demuxer.audioStreamIndex
         guard audioIdx >= 0, let stream = demuxer.stream(at: audioIdx) else { return [] }
-        let decoder = AudioTapDecoder()
+        // #910: the video packets of a loopback fragment are most of its bytes, and the tap never
+        // looks at them. Discarded here, the demuxer skips them instead of allocating each one.
+        demuxer.discardAllStreamsExcept([audioIdx])
+        let decoder = AudioTapDecoder(channels: channels)
         do {
             try decoder.open(stream: stream)
         } catch {

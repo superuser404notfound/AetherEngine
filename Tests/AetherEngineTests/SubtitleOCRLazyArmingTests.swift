@@ -70,4 +70,41 @@ struct SubtitleOCRLazyArmingTests {
         #expect(!AetherEngine.subtitleOCRWindowCovered(harvestRead: false, undecodedPackets: 0))
         #expect(!AetherEngine.subtitleOCRWindowCovered(harvestRead: true, undecodedPackets: 2))
     }
+
+    // AE#955: a host re-asserting its pick next to `setNativeSubtitleRendering(true)` restarted the
+    // worker on every call, and a restart with a batch in flight drops that batch's cursor, so the
+    // pre-fill gate waited on coverage that kept being thrown away.
+    @Test("re-picking the armed track keeps the worker, any other pick re-arms")
+    func rePickKeepsTheWorker() {
+        #expect(AetherEngine.subtitleOCRWorkerSurvivesPick(armedOrdinal: 1, pickedOrdinal: 1, pickIsEmbedded: true))
+        #expect(!AetherEngine.subtitleOCRWorkerSurvivesPick(armedOrdinal: 1, pickedOrdinal: 0, pickIsEmbedded: true))
+        #expect(!AetherEngine.subtitleOCRWorkerSurvivesPick(armedOrdinal: nil, pickedOrdinal: 1, pickIsEmbedded: true))
+        #expect(!AetherEngine.subtitleOCRWorkerSurvivesPick(armedOrdinal: 1, pickedOrdinal: nil, pickIsEmbedded: true))
+        // An external .sup shares no worker with an embedded track, whatever its ordinal says.
+        #expect(!AetherEngine.subtitleOCRWorkerSurvivesPick(armedOrdinal: 1, pickedOrdinal: 1, pickIsEmbedded: false))
+    }
+
+    // AE#955: a host that never asks left the receiver with its rendition pinned off.
+    @Test("a wireless receiver raises the rendering request the host did not, and withdraws only its own")
+    func airPlayImpliesRendering() {
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: true, hostRequested: false, impliedByEngine: false) == true)
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: true, hostRequested: true, impliedByEngine: false) == nil)
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: false, hostRequested: true, impliedByEngine: true) == false)
+        // The host's own request outlives the receiver; it takes it down itself.
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: false, hostRequested: true, impliedByEngine: false) == nil)
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: false, hostRequested: false, impliedByEngine: false) == nil)
+        // The remote-HLS bypass has no rendition of ours; a request there would deselect the origin's.
+        #expect(AetherEngine.airPlayImpliedRenderingAction(wirelessActive: true, servesOwnRenditions: false, hostRequested: false, impliedByEngine: false) == nil)
+    }
+
+    @MainActor
+    @Test("any host call takes the request over from the engine")
+    func hostCallOwnsTheRequest() throws {
+        let engine = try engineWithBitmapTrack()
+        defer { engine.cancelSubtitleOCRWorker() }
+        engine.nativeRenderingImpliedByAirPlay = true
+        engine.setNativeSubtitleRendering(true)
+        #expect(!engine.nativeRenderingImpliedByAirPlay)
+        #expect(engine.nativeSubtitleRenderingRequested)
+    }
 }

@@ -4,7 +4,7 @@ import Testing
 /// F5: a play press while an audio-session interruption is active must not restart audio on the
 /// renderer paths. The notification itself only exists on iOS and tvOS, so the tests drive the same
 /// entry points the observer calls.
-@Suite("F5: play() during an audio interruption")
+@Suite("F5: play() during an audio interruption", .timeLimit(.minutes(3)))
 @MainActor
 struct InterruptionPlayGuardTests {
 
@@ -108,7 +108,7 @@ struct InterruptionPlayGuardTests {
         engine.play()
         #expect(!engine.audioInterruptionActive)
         #expect(!engine.playDeferredByInterruption)
-        for _ in 0..<50 where engine.state != .playing { try await Task.sleep(for: .milliseconds(20)) }
+        try await waitFor { engine.state == .playing }
         #expect(engine.state == .playing)
     }
 

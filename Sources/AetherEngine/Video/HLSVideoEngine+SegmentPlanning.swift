@@ -69,6 +69,40 @@ extension HLSVideoEngine {
     ///   producer can never finish and AVPlayer waits on forever. The 60 s default leaves room for a
     ///   long final GOP and for a container duration padded by a trailing audio or subtitle track.
     ///
+    /// The cutter's and the restart gate's reach for each boundary of a keyframe-aligned plan:
+    /// `advance` (how far a repaired keyframe can precede its index entry), held below the distance
+    /// to the keyframe before that boundary so that one never reaches it. Per boundary, not one
+    /// figure for the plan: the 23 fps reporting asset keeps its keyframes 15 s apart but has one
+    /// pair four pictures apart, and a plan-wide bound left every other boundary without the reach
+    /// it needed. Empty when nothing moves.
+    static func keyframeReachTicks(advance: Int64, keyframes: [Int64], boundaries: [Int64]) -> [Int64] {
+        guard advance > 0 else { return [] }
+        let sorted = keyframes.sorted()
+        return boundaries.map { boundary in
+            var low = 0, high = sorted.count
+            while low < high {
+                let mid = (low + high) / 2
+                if sorted[mid] < boundary { low = mid + 1 } else { high = mid }
+            }
+            guard low > 0 else { return advance }
+            let (gap, overflow) = boundary.subtractingReportingOverflow(sorted[low - 1])
+            return overflow ? 0 : max(0, min(advance, gap - 1))
+        }
+    }
+
+    /// `collapseShortSegments`, then the reach for each boundary of the plan it leaves. The order is
+    /// the point: a pair of keyframes a few pictures apart is what makes a segment that gets folded,
+    /// and reaches read off the unfolded plan sat one boundary off from that fold on (three folds on
+    /// the 23 fps reporting asset). Off by one, a boundary takes the reach of the one before, which
+    /// can let the earlier keyframe of the pair open it, and hands its own to the next boundary,
+    /// whose keyframe can then miss it.
+    static func finalizedPlan(_ plan: [Segment], minDurationSeconds: Double, keyframeAdvance: Int64,
+                              keyframes: [Int64]) -> (plan: [Segment], reach: [Int64]) {
+        let collapsed = collapseShortSegments(plan, minDurationSeconds: minDurationSeconds)
+        return (collapsed, keyframeReachTicks(advance: keyframeAdvance, keyframes: keyframes,
+                                              boundaries: collapsed.map(\.startPts)))
+    }
+
     /// An index failing any witness is routed to the uniform-stride fallback.
     static func keyframeIndexIsTrustworthy(
         keyframes: [Int64],
@@ -533,6 +567,46 @@ extension HLSVideoEngine {
             return nil
         }
         return VideoConfigRecord.hevcRecord(header: extradata, vps: vps, sps: sps, pps: pps)
+    }
+
+    /// `rebuildHEVCExtradataWithInBandParameterSets` for an `avcC` without SPS or PPS (#938). Same
+    /// scan, same budgets, same rewind contract.
+    func rebuildH264ExtradataWithInBandParameterSets(
+        demuxer: Demuxer,
+        videoStreamIndex: Int32,
+        codecpar: UnsafePointer<AVCodecParameters>,
+        rewindBeforeScan: Bool = true
+    ) -> [UInt8]? {
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_H264,
+              let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 else { return nil }
+        let source = Array(UnsafeBufferPointer(start: extradata, count: Int(codecpar.pointee.extradata_size)))
+        guard VideoConfigRecord.avcRecordNeedsInBandRebuild(source),
+              let naluLengthSize = VideoConfigRecord.avcNALULengthSize(source) else { return nil }
+
+        var sets = VideoConfigRecord.H264ParameterSets()
+        let packetBudget = 16
+        var packetsScanned = 0
+        let readBudget = 512
+
+        scanSourceHead(demuxer: demuxer, rewind: rewindBeforeScan, readBudget: readBudget) { pkt in
+            if pkt.pointee.stream_index != videoStreamIndex { return false }
+            packetsScanned += 1
+            guard let pktData = pkt.pointee.data else { return packetsScanned >= packetBudget }
+            sets.collect(from: pktData, size: Int(pkt.pointee.size), naluLengthSize: naluLengthSize)
+            return sets.isComplete || packetsScanned >= packetBudget
+        }
+
+        guard let sps = sets.sps, let pps = sets.pps else {
+            EngineLog.emit(
+                "[HLSVideoEngine] in-band H.264 parameter-set scan found none: "
+                + "packets=\(packetsScanned) sps=\(sets.sps != nil) pps=\(sets.pps != nil)",
+                category: .session
+            )
+            return nil
+        }
+        return VideoConfigRecord.avcRecord(
+            sps: sps, pps: pps, naluLengthSize: naluLengthSize,
+            width: codecpar.pointee.width, height: codecpar.pointee.height)
     }
 
     /// Shows the packets at the head of the source to `inspect`, which returns true once it has seen

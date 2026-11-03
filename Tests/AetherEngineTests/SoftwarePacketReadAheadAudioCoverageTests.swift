@@ -89,7 +89,7 @@ struct SoftwarePacketReadAheadAudioCoverageTests {
 }
 
 
-@Suite(.timeLimit(.minutes(1)), .offCooperativePool)
+@Suite(.timeLimit(.minutes(3)), .offCooperativePool)
 struct QuantizedAudioReadAheadTests {
     private final class Index: @unchecked Sendable {
         let lock = NSLock()

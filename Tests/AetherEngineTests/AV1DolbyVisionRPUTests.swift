@@ -161,6 +161,69 @@ struct AV1DolbyVisionRPUTests {
         return IOSurfaceCopyValue(surface, key as CFString)
     }
 
+    @Test("a failed owned copy cannot set or clear RPU metadata on the decoder's original",
+          arguments: [false, true])
+    func copyFailurePreservesOriginal(clearsRPU: Bool) throws {
+        let original = try Self.makeBuffer()
+        let previousRPU = Data([0x19, 0x08, 0x09, 0xAA])
+        AV1DolbyVisionRPUTable.attach(previousRPU, to: original)
+        let requestedRPU: Data? = clearsRPU ? nil : Data([0x19, 0x08, 0x09, 0xBB])
+        var copyCalls = 0
+        let result = AV1DolbyVisionRPUTable.attachingToOwnedOutput(
+            requestedRPU, normalized: original, original: original,
+            copyOriginal: { source in
+                #expect(source === original)
+                copyCalls += 1
+                return nil
+            })
+        #expect(result === original)
+        #expect(copyCalls == 1)
+        let rpuKey = DoviDisplayMetadata.rpuDataKey, idKey = DoviDisplayMetadata.compatibilityIDKey
+        #expect(CVBufferCopyAttachment(original, rpuKey as CFString, nil) as? Data == previousRPU)
+        #expect(Self.surfaceValue(original, rpuKey) as? Data == previousRPU)
+        #expect(CVBufferCopyAttachment(original, idKey as CFString, nil) as? String
+                == DoviDisplayMetadata.profile81CompatibilityID)
+        #expect(Self.surfaceValue(original, idKey) as? String == DoviDisplayMetadata.profile81CompatibilityID)
+    }
+
+    @Test("an existing normalized copy receives RPU changes without a second copy",
+          arguments: [false, true])
+    func normalizedCopyIsReused(clearsRPU: Bool) throws {
+        let original = try Self.makeBuffer()
+        let owned = try Self.makeBuffer()
+        let previousRPU = Data([0x19, 0x08, 0x09, 0xAA])
+        AV1DolbyVisionRPUTable.attach(previousRPU, to: original)
+        AV1DolbyVisionRPUTable.attach(previousRPU, to: owned)
+        let requestedRPU: Data? = clearsRPU ? nil : Data([0x19, 0x08, 0x09, 0xBB])
+        let result = AV1DolbyVisionRPUTable.attachingToOwnedOutput(
+            requestedRPU, normalized: owned, original: original,
+            copyOriginal: { _ in
+                Issue.record("the normalized output is already owned")
+                return nil
+            })
+        let rpuKey = DoviDisplayMetadata.rpuDataKey
+        #expect(result === owned)
+        #expect(CVBufferCopyAttachment(owned, rpuKey as CFString, nil) as? Data == requestedRPU)
+        #expect(Self.surfaceValue(owned, rpuKey) as? Data == requestedRPU)
+        #expect(CVBufferCopyAttachment(original, rpuKey as CFString, nil) as? Data == previousRPU)
+        #expect(Self.surfaceValue(original, rpuKey) as? Data == previousRPU)
+    }
+
+    @Test("a successful frame copy receives the RPU without modifying the source")
+    func successfulOwnedCopy() throws {
+        let original = try Self.makeBuffer()
+        let rpu = Data([0x19, 0x08, 0x09, 0xAA])
+        let copier = FrameCopier()
+        let result = AV1DolbyVisionRPUTable.attachingToOwnedOutput(
+            rpu, normalized: original, original: original, copyOriginal: copier.copy)
+        let rpuKey = DoviDisplayMetadata.rpuDataKey
+        #expect(result !== original)
+        #expect(CVBufferCopyAttachment(result, rpuKey as CFString, nil) as? Data == rpu)
+        #expect(Self.surfaceValue(result, rpuKey) as? Data == rpu)
+        #expect(CVBufferCopyAttachment(original, rpuKey as CFString, nil) == nil)
+        #expect(Self.surfaceValue(original, rpuKey) == nil)
+    }
+
     @Test("attach sets the RPU and a CFString compatibility ID on the buffer and its IOSurface; nil clears both")
     func attachesAndClears() throws {
         let buffer = try Self.makeBuffer()

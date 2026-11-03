@@ -4,13 +4,20 @@ import Foundation
 
 /// Fixed-capacity ring buffer for Dolby Vision per-frame side data (dolby-vision-fel.md §5.3).
 ///
-/// Stores `{ params, dmNAL }` keyed by canonical PTS.
+/// Stores `{ params, dmNAL, baseLayerNAL }` keyed by canonical PTS.
 /// Fixed capacity of 32 entries (reorder depth plus maximum layer skew with margin).
 /// Insert overwrites the oldest entry when full.
-/// Lookup scans up to 32 entries for the nearest key within ±300 ticks (~3.3 ms).
+/// Lookup scans up to 32 entries for the nearest key within ±300 ticks.
+///
+/// Keys are in a 90 kHz time base, always: the owner builds every key with
+/// `DualLayerVideoDecoder.canonicalKey`, which rescales the stream's time base (Matroska's 1/1000,
+/// MPEG-TS's 1/90000, whatever the demuxer reports) to 90 kHz, and nothing else inserts or looks up.
+/// So the window is ±300 / 90 000 s = ±3.3 ms; fed raw 1/1000 ticks it would be ±300 ms, several
+/// frames wide. `jitterToleranceTicks` is therefore in 90 kHz ticks, not in any stream's.
 /// No heap reallocation on insert, no sorting, no dictionary overhead.
 struct FrameSideDataRing: Sendable {
     static let capacity = 32
+    /// ±3.3 ms, in the 90 kHz time base every key is in.
     static let jitterToleranceTicks: Int64 = 300
 
     /// Distance between two canonical keys, or nil when either is the missing-PTS key (`Int64.min`) or the
@@ -32,11 +39,15 @@ struct FrameSideDataRing: Sendable {
         var key: Int64
         var params: DoviMetalParams?
         var dmNAL: [UInt8]?
+        /// The same RPU with its mapping kept, for the frame if it goes out as its raw base layer
+        /// (`DoviRpuConverter.DualLayerPacketResult.baseLayerRpu`); `dmNAL` is the composed frame's form.
+        var baseLayerNAL: [UInt8]?
 
-        init(key: Int64, params: DoviMetalParams? = nil, dmNAL: [UInt8]? = nil) {
+        init(key: Int64, params: DoviMetalParams? = nil, dmNAL: [UInt8]? = nil, baseLayerNAL: [UInt8]? = nil) {
             self.key = key
             self.params = params
             self.dmNAL = dmNAL
+            self.baseLayerNAL = baseLayerNAL
         }
     }
 
@@ -72,19 +83,20 @@ struct FrameSideDataRing: Sendable {
     /// Inserts or updates an entry for `key`.
     /// If an entry already exists for this exact key, updates its fields.
     /// Otherwise overwrites the oldest slot in the ring.
-    mutating func insert(key: Int64, params: DoviMetalParams? = nil, dmNAL: [UInt8]? = nil) {
+    mutating func insert(key: Int64, params: DoviMetalParams? = nil, dmNAL: [UInt8]? = nil, baseLayerNAL: [UInt8]? = nil) {
         // If an entry exists for the exact key, update in-place without consuming a new slot:
         for i in 0..<entryCount {
             let idx = (writeIndex - entryCount + i + Self.capacity) % Self.capacity
             if let entry = buffer[idx], entry.key == key {
                 if let params { buffer[idx]?.params = params }
                 if let dmNAL { buffer[idx]?.dmNAL = dmNAL }
+                if let baseLayerNAL { buffer[idx]?.baseLayerNAL = baseLayerNAL }
                 return
             }
         }
 
         // Otherwise write at writeIndex (overwriting the oldest if at capacity):
-        buffer[writeIndex] = Entry(key: key, params: params, dmNAL: dmNAL)
+        buffer[writeIndex] = Entry(key: key, params: params, dmNAL: dmNAL, baseLayerNAL: baseLayerNAL)
         writeIndex = (writeIndex + 1) % Self.capacity
         if entryCount < Self.capacity {
             entryCount += 1
@@ -117,12 +129,18 @@ struct FrameSideDataRing: Sendable {
 
     /// Removes and returns `dmNAL` for `key` (or nearest within ±300 ticks).
     mutating func removeDisplayMetadata(key: Int64) -> [UInt8]? {
+        removeDisplayMetadataForms(key: key).composed
+    }
+
+    /// Removes and returns both RPU forms for `key` (or nearest within ±300 ticks): `composed` is
+    /// `dmNAL`, `baseLayer` is `baseLayerNAL`.
+    mutating func removeDisplayMetadataForms(key: Int64) -> (composed: [UInt8]?, baseLayer: [UInt8]?) {
         var bestIndex: Int?
         var minDiff = UInt64.max
 
         for i in 0..<entryCount {
             let idx = (writeIndex - entryCount + i + Self.capacity) % Self.capacity
-            guard let entry = buffer[idx], entry.dmNAL != nil else { continue }
+            guard let entry = buffer[idx], entry.dmNAL != nil || entry.baseLayerNAL != nil else { continue }
             guard let diff = Self.distance(entry.key, key) else { continue }
             if diff <= UInt64(Self.jitterToleranceTicks) && diff < minDiff {
                 minDiff = diff
@@ -131,9 +149,10 @@ struct FrameSideDataRing: Sendable {
             }
         }
 
-        guard let idx = bestIndex, let nal = buffer[idx]?.dmNAL else { return nil }
+        guard let idx = bestIndex, let entry = buffer[idx] else { return (nil, nil) }
         buffer[idx]?.dmNAL = nil
-        return nal
+        buffer[idx]?.baseLayerNAL = nil
+        return (entry.dmNAL, entry.baseLayerNAL)
     }
 
     /// Removes and returns `params` for `key` (or nearest within ±300 ticks).

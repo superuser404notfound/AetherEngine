@@ -127,6 +127,42 @@ enum VideoRoutingPolicy {
         return fieldOrder == AV_FIELD_UNKNOWN && spsIndicatesInterlaced
     }
 
+    /// Hardware deinterlace setup is unrelated to progressive software codecs such as VP8/VP9/AV1.
+    /// Start that relatively expensive Metal/VideoToolbox warm-up only when probe metadata says the
+    /// source can actually enter the deinterlacer.
+    static func requiresDeinterlaceWarmup(
+        codecID: AVCodecID,
+        fieldOrder: AVFieldOrder,
+        spsIndicatesInterlaced: Bool = false
+    ) -> Bool {
+        // The decoder can deinterlace any codec whose frames carry the interlaced flag.
+        // Concrete probe evidence also covers DV, MPEG-1, H.263 and interlaced ProRes.
+        // A progressive declaration skips speculative work. If later mixed-cadence frames are
+        // interlaced, DeinterlaceFilter still builds its graph on demand at that first frame.
+        if interlacedFieldOrders.contains(fieldOrder) { return true }
+        switch codecID {
+        case AV_CODEC_ID_H264:
+            return fieldOrder == AV_FIELD_UNKNOWN && spsIndicatesInterlaced
+        case AV_CODEC_ID_MPEG4, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_VC1:
+            // Shallow/live probes often leave legacy codecs UNKNOWN even though decoded frames later
+            // carry AV_FRAME_FLAG_INTERLACED. Warm conservatively for those codecs so the first such
+            // frame does not have to build the Metal/VideoToolbox graph inline.
+            return fieldOrder != AV_FIELD_PROGRESSIVE
+        default:
+            return false
+        }
+    }
+
+    /// The same SPS tie-breaker for the initial probe and a reopened disc title. A concrete field
+    /// order wins; no borrowed codec-parameter storage escapes this synchronous classification.
+    static func spsIndicatesInterlaced(codecParameters: UnsafePointer<AVCodecParameters>) -> Bool {
+        let parameters = codecParameters.pointee
+        guard parameters.codec_id == AV_CODEC_ID_H264, parameters.field_order == AV_FIELD_UNKNOWN,
+              let extradata = parameters.extradata, parameters.extradata_size > 0 else { return false }
+        let bytes = Array(UnsafeBufferPointer(start: extradata, count: Int(parameters.extradata_size)))
+        return spsIndicatesInterlaced(extradata: bytes)
+    }
+
     /// #150: pure extradata classifier feeding `spsIndicatesInterlaced`. Accepts Annex-B (MPEG-TS) and
     /// avcC (MP4/MKV) extradata; anything unparseable classifies as not-interlaced so a missing or
     /// malformed config never forces the software path.

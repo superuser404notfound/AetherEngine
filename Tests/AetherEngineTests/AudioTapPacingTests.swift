@@ -1,4 +1,5 @@
 import XCTest
+import AVFAudio
 @testable import AetherEngine
 
 /// #95: pure pacing core for the loopback audio tap reader. The reader decodes the engine's own
@@ -53,5 +54,27 @@ final class AudioTapPacingTests: XCTestCase {
         // normal overshoot, not a seek.
         XCTAssertEqual(decide(120.0, 95.1, previous: 95.1), .sleep)
         XCTAssertEqual(decide(300.0, 100.0, previous: 99.75), .sleep)
+    }
+
+    /// #864 follow-up (qoli's characterization): lead + tolerance bounds what is RELEASED ahead of
+    /// the playhead, not what is retained. A reader parked at 95 s with 15 s segments has decoded
+    /// 90-105 and 105-120: 12.1 s went to the stream and the other 14.9 s are still held, so the
+    /// decoded tail of the current segment comes on top of the released window.
+    func testHeldTailIsAdditionalToTheReleasedLead() {
+        func packet(_ index: Int) -> AudioTapBuffer {
+            let pcm = AVAudioPCMBuffer(pcmFormat: AetherEngine.audioTapFormat, frameCapacity: 4800)!
+            pcm.frameLength = 4800
+            return AudioTapBuffer(buffer: pcm, sourceTime: Double(index) / 10, discontinuity: false)
+        }
+        var held = AudioTapHeldBuffers()
+        var released = 0
+        for index in 900..<1050 { held.append(start: Double(index) / 10, buffer: packet(index)) }
+        _ = held.release(before: 105.05, droppingEndsBefore: 93.05) { _ in released += 1 }
+        for index in 1050..<1200 { held.append(start: Double(index) / 10, buffer: packet(index)) }
+        _ = held.release(before: 105.05, droppingEndsBefore: 93.05) { _ in released += 1 }
+        var stillHeld = 0
+        _ = held.release(before: .infinity, droppingEndsBefore: -.infinity) { _ in stillHeld += 1 }
+        XCTAssertEqual(released, 121)
+        XCTAssertEqual(stillHeld, 149)
     }
 }

@@ -56,9 +56,12 @@ struct HDR10PlusScanInputBudgetTests {
 /// resyncs through byte by byte inside a single `av_read_frame`.
 enum TailHeavyMatroska {
 
-    static func make(foreignBytes: Int, junkTail: Bool = false) throws -> Data {
+    /// `bareRecord` leaves the hvcC as its 22-byte header with no parameter-set arrays, the record of a
+    /// source whose parameter sets are in-band.
+    static func make(foreignBytes: Int, junkTail: Bool = false, bareRecord: Bool = false) throws -> Data {
         let mp4 = try ProbeTestFixtures.decode(HDR10PlusProbeIntegrationTests.hdr10Base64)
-        let (hvcC, frames) = try hevcTrack(mp4)
+        var (hvcC, frames) = try hevcTrack(mp4)
+        if bareRecord { hvcC = Array(hvcC.prefix(22)) + [0] }
 
         var out = Data()
         out += element([0x1A, 0x45, 0xDF, 0xA3],

@@ -336,10 +336,10 @@ struct HLSOriginRelayAddressingTests {
         // refusal the reader and the subtitle prefetcher would have been metered by.
         //
         // Read off the counter and the learned limit rather than `isPaced`. The quiet ladder
-        // `isPaced` reports is switched off process-wide by `quietPeriodCapForTesting`, which two
-        // other suites set in their init and never restore, so in a full run this suite's answer
-        // would be decided by whether one of them happened to have started. The origin's port is
-        // this test's own, which is what keeps the counter this test's own.
+        // `isPaced` reports is switched off process-wide while two other suites hold a
+        // `pinQuietPeriodCapForTesting` pin, and suites run in parallel, so this suite's answer would
+        // be decided by whether one of them happened to be running. The origin's port is this test's
+        // own, which is what keeps the counter this test's own.
         let snapshot = try #require(OriginRequestBudget.shared.snapshot(for: origin))
         #expect(snapshot.refusals == 1, "a 429 through the relay was charged \(snapshot.refusals) times")
         #expect(snapshot.limit == 1, "the refusal did not bring the origin's concurrency down")

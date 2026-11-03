@@ -55,7 +55,8 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
             let lang = track.language ?? "und"
             let atmos = track.isAtmos ? " [Atmos]" : ""
             let def = track.isDefault ? " (default)" : ""
-            print("  [\(track.id)] codec=\(track.codec) channels=\(track.channels) lang=\(lang)\(atmos)\(def)")
+            let kind = (track.isVisualImpaired ? " (audio description)" : "") + (track.isCommentary ? " (commentary)" : "")
+            print("  [\(track.id)] codec=\(track.codec) channels=\(track.channels) lang=\(lang)\(atmos)\(def)\(kind)")
             print("       rate=\(track.sampleRate) Hz bits=\(track.bitsPerSample) fmt=\(track.sampleFormat ?? "-") "
                   + "layout=\(track.channelLayout ?? "-") profile=\(track.profile ?? "-")")
             print("       title=\(track.name)")

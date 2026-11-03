@@ -1,4 +1,6 @@
 import XCTest
+import Testing
+import Synchronization
 @testable import AetherEngine
 
 final class ByteFIFOTests: XCTestCase {
@@ -106,5 +108,67 @@ final class ByteFIFOTests: XCTestCase {
             fifo.read(into: $0.baseAddress!, maxLength: 4)
         }
         wait(for: [expectation], timeout: 300)
+    }
+}
+
+// Empty writes must not masquerade as the EOF that the ingest reader returns to FFmpeg.
+// Run potentially blocking calls on real threads so cancellation can still release them.
+@Suite(.timeLimit(.minutes(3)))
+struct ByteFIFOEmptyOperationsTests {
+    @Test("an empty write leaves a reader waiting for bytes")
+    func emptyWriteDoesNotSignalEOF() async throws {
+        let fifo = ByteFIFO(capacity: 4)
+        defer { fifo.cancel() }
+        #expect(fifo.write(Data()))
+        let result = Mutex<Int?>(nil)
+        Thread.detachNewThread {
+            var byte: UInt8 = 0
+            let count = fifo.read(into: &byte, maxLength: 1)
+            result.withLock { $0 = count }
+        }
+        try await waitFor { result.withLock { $0 != nil } || fifo.parkedWaiterCount > 0 }
+        #expect(result.withLock { $0 == nil }, "an empty write must not return zero (EOF)")
+        #expect(fifo.isEmptyWithReaderParked)
+        #expect(fifo.write(Data([42])))
+        try await waitFor { result.withLock { $0 != nil } }
+        #expect(result.withLock { $0 == 1 })
+    }
+
+    @Test("an empty write completes even when capacity is occupied")
+    func emptyWriteDoesNotWaitForCapacity() async throws {
+        let fifo = ByteFIFO(capacity: 1)
+        defer { fifo.cancel() }
+        #expect(fifo.write(Data([42])))
+        let result = Mutex<Bool?>(nil)
+        Thread.detachNewThread {
+            let accepted = fifo.write(Data())
+            result.withLock { $0 = accepted }
+        }
+        try await waitFor { fifo.parkedWaiterCount > 0 || result.withLock { $0 != nil } }
+        #expect(fifo.parkedWaiterCount == 0)
+        fifo.cancel()
+        try await waitFor { result.withLock { $0 != nil } }
+        #expect(result.withLock { $0 == true })
+    }
+
+    @Test("empty writes still reject a finished or cancelled FIFO")
+    func emptyWriteHonorsTerminalState() {
+        let finished = ByteFIFO(capacity: 1)
+        finished.finish()
+        #expect(!finished.write(Data()))
+        let cancelled = ByteFIFO(capacity: 1)
+        cancelled.cancel()
+        #expect(!cancelled.write(Data()))
+    }
+
+    @Test("a nonpositive read length is an error and preserves queued bytes", arguments: [0, -1, Int.min])
+    func invalidLengthPreservesBytes(length: Int) {
+        let fifo = ByteFIFO(capacity: 1)
+        #expect(fifo.write(Data([42])))
+        var byte: UInt8 = 99
+        #expect(fifo.read(into: &byte, maxLength: length) == -1)
+        #expect(byte == 99)
+        #expect(fifo.read(into: &byte, maxLength: 1) == 1)
+        #expect(byte == 42)
     }
 }

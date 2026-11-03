@@ -139,7 +139,8 @@ final class LoopbackAudioReader: @unchecked Sendable {
             held.append(start: chunk.ptsSeconds,
                         buffer: AudioTapBuffer(buffer: chunk.buffer,
                                                sourceTime: chunk.ptsSeconds + shift,
-                                               discontinuity: pendingDiscontinuity))
+                                               discontinuity: pendingDiscontinuity,
+                                               channels: chunk.channels))
             pendingDiscontinuity = false
         }
         nextIndex = idx + 1

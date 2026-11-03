@@ -150,6 +150,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// (HEVC allows at most 16 pictures of it), so it is a timestamp discontinuity: the highest PTS
     /// restarts from this packet and the learned lead is left alone, instead of absorbing the jump
     /// into the lead and switching the look-ahead cap off for the rest of the session.
+    /// The gate is armed only on the dual-layer route (VOD, seekable); a forward jump holds the packet
+    /// until the clock reaches it, when the layer would present it anyway.
     ///
     /// The learned lead is also capped at `maxLearnedLead`: a backward step inside the 16-picture
     /// window that is still a glitch (a 12-frame one, say) would otherwise raise the lead for the whole
@@ -347,6 +349,20 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return _outOfOrderFramesDropped
     }
 
+    /// Frames the arrival-order path discarded for sitting below the seek threshold: the pictures of the
+    /// GOP the seek landed in that precede the target. A decision rather than a loss, so it stays out of
+    /// `lostBeforeLayer`, but counted so a seek that discards more than its GOP is visible.
+    /// Guarded by `reorderLock`.
+    private var _arrivalSkippedFramesDropped = 0
+    /// Whether this seek's first skipped frame has been logged. Re-armed whenever the threshold changes
+    /// or is cleared, so the line fires once per seek rather than once per renderer. Guarded by `reorderLock`.
+    private var arrivalSkipLogged = false
+    var arrivalSkippedFramesDropped: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _arrivalSkippedFramesDropped
+    }
+
     /// #298: frames refused at the enqueue gate for carrying an unschedulable PTS. Guarded by `reorderLock`.
     private var _untimedFramesDropped = 0
     var untimedFramesDropped: Int {
@@ -406,6 +422,160 @@ final class SampleBufferRenderer: @unchecked Sendable {
         let layer = Self.makeDisplayLayer(isHDR: false, gravity: videoGravity)
         displayLayer = layer
         videoRenderer = layer.sampleBufferRenderer
+        observeQueueFlushRequirements()
+    }
+
+    deinit {
+        for token in queueNotificationTokens { NotificationCenter.default.removeObserver(token) }
+    }
+
+    // MARK: - Flush recovery
+
+    /// Why the queue target needs a flush it did not get from the host.
+    enum QueueFlushReason: Sendable, Equatable {
+        /// `requiresFlushToResumeDecoding` turned true (the app lost the right to use decoder resources).
+        case requiresFlush
+        /// The queue target's status is `.failed`.
+        case failed
+
+        var trigger: FlushRecoveryTrigger {
+            switch self {
+            case .requiresFlush: .videoQueueRequiresFlush
+            case .failed: .videoQueueFailed
+            }
+        }
+    }
+
+    /// Told, on whatever thread noticed it and with no lock held, that the queue target needs a flush
+    /// and has lost what was in it. The host decides between a plain flush and a reposition to the
+    /// playhead (`FlushRecoveryPolicy`). Guarded by `reorderLock`.
+    private var _queueFlushObserver: (@Sendable (QueueFlushReason) -> Void)?
+    func setQueueFlushObserver(_ observer: (@Sendable (QueueFlushReason) -> Void)?) {
+        reorderLock.lock()
+        _queueFlushObserver = observer
+        reorderLock.unlock()
+    }
+
+    private func reportQueueFlush(_ reason: QueueFlushReason) {
+        reorderLock.lock()
+        let observer = _queueFlushObserver
+        reorderLock.unlock()
+        observer?(reason)
+    }
+
+    #if DEBUG
+    /// Test seam: what a failed enqueue does, without a renderer to fail.
+    func reportQueueFlushForTesting(_ reason: QueueFlushReason) { reportQueueFlush(reason) }
+    #endif
+
+    /// Frames the queue target took while it was neither failed nor asking for a flush, counted after
+    /// the enqueue. `enqueueCount` also counts the frame handed over right after a failed queue was
+    /// revived, which proves nothing about the queue. The host reads this as "the queue has been given a
+    /// frame": before the first one there is nothing to recover. Whether a recovery helped is asked of
+    /// `presentedFrameCount(clockSeconds:)`, which wants more than an enqueue the queue may still
+    /// refuse. Guarded by `reorderLock`.
+    private var _acceptedFrameCount = 0
+    var acceptedFrameCount: Int {
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        return _acceptedFrameCount
+    }
+
+    private var loggedRequiresFlushAtEnqueue = false
+
+    /// Frames handed to a healthy queue whose time the clock has not passed yet, in source seconds,
+    /// oldest first. Guarded by `reorderLock`.
+    private var _pendingPresentation: [Double] = []
+    private var _presentedFrameCount = 0
+    private static let pendingPresentationCapacity = 256
+
+    /// Frames the clock has passed while the queue stayed healthy: the stronger evidence the storm rule
+    /// wants, since a queue can report itself healthy right after an enqueue and refuse the frame later.
+    /// A frame still ahead of the clock is not counted, and none is while the queue needs a flush; a
+    /// flush drops the ones not yet counted, as the queue dropped them.
+    func presentedFrameCount(clockSeconds: Double) -> Int {
+        let healthy = queueFlushReasonNow() == nil
+        reorderLock.lock()
+        defer { reorderLock.unlock() }
+        if healthy, clockSeconds.isFinite {
+            let passed = _pendingPresentation.prefix { $0 <= clockSeconds }.count
+            if passed > 0 {
+                _pendingPresentation.removeFirst(passed)
+                _presentedFrameCount += passed
+            }
+        }
+        return _presentedFrameCount
+    }
+
+    /// The tokens for the notifications below; removed in `deinit`.
+    private var queueNotificationTokens: [NSObjectProtocol] = []
+
+    /// The renderer posts from an arbitrary thread, possibly from inside a call that already holds
+    /// `reorderLock` (`presentationTimeExpectation` is set under it), and the handlers take that lock.
+    /// They therefore only hop here, the way `AudioOutput` does for its renderer.
+    private let queueNotificationQueue = DispatchQueue(label: "engine.renderer.queue-flush")
+
+    /// Before this nothing here observed either: a picture that froze after backgrounding stayed frozen
+    /// until the user seeked, while AVPlayer resumes by itself.
+    ///
+    /// The property is read back rather than taken from the payload: the notification says "changed",
+    /// the property says which way.
+    private func observeQueueFlushRequirements() {
+        let center = NotificationCenter.default
+        let renderer = videoRenderer
+        queueNotificationTokens.append(center.addObserver(
+            forName: AVSampleBufferVideoRenderer.requiresFlushToResumeDecodingDidChangeNotification,
+            object: renderer, queue: nil
+        ) { [weak self] _ in
+            self?.queueNotificationQueue.async { [weak self] in
+                guard let self, self.queueNeedsFlushNow() else { return }
+                EngineLog.emit("[Renderer] video queue requires a flush to resume decoding (status=\(self.statusName))",
+                               category: .swPlayback)
+                self.reportQueueFlush(.requiresFlush)
+            }
+        })
+        queueNotificationTokens.append(center.addObserver(
+            forName: AVSampleBufferVideoRenderer.didFailToDecodeNotification,
+            object: renderer, queue: nil
+        ) { [weak self] note in
+            let error = note.userInfo?[AVSampleBufferVideoRenderer.didFailToDecodeNotificationErrorKey] as? NSError
+            self?.queueNotificationQueue.async { [weak self] in
+                guard let self else { return }
+                EngineLog.emit("[Renderer] video queue failed to decode: \(error.map { "\($0.domain)/\($0.code)" } ?? "nil") (status=\(self.statusName))",
+                               category: .swPlayback)
+                // One undecodable frame leaves the queue running; only a queue that is no longer is reported.
+                guard self.queueNeedsFlushNow() else { return }
+                self.reportQueueFlush(.failed)
+            }
+        })
+    }
+
+    #if DEBUG
+    /// Runs the work the notification handlers queue, then returns. Tests wait on this instead of sleeping.
+    func drainQueueNotificationsForTesting() { queueNotificationQueue.sync {} }
+
+    /// The test answers below are set on one thread and read on another (the demux loop, the notification
+    /// queue), so they sit behind a lock.
+    private let testAnswerLock = NSLock()
+    private var _queueNeedsFlushForTesting: (@Sendable () -> Bool)?
+    private var _readyForMoreMediaDataForTesting: (@Sendable () -> Bool)?
+
+    /// A renderer cannot be made to fail on demand; tests answer for it.
+    var queueNeedsFlushForTesting: (@Sendable () -> Bool)? {
+        get { testAnswerLock.lock(); defer { testAnswerLock.unlock() }; return _queueNeedsFlushForTesting }
+        set { testAnswerLock.lock(); _queueNeedsFlushForTesting = newValue; testAnswerLock.unlock() }
+    }
+    #endif
+
+    private func queueNeedsFlushNow() -> Bool { queueFlushReasonNow() != nil }
+
+    /// Why the queue target needs a flush right now, nil if it does not. Failed is the stronger of the two.
+    private func queueFlushReasonNow() -> QueueFlushReason? {
+        #if DEBUG
+        if let answer = queueNeedsFlushForTesting { return answer() ? .requiresFlush : nil }
+        #endif
+        if videoRenderer.status == .failed { return .failed }
+        return videoRenderer.requiresFlushToResumeDecoding ? .requiresFlush : nil
     }
 
     /// #303: what the display did with the frames, as the renderer itself counts them. Our own
@@ -429,6 +599,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
         /// timestamps plus failed sample-buffer builds. A gap between the decoder's count and
         /// `handedOver` that this does not account for is a post-seek skip.
         let lostBeforeLayer: Int
+        /// Cumulative frames the arrival-order path discarded below the seek threshold. A decision
+        /// rather than a loss, so it is not part of `lostBeforeLayer`.
+        let arrivalSkipped: Int
         /// Shortest and longest gap between consecutive handed-over timestamps over the interval,
         /// nil when fewer than two frames were handed over. Source axis, seconds.
         let minDeltaSeconds: Double?
@@ -446,6 +619,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         _maxHandedDeltaSeconds = -.infinity
         return Cadence(handedOver: enqueueCount,
                        lostBeforeLayer: _untimedFramesDropped + _sampleBuildFailures + _outOfOrderFramesDropped,
+                       arrivalSkipped: _arrivalSkippedFramesDropped,
                        minDeltaSeconds: minD, maxDeltaSeconds: maxD)
     }
 
@@ -484,8 +658,24 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// isReadyForMoreMediaData stays optimistically true even when the renderer queue is full, causing
     /// FigVideoQueueRemote -12080 on over-enqueue.
     var isReadyForMoreMediaData: Bool {
-        queueTarget.isReadyForMoreMediaData
+        #if DEBUG
+        if let answer = readyForMoreMediaDataForTesting { return answer() }
+        #endif
+        return queueTarget.isReadyForMoreMediaData
     }
+
+    #if DEBUG
+    /// Holds the demux loop in its back-pressure wait on demand.
+    var readyForMoreMediaDataForTesting: (@Sendable () -> Bool)? {
+        get { testAnswerLock.lock(); defer { testAnswerLock.unlock() }; return _readyForMoreMediaDataForTesting }
+        set { testAnswerLock.lock(); _readyForMoreMediaDataForTesting = newValue; testAnswerLock.unlock() }
+    }
+    /// Frames handed to a healthy queue that no sample has counted yet.
+    var pendingPresentationCountForTesting: Int {
+        reorderLock.lock(); defer { reorderLock.unlock() }
+        return _pendingPresentation.count
+    }
+    #endif
 
     /// A suspended process may return with a failed queue that never admits another frame.
     /// Recover before the feeder wakes; a healthy full queue must keep its buffered frames.
@@ -537,14 +727,21 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     func setSkipThreshold(_ time: CMTime?) {
         reorderLock.lock()
+        installSkipThresholdLocked(time)
+        reorderLock.unlock()
+    }
+
+    /// `reorderLock` held.
+    private func installSkipThresholdLocked(_ time: CMTime?) {
         skipUntilPTS = time
         // Nothing below the threshold will be handed over, and the first frame past it need not be
         // the lowest one to come, so the floor starts here rather than at that frame.
         if arrivalFloor != nil, let time, time.isNumeric {
             arrivalFloor?.reset(start: CMTimeGetSeconds(time))
+            // A seek sets the same threshold again after the landing; only a new target is a new seek.
+            if arrivalSkipBelow != CMTimeGetSeconds(time) { arrivalSkipLogged = false }
             arrivalSkipBelow = CMTimeGetSeconds(time)
         }
-        reorderLock.unlock()
     }
 
     /// #298: whether a frame's presentation timestamp can be scheduled at all. AV_NOPTS_VALUE reaches
@@ -576,7 +773,21 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
         if let threshold = skipUntilPTS {
             if CMTimeCompare(pts, threshold) < 0 {
+                // On the arrival-order path this is the seek's own discard: the count and the once-per-seek
+                // line cover it as they cover the frames `handOverOnArrival` refuses below the threshold.
+                var logFirst = false
+                if arrivalFloor != nil {
+                    _arrivalSkippedFramesDropped += 1
+                    logFirst = !arrivalSkipLogged
+                    arrivalSkipLogged = true
+                }
                 reorderLock.unlock()
+                if logFirst {
+                    EngineLog.emit(
+                        "[Renderer] frame at \(String(format: "%.3f", CMTimeGetSeconds(pts)))s is below the seek threshold "
+                        + "\(String(format: "%.3f", CMTimeGetSeconds(threshold)))s; skipping until the first frame at or past it",
+                        category: .swPlayback)
+                }
                 return
             }
             skipUntilPTS = nil
@@ -634,7 +845,16 @@ final class SampleBufferRenderer: @unchecked Sendable {
     private func handOverOnArrival(pixelBuffer: CVPixelBuffer, pts: CMTime, ptsSeconds: Double,
                                    hdr10PlusData: Data?) {
         if let below = arrivalSkipBelow, ptsSeconds < below {
+            _arrivalSkippedFramesDropped += 1
+            let logFirst = !arrivalSkipLogged
+            arrivalSkipLogged = true
             reorderLock.unlock()
+            if logFirst {
+                EngineLog.emit(
+                    "[Renderer] frame at \(String(format: "%.3f", ptsSeconds))s is below the seek threshold "
+                    + "\(String(format: "%.3f", below))s; skipping until the first frame at or past it",
+                    category: .swPlayback)
+            }
             return
         }
         // #303: the newest timestamp admitted, as on the reorder path.
@@ -690,9 +910,15 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// Discard all buffered frames. `removingDisplayedImage: true` (stop/teardown) also clears the visible
     /// frame; `false` (seek) holds the last frame on screen until the post-seek frame is enqueued, so a seek
     /// doesn't flash black between the old and new positions (matches the hardware path's hold-last-frame).
-    func flush(removingDisplayedImage: Bool = true) {
+    ///
+    /// `skipThreshold` is installed under the same lock as the flush, for a recovery that restarts the
+    /// decoder on a keyframe past the playhead: a frame that arrives between the flush and a separate
+    /// `setSkipThreshold` call would otherwise be handed over below the playhead (and start the floor
+    /// at itself).
+    func flush(removingDisplayedImage: Bool = true, skipThreshold: CMTime? = nil) {
         reorderLock.lock()
         reorderBuffer.removeAll()
+        _pendingPresentation.removeAll()
         _lastEnqueuedFrame = nil
         // #407: the next frame handed over will not follow the last one, so the gap between them is
         // not a cadence measurement. Left standing, every seek would report one enormous interval.
@@ -701,6 +927,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // The renderer's own flush below also drops the expectation it was given.
         arrivalFloor?.reset()
         arrivalSkipBelow = nil
+        arrivalSkipLogged = false
         // #303: nothing is held any more, so the frontier is not a frontier. Left standing, a
         // backward seek would keep reporting the pre-seek timestamp and read as a cushion of
         // however far the seek travelled.
@@ -712,6 +939,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         // Invalidate the format description cache; the next load() may open a stream with different colorimetry at the same resolution.
         cachedFormatDesc = nil
         cachedFormatKey = nil
+        if let skipThreshold { installSkipThresholdLocked(skipThreshold) }
         reorderLock.unlock()
 
         videoRenderer.flush(removingDisplayedImage: removingDisplayedImage) { }
@@ -775,20 +1003,45 @@ final class SampleBufferRenderer: @unchecked Sendable {
         }
         // Recover from failed queue target (Synchronizer/controlTimebase handoff races can push it here; flush recovers it).
         let target = queueTarget
-        if queueStatus == .failed {
-            if !loggedLayerFailed {
+        // A queue that requires a flush but is not failed is stalled just the same, and its
+        // notification does not fire again: if the host ignored it (a seek was in flight, a recovery
+        // pending) this is the next chance to act on it. Treated like a failed queue: flushed, and
+        // reported so the host decides how the picture comes back.
+        if let reason = queueFlushReasonNow() {
+            if reason == .failed, !loggedLayerFailed {
                 loggedLayerFailed = true
                 EngineLog.emit("[Renderer] queue target failed at enqueue #\(enqueueCount + 1): \(queueError?.localizedDescription ?? "nil"), attempting recovery via flush()", category: .swPlayback)
+            } else if reason == .requiresFlush, !loggedRequiresFlushAtEnqueue {
+                loggedRequiresFlushAtEnqueue = true
+                EngineLog.emit("[Renderer] queue target requires a flush at enqueue #\(enqueueCount + 1) (status=\(statusName)), flushing", category: .swPlayback)
             }
             target.flush()
+            reorderLock.lock()
+            _pendingPresentation.removeAll()
+            reorderLock.unlock()
+            // The flush revives the queue, but what it held is gone and the demuxer stands ahead of
+            // it: the host decides how the picture comes back.
+            reportQueueFlush(reason)
         }
         if !target.isReadyForMoreMediaData, !loggedNotReady {
             loggedNotReady = true
             EngineLog.emit("[Renderer] isReadyForMoreMediaData=false at enqueue #\(enqueueCount + 1) status=\(statusName)", category: .swPlayback)
         }
         target.enqueue(sampleBuffer)
+        let accepted = queueFlushReasonNow() == nil
         reorderLock.lock()
         _lastEnqueuedFrame = pixelBuffer
+        if accepted {
+            _acceptedFrameCount += 1
+            // The queue may still refuse the frame, and says so later than this read. It counts as
+            // presented only once the clock has passed it with the queue still healthy.
+            if pts.isNumeric {
+                _pendingPresentation.append(CMTimeGetSeconds(pts))
+                if _pendingPresentation.count > Self.pendingPresentationCapacity {
+                    _pendingPresentation.removeFirst(_pendingPresentation.count - Self.pendingPresentationCapacity)
+                }
+            }
+        }
         reorderLock.unlock()
 
         // #311: reported here rather than at admission, so it describes frames the compositor has

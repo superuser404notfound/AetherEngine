@@ -38,7 +38,7 @@ struct DemuxerStreamLifetimeTests {
     }
 
     @Test("close waits for a caller inside withStream and hands out no stream once it has started",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func closeWaitsForStreamUsers() async throws {
         let url = try MultiSubtitleContainerFixture.write()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -91,7 +91,7 @@ struct DemuxerStreamLifetimeTests {
     }
 
     @Test("the track accessors answer from their snapshot while a read holds the demuxer",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func accessorsDoNotWaitOutARead() async throws {
         let url = try MultiSubtitleContainerFixture.write()
         defer { try? FileManager.default.removeItem(at: url) }

@@ -42,6 +42,47 @@ struct HLSSegmentCrypt: Equatable {
     let iv: Data
 }
 
+/// EXT-X-BYTERANGE (RFC 8216 4.3.2.2): the segment is `length` bytes of its URI's resource starting
+/// at `offset`, not the whole resource. A packager that writes one file per stream lists every
+/// segment against that file.
+struct HLSByteRange: Equatable {
+    let offset: Int
+    let length: Int
+
+    /// The `Range` request header value for this sub-range.
+    var requestHeaderValue: String { "bytes=\(offset)-\(offset + length - 1)" }
+
+    /// The segment's bytes out of a 2xx answer to a request that carried `requestHeaderValue`. A 206 is
+    /// the sub-range itself and must start where it was asked to and hold all of it. An origin that
+    /// ignores `Range` answers 200 with the whole resource, and the sub-range is cut from it here. An
+    /// answer that cannot hold the sub-range fails, since playing the wrong bytes is worse than failing
+    /// the segment.
+    func segmentBytes(from body: Data, status: Int, contentRange: String?) throws -> Data {
+        if status == 206 {
+            if let contentRange, Self.contentRangeStart(contentRange) != offset {
+                throw HLSIngestError.playlistInvalid(reason: "byte range answered elsewhere")
+            }
+            guard body.count >= length else {
+                throw HLSIngestError.playlistInvalid(reason: "byte range answered short")
+            }
+            return body.prefix(length)
+        }
+        guard body.count >= offset + length else {
+            throw HLSIngestError.playlistInvalid(reason: "byte range beyond the resource")
+        }
+        let start = body.startIndex + offset
+        return body.subdata(in: start..<(start + length))
+    }
+
+    /// The first byte position of a `Content-Range: bytes <first>-<last>/<total>` value.
+    static func contentRangeStart(_ value: String) -> Int? {
+        let text = value.trimmingCharacters(in: .whitespaces)
+        guard text.lowercased().hasPrefix("bytes "),
+              let dash = text.firstIndex(of: "-") else { return nil }
+        return Int(text[text.index(text.startIndex, offsetBy: 6)..<dash].trimmingCharacters(in: .whitespaces))
+    }
+}
+
 struct HLSMediaSegment: Equatable {
     let uri: String
     let duration: Double
@@ -51,14 +92,17 @@ struct HLSMediaSegment: Equatable {
     /// tag. Nil when the playlist carries none. This is the only reference two renditions of a program
     /// reliably share (AE#359): their PTS bases can differ, their PDT and media sequence do not.
     let programDateTime: Date?
+    /// Nil when the segment is its whole resource.
+    let byteRange: HLSByteRange?
 
     init(uri: String, duration: Double, discontinuityBefore: Bool, crypt: HLSSegmentCrypt? = nil,
-         programDateTime: Date? = nil) {
+         programDateTime: Date? = nil, byteRange: HLSByteRange? = nil) {
         self.uri = uri
         self.duration = duration
         self.discontinuityBefore = discontinuityBefore
         self.crypt = crypt
         self.programDateTime = programDateTime
+        self.byteRange = byteRange
     }
 }
 
@@ -185,6 +229,10 @@ enum HLSPlaylistParser {
         // EXT-X-PROGRAM-DATE-TIME is emitted periodically, not per segment; the segments after one
         // inherit it plus the durations in between.
         var pendingDateTime: Date?
+        // EXT-X-BYTERANGE applies to the next URI only. Without an offset it continues right after the
+        // previous segment, which must then be a sub-range of the same resource.
+        var pendingByteRange: (length: Int, offset: Int?)?
+        var previousRangeEnd: (uri: String, end: Int)?
 
         for line in lines {
             if line.hasPrefix("#EXT-X-TARGETDURATION:") {
@@ -229,6 +277,8 @@ enum HLSPlaylistParser {
                 }
             } else if line.hasPrefix("#EXT-X-PROGRAM-DATE-TIME:") {
                 pendingDateTime = parseProgramDateTime(String(line.dropFirst("#EXT-X-PROGRAM-DATE-TIME:".count)))
+            } else if line.hasPrefix("#EXT-X-BYTERANGE:") {
+                pendingByteRange = try parseByteRange(line.dropFirst("#EXT-X-BYTERANGE:".count))
             } else if line.hasPrefix("#EXT-X-MAP:") {
                 hasMap = true
             } else if line.hasPrefix("#EXT-X-ENDLIST") {
@@ -247,15 +297,34 @@ enum HLSPlaylistParser {
                 let segmentDuration = pendingDuration ?? targetDuration ?? 0
                 let segmentDate = pendingDateTime
                 if let segmentDate { pendingDateTime = segmentDate.addingTimeInterval(segmentDuration) }
+                var byteRange: HLSByteRange?
+                if let pending = pendingByteRange {
+                    let offset: Int
+                    if let explicit = pending.offset {
+                        offset = explicit
+                    } else if let previous = previousRangeEnd, previous.uri == line {
+                        offset = previous.end
+                    } else {
+                        // No previous sub-range of this URI to continue (RFC 8216: MUST fail to parse).
+                        throw HLSIngestError.playlistInvalid(reason: "BYTERANGE offset undefined")
+                    }
+                    guard offset <= Int.max - pending.length else {
+                        throw HLSIngestError.playlistInvalid(reason: "BYTERANGE out of range")
+                    }
+                    byteRange = HLSByteRange(offset: offset, length: pending.length)
+                }
+                previousRangeEnd = byteRange.map { (line, $0.offset + $0.length) }
                 segments.append(HLSMediaSegment(
                     uri: line,
                     duration: segmentDuration,
                     discontinuityBefore: pendingDiscontinuity,
                     crypt: crypt,
-                    programDateTime: segmentDate
+                    programDateTime: segmentDate,
+                    byteRange: byteRange
                 ))
                 pendingDuration = nil
                 pendingDiscontinuity = false
+                pendingByteRange = nil
             }
         }
         guard let target = targetDuration else {
@@ -286,6 +355,20 @@ enum HLSPlaylistParser {
             throw HLSIngestError.playlistInvalid(reason: "\(tag) out of range")
         }
         return value
+    }
+
+    /// `<length>[@<offset>]`, both decimal integers. A zero length names no bytes, so it is refused
+    /// with the malformed forms rather than fetched as a request no origin can answer.
+    private static func parseByteRange(_ text: Substring) throws -> (length: Int, offset: Int?) {
+        let parts = text.trimmingCharacters(in: .whitespaces).split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count <= 2, let length = Int(parts[0]), length > 0 else {
+            throw HLSIngestError.playlistInvalid(reason: "malformed BYTERANGE")
+        }
+        guard parts.count == 2 else { return (length, nil) }
+        guard let offset = Int(parts[1]), offset >= 0 else {
+            throw HLSIngestError.playlistInvalid(reason: "malformed BYTERANGE")
+        }
+        return (length, offset)
     }
 
     /// Parse a `0x`-prefixed hex EXT-X-KEY IV into 16-byte big-endian Data. Returns nil on malformed length (caller falls back to sequence-number IV).

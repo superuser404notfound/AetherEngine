@@ -169,5 +169,55 @@ struct DualLayerPictureAlignmentSyntheticTests {
         let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 21), el: Self.slice(T.trailR, poc: 6)), pts: 21000)
         #expect(r == Result(pts: 6000, placed: true))
     }
+
+    // MARK: - Slots missing from the base layer's times
+
+    @Test("an enhancement slot below the latest base slot that no base picture filled pairs by access unit")
+    func missingPastSlotKeepsUnitTime() {
+        var a = Self.seeded()
+        a.reset()
+        // Base POCs 0, 1, 2, then 4: slot 3 is never filled (a picture the base layer did not number).
+        _ = Self.run(&a, Self.unit(bl: Self.slice(T.idrNLP, poc: 0), el: Self.slice(T.idrNLP, poc: 0), parameterSets: true), pts: 0)
+        for i in [1, 2, 4] {
+            _ = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: i), el: Self.slice(T.trailR, poc: i)), pts: Int64(i) * 1000)
+        }
+        // Unit 4: base POC 5 (latest slot 5, time 5000); the enhancement layer shows POC 3, whose slot
+        // is below the latest and has no base time. Extrapolating along the origin-to-latest line
+        // (1000 per slot) would give 3000, a time no base frame has; the unit keeps its own 5000.
+        let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 5), el: Self.slice(T.trailR, poc: 3)), pts: 5000)
+        #expect(r == Result(pts: 5000, placed: false))
+        #expect(a.reorderedUnits == 0)
+    }
+
+    @Test("when the base layer reorders, an enhancement slot below the latest decoded one is still to come and is extrapolated")
+    func reorderingBaseKeepsExtrapolatingBelowLatest() {
+        var a = Self.seeded()
+        a.reset()
+        // Base decode order 0, 8, 4 (display slots), the enhancement layer in plain order: its slot at
+        // unit k is k, one time per slot of 1000.
+        _ = Self.run(&a, Self.unit(bl: Self.slice(T.idrNLP, poc: 0), el: Self.slice(T.idrNLP, poc: 0), parameterSets: true), pts: 0)
+        // Unit 1: the base layer has not shown a B-frame yet, so slot 1 has no time and pairs by access unit.
+        let first = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 8), el: Self.slice(T.trailR, poc: 1)), pts: 8000)
+        #expect(first == Result(pts: 8000, placed: false))
+        // Unit 2: base slot 4 sits below slot 8, which the base layer decoded first, so it reorders. The
+        // enhancement slot 2 is below the latest decoded slot (4) but its base picture is still to come.
+        let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 4), el: Self.slice(T.trailR, poc: 2)), pts: 4000)
+        #expect(r == Result(pts: 2000, placed: true))
+        #expect(a.reorderedUnits == 1)
+    }
+
+    @Test("an enhancement slot beyond the latest base slot is extrapolated from the time per slot")
+    func futureSlotExtrapolates() {
+        var a = Self.seeded()
+        a.reset()
+        _ = Self.run(&a, Self.unit(bl: Self.slice(T.idrNLP, poc: 0), el: Self.slice(T.idrNLP, poc: 0), parameterSets: true), pts: 0)
+        for i in 1...2 {
+            _ = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: i), el: Self.slice(T.trailR, poc: i)), pts: Int64(i) * 1000)
+        }
+        // Unit 3: base POC 3 (time 3000), enhancement POC 4: one slot ahead at 1000 per slot.
+        let r = Self.run(&a, Self.unit(bl: Self.slice(T.trailR, poc: 3), el: Self.slice(T.trailR, poc: 4)), pts: 3000)
+        #expect(r == Result(pts: 4000, placed: true))
+        #expect(a.reorderedUnits == 1)
+    }
 }
 #endif

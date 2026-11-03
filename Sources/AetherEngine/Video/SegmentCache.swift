@@ -81,6 +81,12 @@ final class SegmentCache: @unchecked Sendable {
     private var initVersions: [(versionID: Int, fromSegment: Int, data: Data)] = []
 
     private var closed = false
+    /// (index, bytes, parked) of every segment the producer completes, for the provider's
+    /// march-rate estimate. `parked`: the producer waited on backpressure since the store before, so
+    /// the interval measures the consumer, not the link. Guarded by `condition`, called after it is released.
+    private var storeObserver: (@Sendable (Int, Int, Bool) -> Void)?
+    /// Set by a backpressure or disk-headroom park, cleared by the next store. Guarded by `condition`.
+    private var _parkedSinceStore = false
     private var _producerParked = false
     private var _evictionCount = 0
     private var _lastFailure: SessionCacheFailureReason?
@@ -405,11 +411,15 @@ final class SegmentCache: @unchecked Sendable {
         }
         let doomed = pruneOutsideWindow()
         if !doomed.isEmpty { residentSetChanged = true }
+        let observer = storeObserver
+        let parked = _parkedSinceStore
+        _parkedSinceStore = false
         condition.broadcast()
         condition.unlock()
         if let supersededFile { try? FileManager.default.removeItem(at: supersededFile) }
         for url in doomed { try? FileManager.default.removeItem(at: url) }
         if residentSetChanged { onResidentSetChanged?() }
+        if writeOK { observer?(index, data.count, parked) }
         return writeOK
     }
 
@@ -476,11 +486,15 @@ final class SegmentCache: @unchecked Sendable {
         }
         let doomed = pruneOutsideWindow()
         if !doomed.isEmpty { residentSetChanged = true }
+        let observer = storeObserver
+        let parked = _parkedSinceStore
+        _parkedSinceStore = false
         condition.broadcast()
         condition.unlock()
         if let supersededFile { try? FileManager.default.removeItem(at: supersededFile) }
         for url in doomed { try? FileManager.default.removeItem(at: url) }
         if residentSetChanged { onResidentSetChanged?() }
+        if renameOK { observer?(index, byteCount, parked) }
         return renameOK
     }
 
@@ -509,6 +523,7 @@ final class SegmentCache: @unchecked Sendable {
         _totalBytes = 0
         _highestStoredIndex = -1
         _producerParked = false
+        _parkedSinceStore = false
         condition.broadcast()
         condition.unlock()
 
@@ -673,8 +688,10 @@ final class SegmentCache: @unchecked Sendable {
 
     /// `fetch` for the loopback server. With `progressive`, a segment that is being written is
     /// answered at once with a reader over its staging file, so AVPlayer receives each fragment as
-    /// the muxer flushes it instead of the whole segment after its cut.
-    func fetchSource(index: Int, timeout: TimeInterval, progressive: Bool) -> SegmentSource? {
+    /// the muxer flushes it instead of the whole segment after its cut. With `whileTarget`, the wait
+    /// also ends as soon as the declared target is no longer `index`.
+    func fetchSource(index: Int, timeout: TimeInterval, progressive: Bool,
+                     whileTarget: Bool = false) -> SegmentSource? {
         let deadline = Date().addingTimeInterval(timeout)
         condition.lock()
         while true {
@@ -682,7 +699,7 @@ final class SegmentCache: @unchecked Sendable {
                 condition.unlock()
                 return readOrDrop(index: index, url: url).map { .data($0) }
             }
-            if closed {
+            if closed || (whileTarget && currentTargetIndex != index) {
                 condition.unlock()
                 return nil
             }
@@ -733,6 +750,7 @@ final class SegmentCache: @unchecked Sendable {
         defer { condition.unlock() }
         if currentTargetIndex >= target { return true }
         if closed { return false }
+        _parkedSinceStore = true
         let deadline = Date().addingTimeInterval(timeout)
         _ = condition.wait(until: deadline)
         return currentTargetIndex >= target
@@ -992,6 +1010,21 @@ final class SegmentCache: @unchecked Sendable {
         return entries.keys.max()
     }
 
+    /// See `storeObserver`.
+    func setStoreObserver(_ observer: (@Sendable (Int, Int, Bool) -> Void)?) {
+        condition.lock()
+        storeObserver = observer
+        condition.unlock()
+    }
+
+    /// True when the producer parked on backpressure after its last store: the time since that store
+    /// was spent waiting for the consumer, not writing.
+    var parkedSinceLastStore: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return _parkedSinceStore
+    }
+
     /// Reset before triggering a restart; previous producer's highWater would keep producerPassedAndPruned
     /// hot on every fetch, cascading a single restart into a per-segment storm.
     func resetHighWaterForRestart() {
@@ -1043,6 +1076,7 @@ final class SegmentCache: @unchecked Sendable {
             return true
         }
         _producerParked = true
+        _parkedSinceStore = true
         _ = condition.wait(until: Date().addingTimeInterval(timeout))
         let released = !shouldParkLocked(head: head, budgetBytes: budgetBytes)
         _producerParked = !released

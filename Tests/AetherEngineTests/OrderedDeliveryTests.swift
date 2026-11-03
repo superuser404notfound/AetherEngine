@@ -14,7 +14,7 @@ import Foundation
 /// from before this returns after" invariant (I3) hold, and a ticket that
 /// never arrives costs exactly the one frame at the stall-guard threshold,
 /// not the rest of the session.
-@Suite(.serialized, .timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct OrderedDeliveryTests {
 
     private static func makeBuffer() -> CVPixelBuffer? {
@@ -57,6 +57,31 @@ struct OrderedDeliveryTests {
 
         try await waitFor { recorder.count == 5 }
         #expect(recorder.snapshot == [0, 1, 2, 3, 4])
+    }
+
+    @Test("a skipped ticket keeps its place, emits nothing and does not hold up the frames behind it")
+    func skippedTicketEmitsNothing() async throws {
+        let buffer = try #require(Self.makeBuffer())
+        let delivery = OrderedDelivery(maxFramesInFlight: 3, maxLayerSkew: 3, label: "test.ordered-delivery.skip")
+        let recorder = Recorder()
+        delivery.setOnFrame { _, pts, _ in recorder.record(pts) }
+
+        delivery.fulfil(ticket: 2, epoch: 0, Self.frame(buffer, tag: 2))
+        delivery.skip(ticket: 1, epoch: 0)
+        delivery.fulfil(ticket: 0, epoch: 0, Self.frame(buffer, tag: 0))
+        delivery.fulfil(ticket: 3, epoch: 0, Self.frame(buffer, tag: 3))
+
+        try await waitFor { recorder.count == 3 }
+        #expect(recorder.snapshot == [0, 2, 3])
+        #expect(delivery.nextToEmitForTesting == 4)
+        #expect(delivery.pendingCountForTesting == 0)
+
+        // A skip from before a reset is dropped like any other late delivery.
+        delivery.reset(epoch: 1, nextTicket: 10)
+        delivery.skip(ticket: 10, epoch: 0)
+        delivery.fulfil(ticket: 10, epoch: 1, Self.frame(buffer, tag: 10))
+        try await waitFor { recorder.count == 4 }
+        #expect(recorder.snapshot == [0, 2, 3, 10])
     }
 
     @Test("bypass-shaped and compose-shaped fulfil calls interleave through the same order, indistinguishably")

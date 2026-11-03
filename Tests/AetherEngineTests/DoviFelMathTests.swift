@@ -324,5 +324,30 @@ struct DoviFelMathTests {
         let sampleY = Int(outY[0] >> 6)
         #expect(sampleY > 400 && sampleY < 600, "Output Y sample must be near mid-gray (~512), was \(sampleY)")
     }
+
+    // MARK: - NLQ ceiling
+
+    @Test("a vdr_in_max that shifts down to 0 drops the residual for that component, as an out-of-range one does")
+    func zeroVdrInMaxDropsResidual() {
+        func parse(maxInt: UInt64, maxFrac: UInt64) -> DoviNlqParams {
+            var nlq = DoviRpuDataNlq()
+            nlq.nlq_offset = (512, 512, 512)
+            nlq.linear_deadzone_slope = (1 << 20, 1 << 20, 1 << 20)       // 0.125 at denominator 23
+            nlq.vdr_in_max_int = (maxInt, maxInt, maxInt)
+            nlq.vdr_in_max = (maxFrac, maxFrac, maxFrac)
+            return withUnsafePointer(to: &nlq) {
+                DoviFelComposer.parseNlqParams(nlq: $0, component: 0, label: "Y", method: .linear,
+                                               coefLog2Denom: 23, nlqShift: 11, pivots: [])
+            }
+        }
+        let live = parse(maxInt: 0, maxFrac: 1 << 20)
+        #expect(live.nlqScale != 0)
+        #expect(live.vdrInMax > 0)
+        // 2^8 in Q23 shifts down by 11 to 0: no usable ceiling.
+        let degenerate = parse(maxInt: 0, maxFrac: 1 << 8)
+        #expect(degenerate.nlqScale == 0)
+        let zero = parse(maxInt: 0, maxFrac: 0)
+        #expect(zero.nlqScale == 0)
+    }
 }
 #endif

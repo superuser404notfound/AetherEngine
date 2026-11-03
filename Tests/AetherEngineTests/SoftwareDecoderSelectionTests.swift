@@ -1,6 +1,8 @@
 import Testing
 import Foundation
 import CoreMedia
+import VideoToolbox
+import Synchronization
 import AetherLibavformat
 import AetherLibavutil
 import AetherLibavcodec
@@ -337,6 +339,67 @@ struct SoftwareDecoderSelectionTests {
         var badSync = full
         badSync[1] ^= 0xFF
         #expect(Self.keyFrameSize(badSync) == nil)
+    }
+
+    private static var hardwareVP9Available: Bool {
+        if #available(macOS 11.0, iOS 26.2, tvOS 26.2, visionOS 26.2, *) {
+            VTRegisterSupplementalVideoDecoderIfAvailable(kCMVideoCodecType_VP9)
+        }
+        return VTIsHardwareDecodeSupported(kCMVideoCodecType_VP9)
+    }
+
+    @Test("a retired VP9 keyframe cannot resize the current hardware session",
+          .enabled(if: hardwareVP9Available))
+    func staleVP9KeyframeDoesNotReplaceSession() throws {
+        try withVP9Stream { stream in
+            let parameters = try #require(stream.pointee.codecpar)
+            parameters.pointee.width = 640
+            parameters.pointee.height = 360
+            let decoder = HardwareVideoDecoder()
+            defer { decoder.close() }
+            let widths = Mutex<[Int]>([])
+            try decoder.open(stream: stream) { buffer, _, _ in
+                widths.withLock { $0.append(CVPixelBufferGetWidth(buffer)) }
+            }
+            let staleEpoch = decoder.feedEpoch
+            decoder.flush()
+            let currentEpoch = decoder.feedEpoch
+
+            func feed(_ bytes: [UInt8], keyframe: Bool, pts: Int64, epoch: UInt64) throws {
+                let packet = try #require(av_packet_alloc())
+                defer { var pointer: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&pointer) }
+                try #require(av_new_packet(packet, Int32(bytes.count)) == 0)
+                let destination = try #require(packet.pointee.data)
+                bytes.withUnsafeBytes { destination.update(from: $0.bindMemory(to: UInt8.self).baseAddress!, count: bytes.count) }
+                packet.pointee.flags = keyframe ? AV_PKT_FLAG_KEY : 0
+                packet.pointee.pts = pts
+                packet.pointee.dts = pts
+                decoder.decode(packet: packet, epoch: epoch)
+                decoder.flushKeepingEpoch()
+            }
+
+            // Actual first two packets from a three-frame black 640x360 VP9 clip. The second needs
+            // the first reference picture; rebuilding the session between them makes it fail.
+            // ffmpeg -f lavfi -i color=c=black:size=640x360:rate=24:duration=0.125 -c:v libvpx-vp9
+            //   -threads 1 -row-mt 0 -g 999 -lag-in-frames 0 -auto-alt-ref 0 -pix_fmt yuv420p out.webm
+            let keyframe: [UInt8] = [
+                0x82, 0x49, 0x83, 0x42, 0x00, 0x27, 0xf0, 0x16, 0x76, 0x00, 0x38, 0x24, 0x1c, 0x18, 0x4a, 0x10,
+                0x00, 0x50, 0x61, 0xf6, 0x3a, 0xf6, 0x80, 0x5c, 0xd1, 0xee, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f,
+                0x67, 0x1a, 0x9a, 0xe0, 0x62, 0x23, 0x7e, 0x44, 0x78, 0xf0, 0xe3, 0xc7, 0x8f, 0x1d, 0x00, 0x67,
+                0x1a, 0x9a, 0xe0, 0x62, 0x23, 0x7e, 0x44, 0x78, 0xf0, 0xe3, 0xc7, 0x8f, 0x1d, 0x00,
+            ]
+            let interframe: [UInt8] = [
+                0x86, 0x00, 0x40, 0x92, 0x9c, 0x00, 0x50, 0x01, 0x00, 0x02, 0x00, 0x26, 0xac, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x04, 0x58, 0x40, 0xf4, 0xe0, 0x58, 0x40, 0xf4, 0xe0,
+            ]
+            try feed(keyframe, keyframe: true, pts: 0, epoch: currentEpoch)
+            #expect(widths.withLock { $0 } == [640])
+            // Only the header matters: this packet is already retired and must cause no work.
+            try feed(Self.vp9KeyFrame(profile: 0, width: 1280, height: 720),
+                     keyframe: true, pts: 100, epoch: staleEpoch)
+            try feed(interframe, keyframe: false, pts: 200, epoch: currentEpoch)
+            #expect(widths.withLock { $0 } == [640, 640])
+        }
     }
 
     @Test("a rejected hardware open closes its state and opens libavcodec before returning")

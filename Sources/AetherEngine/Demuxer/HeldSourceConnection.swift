@@ -463,7 +463,8 @@ extension HeldSourceConnection {
         // A non-default port belongs in Host, since the origin may route on it.
         let hostHeader = (secure && port == 443) || (!secure && port == 80) ? hostName : "\(hostName):\(port)"
 
-        // A nil offset is a whole-resource GET (AE#732's segment fetches), which carries no Range.
+        // A nil offset is a whole-resource GET (AE#732's segment fetches), which carries no Range of
+        // its own; the caller's applies, which is how an EXT-X-BYTERANGE segment names its sub-range.
         var lines = ["GET \(path) HTTP/1.1",
                      "Host: \(hostHeader)"]
         if let offset { lines.append("Range: bytes=\(offset)-") }
@@ -473,7 +474,7 @@ extension HeldSourceConnection {
         if let userAgent { lines.append("User-Agent: \(userAgent)") }
         // The caller's headers win: they carry the source's authentication, and a duplicate of a
         // header set above would be sent twice.
-        let reserved = Set(["host", "range", "connection", "accept-encoding"])
+        let reserved = Set(["host", "connection", "accept-encoding"] + (offset == nil ? [] : ["range"]))
         for (name, value) in extraHeaders where !reserved.contains(name.lowercased()) {
             lines.removeAll { $0.lowercased().hasPrefix(name.lowercased() + ":") }
             lines.append("\(name): \(value)")

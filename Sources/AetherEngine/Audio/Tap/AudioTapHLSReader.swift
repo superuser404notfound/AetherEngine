@@ -159,7 +159,8 @@ final class AudioTapHLSReader: @unchecked Sendable {
         var cursor = pendingDiscontinuity ? segmentStart : (lastDecodedEndPTS ?? segmentStart)
         for chunk in chunks {
             deliver(cursor, AudioTapBuffer(buffer: chunk.buffer, sourceTime: cursor,
-                                           discontinuity: pendingDiscontinuity))
+                                           discontinuity: pendingDiscontinuity,
+                                           channels: chunk.channels))
             pendingDiscontinuity = false
             cursor += Double(chunk.buffer.frameLength) / AudioTapDefaults.sampleRate
         }

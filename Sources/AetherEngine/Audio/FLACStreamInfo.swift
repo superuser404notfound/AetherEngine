@@ -53,6 +53,55 @@ enum FLACStreamInfo {
         return written < coreMediaMinimumBlockSize
     }
 
+    /// AE#946: the block size a fixed-blocksize FLAC frame header declares, or nil for anything else (no
+    /// frame sync, a variable-blocksize frame, a reserved code, a header cut short). A variable-blocksize
+    /// stream numbers its frames by sample, so it does not fall into the timing trap below.
+    static func fixedStrategyFrameBlockSize<C: Collection>(_ frame: C) -> UInt16? where C.Element == UInt8 {
+        // Sync, codes, a UTF-8 frame number (at most 6 bytes in fixed mode) and a 16-bit size field.
+        let b = Array(frame.prefix(12))
+        guard b.count >= 5, b[0] == 0xFF, b[1] == 0xF8 else { return nil }
+        let code = b[2] >> 4
+        switch code {
+        case 1: return 192
+        case 2...5: return 576 << UInt16(code - 2)
+        case 8...15: return 256 << UInt16(code - 8)
+        case 6, 7: break
+        default: return nil
+        }
+        let numberLength: Int
+        switch b[4] {
+        case 0x00...0x7F: numberLength = 1
+        case 0xC0...0xDF: numberLength = 2
+        case 0xE0...0xEF: numberLength = 3
+        case 0xF0...0xF7: numberLength = 4
+        case 0xF8...0xFB: numberLength = 5
+        case 0xFC...0xFD: numberLength = 6
+        default: return nil
+        }
+        let at = 4 + numberLength
+        if code == 6 {
+            guard b.count > at else { return nil }
+            return UInt16(b[at]) + 1
+        }
+        guard b.count > at + 1 else { return nil }
+        let minusOne = UInt16(b[at]) << 8 | UInt16(b[at + 1])
+        return minusOne == .max ? nil : minusOne + 1
+    }
+
+    /// AE#946: whether CoreMedia mistimes a stream whose fixed-blocksize frames carry `frameBlockSize`
+    /// samples. It takes `STREAMINFO`'s `max_blocksize` as each such frame's duration. Measured on macOS 26
+    /// over real 4096-sample frames: declared 4608/4608 ran the clock past the end by 4608/4096 (the
+    /// reporter's 3:50 of 3:23), 4096/4608 failed with `-12842`; libavcodec plays both. Frames LARGER than
+    /// `max_blocksize` break the specification and libavcodec refuses them too ("blocksize 4608 > 4096";
+    /// AVPlayer never leaves 0), so they keep their route. False when there is no `STREAMINFO` or its
+    /// `max_blocksize` is not a legal size.
+    static func coreMediaMistimesFrames(
+        _ codecpar: UnsafePointer<AVCodecParameters>, frameBlockSize: UInt16
+    ) -> Bool {
+        guard let sizes = blockSizes(codecpar), sizes.max >= specMinimumBlockSize else { return false }
+        return frameBlockSize < sizes.max
+    }
+
     /// The samples per frame a fixed-blocksize stream declares (min = max), for a packet duration fallback.
     static func fixedBlockSize(_ codecpar: UnsafePointer<AVCodecParameters>) -> Int64? {
         guard let sizes = blockSizes(codecpar), sizes.min == sizes.max,

@@ -164,6 +164,26 @@ final class AV1DolbyVisionRPUTable: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// The hardware route must own the buffer before either setting or removing RPU metadata.
+    /// The normalizer may already have copied it; otherwise a failed copy preserves the original
+    /// frame and all of its attachments, rather than writing into a decoder-owned reference picture.
+    static func attachingToOwnedOutput(
+        _ rpu: Data?,
+        normalized: CVPixelBuffer,
+        original: CVPixelBuffer,
+        copyOriginal: (CVPixelBuffer) -> CVPixelBuffer?
+    ) -> CVPixelBuffer {
+        let output: CVPixelBuffer
+        if normalized !== original {
+            output = normalized
+        } else {
+            guard let copy = copyOriginal(original), copy !== original else { return original }
+            output = copy
+        }
+        attach(rpu, to: output)
+        return output
+    }
+
     /// The two keys VideoToolbox sets on a frame it decodes as HEVC Dolby Vision, on the buffer and
     /// its IOSurface, as it sets them. Cleared on a frame without an RPU: output buffers are recycled
     /// from a pool, and a stale RPU would grade the frame with another frame's metadata.

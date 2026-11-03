@@ -173,21 +173,21 @@ final class APACEncoder {
     }
 
     private func drain(feeding input: AVAudioPCMBuffer?, endOfStream: Bool, into packets: inout [Packet]) throws {
-        var supplied = input == nil
+        // One borrow spans the whole drain, including another conversion when output fills.
+        let pendingInput = APACConverterInput(input)
+        defer { pendingInput.clear() }
+        let provideInput: @Sendable (AVAudioPacketCount, UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? = {
+            _, inputStatus in
+            let next = pendingInput.take()
+            inputStatus.pointee = next != nil ? .haveData : (endOfStream ? .endOfStream : .noDataNow)
+            return next
+        }
         let output = outputBuffer
         while true {
             output.packetCount = 0
             output.byteLength = 0
             var error: NSError?
-            let status = converter.convert(to: output, error: &error) { _, inputStatus in
-                if !supplied, let input {
-                    supplied = true
-                    inputStatus.pointee = .haveData
-                    return input
-                }
-                inputStatus.pointee = endOfStream ? .endOfStream : .noDataNow
-                return nil
-            }
+            let status = converter.convert(to: output, error: &error, withInputFrom: provideInput)
             if status == .error {
                 throw EncoderError.convertFailed(error.map { "\($0)" } ?? "status error")
             }

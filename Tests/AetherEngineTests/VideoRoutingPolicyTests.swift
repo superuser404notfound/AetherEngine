@@ -82,6 +82,34 @@ struct VideoRoutingPolicyTests {
         #expect(calls == 1)
     }
 
+    @Test("progressive software codecs do not need hardware deinterlace warm-up")
+    func progressiveCodecsSkipDeinterlaceWarmup() {
+        for codec in [AV_CODEC_ID_NONE, AV_CODEC_ID_VP8, AV_CODEC_ID_VP9, AV_CODEC_ID_AV1, AV_CODEC_ID_HEVC] {
+            #expect(!VideoRoutingPolicy.requiresDeinterlaceWarmup(codecID: codec, fieldOrder: AV_FIELD_UNKNOWN))
+        }
+        for codec in [AV_CODEC_ID_H264, AV_CODEC_ID_MPEG4, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_VC1] {
+            #expect(!VideoRoutingPolicy.requiresDeinterlaceWarmup(codecID: codec, fieldOrder: AV_FIELD_PROGRESSIVE))
+        }
+    }
+
+    @Test("interlaced and unknown legacy sources preserve hardware deinterlace warm-up")
+    func interlacedSourcesWarmDeinterlacer() {
+        for order in VideoRoutingPolicy.interlacedFieldOrders {
+            for codec in [AV_CODEC_ID_H264, AV_CODEC_ID_MPEG4, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_VC1,
+                          AV_CODEC_ID_DVVIDEO, AV_CODEC_ID_MPEG1VIDEO, AV_CODEC_ID_H263, AV_CODEC_ID_PRORES] {
+                #expect(VideoRoutingPolicy.requiresDeinterlaceWarmup(codecID: codec, fieldOrder: order))
+            }
+        }
+        for codec in [AV_CODEC_ID_MPEG4, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_VC1] {
+            #expect(VideoRoutingPolicy.requiresDeinterlaceWarmup(codecID: codec, fieldOrder: AV_FIELD_UNKNOWN))
+        }
+        #expect(!VideoRoutingPolicy.requiresDeinterlaceWarmup(codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_UNKNOWN))
+        #expect(VideoRoutingPolicy.requiresDeinterlaceWarmup(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_UNKNOWN, spsIndicatesInterlaced: true))
+        #expect(!VideoRoutingPolicy.requiresDeinterlaceWarmup(
+            codecID: AV_CODEC_ID_H264, fieldOrder: AV_FIELD_PROGRESSIVE, spsIndicatesInterlaced: true))
+    }
+
     // MARK: - #150 SPS frame_mbs_only fallback for UNKNOWN field order
 
     @Test("UNKNOWN field order + SPS frame_mbs_only=0 routes to software")

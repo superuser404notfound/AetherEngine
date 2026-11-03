@@ -112,7 +112,7 @@ its own account; the footer names Claude or Quint):
 
 ## Output
 
-You return JSON with two fields; the workflow turns it into one GitHub review.
+You return JSON with three fields; the workflow turns it into one GitHub review.
 
 1. **`inline`**: findings tied to a line. `path` is the repository path of a file the PR changes
    (`Sources/AetherEngine/AetherEngine.swift`, never a path under the data directory), `line` is the
@@ -140,5 +140,16 @@ You return JSON with two fields; the workflow turns it into one GitHub review.
 
    With no findings, say so in one line; do not invent any. The workflow adds the footer that marks
    the review as automated.
+3. **`status`**: the verdict for the PR as it stands now, one of four values. The workflow renders it
+   as a fixed coloured status line right under the summary heading, so do not repeat it in the summary.
+   It follows the most severe finding that is still open, including unresolved ones from an earlier
+   review, not only what is new in this push:
+   - `red`: at least one **Blocking** finding, or the direction is wrong.
+   - `orange`: no blocking finding, but at least one **Should fix**.
+   - `yellow`: only **Nit** findings or small housekeeping (a missing CHANGELOG line, a doc touch-up).
+   - `green`: nothing left to fix.
+
+   A finding you post as a question does not raise the status on its own. "Needs a device run" does
+   not either; it is not a defect in the code.
 
 Write in plain English, short sentences, no em-dashes, no emoji, no marketing tone.

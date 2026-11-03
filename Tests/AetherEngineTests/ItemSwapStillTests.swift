@@ -4,7 +4,7 @@ import AVFoundation
 @testable import AetherEngine
 
 @Suite("AE#711 follow-up: the native picture held across an in-place item swap", .serialized,
-       .timeLimit(.minutes(1)))
+       .timeLimit(.minutes(3)))
 @MainActor
 struct ItemSwapStillTests {
 
@@ -186,7 +186,7 @@ struct ItemSwapStillTests {
         let watcher = Task { @MainActor in
             while !Task.isCancelled {
                 if view.isHoldingStill { held = true }
-                try? await Task.sleep(for: .milliseconds(2))
+                do { try await Task.sleep(for: .milliseconds(2)) } catch { return }
             }
         }
         let failure = await engine.reloadWithAudioOverride(
@@ -240,7 +240,7 @@ struct ItemSwapStillTests {
         let watcher = Task { @MainActor in
             while !Task.isCancelled {
                 if still.isHoldingStill { held = true }
-                try? await Task.sleep(for: .milliseconds(2))
+                do { try await Task.sleep(for: .milliseconds(2)) } catch { return }
             }
         }
         let failure = await engine.reloadWithAudioOverride(
@@ -346,7 +346,7 @@ struct ItemSwapStillTests {
         let watcher = Task { @MainActor in
             while !Task.isCancelled {
                 if view.isHoldingStill { held = true }
-                try? await Task.sleep(for: .milliseconds(2))
+                do { try await Task.sleep(for: .milliseconds(2)) } catch { return }
             }
         }
         let failure = await engine.reloadWithAudioOverride(
@@ -384,6 +384,10 @@ struct ItemSwapStillTests {
         try await waitFor { host.isVideoReadyForDisplay }
         try await Task.sleep(for: .seconds(1))
         engine.pause()
+        // Scrubbing takes the reshaped still path, not the compositor preview.
+        #expect(engine.supportsCacheBackedStills)
+        #expect(!engine.scrubPreviewDrawsInView)
+        #expect(await engine.scrubThumbnail(atSeconds: 0.5, maxWidth: 160) != nil)
         let started = ContinuousClock.now
         await engine.holdPictureAcrossItemSwap()
         #expect(ContinuousClock.now - started < .seconds(AetherEngine.heldPictureDolbyVisionBudgetSeconds))

@@ -4,7 +4,7 @@ import Testing
 /// Wedge-safe background keepalive policy (iOS): the video pipeline survives backgrounding ONLY while
 /// the app stays genuinely running (PiP active, or actively playing for background audio), never across
 /// an idle suspension. See AetherEngine.shouldKeepVideoAlive.
-@Suite("Background keepalive policy")
+@Suite("Background keepalive policy", .timeLimit(.minutes(3)))
 struct BackgroundKeepaliveTests {
 
     @Test("keep alive while playing and enabled")
@@ -155,8 +155,60 @@ struct BackgroundKeepaliveTests {
         engine.state = .paused
         engine.noteDidEnterBackground()
         engine.state = .playing
-        for _ in 0..<50 where runs.isEmpty { await Task.yield() }
+        if retains {
+            try await waitFor { !runs.isEmpty }
+        } else {
+            for _ in 0..<50 { await Task.yield() }
+        }
         #expect(runs == (retains ? [.playing] : []))
+    }
+
+    @Test("a seek or reload from a retained pause owes background policy until it settles (AE#870)",
+          arguments: [PlaybackState.seeking, .loading])
+    func retainedOperationOwesPolicy(transition: PlaybackState) {
+        #expect(AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: true, from: .paused, to: transition))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: false, retainsPausedPipeline: true, from: .paused, to: transition))
+        #expect(!AetherEngine.backgroundPolicyIsOwedOnResume(
+            isBackgrounded: true, retainsPausedPipeline: false, from: .paused, to: transition))
+        #expect(!AetherEngine.backgroundDecisionSettles(state: transition, loadInFlight: false))
+    }
+
+    @MainActor
+    @Test("a retained background seek applies its final transport policy (AE#870)",
+          .timeLimit(.minutes(3)), arguments: [
+            (true, true, true), (true, true, false), (true, false, true), (true, false, false),
+            (false, true, true), (false, true, false), (false, false, true), (false, false, false),
+          ])
+    func retainedSeekSettlesPolicy(resumes: Bool, backgroundEnabled: Bool, software: Bool) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var actions: [AetherEngine.BackgroundAction] = []
+        engine.owedBackgroundPolicyForTesting = { engine in
+            actions.append(AetherEngine.backgroundAction(
+                isAudioBackend: false, hasSoftwareHost: software, softwareHostHasAudio: true,
+                keepVideoAlive: AetherEngine.shouldKeepVideoAlive(
+                    enabled: engine.backgroundPlaybackEnabled, pipActive: false, state: engine.state),
+                pipActive: false, state: engine.state,
+                retainPausedVideoPipeline: engine.retainsVideoPipelineWhenBackgrounded))
+        }
+        engine.backgroundPlaybackEnabled = backgroundEnabled
+        engine.retainsVideoPipelineWhenBackgrounded = true
+        engine.state = .paused
+        engine.noteDidEnterBackground()
+        // A seek publishes .seeking before awaiting its host. Play during that wait updates
+        // transport intent without publishing .playing until the seek settles.
+        engine.state = .seeking
+        if resumes { engine.play() }
+        #expect(engine.state == .seeking)
+        #expect(actions.isEmpty)
+        engine.state = resumes ? .playing : .paused
+        try await waitFor { !actions.isEmpty }
+        let expected: AetherEngine.BackgroundAction = !resumes ? .doNothing
+            : !backgroundEnabled ? .teardownVideo
+            : software ? .enterSoftwareAudioOnly : .doNothing
+        #expect(actions == [expected])
     }
 
 }

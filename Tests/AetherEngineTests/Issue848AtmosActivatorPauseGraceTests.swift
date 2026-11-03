@@ -5,12 +5,16 @@ import Testing
 /// AE#848: pausing the silent Atmos stream with the host let an HDMI soundbar drop out of Dolby Atmos
 /// and re-lock on every resume and scrub. The stream now rides through a pause for a bounded grace.
 @MainActor
-@Suite("The Atmos output activator holds through a short pause (#848)", .serialized)
+@Suite("The Atmos output activator holds through a short pause (#848)", .serialized, .timeLimit(.minutes(3)))
 struct Issue848AtmosActivatorPauseGraceTests {
 
+    /// The host holds at the end of its 2 s clip instead of pausing: a host that paused on its own
+    /// would start a grace the test never asked for, which a loaded runner stretching the body past
+    /// 2 s did.
     private func attached(grace: Duration, ports: [String] = ["HDMIOutput"]) -> (AtmosOutputActivator, AVPlayer) {
         let host = AVPlayer(playerItem: AVPlayerItem(url: AtmosOutputActivator.silentAtmosStream))
         host.isMuted = true
+        host.actionAtItemEnd = .none
         let activator = AtmosOutputActivator(outputPortTypes: { ports }, pauseGrace: grace)
         activator.attach(to: host) { _ in true }
         return (activator, host)
@@ -24,8 +28,7 @@ struct Issue848AtmosActivatorPauseGraceTests {
         #expect(activator.isPlayingStream)
         host.pause()
         #expect(activator.isPlayingStream)
-        try await Task.sleep(for: .milliseconds(900))
-        #expect(!activator.isPlayingStream)
+        try await waitFor { !activator.isPlayingStream }
         host.play()
         #expect(activator.isPlayingStream)
     }
@@ -36,7 +39,7 @@ struct Issue848AtmosActivatorPauseGraceTests {
         defer { activator.detach() }
         host.play()
         host.pause()
-        try await Task.sleep(for: .milliseconds(100))
+        // No sleep in between: any wait here can outlast the grace on a loaded runner.
         host.play()
         try await Task.sleep(for: .milliseconds(700))
         #expect(activator.isPlayingStream)
@@ -82,8 +85,7 @@ struct Issue848AtmosActivatorPauseGraceTests {
         playing = false
         activator.refresh()
         #expect(activator.isPlayingStream)
-        try await Task.sleep(for: .milliseconds(900))
-        #expect(!activator.isPlayingStream)
+        try await waitFor { !activator.isPlayingStream }
         playing = true
         activator.refresh()
         #expect(activator.isPlayingStream)

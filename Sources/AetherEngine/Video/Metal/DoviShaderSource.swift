@@ -327,7 +327,8 @@ static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale,
     // The prediction is clamped to the VDR range before the residual is added, as DoViBaker does for both
     // the polynomial and the MMR result, so a prediction outside it cannot be pulled back in by the
     // residual: a negative one starts from 0, one above full scale from vdr_max.
-    return clamp(int(rint(pred_norm * float(bl_max) * float(vdr_scale))), 0, int(vdr_max));
+    // The clamp is in float, before the conversion: an MMR result far outside the range would overflow int.
+    return int(rint(clamp(pred_norm * float(bl_max) * float(vdr_scale), 0.0f, float(vdr_max))));
 }
 
 /* ============================================================================
@@ -498,22 +499,25 @@ kernel void dovi_compose_luma(
     out_y_tex.write(ushort4(ushort(out_y << 6), 0, 0, 0), gid);
 }
 
+/* The composed chroma at one 4:2:0 site, before quantisation, as clamped VDR codes. The 4:2:0 kernel
+   writes it on its own grid; the 4:2:2 and 4:4:4 kernels take their samples from these sites, so
+   every chroma format is the same composition at the 4:2:0 sites, stepped up. */
+struct DoviChromaSite {
+    int cb;
+    int cr;
+};
+
 // Chroma: both chroma planes in one pass, since an MMR curve for Cb and for Cr
 // reads the same three base-layer components.
-kernel void dovi_compose_chroma(
-    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
-    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
-    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
-    constant struct DoviMetalParams&       params        [[buffer(0)]],
-    uint2                                  gid           [[thread_position_in_grid]])
+static inline DoviChromaSite dovi_chroma_site(
+    uint2                                  site,
+    texture2d<ushort, access::read>        bl_y_tex,
+    texture2d<ushort, access::read>        bl_uv_tex,
+    texture2d<float, access::sample>       el_uv_tex,
+    constant struct DoviMetalParams        &params)
 {
-    uint uv_width = params.bl_width / 2u;
-    uint uv_height = params.bl_height / 2u;
-
-    if (gid.x >= uv_width || gid.y >= uv_height) {
-        return;
-    }
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
 
     // Base-layer luma at the chroma site, for the cross-component terms: [1 2 1]
     // around the even column in each of the cell's two rows, then the rows
@@ -521,12 +525,12 @@ kernel void dovi_compose_chroma(
     // Dolby-encoded streams agree with it: on one with order-3 MMR chroma the
     // coded residual matches it at about half the error of the plain vertical
     // 2-tap this kernel used before.
-    uint lx = min(gid.x * 2u, params.bl_width - 1u);
+    uint lx = min(site.x * 2u, params.bl_width - 1u);
     uint lxl = lx > 0u ? lx - 1u : 0u;
     uint lxr = min(lx + 1u, params.bl_width - 1u);
     int bl_y = 0;
     for (uint r = 0u; r < 2u; ++r) {
-        uint ly = min(gid.y * 2u + r, params.bl_height - 1u);
+        uint ly = min(site.y * 2u + r, params.bl_height - 1u);
         int row = int(bl_y_tex.read(uint2(lxl, ly)).r >> 6)
                 + 2 * int(bl_y_tex.read(uint2(lx, ly)).r >> 6)
                 + int(bl_y_tex.read(uint2(lxr, ly)).r >> 6);
@@ -534,7 +538,7 @@ kernel void dovi_compose_chroma(
     }
     bl_y = (bl_y + 1) >> 1;
 
-    ushort4 bl_uv = bl_uv_tex.read(gid);
+    ushort4 bl_uv = bl_uv_tex.read(site);
     int bl_cb = int(bl_uv.r >> 6);
     int bl_cr = int(bl_uv.g >> 6);
 
@@ -564,8 +568,8 @@ kernel void dovi_compose_chroma(
             // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
             // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
             // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
-            float2 el_uv_size = float2(params.el_width / 2u, params.el_height / 2u);
-            float2 uv = float2(gid) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
+            float2 el_uv_size = float2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u);
+            float2 uv = float2(site) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
             float2 el = dovi_sample_el_2d(el_uv_tex, s, uv, el_uv_size) * dovi_unorm_to_code;
             if (cb_active) {
                 vdr_cb += dovi_eval_inv_nlq(params.nlq_cb, int(rint(el.r)));
@@ -576,9 +580,19 @@ kernel void dovi_compose_chroma(
         }
     }
 
-    vdr_cb = clamp(vdr_cb, 0, int(params.vdr_max));
-    vdr_cr = clamp(vdr_cr, 0, int(params.vdr_max));
+    DoviChromaSite out;
+    out.cb = clamp(vdr_cb, 0, int(params.vdr_max));
+    out.cr = clamp(vdr_cr, 0, int(params.vdr_max));
+    return out;
+}
 
+static inline void dovi_write_chroma(
+    texture2d<ushort, access::write>       out_uv_tex,
+    uint2                                  gid,
+    int                                    vdr_cb,
+    int                                    vdr_cr,
+    constant struct DoviMetalParams        &params)
+{
     int out_cb = dovi_quantize(vdr_cb, params.vdr_scale, params.dither_mode,
                                dovi_dither(gid, params.frame_index, uint2(1u, 0u)), 64, 960);
     int out_cr = dovi_quantize(vdr_cr, params.vdr_scale, params.dither_mode,
@@ -594,6 +608,135 @@ kernel void dovi_compose_chroma(
         return;
     }
     out_uv_tex.write(ushort4(ushort(out_cb << 6), ushort(out_cr << 6), 0, 0), gid);
+}
+
+kernel void dovi_compose_chroma(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
+
+    if (gid.x >= uv_width || gid.y >= uv_height) {
+        return;
+    }
+
+    DoviChromaSite site = dovi_chroma_site(gid, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    dovi_write_chroma(out_uv_tex, gid, site.cb, site.cr, params);
+}
+
+// A 4:2:0 site as the output holds it: quantised and clamped to video range. The step-up kernels mean
+// these, not the unclamped codes, so a site past the range does not pull its neighbours' means off
+// the picture the 4:2:0 output would show.
+static inline DoviChromaSite dovi_output_site(
+    uint2                                  site,
+    texture2d<ushort, access::read>        bl_y_tex,
+    texture2d<ushort, access::read>        bl_uv_tex,
+    texture2d<float, access::sample>       el_uv_tex,
+    constant struct DoviMetalParams        &params)
+{
+    DoviChromaSite s = dovi_chroma_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    int lo = int(64u * params.vdr_scale);
+    int hi = int(960u * params.vdr_scale);
+    s.cb = clamp(s.cb, lo, hi);
+    s.cr = clamp(s.cr, lo, hi);
+    return s;
+}
+
+// 4:2:2 has the luma's full height. A row on a 4:2:0 site is that site's composition; a row between
+// two sites is their mean, the co-sited step up that the 4:2:0 phase implies (copy on the site row,
+// half way between the rows either side). Rounded up, so with dither off an exact site row comes back unchanged.
+kernel void dovi_compose_chroma_422(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    uint2                                  gid           [[thread_position_in_grid]])
+{
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
+
+    if (gid.x >= uv_width || gid.y >= params.bl_height) {
+        return;
+    }
+
+    uint site_y = gid.y / 2u;
+    uint other_y = (gid.y & 1u) != 0u ? min(site_y + 1u, uv_height - 1u) : site_y;
+    DoviChromaSite a = dovi_output_site(uint2(gid.x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    DoviChromaSite b = dovi_output_site(uint2(gid.x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    dovi_write_chroma(out_uv_tex, gid, (a.cb + b.cb + 1) >> 1, (a.cr + b.cr + 1) >> 1, params);
+}
+
+// 4:4:4 has the luma's full size: each sample is the mean of the 4:2:0 sites around it (one site on
+// a site, two between two, four in a cell's middle), rounded once. Experimental: the reconstruction
+// has no 4:4:4 form in the spec, so this only steps the 4:2:0 composition up.
+//
+// A threadgroup covers a DOVI_444_TILE x DOVI_444_TILE block of output samples. The block's 4:2:0
+// sites, plus the one site past it that the odd samples on its far edge average with, are composed
+// once into threadgroup memory, then every output sample reads its one to four sites from there. The
+// per-sample form composed every site four times for each of the four samples around it, sixteen
+// evaluations per site; this does 81 per 256 samples. The sites are the same `dovi_output_site`
+// values, clamped to the same edge, and the mean and the write are unchanged, so the output is bit
+// for bit what the per-sample form gave. The kernel must be dispatched in threadgroups of exactly
+// DOVI_444_TILE x DOVI_444_TILE threads: the block's origin is the threadgroup index.
+#define DOVI_444_TILE   16u
+#define DOVI_444_SITES  ((DOVI_444_TILE / 2u) + 1u)
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void dovi_compose_chroma_444(
+    texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
+    texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
+    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
+    constant struct DoviMetalParams&       params        [[buffer(0)]],
+    uint2                                  gid           [[thread_position_in_grid]],
+    uint2                                  tid           [[thread_position_in_threadgroup]],
+    uint2                                  tgid          [[threadgroup_position_in_grid]],
+    uint2                                  tg_dim        [[threads_per_threadgroup]])
+{
+    uint uv_width = (params.bl_width + 1u) / 2u;
+    uint uv_height = (params.bl_height + 1u) / 2u;
+
+    threadgroup int tile_cb[DOVI_444_SITES * DOVI_444_SITES];
+    threadgroup int tile_cr[DOVI_444_SITES * DOVI_444_SITES];
+
+    // Every thread of the group takes part in filling the tile and reaches the barrier, including
+    // threads past the edge of the picture when the grid is rounded up to whole threadgroups.
+    uint site_x0 = tgid.x * (DOVI_444_TILE / 2u);
+    uint site_y0 = tgid.y * (DOVI_444_TILE / 2u);
+    uint lane = tid.y * tg_dim.x + tid.x;
+    uint lanes = tg_dim.x * tg_dim.y;
+    for (uint i = lane; i < DOVI_444_SITES * DOVI_444_SITES; i += lanes) {
+        uint2 site = uint2(min(site_x0 + i % DOVI_444_SITES, uv_width - 1u),
+                           min(site_y0 + i / DOVI_444_SITES, uv_height - 1u));
+        DoviChromaSite s = dovi_output_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+        tile_cb[i] = s.cb;
+        tile_cr[i] = s.cr;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (gid.x >= params.bl_width || gid.y >= params.bl_height) {
+        return;
+    }
+
+    // Local site (column, row) of the cell this sample is in, and the one it averages with. The tile
+    // already holds the far neighbour clamped to the last site, as the per-sample form clamped it.
+    uint sx = tid.x / 2u;
+    uint sy = tid.y / 2u;
+    uint ox = (tid.x & 1u) != 0u ? sx + 1u : sx;
+    uint oy = (tid.y & 1u) != 0u ? sy + 1u : sy;
+    uint ia = sy * DOVI_444_SITES + sx;
+    uint ib = sy * DOVI_444_SITES + ox;
+    uint ic = oy * DOVI_444_SITES + sx;
+    uint id = oy * DOVI_444_SITES + ox;
+    dovi_write_chroma(out_uv_tex, gid,
+                      (tile_cb[ia] + tile_cb[ib] + tile_cb[ic] + tile_cb[id] + 2) >> 2,
+                      (tile_cr[ia] + tile_cr[ib] + tile_cr[ic] + tile_cr[id] + 2) >> 2, params);
 }
 
 /* ============================================================================

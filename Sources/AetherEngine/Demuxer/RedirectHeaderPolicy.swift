@@ -50,20 +50,98 @@ enum RedirectHeaderPolicy {
         extraHeaders: [String: String]
     ) -> URLRequest {
         var updated = request
+        if let upgraded = upgradedDowngrade(request.url, from: originalURL) {
+            updated.url = upgraded
+        }
         if let originalRange {
             updated.setValue(originalRange, forHTTPHeaderField: "Range")
         }
-        if !credentialsAllowed(from: originalURL, to: request.url) {
+        if !credentialsAllowed(from: originalURL, to: updated.url) {
             for name in credentialHeaders {
                 updated.setValue(nil, forHTTPHeaderField: name)
             }
         }
         let replayable = headersToReplay(
-            extraHeaders: extraHeaders, originalURL: originalURL, redirectURL: request.url)
+            extraHeaders: extraHeaders, originalURL: originalURL, redirectURL: updated.url)
         for (name, value) in replayable {
             updated.setValue(value, forHTTPHeaderField: name)
         }
         return updated
+    }
+
+    /// An https source redirected to plain http on a public host: App Transport Security refuses
+    /// that hop before a byte moves (-1022), and every reopen meets the same refusal until the
+    /// opening budget runs out and the load reads as a source that never answered. A server behind
+    /// a TLS-terminating proxy builds exactly this link from the inner http request (an add-on
+    /// bridge whose 302 names its own host over http). Ask for the same address over https.
+    /// Local names and IP literals keep the redirect as sent (ATS lets local ones through, and a
+    /// certificate rarely names an address), and so does any target the app's own ATS
+    /// configuration already lets through over http.
+    static func upgradedDowngrade(_ target: URL?, from original: URL?) -> URL? {
+        guard original?.scheme?.lowercased() == "https",
+              let target, target.scheme?.lowercased() == "http",
+              let host = target.host?.lowercased(), !isLocalNetworkHost(host),
+              !appATSRules.allows(host),
+              var components = URLComponents(url: target, resolvingAgainstBaseURL: false)
+        else { return nil }
+        components.scheme = "https"
+        if components.port == 80 { components.port = nil }
+        return components.url
+    }
+
+    /// Single-label names, `.local` and IP literals.
+    private static func isLocalNetworkHost(_ host: String) -> Bool {
+        let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if bare.hasSuffix(".local") || !bare.contains(".") { return true }
+        var v4 = in_addr(), v6 = in6_addr()
+        return inet_pton(AF_INET, bare, &v4) == 1 || inet_pton(AF_INET6, bare, &v6) == 1
+    }
+
+    private static let appATSRules = PlainHTTPRules(
+        Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any] ?? [:])
+
+    /// Whether `ats` (an `NSAppTransportSecurity` dictionary) already allows plain http to `host`.
+    static func atsAllowsPlainHTTP(to host: String, in ats: [String: Any]) -> Bool {
+        PlainHTTPRules(ats).allows(host)
+    }
+
+    /// The parts of an ATS configuration that decide plain http to a named host: an
+    /// `NSExceptionDomains` entry with `NSExceptionAllowsInsecureHTTPLoads` for the host or, with
+    /// `NSIncludesSubdomains`, a parent domain; otherwise `NSAllowsArbitraryLoads`, which the system
+    /// ignores whenever `NSAllowsLocalNetworking`, `NSAllowsArbitraryLoadsForMedia` or
+    /// `NSAllowsArbitraryLoadsInWebContent` is also present.
+    struct PlainHTTPRules: Sendable {
+        private struct Exception: Sendable {
+            let includesSubdomains: Bool
+            let allowsInsecureHTTP: Bool
+        }
+        private let exceptions: [String: Exception]
+        private let arbitraryLoads: Bool
+
+        init(_ ats: [String: Any]) {
+            var exceptions: [String: Exception] = [:]
+            for (domain, value) in ats["NSExceptionDomains"] as? [String: Any] ?? [:] {
+                guard let entry = value as? [String: Any] else { continue }
+                exceptions[domain.lowercased()] = Exception(
+                    includesSubdomains: entry["NSIncludesSubdomains"] as? Bool == true,
+                    allowsInsecureHTTP: entry["NSExceptionAllowsInsecureHTTPLoads"] as? Bool == true)
+            }
+            self.exceptions = exceptions
+            let overridingKeys = [
+                "NSAllowsLocalNetworking", "NSAllowsArbitraryLoadsForMedia", "NSAllowsArbitraryLoadsInWebContent",
+            ]
+            arbitraryLoads = !overridingKeys.contains { ats[$0] != nil }
+                && ats["NSAllowsArbitraryLoads"] as? Bool == true
+        }
+
+        /// The most specific entry decides: the host itself, then the longest parent domain.
+        func allows(_ host: String) -> Bool {
+            if let exact = exceptions[host] { return exact.allowsInsecureHTTP }
+            let parent = exceptions
+                .filter { $0.value.includesSubdomains && host.hasSuffix("." + $0.key) }
+                .max { $0.key.count < $1.key.count }
+            return parent?.value.allowsInsecureHTTP ?? arbitraryLoads
+        }
     }
 
     /// Same host and no TLS downgrade. Ports may differ only across an http -> https

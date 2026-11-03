@@ -7,6 +7,8 @@ struct SoftwareStoredPacket: Sendable, Equatable {
         let type: UInt32
         let bytes: Data
     }
+    // Consumer-only identity for decoder observations. Never encoded into the session spool.
+    var cacheTimingEpoch: UInt64? = nil
     let pts: Int64
     let dts: Int64
     let duration: Int64

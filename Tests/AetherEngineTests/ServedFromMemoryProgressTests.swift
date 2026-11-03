@@ -74,7 +74,10 @@ struct ServedFromMemoryProgressTests {
         let frontier: Int64 = 8 * 1024 * 1024
         let serverMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
-            respond: { _, offset, _ in offset == frontier ? .status(509) : .serve206 }
+            // AE#958: the refill asks `rangeCheckBytes` before the frontier to check the origin.
+            respond: { _, offset, _ in
+                offset == frontier - Int64(AVIOReader.rangeCheckBytes) ? .status(509) : .serve206
+            }
         )
         let server = try #require(serverMaybe)
         defer { server.stop() }

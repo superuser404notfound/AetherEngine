@@ -14,7 +14,7 @@ import AetherLibavcodec
 import AetherLibavutil
 @testable import AetherEngine
 
-@Suite("Audio tail padding (#847)")
+@Suite("Audio tail padding (#847)", .offCooperativePoolOneLane)
 struct AudioTailPaddingTests {
 
     // MARK: - Span

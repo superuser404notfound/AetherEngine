@@ -43,8 +43,9 @@ final class ProbeHTTPTestOrigin: @unchecked Sendable {
         self.stallOpenEndedBody = stallOpenEndedBody
         self.onBlocked = onBlocked
         self.response = response
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        guard let (fd, boundPort) = LoopbackPort.listen(backlog: 16) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         var wake: [Int32] = [-1, -1]
         var initialized = false
         defer {
@@ -53,23 +54,6 @@ final class ProbeHTTPTestOrigin: @unchecked Sendable {
                 for pipeFD in wake where pipeFD >= 0 { Darwin.close(pipeFD) }
             }
         }
-        var address = sockaddr_in()
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_addr.s_addr = inet_addr("127.0.0.1")
-        address.sin_port = 0
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bound == 0, listen(fd, 16) == 0 else {
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
-        }
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let named = withUnsafeMutablePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
-        }
-        guard named == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
         guard pipe(&wake) == 0,
               fcntl(fd, F_SETFL, O_NONBLOCK) == 0,
               fcntl(wake[1], F_SETFL, O_NONBLOCK) == 0 else {
@@ -78,7 +62,7 @@ final class ProbeHTTPTestOrigin: @unchecked Sendable {
         listener = fd
         wakeRead = wake[0]
         wakeWrite = wake[1]
-        port = UInt16(bigEndian: address.sin_port)
+        port = boundPort
         initialized = true
         Thread.detachNewThread { self.acceptLoop() }
     }

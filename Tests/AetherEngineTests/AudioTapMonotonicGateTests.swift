@@ -44,7 +44,7 @@ final class AudioTapMonotonicGateTests: XCTestCase {
 
     func testFilterTrimsSeamOverlapToMonotonic() {
         let out = Box<[AudioTapBuffer]>([])
-        let filter = AudioTapMonotonicFilter(downstream: { out.value.append($0) })
+        let filter = AudioTapMonotonicFilter(downstream: { out.value.append($0); return true })
         filter.accept(buf(0.0, frames: 96_000))                 // ends at 2.0 s
         filter.accept(buf(1.9, frames: 96_000))                 // 0.1 s seam overlap
         XCTAssertEqual(out.value.count, 2)
@@ -55,7 +55,7 @@ final class AudioTapMonotonicGateTests: XCTestCase {
 
     func testFilterDropsFullyContained() {
         let out = Box<[AudioTapBuffer]>([])
-        let filter = AudioTapMonotonicFilter(downstream: { out.value.append($0) })
+        let filter = AudioTapMonotonicFilter(downstream: { out.value.append($0); return true })
         filter.accept(buf(0.0, frames: 96_000))                 // ends at 2.0 s
         filter.accept(buf(1.9, frames: 2400))                   // 0.05 s buffer, 0.1 s overlap: contained
         XCTAssertEqual(out.value.count, 1)

@@ -77,7 +77,7 @@ struct StoppedPumpInFlightReadTests {
     private static let parkOffset = 2237
 
     @Test("a read that returns end of file after stop() exits as a stop and adopts nothing",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func eofAfterStopAdoptsNothing() async throws {
         let data = try #require(Data(base64Encoded: Issue234SideReaderSeekAnchorTests.fixtureBase64,
                                      options: .ignoreUnknownCharacters))

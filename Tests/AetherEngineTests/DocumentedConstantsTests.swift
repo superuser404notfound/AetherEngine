@@ -46,6 +46,21 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("five entries per item", docs)
     }
 
+    func testNominalRateCompositionShiftMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.maximumNominalShiftPictures, 16)
+        assertDocumented("clamped to **16 pictures**", try documentation())
+    }
+
+    func testCompositionSampleExtensionMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.extendedSampleTarget, 48)
+        assertDocumented("up to\n**48 pictures**", try documentation())
+    }
+
+    func testLandingEnvelopeHoldMatchesDocumentation() throws {
+        XCTAssertEqual(H264CompositionOffsetRepair.landingEnvelopePictures, 8)
+        assertDocumented("first **8 pictures**", try documentation())
+    }
+
     func testPartialCompositionHoldBoundsMatchDocumentation() throws {
         let docs = try documentation()
         XCTAssertEqual(H264PartialCompositionRepair.maximumReorderDepth, 16)
@@ -89,7 +104,27 @@ final class DocumentedConstantsTests: XCTestCase {
                        0.036, accuracy: 1e-9)
 
         assertDocumented("once K = 3 newer base-layer", fel)
-        assertDocumented("is the maximum layer skew, 3;", fel)
+        assertDocumented("(`maxLayerSkewFrames`) is the maximum layer", fel)
+        assertDocumented("skew, 3, and is the whole rule", fel)
+
+        // The deadline release (§5.5) and its log lines (§5.11).
+        XCTAssertEqual(DualLayerVideoDecoder.deadlineMarginFloor, 0.1)
+        XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceFloor, 0.015)
+        XCTAssertEqual(DualLayerVideoDecoder.enhancementGraceCap, 0.05)
+        XCTAssertEqual(DualLayerVideoDecoder.heldClockWallBound, 2)
+        XCTAssertEqual(DualLayerVideoDecoder.maxDeadlineHoldFrames, 7)
+        XCTAssertEqual(DoviFelComposer.maxFramesInFlight + DualLayerVideoDecoder.maxLayerSkewFrames + 2, 8)
+        XCTAssertEqual(DualLayerVideoDecoder.minSweepDelay, 0.002)
+        XCTAssertEqual(DualLayerVideoDecoder.maxSweepDelay, 0.25)
+        XCTAssertEqual(DualLayerVideoDecoder.totalsLogIntervalSeconds, 10)
+        assertDocumented("least 100 ms.", fel)
+        assertDocumented("clamped to 15 to 50 ms", fel)
+        assertDocumented("it waits 2 s at most", fel)
+        assertDocumented("`maxDeadlineHoldFrames` = 7 newer arrivals", fel)
+        assertDocumented("`maxFramesInFlight + maxLayerSkew + 2` = 8 pending frames", fel)
+        assertDocumented("every 2 to 250 ms", fel)
+        assertDocumented("at most every 10 s", fel)
+        assertDocumented("`maxDeadlineHoldFrames` = 7 with a render clock", fel)
         assertDocumented("waiting enhancement frames capped at 10", fel)
         assertDocumented("At most 10 enhancement frames wait", fel)
         assertDocumented("fixed capacity 32", fel)
@@ -436,6 +471,13 @@ final class DocumentedConstantsTests: XCTestCase {
                                      encoding: .utf8)
         else { throw XCTSkip("running outside a source checkout; no sources to check against") }
         return text
+    }
+
+    // MARK: - Keyframe-snapped seeks (docs/api.md, seek(to:))
+
+    func testKeyframeSnapReachMatchesDocumentation() throws {
+        XCTAssertEqual(SWKeyframeSnap.reachSeconds, 10)
+        assertDocumented("lands on the keyframe nearest the target, within 10 s", try documentation())
     }
 
     // MARK: - Picture-order pairing (docs/dolby-vision-fel.md §5.3)

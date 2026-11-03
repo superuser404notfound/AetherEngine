@@ -106,13 +106,16 @@ flowchart LR
 | Split | `DoviRpuConverter.separateDualLayers` | demux | RPU parsed into composer parameters and converted to an 8.1 NAL; EL NAL units copied into a new `AVPacket`; the BL packet goes to VideoToolbox untouched (it skips the `unspec` NAL units itself) |
 | Align | `DualLayerPictureAlignment.enhancementPTS` | demux, under the decoder's lock | each layer's display slot from its POC (`HEVCPictureOrderCount`); the EL packet takes the PTS of the BL picture in the same slot, so pairing by time pairs by picture order when the layers' GOPs differ. A layer whose sequence cannot be trusted (leading pictures of the opener, or more than 16 slots off its unit, or a seek before its next IRAP) keeps its access unit's PTS |
 | Decode | two `HardwareVideoDecoder`s | VideoToolbox output threads | asynchronous decode with temporal processing, P010 IOSurface buffers in decode order (the renderer's 4-frame reorder buffer restores display order, as for any VideoToolbox HEVC stream) |
-| Pair | `DualLayerVideoDecoder.handleBaseLayerFrame` / `handleEnhancementLayerFrame` | VideoToolbox output threads, under the decoder's recursive lock | match the other layer by 90 kHz canonical PTS within ±300 ticks; a base-layer frame takes its ticket at arrival and is bypassed under it once K = 3 newer base-layer frames have arrived; waiting enhancement frames capped at 10; side data in a 32-entry ring; `hdr10Data` and the display-metadata NAL are resolved once here and travel with the ticket |
+| Pair | `DualLayerVideoDecoder.handleBaseLayerFrame` / `handleEnhancementLayerFrame` | VideoToolbox output threads, under the decoder's recursive lock | match the other layer by 90 kHz canonical PTS within ±300 ticks; a base-layer frame takes its ticket at arrival and is bypassed under it by its display deadline when the decoder has a render clock (§5.5), or once K = 3 newer base-layer frames have arrived when it has none; waiting enhancement frames capped at 10; side data in a 32-entry ring; `hdr10Data` and the display-metadata NAL are resolved once here and travel with the ticket |
 | Compose | `DoviFelComposer.composeAsync` | caller, then Metal | wait for one of 3 in-flight slots, rent a P010 buffer (§5.6), copy colour attachments from the base layer, bind 6 texture-cache textures, serialize the parameter block, encode luma and chroma kernels in one concurrent encoder, commit |
 | Deliver | Metal completion handler → composer's `deliveryQueue` (composed frames) or the pairing call directly (a bypass) → `OrderedDelivery.fulfil` → `emit` | Metal's completion queue hands off immediately to the composer's own `.userInteractive` queue (§4.3's firewall, not an ordering mechanism), or the pairing thread for a bypass, then `OrderedDelivery`'s own `.userInteractive` queue — never the decoder lock | release the GPU slot inline, nothing else, on Metal's queue; everything else (error logging, GPU-time accounting, `completion`) hops off it first. Either path hands the frame to `OrderedDelivery` (§5.7): one serial queue orders composed and bypassed frames alike regardless of which queue called `fulfil`, drops anything tagged with an epoch a flush/close has since retired, and calls `onFrame` (renderer enqueue) with no decoder lock held |
 
 A frame bypasses composition, and goes out as its base layer with its own DV metadata, when the
-stream is not FEL, when MEL was detected, when no RPU parameters exist for its PTS, or when
-composition fails.
+stream is not FEL, when MEL was detected, when no RPU parameters exist for its PTS, when its
+enhancement layer does not arrive in time (§5.5), when the access unit carried none, at end of stream,
+or when composition fails. A bypassed frame carries the Profile 8.1 RPU that keeps the source's
+mapping, so the display reshapes the picture the composer did not; a composed frame carries the form
+with the mapping removed.
 
 **Kernels** (`DoviShaderSource.swift`). Luma: base code → piece selection → polynomial (evaluated in
 normalized float) or MMR when the luma curve uses MMR → plus the inverse-NLQ residual of the
@@ -239,6 +242,23 @@ Every device figure above came from DEBUG builds: `-Onone`, with the HDMI probe 
 memory watermark sampling on every emitted frame. They show the direction and the GPU cost; CPU and
 memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of
 ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
+
+### 4.7 4:4:4 chroma compose on the A12
+
+Measured on an Apple TV 4K (2nd generation) with the 4:2:0 output as the control, running the
+4:4:4 kernel described in §5.6. The build kind is given per row.
+
+| | Before | After |
+|---|---|---|
+| 4:4:4 compose rate, 65 s clip (Debug) | about 12.8 per second, video falling 30 s or more behind the clock | about 23.9 per second, the clip's rate; 4:2:0 control 24.1 per second; video lead 0.2 to 0.3 s, 0 drops |
+| 4:4:4 compose rate, 65 s clip (Release) | not measured | 24.0 per second, 1555 frames composed (last totals line; it prints at most every 10 s), 4:2:0 control 24.0 per second and 1577 frames; video lead up to 0.25 s, 0 drops, 0 compose failures |
+
+- **4:4:4 costs memory.** On the Release runs above, footprint (sampled at 30 s and 60 s) is 792 MB
+  against 436 MB for 4:2:0 on this code. In Debug builds of the same clip, 4:4:4 was 618 MB before
+  this kernel and 762 MB with it; 4:2:0 was 429 MB and 424 to 430 MB. The kernel allocates no new
+  textures, and the cause of the rise is not measured. 4:4:4 takes the pool path while the 4:2:0
+  control composes in place, and its chroma planes are larger; the split between the two is not
+  measured.
 
 ---
 
@@ -383,9 +403,36 @@ the decoder's lock, and each call is O(K):
   decode; `DoviFelRealFileTests.reconstructsAndOrders` replays that rule on the real files).
 - If its enhancement layer is already waiting (within ±300 ticks), the pair is composed. Otherwise it
   waits.
-- **A waiting base layer is bypassed, under its own ticket, once K newer base-layer frames have
-  arrived.** K (`maxLayerSkewFrames`) is the maximum layer skew, 3; the summary line reports the
-  observed skew (§5.11). A lost enhancement frame costs K frames of delay and never reorders output.
+- **A waiting base layer is bypassed, under its own ticket, by its display deadline; with no render
+  clock, once K newer base-layer frames have arrived.** K (`maxLayerSkewFrames`) is the maximum layer
+  skew, 3, and is the whole rule only when the host installed no clock (`setRenderClock`): a lost
+  enhancement frame then costs K frames of delay and never reorders output. The summary line reports
+  the observed skew (§5.11). With a clock (the software host installs one) the rule is the deadline:
+  - *Deadline.* A waiting frame is released as its base layer once its presentation time less a margin
+    has been reached on the running clock. The margin is `maxFramesInFlight` (3) frame intervals, at
+    least 100 ms. Its presentation time is the earliest of its own and those of the frames behind it,
+    since delivery is ordered by ticket and none of them can show first.
+  - *Grace.* A frame is given one frame interval, clamped to 15 to 50 ms, from its arrival before the
+    deadline may release it, because the two layers decode on separate sessions and the partner of a
+    frame that arrives already inside its margin is normally a moment behind, not lost. A frame already
+    at or past its presentation time gets none.
+  - *Held clock.* With no running clock there is no time to count down to. While a preroll waits on the
+    renderer a frame waits the margin of wall time at most; for a pause, or before the clock is armed,
+    it waits 2 s at most (this only bounds a layer that is lost for good).
+  - *Backstop.* With a clock, `maxDeadlineHoldFrames` = 7 newer arrivals release a frame in every mode.
+    It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 8 pending frames) at which
+    `OrderedDelivery`'s stall guard skips a ticket, so the frames queued behind a waiting one can never
+    reach the guard, and it bounds the queue.
+  - *Sweep.* A timer re-checks what waits (every 2 to 250 ms, only while something waits) and every
+    arrival re-arms it, since an arrival can lower a waiting frame's deadline.
+  - *No enhancement layer in the access unit.* An access unit that carries no enhancement-layer NAL has
+    no picture to wait for, so its base frame is released at once (`bypassNoELInAU`). That is judged only
+    while the layers' pictures sit in the same units; once the alignment has restamped any (a reordered
+    stream), a unit without one says nothing about its own frame. A reordered stream is recognised only
+    after its first restamp, so a frame in that start-up stretch (the opening of a play and of each seek)
+    can be released early and shown as its base layer.
+  - The count `K` also sets how far back the picture alignment will restamp (`maxBackwardRestamp`); with
+    a clock a frame waits longer than `K` arrivals, so that bound is conservative there.
 - An enhancement frame whose base layer has already gone out (its key matches one of the last 64
   settled base-layer keys) is dropped on arrival. At most 10 enhancement frames wait.
 - A frame's side data is looked up once, when its base layer arrives, and travels with the ticket;
@@ -408,6 +455,47 @@ the decoder's lock, and each call is O(K):
   threshold a burst draws on a reserve of 3 more. Only with the reserve spent does the composer wait,
   for at most about 36 ms (a 300 ms wait stalled the VideoToolbox callback and starved audio into
   rebuffers on device), and then the frame bypasses instead of growing the pool.
+- **Chroma sampling (experimental switch).** The composition is defined on the 4:2:0 sites, where the base
+  layer's chroma sits, and 4:2:0 is the output unless `AETHER_FEL_CHROMA` says otherwise. `422` and `444`
+  step that result up by co-sited means: a copy on a site, and the mean of the sites either side between
+  them (the four around a sample in 4:4:4). 4:2:2 composes each step-up site again from its neighbours,
+  so it does about four times the chroma work of 4:2:0; a pass that composes the 4:2:0 sites once into a
+  scratch texture would remove that, and it has not been done. 4:4:4 does not recompute: its kernel works
+  on 16 x 16 blocks of output samples, composes the 9 x 9 sites a block needs once into threadgroup
+  memory, and every sample then takes the mean of its one to four stored sites with the same rounding,
+  clamping and dither as before, so the output is byte-identical to the per-sample version. That is 81
+  site evaluations per 256 samples instead of 1024 (0.32 per sample against 4, and 0.25 for 4:2:0). The
+  Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms, and the A12 numbers are in §4.7. Both
+  take the pool path, since in-place composition is 4:2:0 only. The kernel needs threadgroups of exactly
+  16 x 16, so a pipeline that allows fewer than 256 threads refuses the frame with a logged compose
+  failure; the per-window GPU time line carries the limit it saw. 4:4:4 is experimental: the spec has no
+  4:4:4 reconstruction.
+- **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
+  instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
+  (for example a luma MMR curve). It is used when the buffer is
+  IOSurface-backed, in the 10-bit biplanar video-range format (`x420`), has even dimensions with the
+  luma and half-size chroma planes the output has, and the frame's luma curve is not MMR; anything else
+  takes the pool path unchanged. Setting `AETHER_FEL_INPLACE=0` turns it off for an A/B run.
+  - *Why no scratch buffer.* The chroma kernel reads the base-layer luma around each chroma sample
+    (other threads' pixels) but only its own chroma sample. The luma kernel reads only its own luma sample.
+    So chroma runs first, while all the luma is still the decoded base layer, and each thread overwrites
+    just the chroma sample it has read; luma runs second, each thread overwriting just its own sample, and
+    nothing reads luma any more. A serial encoder and a texture barrier between the passes make the second
+    wait for the first. A luma MMR curve would read chroma in the luma pass, after chroma was overwritten,
+    so such a frame uses the pool (no stream seen so far has one).
+  - *Exclusive buffer.* The decoder hands the buffer to the composition when it pairs the frame, keeps no
+    other reference that reads pixels, and delivers it to the renderer only from the completion. The
+    composer refuses a second composition of a buffer while one is outstanding (that request is dropped and
+    counted as lost, it does not take the pool path, which would read pixels the first one is still writing), and the residual
+    measurement (`AETHER_FEL_MEASURE`), which composes the base layer again from another queue, runs on
+    the pool path.
+  - *Failure.* A frame that cannot be set up is untouched and goes out as its base layer, as before. A
+    command buffer that fails after it started leaves a mix of base layer and composed pixels in the
+    buffer; that frame is dropped (`OrderedDelivery.skip` keeps its place in line), counted as a compose
+    failure and as `inPlaceDropped` in the summary, and nothing retries it.
+  - *Attachments.* The buffer already holds the base layer's attachments, which is what the pool path
+    copies over. The attachments that do not propagate are removed, so the result carries the same set a
+    pool buffer would; the Dolby Vision attachment is set on delivery as for any frame.
 - **Texture cache** is flushed from the 1 Hz tick, which releases textures for buffers no longer in use.
 - **Colour attachments** are copied from the base layer when encoding, on the calling thread, not on
   Metal's completion queue.
@@ -417,7 +505,7 @@ the decoder's lock, and each call is O(K):
 - **Kernels:** a per-frame 1024-entry luma prediction table replaces piece selection and polynomial
   evaluation per pixel whenever luma is polynomial (it is a pure function of the 10-bit base code);
   residual evaluation is skipped per component when that component's NLQ is inactive; threadgroup sizes
-  come from `threadExecutionWidth`. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
+  come from `threadExecutionWidth`, except the 4:4:4 chroma pass, which needs exactly 16 x 16. Every one of these keeps `DoviGpuCurveSweepTests` bit-exact.
 
 ### 5.7 Delivery
 
@@ -532,9 +620,9 @@ pictures and the display layer's queue are extra):
 
 | Holder | Bound |
 |---|---|
-| Base-layer frames waiting for their EL | K = 3 → 75 MB |
+| Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 7 with a render clock (K = 3 without one) → about 175 MB at 4K with the clock, 75 MB at K = 3. The 7 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds |
 | Enhancement-layer frames waiting | 10 → 62 MB |
-| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 15 + reserve 3 → 448 MB, the reserve freed after a second unused |
+| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 15 + reserve 3 → 448 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR):** the composed frame is the decoded base-layer buffer, which VideoToolbox's own pool then keeps alive until the renderer lets go of it (the memory moves to the decoder's side rather than vanishing). Approximate: another aetherctl ran on the same machine during these runs, so the numbers are noisy. Mac, 4K, 200 s with 7 seeks, two runs each: our process plus the decoder service, median 841 and 903 MB before, 708 and 744 MB in place (about 147 MB less); peak 936 and 965 MB before, 761 and 817 MB in place (about 161 MB less). Our process alone falls by about 300 MB, the decoder service gains about 170 MB |
 
 CPU per composed frame:
 
@@ -554,15 +642,27 @@ GPU: 12.9–14.3 ms per frame measured on the A12 (§4.2), against a 41.7 ms bud
 ### 5.11 Observability
 
 One `[DualLayerVideoDecoder] summary` line per second while composing: frames composed, compose
-failures, bypassed without EL, bypassed without RPU, stale enhancement frames dropped, maximum
-observed layer skew in frames, peak GPU slots in use, output pool buffers allocated, delivery pending
-peak, mean GPU ms. `[DoviFelComposer] gpu … ms/frame` is the same kind of line, once per 120 composed
+failures, base frames bypassed without an enhancement layer, split by the rule that released them
+(`bypassNoELInAU`: no enhancement-layer NAL in the access unit; `bypassDeadline`: the display deadline;
+`bypassHeldWall`: the wall-time bound on a held clock; `bypassBackstop`: the count of 7, or K with no
+clock; `bypassNoELDecoder`: no enhancement decoder; `bypassEndOfStream`: released at end of stream),
+bypassed without RPU, stale enhancement frames dropped, maximum
+observed layer skew in frames, peak GPU slots in use, output pool buffers allocated (0 in place), frames composed in place so far,
+frames dropped after a failed in-place composition, delivery pending peak, mean GPU ms. `[DoviFelComposer] gpu … ms/frame` is the same kind of line, once per 120 composed
 frames. Both are `.verbose`: they go to OSLog's debug level and never reach the host handler, so they
 cost nothing unless the category's debug level is on:
 
 ```
 log stream --level debug --predicate 'subsystem == "de.superuser404.AetherEngine" && category == "sw.playback"'
 ```
+
+A second line, `[DualLayerVideoDecoder] totals: composed=…, bypassDeadline=…, bypassHeldWall=…, bypassBackstop=…`,
+goes out at the default level (so a host's log carries it without a debug build): the session-wide
+count of composed frames and of the base frames released by the deadline, the held-wall bound and the
+backstop. It is sent at most every 10 s and only when one of the counts moved since the last one, so a
+device run is judged from it. The software host's `[SWDiag]` line carries `skip=`, the number of frames
+the arrival-order path discarded below a seek's threshold (the pictures of the landing GOP before the
+target, a decision rather than a loss), next to `lost=` and `layerDrop=`.
 
 The exception is a summary whose second counted a compose failure, which goes out at the default level
 so the failure is visible without that. `os_signpost` intervals around compose and delivery make the
@@ -582,6 +682,7 @@ debugging, such as the pairing, queueing and bypass traces, uses `EngineLog` lev
 | I7 | Held frames are bounded: waiting EL, waiting BL, GPU in flight | `orphanedEnhancementLayersAreBounded`, `lostEnhancementLayerDelaysBaseLayerByAtMostKFrames`; `DoviComposeAsyncTests.completionsAreExactlyOnceAndBounded`. **Not bounded on its own: the delivery queue.** A slow `onFrame` does not throttle pairing (a composed frame's GPU slot is released before delivery), so nothing bounds the backlog in `OrderedDelivery` itself. The demux thread's `mayEnqueueVideoFrame` gate limits how fast new packets arrive, which limits the backlog only indirectly; `flush()`'s `barrier()` waits for the queue to empty but does not cap it. |
 | I8 | No lock is held across a blocking wait or a host callback | `DualLayerVideoDecoderTests.slowOnFrameDoesNotBlockDecoderOperations` (a blocked `onFrame` never stalls concurrent decoder work); `DualLayerGpuSlotWaitTests` for the GPU slot wait |
 | I9 | Stream classification changes only at open, flush or close | `DualLayerStreamClassificationTests` |
+| I10 | An in-place composition is bit-identical to the pool composition; a buffer is never composed twice or shown half composed | `DoviFelInPlaceComposeTests` (`inPlaceMatchesPool`, `sameBufferIsNotComposedTwice`, `failedInPlaceIsCorrupt`, `decoderDropsCorruptFrame`) |
 
 ---
 

@@ -302,4 +302,73 @@ struct DoviComposedFrameRpuTests {
         #expect(!kept.isIdentityMapping)
         #expect(!kept.carriesNoEnhancementLayer)
     }
+
+
+    #if DualLayerDolbyVision
+    // MARK: - Raw base layer: the mapping stays
+
+    /// `fel_orig` with `disable_residual_flag` set, made by libdovi itself (mode 1, then mode 2: the NLQ is
+    /// dropped and the flag set, the curves and the display metadata are kept), so it is the RPU class libdovi
+    /// parses, not a hand-made bit pattern. A real FEL stream carries these on frames without a residual.
+    static let felNoResidualNAL: [UInt8]? = {
+        felNAL.withUnsafeBufferPointer { buf -> [UInt8]? in
+            guard let rpu = DoviRpuGuard.parse(buf.baseAddress!, buf.count) else { return nil }
+            defer { dovi_rpu_free(rpu) }
+            guard dovi_convert_rpu_with_mode(rpu, 1) == 0, dovi_convert_rpu_with_mode(rpu, 2) == 0,
+                  let out = dovi_write_unspec62_nalu(rpu) else { return nil }
+            defer { dovi_data_free(out) }
+            return [UInt8](UnsafeBufferPointer(start: out.pointee.data, count: out.pointee.len))
+        }
+    }()
+
+    @Test("The residual-off fixture has the flag set, no el_type, a non-identity mapping, and L1/L2")
+    func noResidualFixtureShape() throws {
+        let nal = try #require(Self.felNoResidualNAL)
+        let s = try #require(Self.snapshot(ofNAL: nal))
+        #expect(s.disableResidual)
+        #expect(s.elType == nil)
+        #expect(!s.hasNLQ)
+        #expect(!s.isIdentityMapping)
+        #expect(s.blocks["L1"] != nil)
+        #expect(s.blocks["L2"] != nil)
+    }
+
+    @Test("A composed frame whose RPU has disable_residual_flag set still carries no mapping, and the same display metadata")
+    func noResidualRpuIsUnmappedOnComposedFrames() throws {
+        let nal = try #require(Self.felNoResidualNAL)
+        let source = try #require(Self.snapshot(ofNAL: nal))
+        let (raw, attached) = try #require(Self.composedFrameRpu(source: nal))
+        #expect(raw == nal)
+        let out = try #require(Self.snapshot(ofNAL: attached))
+        Self.expectPinned(source: source, attached: out, label: "fel_orig, residual off")
+    }
+
+    /// An access unit with no enhancement layer NAL (the case the decoder releases a base frame for) still
+    /// yields both forms of its RPU: the composed one with the mapping removed, and the one a raw base
+    /// layer carries, which keeps it.
+    @Test("An access unit without an enhancement layer yields a mapping-preserving RPU for the raw base layer and the no-op one for a composed frame",
+          arguments: ["fel_orig", "fel_orig, residual off"])
+    func baseLayerRpuKeepsTheMapping(label: String) throws {
+        let nal = try #require(label == "fel_orig" ? Self.felNAL : Self.felNoResidualNAL)
+        let pkt = Self.avcc([Self.hevcNAL(type: 1, payload: [0xAA, 0xBB]), nal])
+        defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+        let r = DoviRpuConverter.separateDualLayers(pkt, extractEL: true, useCustomBlockSource: true, extractParams: true)
+        #expect(r.elPacket == nil, "the access unit has no enhancement layer")
+        let source = try #require(Self.snapshot(ofNAL: nal))
+        let composed = try #require(r.convertedRpu)
+        let baseLayer = try #require(r.baseLayerRpu)
+        #expect(baseLayer.prefix(2).elementsEqual([0x7C, 0x01]), "complete unspec62 NAL")
+
+        let c = try #require(Self.snapshot(ofNAL: composed))
+        Self.expectPinned(source: source, attached: c, label: "\(label): composed form")
+
+        let b = try #require(Self.snapshot(ofNAL: baseLayer))
+        #expect(b.profile == 8, "not Profile 8")
+        #expect(b.carriesNoEnhancementLayer, "still carries an EL/NLQ part")
+        #expect(!b.isIdentityMapping, "the mapping was dropped: the display would show the base layer unreshaped")
+        #expect(b.curves == source.curves, "the curves changed")
+        #expect(b.blocks == source.blocks, "display metadata changed")
+        #expect(baseLayer != composed)
+    }
+    #endif
 }

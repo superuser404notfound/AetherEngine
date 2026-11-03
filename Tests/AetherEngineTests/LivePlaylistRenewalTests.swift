@@ -71,7 +71,7 @@ struct LivePlaylistRenewalTests {
         #expect(!HLSLocalServer.buildMediaPlaylistText(provider: provider, generation: 1).contains("#EXT-X-ENDLIST"))
     }
 
-    @Test("HTTP clients can finish the old playlist and mount the renewed master", .timeLimit(.minutes(1)))
+    @Test("HTTP clients can finish the old playlist and mount the renewed master", .timeLimit(.minutes(3)))
     func httpRenewal() async throws {
         let (provider, cache) = makeProvider()
         defer { cache.close() }

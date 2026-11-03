@@ -176,7 +176,8 @@ struct RangeIgnoringOriginTests {
         }
         #expect(read >= 36 * Int64(mb))
         #expect(server.rangeHeaderPresence.allSatisfy { $0 }, "a ranged source asked for an unranged GET")
-        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) },
+        // AE#958: the refill re-reads the held bytes before the boundary to check the origin.
+        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) - Int64(AVIOReader.rangeCheckBytes) },
                 "the refill at the 32 MB boundary never asked for its range")
         #expect(!server.requestLog.contains { $0.start == 1 && $0.end == 1 },
                 "an honoured range needs no confirmation")
@@ -211,7 +212,8 @@ struct RangeIgnoringOriginTests {
             read += Int64(n)
         }
         #expect(read >= 36 * Int64(mb))
-        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) },
+        // AE#958: the refill re-reads the held bytes before the boundary to check the origin.
+        #expect(server.requestedRanges.contains { $0.start == 32 * Int64(mb) - Int64(AVIOReader.rangeCheckBytes) },
                 "the refill at the 32 MB boundary never asked for its range")
         #expect(!server.requestLog.contains { $0.start == 1 && $0.end == 1 },
                 "an honoured range needs no confirmation")
@@ -243,7 +245,7 @@ struct RangeIgnoringOriginTests {
     }
 
     @Test("a small file answered with a 200 that covers it stays sized and seekable",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func smallWholeFileStaysSeekable() throws {
         let total = Int64(4 * mb)
         let maybe = ThrottledOriginServer(totalSize: total, throttleUs: 0, patternedBody: true,

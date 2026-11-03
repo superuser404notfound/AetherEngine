@@ -179,6 +179,134 @@ struct DetourBlockCacheTests {
         #expect(cache.residentCount == 0)
         #expect(cache.block(0) == nil)
     }
+
+    /// Walks `cycle` blocks round-robin the way the detour path does (look up, insert on a miss) and
+    /// returns how many lookups missed in each pass.
+    private func missesPerPass(_ cache: DetourBlockCache, cycle: Int, passes: Int) -> [Int] {
+        (0..<passes).map { _ in
+            var misses = 0
+            for i in 0..<cycle where cache.block(Int64(i)) == nil {
+                misses += 1
+                cache.insert(Int64(i), patternBlock(base: i * 16))
+            }
+            return misses
+        }
+    }
+
+    // #909: 14 subtitle tracks, each in its own byte range, against 8 blocks missed on every lookup.
+    @Test("a cyclic working set larger than the resting size grows the cache until every lookup hits")
+    func cyclicWorkingSetGrows() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24)
+        let misses = missesPerPass(cache, cycle: 14, passes: 4)
+        #expect(misses[0] == 14)
+        #expect(misses.last == 0)
+        #expect(cache.capacity == 14)
+        #expect(cache.residentCount == 14)
+    }
+
+    @Test("the same cycle without a ceiling keeps missing every lookup")
+    func cyclicWorkingSetWithoutCeilingThrashes() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8)
+        #expect(missesPerPass(cache, cycle: 14, passes: 4) == [14, 14, 14, 14])
+        #expect(cache.capacity == 8)
+    }
+
+    @Test("a cycle exactly the ceiling's size grows the cache to the ceiling")
+    func cycleAtTheCeilingGrowsToIt() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 4, ceilingBlocks: 6)
+        #expect(missesPerPass(cache, cycle: 6, passes: 3).last == 0)
+        #expect(cache.capacity == 6)
+    }
+
+    // Nine blocks in turn miss on every lookup under any capacity below nine, so growing to five would
+    // only hold more memory for the same fetches.
+    @Test("a cycle the ceiling could not hold either does not grow the cache")
+    func cycleBeyondTheCeilingStaysAtRestingSize() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 3, ceilingBlocks: 5)
+        #expect(missesPerPass(cache, cycle: 9, passes: 4) == [9, 9, 9, 9])
+        #expect(cache.capacity == 3)
+    }
+
+    @Test("a forward scan that never returns to a block does not grow the cache")
+    func forwardScanStaysAtRestingSize() {
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24)
+        for i in 0..<100 { cache.insert(Int64(i), patternBlock(base: i * 16)) }
+        #expect(cache.capacity == 8)
+        #expect(cache.residentCount == 8)
+    }
+
+    @Test("the idle sweep shrinks a grown cache back, and clear resets it")
+    func idleSweepAndClearShrink() {
+        let clock = ManualClock()
+        let cache = DetourBlockCache(blockSize: 16, maxBlocks: 8, ceilingBlocks: 24, now: { clock.now })
+        _ = missesPerPass(cache, cycle: 14, passes: 3)
+        #expect(cache.capacity == 14)
+
+        clock.advance(60)
+        for i in 0..<3 { _ = cache.block(Int64(i)) }
+        #expect(cache.evictIdle(olderThan: 30) == 11)
+        #expect(cache.capacity == 8, "never below the resting size")
+
+        _ = missesPerPass(cache, cycle: 14, passes: 3)
+        #expect(cache.capacity == 14)
+        cache.clear()
+        #expect(cache.capacity == 8)
+    }
+}
+
+/// AE#909, through the reader: a demuxer reading twelve regions behind the streaming window, the way a
+/// flat MP4 with one region per subtitle track is read during playback. Contributed by @oxyc in #911.
+@Suite("Detour cache grows to the reader's working set", .offCooperativePool)
+struct DetourCacheWorkingSetReaderTests {
+
+    private static let chunk = 256 * 1024
+    private static let block: Int64 = 4 * 1024 * 1024
+
+    @Test("a third pass over twelve regions behind the window fetches nothing", .timeLimit(.minutes(2)))
+    func repeatedPassesStopFetching() throws {
+        let server = try #require(ThrottledOriginServer(totalSize: 128 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
+        defer { server.stop() }
+        // The detour fetch's interactive budget is a wall clock; see Issue782RestartReanchorTests. So is
+        // idle release: on a loaded runner a pass can outlast its 30 s, and the release would shrink the
+        // cache between passes. What is measured here is growth, not release.
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/movie.bin")!,
+                                detourIdleSeconds: 3600, detourFetchBudget: 30)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+        reader.markOpenPhaseFinished()
+
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: Self.chunk)
+        defer { buf.deallocate() }
+        var read = 0
+        while read < 80 * 1024 * 1024 {
+            let n = Int(reader.read(into: buf, size: Int32(Self.chunk)))
+            #expect(n > 0, "forward read failed at \(read)")
+            if n <= 0 { return }
+            read += n
+        }
+
+        func blockFetches() -> Int {
+            server.requestedRanges.filter { range in
+                guard let end = range.end else { return false }
+                return end - range.start + 1 == Self.block
+            }.count
+        }
+        var perPass: [Int] = []
+        for _ in 0..<3 {
+            let before = blockFetches()
+            for region in 0..<12 {
+                let offset = Int64(region) * Self.block + 4321
+                #expect(reader.seek(offset: offset, whence: Int32(SEEK_SET)) == offset)
+                let n = Int(reader.read(into: buf, size: Int32(Self.chunk)))
+                #expect(n > 0)
+                #expect((0..<n).allSatisfy { buf[$0] == ThrottledOriginServer.patternByte(at: offset + Int64($0)) },
+                        "region \(region) served the wrong bytes")
+            }
+            perPass.append(blockFetches() - before)
+        }
+        #expect(perPass.first == 12, "the first pass did not fetch each region as a detour block: \(perPass)")
+        #expect(perPass.last == 0, "passes fetched \(perPass)")
+    }
 }
 
 /// Issue #71: under a sustained 429, parse-driven seekReconnect kept resetting unproductiveReconnects

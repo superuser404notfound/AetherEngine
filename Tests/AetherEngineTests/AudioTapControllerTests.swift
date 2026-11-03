@@ -27,6 +27,38 @@ final class AudioTapControllerTests: XCTestCase {
         XCTAssertEqual(received[0].sourceTime, 1.0, accuracy: 0.001)
     }
 
+    /// #864 follow-up (qoli's characterization): a consumer that falls behind keeps every queued
+    /// buffer, loses what arrives while the queue is full, and the first buffer after that gap is
+    /// flagged, so it cannot be mistaken for PCM contiguous with the last one it received.
+    func testOverflowFlagsTheFirstBufferAfterTheGap() async {
+        func packet(_ index: Int, discontinuity: Bool = false) -> AudioTapBuffer {
+            let pcm = AVAudioPCMBuffer(pcmFormat: AetherEngine.audioTapFormat, frameCapacity: 4800)!
+            pcm.frameLength = 4800
+            return AudioTapBuffer(buffer: pcm, sourceTime: Double(index) / 10, discontinuity: discontinuity)
+        }
+        let controller = AudioTapController()
+        let stream = controller.makeStream(startReader: { onStop in onStop {} })
+        let emit = controller.makeYield()!
+        var iterator = stream.makeAsyncIterator()
+        emit(packet(0, discontinuity: true))
+        _ = await iterator.next()
+        let capacity = AudioTapController.streamCapacity
+        for index in 1...(capacity + 1) { emit(packet(index)) }   // the last one finds the queue full
+        var queued: [AudioTapBuffer] = []
+        for _ in 0..<capacity { queued.append(await iterator.next()!) }
+        XCTAssertEqual(queued.first!.sourceTime, 0.1, accuracy: 1e-6)
+        XCTAssertEqual(queued.last!.sourceTime, Double(capacity) / 10, accuracy: 1e-6)
+        XCTAssertFalse(queued.contains(where: \.discontinuity))
+        emit(packet(capacity + 2))
+        let afterGap = await iterator.next()!
+        XCTAssertEqual(afterGap.sourceTime, Double(capacity + 2) / 10, accuracy: 1e-6)
+        XCTAssertTrue(afterGap.discontinuity)
+        emit(packet(capacity + 3))
+        let next = await iterator.next()!
+        XCTAssertFalse(next.discontinuity)
+        controller.teardown()
+    }
+
     func testTeardownStopsReaderAndYieldGoesDead() {
         let controller = AudioTapController()
         var stopped = false

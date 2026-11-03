@@ -163,12 +163,16 @@ struct Issue357BackgroundTeardownSelectionTests {
         let engine = try AetherEngine()
         let track = engine.addExternalSubtitleTrack(makeTrack("gone"))
         engine.selectSubtitleTrack(index: track.id)
+        engine.playbackBackend = .software
+        engine.lastRequiresDeinterlaceWarmup = true
         backgroundTeardown(engine)
+        #expect(engine.backgroundTeardownSelection?.requiresDeinterlaceWarmup == true)
 
         engine.stop()
         let selection = engine.consumeReloadSelection()
         #expect(selection.subtitles.activeSubtitleTrackIndex == nil)
         #expect(selection.audioTrackIndex == nil)
+        #expect(selection.requiresDeinterlaceWarmup == nil)
     }
 
     // MARK: - The host the teardown keeps (Sodalite#149)

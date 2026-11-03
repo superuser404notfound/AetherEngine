@@ -39,12 +39,15 @@ struct ThreadCPUSamplerTests {
         #expect(sampler.sample() == nil)
         let done = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        // Burn thread CPU time, not wall time: on a loaded runner a wall-clock burn gets
+        // preempted and its share of the window says nothing about the sampler.
+        nonisolated(unsafe) var burned = 0.0
         let thread = Thread {
             pthread_setname_np("cpuprobe-burner")
-            let end = Date().addingTimeInterval(0.3)
             var x = 0.0
-            while Date() < end { x += sin(x) + 1 }
+            while clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) < 200_000_000 { x += sin(x) + 1 }
             if x < 0 { print(x) }
+            burned = Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e9
             done.signal()
             release.wait()
         }
@@ -53,7 +56,7 @@ struct ThreadCPUSamplerTests {
         let report = try #require(sampler.sample())
         release.signal()
         let burner = try #require(report.groups.first { $0.name == "cpuprobe-burner" })
-        #expect(burner.percent > 30)
+        #expect(burner.percent / 100 * report.intervalSeconds >= burned * 0.99)
         #expect(report.totalPercent >= burner.percent)
         #expect(report.logFragment().hasPrefix("cpu="))
     }

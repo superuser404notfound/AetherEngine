@@ -338,6 +338,11 @@ enum SubtitleForwardPrefetcher {
                 break
             }
             guard let pkt = next else {
+                // AE#955: the run read everything there is. Without this the ledger ends at the
+                // last progress step, short of the duration, so a span that runs to the end of the
+                // program never read as read and the OCR pre-fill in the last
+                // `subtitleOCRLeadSeconds` of a film waited forever.
+                store.noteHarvestReach(.prefetch, through: .greatestFiniteMagnitude)
                 exit = .endOfFile
                 break
             }

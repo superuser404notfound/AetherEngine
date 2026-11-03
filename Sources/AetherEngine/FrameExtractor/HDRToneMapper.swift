@@ -10,8 +10,14 @@ struct HDRToneMapper {
         frame: UnsafeMutablePointer<AVFrame>,
         targetWidth: Int,
         timeBase: AVRational,
+        sar: AVRational,
         highQuality: Bool = false
     ) -> UnsafeMutablePointer<AVFrame>? {
+        let srcW = Int(frame.pointee.width)
+        let srcH = Int(frame.pointee.height)
+        guard srcW > 0, srcH > 0, targetWidth > 0 else { return nil }
+        let (width, height) = FrameDecodeContext.displayDimensions(
+            srcW: srcW, srcH: srcH, sar: sar, targetWidth: targetWidth)
         guard let graph = avfilter_graph_alloc() else { return nil }
         var graphOpt: UnsafeMutablePointer<AVFilterGraph>? = graph
         defer { avfilter_graph_free(&graphOpt) }
@@ -19,7 +25,6 @@ struct HDRToneMapper {
         guard let bufferFilter = avfilter_get_by_name("buffer"),
               let sinkFilter = avfilter_get_by_name("buffersink") else { return nil }
 
-        let sar = frame.pointee.sample_aspect_ratio
         let sarNum = sar.num > 0 ? sar.num : 1
         let sarDen = sar.den > 0 ? sar.den : 1
         // AE#499: colorspace and range belong in the args. Without them the link is configured as
@@ -44,7 +49,8 @@ struct HDRToneMapper {
         }
 
         // BT.2020 PQ/HLG to linear, Hable tone-map to SDR, BT.709 (tv range), RGBA.
-        let chain = "zscale=w=\(targetWidth):h=-2:t=linear:npl=100:f=\(highQuality ? "bicubic" : "bilinear")," +
+        // CGImage does not carry SAR. Bake the same display dimensions as SDR/DV into the pixels.
+        let chain = "zscale=w=\(width):h=\(height):t=linear:npl=100:f=\(highQuality ? "bicubic" : "bilinear")," +
                     "tonemap=tonemap=hable:desat=0," +
                     "zscale=p=bt709:t=bt709:m=bt709:r=tv," +
                     "format=pix_fmts=rgba"

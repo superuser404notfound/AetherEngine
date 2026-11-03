@@ -338,7 +338,13 @@ struct HLSLiveIngestRefusalTests {
         let joined = (1..<8).map(Self.segment).reduce(Data(), +)
         _ = try await drain(reader, expectedBytes: joined.count + 1)
         #expect(reader.terminalError == .playlistUnreachable(status: 502))
-        #expect(Date().timeIntervalSince(startedAt) < HLSLiveIngestReader.refreshRetryBudget / 2)
+        // Refreshes are paced at a fixed interval and the deadline is wall time, so a starved runner
+        // can only lower this count; the minute a refusal gets would roughly quintuple it.
+        let failedRefreshes = origin.requestCount("/media.m3u8") - 1
+        let shortBudgetAttempts = Int(HLSLiveIngestReader.unreachableRetryBudget
+            / HLSLiveIngestReader.refusedRefreshRetryInterval) + 1
+        #expect(failedRefreshes <= shortBudgetAttempts)
+        #expect(Date().timeIntervalSince(startedAt) < HLSLiveIngestReader.refreshRetryBudget)
     }
 
     @Test("only a refusal gets the long retry budget")

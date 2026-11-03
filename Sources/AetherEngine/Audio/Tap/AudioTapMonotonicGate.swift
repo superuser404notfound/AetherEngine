@@ -31,14 +31,19 @@ enum AudioTapMonotonicGate {
 /// Stateful wrapper: holds `lastEnd`, applies the decision, performs the PCM trim, forwards to the
 /// stream continuation. Called from a single delivery source at a time but locked for safety since
 /// its `accept` is handed out as a `@Sendable` closure.
+///
+/// `downstream` returns false when it could not take the buffer (the stream queue was full); the
+/// next buffer it does take then carries `discontinuity`, so a consumer that fell behind sees the
+/// gap instead of inferring contiguous PCM across it (#864 follow-up).
 final class AudioTapMonotonicFilter: @unchecked Sendable {
     private let lock = NSLock()
     private var lastEnd: Double?
+    private var pendingDiscontinuity = false
     private let sampleRate = AudioTapDefaults.sampleRate
     private let threshold = AudioTapDefaults.overlapTrimThreshold
-    private let downstream: @Sendable (AudioTapBuffer) -> Void
+    private let downstream: @Sendable (AudioTapBuffer) -> Bool
 
-    init(downstream: @escaping @Sendable (AudioTapBuffer) -> Void) {
+    init(downstream: @escaping @Sendable (AudioTapBuffer) -> Bool) {
         self.downstream = downstream
     }
 
@@ -51,21 +56,28 @@ final class AudioTapMonotonicFilter: @unchecked Sendable {
             lastEnd: lastEnd, sampleRate: sampleRate, overlapTrimThreshold: threshold)
         switch decision {
         case .pass:
-            emit(buf.buffer, sourceTime: buf.sourceTime, discontinuity: buf.discontinuity, frames: frames)
+            emit(buf, sourceTime: buf.sourceTime, discontinuity: buf.discontinuity, frames: frames)
         case .forceDiscontinuity:
-            emit(buf.buffer, sourceTime: buf.sourceTime, discontinuity: true, frames: frames)
+            emit(buf, sourceTime: buf.sourceTime, discontinuity: true, frames: frames)
         case .drop:
             break
         case .trim(let dropFrames):
             guard let trimmed = Self.trimmedBuffer(buf.buffer, dropFrames: dropFrames),
                   let anchor = lastEnd else { break }
-            emit(trimmed, sourceTime: anchor, discontinuity: false, frames: frames - dropFrames)
+            emit(buf.restamped(buffer: trimmed, discontinuity: false), sourceTime: anchor,
+                 discontinuity: false, frames: frames - dropFrames)
         }
     }
 
-    private func emit(_ buffer: AVAudioPCMBuffer, sourceTime: Double, discontinuity: Bool, frames: Int) {
+    private func emit(_ buf: AudioTapBuffer, sourceTime: Double, discontinuity: Bool, frames: Int) {
         lastEnd = sourceTime + Double(frames) / sampleRate
-        downstream(AudioTapBuffer(buffer: buffer, sourceTime: sourceTime, discontinuity: discontinuity))
+        let accepted = downstream(buf.restamped(sourceTime: sourceTime,
+                                                discontinuity: discontinuity || pendingDiscontinuity))
+        if !accepted, !pendingDiscontinuity {
+            EngineLog.emit("[AudioTap] consumer behind, stream full, dropping from \(sourceTime)s",
+                           category: .engine)
+        }
+        pendingDiscontinuity = !accepted
     }
 
     /// Copy the trailing `frameLength - dropFrames` mono Float32 frames into a fresh buffer.

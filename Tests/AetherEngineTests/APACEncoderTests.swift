@@ -98,4 +98,26 @@ struct APACEncoderTests {
             try withPlanes(layout, frames: 1000) { try encoder.encode(planes: $0, frameCount: 1000) }
         }
     }
+
+    @Test("a drain spanning several output buffers supplies its PCM exactly once")
+    func fullOutputBuffersDoNotRepeatInput() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let layout = SpatialSpeakerLayout.l512
+        let frames = 65_536
+        let large = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000,
+                                    maxInputFrames: frames)
+        let sliced = try APACEncoder(layout: layout, bitRate: layout.channelCount * 320_000,
+                                     maxInputFrames: 2048)
+        try withPlanes(layout, frames: frames) { planes in
+            var actual = try large.encode(planes: planes, frameCount: frames)
+            #expect(actual.count > 16, "this drain must fill the 16-packet output buffer more than once")
+            actual += try large.flush()
+            var expected = try sliced.encode(planes: planes, frameCount: frames)
+            expected += try sliced.flush()
+            #expect(actual.map(\.data) == expected.map(\.data))
+            let expectedCount = (frames + large.leadingFrames + 1023) / APACEncoder.framesPerPacket
+            #expect(abs(actual.count - expectedCount) <= 1)
+        }
+    }
+
 }

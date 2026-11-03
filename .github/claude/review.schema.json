@@ -1,6 +1,11 @@
 {
   "type": "object",
   "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["red", "orange", "yellow", "green"],
+      "description": "Overall verdict for the PR as it stands now, set by the most severe finding still open: red = blocking, orange = should fix, yellow = nits only, green = nothing left."
+    },
     "summary": {
       "type": "string",
       "description": "The review summary in Markdown, in the shape review.md prescribes, without the automated-review footer."
@@ -20,6 +25,6 @@
       }
     }
   },
-  "required": ["summary", "inline"],
+  "required": ["status", "summary", "inline"],
   "additionalProperties": false
 }

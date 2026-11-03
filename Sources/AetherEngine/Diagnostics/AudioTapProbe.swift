@@ -24,7 +24,8 @@ public enum AudioTapProbe {
         public var errorDescription: String? { description }
     }
 
-    public static func run(url: URL, durationSeconds: Double, outPath: String) throws -> String {
+    public static func run(url: URL, durationSeconds: Double, outPath: String,
+                           channels: AudioTapChannels = .downmix) throws -> String {
         let session = HLSVideoEngine(url: url, dvModeAvailable: false)
         _ = try session.start()
         defer { session.stop() }
@@ -40,12 +41,13 @@ public enum AudioTapProbe {
             var samples: [Float] = []
             var buffers = 0
             var discontinuities = 0
+            var dialogueBuffers = 0
             var firstSource: Double?
             var lastSource: Double = 0
             var lastEmittedEndPTS: Double = 0
         }
         let sink = Sink()
-        let decoder = AudioTapSegmentDecoder()
+        let decoder = AudioTapSegmentDecoder(channels: channels)
 
         let deps = LoopbackAudioReader.Dependencies(
             // As-fast-as-available: the synthetic playhead trails the decode position by
@@ -65,6 +67,7 @@ public enum AudioTapProbe {
                 sink.lock.lock(); defer { sink.lock.unlock() }
                 sink.buffers += 1
                 if buf.discontinuity { sink.discontinuities += 1 }
+                if buf.channels == .dialogue { sink.dialogueBuffers += 1 }
                 if sink.firstSource == nil { sink.firstSource = buf.sourceTime }
                 sink.lastSource = buf.sourceTime
                 sink.lastEmittedEndPTS = buf.sourceTime
@@ -98,6 +101,7 @@ public enum AudioTapProbe {
         return "audiotap: buffers=\(sink.buffers) "
             + "pcmSeconds=\(String(format: "%.2f", seconds)) "
             + "discontinuities=\(sink.discontinuities) "
+            + "dialogue=\(sink.dialogueBuffers)/\(sink.buffers) "
             + "sourceTime=[\(sink.firstSource ?? -1) ... \(sink.lastSource)] "
             + "wrote=\(outPath)"
     }
@@ -109,6 +113,8 @@ public enum AudioTapProbe {
         public let buffers: Int
         public let pcmSeconds: Double
         public let discontinuities: Int
+        /// Buffers that carried the centre channel alone (#908); 0 on a downmix install.
+        public let dialogueBuffers: Int
         public let firstSource: Double?
         public let lastSource: Double
         public let peak: Float
@@ -121,6 +127,7 @@ public enum AudioTapProbe {
             "audiotap (software): buffers=\(buffers) "
                 + "pcmSeconds=\(String(format: "%.2f", pcmSeconds)) "
                 + "discontinuities=\(discontinuities) "
+                + "dialogue=\(dialogueBuffers)/\(buffers) "
                 + "peak=\(String(format: "%.4f", peak)) "
                 + "sourceTime=[\(firstSource ?? -1) ... \(lastSource)] "
                 + "wrote=\(outPath)"
@@ -135,13 +142,14 @@ public enum AudioTapProbe {
     /// Unlike the other two modes this is bound to wall clock: the SW host decodes in real time.
     @MainActor
     public static func runSoftware(url: URL, durationSeconds: Double,
-                                   outPath: String) async throws -> SoftwareTapReport {
+                                   outPath: String,
+                                   channels: AudioTapChannels = .downmix) async throws -> SoftwareTapReport {
         let engine = try AetherEngine()
         try await engine.load(url: url)
         guard engine.playbackBackend == .software else {
             throw ProbeError.notSoftwareRouted(engine.playbackBackend.rawValue)
         }
-        let stream = engine.installAudioTap()
+        let stream = engine.installAudioTap(channels: channels)
         engine.play()
 
         // The stream only ends when the tap is removed, so nothing else would bound a source
@@ -159,12 +167,14 @@ public enum AudioTapProbe {
         var samples: [Float] = []
         var buffers = 0
         var discontinuities = 0
+        var dialogueBuffers = 0
         var firstSource: Double?
         var lastSource: Double = 0
         var peak: Float = 0
         for await buf in stream {
             buffers += 1
             if buf.discontinuity { discontinuities += 1 }
+            if buf.channels == .dialogue { dialogueBuffers += 1 }
             if firstSource == nil { firstSource = buf.sourceTime }
             lastSource = buf.sourceTime
             let frames = Int(buf.buffer.frameLength)
@@ -183,6 +193,7 @@ public enum AudioTapProbe {
             buffers: buffers,
             pcmSeconds: Double(samples.count) / AudioTapDefaults.sampleRate,
             discontinuities: discontinuities,
+            dialogueBuffers: dialogueBuffers,
             firstSource: firstSource, lastSource: lastSource,
             peak: peak, outPath: outPath)
     }
@@ -190,19 +201,21 @@ public enum AudioTapProbe {
     /// #95 remote-HLS variant: drives AudioTapHLSReader against a remote HLS URL through the real
     /// AudioTapHLSFetcher (no loopback producer, no AVPlayer). A synthetic playhead trails the
     /// decode position so the reader decodes as-fast-as-available, the same trick as `run`.
-    public static func runRemote(url: URL, durationSeconds: Double, outPath: String) throws -> String {
+    public static func runRemote(url: URL, durationSeconds: Double, outPath: String,
+                                 channels: AudioTapChannels = .downmix) throws -> String {
         final class Sink: @unchecked Sendable {
             let lock = NSLock()
             var samples: [Float] = []
             var buffers = 0
             var discontinuities = 0
+            var dialogueBuffers = 0
             var firstSource: Double?
             var lastSource: Double = 0
             var lastEmittedEndPTS: Double = 0
         }
         let sink = Sink()
         let fetcher = AudioTapHLSFetcher()
-        let decoder = AudioTapSegmentDecoder()
+        let decoder = AudioTapSegmentDecoder(channels: channels)
         let base = AudioTapBaseBox(url)
 
         let deps = AudioTapHLSReader.Dependencies(
@@ -239,6 +252,7 @@ public enum AudioTapProbe {
                 sink.lock.lock(); defer { sink.lock.unlock() }
                 sink.buffers += 1
                 if buf.discontinuity { sink.discontinuities += 1 }
+                if buf.channels == .dialogue { sink.dialogueBuffers += 1 }
                 if sink.firstSource == nil { sink.firstSource = buf.sourceTime }
                 sink.lastSource = buf.sourceTime
                 sink.lastEmittedEndPTS = buf.sourceTime
@@ -270,6 +284,7 @@ public enum AudioTapProbe {
         return "audiotap(remote): buffers=\(sink.buffers) "
             + "pcmSeconds=\(String(format: "%.2f", seconds)) "
             + "discontinuities=\(sink.discontinuities) "
+            + "dialogue=\(sink.dialogueBuffers)/\(sink.buffers) "
             + "sourceTime=[\(sink.firstSource ?? -1) ... \(sink.lastSource)] "
             + "wrote=\(outPath)"
     }

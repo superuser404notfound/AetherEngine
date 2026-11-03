@@ -37,12 +37,28 @@ final class DoviFelComposer: @unchecked Sendable {
     private var pixelBufferPool: CVPixelBufferPool?
     private var poolWidth: Int = 0
     private var poolHeight: Int = 0
+    private var poolFormat: DoviFelChromaFormat = .yuv420
     private var poolBuffers: [WeakPoolBuffer] = []
     private var poolBufferHighWaterMark = 0
     /// Set by ``releaseOutputPool()``. A composition arriving after teardown (a VideoToolbox callback still in
     /// flight when the decoder closed) is refused instead of quietly building a new pool nobody will release.
     private var tornDown = false
     private let lock = NSLock()
+
+    /// Whether playback composes into the decoded base-layer buffer instead of a buffer from the output pool
+    /// (see ``canComposeInPlace(baseBuffer:params:)``). On by default; `AETHER_FEL_INPLACE=0` in the
+    /// environment turns it off for an A/B run, and tests set it directly. Guarded by `lock`.
+    private var inPlaceEnabled = ProcessInfo.processInfo.environment["AETHER_FEL_INPLACE"] != "0"
+    /// Base-layer buffers a composition is currently writing into. A buffer in here is not composed again
+    /// and not handed to anything else until its command buffer retires. Guarded by `lock`.
+    private var inPlaceInFlight = Set<ObjectIdentifier>()
+    /// Frames composed in place since creation, and frames lost to a command buffer that failed after it had
+    /// started writing into the base-layer buffer. Guarded by `lock`.
+    private var inPlaceComposedCount = 0
+    private var inPlaceLostCount = 0
+    /// The chroma sampling of composed frames (see ``DoviFelChromaFormat``). Starts from `AETHER_FEL_CHROMA`,
+    /// 4:2:0 when unset; tests set it directly. Guarded by `lock`.
+    private var chromaFormatStorage = DoviFelChromaFormat.fromEnvironment
 
     private final class WeakPoolBuffer {
         weak var value: CVPixelBuffer?
@@ -116,16 +132,31 @@ final class DoviFelComposer: @unchecked Sendable {
     final class SharedPipelines: @unchecked Sendable {
         let lumaPipeline: MTLComputePipelineState
         let chromaPipeline: MTLComputePipelineState
+        let chroma422Pipeline: MTLComputePipelineState
+        let chroma444Pipeline: MTLComputePipelineState
         let layoutProbePipeline: MTLComputePipelineState?
 
         init(
             luma: MTLComputePipelineState,
             chroma: MTLComputePipelineState,
+            chroma422: MTLComputePipelineState,
+            chroma444: MTLComputePipelineState,
             probe: MTLComputePipelineState?
         ) {
             self.lumaPipeline = luma
             self.chromaPipeline = chroma
+            self.chroma422Pipeline = chroma422
+            self.chroma444Pipeline = chroma444
             self.layoutProbePipeline = probe
+        }
+
+        /// The chroma kernel for `format`.
+        func pipeline(for format: DoviFelChromaFormat) -> MTLComputePipelineState {
+            switch format {
+            case .yuv420: return chromaPipeline
+            case .yuv422: return chroma422Pipeline
+            case .yuv444: return chroma444Pipeline
+            }
         }
 
         /// Per-device results, failures included: a shader that does not compile will not compile on the next
@@ -167,11 +198,15 @@ final class DoviFelComposer: @unchecked Sendable {
         static func compile(device: MTLDevice, source: String) throws -> SharedPipelines {
             let library = try device.makeLibrary(source: source, options: nil)
             guard let lumaFn = library.makeFunction(name: "dovi_compose_luma"),
-                  let chromaFn = library.makeFunction(name: "dovi_compose_chroma") else {
+                  let chromaFn = library.makeFunction(name: "dovi_compose_chroma"),
+                  let chroma422Fn = library.makeFunction(name: "dovi_compose_chroma_422"),
+                  let chroma444Fn = library.makeFunction(name: "dovi_compose_chroma_444") else {
                 throw ComposerError.missingKernelFunction
             }
             let luma = try device.makeComputePipelineState(function: lumaFn)
             let chroma = try device.makeComputePipelineState(function: chromaFn)
+            let chroma422 = try device.makeComputePipelineState(function: chroma422Fn)
+            let chroma444 = try device.makeComputePipelineState(function: chroma444Fn)
             let probe: MTLComputePipelineState?
             if let probeFn = library.makeFunction(name: "dovi_layout_probe") {
                 probe = try? device.makeComputePipelineState(function: probeFn)
@@ -179,7 +214,7 @@ final class DoviFelComposer: @unchecked Sendable {
                 probe = nil
             }
 
-            return SharedPipelines(luma: luma, chroma: chroma, probe: probe)
+            return SharedPipelines(luma: luma, chroma: chroma, chroma422: chroma422, chroma444: chroma444, probe: probe)
         }
 
         #if DEBUG
@@ -199,6 +234,31 @@ final class DoviFelComposer: @unchecked Sendable {
         guard let p = try? SharedPipelines.getOrCreate(device: device) else { return nil }
         self.pipelines = p
         return p
+    }
+
+    /// The thread limit the last 4:4:4 frame was checked against; nil until one has been encoded.
+    /// Kept apart from `lock` because the GPU time line reads it from a command buffer completion handler,
+    /// which must not take a lock a caller may hold.
+    private let chroma444ThreadLimitForLog = OSAllocatedUnfairLock<Int?>(initialState: nil)
+
+    /// Test seam: stands in for the 4:4:4 pipeline's `maxTotalThreadsPerThreadgroup`, so a test can drive the
+    /// refusal a GPU with a smaller limit would cause. Nil uses the pipeline's own value.
+    let forcedChroma444ThreadLimit = OSAllocatedUnfairLock<Int?>(initialState: nil)
+
+    /// Why a 4:4:4 pipeline that allows `limit` threads per threadgroup cannot run the kernel, which needs
+    /// threadgroups of exactly ``chroma444Threadgroup``; nil when it can.
+    static func chroma444Refusal(threadLimit limit: Int) -> String? {
+        let needed = chroma444Threadgroup.width * chroma444Threadgroup.height
+        guard limit < needed else { return nil }
+        return "4:4:4 kernel needs \(needed) threads per threadgroup but its pipeline allows \(limit); refusing to compose 4:4:4"
+    }
+
+    /// The per-window GPU time line. In 4:4:4 it also carries the 4:4:4 pipeline's thread limit, so a device
+    /// run shows what the guard saw.
+    static func gpuTimeLine(mean: Double, frames: Int, chroma444ThreadLimit: Int?) -> String {
+        var line = String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames", mean, frames)
+        if let chroma444ThreadLimit { line += ", 4:4:4 pipeline allows \(chroma444ThreadLimit) threads per threadgroup" }
+        return line
     }
 
     #if DEBUG
@@ -250,7 +310,7 @@ final class DoviFelComposer: @unchecked Sendable {
 
     // MARK: - Pixel Buffer Pool Management
 
-    private func ensurePool(width: Int, height: Int) -> CVPixelBufferPool? {
+    private func ensurePool(width: Int, height: Int, format: DoviFelChromaFormat) -> CVPixelBufferPool? {
         lock.lock()
         defer { lock.unlock() }
 
@@ -258,7 +318,7 @@ final class DoviFelComposer: @unchecked Sendable {
         // earlier look and this point cannot leave a fresh pool behind that nothing will release.
         guard !tornDown else { return nil }
 
-        if let pool = pixelBufferPool, poolWidth == width, poolHeight == height {
+        if let pool = pixelBufferPool, poolWidth == width, poolHeight == height, poolFormat == format {
             return pool
         }
 
@@ -269,7 +329,7 @@ final class DoviFelComposer: @unchecked Sendable {
         ]
 
         let pixelBufferAttributes: [CFString: Any] = [
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            kCVPixelBufferPixelFormatTypeKey: format.pixelFormat,
             kCVPixelBufferWidthKey: width,
             kCVPixelBufferHeightKey: height,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any],
@@ -291,6 +351,7 @@ final class DoviFelComposer: @unchecked Sendable {
         self.pixelBufferPool = pool
         self.poolWidth = width
         self.poolHeight = height
+        self.poolFormat = format
         poolBuffers.removeAll()
         poolBufferHighWaterMark = 0
         return pool
@@ -308,8 +369,8 @@ final class DoviFelComposer: @unchecked Sendable {
     }
 
     #if DEBUG
-    func ensurePoolForTesting(width: Int, height: Int) -> CVPixelBufferPool? {
-        ensurePool(width: width, height: height)
+    func ensurePoolForTesting(width: Int, height: Int, format: DoviFelChromaFormat = .yuv420) -> CVPixelBufferPool? {
+        ensurePool(width: width, height: height, format: format)
     }
 
     /// One allocation from the output pool: `reserve: false` stops at the threshold, `true` draws on the reserve
@@ -503,16 +564,33 @@ final class DoviFelComposer: @unchecked Sendable {
         frameIndex: UInt32 = 0,
         completion: @escaping @Sendable (CVPixelBuffer?) -> Void
     ) {
+        startComposeAsync(baseBuffer: baseBuffer, enhancementBuffer: enhancementBuffer, params: params,
+                          frameIndex: frameIndex, inPlace: false) { buffer, _ in completion(buffer) }
+    }
+
+    /// The shared body of the two asynchronous entry points. `finish` gets the composed buffer, or nil with
+    /// `corrupt` telling whether the base-layer buffer was already being written when the frame failed (only
+    /// ever true in place, where the destination is the base-layer buffer itself).
+    private func startComposeAsync(
+        baseBuffer: CVPixelBuffer,
+        enhancementBuffer: CVPixelBuffer,
+        params: DoviMetalParams,
+        frameIndex: UInt32,
+        inPlace: Bool,
+        finish completion: @escaping @Sendable (CVPixelBuffer?, _ corrupt: Bool) -> Void
+    ) {
         let signpostID = OSSignpostID(log: Self.signpostLog)
         os_signpost(.begin, log: Self.signpostLog, name: "Compose", signpostID: signpostID,
                     "frame=%{public}u", frameIndex)
         guard let work = encodeCompose(baseBuffer: baseBuffer,
                                        enhancementBuffer: enhancementBuffer,
                                        params: params,
-                                       frameIndex: frameIndex) else {
+                                       frameIndex: frameIndex,
+                                       inPlace: inPlace) else {
             os_signpost(.end, log: Self.signpostLog, name: "Compose", signpostID: signpostID, "encode-failed")
+            if inPlace { endInPlace(baseBuffer, composed: false, started: false) }
             releaseInFlightSlot()
-            completion(nil)
+            completion(nil, false)
             return
         }
         // `textures` holds the CVMetalTextures; the source buffers are held
@@ -594,9 +672,11 @@ final class DoviFelComposer: @unchecked Sendable {
                 }
                 composer?.recordGPUTime(ms: gpuMs)
                 os_signpost(.end, log: Self.signpostLog, name: "Compose", signpostID: signpostID)
-                // A command buffer that errored leaves the destination partly written: deliver a failure,
-                // so the caller falls back to the base layer instead of showing garbage.
-                completion(errorDescription == nil ? frame.destination : nil)
+                if inPlace { composer?.endInPlace(frame.destination, composed: errorDescription == nil, started: true) }
+                // A command buffer that errored leaves the destination partly written. With a pool buffer the
+                // caller falls back to the base layer instead of showing garbage. In place the destination
+                // is the base layer, so there is nothing clean to fall back to and `corrupt` says so.
+                completion(errorDescription == nil ? frame.destination : nil, errorDescription != nil && inPlace)
                 frame.release()
             }
         }
@@ -715,13 +795,17 @@ final class DoviFelComposer: @unchecked Sendable {
         let paramSlot: Int
     }
 
-    /// Everything up to (not including) `commit`: pool rental, texture binding,
+    /// Everything up to (not including) `commit`: pool rental (or, in place, none), texture binding,
     /// parameter upload and the two dispatches.
+    ///
+    /// `inPlace` writes the result into `baseBuffer` itself. Nothing is written by this function (the GPU
+    /// writes only after the caller commits), so a nil return always means the base-layer buffer is untouched.
     private func encodeCompose(
         baseBuffer: CVPixelBuffer,
         enhancementBuffer: CVPixelBuffer,
         params: DoviMetalParams,
-        frameIndex: UInt32
+        frameIndex: UInt32,
+        inPlace: Bool = false
     ) -> EncodedFrame? {
         let blW = CVPixelBufferGetWidth(baseBuffer)
         let blH = CVPixelBufferGetHeight(baseBuffer)
@@ -729,8 +813,168 @@ final class DoviFelComposer: @unchecked Sendable {
         let elH = CVPixelBufferGetHeight(enhancementBuffer)
 
         guard blW > 0, blH > 0, elW > 0, elH > 0 else { return nil }
-        guard let pool = ensurePool(width: blW, height: blH) else { return nil }
+        // Chroma is subsampled by two and rounds up: an odd luma size still has a last chroma column/row.
+        let blCW = (blW + 1) / 2, blCH = (blH + 1) / 2
+        let elCW = (elW + 1) / 2, elCH = (elH + 1) / 2
 
+        // The output's chroma sampling. Only the 4:2:0 base layer can be composed into, so in place is 4:2:0 only.
+        let format = chromaFormat
+        if inPlace, format != .yuv420 { return nil }
+        let (outCW, outCH) = format.chromaSize(width: blW, height: blH)
+
+        // The 4:4:4 kernel needs a full 16 x 16 threadgroup. A device whose pipeline allows fewer threads
+        // would fail the encoder or its validation without saying why, so refuse the frame here, before a
+        // buffer is rented: a logged compose failure, with the frame falling back like any other.
+        if format == .yuv444 {
+            guard let pipelines = ensurePipelines() else { return nil }
+            let limit = forcedChroma444ThreadLimit.withLock { $0 } ?? pipelines.chroma444Pipeline.maxTotalThreadsPerThreadgroup
+            chroma444ThreadLimitForLog.withLock { $0 = limit }
+            if let refusal = Self.chroma444Refusal(threadLimit: limit) {
+                Self.logOnce("[DoviFelComposer] \(refusal)")
+                return nil
+            }
+        }
+
+        // The destination is either a buffer rented from the output pool, or the base-layer buffer itself.
+        // In place the pool is not asked for, so it is not created unless a frame is refused for in-place
+        // (for example a luma MMR curve).
+        let dst: CVPixelBuffer
+        if inPlace {
+            guard !isTornDown else { return nil }
+            dst = baseBuffer
+        } else {
+            guard let pool = ensurePool(width: blW, height: blH, format: format) else { return nil }
+            guard let rented = rentOutputBuffer(from: pool) else { return nil }
+            dst = rented
+            // Colour attachments are metadata, not pixels: copying them now, on
+            // this calling thread, rather than from Metal's completion handler
+            // (dolby-vision-fel.md §5.6) is safe because `dst` is not handed to anyone
+            // until the command buffer this function's caller commits has
+            // retired — nothing reads `dst` early just because its attachments
+            // are set before the GPU has written its pixels.
+            propagateColorAttachments(from: baseBuffer, to: dst)
+        }
+
+        var keepAliveTextures: [CVMetalTexture] = []
+
+        // Plane 0 is luma, plane 1 is interleaved chroma. The integer planes are
+        // bound as Uint so the kernels see raw code values; the enhancement layer
+        // is bound as Unorm because it is upsampled by the hardware bilinear sampler.
+        guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
+              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures),
+              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Unorm, width: elW, height: elH, keepAlive: &keepAliveTextures),
+              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Unorm, width: elCW, height: elCH, keepAlive: &keepAliveTextures) else {
+            return nil
+        }
+        // In place the output planes are the base-layer planes: the same textures, bound a second time.
+        let outYTex: MTLTexture
+        let outUvTex: MTLTexture
+        if inPlace {
+            outYTex = blYTex
+            outUvTex = blUvTex
+        } else {
+            guard let y = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
+                  let uv = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: outCW, height: outCH, keepAlive: &keepAliveTextures) else {
+                return nil
+            }
+            outYTex = y
+            outUvTex = uv
+        }
+
+        var metalParams = params
+        metalParams.blWidth = UInt32(blW)
+        metalParams.blHeight = UInt32(blH)
+        metalParams.elWidth = UInt32(elW)
+        metalParams.elHeight = UInt32(elH)
+        metalParams.frameIndex = frameIndex
+        metalParams.polyY.clampToCapacity()
+        metalParams.polyCb.clampToCapacity()
+        metalParams.polyCr.clampToCapacity()
+
+        // The in-place order below depends on luma never reading chroma. A luma MMR curve does, and
+        // `canComposeInPlace` sends such frames down the pool path; this is the same check one more time
+        // where it would do harm, so a caller that skipped the question cannot get a wrong picture.
+        if inPlace, metalParams.flags.contains(.lumaMmr) { return nil }
+
+        guard let pipelines = ensurePipelines() else { return nil }
+        let chromaPipeline = pipelines.pipeline(for: format)
+
+        guard let paramSlot = takeParamSlot() else { return nil }
+        let paramBuffer = paramBuffers[paramSlot]
+        let rawBuffer = UnsafeMutableRawBufferPointer(start: paramBuffer.contents(), count: DoviMetalParams.serializedSize)
+        var serialized = metalParams
+        if !Self.residualEnabled { serialized.flags.insert(.disableResidual) }
+        serialized.serialize(into: rawBuffer)
+
+        let lutBuffer = lumaLutBuffers[paramSlot]
+        populateLumaLut(into: lutBuffer.contents().assumingMemoryBound(to: Float.self), params: metalParams)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            returnParamSlot(paramSlot)
+            return nil
+        }
+
+        // Pool path: both passes go in one concurrent encoder. Luma reads BL luma + BL
+        // chroma (a luma MMR curve would need it) and the EL luma; chroma reads
+        // BL luma + BL chroma and the EL chroma. Neither reads what the other
+        // writes — `outYTex` and `outUvTex` are separate planes — so the barrier
+        // Metal puts between two serial encoders buys nothing and costs a full
+        // GPU sync point per frame.
+        //
+        // In place the two passes do depend on each other, and the order matters. The chroma pass reads
+        // the base-layer luma around each chroma sample (a neighbourhood, so other threads' pixels), but only
+        // its own chroma sample. The luma pass reads only its own luma sample (chroma only for a luma MMR
+        // curve, which is excluded above). So chroma goes first, while all the luma is still the decoded
+        // base layer, and each chroma thread overwrites only the chroma sample it has just read. Luma goes
+        // second, and each luma thread overwrites only the luma sample it has just read; nothing reads
+        // luma any more. That needs no scratch buffer. The serial encoder and the barrier between
+        // the passes make the second wait for the first.
+        let encoderType: MTLDispatchType = inPlace ? .serial : .concurrent
+        guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: encoderType) else {
+            returnParamSlot(paramSlot)
+            return nil
+        }
+
+        func encodeLuma() {
+            encoder.setComputePipelineState(pipelines.lumaPipeline)
+            encoder.setTexture(blYTex, index: 0)
+            encoder.setTexture(blUvTex, index: 1)
+            encoder.setTexture(elYTex, index: 2)
+            encoder.setTexture(outYTex, index: 3)
+            encoder.setBuffer(paramBuffer, offset: 0, index: 0)
+            encoder.setBuffer(lutBuffer, offset: 0, index: 1)
+            dispatch(encoder, width: blW, height: blH,
+                     threadgroup: threadgroupSize(for: pipelines.lumaPipeline))
+        }
+        func encodeChroma() {
+            encoder.setComputePipelineState(chromaPipeline)
+            encoder.setTexture(blYTex, index: 0)
+            encoder.setTexture(blUvTex, index: 1)
+            encoder.setTexture(elUvTex, index: 2)
+            encoder.setTexture(outUvTex, index: 3)
+            encoder.setBuffer(paramBuffer, offset: 0, index: 0)
+            dispatch(encoder, width: outCW, height: outCH,
+                     threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaPipeline))
+        }
+
+        if inPlace {
+            encodeChroma()
+            encoder.memoryBarrier(scope: .textures)
+            encodeLuma()
+        } else {
+            encodeLuma()
+            encodeChroma()
+        }
+
+        encoder.endEncoding()
+
+        if inPlace { Self.removeNonPropagatingAttachments(from: dst) }
+
+        return EncodedFrame(commandBuffer: commandBuffer, destination: dst, keepAlive: keepAliveTextures, paramSlot: paramSlot)
+    }
+
+    /// Takes a buffer from the output pool, drawing on the reserve and retrying briefly when the pool is full.
+    private func rentOutputBuffer(from pool: CVPixelBufferPool) -> CVPixelBuffer? {
         // A base-layer frame is NOT close to the composed one on real titles: measured on the three
         // real FEL files its 10-bit luma differs by a mean of ~8 codes (p99 up to 230) on two and ~79
         // on clip C (`fallbackFrameDelta`), a visible brightness step. So when the threshold
@@ -751,91 +995,176 @@ final class DoviFelComposer: @unchecked Sendable {
             EngineLog.emit("[DoviFelComposer] output pool refused a buffer (status \(poolStatus)); frame falls back to the base layer", category: .swPlayback, level: .verbose)
             return nil
         }
-
         recordPoolBuffer(dst, pool: pool)
+        return dst
+    }
 
-        // Colour attachments are metadata, not pixels: copying them now, on
-        // this calling thread, rather than from Metal's completion handler
-        // (dolby-vision-fel.md §5.6) is safe because `dst` is not handed to anyone
-        // until the command buffer this function's caller commits has
-        // retired — nothing reads `dst` early just because its attachments
-        // are set before the GPU has written its pixels.
-        propagateColorAttachments(from: baseBuffer, to: dst)
+    // MARK: - In-place composition
 
-        var keepAliveTextures: [CVMetalTexture] = []
+    /// Why a base-layer buffer is not composed in place (it goes through the output pool instead).
+    enum InPlaceRefusal: Equatable, Sendable {
+        case switchedOff
+        case tornDown
+        case outputChroma
+        case notIOSurfaceBacked
+        case notX420
+        case planeLayout
+        case lumaMmr
+    }
 
-        // Plane 0 is luma, plane 1 is interleaved chroma. The integer planes are
-        // bound as Uint so the kernels see raw code values; the enhancement layer
-        // is bound as Unorm because it is upsampled by the hardware bilinear sampler.
-        guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-              let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blW / 2, height: blH / 2, keepAlive: &keepAliveTextures),
-              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Unorm, width: elW, height: elH, keepAlive: &keepAliveTextures),
-              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Unorm, width: elW / 2, height: elH / 2, keepAlive: &keepAliveTextures),
-              let outYTex = makeTexture(from: dst, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
-              let outUvTex = makeTexture(from: dst, plane: 1, format: .rg16Uint, width: blW / 2, height: blH / 2, keepAlive: &keepAliveTextures) else {
-            return nil
+    /// Decides whether `baseBuffer` can be the compose target. Pure apart from reading the buffer's
+    /// description; nothing is changed.
+    ///
+    /// All of these must hold: the switch is on; the buffer is IOSurface-backed (the GPU can only write
+    /// those through a texture); its format is the 10-bit biplanar video-range layout the kernels write
+    /// (`x420`, the same as a pool buffer); the planes are the luma size and the half-size interleaved chroma
+    /// (even dimensions), which is what the composed output has; and the frame has no luma MMR curve (that
+    /// curve reads the chroma that the in-place order overwrites first). Anything else gets the pool path,
+    /// unchanged.
+    func inPlaceDecision(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> InPlaceRefusal? {
+        lock.lock()
+        let enabled = inPlaceEnabled
+        let torn = tornDown
+        let format = chromaFormatStorage
+        lock.unlock()
+        if !enabled { return .switchedOff }
+        if torn { return .tornDown }
+        if format != .yuv420 { return .outputChroma }
+        return Self.inPlaceRefusal(baseBuffer: baseBuffer, params: params)
+    }
+
+    /// The buffer-and-frame part of ``inPlaceDecision(baseBuffer:params:)``, without composer state.
+    static func inPlaceRefusal(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> InPlaceRefusal? {
+        guard CVPixelBufferGetIOSurface(baseBuffer) != nil else { return .notIOSurfaceBacked }
+        guard CVPixelBufferGetPixelFormatType(baseBuffer) == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange else {
+            return .notX420
         }
+        let w = CVPixelBufferGetWidth(baseBuffer)
+        let h = CVPixelBufferGetHeight(baseBuffer)
+        guard w > 0, h > 0, w % 2 == 0, h % 2 == 0,
+              CVPixelBufferGetPlaneCount(baseBuffer) == 2,
+              CVPixelBufferGetWidthOfPlane(baseBuffer, 0) == w, CVPixelBufferGetHeightOfPlane(baseBuffer, 0) == h,
+              CVPixelBufferGetWidthOfPlane(baseBuffer, 1) == w / 2, CVPixelBufferGetHeightOfPlane(baseBuffer, 1) == h / 2
+        else { return .planeLayout }
+        if params.flags.contains(.lumaMmr) { return .lumaMmr }
+        return nil
+    }
 
-        var metalParams = params
-        metalParams.blWidth = UInt32(blW)
-        metalParams.blHeight = UInt32(blH)
-        metalParams.elWidth = UInt32(elW)
-        metalParams.elHeight = UInt32(elH)
-        metalParams.frameIndex = frameIndex
-        metalParams.polyY.clampToCapacity()
-        metalParams.polyCb.clampToCapacity()
-        metalParams.polyCr.clampToCapacity()
+    /// True when ``composeInPlaceAsyncWithAcquiredSlot(baseBuffer:enhancementBuffer:params:frameIndex:completion:)``
+    /// may be used for this frame.
+    func canComposeInPlace(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> Bool {
+        inPlaceDecision(baseBuffer: baseBuffer, params: params) == nil
+    }
 
-        guard let pipelines = ensurePipelines() else { return nil }
+    /// What an in-place composition did to the base-layer buffer.
+    enum InPlaceResult: Sendable, Equatable {
+        /// The base-layer buffer now holds the composed frame.
+        case composed
+        /// The frame could not be set up and nothing was written: the buffer still holds the base layer, which
+        /// is the same fallback a failed pool composition gets.
+        case baseIntact
+        /// The GPU started writing and then failed: the buffer holds a mix of base layer and composed pixels. It
+        /// must not be shown; the frame is dropped. A second request for a buffer that is already being
+        /// composed in place gets this too: it is dropped and counted as lost, not sent to the pool path
+        /// (a pool compose would read pixels the first composition is still writing).
+        case baseCorrupted
+    }
 
-        guard let paramSlot = takeParamSlot() else { return nil }
-        let paramBuffer = paramBuffers[paramSlot]
-        let rawBuffer = UnsafeMutableRawBufferPointer(start: paramBuffer.contents(), count: DoviMetalParams.serializedSize)
-        var serialized = metalParams
-        if !Self.residualEnabled { serialized.flags.insert(.disableResidual) }
-        serialized.serialize(into: rawBuffer)
-
-        let lutBuffer = lumaLutBuffers[paramSlot]
-        populateLumaLut(into: lutBuffer.contents().assumingMemoryBound(to: Float.self), params: metalParams)
-
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            returnParamSlot(paramSlot)
-            return nil
+    /// Composes into `baseBuffer` itself, assuming the caller holds a slot from ``acquireSlot()``. The caller
+    /// must have asked ``canComposeInPlace(baseBuffer:params:)`` first.
+    ///
+    /// The base-layer buffer is exclusive to this composition from here until `completion` runs: the
+    /// decoder hands it over when it pairs the frame and keeps no other reference that reads pixels,
+    /// the buffer is delivered to the renderer only from `completion`, and the composer refuses a second
+    /// composition of the same buffer while the first is outstanding. A frame is never composed twice:
+    /// nothing retries after a failure, because the failed buffer is dropped.
+    func composeInPlaceAsyncWithAcquiredSlot(
+        baseBuffer: CVPixelBuffer,
+        enhancementBuffer: CVPixelBuffer,
+        params: DoviMetalParams,
+        frameIndex: UInt32 = 0,
+        completion: @escaping @Sendable (InPlaceResult) -> Void
+    ) {
+        guard beginInPlace(baseBuffer) else {
+            EngineLog.emit("[DoviFelComposer] in-place compose refused: the buffer is already being composed; frame dropped", category: .swPlayback)
+            releaseInFlightSlot()
+            completion(.baseCorrupted)
+            return
         }
-
-        // Both passes go in one concurrent encoder. Luma reads BL luma + BL
-        // chroma (a luma MMR curve would need it) and the EL luma; chroma reads
-        // BL luma + BL chroma and the EL chroma. Neither reads what the other
-        // writes — `outYTex` and `outUvTex` are separate planes — so the barrier
-        // Metal puts between two serial encoders buys nothing and costs a full
-        // GPU sync point per frame.
-        guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) else {
-            returnParamSlot(paramSlot)
-            return nil
+        startComposeAsync(baseBuffer: baseBuffer, enhancementBuffer: enhancementBuffer, params: params,
+                          frameIndex: frameIndex, inPlace: true) { buffer, corrupt in
+            completion(buffer != nil ? .composed : (corrupt ? .baseCorrupted : .baseIntact))
         }
+    }
 
-        encoder.setComputePipelineState(pipelines.lumaPipeline)
-        encoder.setTexture(blYTex, index: 0)
-        encoder.setTexture(blUvTex, index: 1)
-        encoder.setTexture(elYTex, index: 2)
-        encoder.setTexture(outYTex, index: 3)
-        encoder.setBuffer(paramBuffer, offset: 0, index: 0)
-        encoder.setBuffer(lutBuffer, offset: 0, index: 1)
-        dispatch(encoder, width: blW, height: blH,
-                 threadgroup: threadgroupSize(for: pipelines.lumaPipeline))
+    /// Claims `buffer` for an in-place composition; false when one is already outstanding on it.
+    private func beginInPlace(_ buffer: CVPixelBuffer) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return inPlaceInFlight.insert(ObjectIdentifier(buffer)).inserted
+    }
 
-        encoder.setComputePipelineState(pipelines.chromaPipeline)
-        encoder.setTexture(blYTex, index: 0)
-        encoder.setTexture(blUvTex, index: 1)
-        encoder.setTexture(elUvTex, index: 2)
-        encoder.setTexture(outUvTex, index: 3)
-        encoder.setBuffer(paramBuffer, offset: 0, index: 0)
-        dispatch(encoder, width: blW / 2, height: blH / 2,
-                 threadgroup: threadgroupSize(for: pipelines.chromaPipeline))
+    /// Releases the claim. `started` is whether the command buffer was committed (so the buffer may have been
+    /// written to); a failure after that is a lost frame.
+    private func endInPlace(_ buffer: CVPixelBuffer, composed: Bool, started: Bool) {
+        lock.lock()
+        inPlaceInFlight.remove(ObjectIdentifier(buffer))
+        if composed {
+            inPlaceComposedCount += 1
+        } else if started {
+            inPlaceLostCount += 1
+        }
+        lock.unlock()
+    }
 
-        encoder.endEncoding()
+    /// Frames composed into their base-layer buffer so far (for the 1 Hz summary).
+    var inPlaceComposedFrames: Int {
+        lock.lock(); defer { lock.unlock() }
+        return inPlaceComposedCount
+    }
 
-        return EncodedFrame(commandBuffer: commandBuffer, destination: dst, keepAlive: keepAliveTextures, paramSlot: paramSlot)
+    /// Frames dropped because the GPU failed after it had started writing into the base-layer buffer.
+    var inPlaceLostFrames: Int {
+        lock.lock(); defer { lock.unlock() }
+        return inPlaceLostCount
+    }
+
+    private var isTornDown: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return tornDown
+    }
+
+    #if DEBUG
+    /// Test seam: claims a buffer the way an outstanding in-place composition does, and gives it back.
+    func claimInPlaceForTesting(_ buffer: CVPixelBuffer) -> Bool { beginInPlace(buffer) }
+    func releaseInPlaceClaimForTesting(_ buffer: CVPixelBuffer) { endInPlace(buffer, composed: false, started: false) }
+    #endif
+
+    /// Turns the in-place path on or off for this composer (A/B runs and tests). From the next frame on.
+    var inPlaceComposeEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return inPlaceEnabled }
+        set { lock.lock(); inPlaceEnabled = newValue; lock.unlock() }
+    }
+
+    /// The chroma sampling composed frames are written in. Frames already in flight keep the format they
+    /// were started with.
+    var chromaFormat: DoviFelChromaFormat {
+        get { lock.lock(); defer { lock.unlock() }; return chromaFormatStorage }
+        set { lock.lock(); chromaFormatStorage = newValue; lock.unlock() }
+    }
+
+    /// Whether the output pool exists. In-place playback must leave it absent.
+    var hasOutputPool: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return pixelBufferPool != nil
+    }
+
+    /// Removes the attachments that do not propagate from `buffer`. A pool buffer gets only the base layer's
+    /// propagating attachments (`CVBufferPropagateAttachments`), so this makes the in-place buffer carry
+    /// the same set. Decoder-private per-buffer notes are the kind of thing that does not propagate.
+    private static func removeNonPropagatingAttachments(from buffer: CVPixelBuffer) {
+        guard let local = CVBufferCopyAttachments(buffer, .shouldNotPropagate) as? [CFString: Any] else { return }
+        for key in local.keys { CVBufferRemoveAttachment(buffer, key) }
     }
 
     /// Precomputes the 1024-entry luma prediction table when luma is polynomial (dolby-vision-fel.md §5.6).
@@ -889,6 +1218,10 @@ final class DoviFelComposer: @unchecked Sendable {
         }
     }
 
+    /// The 4:4:4 kernel composes each 4:2:0 site once per threadgroup tile and so needs threadgroups of exactly
+    /// this size (`DOVI_444_TILE` in the shader).
+    static let chroma444Threadgroup = MTLSize(width: 16, height: 16, depth: 1)
+
     /// Sizes threadgroups using the pipeline's execution width (dolby-vision-fel.md §5.6).
     private func threadgroupSize(for pipeline: MTLComputePipelineState) -> MTLSize {
         let w = pipeline.threadExecutionWidth
@@ -940,8 +1273,9 @@ final class DoviFelComposer: @unchecked Sendable {
         }
         gpuTimeLock.unlock()
         if let closed {
-            EngineLog.emit(String(format: "[DoviFelComposer] gpu %.1fms/frame over %d frames",
-                                  closed, Self.gpuTimeWindow), category: .swPlayback, level: .verbose)
+            EngineLog.emit(Self.gpuTimeLine(mean: closed, frames: Self.gpuTimeWindow,
+                                            chroma444ThreadLimit: chroma444ThreadLimitForLog.withLock { $0 }),
+                           category: .swPlayback, level: .verbose)
         }
     }
 
@@ -1361,7 +1695,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// the fixed-point ABI disables the residual for that component instead of
     /// being clamped, while keeping the decoded shift and pivots so a probe can
     /// still report what the RPU said.
-    private static func parseNlqParams(
+    static func parseNlqParams(
         nlq: UnsafePointer<DoviRpuDataNlq>?,
         component c: Int,
         label: String,
@@ -1424,8 +1758,10 @@ final class DoviFelComposer: @unchecked Sendable {
         // vdr_in_max is a normalised ceiling in Q(coefficient_log2_denom); the
         // same shift that converts the residual converts the ceiling.
         let scaledMax = maxFp >> Int64(nlqShift)
-        guard scaledMax >= 0, scaledMax <= Int64(Int32.max) else {
-            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) out of range; dropping residual", category: .swPlayback)
+        // A ceiling of 0 clamps every magnitude to min(|r|, 0) = 0 under the spec's clamp, so the residual
+        // contributes nothing: refusing it, which drops the residual, is exact.
+        guard scaledMax > 0, scaledMax <= Int64(Int32.max) else {
+            logOnce("[DoviFelComposer] \(label) vdr_in_max \(scaledMax) zero or out of range; dropping residual", category: .swPlayback)
             return disabled
         }
 

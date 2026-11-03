@@ -63,10 +63,19 @@ final class EmbeddedSubtitleDecoder {
     private let assPlayRes: CGSize
 
     /// Open the subtitle decoder for `stream`. Returns `nil` if the codec couldn't be opened.
-    init?(stream: UnsafeMutablePointer<AVStream>, sourceVideoWidth: Int32, sourceVideoHeight: Int32, preserveASSMarkup: Bool = false, teletextPage: Int? = nil) {
-        guard let codecpar = stream.pointee.codecpar,
-              codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE
-        else { return nil }
+    convenience init?(stream: UnsafeMutablePointer<AVStream>, sourceVideoWidth: Int32, sourceVideoHeight: Int32, preserveASSMarkup: Bool = false, teletextPage: Int? = nil) {
+        guard let codecpar = stream.pointee.codecpar else { return nil }
+        self.init(codecpar: codecpar, sourceVideoWidth: sourceVideoWidth,
+                  sourceVideoHeight: sourceVideoHeight, preserveASSMarkup: preserveASSMarkup,
+                  teletextPage: teletextPage)
+        // Some demuxers default to AVDISCARD_DEFAULT and swallow packets; force NONE so everything reaches av_read_frame.
+        stream.pointee.discard = AVDISCARD_NONE
+    }
+
+    /// Open the subtitle decoder for a stream's parameters alone. #921: a bitmap sidecar keeps a
+    /// copy of its parameters after its container is closed, and builds its drain decoders from it.
+    init?(codecpar: UnsafePointer<AVCodecParameters>, sourceVideoWidth: Int32, sourceVideoHeight: Int32, preserveASSMarkup: Bool = false, teletextPage: Int? = nil) {
+        guard codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE else { return nil }
         let id = codecpar.pointee.codec_id
         guard let codec = avcodec_find_decoder(id),
               let ctx = avcodec_alloc_context3(codec)
@@ -112,9 +121,6 @@ final class EmbeddedSubtitleDecoder {
             if let declared = SubtitleRectText.playRes(fromASSHeader: header) { playRes = declared }
         }
         self.assPlayRes = playRes
-
-        // Some demuxers default to AVDISCARD_DEFAULT and swallow packets; force NONE so everything reaches av_read_frame.
-        stream.pointee.discard = AVDISCARD_NONE
     }
 
     deinit {

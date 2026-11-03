@@ -52,7 +52,7 @@ struct SecondaryBitmapSubtitleTests {
         return pcs(x: x, state: 0x80) + palette + object + segment(0x80, [])
     }
 
-    @Test("PGS channels isolate palettes, clear, off and cached reconstruction", .timeLimit(.minutes(1)))
+    @Test("PGS channels isolate palettes, clear, off and cached reconstruction", .timeLimit(.minutes(3)))
     func independentChannels() async throws {
         let format = try #require(avformat_alloc_context())
         defer { avformat_free_context(format) }

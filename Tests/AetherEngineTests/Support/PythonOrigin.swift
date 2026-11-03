@@ -58,20 +58,28 @@ enum PythonOrigin {
                 to: dir.appendingPathComponent("origin.py"), atomically: true, encoding: .utf8)
         } catch { return abandon() }
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        proc.arguments = [dir.appendingPathComponent("origin.py").path]
-        proc.currentDirectoryURL = dir
-        let stdout = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = FileHandle.nullDevice
-        do { try proc.run() } catch { return abandon() }
+        // An interpreter that announced a port an earlier origin had (see `LoopbackPort`) keeps
+        // running until a fresh one is found, so the kernel cannot offer the same number again.
+        var recycled: [Process] = []
+        defer { for proc in recycled { proc.terminate() } }
+        for _ in 0..<16 {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = [dir.appendingPathComponent("origin.py").path]
+            proc.currentDirectoryURL = dir
+            let stdout = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = FileHandle.nullDevice
+            do { try proc.run() } catch { return abandon() }
 
-        guard let port = await readyPort(of: proc, reading: stdout.fileHandleForReading) else {
-            proc.terminate()
-            return abandon()
+            guard let port = await readyPort(of: proc, reading: stdout.fileHandleForReading) else {
+                proc.terminate()
+                return abandon()
+            }
+            if LoopbackPort.claim(port) { return Launched(process: proc, port: port, workDir: dir) }
+            recycled.append(proc)
         }
-        return Launched(process: proc, port: port, workDir: dir)
+        return abandon()
     }
 
     /// Resolves once the origin announces its port, or once it is established that it never will.

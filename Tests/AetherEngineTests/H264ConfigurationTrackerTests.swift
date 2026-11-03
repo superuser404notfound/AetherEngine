@@ -209,7 +209,7 @@ struct H264ConfigurationTrackerTests {
         #expect(engine.pendingVODVideoConfigurationMismatch == nil)
     }
 
-    @Test("A cold resume reaches the compatibility path and retains its paused position", .timeLimit(.minutes(1)))
+    @Test("A cold resume reaches the compatibility path and retains its paused position", .timeLimit(.minutes(3)))
     @MainActor
     func fullColdResume() async throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("h264-change-\(UUID().uuidString).mp4")

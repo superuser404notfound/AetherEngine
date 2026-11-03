@@ -18,9 +18,11 @@
 #   restart-witness-subs.mkv      - same as MKV with an embedded SRT track (pump tap)
 #   a53-captions.mp4              - H.264 with in-picture A/53 CEA-608 SEI (#131, #259)
 #   hev1-inband-xps.mp4           - HEVC with in-band VPS/SPS/PPS and an empty hvcC
+#   h264-inband-avcc.mkv          - H.264 with in-band SPS/PPS and a 7-byte avcC (#938)
 #   cue-axis-bframes.mkv/.mp4     - one HEVC B-pyramid stream in both containers (AE#561)
 #   long-first-gop-{aac,pcm}.mkv  - 11 s first GOP, then 2 s GOPs; passthrough and bridged audio
 #   bridge-eac3-51.mkv            - 5.1 PCM in MKV, drives the EAC3 audio bridge (AE#561 follow-up)
+#   audio-tail.mkv                - 6 s of video, 70 s of audio, interleaved by time (AE#962)
 #
 # Real-world DV / Atmos / multichannel sources have to come from your
 # own library. Drop those into ./Fixtures/user/ (also gitignored)
@@ -283,6 +285,35 @@ data[start:start + size] = replacement
 open(path, 'wb').write(bytes(data))
 PY
 
+# #938: the H.264 counterpart, an mkvmerge-style CodecPrivate with zero SPS and zero PPS
+# (`01 64 00 20 ff e0 00`), the parameter sets repeated in-band at every IDR. The freed bytes become
+# an EBML Void so no offset in the file moves.
+echo "→ h264-inband-avcc.mkv (H.264 with in-band SPS/PPS, 7-byte avcC)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=320x240:rate=25 -t 6 \
+    -c:v libx264 -profile:v high -level 3.2 -pix_fmt yuv420p -g 50 -bf 3 \
+    -x264-params repeat-headers=1 "$FIXTURES_DIR/h264-inband-avcc.mkv"
+python3 - "$FIXTURES_DIR/h264-inband-avcc.mkv" <<'PY'
+import sys
+
+path = sys.argv[1]
+data = bytearray(open(path, 'rb').read())
+i = data.find(b'\x63\xa2')                       # CodecPrivate
+while i >= 0:
+    sz = data[i + 2]
+    if sz & 0x80 and data[i + 3] == 1:          # 1-byte size, avcC v1
+        total = 3 + (sz & 0x7f)
+        new = b'\x63\xa2\x87' + bytes(data[i + 3:i + 7]) + b'\xff\xe0\x00'
+        pad = total - len(new)
+        assert pad >= 2, f'avcC too small to empty in place: {total}'
+        data[i:i + total] = new + b'\xec' + bytes([0x80 | (pad - 2)]) + bytes(pad - 2)
+        break
+    i = data.find(b'\x63\xa2', i + 1)
+else:
+    sys.exit('no avcC CodecPrivate found')
+open(path, 'wb').write(bytes(data))
+PY
+
 # AE#561: one HEVC elementary stream in both containers, so the only difference between the two
 # files is what their index entries are stamped on. A Matroska Cue stores a presentation time, a
 # mov/mp4 sample table stores decode times, and the keyframe-aligned plan's boundaries ARE those
@@ -385,6 +416,20 @@ for AUDIO in aac pcm; do
         -g 1000 -sc_threshold 0 -force_key_frames "0,11,13,15,17,19,21,23,25,27,29" \
         -c:a "$CODEC" -ac 2 -f matroska "$FIXTURES_DIR/long-first-gop-$AUDIO.mkv"
 done
+
+# AE#962: audio that outlasts the video by more than the 60 s an index may stop short of the
+# duration, so the plan is the uniform stride and the audio-only tail is cut into 4 s segments.
+# Remuxed with `-max_interleave_delta 0` so the file is interleaved strictly by time; the encoder's
+# own output parks the last GOP next to much later audio, which is a different shape.
+echo "→ audio-tail.mkv (video 0-6 s, audio 0-70 s)"
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "testsrc2=size=320x180:rate=24:duration=6" \
+    -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=70" \
+    -map 0:v -map 1:a -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v 200k \
+    -g 48 -sc_threshold 0 -c:a aac -ac 2 -f matroska "$FIXTURES_DIR/audio-tail-raw.mkv"
+ffmpeg -hide_banner -loglevel error -y -i "$FIXTURES_DIR/audio-tail-raw.mkv" -c copy \
+    -max_interleave_delta 0 "$FIXTURES_DIR/audio-tail.mkv"
+rm -f "$FIXTURES_DIR/audio-tail-raw.mkv"
 
 echo ""
 echo "Done. Try:"

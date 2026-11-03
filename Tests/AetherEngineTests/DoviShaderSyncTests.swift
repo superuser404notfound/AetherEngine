@@ -13,7 +13,7 @@ struct DoviShaderSyncTests {
 
     @Test("The runtime-compiled source carries all expected kernels")
     func runtimeSourceCarriesKernels() {
-        for kernel in ["dovi_compose_luma", "dovi_compose_chroma", "dovi_layout_probe"] {
+        for kernel in ["dovi_compose_luma", "dovi_compose_chroma", "dovi_compose_chroma_422", "dovi_compose_chroma_444", "dovi_layout_probe"] {
             #expect(DoviShaderSource.source.contains("kernel void \(kernel)("),
                     "runtime source is missing \(kernel)")
         }

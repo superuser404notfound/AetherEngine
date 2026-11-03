@@ -216,6 +216,16 @@ extension HLSVideoEngine {
             )
         }
         let forcedDrop = forcedForTesting || knownUndecodable
+        // AE#923: shaping needs PCM, so it takes the session past stream copy and object rendering.
+        let shapes = audioShaping.isActive
+        audioShapingApplied = false
+        if shapes, sourceAudioStream != nil {
+            EngineLog.emit(
+                "[HLSVideoEngine] AE#923 audio shaping (\(audioShaping.summary)): decoding \(sourceIsAtmos ? "the EAC3+JOC Atmos track (objects not carried) " : "")"
+                + "through the PCM bridge instead of stream copy",
+                category: .session
+            )
+        }
 
         let sourceCodecLabel: String = {  // falls back to "audio" for codecs with no libavcodec name entry
             if let stream = sourceAudioStream,
@@ -225,7 +235,7 @@ extension HLSVideoEngine {
             return "audio"
         }()
 
-        if !forcedDrop, !preferBridge, let cfg = streamCopyAudio, let vcfg = savedVideoConfig {
+        if !forcedDrop, !preferBridge, !shapes, let cfg = streamCopyAudio, let vcfg = savedVideoConfig {
             // Pre-flight avformat_write_header: makeProducer is lazy (muxer alloc on first keep-packet), so a
             // failure there (EAC3-from-MKV, missing dec3 extradata, -22 "Cannot write moov atom before EAC3
             // packets parsed") would leave the producer stuck with the bridge fallback unreachable.
@@ -289,7 +299,7 @@ extension HLSVideoEngine {
                     )
                 }
             }
-        } else if preferBridge && sourceIsAtmos {
+        } else if preferBridge && sourceIsAtmos && !shapes {
             // EAC3+JOC always stream-copies; a pre-bridge decision is a codec-table bug.
             EngineLog.emit(
                 "[HLSVideoEngine] WARNING: Atmos source pre-routed to FLAC bridge without stream-copy attempt, Atmos lost. Investigate the codec compatibility table.",
@@ -299,7 +309,7 @@ extension HLSVideoEngine {
 
         // #731: TrueHD Atmos or DTS:X with object rendering requested. Tried before the channel bridges,
         // which it falls back to on any failure (see buildSpatialAudioProducerIfEligible).
-        if !forcedDrop, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
+        if !forcedDrop, !shapes, let audioStream = sourceAudioStream, sourceAudioStreamIndex >= 0,
            let prod = buildSpatialAudioProducerIfEligible(
                audioStream: audioStream,
                audioDemuxer: audioDemuxer,
@@ -317,9 +327,10 @@ extension HLSVideoEngine {
             // video-only after one attempt, try the other encoder. Only encoder-absence cascades (retrying
             // a different encoder can help); every other init failure is source-specific and re-attempting
             // is pointless, so it stops immediately.
+            let sourceChannels = audioStream.pointee.codecpar.pointee.ch_layout.nb_channels
             let firstAttempt = AudioBridge.bridgeEncoder(
                 for: audioBridgeMode,
-                sourceChannels: audioStream.pointee.codecpar.pointee.ch_layout.nb_channels)
+                sourceChannels: shapes ? audioShaping.outputChannels(forSource: sourceChannels) : sourceChannels)
             let cascade = Self.bridgeEncoderCascade(firstAttempt: firstAttempt)
             attempts: for (attemptIndex, encoderAttempt) in cascade.enumerated() {
                 let isLastAttempt = attemptIndex == cascade.count - 1
@@ -331,7 +342,8 @@ extension HLSVideoEngine {
                         mode: audioBridgeMode,
                         // The first attempt lets the bridge resolve, so a container that under-reports its
                         // channel count still gets the decoder-resolved answer; only the retry is forced.
-                        forcedEncoder: attemptIndex == 0 ? nil : encoderAttempt
+                        forcedEncoder: attemptIndex == 0 ? nil : encoderAttempt,
+                        shaping: audioShaping
                     )
                 } catch AudioBridge.AudioBridgeError.encoderNotFound(let missing) where !isLastAttempt {
                     EngineLog.emit(
@@ -380,8 +392,9 @@ extension HLSVideoEngine {
                     let hlsCodec = isEAC3Out ? "ec-3" : "fLaC"
                     let pipelineLabel = "\(sourceCodecLabel) → \(isEAC3Out ? "EAC3" : "FLAC") bridge"
                     audioHLSCodecs = hlsCodec
-                    self.audioPipelineDescription = pipelineLabel
+                    self.audioPipelineDescription = shapes ? pipelineLabel + " (shaped)" : pipelineLabel
                     self.audioDelivery = .bridged
+                    self.audioShapingApplied = shapes
                     if attemptIndex > 0 {
                         EngineLog.emit(
                             "[HLSVideoEngine] audio bridge cascaded \(Self.encoderLabel(firstAttempt)) → "

@@ -7,53 +7,55 @@ import AetherLibavcodec
 import AetherLibavutil
 @testable import AetherEngine
 
-/// End-to-end FEL checks on real Profile 7 files, where the synthetic suites
-/// cannot reach: container framing quirks (the Matroska `packet->data != buf->data`
-/// case that produced zero frames), real RPUs, real reorder, seeks and teardown.
-///
-/// The fixtures (`fel-clip-a.mkv`, `fel-clip-b.mkv`, `fel-clip-c.mp4`) live in the
-/// directory named by `DV_FEL_TESTS_DIR`, or in `DV FEL Tests/` next to the package;
-/// they are not checked in, and every test skips when its file is absent.
-@Suite(.offCooperativePoolOneLane)
-struct DoviFelRealFileTests {
+extension HeavyDualLayerSuites {
+    /// End-to-end FEL checks on real Profile 7 files, where the synthetic suites
+    /// cannot reach: container framing quirks (the Matroska `packet->data != buf->data`
+    /// case that produced zero frames), real RPUs, real reorder, seeks and teardown.
+    ///
+    /// The fixtures (`fel-clip-a.mkv`, `fel-clip-b.mkv`, `fel-clip-c.mp4`) live in the
+    /// directory named by `DV_FEL_TESTS_DIR`, or in `DV FEL Tests/` next to the package;
+    /// they are not checked in, and every test skips when its file is absent.
+    @Suite(.offCooperativePool)
+    struct DoviFelRealFileTests {
 
-    static let fixtures = [
-        "fel-clip-a.mkv",
-        "fel-clip-b.mkv",
-        "fel-clip-c.mp4",
-    ]
+        static let fixtures = [
+            "fel-clip-a.mkv",
+            "fel-clip-b.mkv",
+            "fel-clip-c.mp4",
+        ]
 
-    static func url(_ name: String) -> URL {
-        if let dir = ProcessInfo.processInfo.environment["DV_FEL_TESTS_DIR"] {
-            return URL(fileURLWithPath: dir).appendingPathComponent(name)
+        static func url(_ name: String) -> URL {
+            if let dir = ProcessInfo.processInfo.environment["DV_FEL_TESTS_DIR"] {
+                return URL(fileURLWithPath: dir).appendingPathComponent(name)
+            }
+            return URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()   // AetherEngineTests
+                .deletingLastPathComponent()   // Tests
+                .deletingLastPathComponent()   // AetherEngine
+                .deletingLastPathComponent()   // repo root
+                .appendingPathComponent("DV FEL Tests")
+                .appendingPathComponent(name)
         }
-        return URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()   // AetherEngineTests
-            .deletingLastPathComponent()   // Tests
-            .deletingLastPathComponent()   // AetherEngine
-            .deletingLastPathComponent()   // repo root
-            .appendingPathComponent("DV FEL Tests")
-            .appendingPathComponent(name)
+
+        static func available(_ name: String) -> Bool {
+            FileManager.default.fileExists(atPath: url(name).path)
+        }
+
+        /// The `.enabled(if:)` reason of every test that needs a clip: the clips are not checked in, so
+        /// those tests show as skipped without them rather than passing without having run.
+        static let needsClips: Comment = "needs the DV FEL test clips (not checked in): set DV_FEL_TESTS_DIR"
+
+        /// The fixtures present, for `arguments:` of a test that runs once per clip.
+        static var availableFixtures: [String] { fixtures.filter(available) }
+
+        /// The first two clips, when present: the ones long enough to seek into.
+        static var firstTwoClips: [String] { [fixtures[0], fixtures[1]].filter(available) }
     }
-
-    static func available(_ name: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(name).path)
-    }
-
-    /// The `.enabled(if:)` reason of every test that needs a clip: the clips are not checked in, so
-    /// those tests show as skipped without them rather than passing without having run.
-    static let needsClips: Comment = "needs the DV FEL test clips (not checked in): set DV_FEL_TESTS_DIR"
-
-    /// The fixtures present, for `arguments:` of a test that runs once per clip.
-    static var availableFixtures: [String] { fixtures.filter(available) }
-
-    /// The first two clips, when present: the ones long enough to seek into.
-    static var firstTwoClips: [String] { [fixtures[0], fixtures[1]].filter(available) }
 }
 
 // Only with the DualLayerDolbyVision trait: the composer is not built without it.
 #if DualLayerDolbyVision
-extension DoviFelRealFileTests {
+extension HeavyDualLayerSuites.DoviFelRealFileTests {
 
     // MARK: - Harness
 
@@ -211,6 +213,75 @@ extension DoviFelRealFileTests {
         print("[order] \(name): \(inversions) decode-order inversions of \(pts.count); after the renderer's 4-deep reorder: \(bad) regressions")
         #expect(bad == 0, "reorder depth exceeds the renderer buffer: \(bad) regressions")
         #expect(Set(pts).count == pts.count, "duplicate presentation timestamps delivered")
+    }
+
+    @Test("every delivered frame carries its own packet's Profile 8.1 RPU: the composed form, or the mapping-preserving form when it was shown as its base layer",
+          .enabled(if: !DoviFelRealFileTests.availableFixtures.isEmpty, DoviFelRealFileTests.needsClips),
+          arguments: DoviFelRealFileTests.availableFixtures)
+    func deliveredFramesCarryTheirOwnRpu(name: String) throws {
+        // Expected: the 8.1 RPU of each packet, or the last good one before it in decode order. A composed
+        // frame carries the composed form (mapping removed); a frame the decoder bypassed (deadline, missing
+        // enhancement layer, failed composition) carries the base-layer form that keeps its mapping. Which
+        // frames were bypassed depends on machine load, so both forms are expected per packet.
+        let reference = Demuxer()
+        try reference.open(url: Self.url(name))
+        let index = Int32(reference.videoStreamIndex)
+        let timeBase = try #require(reference.stream(at: reference.videoStreamIndex)).pointee.time_base
+        var expected: [Int64: Data] = [:]
+        var expectedBase: [Int64: Data] = [:]
+        var lastGood: [UInt8]?
+        var lastGoodBase: [UInt8]?
+        var packets = 0
+        while packets < 240, let pkt = try? reference.readPacket() {
+            if pkt.pointee.stream_index == index {
+                packets += 1
+                let layers = DoviRpuConverter.separateDualLayers(pkt, extractEL: false, extractParams: true)
+                if let converted = layers.convertedRpu {
+                    lastGood = converted
+                    // A missing mapping form falls back to the composed one, as the decoder does.
+                    lastGoodBase = layers.baseLayerRpu ?? converted
+                }
+                let ms = Int64((Double(pkt.pointee.pts) * av_q2d(timeBase) * 1000).rounded())
+                expected[ms] = DoviDisplayMetadata.payload(fromNAL: lastGood)
+                expectedBase[ms] = DoviDisplayMetadata.payload(fromNAL: lastGoodBase)
+            }
+            av_packet_unref(pkt)
+            var opt: UnsafeMutablePointer<AVPacket>? = pkt
+            trackedPacketFree(&opt)
+        }
+        reference.close()
+
+        let demuxer = Demuxer()
+        try demuxer.open(url: Self.url(name))
+        let stream = try #require(demuxer.stream(at: demuxer.videoStreamIndex))
+        final class Delivered: @unchecked Sendable {
+            let lock = NSLock()
+            var frames: [(Int64, Data?)] = []
+        }
+        let delivered = Delivered()
+        let decoder = DualLayerVideoDecoder(composer: DoviFelComposer())
+        try decoder.open(stream: stream) { buffer, pts, _ in
+            let payload = CVBufferCopyAttachment(buffer, DoviDisplayMetadata.rpuDataKey as CFString, nil) as? Data
+            delivered.lock.withLock { delivered.frames.append((Int64((pts.seconds * 1000).rounded()), payload)) }
+        }
+        let s = Session(demuxer: demuxer, decoder: decoder, sink: Sink(), videoIndex: Int32(demuxer.videoStreamIndex))
+        defer { decoder.close(); demuxer.close() }
+        Self.feed(s, count: 240)
+        decoder.flush()
+
+        let frames = delivered.lock.withLock { delivered.frames }
+        // Delivered and demuxed times round to the millisecond independently: allow one either way.
+        func expectedPayload(_ ms: Int64) -> Data? { expected[ms] ?? expected[ms - 1] ?? expected[ms + 1] }
+        func expectedBasePayload(_ ms: Int64) -> Data? { expectedBase[ms] ?? expectedBase[ms - 1] ?? expectedBase[ms + 1] }
+        let composedForm = frames.filter { ms, payload in payload != nil && payload == expectedPayload(ms) }.count
+        let matched = frames.filter { ms, payload in
+            payload != nil && (payload == expectedPayload(ms) || payload == expectedBasePayload(ms))
+        }.count
+        print("[rpu] \(name): \(matched) of \(frames.count) delivered frames carry their packet's RPU (\(composedForm) in the composed form); composed \(decoder.composedFrameCount)")
+        #expect(frames.count >= 216)
+        #expect(matched == frames.count)
+        // Composition ran, and its frames carry the composed form (a bypassed frame carries the other one).
+        #expect(composedForm > 0 || decoder.composedFrameCount == 0, "no frame carries the composed RPU form")
     }
 
     @Test("the enhancement layer is aligned with the base layer: the residual acts, and never exceeds vdr_in_max",

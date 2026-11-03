@@ -78,6 +78,9 @@ struct DualLayerPictureAlignment {
     /// First base-layer slot seen since the reset: with the latest it gives the time per slot.
     private var origin: (slot: Int, pts: Int64)?
     private var latest: (slot: Int, pts: Int64)?
+    /// Whether the base layer has decoded a picture below a slot it had already seen (a B-frame), so a
+    /// slot below `latest` that has no time yet can still be to come. Cleared by `reset`.
+    private var baseReordered = false
 
     /// Units whose enhancement-layer picture was moved to another frame's time.
     private(set) var reorderedUnits = 0
@@ -97,6 +100,7 @@ struct DualLayerPictureAlignment {
         baseTime.removeAll()
         origin = nil
         latest = nil
+        baseReordered = false
     }
 
     /// Reads both layers' pictures from one access unit (base-layer NALs, and enhancement-layer NALs
@@ -131,6 +135,7 @@ struct DualLayerPictureAlignment {
                 for s in baseTime.keys where s < unit - 32 { baseTime.removeValue(forKey: s) }
             }
             if origin == nil { origin = (blSlot, pts) }
+            if let latest, blSlot < latest.slot { baseReordered = true }
             latest = (blSlot, pts)
         }
 
@@ -141,8 +146,14 @@ struct DualLayerPictureAlignment {
             reorderedUnits += 1
             return known
         }
-        // That base-layer picture is still to come: extrapolate from the time per slot.
-        guard let origin, let latest, latest.slot != origin.slot,
+        // A slot beyond the latest base picture is still to come: extrapolate from the time per slot.
+        // A slot at or below it that is not in `baseTime` is still to come only when the base layer
+        // itself reorders (a B-frame decoded after a higher slot has been seen). With a base layer
+        // that has only ever stepped forward, such a slot was pruned or its base picture carried no
+        // POC: an extrapolated time would belong to no base frame, so it pairs by access unit like an
+        // unknown slot. A base layer is taken to reorder from its first B-frame on, so the unit before
+        // that one is paired by access unit as well.
+        guard let origin, let latest, elSlot > latest.slot || baseReordered, latest.slot != origin.slot,
               let result = Self.extrapolate(origin: origin, latest: latest, slot: elSlot) else {
             lastEnhancementPlaced = false; return pts
         }

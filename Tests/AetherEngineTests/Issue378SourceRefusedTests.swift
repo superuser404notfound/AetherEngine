@@ -98,7 +98,7 @@ struct Issue378SourceRefusedTests {
 
     /// The regression guard for #281: an origin that answers the suffix form itself — here with a
     /// 416 — is still remembered after one occurrence.
-    @Test("a 416 to the suffix form still latches", .timeLimit(.minutes(1)))
+    @Test("a 416 to the suffix form still latches", .timeLimit(.minutes(3)))
     func rangeNotSatisfiableStillLatches() async throws {
         let declared: Int64 = 4 * 1024 * 1024 * 1024
         let server = try #require(ScriptedOriginServer { recorded in

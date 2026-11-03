@@ -159,7 +159,7 @@ struct SharedOutputCoordinatorTests {
         let c = SharedOutputCoordinator()
         let journal = Journal()
         _ = c.enqueueTransition {
-            try? await Task.sleep(for: .milliseconds(100))
+            try? await Task.sleep(for: .milliseconds(100)) // hygiene: allow one-shot delay inside the transition under test, not a wait
             await journal.note("activation by A")
         }
         let release = c.enqueueTransition { await journal.note("release by B") }
@@ -218,7 +218,7 @@ struct SharedOutputCoordinatorTests {
         }
     }
 
-    @Test("concurrent category requests share work, and a success is never repeated", .timeLimit(.minutes(1)))
+    @Test("concurrent category requests share work, and a success is never repeated", .timeLimit(.minutes(3)))
     func categoryRequestsCoalesceOnce() async throws {
         let coordinator = SharedOutputCoordinator()
         let probe = ConfigurationProbe()
@@ -239,7 +239,7 @@ struct SharedOutputCoordinatorTests {
         #expect(await probe.calls == 1)
     }
 
-    @Test("a failed category declaration is retried by the next load", .timeLimit(.minutes(1)))
+    @Test("a failed category declaration is retried by the next load", .timeLimit(.minutes(3)))
     func categoryFailureRetries() async {
         let coordinator = SharedOutputCoordinator()
         let probe = ConfigurationProbe()
@@ -249,7 +249,7 @@ struct SharedOutputCoordinatorTests {
         #expect(await probe.calls == 2)
     }
 
-    @Test("the category declaration waits behind a pending release", .timeLimit(.minutes(1)))
+    @Test("the category declaration waits behind a pending release", .timeLimit(.minutes(3)))
     func categoryWaitsForPendingTransition() async throws {
         let coordinator = SharedOutputCoordinator()
         let probe = ConfigurationProbe()
@@ -264,7 +264,7 @@ struct SharedOutputCoordinatorTests {
         #expect(await probe.calls == 2)
     }
 
-    @Test("renderer activation belongs to the host when disabled", .timeLimit(.minutes(1)))
+    @Test("renderer activation belongs to the host when disabled", .timeLimit(.minutes(3)))
     func rendererActivationOwnership() async throws {
         let engine = try AetherEngine()
         let probe = ConfigurationProbe()

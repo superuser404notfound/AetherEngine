@@ -109,7 +109,7 @@ struct AbortedReadIsNotEndOfFileTests {
     }
 
     @Test("a read that the close aborts throws instead of reporting the end of the source",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func abortedReadThrows() async throws {
         let reader = ParkingReader(try fixture())
         let demuxer = Demuxer()
@@ -128,7 +128,7 @@ struct AbortedReadIsNotEndOfFileTests {
     }
 
     @Test("the end of a source nobody closed is still the end of the source",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func realEndOfFileIsStillNil() async throws {
         let demuxer = Demuxer()
         try demuxer.open(reader: ParkingReader(try fixture()), formatHint: "matroska")

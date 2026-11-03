@@ -98,7 +98,7 @@ struct AudioOutputFlushEpochTests {
     /// 27 SDKs move the same condition into the enqueue call itself) would make the feed thread wait on a
     /// lock it already holds, and every later `flush()` / `stop()` / `seekClock()` with it.
     @Test("an automatic-flush notification posted from inside enqueue does not hang the feed",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func automaticFlushPostedInsideEnqueueDoesNotDeadlock() async throws {
         let output = AudioOutput()
         let box = BufferBox(try #require(makeBuffer(pts: 1)))

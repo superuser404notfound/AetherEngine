@@ -182,6 +182,19 @@ struct SampleBufferRendererLookaheadTests {
         #expect(abs(r.lead - 4 * frame) < 1e-9)
     }
 
+    @Test("A frame 100 s ahead of the clock is held until the clock reaches it")
+    func forwardJumpIsHeld() {
+        let frame = 1.0 / 24
+        let maxLead = SampleBufferRenderer.maxReorderPictures * frame
+        let lead = 3 * frame
+        // 100 s on from the highest PTS seen: the lead is kept and the gate refuses the frame.
+        let d = SampleBufferRenderer.displayOrderPTS(packetPTS: 200, maxSeenPTS: 100, reorderLead: lead, maxLead: maxLead)
+        #expect(d.maxSeen == 200)
+        #expect(d.lead == lead)
+        #expect(!mayEnqueue(rate: 24, pts: d.pts, clock: 100))
+        #expect(mayEnqueue(rate: 24, pts: d.pts, clock: 200))
+    }
+
     #if DualLayerDolbyVision
     @Test("The pool threshold follows the look-ahead cap")
     func poolFollowsCap() {

@@ -36,12 +36,25 @@ struct VODSegmentCutter {
     /// never advance).
     let boundaries: [Int64]
     let baseIndex: Int
+    /// How far before each boundary (same local indices as `boundaries`, missing entries 0) the
+    /// keyframe that boundary names may arrive. A #409 repair that synthesizes the decode ladder
+    /// places a late-written IDR back on its sequence, before the index entry the plan was built from
+    /// (`Demuxer.indexedKeyframeAdvanceTicks`); without the reach that keyframe stays in the previous
+    /// segment and the next one opens mid-GOP (25 of 40 segments on the 23 fps reporting asset). The
+    /// engine keeps each reach below the distance to the keyframe before, so that one never reaches.
+    let reachTicks: [Int64]
     private(set) var current: Int
 
-    init(sourceBoundaries: [Int64], planAnchorPts: Int64, baseIndex: Int) {
+    init(sourceBoundaries: [Int64], planAnchorPts: Int64, baseIndex: Int, reachTicks: [Int64] = []) {
         self.boundaries = sourceBoundaries.map { $0 &- planAnchorPts }
         self.baseIndex = baseIndex
+        self.reachTicks = reachTicks.map { max(0, $0) }
         self.current = baseIndex
+    }
+
+    /// The reach of local boundary `index`.
+    func reach(at index: Int) -> Int64 {
+        index >= 0 && index < reachTicks.count ? reachTicks[index] : 0
     }
 
     /// Segment index for a video packet, in decode order, from its ITEM-axis presentation time.
@@ -53,7 +66,8 @@ struct VODSegmentCutter {
         // boundaries[count-1] is the end of the final segment, not a segment start, so the last segment
         // a keyframe can open is local (count-2): advance only while the next entry is a real start.
         var nextLocal = (current - baseIndex) + 1
-        while nextLocal < boundaries.count - 1, pts >= boundaries[nextLocal] {
+        while nextLocal < boundaries.count - 1,
+              SourceTimestampBounds.sum(pts, reach(at: nextLocal)) >= boundaries[nextLocal] {
             current += 1
             nextLocal += 1
         }

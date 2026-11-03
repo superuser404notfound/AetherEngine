@@ -12,6 +12,8 @@ protocol H264TimestampRepairSession: AnyObject {
     var isDecided: Bool { get }
     /// Ticks the container's own index has to move by to describe the same axis as the packets.
     var decodeTimestampOffset: Int64? { get }
+    /// Ticks a delivered keyframe may sit before its index entry once `decodeTimestampOffset` is applied.
+    var keyframeAdvanceTicks: Int64 { get }
     /// True when the packet was taken over and must not be emitted yet.
     func ingest(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool
     func dequeue() -> UnsafeMutablePointer<AVPacket>?
@@ -452,6 +454,7 @@ final class H264MatroskaSlotPermutationSession: H264TimestampRepairSession {
     /// keyframe is the first picture of its own sequence, and a permutation leaves that slot exactly
     /// where the container wrote it. The index and the packets already describe one axis.
     var decodeTimestampOffset: Int64? { nil }
+    var keyframeAdvanceTicks: Int64 { 0 }
 
     func ingest(_ packet: UnsafeMutablePointer<AVPacket>) -> Bool {
         guard phase != .off else { return false }

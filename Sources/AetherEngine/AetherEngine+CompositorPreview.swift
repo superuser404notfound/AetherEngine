@@ -12,8 +12,9 @@ extension AetherEngine {
 
     /// True when this session's scrub previews come through `showScrubPreview(atSeconds:in:)` and an
     /// `AetherScrubPreviewView` rather than a `CGImage`: a native VOD session of Dolby Vision without
-    /// a displayable base layer (Profile 5, AV1 Profile 10.0), whose colour only the system
-    /// compositor applies. Independent of the `DolbyVisionStillReshaping` trait. Inside the resident
+    /// a displayable base layer (Profile 5, AV1 Profile 10.0) in a build without the
+    /// `DolbyVisionStillReshaping` trait, whose colour only the system compositor applies then. With
+    /// the trait such a session serves reshaped `scrubThumbnail` stills instead. Inside the resident
     /// window the picture comes out of the segment cache, like `scrubThumbnail`; outside it, out of
     /// the source's own keyframe, read by a side demuxer.
     public var scrubPreviewDrawsInView: Bool {

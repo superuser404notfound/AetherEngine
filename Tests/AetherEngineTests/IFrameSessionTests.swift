@@ -50,7 +50,7 @@ private final class CountingFileReader: IOReader, @unchecked Sendable {
     func close() { lock.withLock { _closes += 1 } }
 }
 
-@Suite("I-frame rendition on a real session", .serialized)
+@Suite("I-frame rendition on a real session", .serialized, .offCooperativePool)
 struct IFrameSessionTests {
     private static let fixture = "restart-witness-av.mp4"
 

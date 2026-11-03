@@ -13,6 +13,7 @@ public enum HLSIngestDiagnosticReason: String, Sendable, CaseIterable {
     case invalidMediaSequence = "invalid_media_sequence"
     case invalidTargetDuration = "invalid_target_duration"
     case invalidSegmentDuration = "invalid_segment_duration"
+    case invalidByteRange = "invalid_byte_range"
     case durationLimitExceeded = "duration_limit_exceeded"
     case playlistSizeLimitExceeded = "playlist_size_limit_exceeded"
     case playlistLineLimitExceeded = "playlist_line_limit_exceeded"
@@ -117,6 +118,10 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible, Localized
             case "media sequence out of range": return .invalidMediaSequence
             case "TARGETDURATION out of range": return .invalidTargetDuration
             case "EXTINF out of range", "segment duration must be positive": return .invalidSegmentDuration
+            case "malformed BYTERANGE", "BYTERANGE out of range", "BYTERANGE offset undefined",
+                 "byte range answered elsewhere", "byte range answered short",
+                 "byte range beyond the resource":
+                return .invalidByteRange
             case "non-UTF8 playlist", "playlist is not bounded UTF-8", "rendition payload is not UTF-8": return .invalidPlaylistEncoding
             default:
                 if reason.hasPrefix("playlist line exceeds ") { return .playlistLineLimitExceeded }

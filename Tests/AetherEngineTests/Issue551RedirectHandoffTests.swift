@@ -65,7 +65,8 @@ extension PrewarmStoreSuites {
 
             #expect(source.rangeRequestCount == resolvesForTheWarm,
                     "the session resolved the chain a second time: \(source.requestLog)")
-            #expect(cdn.requestLog.contains(where: { $0.start >= 256 * 1024 }),
+            // AE#958: the connection re-reads the warm's last `rangeCheckBytes` to check the origin.
+            #expect(cdn.requestLog.contains(where: { $0.start >= 256 * 1024 - Int64(AVIOReader.rangeCheckBytes) }),
                     "the data connection never reached the resolved target: \(cdn.requestLog)")
         }
 

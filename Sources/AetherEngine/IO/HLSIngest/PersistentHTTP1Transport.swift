@@ -747,18 +747,35 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
         return task
     }
 
+    /// How long the next head read may wait, nil once the head deadline is spent. A deadline that ran
+    /// out while this task waited for a thread has not seen the socket yet: the origin may have
+    /// answered in time, so one short read takes what is already there before the deadline is called.
+    /// A loaded process otherwise refused a response that had arrived in milliseconds.
+    static func headReadTimeout(left: TimeInterval, readTimeout: TimeInterval,
+                                lateReadSpent: Bool) -> TimeInterval? {
+        if left > 0 { return min(readTimeout, left) }
+        return lateReadSpent ? nil : lateHeadReadTimeout
+    }
+
+    static let lateHeadReadTimeout: TimeInterval = 0.5
+
     private func readHead(
         _ task: URLSessionStreamTask, reused: Bool, deadline: Date
     ) async throws -> HeldSourceConnection.ResponseHead {
         let separator = Data("\r\n\r\n".utf8)
         var head = takePending()
+        var lateReadSpent = false
         while head.range(of: separator) == nil {
             try Task.checkCancellation()
             let left = deadline.timeIntervalSinceNow
-            guard left > 0 else { throw ConnectionError.headDeadlineExceeded }
+            guard let timeout = Self.headReadTimeout(left: left, readTimeout: readTimeout,
+                                                     lateReadSpent: lateReadSpent) else {
+                throw ConnectionError.headDeadlineExceeded
+            }
+            if left <= 0 { lateReadSpent = true }
             let (chunk, eof): (Data, Bool)
             do {
-                (chunk, eof) = try await read(task, maxLength: 64 * 1024, timeout: min(readTimeout, left))
+                (chunk, eof) = try await read(task, maxLength: 64 * 1024, timeout: timeout)
             } catch where Self.isTimeout(error) {
                 // The read's timeout was clamped to the deadline; its expiry is the deadline's, not a
                 // stall, and the socket's own POSIX timeout would say neither.

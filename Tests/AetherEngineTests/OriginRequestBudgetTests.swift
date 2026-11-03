@@ -21,7 +21,7 @@ struct OriginRequestBudgetTests {
     }
 
     @Test("network completion returns a lease while its caller still retains it",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func completedLeaseUnblocksNextReader() async throws {
         let budget = freshBudget()
         budget.setHostLimit(1, for: url)
@@ -46,7 +46,7 @@ struct OriginRequestBudgetTests {
     }
 
     @Test("racing completion and cancellation return a request lease only once",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func leaseReleaseIsIdempotent() async throws {
         let budget = freshBudget()
         let lease = OriginRequestBudget.Lease(

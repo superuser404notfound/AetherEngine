@@ -34,6 +34,16 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// nothing looked. Nothing about the media is wrong and no retry will help; the trust decision is
     /// the host's to make (AE#495).
     public static let sourceCertificateRejected = PlaybackErrorKind(rawValue: "sourceCertificateRejected")
+    /// The origin answered a byte range with bytes from somewhere else: a `206` whose `Content-Range`
+    /// names the requested offset over a body that does not hold the bytes the reader already had for
+    /// that offset (IPTV timeshift archives answer on their own chunk boundaries). Arrives at the open
+    /// or mid-session, wherever the reader first re-reads bytes it holds. Nothing this origin sends past
+    /// byte 0 can be placed, so no retry at an offset helps: load the source again with
+    /// `LoadOptions.sequentialOrigin` (and `declaredDurationSeconds`), and serve seeks outside the
+    /// resident range by re-requesting the source at the target, the way a timeshift URL addresses
+    /// time (AE#958). Before this kind the same session played repeated or shifted audio and video,
+    /// or failed as `vodSourceFailed` / `softwarePipelineFailed`.
+    public static let sourceFabricatesRanges = PlaybackErrorKind(rawValue: "sourceFabricatesRanges")
     /// A custom `IOReader`'s initial probe failed. The host built that reader, so only the host can
     /// re-point it.
     public static let customSourceProbeFailed = PlaybackErrorKind(rawValue: "customSourceProbeFailed")
@@ -157,8 +167,24 @@ extension AetherEngine {
     /// `state = .error(...)` appears anywhere else.
     @MainActor
     func publishError(_ info: PlaybackErrorInfo) {
+        let caught = !isCustomSource && loadedURL.map {
+            FabricatedRangeOrigins.caughtRecently($0, within: HLSVideoEngine.rateLimitVerdictWindowSeconds)
+        } == true
+        let info = Self.reclassifiedForFabricatedRanges(info, caught: caught)
         errorInfo = info
         state = .error(info.message)
+    }
+
+    /// AE#958: every route reports a reader that stopped reading in its own generic terms (the open,
+    /// the native producer, the software pipeline). When the reader stopped because the origin was
+    /// caught fabricating a range, that is what the host is told, since it calls for a different load.
+    nonisolated static func reclassifiedForFabricatedRanges(_ info: PlaybackErrorInfo,
+                                                           caught: Bool) -> PlaybackErrorInfo {
+        let generic: Set<PlaybackErrorKind> = [.sourceOpenFailed, .vodSourceFailed, .softwarePipelineFailed]
+        guard caught, generic.contains(info.kind) else { return info }
+        return PlaybackErrorInfo(kind: .sourceFabricatesRanges,
+                                 message: "Source origin answers byte ranges with other bytes; "
+                                    + "load it with sequentialOrigin")
     }
 
     /// Engine-authored failure: the sentence names the cause and stays in English.

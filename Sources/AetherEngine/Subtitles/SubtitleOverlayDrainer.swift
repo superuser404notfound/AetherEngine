@@ -117,9 +117,11 @@ enum SubtitleOverlayDrainer {
     /// contiguous in sequence and never stops anything, however long it is.
     ///
     /// Stopping at the near side costs nothing visible: the drain runs a 60 s lead ahead of the
-    /// playhead, a hole is only honoured at or after the playhead (`notBefore`), so the landing
-    /// region always decodes whole, and the caller crosses the hole anyway once its tick budget is
-    /// spent. What it does change is the cursor's claim: a tick that stopped at a hole no longer
+    /// playhead, a hole is only honoured while its FAR side lies past `notBefore` (the playhead plus
+    /// a short release lead), so everything at or behind the playhead decodes whole and the landing
+    /// region with it, and the caller crosses the hole anyway once its tick budget is spent. #941
+    /// moved this from the near side: a refill at about 1x keeps the playhead just behind the
+    /// filling run, past the last packet before the hole while the hole itself is still ahead. What it does change is the cursor's claim: a tick that stopped at a hole no longer
     /// reports determination past it, which is the honest reading and the one #250 asks for.
     ///
     /// `resumeFrom` is the packet the cursor sits on, i.e. the last one a steady tick decoded, and
@@ -128,15 +130,22 @@ enum SubtitleOverlayDrainer {
     /// the island and carry the cursor past the hole. That is the reported shape exactly (a set at
     /// 280 s closed at 295 s, the four packets between them never read). Pass nil on a reset, whose
     /// window starts at a backscan boundary rather than at something that was read.
+    ///
+    /// #941: `isRead` is the #416 ledger, and it covers the half order cannot. A run re-anchored
+    /// FORWARD hangs its island behind the stretch it skipped with ascending sequences, so after a
+    /// seek past the front and straight back the window reads "old run, hole, newer island" and no
+    /// pair descends. Any pair whose span no reader has read is a hole whatever its order says.
     static func harvestGapCut(count: Int, ptsAt: (Int) -> Double,
                               sequenceAt: (Int) -> UInt64,
                               resumeFrom: (pts: Double, sequence: UInt64)?,
-                              notBefore: Double) -> (index: Int, at: Double, sequence: UInt64)? {
+                              notBefore: Double,
+                              isRead: (Double, Double) -> Bool = { _, _ in true })
+        -> (index: Int, at: Double, sequence: UInt64)? {
         guard count > 0 else { return nil }
         var previous = resumeFrom
         for index in 0..<count {
-            if let previous, previous.sequence > 0, sequenceAt(index) < previous.sequence,
-               previous.pts >= notBefore {
+            if let previous, previous.sequence > 0, ptsAt(index) > notBefore,
+               sequenceAt(index) < previous.sequence || !isRead(previous.pts, ptsAt(index)) {
                 return (index, previous.pts, previous.sequence)
             }
             previous = (ptsAt(index), sequenceAt(index))
@@ -149,9 +158,16 @@ enum SubtitleOverlayDrainer {
     /// cannot be re-formed; what answers instead is the first entry's provenance. A sequence newer
     /// than the one held at means the filling run has reached this position and everything from
     /// the hold to here is read; an older one is still the island on the far side of the hole.
-    static func harvestGapHoldResumes(firstSequence: UInt64?, heldSequence: UInt64) -> Bool {
-        guard let firstSequence else { return false }
-        return firstSequence > heldSequence
+    ///
+    /// #941: a newer sequence is necessary and not sufficient. A later reader re-harvesting the
+    /// island stamps it newer too, so the ledger has to agree that the ground from the hold up to
+    /// that entry was read.
+    static func harvestGapHoldResumes(firstSequence: UInt64?, heldSequence: UInt64,
+                                      firstPts: Double? = nil, heldAt: Double = 0,
+                                      isRead: (Double, Double) -> Bool = { _, _ in true }) -> Bool {
+        guard let firstSequence, firstSequence > heldSequence else { return false }
+        guard let firstPts else { return true }
+        return isRead(heldAt, firstPts)
     }
 
     /// Whether a reconstruction pass should be finalized after its drain window has decoded.

@@ -136,4 +136,39 @@ struct BackgroundDecisionWaitsForLoadTests {
         #expect(runs.states == [.playing])
         #expect(engine.state == .paused)
     }
+
+    @Test("a retained background reload settles policy without a paused readiness waypoint (AE#870)",
+          arguments: [true, false], [true, false])
+    func retainedReloadSettlesPolicy(autoplay: Bool, settlesBeforeReturn: Bool) async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var actions: [AetherEngine.BackgroundAction] = []
+        engine.owedBackgroundPolicyForTesting = { engine in
+            let action = AetherEngine.backgroundAction(
+                isAudioBackend: false, hasSoftwareHost: false, softwareHostHasAudio: false,
+                keepVideoAlive: false, pipActive: false, state: engine.state,
+                retainPausedVideoPipeline: engine.retainsVideoPipelineWhenBackgrounded)
+            actions.append(action)
+            if action == .teardownVideo { engine.releaseVideoPipelineForBackground() }
+        }
+        engine.retainsVideoPipelineWhenBackgrounded = true
+        engine.backgroundPlaybackEnabled = false
+        engine.state = .paused
+        engine.noteDidEnterBackground()
+        // The same admission as loadSession. Remote-HLS autoplay stays .loading until rendering;
+        // it intentionally omits the .paused readiness waypoint of the other video paths.
+        engine.stopInternal(resetDisplayCriteria: false)
+        let generation = engine.loadGeneration
+        engine.beginLoadInFlight(generation)
+        engine.state = .loading
+        if settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
+        let decidedMidLoad = try await waitFor(upTo: .milliseconds(300)) { !actions.isEmpty }
+        #expect(!decidedMidLoad)
+        engine.endLoadInFlight(generation)
+        if !settlesBeforeReturn { engine.state = autoplay ? .playing : .paused }
+        try await waitFor { !actions.isEmpty }
+        #expect(actions == [autoplay ? .teardownVideo : .doNothing])
+        #expect(engine.state == .paused)
+    }
+
 }

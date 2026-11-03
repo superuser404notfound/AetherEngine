@@ -16,6 +16,7 @@ import AetherLibavutil
 /// not a ground truth.
 ///
 /// `AETHER_REAL_EXPORT=<dir> swift test --filter exportRealTitle`
+@Suite(.offCooperativePoolOneLane)
 struct DoviRealFileExportTests {
 
     static func planar10(_ b: CVPixelBuffer) -> Data {

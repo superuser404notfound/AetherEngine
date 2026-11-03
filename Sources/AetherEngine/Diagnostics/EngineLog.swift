@@ -2,7 +2,7 @@ import Foundation
 import os
 
 /// Central log sink. Two outputs: (1) os.Logger per category (always on, survives Release builds, filterable in Console.app);
-/// (2) optional host handler for in-app overlays and aetherctl stdout. No stdio fallback; install a handler for that.
+/// (2) optional host handlers (`handler`, `structuredHandler`) for in-app overlays and aetherctl stdout. No stdio fallback; install a handler for that.
 public enum EngineLog {
 
     /// OSLog category (raw value = category string for Console.app filters).
@@ -27,6 +27,16 @@ public enum EngineLog {
     }
     private static let handlerLock = NSLock()
     nonisolated(unsafe) private static var _handler: ((String) -> Void)?
+
+    /// `handler` with the line's category and level attached (AE#897), for a host that files lines by
+    /// subsystem instead of parsing the `[Prefix]` convention. Receives the same redacted lines as
+    /// `handler`, in the same order and under the same threading rules; installing both delivers every
+    /// line to each. The level is `.info` today, since `.verbose` lines never reach a host handler.
+    public static var structuredHandler: ((String, Category, Level) -> Void)? {
+        get { handlerLock.lock(); defer { handlerLock.unlock() }; return _structuredHandler }
+        set { handlerLock.lock(); _structuredHandler = newValue; handlerLock.unlock() }
+    }
+    nonisolated(unsafe) private static var _structuredHandler: ((String, Category, Level) -> Void)?
 
     /// Names a value that must never appear in a log line, such as an IPTV account password the host
     /// holds. Every line then has that exact value (and its percent-encoded form) replaced before it
@@ -104,6 +114,7 @@ public enum EngineLog {
             let line = LogRedaction.redact(line)
             loggers[category]?.log("\(line, privacy: .public)")
             handler?(line)
+            structuredHandler?(line, category, level)
         case .verbose:
             guard let osLog = osLogs[category], osLog.isEnabled(type: .debug) else { return }
             let line = LogRedaction.redact(line)

@@ -43,6 +43,8 @@ final class ByteFIFO: @unchecked Sendable {
     func write(_ data: Data) -> Bool {
         condition.lock()
         defer { condition.unlock() }
+        // Empty writes neither occupy capacity nor make a reader's EOF condition true.
+        if data.isEmpty { return !finished && !cancelled }
         parked += 1
         while pendingCount >= capacity && !finished && !cancelled {
             condition.wait()
@@ -55,8 +57,9 @@ final class ByteFIFO: @unchecked Sendable {
         return true
     }
 
-    /// Blocking read. Returns: >0 bytes copied; 0 = EOF (finished + drained); -1 = cancelled.
+    /// Blocking read. Returns: >0 bytes copied; 0 = EOF (finished + drained); -1 = cancelled or invalid length.
     func read(into buffer: UnsafeMutablePointer<UInt8>, maxLength: Int) -> Int {
+        guard maxLength > 0 else { return -1 }
         condition.lock()
         defer { condition.unlock() }
         parked += 1

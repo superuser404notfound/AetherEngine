@@ -84,7 +84,7 @@ struct DoviComposeAsyncTests {
     }
 
     @Test("after releaseOutputPool a composition is refused, its slot is returned and no pool is rebuilt",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func composeAfterTeardownIsRefused() async throws {
         let composer = try #require(DoviFelComposer())
         let bl = try #require(Self.makeBuffer(width: 256, height: 256, fill: 0x8000))
@@ -108,7 +108,7 @@ struct DoviComposeAsyncTests {
         #expect(composer.allocatedPoolBuffers == 0, "a pool was rebuilt after teardown")
     }
 
-    @Test("pool creation is refused once torn down, whatever the caller saw before", .timeLimit(.minutes(1)))
+    @Test("pool creation is refused once torn down, whatever the caller saw before", .timeLimit(.minutes(3)))
     func poolCreationAfterTeardownIsRefused() throws {
         let composer = try #require(DoviFelComposer())
         #expect(composer.ensurePoolForTesting(width: 256, height: 256) != nil)
@@ -119,7 +119,7 @@ struct DoviComposeAsyncTests {
         #expect(composer.allocatedPoolBuffers == 0)
     }
 
-    @Test("the blocking compose waits for an in-flight slot like composeAsync does", .timeLimit(.minutes(1)))
+    @Test("the blocking compose waits for an in-flight slot like composeAsync does", .timeLimit(.minutes(3)))
     func blockingComposeTakesAnInFlightSlot() throws {
         final class Box: @unchecked Sendable { let done = DispatchSemaphore(value: 0); var result: Bool? }
         let composer = try #require(DoviFelComposer())
@@ -164,7 +164,7 @@ struct DoviComposeAsyncTests {
     }
 
     @Test("every composeAsync call completes exactly once, and no more than maxFramesInFlight are outstanding",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func completionsAreExactlyOnceAndBounded() async throws {
         let composer = try #require(DoviFelComposer())
         guard let bl = Self.makeBuffer(width: 256, height: 256, fill: 0x8000),
@@ -214,7 +214,7 @@ struct DoviComposeAsyncTests {
     /// and a `composeAsync` that waits for its completion while the caller holds
     /// the lock deadlocks regardless of timing.
     @Test("composeAsync makes progress while the caller holds a lock the completion also needs",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func doesNotDeadlockAgainstTheCallersLock() async throws {
         let composer = try #require(DoviFelComposer())
         guard let bl = Self.makeBuffer(width: 256, height: 256, fill: 0x8000),

@@ -157,7 +157,8 @@ struct Issue450ConcurrentReaderCeilingTests {
     func aConnectionWithNoFirstByteIsReported() async throws {
         let stallTimeout: TimeInterval = 2.0
         let firstRange: Int64 = 2 * 1024 * 1024
-        let silenceOffset = firstRange
+        // AE#958: the frontier refill starts the overlap check's worth of held bytes early.
+        let silenceOffset = firstRange - Int64(AVIOReader.rangeCheckBytes)
         let attempts = AttemptCounter()
         let serverMaybe = ThrottledOriginServer(
             totalSize: 256 * 1024 * 1024,

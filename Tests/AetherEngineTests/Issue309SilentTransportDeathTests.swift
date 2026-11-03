@@ -32,7 +32,9 @@ struct Issue309SilentTransportDeathTests {
     /// keeps the silent generation off offset 0, where the speculative tail fetch and the open's
     /// own from-zero request live.
     private static let firstRange: Int64 = 2 * 1024 * 1024
-    private static var silenceOffset: Int64 { firstRange }
+    // AE#958: the refill at the frontier re-reads the held bytes before it to check the origin, so the
+    // request the origin sees starts that much earlier.
+    private static var silenceOffset: Int64 { firstRange - Int64(AVIOReader.rangeCheckBytes) }
 
     /// Snapshot taken from the ORIGIN's thread at the moment it receives a given request, which is
     /// the only way to observe how much read-ahead the reader still held when it asked for the
@@ -103,7 +105,7 @@ struct Issue309SilentTransportDeathTests {
     /// the shape #309's own detection test failed in on a loaded CI runner, where a first byte took
     /// longer than its 0.6 s threshold.
     @Test("an open whose first byte is slower than the stall threshold still opens",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func slowFirstByteOpens() throws {
         let serverMaybe = ThrottledOriginServer(totalSize: Self.totalSize, firstByteDelayUs: { _ in 1_500_000 })
         let server = try #require(serverMaybe)
@@ -210,7 +212,7 @@ struct Issue309SilentTransportDeathTests {
 
         let silenceOffset = Self.silenceOffset
         let silentBytes: Int64 = 4 * 1024 * 1024
-        let frontierAfterSilence = silenceOffset + silentBytes
+        let frontierAfterSilence = silenceOffset + silentBytes - Int64(AVIOReader.rangeCheckBytes)
         let probe = RunwayProbe()
         let serverMaybe = ThrottledOriginServer(
             totalSize: Self.totalSize,

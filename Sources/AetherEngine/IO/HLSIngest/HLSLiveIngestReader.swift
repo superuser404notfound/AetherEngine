@@ -491,7 +491,8 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         mediaURL: URL
     ) {
         group.addTask {
-            let fetched = try await self.fetchSegment(item.url, duration: item.segment.duration)
+            let fetched = try await self.fetchSegment(item.url, duration: item.segment.duration,
+                                                      byteRange: item.segment.byteRange)
             guard !fetched.isEmpty, let crypt = item.segment.crypt else { return (index, fetched) }
             return (index, try await self.decryptSegment(fetched, crypt: crypt, against: mediaURL))
         }
@@ -794,12 +795,16 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private var isClosed: Bool { startLock.withLock { closed } }
 
     /// Applies the configured origin headers to every ingest fetch, credentials only where the host's
-    /// origin is (audit NET-7). Internal for the header-contract tests.
-    func makeRequest(_ url: URL) -> URLRequest {
+    /// origin is (audit NET-7), and a segment's sub-range when it has one. Internal for the
+    /// header-contract tests.
+    func makeRequest(_ url: URL, byteRange: HLSByteRange? = nil) -> URLRequest {
         var request = URLRequest(url: url)
         for (field, value) in RedirectHeaderPolicy.scoped(
             httpHeaders, grantedFor: credentialOrigin, sentTo: url) {
             request.setValue(value, forHTTPHeaderField: field)
+        }
+        if let byteRange {
+            request.setValue(byteRange.requestHeaderValue, forHTTPHeaderField: "Range")
         }
         return SourceNetworkDiagnostics.request(request, context: diagnosticContext)
     }
@@ -820,7 +825,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         return (try HLSPlaylistParser.parse(text), response.url ?? url)
     }
 
-    private func fetchSegment(_ url: URL, duration: Double) async throws -> Data {
+    private func fetchSegment(_ url: URL, duration: Double, byteRange: HLSByteRange?) async throws -> Data {
         var lastFailure: Error = HLSIngestError.playlistUnreachable(status: -1)
         let limit = BoundedFetch.segmentLimit(forDuration: duration)
         let startedAt = Date()
@@ -834,7 +839,8 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 let (data, response): (Data, URLResponse)
                 do {
                     (data, response) = try await budgeted(url, label: "ingest-segment") {
-                        try await BoundedFetch.data(for: self.makeRequest(url), session: self.session, limit: limit, role: .hlsSegment)
+                        try await BoundedFetch.data(for: self.makeRequest(url, byteRange: byteRange),
+                                                    session: self.session, limit: limit, role: .hlsSegment)
                     }
                 } catch is BoundedFetch.Exceeded {
                     // Audit NET-112: an endless body is the origin's answer, not a blip to retry.
@@ -843,7 +849,12 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 let lastStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
                 lastFailure = HLSIngestError.playlistUnreachable(status: lastStatus)
                 status = lastStatus
-                if (200..<300).contains(lastStatus) { return data }
+                if (200..<300).contains(lastStatus) {
+                    guard let byteRange else { return data }
+                    return try byteRange.segmentBytes(
+                        from: data, status: lastStatus,
+                        contentRange: (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Range"))
+                }
                 if lastStatus == 404 { return Data() } // slid out of provider window; tracker advances regardless
                 if (400..<500).contains(lastStatus) && lastStatus != 429 {
                     throw HLSIngestError.playlistUnreachable(status: lastStatus)

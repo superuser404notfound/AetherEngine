@@ -63,12 +63,58 @@ final class OriginRequestBudget: @unchecked Sendable {
     /// suites of threads on a CI runner. Pinned on `.shared` by those suites; the pacer's own tests
     /// build their own instances and keep the shipped ladder.
     ///
-    /// Those suites pin it in `init` and never put it back, and suites run in parallel, so from the
-    /// first of them onward `.shared` has no quiet ladder for the rest of the process. A test that
-    /// asserts `isPaced` on `.shared` therefore passes under `--filter` and fails in a full run,
-    /// which is not a flake but the reading order. Assert on `snapshot(for:)`, whose refusal count
-    /// and learned limit this seam does not touch.
+    /// Setting it directly is for a budget a test owns. On `.shared` use `pinQuietPeriodCapForTesting`:
+    /// a suite that set it in `init` and never put it back left `.shared` without a quiet ladder for
+    /// the rest of the process, so a test asserting `isPaced` there passed under `--filter` and failed
+    /// in a full run, which was the reading order and not a flake.
     var quietPeriodCapForTesting: TimeInterval?
+
+    /// How many pins are alive, and the cap in force before the first of them. Guarded by `lock`.
+    private var quietPeriodCapPins = 0
+    private var quietPeriodCapBeforePins: TimeInterval?
+
+    /// Pins `quietPeriodCapForTesting` for as long as the returned token lives, then puts back what was
+    /// there before the first live pin. Suites run in parallel, so pins count: the cap is restored when
+    /// the last one is released, not when the first suite finishes. A test suite keeps the token in a
+    /// stored property, which lives exactly as long as the suite instance serving one test.
+    /// All pins on one budget are expected to pin the same cap: the last pin's value stays in force until
+    /// the last release.
+    func pinQuietPeriodCapForTesting(_ cap: TimeInterval?) -> QuietPeriodCapPin {
+        lock.lock(); defer { lock.unlock() }
+        if quietPeriodCapPins == 0 { quietPeriodCapBeforePins = quietPeriodCapForTesting }
+        quietPeriodCapPins += 1
+        quietPeriodCapForTesting = cap
+        return QuietPeriodCapPin(budget: self)
+    }
+
+    /// The token `pinQuietPeriodCapForTesting` hands out. Released exactly once, by `release()` or by
+    /// `deinit`, whichever comes first.
+    final class QuietPeriodCapPin: @unchecked Sendable {
+        private let tokenLock = NSLock()
+        private var budget: OriginRequestBudget?
+
+        fileprivate init(budget: OriginRequestBudget) { self.budget = budget }
+
+        deinit { release() }
+
+        func release() {
+            let held = tokenLock.withLock { () -> OriginRequestBudget? in
+                let held = budget
+                budget = nil
+                return held
+            }
+            held?.releaseQuietPeriodCapPin()
+        }
+    }
+
+    fileprivate func releaseQuietPeriodCapPin() {
+        lock.lock(); defer { lock.unlock() }
+        quietPeriodCapPins -= 1
+        if quietPeriodCapPins == 0 {
+            quietPeriodCapForTesting = quietPeriodCapBeforePins
+            quietPeriodCapBeforePins = nil
+        }
+    }
 
     /// Scheme + host + port, matching `SuffixRangeSupport.originKey`. Deliberately NOT the full
     /// URL: a metered CDN hands out signed URLs with a rotating token, so a per-URL budget would

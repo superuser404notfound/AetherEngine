@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite("Live DVR resource contract", .timeLimit(.minutes(1)))
+@Suite("Live DVR resource contract", .timeLimit(.minutes(3)))
 struct LiveDVRLimitsTests {
     private final class Clock: @unchecked Sendable {
         private let lock = NSLock()

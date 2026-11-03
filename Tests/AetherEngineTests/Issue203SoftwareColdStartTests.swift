@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
+@Suite(.timeLimit(.minutes(3)))
 struct Issue203SoftwareColdStartTests {
 
     private actor Gate {
@@ -44,7 +45,7 @@ struct Issue203SoftwareColdStartTests {
         }
     }
 
-    @Test("construction starts one process warm-up shared by concurrent auto waiters")
+    @Test("first demand starts one process warm-up shared by concurrent auto waiters")
     func oneTaskServesConcurrentWaiters() async {
         let started = Gate()
         let release = Gate()
@@ -56,10 +57,9 @@ struct Issue203SoftwareColdStartTests {
             return .ready
         }
 
+        async let first = warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
+        async let second = warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
         await started.wait()
-
-        async let first = warmup.waitIfNeeded(for: .auto)
-        async let second = warmup.waitIfNeeded(for: .auto)
         await release.open()
 
         #expect(await first == .ready)
@@ -76,7 +76,7 @@ struct Issue203SoftwareColdStartTests {
         }
 
         let started = DispatchTime.now()
-        let result = await warmup.waitIfNeeded(for: .software)
+        let result = await warmup.waitIfNeeded(for: .software, sourceIsInterlaced: true)
         let elapsed = Double(
             DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds
         ) / 1_000_000_000
@@ -95,16 +95,15 @@ struct Issue203SoftwareColdStartTests {
             await release.wait()
             return .ready
         }
-        await started.wait()
-
         let waiter = Task {
-            await warmup.waitIfNeeded(for: .auto)
+            await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true)
         }
+        await started.wait()
         waiter.cancel()
         await release.open()
 
         #expect(await waiter.value == .ready)
-        #expect(await warmup.waitIfNeeded(for: .auto) == .ready)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true) == .ready)
     }
 
     @Test("hardware unavailability completes the gate without throwing")
@@ -113,6 +112,25 @@ struct Issue203SoftwareColdStartTests {
             .unavailable
         }
 
-        #expect(await warmup.waitIfNeeded(for: .auto) == .unavailable)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true) == .unavailable)
     }
+
+    @Test("progressive and forced-software requests leave warm-up cold until interlaced auto demand")
+    func startsOnlyForInterlacedAutoDemand() async {
+        let counter = Counter()
+        let warmup = DeinterlaceHardwareWarmup {
+            counter.increment()
+            return .ready
+        }
+        for _ in 0..<32 {
+            #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: false) == nil)
+            #expect(await warmup.waitIfNeeded(for: .software, sourceIsInterlaced: true) == nil)
+        }
+        #expect(counter.value == 0)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: true) == .ready)
+        #expect(counter.value == 1)
+        #expect(await warmup.waitIfNeeded(for: .auto, sourceIsInterlaced: false) == nil)
+        #expect(counter.value == 1)
+    }
+
 }

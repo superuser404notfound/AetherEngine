@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
+// AE#958: a refill at a held frontier asks `AVIOReader.rangeCheckBytes` early to check the origin,
+// so the origin below keys on the request the reader actually sends, `firstRange - rangeCheckBytes`.
+
 /// A connection that ended in ERROR without delivering a single byte of its generation used
 /// to be routed through the no-connection reposition branch: `seekReconnect` cleared the
 /// unproductive streak and applied no backoff, so an origin refusing every refill (e.g. a
@@ -46,7 +49,7 @@ struct ErrorEndedReconnectTests {
         let firstRange: Int64 = 512 * 1024
         let serverMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
-            respond: { _, offset, _ in offset < firstRange ? .serve206 : .status(500) }
+            respond: { _, offset, _ in offset < (firstRange - Int64(AVIOReader.rangeCheckBytes)) ? .serve206 : .status(500) }
         )
         let server = try #require(serverMaybe)
         defer { server.stop() }
@@ -72,7 +75,7 @@ struct ErrorEndedReconnectTests {
         #expect(result == -1, "a refused source must fail the read, not hang")
         // Streak 0..12 then give-up: ~14 attempts. The bug produced hundreds; leave slack
         // for the odd URLSession-level retry without letting a spiral pass.
-        let attemptsAtBoundary = server.requestedRanges.filter { $0.start == firstRange }.count
+        let attemptsAtBoundary = server.requestedRanges.filter { $0.start == (firstRange - Int64(AVIOReader.rangeCheckBytes)) }.count
         #expect(attemptsAtBoundary >= 2, "the failure must have been retried at all")
         #expect(attemptsAtBoundary <= 20,
                 "reconnect spiral: \(attemptsAtBoundary) attempts at offset \(firstRange)")
@@ -91,7 +94,7 @@ struct ErrorEndedReconnectTests {
         let serverMaybe = ThrottledOriginServer(
             totalSize: 64 * 1024 * 1024,
             respond: { _, offset, _ in
-                offset == firstRange && attempts.next(for: offset) == 1
+                offset == (firstRange - Int64(AVIOReader.rangeCheckBytes)) && attempts.next(for: offset) == 1
                     ? .dropConnection : .serve206
             }
         )

@@ -1,6 +1,16 @@
 import Foundation
 import AVFAudio
 
+/// Which part of the source's channels the tap folds into its mono output (#908).
+public enum AudioTapChannels: Sendable, Equatable {
+    /// Every channel summed to mono.
+    case downmix
+    /// The front-centre channel alone, where a multichannel mix carries its dialogue. A source
+    /// without one (mono, stereo, 2.1, an unlabelled layout) is delivered as `.downmix`, and each
+    /// buffer's `channels` says which it got. A mono track's only channel is not a centre.
+    case dialogue
+}
+
 /// One decoded tap buffer (#95). Handed to exactly one consumer via `AsyncStream`; the engine
 /// never touches `buffer` after yielding it, which is the invariant behind `@unchecked Sendable`.
 public struct AudioTapBuffer: @unchecked Sendable {
@@ -13,6 +23,25 @@ public struct AudioTapBuffer: @unchecked Sendable {
     /// `sourceTime` (AudioTapMonotonicFilter trims sub-`overlapTrimThreshold` seam overlaps),
     /// which SpeechAnalyzer's input timeline requires.
     public let discontinuity: Bool
+    /// What this buffer actually carries (#908). Always `.downmix` on a `.downmix` install; on a
+    /// `.dialogue` install, `.downmix` for a source with no centre channel. Can change between
+    /// buffers of one stream when the source's layout changes (a live program boundary).
+    public let channels: AudioTapChannels
+
+    init(buffer: AVAudioPCMBuffer, sourceTime: Double, discontinuity: Bool,
+         channels: AudioTapChannels = .downmix) {
+        self.buffer = buffer
+        self.sourceTime = sourceTime
+        self.discontinuity = discontinuity
+        self.channels = channels
+    }
+
+    /// The same audio with a new stamp, keeping `channels`.
+    func restamped(buffer: AVAudioPCMBuffer? = nil, sourceTime: Double? = nil,
+                   discontinuity: Bool) -> AudioTapBuffer {
+        AudioTapBuffer(buffer: buffer ?? self.buffer, sourceTime: sourceTime ?? self.sourceTime,
+                       discontinuity: discontinuity, channels: channels)
+    }
 }
 
 public extension AetherEngine {
@@ -94,15 +123,12 @@ struct AudioTapHeldBuffers {
                 carriedDiscontinuity = carriedDiscontinuity || item.buffer.discontinuity
                 continue
             }
-            emit(AudioTapBuffer(buffer: item.buffer.buffer, sourceTime: item.buffer.sourceTime,
-                                discontinuity: item.buffer.discontinuity || carriedDiscontinuity))
+            emit(item.buffer.restamped(discontinuity: item.buffer.discontinuity || carriedDiscontinuity))
             carriedDiscontinuity = false
         }
         items.removeFirst(consumed)
         if carriedDiscontinuity, let next = items.first {
-            items[0] = (next.start, AudioTapBuffer(buffer: next.buffer.buffer,
-                                                   sourceTime: next.buffer.sourceTime,
-                                                   discontinuity: true))
+            items[0] = (next.start, next.buffer.restamped(discontinuity: true))
         }
         return end
     }

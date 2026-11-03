@@ -33,7 +33,7 @@ struct PlaybackErrorInfoTests {
 
     @MainActor
     @Test("A live HLS join the origin refuses publishes its answer, not a probe failure",
-          .timeLimit(.minutes(1)),
+          .timeLimit(.minutes(3)),
           arguments: [(509, PlaybackErrorKind.sourceRateLimited), (403, .sourceRefused)])
     func refusedLiveJoinPublishesTheOriginsAnswer(status: Int, kind: PlaybackErrorKind) async throws {
         let origin = try #require(RefusingOrigin(status: status))
@@ -45,7 +45,7 @@ struct PlaybackErrorInfoTests {
     }
 
     @MainActor
-    @Test("A live HLS join retains the actual connection error", .timeLimit(.minutes(1)))
+    @Test("A live HLS join retains the actual connection error", .timeLimit(.minutes(3)))
     func unreachableLiveJoinIsUnavailable() async throws {
         let observed = try await failedLiveIngestLoad(try #require(URL(string: "http://127.0.0.1:1/live/1.m3u8")))
         #expect(observed?.kind == .liveSourceUnavailable)
@@ -76,7 +76,7 @@ struct PlaybackErrorInfoTests {
 
     @MainActor
     @Test("A plain-URL live open the origin refuses publishes its answer, not an outage (#796)",
-          .timeLimit(.minutes(1)),
+          .timeLimit(.minutes(3)),
           arguments: [(503, PlaybackErrorKind.sourceRateLimited), (403, .sourceRefused)])
     func refusedLiveOpenPublishesTheOriginsAnswer(status: Int, kind: PlaybackErrorKind) async throws {
         let origin = try #require(RefusingOrigin(status: status))

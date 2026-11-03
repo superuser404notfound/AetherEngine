@@ -2,6 +2,7 @@
 #if DualLayerDolbyVision
 import Testing
 import Foundation
+import AetherLibavutil
 @testable import AetherEngine
 
 @Suite("FrameSideDataRing unit tests")
@@ -150,6 +151,31 @@ struct FrameSideDataRingTests {
         #expect(ring.paramsCount == 0)
         #expect(ring.dmNALCount == 0)
         #expect(ring.find(key: 1_000) == nil)
+    }
+
+    @Test("keys from a 1/1000 time base are rescaled to 90 kHz before they reach the ring, so frames do not share side data")
+    func millisecondTimeBaseKeysAreCanonical() {
+        // 24 fps in Matroska's 1/1000: frames at 0, 41.7, 83.3, 125 ms round to these raw ticks.
+        let tb = AVRational(num: 1, den: 1000)
+        let raw: [Int64] = [0, 42, 83, 125]
+        let keys = raw.map { DualLayerVideoDecoder.canonicalKey(rawPTS: $0, timeBase: tb) }
+        // 90 ticks per millisecond
+        #expect(keys == [0, 3_780, 7_470, 11_250])
+        // Raw millisecond values would sit inside one ±300 window of each other's neighbours' scale
+        // (42 ms apart < 300); the canonical keys are 3 000+ ticks apart, outside the window.
+        #expect(FrameSideDataRing.isWithinJitter(raw[0], raw[1]))
+        #expect(!FrameSideDataRing.isWithinJitter(keys[0], keys[1]))
+
+        var ring = FrameSideDataRing()
+        for (i, k) in keys.enumerated() {
+            ring.insert(key: k, params: DoviMetalParams(), dmNAL: [UInt8(i)])
+        }
+        for (i, k) in keys.enumerated() {
+            #expect(ring.find(key: k)?.dmNAL == [UInt8(i)], "frame \(i) resolves to its own side data")
+        }
+        // A timestamp 1 ms off (the demuxer's rounding) still finds its own frame, not a neighbour.
+        let off = DualLayerVideoDecoder.canonicalKey(rawPTS: 84, timeBase: tb)
+        #expect(ring.find(key: off)?.key == keys[2])
     }
 }
 #endif

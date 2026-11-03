@@ -6,7 +6,8 @@ extension AetherEngine {
 
     /// Install the tap on the currently loaded item and return its buffer stream.
     /// Mono Float32 48 kHz (`AetherEngine.audioTapFormat`), source-PTS timestamps, lossy under
-    /// pressure, never stalls playback. One tap per engine: installing again finishes the
+    /// pressure, never stalls playback. A consumer that falls more than the stream's queue behind
+    /// loses buffers, and the first one it receives after such a gap carries `discontinuity`. One tap per engine: installing again finishes the
     /// previous stream. `load()` and `stop()` finish it too (opt-in is per load). With no
     /// active playback session (or a video-only source) the returned stream finishes
     /// immediately.
@@ -23,8 +24,13 @@ extension AetherEngine {
     /// with the old `lastEnd` still latched, which is the backward-overlap shape SpeechAnalyzer
     /// rejects outright (`SFSpeechErrorDomain Code=17`, the reason the filter exists). A stream
     /// that ends is a boundary a host can act on; a stitched one is not.
+    ///
+    /// `channels` picks what the mono output is folded from (#908). `.downmix` sums every channel;
+    /// `.dialogue` takes the front-centre channel alone, which keeps a recognizer off the score
+    /// and effects of a 5.1 or 7.1 mix, and falls back to the downmix on a source without one.
+    /// Each buffer's `channels` reports which it carries. The output format is the same either way.
     @MainActor
-    public func installAudioTap() -> AsyncStream<AudioTapBuffer> {
+    public func installAudioTap(channels: AudioTapChannels = .downmix) -> AsyncStream<AudioTapBuffer> {
         removeAudioTap()
         let controller = AudioTapController()
         audioTapController = controller
@@ -38,20 +44,20 @@ extension AetherEngine {
         switch kind {
         case .loopback:
             stream = controller.makeStream { onStop in
-                guard let reader = makeNativeTapReader(controller: controller) else { return }
+                guard let reader = makeNativeTapReader(controller: controller, channels: channels) else { return }
                 reader.start()
                 onStop { reader.stop() }
             }
         case .remoteHLS:
             stream = controller.makeStream { onStop in
-                guard let reader = makeRemoteHLSTapReader(controller: controller) else { return }
+                guard let reader = makeRemoteHLSTapReader(controller: controller, channels: channels) else { return }
                 reader.start()
                 onStop { reader.stop() }
             }
         case .software:
             stream = controller.makeStream { onStop in
                 guard softwareHost != nil else { return }
-                installSoftwareTapSink(controller: controller)
+                installSoftwareTapSink(controller: controller, channels: channels)
                 onStop { [weak self] in self?.softwareHost?.audioTapSink = nil }
             }
         case .none:
@@ -60,7 +66,7 @@ extension AetherEngine {
         // No session / no audio track / backend .none: nothing will ever yield, finish now.
         if !controller.hasDeliverySource { controller.teardown() }
         EngineLog.emit("[AetherEngine] audio tap installed (backend=\(playbackBackend.rawValue) "
-            + "live=\(controller.hasDeliverySource))", category: .engine)
+            + "channels=\(channels) live=\(controller.hasDeliverySource))", category: .engine)
         return stream
     }
 
@@ -81,7 +87,8 @@ extension AetherEngine {
     }
 
     @MainActor
-    private func makeNativeTapReader(controller: AudioTapController) -> LoopbackAudioReader? {
+    private func makeNativeTapReader(controller: AudioTapController,
+                                     channels: AudioTapChannels) -> LoopbackAudioReader? {
         guard let session = nativeVideoSession,
               let cache = session.cache,
               let provider = session.provider,
@@ -91,7 +98,7 @@ extension AetherEngine {
             EngineLog.emit("[AudioTap] source has no audio track", category: .engine)
             return nil
         }
-        let decoder = AudioTapSegmentDecoder()
+        let decoder = AudioTapSegmentDecoder(channels: channels)
         let mirror = renderedPositionMirror
         let live = isLive
         let deps = LoopbackAudioReader.Dependencies(
@@ -117,22 +124,23 @@ extension AetherEngine {
     }
 
     @MainActor
-    private func installSoftwareTapSink(controller: AudioTapController) {
+    private func installSoftwareTapSink(controller: AudioTapController, channels: AudioTapChannels) {
         guard let host = softwareHost, let yield = controller.makeYield() else { return }
-        let converter = AudioTapPCMConverter()
+        let converter = AudioTapPCMConverter(channels: channels)
         host.audioTapSink = { sample in
             for buf in converter.convert(sample) { yield(buf) }
         }
     }
 
     @MainActor
-    private func makeRemoteHLSTapReader(controller: AudioTapController) -> AudioTapHLSReader? {
+    private func makeRemoteHLSTapReader(controller: AudioTapController,
+                                        channels: AudioTapChannels) -> AudioTapHLSReader? {
         guard let masterURL = loadedURL, let yield = controller.makeYield() else { return nil }
         // Same headers the player's AVURLAsset sends (#119); header-enforcing IPTV origins 403
         // the tap's own playlist / segment fetches without them.
         let fetcher = AudioTapHLSFetcher(
             httpHeaders: loadedOptions.httpHeaders, credentialOrigin: masterURL)
-        let decoder = AudioTapSegmentDecoder()
+        let decoder = AudioTapSegmentDecoder(channels: channels)
         let base = AudioTapBaseBox(masterURL)
         // renderedPositionMirror is fed by loadRemoteHLS's $currentTime sink (shift 0 here, so it
         // equals the source-PTS playhead); AtomicDouble is safe to read off the ingest task.

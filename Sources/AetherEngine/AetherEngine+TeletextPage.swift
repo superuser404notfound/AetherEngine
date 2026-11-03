@@ -54,7 +54,7 @@ extension AetherEngine {
     /// Returns the channels it touched.
     private func rebuildTeletextDrainDecoders() -> [SubtitleChannel] {
         var affected: [SubtitleChannel] = []
-        for (channel, streamIndex) in subtitleDrainTargets {
+        for (channel, streamIndex) in embeddedSubtitleDrainTargets {
             guard let codec = subtitleTracks.first(where: { $0.id == Int(streamIndex) })?.codec,
                   Self.isTeletextSubtitleCodec(codec) else { continue }
             subtitleDrainDecoders[channel] = nil

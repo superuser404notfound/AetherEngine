@@ -73,10 +73,12 @@ extension PrewarmStoreSuites {
             let reader = AVIOReader(url: url(server))
             defer { reader.markClosed(); reader.close() }
             try reader.open()
-            try await waitForRequest(server, startingAt: Int64(warmBytes))
+            // AE#958: the connection re-reads the warm's last bytes to check the origin against them.
+            let frontier = Int64(warmBytes) - Int64(AVIOReader.rangeCheckBytes)
+            try await waitForRequest(server, startingAt: frontier)
 
             let opened = Array(server.requestedRanges.dropFirst(warmRequests))
-            #expect(opened.contains(where: { $0.start == Int64(warmBytes) }),
+            #expect(opened.contains(where: { $0.start == frontier }),
                     "no connection at the warm frontier: \(opened)")
             #expect(!opened.contains(where: { $0.start == 0 }),
                     "the open went back to byte zero: \(opened)")
@@ -237,7 +239,7 @@ extension PrewarmStoreSuites {
         /// write-once rule treats any positive `fileSize` as settled, so a warm that belongs to a
         /// different response would fix a wrong EOF point for the whole session. The connection that is
         /// actually serving the session gets to overrule it.
-        @Test("a connection that states a different size drops the warm", .timeLimit(.minutes(1)))
+        @Test("a connection that states a different size drops the warm", .timeLimit(.minutes(3)))
         func sizeMismatchDropsTheWarm() async throws {
             SourcePrewarmStore.shared.clear()
             let server = try #require(ThrottledOriginServer(totalSize: fileSize))

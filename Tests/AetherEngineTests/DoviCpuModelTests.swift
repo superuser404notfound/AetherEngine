@@ -93,7 +93,11 @@ struct DoviCpuModelTests {
             return s
         }
 
-        func denormalize(_ n: Double) -> Int { Int((n * blMax * scale).rounded(.toNearestOrEven)) }
+        /// The VDR-range clamp is left out on purpose so the census below still counts predictions outside
+        /// the range.
+        func denormalize(_ n: Double) -> Int {
+            Int((n * blMax * scale).rounded(.toNearestOrEven))
+        }
 
         /// Inverse NLQ in `Int64`, reconstructing at the middle of the quantisation step.
         func inverseNlq(_ n: DoviNlqParams, _ el: Int) -> Int {

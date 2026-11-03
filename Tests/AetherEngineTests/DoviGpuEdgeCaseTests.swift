@@ -195,7 +195,7 @@ struct DoviGpuEdgeCaseTests {
     // MARK: - Geometry
 
     @Test("GPU writes every pixel for sizes that are not a multiple of the threadgroup or of 8",
-          arguments: [(4, 4), (6, 4), (34, 10), (130, 18), (514, 6), (1030, 10)])
+          arguments: [(4, 4), (6, 4), (34, 10), (130, 18), (514, 6), (1030, 10), (65, 17), (65, 16), (64, 17)])
     func oddGeometryCoversEveryPixel(width: Int, height: Int) throws {
         let composer = try #require(DoviFelComposer())
         // Residual of +100 over the whole frame: an unwritten pixel would read 0,
@@ -206,19 +206,27 @@ struct DoviGpuEdgeCaseTests {
         )
         #expect(Self.lumaValues(out) == [537], "luma \(width)x\(height)")
         let uv = Self.allSamples(out, plane: 1, components: 2)
-        #expect(uv.count == (width / 2) * (height / 2))
+        #expect(uv.count == ((width + 1) / 2) * ((height + 1) / 2))
         #expect(Set(uv.map { $0[0] }) == [537], "Cb \(width)x\(height)")
         #expect(Set(uv.map { $0[1] }) == [487], "Cr \(width)x\(height)")
     }
 
-    @Test("a frame whose enhancement chroma plane would be empty is refused, not composed from garbage",
+    @Test("a frame whose enhancement layer is one or three luma samples wide still has a chroma plane and composes it",
           arguments: [(2, 2), (6, 2)])
-    func tooSmallForChromaIsRefused(width: Int, height: Int) throws {
+    func tinyEnhancementLayerStillComposes(width: Int, height: Int) throws {
         let composer = try #require(DoviFelComposer())
-        let blBuf = try #require(H.makeBuffer(width: width, height: height))
-        let elBuf = try #require(H.makeBuffer(width: width / 2, height: height / 2))
-        #expect(composer.compose(baseBuffer: blBuf, enhancementBuffer: elBuf, params: Self.params()) == nil)
-        // and the failed attempt must not have leaked a parameter slot
+        // Chroma rounds up, so a narrow EL has a chroma plane of at least one sample rather than an empty one.
+        // The kernel divides by that size: a floored size would be 0 for a 1-sample-wide EL and sample at infinity.
+        let out = try Self.composeConstant(
+            composer, blWidth: width, blHeight: height,
+            bl: (512, 512, 512), el: (612, 612, 412), params: Self.params()
+        )
+        #expect(Self.lumaValues(out) == [537], "luma \(width)x\(height)")
+        let uv = Self.allSamples(out, plane: 1, components: 2)
+        #expect(uv.count == ((width + 1) / 2) * ((height + 1) / 2))
+        #expect(Set(uv.map { $0[0] }) == [537], "Cb \(width)x\(height)")
+        #expect(Set(uv.map { $0[1] }) == [487], "Cr \(width)x\(height)")
+        // and the composer still works afterwards (no leaked parameter slot)
         let ok = try Self.composeConstant(composer, bl: (512, 512, 512), el: (612, 512, 512), params: Self.params())
         #expect(Self.lumaValues(ok) == [537])
     }
@@ -518,6 +526,50 @@ extension DoviGpuEdgeCaseTests {
         p.polyCr = mp; p.mmrCr = m
         let c = try Self.composeConstant(composer, bl: (512, 512, 512), el: (512, 512, 412), params: p)
         #expect(Set(DoviTestSupport.rawVDR(c)[2]) == [3996])
+    }
+
+    @Test("GPU luma MMR on odd sizes reads the last base-layer chroma column and row",
+          arguments: [(65, 17), (65, 16), (64, 17)])
+    func oddSizesWithLumaMmr(width: Int, height: Int) throws {
+        let composer = try #require(DoviFelComposer())
+        var poly = DoviPolynomialParams()
+        poly.numPivots = 2
+        poly.pivots[0] = 0; poly.pivots[1] = 1023
+        poly.method[0] = DoviMapping.mmr.rawValue
+        poly.order[0] = 1
+        poly.coefShift[0] = 23
+        var mmr = DoviMmrParams()
+        mmr.coefShift = 23
+        mmr.coef[0][1] = 1 << 23       // luma out = BL Cb
+        var p = Self.params(flags: [.disableResidual, .lumaMmr])
+        p.polyY = poly
+        p.mmrY = mmr
+        let out = try Self.composeConstant(composer, blWidth: width, blHeight: height,
+                                           bl: (800, 300, 700), el: (512, 512, 512), params: p)
+        #expect(Self.lumaValues(out) == [300], "\(width)x\(height)")
+    }
+
+    /// The GPU's float-to-int conversion saturates, so this passes without the clamp too; it locks in the
+    /// result the clamp-before-convert in `dovi_denormalize` is meant to give.
+    @Test("GPU MMR result far outside the range ends at the VDR range limit",
+          arguments: [Int32.max, Int32.min])
+    func mmrOutOfRangeClamps(coef: Int32) throws {
+        let composer = try #require(DoviFelComposer())
+        var poly = DoviPolynomialParams()
+        poly.numPivots = 2
+        poly.pivots[0] = 0; poly.pivots[1] = 1023
+        poly.method[0] = DoviMapping.mmr.rawValue
+        poly.order[0] = 1
+        poly.coefShift[0] = 0
+        var mmr = DoviMmrParams()
+        mmr.coefShift = 0
+        mmr.coef[0][1] = coef       // u * 2^31, times 4092 in the denormalise: far past Int32
+        var p = Self.params(flags: [.disableResidual, .lumaMmr])
+        p.polyY = poly
+        p.mmrY = mmr
+        p.ditherMode = .debugRawVDR
+        let out = try Self.composeConstant(composer, bl: (512, 300, 700), el: (512, 512, 512), params: p)
+        #expect(Set(DoviTestSupport.rawVDR(out)[0]) == [coef > 0 ? 4095 : 0])
     }
 }
 #endif

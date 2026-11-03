@@ -25,6 +25,7 @@ struct LiveStreamRefusalRetryTests {
             var status: Int
             var headers: [String: String] = [:]
             var body = Data()
+            var contentType = "video/mp2t"
         }
 
         let port: UInt16
@@ -76,7 +77,7 @@ struct LiveStreamRefusalRetryTests {
             }
             let response = respond(index)
             var header = "HTTP/1.1 \(response.status) \(response.status == 200 ? "OK" : "Status")\r\n"
-            header += "Content-Type: video/mp2t\r\n"
+            header += "Content-Type: \(response.contentType)\r\n"
             for (field, value) in response.headers {
                 header += "\(field): \(value)\r\n"
             }
@@ -248,5 +249,131 @@ struct LiveStreamRefusalRetryTests {
         let failure = #expect(throws: AVIOReaderError.self) { try reader.open() }
         #expect(failure == .httpStatus(403))
         #expect(origin.requestCount == 1)
+    }
+
+    // MARK: - A refusal served as text (AE#925)
+
+    private static let capNotice = Data(
+        "CONNECTION LIMIT REACHED\nThis account is already streaming on another device.\nStop the other stream and try again.\n".utf8)
+
+    private static func capRefusal() -> ScriptedOrigin.Response {
+        .init(status: 200, body: capNotice, contentType: "text/plain; charset=utf-8")
+    }
+
+    private static func response(status: Int = 200, _ headers: [String: String]) -> HTTPURLResponse {
+        HTTPURLResponse(url: URL(string: "http://panel.example/live/u/p/1.ts")!, statusCode: status,
+                        httpVersion: "HTTP/1.1", headerFields: headers)!
+    }
+
+    /// Reads exactly `count` bytes, or what came before the reader failed.
+    private static func readExactly(_ reader: AVIOReader, count: Int) -> Data {
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64 * 1024)
+        defer { buf.deallocate() }
+        var out = Data()
+        while out.count < count {
+            let n = reader.read(into: buf, size: Int32(min(64 * 1024, count - out.count)))
+            if n <= 0 { break }
+            out.append(buf, count: Int(n))
+        }
+        return out
+    }
+
+    @Test("only a short text body with a length is a suspect")
+    func textSuspectNeedsTypeAndShortLength() {
+        #expect(AVIOReader.isLiveTextNoticeCandidate(
+            Self.response(["Content-Type": "text/plain; charset=utf-8", "Content-Length": "115"])))
+        #expect(AVIOReader.isLiveTextNoticeCandidate(
+            Self.response(status: 206, ["Content-Type": "text/html", "Content-Length": "65536"])))
+        // A mislabelled endless feed has no length, and nothing that plays fits in 64 KiB.
+        #expect(!AVIOReader.isLiveTextNoticeCandidate(Self.response(["Content-Type": "text/plain"])))
+        #expect(!AVIOReader.isLiveTextNoticeCandidate(
+            Self.response(["Content-Type": "text/plain", "Content-Length": "65537"])))
+        #expect(!AVIOReader.isLiveTextNoticeCandidate(
+            Self.response(["Content-Type": "video/mp2t", "Content-Length": "115"])))
+        #expect(!AVIOReader.isLiveTextNoticeCandidate(
+            Self.response(status: 509, ["Content-Type": "text/plain", "Content-Length": "115"])))
+    }
+
+    @Test("the body decides: a playlist, a manifest or TS is media, anything else a refusal")
+    func bodyDecidesTheSuspect() {
+        #expect(AVIOReader.isConnectionRefusalNotice([UInt8](Self.capNotice)))
+        #expect(AVIOReader.isConnectionRefusalNotice(Array("<html>Too many connections</html>".utf8)))
+        #expect(!AVIOReader.isConnectionRefusalNotice(Array("#EXTM3U\n#EXT-X-VERSION:3\n".utf8)))
+        #expect(!AVIOReader.isConnectionRefusalNotice(
+            Array("<?xml version=\"1.0\"?><MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\">".utf8)))
+        #expect(!AVIOReader.isConnectionRefusalNotice([UInt8](Self.streamBytes(count: 2))))
+        #expect(!AVIOReader.isConnectionRefusalNotice([]))
+        #expect(AVIOReader.noticeExcerpt([UInt8](Self.capNotice), limit: 40)
+                == "CONNECTION LIMIT REACHED / This account...")
+    }
+
+    @Test("a live open answered with a text notice fails typed as the 509 it means")
+    func textNoticeAtOpenFailsTyped() throws {
+        let origin = try #require(ScriptedOrigin { _ in Self.capRefusal() })
+        defer { origin.stop() }
+        let reader = Self.makeLiveReader(origin.url)
+        defer { reader.markClosed(); reader.close() }
+
+        let failure = #expect(throws: AVIOReaderError.self) { try reader.open() }
+        #expect(failure == .httpStatus(509))
+        #expect(origin.requestCount == 1)
+    }
+
+    @Test("text notices mid-stream are refusals: paced, and none of their bytes reach the stream")
+    func textNoticesMidStreamAreRidOut() throws {
+        let first = Self.streamBytes(count: 400)
+        let second = Self.streamBytes(count: 400)
+        let refusals = 3
+        let origin = try #require(ScriptedOrigin { index in
+            switch index {
+            case 0: return .init(status: 200, body: first)
+            case 1...refusals: return Self.capRefusal()
+            default: return .init(status: 200, body: second)
+            }
+        })
+        defer { origin.stop() }
+        let reader = Self.makeLiveReader(origin.url)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        let read = Self.readExactly(reader, count: first.count + second.count)
+
+        #expect(read == first + second)
+        #expect(origin.requestCount >= refusals + 2)
+    }
+
+    @Test("text notices for longer than the budget end as a read error, not a request storm")
+    func textNoticesPastTheBudgetGiveUp() throws {
+        let budget: TimeInterval = 1
+        let first = Self.streamBytes(count: 400)
+        let origin = try #require(ScriptedOrigin { index in
+            index == 0 ? .init(status: 200, body: first) : Self.capRefusal()
+        })
+        defer { origin.stop() }
+        // The real wait (one second per refusal), so the count below is the pacing itself.
+        let reader = Self.makeLiveReader(origin.url, backoffScale: 1, refusalBudget: budget)
+        defer { reader.markClosed(); reader.close() }
+        try reader.open()
+
+        let drained = Self.drain(reader, expectedBytes: first.count + 1)
+
+        #expect(drained.bytes == first.count)
+        #expect(drained.failure == FFmpegErr.eio)
+        // Unpaced, the reporter's origin saw 436 requests in ten seconds.
+        #expect(origin.requestCount - 1 <= 4, "\(origin.requestCount - 1) refused attempts in \(budget) s")
+    }
+
+    @Test("a playlist served as short text still reaches the AE#140 reroute")
+    func textPlaylistAtOpenIsStillRerouted() throws {
+        let playlist = Data("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nseg1.ts\n".utf8)
+        let origin = try #require(ScriptedOrigin { _ in
+            .init(status: 200, body: playlist, contentType: "text/plain")
+        })
+        defer { origin.stop() }
+        let reader = Self.makeLiveReader(origin.url)
+        defer { reader.markClosed(); reader.close() }
+
+        let failure = #expect(throws: AVIOReaderError.self) { try reader.open() }
+        #expect(failure == .hlsPlaylistOnRawLivePath)
     }
 }

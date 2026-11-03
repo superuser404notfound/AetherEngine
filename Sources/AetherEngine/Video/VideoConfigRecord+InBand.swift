@@ -64,6 +64,78 @@ extension VideoConfigRecord {
         return hvcC
     }
 
+    /// The H.264 counterpart (#938): an `avcC` that declares zero SPS or zero PPS, the parameter sets
+    /// travelling in every IDR instead (an mkvmerge remux writes the 7-byte `01 64 00 20 ff e0 00`).
+    /// AVPlayer does NOT recover from that one: the session reaches `readyToPlay`, the clock runs,
+    /// audio plays, and no frame ever becomes ready for display.
+    struct H264ParameterSets {
+        var sps: [UInt8]?
+        var pps: [UInt8]?
+
+        var isComplete: Bool { sps != nil && pps != nil }
+
+        mutating func collect(from data: UnsafePointer<UInt8>, size: Int, naluLengthSize: Int) {
+            var offset = 0
+            while offset + naluLengthSize <= size {
+                var nalLen = 0
+                for i in 0..<naluLengthSize {
+                    nalLen = (nalLen << 8) | Int(data[offset + i])
+                }
+                offset += naluLengthSize
+                if nalLen == 0 || offset + nalLen > size { break }
+                switch Int(data[offset]) & 0x1F {
+                case 7 where sps == nil: sps = Array(UnsafeBufferPointer(start: data + offset, count: nalLen))
+                case 8 where pps == nil: pps = Array(UnsafeBufferPointer(start: data + offset, count: nalLen))
+                default: break
+                }
+                offset += nalLen
+            }
+        }
+    }
+
+    /// Is this an `avcC` with no SPS or no PPS? Annex-B extradata fails the `configurationVersion`
+    /// check, so it never reaches the scan (the #365 normalizer owns that case).
+    static func avcRecordNeedsInBandRebuild(_ record: [UInt8]) -> Bool {
+        guard record.count >= 6, record[0] == 1 else { return false }
+        let spsCount = Int(record[5] & 0x1F)
+        if spsCount == 0 { return true }
+        var cursor = 6
+        for _ in 0..<spsCount {
+            guard cursor + 2 <= record.count else { return true }
+            cursor += 2 + (Int(record[cursor]) << 8 | Int(record[cursor + 1]))
+        }
+        return cursor >= record.count || record[cursor] == 0
+    }
+
+    /// NAL length size the `avcC` header states (`lengthSizeMinusOne`, byte 4, low 2 bits); nil for
+    /// the illegal 3.
+    static func avcNALULengthSize(_ record: [UInt8]) -> Int? {
+        guard record.count >= 5, record[0] == 1 else { return nil }
+        let size = Int(record[4] & 0x03) + 1
+        return size == 3 ? nil : size
+    }
+
+    /// The `avcC` movenc builds for one SPS and PPS (`fromAnnexB`, so the High-profile chroma and
+    /// bit-depth extension comes out right), with the source's `lengthSizeMinusOne` put back: movenc
+    /// always states 4, and the samples are copied with whatever length the source uses.
+    static func avcRecord(sps: [UInt8], pps: [UInt8], naluLengthSize: Int, width: Int32, height: Int32) -> [UInt8]? {
+        guard var record = fromAnnexB(
+            H264SPS.annexBExtradata(sps: sps, pps: pps),
+            codecID: AV_CODEC_ID_H264, width: width, height: height
+        ), record.count > 6, record[0] == 1 else { return nil }
+        record[4] = (record[4] & 0xFC) | UInt8(naluLengthSize - 1)
+        return record
+    }
+
+    /// Input the in-band scan may read in total, foreign streams included. Parameter sets sit at the
+    /// first IRAP, so a few packets find them; this only caps a stream that never carries any.
+    static let inBandScanByteBudget = 16 * 1024 * 1024
+
+    static func scanMayContinue(packetsRead: Int, videoPackets: Int, bytesRead: Int,
+                                packetBudget: Int, readBudget: Int, byteBudget: Int) -> Bool {
+        packetsRead < readBudget && videoPackets < packetBudget && bytesRead < byteBudget
+    }
+
     /// Replace a video stream's empty hvcC with one rebuilt from the parameter sets at the head of the
     /// source, so the hardware-decode verdict and `HardwareVideoDecoder` see the record AVPlayer would
     /// have reconstructed for itself. Returns true when the record was replaced.
@@ -71,8 +143,14 @@ extension VideoConfigRecord {
     /// Seekable sources only: the scan reads from the head and seeks back to 0, which is where every
     /// caller starts playback from anyway (the start position is applied later). A forward-only
     /// source is left alone, and keeps today's route. Runs off the main actor; it reads packets.
+    ///
+    /// The scan is bounded in packets and in bytes: a stream that carries no parameter sets, or one
+    /// whose packets are very large, ends it at `inBandScanByteBudget` of input rather than reading
+    /// until the packet count runs out, and leaves the record as it was.
     @discardableResult
-    static func completeHEVCRecordFromInBandParameterSets(demuxer: Demuxer, streamIndex: Int32) -> Bool {
+    static func completeHEVCRecordFromInBandParameterSets(
+        demuxer: Demuxer, streamIndex: Int32, byteBudget: Int = inBandScanByteBudget
+    ) -> Bool {
         // Stream access goes through `withStream`, never a pointer held across the packet reads: a
         // stop() closes the demuxer from another thread and frees its streams.
         let needsRebuild = demuxer.withStream(at: streamIndex) { stream -> Bool in
@@ -89,23 +167,34 @@ extension VideoConfigRecord {
         var sets = HEVCParameterSets()
         var videoPackets = 0
         var packetsRead = 0
+        var bytesRead = 0
         demuxer.seek(to: 0)
-        while packetsRead < readBudget, videoPackets < packetBudget, !sets.isComplete {
-            guard let pkt = try? demuxer.readPacket() else { break }
-            var toFree: UnsafeMutablePointer<AVPacket>? = pkt
-            defer { trackedPacketFree(&toFree) }
-            packetsRead += 1
-            guard pkt.pointee.stream_index == streamIndex else { continue }
-            videoPackets += 1
-            if let data = pkt.pointee.data {
-                sets.collect(from: data, size: Int(pkt.pointee.size))
+        // The ceiling is also armed on the input, so one oversized read cannot spend more than the
+        // budget between two checks of the loop.
+        demuxer.beginInputByteBudget(Int64(byteBudget))
+        // Scoped so the ceiling is disarmed before the rewind below, which it would otherwise refuse.
+        do {
+            defer { demuxer.endInputByteBudget() }
+            while scanMayContinue(packetsRead: packetsRead, videoPackets: videoPackets, bytesRead: bytesRead,
+                                  packetBudget: packetBudget, readBudget: readBudget, byteBudget: byteBudget),
+                  !sets.isComplete {
+                guard let pkt = try? demuxer.readPacket() else { break }
+                var toFree: UnsafeMutablePointer<AVPacket>? = pkt
+                defer { trackedPacketFree(&toFree) }
+                packetsRead += 1
+                bytesRead += Int(max(pkt.pointee.size, 0))
+                guard pkt.pointee.stream_index == streamIndex else { continue }
+                videoPackets += 1
+                if let data = pkt.pointee.data {
+                    sets.collect(from: data, size: Int(pkt.pointee.size))
+                }
             }
         }
         demuxer.seek(to: 0)
 
         guard let vps = sets.vps, let sps = sets.sps, let pps = sets.pps else {
             EngineLog.emit(
-                "[VideoConfigRecord] in-band parameter-set scan found none: packets=\(videoPackets) "
+                "[VideoConfigRecord] in-band parameter-set scan found none: packets=\(videoPackets) bytes=\(bytesRead) "
                 + "vps=\(sets.vps != nil) sps=\(sets.sps != nil) pps=\(sets.pps != nil)",
                 category: .engine
             )

@@ -457,6 +457,7 @@ final class LiveTelemetrySampler {
         )
         engine.applyLiveTelemetry(snapshot)
         engine.refreshNativeBufferedPosition()
+        engine.tickKeyframeStillLadder()
         await engine.refreshSessionCacheStatus()
     }
 

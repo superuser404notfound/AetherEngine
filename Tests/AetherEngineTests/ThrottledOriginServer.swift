@@ -33,6 +33,10 @@ final class ThrottledOriginServer: @unchecked Sendable {
         /// Audit DMX-5: a 206 that starts `start` rather than where it was asked, the way an edge
         /// that aligns ranges to its own chunk boundary answers. The body is that range's.
         case serve206From(start: Int64)
+        /// AE#958: a 206 whose headers state exactly the range asked for while the body is the bytes
+        /// from `bodyFrom`, the way a timeshift origin answers on its own chunk boundary. Nothing in
+        /// the response gives it away.
+        case serve206Fabricated(bodyFrom: Int64)
         /// Audit DMX-101: a server that cannot address bytes. Whatever range was asked for, the
         /// answer is a 200 with the whole source from byte 0 and its full Content-Length.
         case serve200
@@ -283,6 +287,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
         var silentAfter: Int64? = nil
         var dropAfter: Int64? = nil
         var answersWholeSource = false
+        var bodyShift: Int64 = 0
         switch respond(requestIndex, offset, path) {
         case .serve206:
             break
@@ -291,6 +296,8 @@ final class ThrottledOriginServer: @unchecked Sendable {
             offset = 0
         case .serve206From(let start):
             offset = max(0, min(start, totalSize - 1))
+        case .serve206Fabricated(let bodyFrom):
+            bodyShift = max(0, min(bodyFrom, totalSize - 1)) - offset
         case .serveThenGoSilent(let afterBytes):
             silentAfter = max(0, afterBytes)
         case .serveThenDrop(let afterBytes):
@@ -364,7 +371,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
             if let silentAfter { n = Int(min(Int64(n), silentAfter - served)) }
             if let dropAfter { n = Int(min(Int64(n), dropAfter - served)) }
             let body = patternedBody
-                ? (0..<n).map { Self.patternByte(at: offset + served + Int64($0)) }
+                ? (0..<n).map { Self.patternByte(at: offset + bodyShift + served + Int64($0)) }
                 : Array(chunk[0..<n])
             guard writeBody(fd, body) else { return false }
             served += Int64(n)

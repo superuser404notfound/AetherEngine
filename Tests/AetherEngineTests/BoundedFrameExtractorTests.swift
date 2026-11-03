@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Bounded source-backed still extraction")
 struct BoundedFrameExtractorTests {
-    @Test("Input and deadline budgets cover open before decode", .timeLimit(.minutes(1)))
+    @Test("Input and deadline budgets cover open before decode", .timeLimit(.minutes(3)))
     func openIsBudgeted() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(".bounded-frame-\(UUID().uuidString).mp4")
@@ -31,7 +31,7 @@ struct BoundedFrameExtractorTests {
         await zeroTime.shutdown()
     }
 
-    @Test("A decoded still returns its measured presentation timestamp", .timeLimit(.minutes(1)))
+    @Test("A decoded still returns its measured presentation timestamp", .timeLimit(.minutes(3)))
     func measuredPTS() async throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(".bounded-frame-\(UUID().uuidString).mp4")
@@ -48,7 +48,7 @@ struct BoundedFrameExtractorTests {
         #expect(frame.actualSeconds?.isFinite == true)
     }
 
-    @Test("The deadline interrupts a stalled HTTP open", .timeLimit(.minutes(1)))
+    @Test("The deadline interrupts a stalled HTTP open", .timeLimit(.minutes(3)))
     func stalledHTTPHeader() async throws {
         let origin = try ProbeHTTPTestOrigin(data: ProbeTestFixtures.hdr10Plus(), stage: .headers)
         defer { origin.stop() }

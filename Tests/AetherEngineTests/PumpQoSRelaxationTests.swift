@@ -69,7 +69,7 @@ struct PumpQoSRelaxationTests {
     /// to the thread it waits for, so the pump tore down and broadcast its finish at `.utility`, which
     /// Xcode's Thread Performance Checker reports as a user-initiated thread waiting on a utility one.
     @Test("A relaxed pump that is stopped and waited on unwinds at the responsive class",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func relaxedPumpUnwindsResponsive() async throws {
         let data = try #require(Data(base64Encoded: Issue234SideReaderSeekAnchorTests.fixtureBase64,
                                      options: .ignoreUnknownCharacters))

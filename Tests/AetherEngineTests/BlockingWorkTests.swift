@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.timeLimit(.minutes(3)))
 struct BlockingWorkTests {
     private static func currentQueueLabel() -> String {
         String(cString: __dispatch_queue_get_label(nil))

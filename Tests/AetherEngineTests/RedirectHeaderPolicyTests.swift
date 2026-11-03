@@ -162,4 +162,46 @@ struct RedirectHeaderPolicyTests {
         #expect(out.value(forHTTPHeaderField: "X-Custom") == "1")
         #expect(out.value(forHTTPHeaderField: "Range") == "bytes=1024-")
     }
+
+    @Test("An https source redirected to http on a public host is asked for over https")
+    func publicDowngradeUpgradedToHTTPS() {
+        let carried = URLRequest(url: url("http://addons.example/api/v1/usenet/stream/7.mkv?t=1"))
+        let out = RedirectHeaderPolicy.redirectRequest(
+            carried,
+            originalURL: url("https://addons.example/jellyfin/Videos/42/stream.mkv"),
+            originalRange: "bytes=0-",
+            extraHeaders: ["Authorization": "Bearer abc"])
+        #expect(out.url?.absoluteString == "https://addons.example/api/v1/usenet/stream/7.mkv?t=1")
+        #expect(out.value(forHTTPHeaderField: "Authorization") == "Bearer abc")
+        #expect(out.value(forHTTPHeaderField: "Range") == "bytes=0-")
+
+        let local = RedirectHeaderPolicy.redirectRequest(
+            URLRequest(url: url("http://192.168.1.20:8096/stream.mkv")),
+            originalURL: url("https://media.example/stream.mkv"),
+            originalRange: nil, extraHeaders: [:])
+        #expect(local.url?.scheme == "http")
+        let plain = RedirectHeaderPolicy.redirectRequest(
+            URLRequest(url: url("http://cdn.example/o.mkv")),
+            originalURL: url("http://media.example/stream.mkv"),
+            originalRange: nil, extraHeaders: [:])
+        #expect(plain.url?.scheme == "http")
+    }
+
+    @Test("The upgrade stands down where the app's ATS configuration already allows plain http")
+    func atsConfigurationAllowsPlainHTTP() {
+        #expect(!RedirectHeaderPolicy.atsAllowsPlainHTTP(to: "cdn.example", in: [:]))
+        #expect(RedirectHeaderPolicy.atsAllowsPlainHTTP(
+            to: "cdn.example", in: ["NSAllowsArbitraryLoads": true]))
+        // The system ignores arbitrary loads next to any of the narrower global keys.
+        #expect(!RedirectHeaderPolicy.atsAllowsPlainHTTP(
+            to: "cdn.example", in: ["NSAllowsArbitraryLoads": true, "NSAllowsLocalNetworking": true]))
+        let exceptions: [String: Any] = ["NSExceptionDomains": [
+            "example.org": ["NSIncludesSubdomains": true, "NSExceptionAllowsInsecureHTTPLoads": true],
+            "strict.example": ["NSExceptionAllowsInsecureHTTPLoads": false],
+        ]]
+        #expect(RedirectHeaderPolicy.atsAllowsPlainHTTP(to: "media.example.org", in: exceptions))
+        #expect(RedirectHeaderPolicy.atsAllowsPlainHTTP(to: "example.org", in: exceptions))
+        #expect(!RedirectHeaderPolicy.atsAllowsPlainHTTP(to: "strict.example", in: exceptions))
+        #expect(!RedirectHeaderPolicy.atsAllowsPlainHTTP(to: "other.example", in: exceptions))
+    }
 }

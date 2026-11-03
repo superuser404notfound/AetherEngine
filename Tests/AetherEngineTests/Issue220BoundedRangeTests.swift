@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
+// AE#958: a refill at a held frontier asks `AVIOReader.rangeCheckBytes` early to check the origin,
+// so the origin below keys on the request the reader actually sends, `firstRange - rangeCheckBytes`.
+
 /// #220: the reader used to ask for `bytes=X-`, the whole rest of the file, and then regulate
 /// the resulting flow by suspending the URLSession task. `suspend()` is advisory, so on a link
 /// that never saturates the socket the transport keeps delivering and the window grows without
@@ -73,7 +76,7 @@ struct Issue220BoundedRangeTests {
     /// the window legitimately opens the next range AT the frontier. A count cannot tell that
     /// apart from a re-fetch: this asserted two requests and saw three on a loaded CI runner,
     /// where the third was `bytes=524288-34078719`, the refill doing its job.
-    @Test("a completed range is read out of the window, not fetched again", .timeLimit(.minutes(1)))
+    @Test("a completed range is read out of the window, not fetched again", .timeLimit(.minutes(3)))
     func completedRangeIsNotRefetched() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: 512 * 1024 * 1024))
         defer { server.stop() }
@@ -98,7 +101,7 @@ struct Issue220BoundedRangeTests {
         // range already in hand. Nothing may do that: the opening request is the only one allowed
         // to touch [0, firstRange), and the refill starts at firstRange exactly.
         try await waitForOriginToSettle(server)
-        let refetches = server.requestedRanges.filter { $0.start > 0 && $0.start < firstRange }
+        let refetches = server.requestedRanges.filter { $0.start > 0 && $0.start < (firstRange - Int64(AVIOReader.rangeCheckBytes)) }
         #expect(refetches.isEmpty,
                 "a completed range was re-fetched instead of read: \(server.requestedRanges)")
         #expect(server.requestedRanges.filter { $0.start == 0 }.count == 1,

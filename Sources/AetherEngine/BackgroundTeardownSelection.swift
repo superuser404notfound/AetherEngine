@@ -13,6 +13,8 @@ struct BackgroundTeardownSelection: Sendable, Equatable {
     var subtitles = SubtitleSessionCarryover()
     var audioTrackIndex: Int?
     var discTitleID: Int?
+    /// nil means no loaded-session evidence; false is a verified decision worth retaining too.
+    var requiresDeinterlaceWarmup: Bool?
 }
 
 extension AetherEngine {
@@ -40,7 +42,9 @@ extension AetherEngine {
             subtitles: Self.mergedSubtitleCarryover(
                 live: captureSubtitleSessionCarryover(), snapshot: parked?.subtitles),
             audioTrackIndex: activeAudioTrackIndex ?? parked?.audioTrackIndex,
-            discTitleID: activeDiscTitleID ?? parked?.discTitleID
+            discTitleID: activeDiscTitleID ?? parked?.discTitleID,
+            requiresDeinterlaceWarmup: playbackBackend != .none
+                ? lastRequiresDeinterlaceWarmup : parked?.requiresDeinterlaceWarmup
         )
     }
 

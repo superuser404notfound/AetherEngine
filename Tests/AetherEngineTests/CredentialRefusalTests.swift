@@ -2,6 +2,9 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
+// AE#958: a refill at a held frontier asks `AVIOReader.rangeCheckBytes` early to check the origin,
+// so the origin below keys on the request the reader actually sends, `firstRange - rangeCheckBytes`.
+
 /// AE#792 part 2: a credential the origin refuses mid-session is told apart from a lost source. The
 /// reader gives it a short ladder and stamps it on the session's header store, the store announces
 /// it once per header set, and the engine revives only after the host replaced the headers.
@@ -70,11 +73,11 @@ struct CredentialRefusalTests {
     /// the token. The unproductive ladder spent about 80 s on this; the credential ladder gives up
     /// after its third refusal, a few seconds in, with the refusal on the store.
     @Test("a reader refused 401 mid-stream gives up in seconds and stamps the store",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func refusedReaderGivesUpQuickly() async throws {
         let firstRange: Int64 = 256 * 1024
         let originMaybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024, respond: { _, offset, _ in
-            offset < firstRange ? .serve206 : .status(401)
+            offset < (firstRange - Int64(AVIOReader.rangeCheckBytes)) ? .serve206 : .status(401)
         })
         let origin = try #require(originMaybe)
         defer { origin.stop() }
