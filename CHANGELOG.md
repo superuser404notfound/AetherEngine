@@ -81,6 +81,27 @@ the public-API contract.
 
 ### Changed
 
+- **A sequential origin seeks inside what the session already holds (AE#958).** `seek(to:)` on a
+  `sequentialOrigin` loopback session lands when the target lies in the resident span that reaches the
+  producer's frontier, served from the segment cache without a second request; anything outside it is
+  still rejected as `.sourceNotSeekable`, and the host requests the archive again at the target. Before,
+  every seek was rejected, although `$isSequentialOrigin` documented the in-cache case. `residentRanges`
+  on such a session now reads the muxed durations the append playlist advertises instead of the static
+  plan, which the cutter drifts from by up to a GOP.
+- **`selectAudioTrack` is ignored on a sequential origin (AE#958), with one log line.** The rebuild could
+  only reopen the source at byte 0: the native route restarted the programme from the beginning and the
+  software route ended the session on its failed reposition. Switch by loading the source again at the
+  position with `audioSourceStreamIndex` set to the chosen `TrackInfo.id`.
+- **Loopback live joins default to `.fastZap`.** `LoadOptions.liveJoinProfile` used to default to
+  `.standard`, whose first manifest waits for the full `3 x TARGETDURATION` holdback: at least 18 s, and
+  30 s on a 10 s GOP, which a strict-realtime origin can only fill in wall-clock time. A host that never
+  chose a profile now gets the bounded join. Measured with `aetherctl live --realtime`, H.264 + AAC,
+  first picture, two runs each (standard / fastZap): 1 s GOP with no backlog 18.9 / 1.8 s; 4 s GOP with
+  no backlog 18.9 / 7.2 s; 10 s GOP with no backlog 28.8 / 19.1 s; 10 s GOP after a 22 s connect burst
+  6.9 / 1.2 s. With a burst that already covers the holdback both start in about 0.4 s. `.standard`
+  stays available for lean-back viewing that can afford the wait, and `aetherctl`'s `--standard-join`
+  loads it (`--fast-zap` is still accepted).
+
 - **Dual-layer Dolby Vision enhancement chroma is upsampled with the standard's default filter.** The
   composer read the enhancement layer's chroma with a co-sited bilinear read, which matched an
   integer model of ETSI GS CCM 001 within one 12-bit code on only 83 to 99% of chroma samples (the worst
@@ -109,6 +130,19 @@ the public-API contract.
   reported tier and whether in-place compose is on. Only with the `DualLayerDolbyVision` trait.
 
 ### Fixed
+
+- **A sequential-origin session no longer stalls about 6 s in (AE#958).** The first append playlist was
+  released on a single segment, and AVPlayer reloads an EVENT playlist only one `TARGETDURATION` later, so
+  a first segment shorter than that ran dry first (`restarting 5.68s from end of live playlist; target
+  duration 6s`, then a 0.1 s `playbackStalled`). The gate now holds for more media than that reload
+  interval, at most 2 s past the first segment, so a stalling origin (AE#370) still starts.
+- **A live edge cushion no longer switches `.fastZap`'s bounded start off.** `liveEdgeCushionSeconds` is
+  documented to floor the bounded start at the cushion, but any cushion at all barred it, so the join
+  waited for the full holdback. On a 10 s GOP that is 45 s under `.fastZap`, and a 2.5 s "network
+  buffer" made an ITV channel wait for real-time segments until the host's watchdog restarted it, every
+  time. A shallow first window now qualifies once it holds the cushion, so the join still lands at
+  least the cushion behind the edge. Same fixture, 10 s GOP, 22 s burst, 2.5 s cushion: first picture
+  26.9 s before, 1.2 to 1.4 s after.
 
 - **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD
   Atmos, so a DTS:X programme rendered into a bed (`objectAudioRendering`) never brought a receiver like a Sonos with

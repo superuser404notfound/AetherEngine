@@ -1065,6 +1065,15 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// with the cushion down to one entry there is no longer a second entry to mask it.
     /// Guarded by stateLock.
     private var _seqAdvertisableCount = 0
+    /// AE#958: the advertised media and its longest entry, so the startup gate can compare what the
+    /// first playlist carries with the TARGETDURATION AVPlayer waits before its first reload, and
+    /// the moment the first entry became advertisable, which starts the comfort budget.
+    /// Guarded by stateLock.
+    private var _seqAdvertisedSeconds: Double = 0
+    private var _seqLongestAdvertised: Double = 0
+    private var _seqFirstAdvertisedAt: Date?
+    /// `sequentialStartupComfortSeconds` for this provider; tests shorten it.
+    var sequentialStartupComfort: TimeInterval = VideoSegmentProvider.sequentialStartupComfortSeconds
 
     /// #370: never hold the first media playlist for more than ONE published duration. The live
     /// constant this gate reused (`LiveEdgePolicy.minStartupSegments = 2`) guards a SLIDING window
@@ -1075,6 +1084,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// possibly-stalling origin. The field session held AVPlayer's playlist GET for the full 30 s
     /// and the asset load timed out (-12884) with ~12 s of media already on disk.
     static let sequentialStartupSegments = 1
+
+    /// AE#958: one entry is enough to release, but not enough to play through. AVPlayer reloads an
+    /// EVENT playlist one TARGETDURATION after the first read, and a first playlist whose single
+    /// entry is shorter than that runs dry before the reload (device: `restarting 5.68s from end of
+    /// live playlist; target duration 6s`, then a 0.1 s `playbackStalled` at t+6.05). So the gate
+    /// holds for more media than one reload interval, but only this long past the first entry: a
+    /// fast archive cuts the second segment well inside it, a stalling one (#370) pays at most this.
+    static let sequentialStartupComfortSeconds: TimeInterval = 2.0
+
+    /// Whether the advertised media outlasts AVPlayer's first reload interval.
+    static func sequentialStartupCoversFirstReload(advertisedSeconds: Double, longestSegment: Double) -> Bool {
+        let target = LiveEdgePolicy.targetDurationSeconds(maxSegmentDuration: longestSegment,
+                                                          cutTargetSeconds: nil, cadenceFloorSeconds: nil)
+        return advertisedSeconds > Double(target)
+    }
 
     init(
         cache: SegmentCache,
@@ -1287,11 +1311,50 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         // playlist renderer omits those entries. Negative values are producer bugs, clamp them.
         let clamped = max(0, durationSeconds)
         _seqDurations.append(clamped)
-        if clamped > 0 { _seqAdvertisableCount += 1 }
+        if clamped > 0 {
+            _seqAdvertisableCount += 1
+            _seqAdvertisedSeconds += clamped
+            _seqLongestAdvertised = max(_seqLongestAdvertised, clamped)
+            if _seqFirstAdvertisedAt == nil { _seqFirstAdvertisedAt = Date() }
+        }
         stateLock.unlock()
         firstSegmentCondition.lock()
         firstSegmentCondition.broadcast()
         firstSegmentCondition.unlock()
+    }
+
+    /// AE#958: the resident spans of a sequential session on the item axis its append playlist builds,
+    /// from the muxed durations instead of the static plan the cutter drifts from. A zero-duration
+    /// entry has no URI and no cache entry, so it joins its neighbours rather than splitting the span,
+    /// and a segment whose duration is not final yet is not in the playlist, so it is not seekable.
+    /// nil off the sequential path.
+    func sequentialResidentItemRanges(residentIndexes: [ClosedRange<Int>]) -> [ClosedRange<Double>]? {
+        guard sequentialAppendPlaylist else { return nil }
+        stateLock.lock()
+        let durations = _seqDurations
+        stateLock.unlock()
+        return Self.itemRanges(durations: durations, residentIndexes: residentIndexes)
+    }
+
+    static func itemRanges(durations: [Double], residentIndexes: [ClosedRange<Int>]) -> [ClosedRange<Double>] {
+        let resident = residentIndexes.reduce(into: IndexSet()) { set, range in
+            set.insert(integersIn: range.lowerBound...range.upperBound)
+        }
+        var ranges: [ClosedRange<Double>] = []
+        var runStart: Double?
+        var cursor = 0.0
+        for (index, duration) in durations.enumerated() {
+            if duration <= 0 { continue }
+            if resident.contains(index) {
+                if runStart == nil { runStart = cursor }
+            } else if let start = runStart {
+                ranges.append(start...cursor)
+                runStart = nil
+            }
+            cursor += duration
+        }
+        if let start = runStart { ranges.append(start...cursor) }
+        return ranges
     }
 
     /// Producer reached true source EOF: the next playlist build renders as a completed VOD
@@ -1308,7 +1371,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// Hold the first media playlist until the startup segment exists (mirrors the live gate:
     /// an empty playlist is a broken asset to AVPlayer, which never re-polls it). A fast
-    /// archive origin cuts the first segments within a second.
+    /// archive origin cuts the first segments within a second. With one entry advertised, hold
+    /// on for media past the first reload interval, up to `sequentialStartupComfort`.
     func waitForSequentialStartupSegments(timeout: TimeInterval) -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         firstSegmentCondition.lock()
@@ -1317,12 +1381,20 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         defer { parkedWaiters -= 1 }
         while true {
             stateLock.lock()
-            let ready = _seqAdvertisableCount >= Self.sequentialStartupSegments || _seqEnded
+            let released = _seqAdvertisableCount >= Self.sequentialStartupSegments
+            let covered = Self.sequentialStartupCoversFirstReload(advertisedSeconds: _seqAdvertisedSeconds,
+                                                                  longestSegment: _seqLongestAdvertised)
+            let comfortEnd = _seqFirstAdvertisedAt?.addingTimeInterval(sequentialStartupComfort)
+            let ended = _seqEnded
             let aborted = _seqStartupAborted
             stateLock.unlock()
-            if ready { return true }
+            if ended || (released && covered) { return true }
             if aborted { return false }
-            if !firstSegmentCondition.wait(until: deadline) { return false }
+            if released, let comfortEnd, Date() >= comfortEnd { return true }
+            let wake = released ? min(deadline, comfortEnd ?? deadline) : deadline
+            if !firstSegmentCondition.wait(until: wake) {
+                if Date() >= deadline { return released }
+            }
         }
     }
 
@@ -2992,8 +3064,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     /// Only completed, independently decodable media participates. The optional duration threshold
-    /// never cuts a GOP early or weakens the standard/full-holdback path.
+    /// never cuts a GOP early or weakens the standard/full-holdback path. A host cushion is a request to
+    /// start further back, so a shallow window qualifies only once it already holds the cushion: the
+    /// join lands at the head of that window, which is then at least the cushion behind the edge. A
+    /// cushion used to bar the bounded start outright, and a 2.5 s one on a 10 s GOP (holdback 30 s)
+    /// held every join for a third segment it did not need.
     private func hasBoundedStartupMedia(_ snapshot: (count: Int, summed: Double, maxDuration: Double)) -> Bool {
+        if let cushion = liveEdgeCushionSeconds,
+           !(LiveEdgePolicy.servedSeconds(snapshot.summed) >= cushion) { return false }
         if snapshot.count >= LiveEdgePolicy.minStartupSegments { return true }
         guard snapshot.count == 1, let minimum = singleSegmentStartupMinimumSeconds else { return false }
         return snapshot.summed.isFinite && snapshot.summed >= minimum
@@ -3047,11 +3125,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 accountForFirstServe(since: enteredAt, snapshot: snap, targetDuration: sealed)
                 return true
             }
-            // A host cushion is a request to start further back, which a shallow first window would
-            // undo on exactly the slow link it was asked for.
             if allowsBoundedDegradedStart,
                !boundedStartFloorsAtHoldback,
-               liveEdgeCushionSeconds == nil,
                hasBoundedStartupMedia(snap),
                degradedDeadline == nil {
                 let grace = startupGraceSeconds ?? LiveEdgePolicy.fastZapDegradedGraceSeconds(

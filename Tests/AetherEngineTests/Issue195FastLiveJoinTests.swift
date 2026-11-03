@@ -42,9 +42,11 @@ final class Issue195FastLiveJoinTests: XCTestCase {
         XCTAssertEqual(HLSVideoEngine.liveCutTargetSeconds(for: .fastZap), 0.5, accuracy: 0.0001)
     }
 
-    func testLoadOptionsDefaultIsStandard() {
-        XCTAssertEqual(LoadOptions().liveJoinProfile, .standard,
-                       "fast join is an explicit host opt-in; the default must not change AE#189 behavior")
+    func testLoadOptionsDefaultIsFastZap() {
+        XCTAssertEqual(LoadOptions().liveJoinProfile, .fastZap,
+                       "a host that never chose a profile gets the bounded live join")
+        XCTAssertEqual(LoadOptions(isLive: true).liveJoinProfile, .fastZap,
+                       "the memberwise init must default the same way as the property")
     }
 
     // MARK: - TARGETDURATION / holdback under fastZap

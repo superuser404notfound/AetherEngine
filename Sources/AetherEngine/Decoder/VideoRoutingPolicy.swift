@@ -245,7 +245,7 @@ enum VideoRoutingPolicy {
 
     /// A URL source that turned out forward-only (the origin ignores `Range` and names no length, so
     /// the reader could only stream it front to back) is served the way a declared sequential origin
-    /// is, when its container states a duration: native path, one linear pass, seeks unavailable.
+    /// is, when its container states a duration: native path, one linear pass, seeks only inside the resident tail (AE#958).
     /// The software path it used to take cannot seek on such a source either, so the promotion costs
     /// nothing it had, and it buys what only the native path has: hardware decode, AVPlayer's
     /// buffering, and a picture on an AirPlay receiver (the software host renders on the device,

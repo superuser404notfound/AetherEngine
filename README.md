@@ -456,9 +456,9 @@ Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SM
 try await player.load(url: streamURL, options: LoadOptions(isLive: true))
 try await player.load(url: streamURL, options: LoadOptions(isLive: true, dvrWindowSeconds: 1800))
 
-// IPTV channel zapping: join in ~3-6s instead of 10-18s on strict-realtime origins by letting
-// TARGETDURATION (and the live-edge holdback derived from it) track the source keyframe cadence:
-try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .fastZap))
+// Lean-back live that may wait for the full 3 x TARGETDURATION holdback before the first picture
+// (the default .fastZap join tracks the source keyframe cadence and bounds that wait):
+try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .standard))
 
 // Drive a scrubber from the live-edge fields (they tick, so they live on player.clock):
 player.clock.$seekableLiveRange   // ClosedRange<Double>?, session-relative; nil when DVR off
@@ -484,7 +484,7 @@ player.$recordingState            // .idle / .recording / .ended / .failed
 
 `startRecording(to:)` (AetherEngine#560) writes the live source to an MPEG-TS file fed from the connection the session already holds. That is the point of it rather than a detail: an IPTV plan commonly caps an account at 1 to 3 simultaneous connections, so a host that opens its own connection to record either fails outright or knocks the viewer off the channel. It is a stream copy of the source packets taken before any audio bridging, so a TrueHD or DTS channel records its original audio while playback listens to the bridged rendition, and a file cut short by a crash is still playable up to the cut. Recording follows the source rather than the playhead, so pausing or scrubbing back inside the DVR window does not interrupt it, and a `liveSourceReset` ends it cleanly rather than writing past a seam the codecs may not survive. The one route that cannot record is `nativeRemoteHLS` (`.remoteBypass`), where AVFoundation holds the source connection and the engine never sees a byte; `startRecording` throws `.unsupportedRoute` there instead of producing an empty file. Full contract in [docs/api.md](docs/api.md#recording-a-live-stream).
 
-`liveJoinProfile: .fastZap` (AetherEngine#195/#208) cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to 1.5 x the source GOP length (1 s GOPs serve 2, and so do segments up to 1.666 s; the headroom covers a broadcast's irregular GOPs, AetherEngine#670) and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; opt in for zapping UX, keep `.standard` for lean-back viewing.
+`liveJoinProfile` defaults to `.fastZap` (AetherEngine#195/#208), which cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to 1.5 x the source GOP length (1 s GOPs serve 2, and so do segments up to 1.666 s; the headroom covers a broadcast's irregular GOPs, AetherEngine#670) and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; choose `.standard` for lean-back viewing that can afford the full wait.
 
 `liveSourceReset` is live's counterpart to a terminal `state = .error`, and a host that plays live has to subscribe to it. It fires where the session cannot be revived from inside the engine and only a new URL can: a source that restarted from byte 0 (a Jellyfin transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), or an in-engine reopen transport whose budget is spent (#199). Each of those halts production first, so a dead provider stops advertising blocking reloads behind the host's back. Answer it by negotiating a fresh URL and calling `load` again, and guard that answer (one retune in flight, a minimum spacing, a bounded count per session) or a permanently dead upstream turns into a retune loop. Spend that bound out loud: a retune ladder that ends on a silent `return` leaves the same dead channel behind a counter, so surface the exhaustion the way a terminal `.error` would be surfaced.
 
@@ -525,8 +525,10 @@ no byte-offset reconnects and no tail read, the demuxer's pb is non-seekable, an
 connection surfaces as a read error rather than end-of-media so the host can re-request. Such a
 source keeps the native path instead of being forced to software, and the session serves an
 append-only `EVENT` playlist carrying the durations actually muxed, completed with `ENDLIST` at
-true source EOF. Every producer reposition is refused by construction, so **seeking is
-unavailable**: re-request the archive with a shifted start timestamp instead. `aetherctl play`
+true source EOF. Every producer reposition is refused by construction, so a seek lands only
+inside what the session already holds (the resident span that reaches the producer's frontier,
+on the native path); for any other target, and for an audio track switch, re-request the archive
+with a shifted start timestamp, passing `audioSourceStreamIndex` for the chosen track (AE#958). `aetherctl play`
 gains `--sequential-origin` / `--declared-duration` for reproducing one from macOS.
 
 ## Host setup on tvOS
