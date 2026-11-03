@@ -403,7 +403,9 @@ struct DualLayerOutputRouteTests {
         enum Mode { case passThrough, replace(CVPixelBuffer), refuse, fail }
         private let lock = NSLock()
         private var _mode: Mode
-        private var _prepared = 0, _trims = 0, _tornDown = 0
+        private var _prepared = 0, _trims = 0, _tornDown = 0, _preparedAfterTearDown = 0
+        /// Called from `tearDown` with no lock held.
+        var onTearDown: (() -> Void)?
         init(_ mode: Mode) { _mode = mode }
         var mode: Mode {
             get { lock.lock(); defer { lock.unlock() }; return _mode }
@@ -412,8 +414,14 @@ struct DualLayerOutputRouteTests {
         var prepared: Int { lock.lock(); defer { lock.unlock() }; return _prepared }
         var trims: Int { lock.lock(); defer { lock.unlock() }; return _trims }
         var tornDown: Int { lock.lock(); defer { lock.unlock() }; return _tornDown }
+        var preparedAfterTearDown: Int { lock.lock(); defer { lock.unlock() }; return _preparedAfterTearDown }
         func prepare(_ buffer: CVPixelBuffer) -> BaseLayerPreparation {
-            lock.lock(); _prepared += 1; let mode = _mode; lock.unlock()
+            lock.lock(); _prepared += 1; let mode = _mode
+            // The contract of the real converter: once torn down it converts nothing and fails the frame.
+            let closed = _tornDown > 0
+            if closed { _preparedAfterTearDown += 1 }
+            lock.unlock()
+            if closed { return .failed("the converter is closed") }
             switch mode {
             case .passThrough: return .ready(buffer)
             case .replace(let other): return .ready(other)
@@ -422,7 +430,7 @@ struct DualLayerOutputRouteTests {
             }
         }
         func trimIfIdle() { lock.lock(); _trims += 1; lock.unlock() }
-        func tearDown() { lock.lock(); _tornDown += 1; lock.unlock() }
+        func tearDown() { lock.lock(); _tornDown += 1; lock.unlock(); onTearDown?() }
         var statistics: BaseLayerConversionStatistics { BaseLayerConversionStatistics() }
     }
 
@@ -518,14 +526,54 @@ struct DualLayerOutputRouteTests {
         #expect(converter.trims >= 20)
     }
 
-    @Test("the stop path tears the converter down once, after the ticks have ended")
+    @Test("the stop path tears the converter down once, after the decoder is closed and the ticks have ended")
     @MainActor func stopTearsTheConverterDown() async throws {
         let converter = ScriptedConverter(.passThrough)
         let rig = try Self.rig(converter: converter)
         Self.play(rig, from: 0, to: 0.5)
         #expect(converter.tornDown == 0)
+        let decoderClosedAtTearDown = Counter()
+        converter.onTearDown = { if rig.decoder.closed { decoderClosedAtTearDown.bump() } }
         await Self.finishStop(rig.route)
         #expect(converter.tornDown == 1)
+        #expect(decoderClosedAtTearDown.count == 1, "the converter outlives the decoder's close")
+    }
+
+    @Test("a tick that outlasts the stop's bounded wait finds the converter closed and hands nothing on")
+    @MainActor func lateTickAfterTearDownConvertsNothing() async throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        // A pull tick sits in the composer's submit (a GPU slot wait) when the stop comes; the wait for it is
+        // bounded, so the teardown runs under it. Frames are waiting, so the tick goes on to convert the next
+        // one once released.
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        rig.decoder.onSubmit = { entered.signal(); release.wait() }
+        rig.route.stopWaitSeconds = 0.2
+        rig.frames.redeliver()
+        rig.route.clockDidJump()
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        rig.route.start(player: AVPlayer())
+        defer { for _ in 0..<16 { release.signal() } }
+        #expect(Self.wait(entered, seconds: 10) == .success, "a pull tick reached the composer and blocks there")
+        await Self.finishStop(rig.route)
+        #expect(converter.tornDown == 1, "the teardown ran although the tick is still inside the composer")
+        let submitsAtStop = rig.decoder.submits.count
+        let framesAtStop = rig.sink.frames.count
+        rig.decoder.onSubmit = nil
+        for _ in 0..<16 { release.signal() }
+        // The released tick takes its next frame from the source and asks the converter for it.
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while converter.preparedAfterTearDown == 0, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(converter.preparedAfterTearDown >= 1, "the released tick asked the converter for another frame")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(rig.decoder.submits.count == submitsAtStop, "the composer was handed nothing after the teardown")
+        #expect(rig.sink.frames.count == framesAtStop, "the display layer was handed nothing after the teardown")
+        #expect(reports.count == 0, "a stopped route does not report a conversion failure")
     }
 
     @Test("the engine hands the picture back to AVPlayer when the conversion fails, and only for its own route")

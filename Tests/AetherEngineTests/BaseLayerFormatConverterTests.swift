@@ -167,8 +167,18 @@ struct BaseLayerFormatConverterTests {
 
     @Test("a converted buffer keeps the source's colour tags and the attachments that travel with the picture")
     func attachmentsFollowThePicture() throws {
+        // An 8-bit source: it needs a conversion on every machine, but it is not the format the player hands out.
+        try Self.checkAttachmentsSurvive(try #require(Self.eightBitSource()))
+    }
+
+    @Test("the same holds for the player's own format, the packed 10-bit one",
+          .enabled(if: BaseLayerFormatConverterTests.canMakePackedBuffers, "needs a system that makes the packed format by pixel transfer"))
+    func attachmentsFollowThePackedPicture() throws {
+        try Self.checkAttachmentsSurvive(try #require(Self.packedPattern()))
+    }
+
+    private static func checkAttachmentsSurvive(_ source: CVPixelBuffer) throws {
         let converter = BaseLayerFormatConverter()
-        let source = try #require(Self.eightBitSource())
         CVBufferSetAttachment(source, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
         CVBufferSetAttachment(source, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ, .shouldPropagate)
         CVBufferSetAttachment(source, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
