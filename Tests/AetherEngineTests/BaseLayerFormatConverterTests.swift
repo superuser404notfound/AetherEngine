@@ -315,13 +315,13 @@ struct BaseLayerFormatConverterTests {
         let source = try #require(Self.eightBitSource())
         let passing = try #require(Self.patternX420())
         let finished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { _ = converter.prepare(source); finished.signal() }
+        Thread.detachNewThread { _ = converter.prepare(source); finished.signal() }
         defer { release.signal(); _ = finished.wait(timeout: .now() + 10) }
         try #require(entered.wait(timeout: .now() + 10) == .success, "the transfer was never reached")
         // Read from another thread, bounded: a reader that waits on the blocked transfer never answers.
         let read = DispatchSemaphore(value: 0)
         let seen = LockedBox<BaseLayerConversionStatistics?>(nil)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
             // A pass-through counts too, and does not take the session lock.
             _ = converter.prepare(passing)
             seen.set(converter.statistics)

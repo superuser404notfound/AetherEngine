@@ -592,10 +592,10 @@ struct DualLayerOutputRouteTests {
         rig.clock.seconds = 0
         rig.route.feedTick()
         let tickDone = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { rig.route.pullTick(); tickDone.signal() }
+        Thread.detachNewThread { rig.route.pullTick(); tickDone.signal() }
         #expect(Self.wait(entered, seconds: 10) == .success, "the pull tick never reached the transfer")
         let summaryRead = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { _ = rig.route.summary; summaryRead.signal() }
+        Thread.detachNewThread { _ = rig.route.summary; summaryRead.signal() }
         #expect(Self.wait(summaryRead, seconds: 3) == .success, "summary waited on the transfer")
         rig.route.stopWaitSeconds = 0.2
         let stopped = DispatchSemaphore(value: 0)
