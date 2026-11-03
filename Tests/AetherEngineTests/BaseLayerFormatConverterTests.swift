@@ -4,6 +4,7 @@ import CoreVideo
 import Foundation
 import VideoToolbox
 import CoreMedia
+import IOSurface
 import AetherLibavcodec
 @testable import AetherEngine
 
@@ -350,9 +351,11 @@ struct BaseLayerFormatConverterTests {
         #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: first, params: params, readWriteSupported: true) == nil,
                 "the composer takes a converted buffer for an in-place write")
         #expect(first !== source && second !== source && first !== second, "each frame has a buffer of its own")
-        #expect(CVPixelBufferGetIOSurface(first) != CVPixelBufferGetIOSurface(second),
+        func surfaceID(_ buffer: CVPixelBuffer) -> UInt32? {
+            CVPixelBufferGetIOSurface(buffer).map { IOSurfaceGetID($0.takeUnretainedValue()) }
+        }
+        #expect(surfaceID(first) != nil && surfaceID(first) != surfaceID(second),
                 "two live converted frames do not share a surface")
-        #expect(CVPixelBufferGetIOSurface(first) != CVPixelBufferGetIOSurface(source))
         // Writing into the converted buffer, as an in-place composition does, leaves the player's buffer alone.
         let before = Self.samples(source)
         CVPixelBufferLockBaseAddress(first, [])
