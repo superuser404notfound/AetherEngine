@@ -599,6 +599,24 @@ struct DualLayerOutputRouteTests {
         engine.stopDualLayerOutputRoute()
     }
 
+    @Test("a wait for a packet starts again after a seek: the time spent at the old position does not count")
+    func seekRestartsTheWaitForAPacket() throws {
+        let rig = try Self.rig()
+        // The pull side runs ahead of the feed: no packet has been fed, so frames wait for theirs.
+        rig.clock.seconds = 1.0
+        rig.route.pullTick()
+        rig.clock.seconds = 1.05
+        rig.route.pullTick()
+        // The clock jumps forward by less than the route's own seek threshold, before the feed has run.
+        rig.clock.seconds = 2.0
+        rig.route.pullTick()
+        #expect(rig.sink.frames.isEmpty, "the frame waits for its packet; the 1 s spent at the old position is not its wait")
+        Self.tick(rig, at: 2.0)
+        Self.play(rig, from: 2.0, to: 3.0)
+        #expect(rig.sink.frames.isEmpty, "every frame was composed")
+        #expect(rig.decoder.accepted.count >= 20)
+    }
+
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0

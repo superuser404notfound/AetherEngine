@@ -88,6 +88,9 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     static let jumpSeconds = 1.5
     /// A base-layer frame that has waited this long for its enhancement-layer packet goes out as it is.
     static let lateFrameSeconds = 0.1
+    /// A clock that moves further than this between two pull ticks has been seeked: the wait for a packet
+    /// starts again at the new position, since time passed at the old one is not time spent waiting here.
+    static let clockJumpSeconds = 0.5
     /// A base-layer frame this far behind the clock, or further, belongs to another position (left over from
     /// before a seek) and is dropped.
     static let staleBehindSeconds = 0.75
@@ -177,6 +180,8 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     private var pullGeneration: UInt64 = 0
     private var cursor: Double?
     private var waitingSince: Double?
+    /// The clock of the previous pull tick, to tell a seek from playing on.
+    private var lastPullClock: Double?
     private var degraded = false
     private var pulledCount = 0
     private var composedSubmitted = 0
@@ -680,6 +685,8 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             conversionFailingSince = nil
         }
         let clock = sample.seconds
+        if let last = lastPullClock, abs(clock - last) > Self.clockJumpSeconds { waitingSince = nil }
+        lastPullClock = clock
         let limit = clock + Self.pullAheadSeconds
         var guardCount = 0
         while guardCount < 8 {
