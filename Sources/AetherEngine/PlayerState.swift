@@ -1736,6 +1736,9 @@ public struct SubtitleImage: @unchecked Sendable {
     /// than the coded video; hosts map the canvas width-aligned and center-anchored onto
     /// the video rect so cues land where the disc authored them (incl. the lower bar).
     /// .zero when unknown (pre-canvas cues): hosts fall back to treating canvas == video.
+    /// DVB reports the video frame here (AE#971): its display covers the whole picture, and a
+    /// 720x576 plane on HD video has non-square pixels, so `position` is normalized against the
+    /// plane while this carries the shape to map onto.
     public let canvasSize: CGSize
     /// AV_SUBTITLE_FLAG_FORCED from the decoded rect (#146): the disc authored this object as a
     /// forced caption (sign / foreign-dialogue overlay shown even with subtitles off).
