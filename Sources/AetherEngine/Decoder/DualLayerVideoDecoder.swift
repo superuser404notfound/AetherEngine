@@ -2496,7 +2496,19 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lastGoodBaseLayerNAL = nil
         borrowedParamsRun = 0
         sideDataRing.removeAll()
-        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0; composeResultLock.unlock()
+        // The counts of the interval in progress and of the last 10 s are in no totals line yet: one more
+        // goes out when any count moved since the last, so a bypass near the end of a session is counted.
+        composeResultLock.lock()
+        let closingComposed = totalComposed + summaryComposedFrames
+        summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0
+        composeResultLock.unlock()
+        let closingDeadline = totalBypassDeadline + summaryBypassDeadline
+        let closingHeldWall = totalBypassHeldWall + summaryBypassHeldWall
+        let closingBackstop = totalBypassBackstop + summaryBypassBackstop
+        let closingTotalsLine = closingComposed + closingDeadline + closingHeldWall + closingBackstop != lastLoggedTotalsSum
+            ? Self.totalsLine(composed: closingComposed, bypassDeadline: closingDeadline,
+                              bypassHeldWall: closingHeldWall, bypassBackstop: closingBackstop)
+            : nil
         summaryBypassNoELInAU = 0
         summaryBypassDeadline = 0
         summaryBypassHeldWall = 0
@@ -2544,6 +2556,12 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.unlock()
         if clearedStall {
             EngineLog.emit("[DualLayerVideoDecoder] compose stall cleared by close", category: .swPlayback)
+        }
+        if let closingTotalsLine {
+            EngineLog.emit(closingTotalsLine, category: .swPlayback, level: .info)
+            #if DEBUG
+            totalsSinkForTesting?(closingTotalsLine)
+            #endif
         }
 
         // Same guarantee as `flush()`: nothing tagged with the
