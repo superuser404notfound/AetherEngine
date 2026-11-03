@@ -73,6 +73,17 @@ the public-API contract.
 
 ### Changed
 
+- **A sequential origin seeks inside what the session already holds (AE#958).** `seek(to:)` on a
+  `sequentialOrigin` loopback session lands when the target lies in the resident span that reaches the
+  producer's frontier, served from the segment cache without a second request; anything outside it is
+  still rejected as `.sourceNotSeekable`, and the host requests the archive again at the target. Before,
+  every seek was rejected, although `$isSequentialOrigin` documented the in-cache case. `residentRanges`
+  on such a session now reads the muxed durations the append playlist advertises instead of the static
+  plan, which the cutter drifts from by up to a GOP.
+- **`selectAudioTrack` is ignored on a sequential origin (AE#958), with one log line.** The rebuild could
+  only reopen the source at byte 0: the native route restarted the programme from the beginning and the
+  software route ended the session on its failed reposition. Switch by loading the source again at the
+  position with `audioSourceStreamIndex` set to the chosen `TrackInfo.id`.
 - **Loopback live joins default to `.fastZap`.** `LoadOptions.liveJoinProfile` used to default to
   `.standard`, whose first manifest waits for the full `3 x TARGETDURATION` holdback: at least 18 s, and
   30 s on a 10 s GOP, which a strict-realtime origin can only fill in wall-clock time. A host that never
@@ -112,6 +123,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A sequential-origin session no longer stalls about 6 s in (AE#958).** The first append playlist was
+  released on a single segment, and AVPlayer reloads an EVENT playlist only one `TARGETDURATION` later, so
+  a first segment shorter than that ran dry first (`restarting 5.68s from end of live playlist; target
+  duration 6s`, then a 0.1 s `playbackStalled`). The gate now holds for more media than that reload
+  interval, at most 2 s past the first segment, so a stalling origin (AE#370) still starts.
 - **A live edge cushion no longer switches `.fastZap`'s bounded start off.** `liveEdgeCushionSeconds` is
   documented to floor the bounded start at the cushion, but any cushion at all barred it, so the join
   waited for the full holdback. On a 10 s GOP that is 45 s under `.fastZap`, and a 2.5 s "network
