@@ -617,6 +617,20 @@ struct DualLayerOutputRouteTests {
         #expect(rig.decoder.accepted.count >= 20)
     }
 
+    @Test("a frame whose own packet is not fed yet is not composed, even when its neighbour's packet was fed")
+    func frameWithoutItsOwnPacketGoesOutAsTheBaseLayer() throws {
+        // Frame 50 has no packet in the history; its neighbours do. The clock is a fraction into frame 50,
+        // so the probe time sits within reach of frame 51's packet.
+        let hole = 50.0 / Self.fps
+        let rig = try Self.rig(skipping: hole...hole)
+        Self.tick(rig, at: 50.4 / Self.fps)
+        let sent = Set(rig.decoder.accepted.map { Int(($0 * Self.fps).rounded()) })
+        let shown = Set(rig.sink.frames.map { Int(($0 * Self.fps).rounded()) })
+        #expect(shown.contains(50), "the frame without a packet went out as the player's frame")
+        #expect(!sent.contains(50), "it was not composed without its RPU")
+        #expect(sent.contains(51), "its neighbour, which has a packet, was composed")
+    }
+
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0

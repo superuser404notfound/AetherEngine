@@ -727,7 +727,10 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             // frame and nothing else: the cursor has moved past it, and the composer and the display layer
             // are not handed a buffer they cannot read.
             guard let ready = readableBaseLayer(buffer, clock: clock) else { continue }
-            if composes {
+            // The packet that was found belongs to the probe time, and the frame taken can be the next one
+            // along. A frame whose own packet is not fed yet would be composed without its RPU, so it goes
+            // out as the player's frame instead, like any other frame the composer has no packet for.
+            if composes && hasFedPacket(near: seconds) {
                 lock.lock(); pulledCount += 1; composedSubmitted += 1; lock.unlock()
                 decoder.submitBaseLayerFrame(ready, pts: display, hdr10Data: nil, epoch: epoch)
             } else {
