@@ -3,6 +3,8 @@ import Testing
 import CoreVideo
 import Foundation
 import VideoToolbox
+import CoreMedia
+import AetherLibavcodec
 @testable import AetherEngine
 
 /// The step that makes the player's base-layer buffers readable for the composer
@@ -245,10 +247,119 @@ struct BaseLayerFormatConverterTests {
         #expect(held.count == 1)
     }
 
-    @Test("the default pool limit and idle period are the measured ones")
-    func defaults() {
-        #expect(BaseLayerFormatConverter.poolLimit == 6)
-        #expect(BaseLayerFormatConverter.idleTrimSeconds == 1.0)
+    @Test("the pool limit follows the frame rate: the lead, the display's two, the compositions in flight and a spare")
+    func poolLimitFollowsTheFrameRate() {
+        typealias C = BaseLayerFormatConverter
+        #expect(C.displayHeldFrames == 2)
+        #expect(C.spareBuffers == 1)
+        #expect(DoviFelComposer.maxFramesInFlight == 2)
+        #expect(DualLayerOutputRoute.pullAheadSeconds == 0.15)
+        // ceil(0.15 s x rate) frames taken ahead, then 2 + 2 + 1.
+        #expect(C.poolLimit(frameRate: 23.976) == 9)
+        #expect(C.poolLimit(frameRate: 24) == 9)
+        #expect(C.poolLimit(frameRate: 25) == 9)
+        #expect(C.poolLimit(frameRate: 30) == 10)
+        #expect(C.poolLimit(frameRate: 48) == 13)
+        #expect(C.poolLimit(frameRate: 50) == 13)
+        #expect(C.poolLimit(frameRate: 60) == 14, "0.15 s of 60 fps is exactly 9 frames, not 10")
+        #expect(C.poolLimit(frameRate: 120) == 23)
+        #expect(C.poolLimit(frameRate: 0) == 14 && C.poolLimit(frameRate: .nan) == 14, "an unknown rate gets the 60 fps figure")
+        #expect(C.idleTrimSeconds == 1.0)
+    }
+
+    @Test("a pool built with the limit of a frame rate serves that many buffers, then refuses")
+    func poolServesExactlyItsLimit() throws {
+        for (rate, expected) in [(24.0, 9), (60.0, 14)] {
+            let converter = BaseLayerFormatConverter(poolLimit: BaseLayerFormatConverter.poolLimit(frameRate: rate),
+                                                     retryAttempts: 1)
+            let source = try #require(Self.eightBitSource())
+            var held: [CVPixelBuffer] = []
+            while case .ready(let out) = converter.prepare(source), held.count < 40 { held.append(out) }
+            #expect(held.count == expected, "at \(rate) fps")
+            #expect(converter.statistics.refused == 1 && converter.statistics.peakLive == expected)
+        }
+    }
+
+    @Test("the route builds its own converter with the limit of its frame rate")
+    func routeConverterFollowsItsFrameRate() throws {
+        func limit(frameRate: Double) throws -> Int? {
+            let history = try #require(VideoPacketHistory(capacityBytes: 1 << 16))
+            let route = DualLayerOutputRoute(decoder: NullDecoder(), sink: NullSink(), history: history, frameRate: frameRate)
+            return (route.baseLayerConverter as? BaseLayerFormatConverter)?.poolLimit
+        }
+        #expect(try limit(frameRate: 24) == 9)
+        #expect(try limit(frameRate: 30) == 10)
+        #expect(try limit(frameRate: 60) == 14)
+    }
+
+    private final class NullDecoder: OutputRouteDecoder, @unchecked Sendable {
+        var feedEpoch: UInt64 { 1 }
+        func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64?) {}
+        func submitBaseLayerFrame(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Data: Data?, epoch: UInt64?) {}
+        func flush() {}
+        func close() {}
+        var onFatalDecodeError: (@Sendable (Error) -> Void)?
+    }
+
+    private final class NullSink: OutputRouteSink, @unchecked Sendable {
+        func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?) {}
+        func flushOutput(removingDisplayedImage: Bool) {}
+    }
+
+    @Test("the counters are readable while a transfer is blocked: no wait on the converter's session lock")
+    func statisticsDoNotWaitOnATransfer() throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let converter = BaseLayerFormatConverter(transfer: { _, _, _ in entered.signal(); release.wait(); return noErr })
+        let source = try #require(Self.eightBitSource())
+        let passing = try #require(Self.patternX420())
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = converter.prepare(source); finished.signal() }
+        defer { release.signal(); _ = finished.wait(timeout: .now() + 10) }
+        try #require(entered.wait(timeout: .now() + 10) == .success, "the transfer was never reached")
+        // Read from another thread, bounded: a reader that waits on the blocked transfer never answers.
+        let read = DispatchSemaphore(value: 0)
+        let seen = LockedBox<BaseLayerConversionStatistics?>(nil)
+        DispatchQueue.global().async {
+            // A pass-through counts too, and does not take the session lock.
+            _ = converter.prepare(passing)
+            seen.set(converter.statistics)
+            read.signal()
+        }
+        #expect(read.wait(timeout: .now() + 3) == .success, "statistics or a pass-through waited on a transfer in progress")
+        #expect(seen.get()?.passedThrough == 1)
+    }
+
+    private final class LockedBox<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: T
+        init(_ value: T) { self.value = value }
+        func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ new: T) { lock.lock(); value = new; lock.unlock() }
+    }
+
+    @Test("a converted buffer is the composer's in-place target: x420, IOSurface-backed, its own memory")
+    func convertedBufferIsAnInPlaceTarget() throws {
+        let converter = BaseLayerFormatConverter()
+        // An x420 buffer with no IOSurface: not what the composer reads, so it is converted into a pool buffer.
+        let source = try #require(Self.makeBuffer(format: Self.x420, ioSurface: false))
+        guard case .ready(let first) = converter.prepare(source) else { Issue.record("not ready"); return }
+        guard case .ready(let second) = converter.prepare(source) else { Issue.record("not ready"); return }
+        var params = DoviMetalParams()
+        params.flags = []
+        #expect(DoviFelComposer.inPlaceRefusal(baseBuffer: first, params: params, readWriteSupported: true) == nil,
+                "the composer takes a converted buffer for an in-place write")
+        #expect(first !== source && second !== source && first !== second, "each frame has a buffer of its own")
+        #expect(CVPixelBufferGetIOSurface(first) != CVPixelBufferGetIOSurface(second),
+                "two live converted frames do not share a surface")
+        #expect(CVPixelBufferGetIOSurface(first) != CVPixelBufferGetIOSurface(source))
+        // Writing into the converted buffer, as an in-place composition does, leaves the player's buffer alone.
+        let before = Self.samples(source)
+        CVPixelBufferLockBaseAddress(first, [])
+        if let base = CVPixelBufferGetBaseAddressOfPlane(first, 0) { memset(base, 0x55, 64) }
+        CVPixelBufferUnlockBaseAddress(first, [])
+        let after = Self.samples(source)
+        #expect(before.luma == after.luma && before.chroma == after.chroma)
     }
 
     private final class FlushLog: @unchecked Sendable {

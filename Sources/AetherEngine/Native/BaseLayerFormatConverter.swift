@@ -47,20 +47,40 @@ protocol BaseLayerConverting: AnyObject, Sendable {
 
 /// The output route asks its `AVPlayerItemVideoOutput` for the player's own buffer format (`nil` pixel buffer
 /// attributes), because naming `x420` there makes the system's decoder service keep a second, much larger
-/// set of buffers (about 220 MB less memory in all on the Mac clip that measured it, see
-/// `docs/dolby-vision-fel.md`). The composer reads `x420`. A player that hands out `x420` directly costs
+/// set of buffers (see `docs/dolby-vision-fel.md` for the figures and the build they come from). The composer reads `x420`. A player that hands out `x420` directly costs
 /// nothing here; any other format is transferred into a small pool of `x420` buffers with
 /// `VTPixelTransferSession` (public API), on the thread that pulled the frame.
 ///
-/// The pool is sized from what was measured on the Mac: 3 buffers live in steady state, 5 in a burst after a
-/// seek, a limit of 6 never refused. It gives its idle buffers back when no frame was converted for a second
-/// (a paused player holds none), and the converter is torn down with the route on its off-main stop path.
+/// The pool limit is sized from the frame rate and the buffers that can be alive at once (`poolLimit(frameRate:)`),
+/// not from one clip. It gives its idle buffers back when no frame was converted for a second (a paused
+/// player holds none), and the converter is torn down with the route on its off-main stop path.
+///
+/// Two locks, so a reader of the counters never waits on a transfer: `lock` guards the session and the pool
+/// and is held across the pixel transfer and the bounded wait for a buffer (up to about 36 ms); `statsLock`
+/// guards only the counters and is held for the length of an increment. `statistics`, which the route's
+/// `summary` reads on the main thread from `stop()`, takes only `statsLock`.
 final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
 
     /// The format the composer reads.
     static let outputFormat = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-    /// Buffers the pool hands out at once. Measured: 3 in steady state, 5 in seek bursts, 6 never refused.
-    static let poolLimit = 6
+    /// Buffers held by the display side once a converted frame has been composed in place: the one on screen
+    /// and the one the layer retains while it replaces it.
+    static let displayHeldFrames = 2
+    /// One more, so a refusal is not the normal state at the exact count.
+    static let spareBuffers = 1
+
+    /// The most pool buffers alive at once for a stream at `frameRate`. With the composition in place the
+    /// converted buffer is the one that reaches the display layer, so it stays out of the pool until the layer
+    /// lets it go. The holders: the frames taken `pullAheadSeconds` ahead of the clock (a whole number of
+    /// them, rounded up), the frames the display holds (`displayHeldFrames`), the compositions in flight
+    /// (`DoviFelComposer.maxFramesInFlight`) and a spare. 9 at 23.976 and 24 fps, 10 at 30, 14 at 60. A stream
+    /// whose rate is unknown gets the 60 fps figure. It is a ceiling, not an allocation: the pool grows only
+    /// as far as the holders need.
+    static func poolLimit(frameRate: Double) -> Int {
+        let rate = frameRate.isFinite && frameRate > 0 ? frameRate : 60
+        let lead = Int((DualLayerOutputRoute.pullAheadSeconds * rate - 1e-9).rounded(.up))
+        return lead + displayHeldFrames + DoviFelComposer.maxFramesInFlight + spareBuffers
+    }
     /// Seconds with no conversion after which the idle buffers are released. The same age the composer's
     /// output pool uses (`kCVPixelBufferPoolMaximumBufferAgeKey`).
     static let idleTrimSeconds = 1.0
@@ -78,7 +98,8 @@ final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
     typealias Transfer = (VTPixelTransferSession, CVPixelBuffer, CVPixelBuffer) -> OSStatus
     typealias Flush = (CVPixelBufferPool) -> Void
 
-    private let poolLimit: Int
+    /// Buffers the pool hands out at once.
+    let poolLimit: Int
     private let idleTrimSeconds: Double
     private let now: @Sendable () -> Double
     private let retryAttempts: Int
@@ -86,7 +107,10 @@ final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
     private let transfer: Transfer
     private let flush: Flush
 
+    /// Guards the session, the pool and the vended list. Held across the transfer and the bounded buffer wait.
     private let lock = NSLock()
+    /// Guards `stats` only. Never held across a transfer or a sleep, and nothing else is taken under it.
+    private let statsLock = NSLock()
     private var session: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?
     private var poolWidth = 0
@@ -101,7 +125,7 @@ final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
 
     /// `retryAttempts` and `retryInterval` default to the composer's own bounded wait for its output pool
     /// (at most about 36 ms on the pull thread, and only while every pool buffer is held downstream).
-    init(poolLimit: Int = BaseLayerFormatConverter.poolLimit,
+    init(poolLimit: Int = BaseLayerFormatConverter.poolLimit(frameRate: 0),
          idleTrimSeconds: Double = BaseLayerFormatConverter.idleTrimSeconds,
          retryAttempts: Int = DoviFelComposer.outputPoolAttempts,
          retryInterval: TimeInterval = DoviFelComposer.outputPoolRetryInterval,
@@ -118,30 +142,34 @@ final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
     }
 
     var statistics: BaseLayerConversionStatistics {
-        lock.lock(); defer { lock.unlock() }
+        statsLock.lock(); defer { statsLock.unlock() }
         return stats
+    }
+
+    private func count(_ update: (inout BaseLayerConversionStatistics) -> Void) {
+        statsLock.lock(); update(&stats); statsLock.unlock()
     }
 
     func prepare(_ buffer: CVPixelBuffer) -> BaseLayerPreparation {
         if Self.decision(for: buffer) == .passThrough {
-            lock.lock(); stats.passedThrough += 1; lock.unlock()
+            count { $0.passedThrough += 1 }
             return .ready(buffer)
         }
         lock.lock(); defer { lock.unlock() }
-        if closed { stats.failed += 1; return .failed("the converter is closed") }
+        if closed { count { $0.failed += 1 }; return .failed("the converter is closed") }
         if session == nil {
             var created: VTPixelTransferSession?
             let status = VTPixelTransferSessionCreate(allocator: kCFAllocatorDefault, pixelTransferSessionOut: &created)
             guard status == noErr, let created else {
-                stats.failed += 1
+                count { $0.failed += 1 }
                 return .failed("no pixel transfer session (status \(status))")
             }
             session = created
         }
-        guard let session else { stats.failed += 1; return .failed("no pixel transfer session") }
+        guard let session else { count { $0.failed += 1 }; return .failed("no pixel transfer session") }
         let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
         guard let pool = ensurePool(width: width, height: height) else {
-            stats.failed += 1
+            count { $0.failed += 1 }
             return .failed("no buffer pool for \(width)x\(height)")
         }
         var destination: CVPixelBuffer?
@@ -153,24 +181,25 @@ final class BaseLayerFormatConverter: BaseLayerConverting, @unchecked Sendable {
             if attempt < retryAttempts - 1 { Thread.sleep(forTimeInterval: retryInterval) }
         }
         if status == kCVReturnWouldExceedAllocationThreshold {
-            stats.refused += 1
+            count { $0.refused += 1 }
             return .refused
         }
         guard status == kCVReturnSuccess, let destination else {
-            stats.failed += 1
+            count { $0.failed += 1 }
             return .failed("buffer pool status \(status)")
         }
         vended.removeAll { $0.value == nil }
         vended.append(WeakBuffer(value: destination))
-        stats.peakLive = max(stats.peakLive, vended.count)
+        let live = vended.count
+        count { $0.peakLive = max($0.peakLive, live) }
         let transferred = transfer(session, buffer, destination)
         guard transferred == noErr else {
-            stats.failed += 1
+            count { $0.failed += 1 }
             return .failed("pixel transfer status \(transferred)")
         }
         // The pixel transfer carries the buffer's attachments (colour tags, display metadata) to the
         // destination; `attachmentsFollowThePicture` holds that.
-        stats.converted += 1
+        count { $0.converted += 1 }
         lastUse = now()
         return .ready(destination)
     }

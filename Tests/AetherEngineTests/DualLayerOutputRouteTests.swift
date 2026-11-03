@@ -43,6 +43,7 @@ struct DualLayerOutputRouteTests {
         private(set) var flushes = 0
         private(set) var closed = false
         var onFlush: (() -> Void)?
+        var onFatalDecodeError: (@Sendable (Error) -> Void)?
         /// Called from `submitBaseLayerFrame` with no lock held; a test blocks here to stand in for the
         /// composer waiting on a GPU slot.
         var onSubmit: (() -> Void)?
@@ -86,10 +87,10 @@ struct DualLayerOutputRouteTests {
         private var decoded: [ClosedRange<Int>] = [0...100_000]
         var onCopy: ((Double) -> Void)?
         private let buffer: CVPixelBuffer
-        init() throws {
+        init(format: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) throws {
             var out: CVPixelBuffer?
-            // IOSurface-backed, as the player's buffers are: the route passes only those on untouched.
-            guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+            // IOSurface-backed, as the player's buffers are: the route passes only x420 ones on untouched.
+            guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, format,
                                       [kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
                                       &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
             buffer = out
@@ -121,7 +122,8 @@ struct DualLayerOutputRouteTests {
     }
 
     private static func rig(packetsUntil seconds: Double = 60, skipping skipped: ClosedRange<Double>? = nil,
-                            historyBytes: Int = 1 << 20, converter: BaseLayerConverting? = nil) throws -> Rig {
+                            historyBytes: Int = 1 << 20, converter: BaseLayerConverting? = nil,
+                            frameFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) throws -> Rig {
         let history = try #require(VideoPacketHistory(capacityBytes: historyBytes))
         let decoder = RecordingDecoder()
         let sink = RecordingSink()
@@ -129,7 +131,7 @@ struct DualLayerOutputRouteTests {
         let route = DualLayerOutputRoute(decoder: decoder, sink: sink, history: history, frameRate: fps,
                                          clock: { clock.sample() },
                                          baseLayerConverter: converter ?? BaseLayerFormatConverter())
-        let frames = try ScriptedFrames()
+        let frames = try ScriptedFrames(format: frameFormat)
         route.attachFrameSource(frames)
         let rig = Rig(route: route, decoder: decoder, sink: sink, frames: frames, clock: clock)
         store(rig, from: 0, until: seconds, skipping: skipped)
@@ -574,6 +576,106 @@ struct DualLayerOutputRouteTests {
         #expect(rig.decoder.submits.count == submitsAtStop, "the composer was handed nothing after the teardown")
         #expect(rig.sink.frames.count == framesAtStop, "the display layer was handed nothing after the teardown")
         #expect(reports.count == 0, "a stopped route does not report a conversion failure")
+    }
+
+
+    // MARK: The counters and the stop
+
+    @Test("stop() returns while a transfer is blocked, and the summary it logs does not wait for the transfer")
+    func stopDoesNotWaitOnABlockedTransfer() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let converter = BaseLayerFormatConverter(transfer: { _, _, _ in entered.signal(); release.wait(); return noErr })
+        // 8-bit frames: every one needs a conversion, so the pull tick goes into the (blocked) transfer.
+        let rig = try Self.rig(converter: converter, frameFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        defer { for _ in 0..<8 { release.signal() } }
+        rig.clock.seconds = 0
+        rig.route.feedTick()
+        let tickDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { rig.route.pullTick(); tickDone.signal() }
+        #expect(Self.wait(entered, seconds: 10) == .success, "the pull tick never reached the transfer")
+        let summaryRead = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = rig.route.summary; summaryRead.signal() }
+        #expect(Self.wait(summaryRead, seconds: 3) == .success, "summary waited on the transfer")
+        rig.route.stopWaitSeconds = 0.2
+        let stopped = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        Task { @MainActor in rig.route.stop { completed.signal() }; stopped.signal() }
+        #expect(Self.wait(stopped, seconds: 3) == .success, "stop() on the main actor waited on the transfer in progress")
+        for _ in 0..<8 { release.signal() }
+        #expect(Self.wait(tickDone, seconds: 10) == .success)
+        #expect(Self.wait(completed, seconds: 10) == .success, "the teardown finished once the transfer did")
+    }
+
+    @Test("a run of pool refusals is logged when it starts, once per run, and a conversion that heals it ends the run")
+    func refusalRunsAreLoggedOnce() throws {
+        let converter = ScriptedConverter(.refuse)
+        let rig = try Self.rig(converter: converter)
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        Self.play(rig, from: 0, to: 2)
+        #expect(rig.route.refusalRunsLogged == 1, "one line for a run of many refusals")
+        #expect(!capture.matching("the conversion pool is full").isEmpty)
+        converter.mode = .passThrough
+        Self.play(rig, from: 2, to: 3)
+        converter.mode = .refuse
+        Self.play(rig, from: 3, to: 4)
+        #expect(rig.route.refusalRunsLogged == 2, "a second run after a conversion is a new line")
+        for run in 0..<(DualLayerOutputRoute.refusalRunLogLimit + 3) {
+            converter.mode = .passThrough
+            Self.play(rig, from: 4 + Double(run) * 2, to: 4.5 + Double(run) * 2)
+            converter.mode = .refuse
+            Self.play(rig, from: 4.5 + Double(run) * 2, to: 5.5 + Double(run) * 2)
+        }
+        #expect(rig.route.refusalRunsLogged == DualLayerOutputRoute.refusalRunLogLimit, "the lines are bounded")
+    }
+
+    // MARK: A decoder that cannot produce video
+
+    @Test("a fatal decoder error reaches the route's owner once, however often the decoder reports it")
+    func decoderFailureIsReportedOnce() throws {
+        let rig = try Self.rig()
+        let reports = Counter()
+        rig.route.onDecoderFailure = { _ in reports.bump() }
+        let fire = try #require(rig.decoder.onFatalDecodeError, "the route never installed its handler")
+        fire(VideoDecoderError.composerStalled)
+        fire(VideoDecoderError.composerStalled)
+        #expect(reports.count == 1)
+    }
+
+    @Test("a decoder error that arrives after the route stopped is not reported")
+    @MainActor func decoderFailureAfterStopIsIgnored() async throws {
+        let rig = try Self.rig()
+        let reports = Counter()
+        rig.route.onDecoderFailure = { _ in reports.bump() }
+        let fire = try #require(rig.decoder.onFatalDecodeError)
+        await Self.finishStop(rig.route)
+        fire(VideoDecoderError.composerStalled)
+        #expect(reports.count == 0)
+    }
+
+    @Test("the engine hands the picture back to AVPlayer when the decoder fails, and only for its own route")
+    @MainActor func engineHandsBackOnDecoderFailure() async throws {
+        let engine = try AetherEngine()
+        let failingRig = try Self.rig()
+        let failing = failingRig.route
+        engine.dualLayerOutputRoute = failing
+        engine.handBackOnDecoderFailure(of: failing)
+        let fire = try #require(failingRig.decoder.onFatalDecodeError)
+        fire(VideoDecoderError.composerStalled)
+        while engine.dualLayerOutputRoute != nil { await Task.yield() }
+        #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
+
+        // A report of a route that is no longer the engine's stops nothing.
+        let oldRig = try Self.rig()
+        engine.handBackOnDecoderFailure(of: oldRig.route)
+        let successor = try Self.rig().route
+        engine.dualLayerOutputRoute = successor
+        let staleFire = try #require(oldRig.decoder.onFatalDecodeError)
+        staleFire(VideoDecoderError.composerStalled)
+        await Task { @MainActor in }.value
+        #expect(engine.dualLayerOutputRoute === successor)
+        engine.stopDualLayerOutputRoute()
     }
 
     @Test("the engine hands the picture back to AVPlayer when the conversion fails, and only for its own route")

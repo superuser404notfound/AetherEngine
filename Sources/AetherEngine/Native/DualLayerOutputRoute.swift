@@ -17,6 +17,9 @@ protocol OutputRouteDecoder: AnyObject {
     func submitBaseLayerFrame(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Data: Data?, epoch: UInt64?)
     func flush()
     func close()
+    /// Called once when the decoder cannot produce video at all: its primary open failed, or the GPU
+    /// composition stalled for good (`VideoDecoderError.composerStalled`).
+    var onFatalDecodeError: (@Sendable (Error) -> Void)? { get set }
 }
 
 extension DualLayerVideoDecoder: OutputRouteDecoder {}
@@ -138,7 +141,7 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     private let composeInPlace: Bool
     private let clockOverride: (@Sendable () -> OutputRouteClockSample?)?
     /// Makes the player's buffers readable for the composer (a pass-through when they already are).
-    private let baseLayerConverter: BaseLayerConverting
+    let baseLayerConverter: BaseLayerConverting
 
     private let lock = NSLock()
     /// Serialises the pull side's direct hand-over of a base-layer frame against a resync's flush, so an
@@ -195,6 +198,11 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     private var conversionFailingSince: Double?
     private var baseLayerFormatLogged = false
     private var conversionFailureReported = false
+    /// Whether the current run of pool refusals has been logged, and how many runs were. Pull queue only.
+    private var refusalRunLogged = false
+    private(set) var refusalRunsLogged = 0
+    /// Refusal runs that get their own line; later ones are only in the summary's counters.
+    static let refusalRunLogLimit = 5
 
     private let feedQueue = DispatchQueue(label: "com.aetherengine.fel-output.feed", qos: .userInteractive)
     private let pullQueue = DispatchQueue(label: "com.aetherengine.fel-output.pull", qos: .userInteractive)
@@ -208,8 +216,10 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
     /// needs no open call, so the route counts it as opened.
     init(decoder: OutputRouteDecoder, sink: OutputRouteSink, history: VideoPacketHistory, frameRate: Double,
          composeInPlace: Bool = false, clock: (@Sendable () -> OutputRouteClockSample?)? = nil,
-         baseLayerConverter: BaseLayerConverting = BaseLayerFormatConverter()) {
+         baseLayerConverter: BaseLayerConverting? = nil) {
+        // The pool limit follows the stream's frame rate (`BaseLayerFormatConverter.poolLimit(frameRate:)`).
         self.baseLayerConverter = baseLayerConverter
+            ?? BaseLayerFormatConverter(poolLimit: BaseLayerFormatConverter.poolLimit(frameRate: frameRate))
         self.decoder = decoder
         self.concreteDecoder = decoder as? DualLayerVideoDecoder
         self.sink = sink
@@ -220,6 +230,30 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         self.clockOverride = clock
         self.opened = concreteDecoder == nil
         self.tap = VideoPacketTap(receiver: self)
+        decoder.onFatalDecodeError = { [weak self] error in self?.decoderFailed(error) }
+    }
+
+    /// The decoder reported it can produce no video (its primary open failed, or the GPU composition stalled
+    /// for good). Told once, so the owner hands the picture back to AVPlayer (the 8.1 base layer): the
+    /// decoder refuses packets from then on, so without the hand-back the route would keep sending base-layer
+    /// frames with no word to the host. A route that has been stopped reports nothing.
+    var onDecoderFailure: (@Sendable (Error) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onDecoderFailure }
+        set { lock.lock(); _onDecoderFailure = newValue; lock.unlock() }
+    }
+    private var _onDecoderFailure: (@Sendable (Error) -> Void)?
+    private var decoderFailureReported = false
+
+    private func decoderFailed(_ error: Error) {
+        lock.lock()
+        let report = !stopped && !decoderFailureReported
+        if report { decoderFailureReported = true }
+        let handler = _onDecoderFailure
+        lock.unlock()
+        guard report else { return }
+        EngineLog.emit("[DualLayerOutputRoute] the decoder cannot produce video (\(error)); "
+                       + "the route hands the picture back to AVPlayer", category: .engine)
+        handler?(error)
     }
 
     /// The conversion of the player's frames failed for good (`conversionFailureSeconds`). Told once, so the
@@ -765,9 +799,22 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         switch baseLayerConverter.prepare(buffer) {
         case .ready(let readable):
             conversionFailingSince = nil
+            refusalRunLogged = false
             return readable
         case .refused:
             conversionFailingSince = nil
+            // A refusal skips a frame, so a run of them is steady judder with the audio running. The first of
+            // each run is logged, because nothing else says so before the summary.
+            if !refusalRunLogged {
+                refusalRunLogged = true
+                if refusalRunsLogged < Self.refusalRunLogLimit {
+                    refusalRunsLogged += 1
+                    let conversion = baseLayerConverter.statistics
+                    EngineLog.emit("[DualLayerOutputRoute] the conversion pool is full (every buffer is held downstream); "
+                                   + "frames are skipped until one is released (refused=\(conversion.refused + 1) "
+                                   + "converted=\(conversion.converted) peakLive=\(conversion.peakLive))", category: .engine)
+                }
+            }
             return nil
         case .failed(let reason):
             if let since = conversionFailingSince, clock < since { conversionFailingSince = nil }

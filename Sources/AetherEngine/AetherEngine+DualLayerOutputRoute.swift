@@ -41,6 +41,7 @@ extension AetherEngine {
         }
         dualLayerOutputRoute = route
         handBackOnConversionFailure(of: route)
+        handBackOnDecoderFailure(of: route)
         route.setVideoGravity(_videoGravity)
         session.setVideoPacketTap(route.tap)
         EngineLog.emit("[AetherEngine] DV P7 dual-layer: AVPlayer-output route (AVPlayer plays the base layer "
@@ -50,6 +51,19 @@ extension AetherEngine {
     }
 
     #if DualLayerDolbyVision
+    /// A decoder that cannot produce video (its primary open failed, or the GPU composition stalled for good)
+    /// leaves the route with base-layer frames and no word to the host, while AVPlayer's own rendering stays
+    /// suppressed. The route reports it once, and the engine stops it and hands the picture back to AVPlayer,
+    /// which shows the 8.1 base layer, only while the route is still its own.
+    func handBackOnDecoderFailure(of route: DualLayerOutputRoute) {
+        route.onDecoderFailure = { [weak self, weak route] _ in
+            Task { @MainActor [weak self, weak route] in
+                guard let self, let route, self.dualLayerOutputRoute === route else { return }
+                self.handDualLayerOutputRouteToPlayer(reason: "the decoder cannot produce video")
+            }
+        }
+    }
+
     /// The hand-back when the player's frames cannot be made readable for the composer: the route reports it
     /// once, and the engine stops it and leaves AVPlayer the picture, only while the route is still its own.
     func handBackOnConversionFailure(of route: DualLayerOutputRoute) {
