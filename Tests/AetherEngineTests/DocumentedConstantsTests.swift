@@ -488,4 +488,11 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("more than 16 slots off its unit", try felDocument())
     }
     #endif
+
+    // MARK: - Split-layer join repair (docs/dolby-vision-fel.md)
+
+    func testLayerJoinRepairRunMatchesDocumentation() throws {
+        XCTAssertEqual(DolbyVisionLayerJoin<Int>.agreeingRunForRepair, 16)
+        assertDocumented("once sixteen units agreed", try felDocument())
+    }
 }

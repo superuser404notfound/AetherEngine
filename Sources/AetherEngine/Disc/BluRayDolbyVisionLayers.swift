@@ -116,44 +116,74 @@ struct BluRayDolbyVisionLayers {
 /// Pairs each base-layer picture with the RPU of the enhancement unit that has its PTS, in read order. A base
 /// picture waits until its RPU is in; an RPU that comes first waits for its picture. Generic over the held unit so
 /// the demuxer holds its packets and the tests hold plain values.
+///
+/// Times are compared within `tolerance` (0 by default: equal). A caller whose two layers keep their own time bases
+/// (the tracks of an MP4 can differ in timescale and rounding) rescales both to one unit first and passes the
+/// tolerance the join uses; an unknown time (`Int64.min`) pairs with nothing.
 struct DolbyVisionLayerPairing<Unit> {
-    /// How many base pictures may wait before the oldest goes out without an RPU.
-    static var holdLimit: Int { 8 }
+    /// How many base pictures may wait before the oldest goes out without an RPU. Large enough for a whole chunk of a
+    /// chunk-interleaved MP4 (libavformat hands out each track in runs of up to a second, 60 pictures at 60 fps); the
+    /// span limit below is what normally releases one.
+    static var holdLimit: Int { 128 }
+
+    /// How long, in the pairing's time unit (microseconds), the newest waiting picture may be ahead of the oldest
+    /// before the oldest goes out without an RPU. Twice the longest chunk a muxer interleaves.
+    static var holdSpan: Int64 { 2_000_000 }
+
+    let tolerance: Int64
+
+    init(tolerance: Int64 = 0) { self.tolerance = tolerance }
 
     private var held: [(unit: Unit, pts: Int64, ready: Bool)] = []
-    private var earlyRPUs: [Int64: [UInt8]] = [:]
+    private var earlyRPUs: [(pts: Int64, rpu: [UInt8])] = []
 
     var heldCount: Int { held.count }
+
+    private func spanExceeded(_ headPTS: Int64) -> Bool {
+        guard headPTS != Int64.min, let last = held.last?.pts, last != Int64.min else { return false }
+        let (d, overflow) = last.subtractingReportingOverflow(headPTS)
+        return !overflow && d > Self.holdSpan
+    }
+
+    private func same(_ a: Int64, _ b: Int64) -> Bool {
+        guard a != Int64.min, b != Int64.min else { return false }
+        let (d, overflow) = a.subtractingReportingOverflow(b)
+        return !overflow && abs(d) <= tolerance
+    }
 
     /// A base-layer picture. `attach` appends an RPU to it and returns whether that worked.
     mutating func addBase(_ unit: Unit, pts: Int64, attach: (Unit, [UInt8]) -> Bool) {
         var ready = false
-        if let rpu = earlyRPUs.removeValue(forKey: pts) { ready = attach(unit, rpu) }
+        if let i = earlyRPUs.firstIndex(where: { same($0.pts, pts) }) {
+            ready = attach(unit, earlyRPUs.remove(at: i).rpu)
+        }
         held.append((unit, pts, ready))
     }
 
     /// An enhancement unit's RPU: completes the waiting base picture with its PTS, or waits for it. The early
     /// RPUs are bounded too, the lowest PTS goes first.
     mutating func addRPU(_ rpu: [UInt8], pts: Int64, attach: (Unit, [UInt8]) -> Bool) {
-        if let i = held.firstIndex(where: { !$0.ready && $0.pts == pts }) {
+        if let i = held.firstIndex(where: { !$0.ready && same($0.pts, pts) }) {
             held[i].ready = attach(held[i].unit, rpu)
             return
         }
-        if earlyRPUs.count >= Self.holdLimit * 2, let oldest = earlyRPUs.keys.min() { earlyRPUs[oldest] = nil }
-        earlyRPUs[pts] = rpu
+        if earlyRPUs.count >= Self.holdLimit * 2, let oldest = earlyRPUs.indices.min(by: { earlyRPUs[$0].pts < earlyRPUs[$1].pts }) {
+            earlyRPUs.remove(at: oldest)
+        }
+        earlyRPUs.append((pts, rpu))
     }
 
-    /// The oldest base picture, once its RPU is in, once more than `holdLimit` wait, or at the end of the source;
-    /// nil while it may still be completed. `paired` is false for a picture that goes out without an RPU.
+    /// The oldest base picture, once its RPU is in, once more than `holdLimit` wait or they span more than `holdSpan`,
+    /// or at the end of the source; nil while it may still be completed. `paired` is false for a picture that goes out without an RPU.
     mutating func release(atEnd: Bool = false) -> (unit: Unit, paired: Bool)? {
-        guard let head = held.first, head.ready || atEnd || held.count > Self.holdLimit else { return nil }
+        guard let head = held.first, head.ready || atEnd || held.count > Self.holdLimit || spanExceeded(head.pts) else { return nil }
         held.removeFirst()
         return (head.unit, head.ready)
     }
 
     /// Everything still waiting, for the caller to free (a seek, a reopen, close).
     mutating func drain() -> [Unit] {
-        defer { held = []; earlyRPUs = [:] }
+        defer { held = []; earlyRPUs = [] }
         return held.map(\.unit)
     }
 }

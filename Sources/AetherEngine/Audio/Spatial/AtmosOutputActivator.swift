@@ -15,8 +15,10 @@ import AVFoundation
 /// player plays or waits to play an item `playsAPAC` accepts (and for a short grace after a pause,
 /// see #848), and is released otherwise, since a prerolled E-AC-3 stream would compete with other audio.
 ///
-/// It runs only for TrueHD Atmos rendered to APAC: a DTS:X programme is not Dolby Atmos, and the
-/// receiver must not say it is.
+/// It runs for every rendered bed, TrueHD Atmos and DTS:X alike. tvOS carries a bed with heights over
+/// HDMI only as Dolby MAT, so a DTS:X bed that reaches the receiver intact shows as Dolby Atmos either
+/// way; without the stream a Sonos with Continuous Audio off stayed on stereo PCM for a DTS:X
+/// programme rendered to PCM.
 ///
 /// #834: it runs only while every output port is HDMI. On an AirPlay route there is no sink indicator
 /// to light, and a second unmuted player restarting beside the programme on every resume left a
@@ -222,9 +224,9 @@ final class AtmosOutputActivator {
 extension AetherEngine {
     /// tvOS only: the switch is an HDMI one, and on iOS and macOS a second unmuted player beside the
     /// engine's would compete with it for Now Playing and the audio session for no gain. Follows the
-    /// engine's `AVPlayer` while it plays TrueHD Atmos as APAC, or else a software host whose renderer
-    /// receives Dolby Atmos (TrueHD Atmos as APAC, or compressed E-AC-3 JOC). DTS:X rendered to APAC is
-    /// not Dolby Atmos and the PCM decode has no Atmos, so neither brings the receiver to Dolby Atmos.
+    /// engine's `AVPlayer` while it plays a rendered bed (TrueHD Atmos or DTS:X, APAC or PCM), or else a
+    /// software host whose renderer receives a rendered bed or compressed E-AC-3 JOC. The PCM decode of
+    /// a source has no heights to bring across and never runs it.
     func followAtmosOutput() {
         #if os(tvOS)
         if let player = currentAVPlayer {
@@ -232,9 +234,9 @@ extension AetherEngine {
             atmosOutputActivator = activator
             activator.attach(to: player) { [weak self] _ in
                 guard let session = self?.nativeVideoSession else { return false }
-                return session.audioIsRenderedBed && session.audioBedIsFromDolbyAtmos
+                return session.audioIsRenderedBed
             }
-        } else if let host = softwareHost, host.audioRouteCarriesDolbyAtmos {
+        } else if let host = softwareHost, host.audioRouteTakesAtmosActivator {
             let activator = atmosOutputActivator ?? AtmosOutputActivator()
             atmosOutputActivator = activator
             activator.attachRenderer { [weak self, weak host] in

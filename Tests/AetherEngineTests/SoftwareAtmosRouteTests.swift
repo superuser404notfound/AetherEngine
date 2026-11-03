@@ -109,12 +109,12 @@ struct SoftwareAtmosRouteTests {
         #expect(route(codec: AV_CODEC_ID_AAC) == .pcm)
     }
 
-    @Test("only Dolby Atmos reaches the receiver as Dolby Atmos: TrueHD Atmos as APAC and JOC E-AC-3, not DTS:X")
-    func dolbyAtmosRoutes() {
-        #expect(SoftwareAtmosRoute.apac(.l714).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_TRUEHD))
-        #expect(SoftwareAtmosRoute.compressedEAC3JOC.carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_EAC3))
-        #expect(!SoftwareAtmosRoute.apac(.l714).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_DTS))
-        #expect(!SoftwareAtmosRoute.pcm.carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_TRUEHD))
+    @Test("every rendered bed and JOC E-AC-3 take the Atmos activator, the PCM decode does not")
+    func activatorRoutes() {
+        #expect(SoftwareAtmosRoute.apac(.l714).takesAtmosOutputActivator)
+        #expect(SoftwareAtmosRoute.pcmBed(.l916).takesAtmosOutputActivator)
+        #expect(SoftwareAtmosRoute.compressedEAC3JOC.takesAtmosOutputActivator)
+        #expect(!SoftwareAtmosRoute.pcm.takesAtmosOutputActivator)
     }
 
     // MARK: - dec3

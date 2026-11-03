@@ -5538,6 +5538,18 @@ public final class AetherEngine: ObservableObject {
                 category: .engine
             )
         }
+        // A split Dolby Vision source (enhancement layer on its own PID or track) joins the layers into single-track
+        // units when the dual-layer route is wanted, so the checks below see the stream the decoder would read. The
+        // join is undone after the decision when the route is not taken.
+        if probeOpened, !options.isLive, probe.canJoinDolbyVisionEnhancementLayer,
+           VideoRoutingPolicy.dualLayerRouteIsWanted(
+               codecID: detectedCodecID,
+               dvProfile: detectedDVProfileNum,
+               dolbyVisionHandling: options.dolbyVisionHandling,
+               preferDualLayerDolbyVision: options.preferDualLayerDolbyVision,
+               canHardwareDecode: nil) {
+            probe.enableDolbyVisionEnhancementLayerJoin()
+        }
         // A Profile 7 source with in-band parameter sets (`hev1` with an empty hvcC) is unclassifiable
         // to the strict verdict below and would stay native for that reason alone. When the dual-layer
         // route is wanted, complete the probe's record from the head of the stream first; the session
@@ -5611,7 +5623,7 @@ public final class AetherEngine: ObservableObject {
             isLive: options.isLive,
             isSourceSeekable: dualLayerSeekable,
             canHardwareDecode: opensHardwareHEVC,
-            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers,
+            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers || probe.joinsDolbyVisionEnhancementLayer,
             airPlayVideoReceiver: airPlayVideoReceiver) == nil {
             let vIdx = probe.videoStreamIndex
             elType = await BlockingWork.detached(priority: .userInitiated) { [probe] in
@@ -5644,7 +5656,7 @@ public final class AetherEngine: ObservableObject {
             canHardwareDecode: opensHardwareHEVC,
             elType: elType,
             geometry: dualLayerGeometry,
-            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers,
+            enhancementLayerInPackets: !probe.foldsBluRayDolbyVisionLayers || probe.joinsDolbyVisionEnhancementLayer,
             airPlayVideoReceiver: airPlayVideoReceiver)
         if let line = dualLayerDecision.logLine {
             EngineLog.emit(line, category: .engine)
@@ -5652,6 +5664,9 @@ public final class AetherEngine: ObservableObject {
         // A route that was not taken leaves no el_type behind, so neither the routing below nor a
         // software host the session reaches for another reason composes the dual layers.
         if !dualLayerDecision.isTaken { elType = nil }
+        if !dualLayerDecision.isTaken, probe.joinsDolbyVisionEnhancementLayer {
+            probe.disableDolbyVisionEnhancementLayerJoin()
+        }
         sourceElType = elType
         // The AVPlayer-output route keeps the native route: AVPlayer plays the base layer, the enhancement
         // layer is composed onto its frames. Everything that routes a Profile 7 FEL source to the software

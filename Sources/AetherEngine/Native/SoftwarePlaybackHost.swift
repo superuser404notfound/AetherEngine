@@ -295,8 +295,8 @@ final class SoftwarePlaybackHost {
     private var audioDecoder: (any SoftwareAudioProducing)?
     /// How this session's audio reaches the renderer (`SoftwareAtmosRoute`), for the logs and the tests.
     private(set) var audioRoute: SoftwareAtmosRoute = .pcm
-    /// The route carries Dolby Atmos (`SoftwareAtmosRoute.carriesDolbyAtmos`), for `AtmosOutputActivator`.
-    private(set) var audioRouteCarriesDolbyAtmos = false
+    /// The route needs `AtmosOutputActivator` (`SoftwareAtmosRoute.takesAtmosOutputActivator`).
+    private(set) var audioRouteTakesAtmosActivator = false
     /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
     /// the renderer as Atmos instead of as the PCM decode of their core.
     var objectAudioRendering: ObjectAudioRendering = .off
@@ -1296,6 +1296,8 @@ final class SoftwarePlaybackHost {
                elType: elType,
                preferDualLayerDolbyVision: preferDualLayerDolbyVision,
                dolbyVisionHandling: dolbyVisionHandling) {
+            // A split source's enhancement layer joins the video packets (a no-op once the load joined it).
+            dem.enableDolbyVisionEnhancementLayerJoin()
             let vIdx = dem.videoStreamIndex
             await BlockingWork.detached(priority: .userInitiated) {
                 _ = VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)
@@ -1521,7 +1523,7 @@ final class SoftwarePlaybackHost {
                 self.audioDecoder = made.producer
                 self.audioShapingApplied = audioShaping.isActive && made.route == .pcm
                 self.audioRoute = made.route
-                self.audioRouteCarriesDolbyAtmos = made.route.carriesDolbyAtmos(sourceCodec: acp.pointee.codec_id)
+                self.audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
                 self.audioTimeBaseSeconds = atb.den > 0 ? Double(atb.num) / Double(atb.den) : 0

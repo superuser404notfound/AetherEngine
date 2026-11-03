@@ -12,6 +12,25 @@ the public-API contract.
 
 ### Added
 
+- **`AetherEngine.probeDolbyVisionEnhancementLayer(url:options:)` and `prewarmDualLayerDolbyVision()`.**
+  The probe reports whether a Profile 7 source carries a FEL or MEL enhancement layer, read off the first RPU
+  without decoding. The prewarm compiles the composer shaders ahead of the first dual-layer frame, off the
+  cooperative pool. `aetherctl` gains `eltype`, `elsurvey`, `elframe` and `dmpass` for the probe, the
+  residual survey, a single-frame dump and the display-metadata passthrough check.
+- **A Profile 7 FEL source with the enhancement layer on its own PID or track now takes the dual-layer route.**
+  A UHD Blu-ray clip (base layer on PID `0x1011`, enhancement layer on `0x1015`) used to play as the base layer
+  with the RPUs folded in (Profile 8.1), and a Matroska / MP4 file with the enhancement layer as a second video
+  track played the base layer alone, because the enhancement layer never reached the decoder. With `preferDualLayerDolbyVision`
+  and the `DualLayerDolbyVision` trait the demuxer now joins the two layers into the one-unit-per-picture
+  form a single-track remux has, pairing the layers in decode order from a shared IRAP and re-anchoring after
+  every seek, and the composer runs on it unchanged. With the trait or the preference off, or when the layers
+  cannot be joined, the enhancement layer's RPUs are folded into the base layer (Profile 8.1): that is the path
+  as before for Blu-ray PIDs, and new for two-track Matroska / MP4 files, which used to play the base layer
+  alone (HDR10 when the RPUs sit in the enhancement track). The fold pairs the layers on times converted to
+  microseconds, so tracks with different timescales pair too. A base picture now waits up to 128 pictures or
+  2 s of presentation time for its RPU (was 8 pictures) before it goes out without one, Blu-ray PIDs included,
+  so a whole chunk of a chunk-interleaved MP4 pairs: a source whose enhancement layer is missing or broken
+  hands out its video up to 2 s behind the other streams.
 - **A Profile 7 FEL source can be composed on AVPlayer's own frames instead of on the software host.**
   `LoadOptions.dualLayerRoute` (default `.softwareHost`, the route as before) takes `.avPlayerOutput` (macOS, tvOS and iOS
   compile it; only macOS has been run) with the `DualLayerDolbyVision` trait and `preferDualLayerDolbyVision` on. AVPlayer then plays the base layer
@@ -24,6 +43,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD
+  Atmos, so a DTS:X programme rendered into a bed (`objectAudioRendering`) never brought a receiver like a Sonos with
+  Continuous Audio off to Dolby MAT, and the bed played as stereo PCM. tvOS carries a bed with heights over HDMI only
+  as Dolby MAT, so an intact DTS:X bed shows as Dolby Atmos on the receiver either way. The activator now runs for
+  every rendered bed, TrueHD Atmos and DTS:X, on the AVPlayer path and the software host alike; still only on a route
+  whose every output is HDMI (#834).
+
 - **Streaked band around the picture with `upscalesLowResolutionVideo` (AE#846).** The edge fix for VideoToolbox
   super resolution's ringing repeated one row and column of the ML output over the outer 12 samples, which reads
   as streaks on real footage (about 27 px top and bottom on an SD DVD at 4K, on all four sides of an anamorphic
@@ -32,6 +58,11 @@ the public-API contract.
   leaves no room for the margin (1280 wide at 1.5x), the outer 8 output samples on that axis are a bilinear
   scale of the source. Measured against reference frames, the edge band now matches the interior instead of
   losing 4 to 10 dB PSNR. The timing line's `clamp` step is now `edge`.
+
+- **Data race on the muxer's lifetime fragment counters (AE#966).** `MP4SegmentMuxer` bumped its fragment byte
+  and cut totals on the pump thread while the diagnostics heartbeat read them through
+  `muxerLifetimeFragmentBytes` / `muxerFragmentCuts` with no common lock. Both totals now sit behind their own
+  lock. Diagnostics only, no change to the fragments written.
 
 ## [7.55.0] - 2026-11-02
 

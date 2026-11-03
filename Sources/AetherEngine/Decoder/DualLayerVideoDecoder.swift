@@ -801,6 +801,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         if ptsKey != Int64.min {
             // In decode order, here, so every frame carries concrete parameters by the time it pairs:
             // compose time runs in completion order, which is not stream order.
+            DoviDmPassthroughProbe.shared.noteSource(key: ptsKey, rpu: layers.rpuData)
             recordSideData(key: ptsKey, params: layers.rpuParams, dmNAL: layers.convertedRpu, baseLayerNAL: layers.baseLayerRpu,
                            usesPrevious: layers.usesPreviousMapping, disableResidual: layers.disableResidual)
         }
@@ -2202,6 +2203,14 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             usleep(500)
         }
         orderedDelivery.barrier()
+    }
+
+    /// Sets the composition counter that drives the dither's frame parity (it counts compositions since the
+    /// last flush). A test that compares pictures from two decoders needs both on the same parity, because a
+    /// seek lands on a different keyframe in two layouts of one title and the counter then differs by an odd
+    /// number while the pictures are the same.
+    func setFrameIndexForTesting(_ value: UInt32) {
+        lock.lock(); frameIndex = value; lock.unlock()
     }
 
     /// Invalidates both layers' sessions without forgetting them, as the system does on an iOS screen

@@ -261,6 +261,19 @@ final class DoviFelComposer: @unchecked Sendable {
         return line
     }
 
+    /// Compiles the process-shared pipelines for the system default device now, off any composer, so the
+    /// first composed frame finds them built (``AetherEngine/prewarmDualLayerDolbyVision()``). The same
+    /// `SharedPipelines` cache the composers read, so a composition that starts mid-compile waits for this
+    /// one instead of compiling twice, and a failure is kept as it would be on first use.
+    static func prewarmPipelines() -> Bool {
+        guard let device = MTLCreateSystemDefaultDevice() else { return false }
+        let start = CFAbsoluteTimeGetCurrent()
+        guard (try? SharedPipelines.getOrCreate(device: device)) != nil else { return false }
+        EngineLog.emit(String(format: "[DoviFelComposer] pipelines ready after %.1f ms (prewarm)",
+                              (CFAbsoluteTimeGetCurrent() - start) * 1000), category: .swPlayback, level: .verbose)
+        return true
+    }
+
     #if DEBUG
     var lumaPipelineForTesting: MTLComputePipelineState? {
         ensurePipelines()?.lumaPipeline
