@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.56.0] - 2026-11-03
+
 ### Added
 
 - **The software host's PiP source now builds its own controller.**
@@ -164,6 +168,15 @@ the public-API contract.
   and cut totals on the pump thread while the diagnostics heartbeat read them through
   `muxerLifetimeFragmentBytes` / `muxerFragmentCuts` with no common lock. Both totals now sit behind their own
   lock. Diagnostics only, no change to the fragments written.
+
+- **DVB subtitles authored on a 720x576 display land where they were placed on HD video (AE#971).** The
+  decoder seeded every bitmap codec's canvas from the video, and dvbsubdec only takes its canvas from a display
+  definition segment, or the EN 300 743 default of 720x576, while the context has no size, so SD cues were
+  normalized against 1920x1080 and drawn left of centre, above the middle and too small. DVB is no longer seeded;
+  PGS is unchanged. `SubtitleImage.position` is normalized against the decoder's canvas, and `canvasSize` reports
+  the video frame for DVB, because a DVB display covers the whole picture and a 720x576 plane on HD video has
+  non-square pixels: a host that maps the canvas aspect-preserving now stretches it onto the picture instead of
+  pushing SD cues off the bottom.
 
 ## [7.55.0] - 2026-11-02
 
