@@ -83,11 +83,128 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     }
     #endif
 
+    /// The picture's size while picture in picture is active (nil otherwise). A system PiP window
+    /// mirrors the display layer's own geometry, so a layer sized to this view carries the view's aspect
+    /// into the window as offset or clipped video. While set, the software display layer is sized to
+    /// the picture's rectangle for the active gravity instead (aspect-fit, or the larger aspect-fill
+    /// rectangle with this view clipping it), so the window gets a layer of the picture's shape. Under
+    /// `resizeAspect` and `resizeAspectFill` this view looks the same; under `resize` the picture is
+    /// shown undistorted while PiP is up.
+    private var pictureFit: CGSize?
+    /// The size of the macOS system PiP window's picture area while it is known (nil otherwise). It takes
+    /// precedence over `pictureFit`: the layer is laid out at the origin with exactly this size and its
+    /// own gravity fits the picture. The system draws an opaque bar over the top of that window, covering
+    /// part of the picture; its height is not public, so we fit to the whole window and leave the bar
+    /// alone (FB22411168).
+    private var pictureArea: CGSize?
+    /// `clipsToBounds` / `masksToBounds` as the host had it, restored when the fit ends.
+    private var clipsBeforeFit: Bool?
+
+    /// Engine-internal. Shape the hosted software layer to the picture (`size` non-nil, PiP active) or
+    /// back to the full view (nil). No-op for a layer that is not a sample buffer layer.
+    func setPictureFit(_ size: CGSize?) {
+        guard pictureFit != size else { return }
+        pictureFit = size
+        #if canImport(AppKit)
+        hostedLayer?.autoresizingMask = layerAutoresizing
+        #endif
+        updateClipping()
+        applyLayerFrame()
+    }
+
+    /// Engine-internal. Lay the hosted software layer out to the PiP window's picture area (`size`
+    /// non-nil) or back to the `pictureFit` / full view layout (nil). Called only on macOS.
+    func setPictureArea(_ size: CGSize?) {
+        let size = size.flatMap { $0.width > 0 && $0.height > 0 ? $0 : nil }
+        guard pictureArea != size else { return }
+        pictureArea = size
+        #if canImport(AppKit)
+        hostedLayer?.autoresizingMask = layerAutoresizing
+        #endif
+        updateClipping()
+        applyLayerFrame()
+    }
+
+    /// Engine-internal. Re-applies the hosted layer's frame now, for a state it depends on that changed
+    /// without a layout pass (the display layer's gravity). Not a layout pass on macOS during PiP,
+    /// where the layer's autoresizing is off.
+    func refreshHostedLayerFrame() {
+        updateClipping()
+        applyLayerFrame()
+    }
+
+    #if canImport(AppKit)
+    /// Full-bounds sizing normally, so the layer follows a live window drag. During PiP the layer is
+    /// the picture's rectangle rather than the bounds: it keeps its size and stays centred during a
+    /// drag, and the next layout pass fits it.
+    private var layerAutoresizing: CAAutoresizingMask {
+        if pictureArea != nil { return [] }
+        return pictureFit == nil
+            ? [.layerWidthSizable, .layerHeightSizable]
+            : [.layerMinXMargin, .layerMaxXMargin, .layerMinYMargin, .layerMaxYMargin]
+    }
+    #endif
+
+    /// The aspect-fill rectangle is larger than the view, so the view clips it while the fit is on.
+    private var wantsClipping: Bool {
+        guard let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return false }
+        // The area frame can exceed this view, so the view clips it.
+        if pictureArea != nil { return true }
+        return pictureFit != nil && sample.videoGravity == .resizeAspectFill
+    }
+
+    private func updateClipping() {
+        #if canImport(UIKit)
+        let current = clipsToBounds
+        #elseif canImport(AppKit)
+        let current = layer?.masksToBounds ?? false
+        #endif
+        var target = current
+        if wantsClipping {
+            if clipsBeforeFit == nil { clipsBeforeFit = current }
+            target = true
+        } else if let saved = clipsBeforeFit {
+            clipsBeforeFit = nil
+            target = saved
+        }
+        guard target != current else { return }
+        #if canImport(UIKit)
+        clipsToBounds = target
+        #elseif canImport(AppKit)
+        layer?.masksToBounds = target
+        #endif
+    }
+
+    /// Frame for the hosted layer inside `bounds`: the rectangle `content` occupies under `gravity`
+    /// (aspect-fit for `resizeAspect` and `resize`, the larger aspect-fill rectangle for
+    /// `resizeAspectFill`), centred; the full bounds when `content` is nil.
+    nonisolated static func hostedFrame(in bounds: CGRect, fitting content: CGSize?,
+                                        gravity: AVLayerVideoGravity = .resizeAspect) -> CGRect {
+        guard let content, content.width > 0, content.height > 0, bounds.width > 0, bounds.height > 0 else { return bounds }
+        let ratios = (bounds.width / content.width, bounds.height / content.height)
+        let scale = gravity == .resizeAspectFill ? max(ratios.0, ratios.1) : min(ratios.0, ratios.1)
+        let size = CGSize(width: content.width * scale, height: content.height * scale)
+        return CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    /// Frame for the layer while the PiP window's picture area is known: origin at zero, the area's size.
+    /// The layer's own gravity fits the picture inside it.
+    nonisolated static func pictureAreaFrame(_ area: CGSize) -> CGRect {
+        CGRect(origin: .zero, size: area)
+    }
+
+    private var hostedFrame: CGRect {
+        guard let sample = hostedLayer as? AVSampleBufferDisplayLayer else { return bounds }
+        if let pictureArea { return Self.pictureAreaFrame(pictureArea) }
+        return Self.hostedFrame(in: bounds, fitting: pictureFit, gravity: sample.videoGravity)
+    }
+
     private func applyLayerFrame() {
         guard hostedLayer != nil || stillLayer != nil else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        hostedLayer?.frame = bounds
+        hostedLayer?.frame = hostedFrame
         presenter.layout(bounds)
         CATransaction.commit()
     }
@@ -118,8 +235,12 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
         // bounds with both axes flexible keeps it full-bounds throughout.
         layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
         #endif
-        layer.frame = bounds
         hostedLayer = layer
+        #if canImport(AppKit)
+        layer.autoresizingMask = layerAutoresizing
+        #endif
+        updateClipping()
+        layer.frame = hostedFrame
         CATransaction.commit()
     }
 
@@ -128,6 +249,9 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
     /// `attach`: a layer that has moved to another surface stays there.
     func detach() {
         clearStill()
+        // The PiP layout belongs to the engine that set it; a view bound again later starts clean.
+        pictureFit = nil
+        pictureArea = nil
         guard let hosted = hostedLayer else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -135,6 +259,7 @@ public final class AetherPlayerView: PlatformBaseView, HeldStillSurface {
             hosted.removeFromSuperlayer()
         }
         hostedLayer = nil
+        updateClipping()
         CATransaction.commit()
     }
 
