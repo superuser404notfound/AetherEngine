@@ -1301,10 +1301,11 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         composeResultLock.lock(); totalComposeStalls += 1; composeResultLock.unlock()
         if episodes > Self.maxComposeStallEpisodes {
             reportComposerStalled(reason: "\(episodes - 1) stalls without \(Self.composeHealthyFramesToResetStalls) healthy compositions between")
+        } else {
+            let ms = Int((composeStallTimeout * 1000).rounded())
+            EngineLog.emit("[DualLayerVideoDecoder] compose stalled: no GPU slot for \(Self.composeStallSlices) waits of \(ms / Self.composeStallSlices) ms; sending frames as the base layer until the GPU frees one",
+                           category: .swPlayback)
         }
-        let ms = Int((composeStallTimeout * 1000).rounded())
-        EngineLog.emit("[DualLayerVideoDecoder] compose stalled: no GPU slot for \(Self.composeStallSlices) waits of \(ms / Self.composeStallSlices) ms; sending frames as the base layer until the GPU frees one",
-                       category: .swPlayback)
         return true
     }
 

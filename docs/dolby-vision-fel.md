@@ -119,7 +119,7 @@ with the mapping removed.
 
 **Kernels** (`DoviShaderSource.swift`). Luma: base code → piece selection → polynomial (evaluated in
 normalized float) or MMR when the luma curve uses MMR → plus the inverse-NLQ residual of the
-enhancement-layer luma, upsampled bilinearly from four explicit texel reads with exact weights, the code rounded half up →
+enhancement-layer luma, upsampled bilinearly from one gather of the 2x2 footprint with exact weights, the code rounded half up →
 12-bit clamp → dither → 10-bit. Chroma: base chroma plus the base luma at the chroma site ([1 2 1] around
 the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled with the
 ETSI GS CCM 001 Annex B.3 default filter (vertical centred, horizontal co-sited; integer arithmetic) → dither.
@@ -476,6 +476,10 @@ the decoder's lock, and each call is O(K):
   `softwarePipelineFailed`), and `fatalDecodeError` holds it; `decode(packet:)` refuses packets from then on.
   The report is made on the compose queue with no decoder lock, backlog lock or counter lock held, so the
   host's handler can call back into the decoder. Frames already queued still go out as the base layer.
+  Ending the session, rather than staying on the base layer, is deliberate: a base-layer picture on a
+  stream the host asked to be composed is a silent loss of the enhancement layer that looks like
+  success, and only a reported error lets the host act on it (retry, or choose another route). Whether
+  that is the right product behaviour is the maintainer's call; the bound is the two constants above.
 - **A bypass goes through the same queue** (`fulfilBypass`), behind every composition handed off
   before it, so it cannot overtake queued compositions and push their tickets past the stall guard. The
   price is that it can wait behind a head that is waiting for a slot, bounded by the first of: the next

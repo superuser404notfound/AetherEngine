@@ -151,6 +151,23 @@ final class DocumentedConstantsTests: XCTestCase {
         XCTAssertEqual(Double(DualLayerVideoDecoder.maxLayerSkewFrames) * frameBytes / 1_000_000, 75, accuracy: 1)
         assertDocumented("about 150 MB at 4K with the clock, 75 MB at K = 3", try felDocument())
     }
+
+    /// The compose stall numbers (dolby-vision-fel.md §5.6) and the output buffers they reserve.
+    func testComposeStallBoundsMatchDocumentation() throws {
+        XCTAssertEqual(DualLayerVideoDecoder.composeStallSlices, 4)
+        XCTAssertEqual(DualLayerVideoDecoder.defaultComposeStallTimeout, 2)
+        XCTAssertEqual(DualLayerVideoDecoder.maxComposeStallBypassFrames, 600)
+        XCTAssertEqual(DualLayerVideoDecoder.maxComposeStallEpisodes, 3)
+        XCTAssertEqual(DualLayerVideoDecoder.composeHealthyFramesToResetStalls, 240)
+        let fel = try felDocument()
+        assertDocumented("`composeStallSlices` (4) slices of `composeStallTimeout / 4` (2 s by default)", fel)
+        assertDocumented("`maxComposeStallBypassFrames` (600,", fel)
+        assertDocumented("`maxComposeStallEpisodes` (3)", fel)
+        assertDocumented("`composeHealthyFramesToResetStalls` (240,", fel)
+        // 14 + 3 buffers of a 4K 10-bit frame, 3 bytes a pixel.
+        XCTAssertEqual(Double(14 + 3) * Double(3840 * 2160 * 3) / 1_000_000, 423, accuracy: 1)
+        assertDocumented("allocation threshold 14 + reserve 3 → 423 MB", fel)
+    }
     #endif
 
     private func felDocument() throws -> String {
