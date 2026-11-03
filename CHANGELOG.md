@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **The AVPlayer-output route takes the player's own frame format.** Its video output no longer names `x420`,
+  which keeps the system's decoder service from holding a second set of buffers (689 MB instead of 1007 MB in
+  the service on a 4K clip on the Mac, 170 to 185 MB less by the sum of the two footprints, which counts the shared pool twice, and about 140 MB less counted once; release builds, two runs each, decimal MB).
+  A frame already in `x420` goes to the composer untouched; any other format is transferred into a pool of
+  `x420` buffers sized from the frame rate, and the composer writes into that buffer in place. A frame whose
+  conversion is refused or fails is skipped and never composed unconverted, the first of each run of refusals
+  is logged, and a conversion that keeps failing hands the picture back to AVPlayer, as does a composer that
+  stops. One clip, macOS only; tvOS has not been run.
 
 ## [7.56.0] - 2026-11-03
 
@@ -74,14 +83,6 @@ _Nothing yet._
   video output's buffers (`AETHER_FEL_OUTPUT_INPLACE=0` turns that off), which takes about 113 MB off the
   process on the Mac; the route still needs about 1.8 times the software host's memory there, most of it
   AVPlayer's own conversion of each frame for the video output.
-- **The AVPlayer-output route takes the player's own frame format.** Its video output no longer names `x420`,
-  which keeps the system's decoder service from holding a second set of buffers (689 MB instead of 1007 MB in
-  the service on a 4K clip on the Mac, 170 to 185 MB less by the sum of the two footprints, which counts the shared pool twice, and about 140 MB less counted once; release builds, two runs each, decimal MB).
-  A frame already in `x420` goes to the composer untouched; any other format is transferred into a pool of
-  `x420` buffers sized from the frame rate, and the composer writes into that buffer in place. A frame whose
-  conversion is refused or fails is skipped and never composed unconverted, the first of each run of refusals
-  is logged, and a conversion that keeps failing hands the picture back to AVPlayer, as does a composer that
-  stops. One clip, macOS only; tvOS has not been run.
 
 ### Changed
 
