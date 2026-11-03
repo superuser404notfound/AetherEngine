@@ -30,7 +30,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Twenty-seven subcommands plus the bare-URL `serve` alias.
+Twenty-eight subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -518,7 +518,7 @@ dovi_tool info -i out.rpu -f 0   # expect dovi_profile 8, disable_residual_flag 
 
 ## feltest
 
-Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so. Runs the Dolby Vision Profile 7 FEL dual-layer pipeline over a real clip: demuxes, splits each packet into the base layer, the enhancement layer (typically 1080p) and the RPU, decodes both layers in hardware `VTDecompressionSession`s, composes each frame with `DoviFelComposer` on Metal, and audits the output twice. The pixel audit reports mean and standard deviation of Y / Cb / Cr, so a black picture or collapsed chroma fails. The metadata audit checks that every delivered frame carries a `DolbyVisionRPUData` attachment, and warns (without failing) when the payload never changes, since a static-metadata clip is valid. The verdict also requires at least one frame the composer actually reconstructed: a bypassed frame comes out as its base layer and counts as output but not as composed. Exit codes: `0` verified, `1` probe error, `2` no frames output, `3` chroma collapsed to a flat 64, `4` frames emitted without per-frame Dolby Vision metadata, `5` no frame was composed. See [dolby-vision-fel.md](dolby-vision-fel.md).
+Does not need the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so. Runs the Dolby Vision Profile 7 FEL dual-layer pipeline over a real clip: demuxes, splits each packet into the base layer, the enhancement layer (typically 1080p) and the RPU, decodes both layers in hardware `VTDecompressionSession`s, composes each frame with `DoviFelComposer` on Metal, and audits the output twice. The pixel audit reports mean and standard deviation of Y / Cb / Cr, so a black picture or collapsed chroma fails. The metadata audit checks that every delivered frame carries a `DolbyVisionRPUData` attachment, and warns (without failing) when the payload never changes, since a static-metadata clip is valid. The verdict also requires at least one frame the composer actually reconstructed: a bypassed frame comes out as its base layer and counts as output but not as composed. Exit codes: `0` verified, `1` probe error, `2` no frames output, `3` chroma collapsed to a flat 64, `4` frames emitted without per-frame Dolby Vision metadata, `5` no frame was composed. See [dolby-vision-fel.md](dolby-vision-fel.md).
 
 ```bash
 swift run aetherctl feltest [--frames N] <p7-source>
@@ -534,7 +534,7 @@ swift run aetherctl dvsurvey --frames 6000 <p7-source>
 
 ## eltype
 
-Reads `label<TAB>url` lines from stdin and prints, for each source, whether its Dolby Vision Profile 7 enhancement layer is FEL or MEL (`AetherEngine.probeDolbyVisionEnhancementLayer`, no decode). Needs the `DualLayerDolbyVision` trait. `--parallel N` (default 8) bounds the sources open at once; the work runs on `concurrentPerform`, so the effective width is also capped by the core count.
+Reads `label<TAB>url` lines from stdin and prints, for each source, whether its Dolby Vision Profile 7 enhancement layer is FEL or MEL (`AetherEngine.probeDolbyVisionEnhancementLayer`, no decode). Does not need the `DualLayerDolbyVision` trait. `--parallel N` (default 8) bounds the sources open at once; the work runs on `concurrentPerform`, so the effective width is also capped by the core count.
 
 ```bash
 printf 'title\t/path/to/p7.mkv\n' | swift run aetherctl eltype --parallel 4

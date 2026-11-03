@@ -117,7 +117,7 @@ func printUsage() {
       aetherctl feltest [--frames N] <file>   (DualLayerDolbyVision trait)
       aetherctl dmpass [--frames N] [--out PATH.jsonl] <file>   (display-metadata passthrough check; DualLayerDolbyVision trait)
       aetherctl dvsurvey [--frames N] [--list K] <file>
-      aetherctl eltype [--parallel N]      (label<TAB>url lines on stdin; DualLayerDolbyVision trait)
+      aetherctl eltype [--parallel N]      (label<TAB>url lines on stdin)
       aetherctl elsurvey [--parallel N] [--points N]   (label<TAB>url lines on stdin; DualLayerDolbyVision trait)
       aetherctl elframe --at SECONDS --out DIR <url>   (DualLayerDolbyVision trait)
       aetherctl extract [--at <sec>] [--preview|--snapshot] [--width <px>] [--loops <n>] <url>

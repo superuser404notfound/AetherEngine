@@ -190,7 +190,7 @@ extension DualLayerRouteDecision.Reason {
         case .notBuiltIn:
             return "built without the DualLayerDolbyVision trait"
         case .enhancementLayerNotInPackets:
-            return "enhancement layer on its own PID (UHD Blu-ray), only its RPUs are folded in"
+            return "enhancement layer on its own PID or track, only its RPUs are folded in"
         case .baseLayerOnlyHandling:
             return "dolbyVisionHandling is baseLayerOnly"
         case .liveOrNotSeekable:

@@ -14,7 +14,7 @@ extension HeavyDualLayerSuites {
     /// stream with the layers on two PIDs, a Matroska file with two tracks) must play exactly like the same title as
     /// one remuxed track: the same frames, the same pixels, the same RPUs, over a full play and after seeks.
     ///
-    /// The fixtures are generated from a single-track FEL clip (`work/fel/dual-track-input/tools/make_dual_track.py`)
+    /// The fixtures are generated from a single-track FEL clip, remuxed to two tracks (Matroska) or two PIDs (transport stream)
     /// and live in the directory named by `DV_FEL_DUAL_TRACK_DIR`: `single.mp4` (or `single.mkv`), `dual.mkv`,
     /// `dual.m2ts`. They are not checked in, and every test skips when they are absent.
     @Suite(.offCooperativePool)
@@ -40,7 +40,7 @@ extension HeavyDualLayerSuites {
 
         static let needsFiles: Comment = "needs the generated dual-track files: set DV_FEL_DUAL_TRACK_DIR"
 
-        /// Seek targets in seconds (the segA soak cycle by default), `DV_FEL_DUAL_TRACK_SEEKS` overrides.
+        /// Seek targets in seconds (a fixed multi-seek cycle by default), `DV_FEL_DUAL_TRACK_SEEKS` overrides.
         static var seekTargets: [Double] {
             let raw = ProcessInfo.processInfo.environment["DV_FEL_DUAL_TRACK_SEEKS"] ?? "35.144,50.144,5,20.144,35.144,50.144,5,20.144"
             return raw.split(separator: ",").compactMap { Double($0) }
@@ -229,7 +229,7 @@ extension HeavyDualLayerSuites.DolbyVisionDualTrackFilesTests {
         #expect(result.differing == 0, "first differing frame at \(result.firstDiff ?? -1) s")
     }
 
-    @Test("after each seek of the segA schedule the split file shows the original's frames",
+    @Test("after each seek of the default schedule the split file shows the original's frames",
           .enabled(if: !DualTrackFiles.splitFiles.isEmpty, DualTrackFiles.needsFiles),
           arguments: DualTrackFiles.splitFiles)
     func seeksMatchSingleTrack(name: String) async throws {
