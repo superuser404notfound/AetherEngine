@@ -1296,6 +1296,8 @@ final class SoftwarePlaybackHost {
                elType: elType,
                preferDualLayerDolbyVision: preferDualLayerDolbyVision,
                dolbyVisionHandling: dolbyVisionHandling) {
+            // A split source's enhancement layer joins the video packets (a no-op once the load joined it).
+            dem.enableDolbyVisionEnhancementLayerJoin()
             let vIdx = dem.videoStreamIndex
             await BlockingWork.detached(priority: .userInitiated) {
                 _ = VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)

@@ -40,6 +40,8 @@ struct DolbyVisionPulseHostApp: App {
                 .onAppear {
                     // About eleven minutes of playback, partly not AVPlayer: keep the screensaver away.
                     UIApplication.shared.isIdleTimerDisabled = true
+                    // Compile the FEL composer's shaders while the first slate is up, not on the first frame.
+                    Task.detached { _ = await AetherEngine.prewarmDualLayerDolbyVision() }
                 }
         }
     }

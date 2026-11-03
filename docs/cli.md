@@ -30,7 +30,7 @@ swift run aetherctl smbtest <smb-url>    # play a file off an SMB2/3 share via t
 swift run aetherctl <url>                # alias for serve (backwards compat)
 ```
 
-Twenty-four subcommands plus the bare-URL `serve` alias.
+Twenty-eight subcommands plus the bare-URL `serve` alias.
 
 ## probe
 
@@ -532,6 +532,30 @@ Walks a title's RPUs with no decoders and no GPU, converts each to Profile 8.1 e
 swift run aetherctl dvsurvey --frames 6000 <p7-source>
 ```
 
+## eltype
+
+Reads `label<TAB>url` lines from stdin and prints, for each source, whether its Dolby Vision Profile 7 enhancement layer is FEL or MEL (`AetherEngine.probeDolbyVisionEnhancementLayer`, no decode). Does not need the `DualLayerDolbyVision` trait. `--parallel N` (default 8) bounds the sources open at once; the work runs on `concurrentPerform`, so the effective width is also capped by the core count.
+
+```bash
+printf 'title\t/path/to/p7.mkv\n' | swift run aetherctl eltype --parallel 4
+```
+
+## elsurvey
+
+Reads `label<TAB>url` lines from stdin and measures what each title's enhancement layer does to its picture at sampled keyframes (`AetherEngine.doviResidualSurvey`): per title the mean and p99 residual in 12-bit codes, the share of pixels moved by a 10-bit step or more, and the nits change at the average and peak levels, taken before the composer's range clamp. A TSV row prints as each title finishes. Needs the `DualLayerDolbyVision` trait. `--points N` (default 48) is the keyframes sampled per title; `--parallel N` (default 8) bounds the titles measured at once, capped by the core count like `eltype`.
+
+```bash
+swift run aetherctl elsurvey --points 24 --parallel 4 < titles.tsv
+```
+
+## elframe
+
+Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and without its residual, and writes the full-precision P010 planes (`fel_y.bin`, `fel_uv.bin`, `mel_y.bin`, `mel_uv.bin`, little-endian 16-bit words, the 10-bit code in the top bits and the finer bits below) and `frame.json` to a directory. `--at SECONDS` picks the keyframe at or before that time and `--out DIR` the destination. Prints a note, and sets `residual_disabled_by_rpu` in `frame.json`, when the RPU itself switches the residual off for the frame (FEL and MEL are then identical). Needs the `DualLayerDolbyVision` trait.
+
+```bash
+swift run aetherctl elframe --at 600 --out /tmp/elframe <p7-source>
+```
+
 ## pktdump
 
 Opens the demuxer under a selectable open profile, optionally seeks, and dumps raw video packet timing exactly as the demuxer delivers it (before any producer-side dts repair and before muxing): per-packet dts / pts / duration / keyframe flag samples, NOPTS and non-monotonic dts counts, and dts-delta / duration histograms. Also prints the resolved stream fields that `find_stream_info` fills (`avg_frame_rate`, `codecpar.video_delay`).
@@ -946,6 +970,16 @@ swift run aetherctl smbtest "smb://user:pass@host/share/path/to/file.mkv" --read
 ```
 
 `--reads N` sets the random-seek count (default 64). Credentials default to guest when omitted from the URL; URL-encode special characters in the password.
+
+## dmpass
+
+Measures whether the Dolby Vision Profile 7 FEL route keeps the source's display-management metadata when it converts the RPU to Profile 8.1 and attaches it to the composed frame. For every composed frame the source RPU (as the demuxer delivered it) is read with libdovi, the RPU is read back from the pixel buffer attachment at the hand-off point, and the two are compared field by field: the header, a summary of the mapping, the display-management scalars and every level (L1 to L6, L8 to L11, L254, L255), plus the Content Mapping version (v4.0 when an L254 block is present, else v2.9). Fields the profile conversion is defined to change (the profile and enhancement-layer labels, the two residual flags, the mapping) are listed as expected; any other difference fails the run. Mode 2 also resets the YCC to RGB matrix and offsets, the RGB to LMS matrix and the signal colour space to the Profile 8.1 values: that is reported as a separate "normalised" category (the frame still passes, the field names and counts are printed), and shows nothing when the source already carries those values. Needs the `DualLayerDolbyVision` trait.
+
+```bash
+swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp/dm.jsonl /path/to/p7.mkv
+```
+
+`--frames N` (default 300) is the packet count to feed. `--out PATH.jsonl` writes one JSON object per frame with both readings and both RPU byte strings in hex, for an independent cross-check with `dovi_tool`. `AETHER_DM_PRINT=1` (or `hex`) echoes the per-frame `[dm-digest]` lines; the exit code is 0 when every frame passes. The same digest runs inside any host when `AETHER_DM_DIGEST` is `1`, `log` or `hex` (the last adds both RPU byte strings to each line); `AETHER_DM_DIGEST_FILE` appends the JSON form to a file. All of it exists only with the `DualLayerDolbyVision` trait. It is off by default and costs nothing then.
 
 ## Fixtures
 

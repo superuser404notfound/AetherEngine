@@ -10,6 +10,25 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`AetherEngine.probeDolbyVisionEnhancementLayer(url:options:)` and `prewarmDualLayerDolbyVision()`.**
+  The probe reports whether a Profile 7 source carries a FEL or MEL enhancement layer, read off the first RPU
+  without decoding. The prewarm compiles the composer shaders ahead of the first dual-layer frame, off the
+  cooperative pool. `aetherctl` gains `eltype`, `elsurvey`, `elframe` and `dmpass` for the probe, the
+  residual survey, a single-frame dump and the display-metadata passthrough check.
+- **A Profile 7 FEL source with the enhancement layer on its own PID or track now takes the dual-layer route.**
+  A UHD Blu-ray clip (base layer on PID `0x1011`, enhancement layer on `0x1015`) used to play as the base layer
+  with the RPUs folded in (Profile 8.1), and a Matroska / MP4 file with the enhancement layer as a second video
+  track played the base layer alone, because the enhancement layer never reached the decoder. With `preferDualLayerDolbyVision`
+  and the `DualLayerDolbyVision` trait the demuxer now joins the two layers into the one-unit-per-picture
+  form a single-track remux has, pairing the layers in decode order from a shared IRAP and re-anchoring after
+  every seek, and the composer runs on it unchanged. With the trait or the preference off, or when the layers
+  cannot be joined, the enhancement layer's RPUs are folded into the base layer (Profile 8.1): that is the path
+  as before for Blu-ray PIDs, and new for two-track Matroska / MP4 files, which used to play the base layer
+  alone (HDR10 when the RPUs sit in the enhancement track). The fold pairs the layers on times converted to
+  microseconds, so tracks with different timescales pair too.
+
 ### Fixed
 
 - **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD

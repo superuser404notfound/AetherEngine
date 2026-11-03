@@ -300,6 +300,9 @@ final class OrderedDelivery: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         #endif
         DoviDisplayMetadata.attach(rpuNAL: frame.dmNAL, to: frame.buffer.value)
+        if DoviDmPassthroughProbe.shared.isOn {
+            DoviDmPassthroughProbe.shared.observe(buffer: frame.buffer.value, key: DualLayerVideoDecoder.canonicalKey(pts: frame.pts), pts: frame.pts)
+        }
         onFrame?(frame.buffer.value, frame.pts, frame.hdr10Data)
     }
 

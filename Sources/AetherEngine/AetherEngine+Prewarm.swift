@@ -2,6 +2,30 @@ import Foundation
 
 public extension AetherEngine {
 
+    /// Compile the Dolby Vision Profile 7 FEL composer's Metal shaders now, so the first composed frame
+    /// does not wait for them.
+    ///
+    /// The composer compiles its shaders from source on the first FEL frame of a process: about 300 ms on
+    /// an M4 Pro the first time (longer on an Apple TV), then about 0.4 ms from Metal's shader cache until an
+    /// app update or a cache purge. A host that calls this at launch, or when a Profile 7 title is selected,
+    /// spends that while the viewer is still in its UI. It runs off the cooperative pool at utility
+    /// priority and returns when the shaders are ready.
+    ///
+    /// Safe to call any number of times, and concurrently with playback: the compile happens once per
+    /// process, and a composition that starts while it runs waits for it rather than compiling again.
+    ///
+    /// - Returns: Whether the pipelines are ready. False without the `DualLayerDolbyVision` trait (there is
+    ///   nothing to warm), with no Metal device, or when the shaders fail to compile; that failure is kept,
+    ///   so the dual-layer route then plays the base layer exactly as it would have without the warm.
+    @discardableResult
+    nonisolated static func prewarmDualLayerDolbyVision() async -> Bool {
+        #if DualLayerDolbyVision
+        await BlockingWork.detached(priority: .utility) { DoviFelComposer.prewarmPipelines() }.value
+        #else
+        false
+        #endif
+    }
+
     /// The default number of source bytes a warm retains, 8 MB.
     ///
     /// A byte budget rather than a duration, because a duration would need the bitrate, and the

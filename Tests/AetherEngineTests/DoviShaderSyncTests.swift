@@ -81,5 +81,15 @@ struct DoviShaderSyncTests {
         }
         #expect(compiles.count == 1)
     }
+
+    @Test("prewarm builds the shared pipelines a composer then uses", .enabled(if: DoviShaderSyncTests.metalAvailable, "needs a Metal device"))
+    func prewarmBuildsTheSharedPipelines() async throws {
+        #expect(await AetherEngine.prewarmDualLayerDolbyVision())
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let shared = try DoviFelComposer.SharedPipelines.getOrCreate(device: device)
+        let composer = try #require(DoviFelComposer())
+        #expect(composer.lumaPipelineForTesting === shared.lumaPipeline, "the composer reuses the warmed pipeline, no second compile")
+        #expect(await AetherEngine.prewarmDualLayerDolbyVision(), "a second warm is a cache hit")
+    }
 }
 #endif

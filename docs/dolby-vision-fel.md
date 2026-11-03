@@ -320,6 +320,17 @@ generation, the composer's GPU time of 12.9-14.3 ms per frame against a 41.7 ms 
 and 30 fps as a margin above 24p, are an assumption until the Apple TV run of this stack. UHD at 60 fps
 (200%) and 8K fall back.
 
+**Split sources.** A UHD Blu-ray clip carries the enhancement layer on its own PID (`0x1015`, with its own RPUs),
+and a Matroska or MP4 file may carry it as a second video track (a `dvcC` record on each track, the enhancement
+track declaring the enhancement layer present and the base layer not). The dual-layer route reads one track, so the
+demuxer joins the two (`Demuxer.enableDolbyVisionEnhancementLayerJoin`, `DolbyVisionLayerJoin`) into the unit a
+single-track remux carries: the n-th base access unit and the n-th enhancement access unit, each layer in its own
+decode order, anchored at an IRAP the layers share (after a seek, units before it are retired). A missing or extra
+enhancement unit is repaired by presentation time once sixteen units agreed; a source whose layers never share an
+IRAP plays base-only. A transport stream's packets are rewritten to four-byte length prefixes and its record to an
+hvcC. The load switches the join on when the route is wanted and switches it off again when the route is not taken,
+so the 8.1 path (`BluRayDolbyVisionLayers`, the RPUs folded into the base layer) is untouched.
+
 A Profile 7 load logs exactly one line, whichever way it goes (other sources log nothing here):
 
 ```
@@ -503,7 +514,10 @@ the decoder's lock, and each call is O(K):
   Metal's completion queue.
 - **Pipelines** are compiled once per process, lazily on first composition (a shared `MTLLibrary` and
   pipeline states), so a MEL or bypassed stream never compiles and a second decoder instance does not
-  recompile.
+  recompile. A cold compile is about 300 ms on an M4 Pro (almost all of it source to library; the
+  pipeline states take a millisecond or two), then about 0.4 ms from Metal's shader cache. A host takes
+  it off the first frame with `AetherEngine.prewarmDualLayerDolbyVision()` at launch or on selecting a
+  Profile 7 title; it fills the same shared cache.
 - **Kernels:** a per-frame 1024-entry luma prediction table replaces piece selection and polynomial
   evaluation per pixel whenever luma is polynomial (it is a pure function of the 10-bit base code);
   residual evaluation is skipped per component when that component's NLQ is inactive; threadgroup sizes
