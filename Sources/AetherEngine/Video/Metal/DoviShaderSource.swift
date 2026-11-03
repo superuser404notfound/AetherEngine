@@ -382,9 +382,23 @@ static inline int dovi_quantize(
    Enhancement layer upsampling
    ========================================================================= */
 
-// EL upsampling: bilinear, from four explicit texel reads with exact weights.
+// EL upsampling: Annex B for the 2:1 chroma, bilinear from explicit texel reads with exact weights elsewhere.
 //
-// el_spatial_resampling_filter_flag advertises that the encoder used its own
+// Chroma, at the 4:2:0 sites, when the EL is half the base layer's size in both axes (the Profile 7
+// enhancement layer): the default spatial resampling filter of ETSI GS CCM 001 Annex B.3, in integers
+// (`dovi_annexb_chroma`). The RPU does not carry the encoder's own filter (el_spatial_resampling_filter_flag
+// only says one was used), and the standard treats resampling as non-normative, but Annex B gives a default
+// and it is the one reading every EL plane agrees on: vertical first, centred, then horizontal, co-sited.
+// Measured on the Mac against an integer model written from the standard, the composed chroma lands within
+// +-1 of 12-bit code on all chroma samples of the corpus frames bar 3 Cb samples of one clip (largest error 2), where the one-fetch co-sited bilinear it
+// replaces reached 83 to 99% (the worst, a high-residual film clip, 83 / 90% for Cb / Cr). Any other
+// ratio (an EL at the base layer's size, which is an exact texel read) takes the exact-weight bilinear read below.
+//
+// Luma is still the centred bilinear read (one gather). An Annex B luma (4 vertical by 8 horizontal taps) is
+// compiled in only under DEBUG (`DOVI_DEBUG_EL_VARIANTS`), behind a flag, so its GPU cost can be measured
+// before anyone decides to ship it. Against the Dolby masters it helps on hard edges only.
+//
+// The bilinear read: el_spatial_resampling_filter_flag advertises that the encoder used its own
 // separable filter, whose taps the RPU does not carry, so no bit-exact inverse
 // is available from the stream. Against the DoViBaker oracle on a fine-detail set (gratings, zone plate,
 // band-limited noise) a 4-fetch Catmull-Rom bought about 0.7% of per-pixel error sd over bilinear, with chroma
@@ -448,6 +462,93 @@ static inline int dovi_el_code(float v) {
     return int(floor(v + 0.5f));
 }
 
+// The EL's integer code at a texel (clamped at the edges, like the standard's edge replication). The EL planes are
+// bound as integer textures (the stored P010 word >> 6); the Annex B filters below take their codes only through
+// these readers, so no filter on the EL path reads through a float sampler.
+template <access A>
+static inline int dovi_el_code_1(texture2d<ushort, A> tex, int2 p, int2 size) {
+    p = clamp(p, int2(0), size - 1);
+    return int(tex.read(uint2(p)).r >> 6);
+}
+
+template <access A>
+static inline int2 dovi_el_code_2(texture2d<ushort, A> tex, int2 p, int2 size) {
+    p = clamp(p, int2(0), size - 1);
+    return int2(tex.read(uint2(p)).rg >> 6);
+}
+
+// True when a plane of `el` texels is the half-size EL of a base-layer plane of `bl` samples (a base plane of
+// odd size still has its last sample, so `bl` may be one more than twice `el`).
+static inline bool dovi_el_is_half(uint bl, uint el) {
+    return el > 0u && (bl == 2u * el || bl + 1u == 2u * el);
+}
+
+// ETSI GS CCM 001 Annex B.3, horizontal: output 2m is the sample m, output 2m+1 is this 8-tap filter over
+// the samples m-3 .. m+4. Taps sum to 4096; the result is rounded (+2048 >> 12) and clamped to 16 bits.
+constant int dovi_annexb_h_taps[8] = { 22, 94, -524, 2456, 2456, -524, 94, 22 };
+
+// Chroma, vertical: output row 2n = (64 e[n-1] + 192 e[n] + 128) >> 8, row 2n+1 = (192 e[n] + 64 e[n+1] + 128) >> 8,
+// both in the EL chroma plane at column `cx`. Cb in .x, Cr in .y.
+template <typename Tex>
+static inline int2 dovi_annexb_v_chroma(Tex tex, int cx, int y, int2 size) {
+    int n = y >> 1;
+    bool odd = (y & 1) != 0;
+    int2 a = dovi_el_code_2(tex, int2(cx, odd ? n : n - 1), size);
+    int2 b = dovi_el_code_2(tex, int2(cx, odd ? n + 1 : n), size);
+    return clamp(((odd ? (192 * a + 64 * b) : (64 * a + 192 * b)) + 128) >> 8, int2(0), int2(65535));
+}
+
+// The Annex B resampled EL chroma code (Cb, Cr) at base chroma site `site`: vertical first, then horizontal on
+// the vertical results, integer all the way. `size` is the EL chroma plane's size.
+template <typename Tex>
+static inline int2 dovi_annexb_chroma(Tex tex, uint2 site, int2 size) {
+    int m = int(site.x >> 1);
+    int y = int(site.y);
+    if ((site.x & 1u) == 0u) {
+        return dovi_annexb_v_chroma(tex, m, y, size);
+    }
+    int2 acc = int2(2048);
+    for (int k = 0; k < 8; ++k) {
+        acc += dovi_annexb_h_taps[k] * dovi_annexb_v_chroma(tex, m + k - 3, y, size);
+    }
+    return clamp(acc >> 12, int2(0), int2(65535));
+}
+
+#ifdef DOVI_DEBUG_EL_VARIANTS
+#define DOVI_FLAG_DEBUG_COSITED_EL_CHROMA 0x4u /* A/B: the pre-Annex B co-sited bilinear chroma read */
+#define DOVI_FLAG_DEBUG_ANNEXB_EL_LUMA    0x8u /* measurement: Annex B EL luma (4 x 8 taps) */
+
+// Luma, vertical: row 2n = (-3 e[n-2] + 29 e[n-1] + 111 e[n] - 9 e[n+1] + 64) >> 7,
+// row 2n+1 = (-9 e[n-1] + 111 e[n] + 29 e[n+1] - 3 e[n+2] + 64) >> 7.
+template <typename Tex>
+static inline int dovi_annexb_v_luma(Tex tex, int cx, int y, int2 size) {
+    int n = y >> 1;
+    int v;
+    if ((y & 1) == 0) {
+        v = -3 * dovi_el_code_1(tex, int2(cx, n - 2), size) + 29 * dovi_el_code_1(tex, int2(cx, n - 1), size)
+          + 111 * dovi_el_code_1(tex, int2(cx, n), size) - 9 * dovi_el_code_1(tex, int2(cx, n + 1), size);
+    } else {
+        v = -9 * dovi_el_code_1(tex, int2(cx, n - 1), size) + 111 * dovi_el_code_1(tex, int2(cx, n), size)
+          + 29 * dovi_el_code_1(tex, int2(cx, n + 1), size) - 3 * dovi_el_code_1(tex, int2(cx, n + 2), size);
+    }
+    return clamp((v + 64) >> 7, 0, 65535);
+}
+
+template <typename Tex>
+static inline int dovi_annexb_luma(Tex tex, uint2 gid, int2 size) {
+    int m = int(gid.x >> 1);
+    int y = int(gid.y);
+    if ((gid.x & 1u) == 0u) {
+        return dovi_annexb_v_luma(tex, m, y, size);
+    }
+    int acc = 2048;
+    for (int k = 0; k < 8; ++k) {
+        acc += dovi_annexb_h_taps[k] * dovi_annexb_v_luma(tex, m + k - 3, y, size);
+    }
+    return clamp(acc >> 12, 0, 65535);
+}
+#endif
+
 /* ============================================================================
    Composition kernels
    ========================================================================= */
@@ -498,10 +599,20 @@ static inline void dovi_compose_luma_plane(
     if ((params.flags & DOVI_FLAG_DISABLE_RESIDUAL) == 0u &&
         params.nlq_y.nlq_method == DOVI_NLQ_METHOD_LINEAR &&
         params.nlq_y.nlq_scale != 0) {
-        // Centre-aligned: luma samples sit at pixel centres on both grids.
-        float el = dovi_upsample_el(el_y_tex, gid, uint2(params.bl_width, params.bl_height),
-                                    uint2(params.el_width, params.el_height));
-        vdr_y += dovi_inv_nlq(nlq_lut, 0u, dovi_el_code(el));
+        int el_code;
+#ifdef DOVI_DEBUG_EL_VARIANTS
+        if ((params.flags & DOVI_FLAG_DEBUG_ANNEXB_EL_LUMA) != 0u &&
+            dovi_el_is_half(params.bl_width, params.el_width) && dovi_el_is_half(params.bl_height, params.el_height)) {
+            el_code = dovi_annexb_luma(el_y_tex, gid, int2(params.el_width, params.el_height));
+        } else
+#endif
+        {
+            // Centre-aligned: luma samples sit at pixel centres on both grids.
+            float el = dovi_upsample_el(el_y_tex, gid, uint2(params.bl_width, params.bl_height),
+                                        uint2(params.el_width, params.el_height));
+            el_code = dovi_el_code(el);
+        }
+        vdr_y += dovi_inv_nlq(nlq_lut, 0u, el_code);
     }
 
     vdr_y = clamp(vdr_y, 0, int(params.vdr_max));
@@ -621,20 +732,32 @@ static inline DoviChromaSite dovi_chroma_site(
         bool cb_active = (params.nlq_cb.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cb.nlq_scale != 0);
         bool cr_active = (params.nlq_cr.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cr.nlq_scale != 0);
         if (cb_active || cr_active) {
-            // Chroma is co-sited with the top-left luma sample (chroma location type 2, as HDR10 and
-            // Dolby Vision streams carry it), so the enhancement chroma grid and the base chroma grid
-            // share their first sample rather than their outer edge: base chroma sample n sits at EL
-            // chroma texel n * el / bl, and a quarter-resolution EL gives the even samples exactly and
-            // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
-            // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
-            // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
-            float2 el = dovi_upsample_el_uv(el_uv_tex, site, uint2(uv_width, uv_height),
-                                            uint2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u));
+            // Chroma comes from the EL by the Annex B filter when the EL is half the base layer in both axes
+            // (its default resampling filter, see "Enhancement layer upsampling"); any other ratio, or the
+            // DEBUG co-sited A/B variant, takes the exact-weight bilinear read.
+            int2 el_uv_size = int2(int((params.el_width + 1u) / 2u), int((params.el_height + 1u) / 2u));
+            bool annexb = dovi_el_is_half(uv_width, uint(el_uv_size.x)) && dovi_el_is_half(uv_height, uint(el_uv_size.y));
+#ifdef DOVI_DEBUG_EL_VARIANTS
+            if ((params.flags & DOVI_FLAG_DEBUG_COSITED_EL_CHROMA) != 0u) {
+                annexb = false;
+            }
+#endif
+            int2 el_code;
+            if (annexb) {
+                el_code = dovi_annexb_chroma(el_uv_tex, site, el_uv_size);
+            } else {
+                // The pre-Annex B read, kept for the ratios the standard's filter does not cover and for the
+                // DEBUG A/B: chroma co-sited with the top-left luma sample (chroma location type 2), so base
+                // chroma sample n sits at EL chroma texel n * el / bl; bilinear from four explicit reads,
+                // same-resolution EL is an exact texel read.
+                float2 el = dovi_upsample_el_uv(el_uv_tex, site, uint2(uv_width, uv_height), uint2(el_uv_size));
+                el_code = int2(dovi_el_code(el.x), dovi_el_code(el.y));
+            }
             if (cb_active) {
-                vdr_cb += dovi_inv_nlq(nlq_lut, 1u, dovi_el_code(el.x));
+                vdr_cb += dovi_inv_nlq(nlq_lut, 1u, el_code.x);
             }
             if (cr_active) {
-                vdr_cr += dovi_inv_nlq(nlq_lut, 2u, dovi_el_code(el.y));
+                vdr_cr += dovi_inv_nlq(nlq_lut, 2u, el_code.y);
             }
         }
     }
@@ -1006,7 +1129,12 @@ kernel void dovi_compose_chroma_in_place(
     /// The source for a device that composes through the output pool only: typedefs, struct block and the pool
     /// and step-up kernels. Contains no `read_write` binding.
     static var poolSource: String {
-        preamble + "\n" + sharedStructs + "\n" + kernels + "\n"
+        #if DEBUG
+        // The A/B and measurement variants of the EL readers exist only in the shader a DEBUG build compiles.
+        return preamble + "\n#define DOVI_DEBUG_EL_VARIANTS 1\n" + sharedStructs + "\n" + kernels + "\n"
+        #else
+        return preamble + "\n" + sharedStructs + "\n" + kernels + "\n"
+        #endif
     }
 
     /// Runtime-compiled form for a device that also runs the in-place kernels: ``poolSource`` plus

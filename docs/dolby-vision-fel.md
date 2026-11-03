@@ -121,7 +121,8 @@ with the mapping removed.
 normalized float) or MMR when the luma curve uses MMR → plus the inverse-NLQ residual of the
 enhancement-layer luma, upsampled bilinearly from four explicit texel reads with exact weights, the code rounded half up →
 12-bit clamp → dither → 10-bit. Chroma: base chroma plus the base luma at the chroma site ([1 2 1] around
-the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled the same way, co-sited with the top-left luma sample (DoViBaker's phase) → dither.
+the even column in each of the cell's two rows, rows averaged; DoViBaker's MMR input) → MMR → plus the residual from the enhancement chroma, upsampled with the
+ETSI GS CCM 001 Annex B.3 default filter (vertical centred, horizontal co-sited; integer arithmetic) → dither.
 
 **Parameter ABI.** `DoviShaderSource.sharedStructs` on the GPU side, `DoviMetalParams.serialize` on
 the Swift side. `DoviLayoutProbeTests` has the GPU read every sub-block back at the offset Swift wrote
@@ -788,19 +789,30 @@ streams and Dolby's prediction is not public.
 
 ### 6.2 What is and is not applied
 
-Applied: base layer (all planes, MMR luma reads base chroma), enhancement layer (bilinear upsampled, inverse
+Applied: base layer (all planes, MMR luma reads base chroma), enhancement layer (upsampled, inverse
 NLQ with offset, scale, threshold, shift, `vdr_in_max`), the per-component polynomial and MMR curves, the
 bit depths, and the display metadata (carried into the converted Profile 8.1 RPU).
 
-The enhancement-layer upsampler is bilinear from four explicit texel reads with exact weights (`dovi_upsample_el`, the code rounded half up by `dovi_el_code`), not DoViBaker's spline taps and not the hardware sampler, whose fixed-point weights could land one code off the exact value. The
-encoder's own filter is not carried in the RPU (`el_spatial_resampling_filter_flag` only says one was
-used), so no kernel inverts it exactly. Against the DoViBaker oracle on a fine-detail set (gratings, zone
-plate, band-limited noise) a 4-fetch Catmull-Rom lowered the per-pixel error sd by about 0.7% on luma and
-left chroma unchanged, for four times the enhancement-layer reads. `dovi_upsample_el` keeps the
-texture size in its signature so a wider filter can replace bilinear without touching the callers.
+Enhancement-layer chroma is upsampled with the default resampling filter of ETSI GS CCM 001 Annex B.3
+(`dovi_annexb_chroma`), when the enhancement layer is half the base layer's size in both axes: vertical first,
+centred, as `(64 a + 192 b + 128) >> 8` of the two nearest rows; then horizontal, co-sited, where an even
+output sample copies and an odd one is the 8-tap filter `22 94 -524 2456 2456 -524 94 22` over the
+samples either side (`+ 2048 >> 12`), edges replicated. The standard treats resampling as non-normative and
+the RPU does not carry the encoder's own filter (`el_spatial_resampling_filter_flag` only says one was
+used), but its default is the one reading that closes the gap: on a spec-written integer model of the whole
+composition, the composer's chroma is within one 12-bit code on every chroma sample of the corpus except 3 Cb
+samples of one test clip (largest error 2), and within one code everywhere at 10 bit, where the co-sited bilinear read it replaced reached 83 to 99% (83% / 90% Cb / Cr on
+a film clip with a large residual). An enhancement layer at the base layer's size is read texel for texel,
+and any other ratio still takes the exact-weight bilinear read co-sited with the top-left luma sample.
+
+Luma is still the centred exact-weight bilinear read (`dovi_upsample_el`). The Annex B luma filter (4 vertical
+by 8 horizontal taps) exists in DEBUG builds only, behind `DoviComposerFlags.debugAnnexBElLuma`, so its GPU
+cost can be measured on a device before anyone decides to ship it; it changes the picture on hard edges
+only (text, graphics). A DEBUG build can also read the chroma the old way (`debugCositedElChroma`) for A/B
+runs. Against the DoViBaker oracle on a fine-detail set (gratings, zone plate, band-limited noise) a 4-fetch
+Catmull-Rom lowered the per-pixel error sd by about 0.7% on luma and left chroma unchanged, for four times
+the enhancement-layer reads. The luma phase is texel-centre aligned (`DoviEnhancementUpsamplerTests`).
 The inverse-NLQ table and the MMR coefficients are read from per-frame tables bound at buffers 2 and 3 of every compose kernel (`nlq_lut`, `mmr_table`).
-The phases are DoViBaker's: luma texel-centre aligned, chroma co-sited with the top-left luma sample in
-both axes (`DoviEnhancementUpsamplerTests`).
 
 - **Missing or CRC-failed RPU:** the frame borrows the previous real RPU's parameters for up to
   `maxBorrowedParamsRun` (3) frames in a row, then bypasses to the base layer. Reshaping and NLQ are constant

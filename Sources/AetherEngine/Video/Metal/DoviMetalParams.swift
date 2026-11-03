@@ -37,6 +37,15 @@ struct DoviComposerFlags: OptionSet, Sendable {
     /// The luma curve carries at least one MMR piece, so the luma kernel has to
     /// read the base-layer chroma planes as well.
     static let lumaMmr = DoviComposerFlags(rawValue: 0x2)
+
+    #if DEBUG
+    // Variants of the enhancement-layer readers, for A/B runs and measurement. They exist only in a DEBUG
+    // build (the shader that honours them is compiled only there), so a release build cannot ask for them.
+    /// Chroma EL read by one co-sited bilinear fetch, as before the Annex B filter.
+    static let debugCositedElChroma = DoviComposerFlags(rawValue: 0x4)
+    /// Luma EL read by the Annex B filter (4 vertical by 8 horizontal taps) instead of one bilinear fetch.
+    static let debugAnnexBElLuma = DoviComposerFlags(rawValue: 0x8)
+    #endif
 }
 
 /// Piecewise reshaping curve for one component; mirrors

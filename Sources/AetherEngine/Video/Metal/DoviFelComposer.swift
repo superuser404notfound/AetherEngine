@@ -505,6 +505,10 @@ final class DoviFelComposer: @unchecked Sendable {
         defer { returnParamSlot(work.paramSlot) }
         work.commandBuffer.commit()
         work.commandBuffer.waitUntilCompleted()
+        #if DEBUG
+        let gpuSeconds = work.commandBuffer.gpuEndTime - work.commandBuffer.gpuStartTime
+        lastGpuSecondsStorage.withLock { $0 = gpuSeconds }
+        #endif
         if let failure = Self.commandBufferFailure(work.commandBuffer, forced: forcedCommandBufferFailure.withLock { $0 }) {
             // The GPU did not finish writing the destination: it is not a frame, so no frame is returned.
             Self.logOnce("[DoviFelComposer] Command buffer error: \(failure)")
@@ -515,6 +519,12 @@ final class DoviFelComposer: @unchecked Sendable {
         // this calling thread — nothing left to do here.
         return work.destination
     }
+
+    #if DEBUG
+    private let lastGpuSecondsStorage = OSAllocatedUnfairLock(initialState: 0.0)
+    /// GPU time of the last blocking `compose`, in seconds (command buffer start to end). For measurement.
+    var lastGpuSecondsForTesting: Double { lastGpuSecondsStorage.withLock { $0 } }
+    #endif
 
     /// Test seam: makes every command buffer count as failed, so a test can drive the failure path without
     /// a GPU fault. Read once per command buffer; a plain unfair lock, never held across anything.

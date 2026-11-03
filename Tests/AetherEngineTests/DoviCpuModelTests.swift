@@ -12,7 +12,7 @@ import Dovi
 /// MMR chroma, large NLQ scales), so this is the check on those paths.
 ///
 /// The model works in `Double` and `Int64`, evaluates the curves with explicit `pow`, and samples the
-/// enhancement layer with its own bilinear filter. It compares the un-quantised 12-bit VDR code
+/// enhancement layer with its own filters (bilinear for luma, the Annex B chroma filter for chroma). It compares the un-quantised 12-bit VDR code
 /// (`DoviDither.debugRawVDR`), so the final rounding cannot hide a disagreement.
 ///
 /// What it settles: arithmetic, piece selection, MMR term layout, NLQ, clamps. What it cannot: the
@@ -118,7 +118,8 @@ struct DoviCpuModelTests {
 
         /// Bilinear sample of an enhancement-layer plane at base-layer sample (x, y) of a plane `baseW` x
         /// `baseH`: the 10-bit codes interpolated, then rounded half up. Luma samples sit at pixel centres;
-        /// chroma (`cosited`) is co-sited with the top-left luma sample, so the two grids share sample 0.
+        /// `cosited` is the pre-Annex B chroma read, co-sited with the top-left luma sample, so the two grids
+        /// share sample 0 (now only the model of the shader's fallback and of its DEBUG A/B variant).
         func elCode(_ el: Plane, comp: Int, x: Int, y: Int, baseW: Int, baseH: Int, cosited: Bool = false) -> Int {
             let centre = cosited ? 0.0 : 0.5
             let u = (Double(x) + centre) / Double(baseW) * Double(el.width) - centre
@@ -131,6 +132,35 @@ struct DoviCpuModelTests {
             let top = w(x0, y0) * (1 - fx) + w(x0 + 1, y0) * fx
             let bot = w(x0, y0 + 1) * (1 - fx) + w(x0 + 1, y0 + 1) * fx
             return Int((top * (1 - fy) + bot * fy + 0.5).rounded(.down))
+        }
+
+        /// An enhancement-layer chroma code at base chroma sample (x, y), by ETSI GS CCM 001 Annex B.3, written
+        /// from the standard's equations and not from the shader: vertical first, centred ((64, 192) / 256 with
+        /// the sample's own row weighted 192), each result rounded to an integer; then horizontal, where the
+        /// even output samples copy and the odd ones are the 8-tap filter over the integers either side
+        /// (taps 22 94 -524 2456 2456 -524 94 22, / 4096, rounded); edges replicated; clamped to 16 bits. An EL
+        /// that is not half the base layer's size is not the standard's case and keeps the bilinear read.
+        func elChromaCode(_ el: Plane, comp: Int, x: Int, y: Int, baseW: Int, baseH: Int) -> Int {
+            // The shader's `dovi_el_is_half`: an odd base size (bl + 1 == 2 * el) counts as half too.
+            func isHalf(_ bl: Int, _ e: Int) -> Bool { bl == 2 * e || bl + 1 == 2 * e }
+            guard isHalf(baseW, el.width), isHalf(baseH, el.height) else {
+                return elCode(el, comp: comp, x: x, y: y, baseW: baseW, baseH: baseH, cosited: true)
+            }
+            func code(_ c: Int, _ r: Int) -> Int {
+                el.code(min(max(c, 0), el.width - 1), min(max(r, 0), el.height - 1), comp)
+            }
+            func vertical(_ c: Int) -> Int {
+                let n = y >> 1
+                let v = y & 1 == 0 ? (64 * code(c, n - 1) + 192 * code(c, n) + 128) >> 8
+                                   : (192 * code(c, n) + 64 * code(c, n + 1) + 128) >> 8
+                return min(max(v, 0), 65535)
+            }
+            let m = x >> 1
+            if x & 1 == 0 { return vertical(m) }
+            let taps = [22, 94, -524, 2456, 2456, -524, 94, 22]
+            var acc = 2048
+            for k in 0..<8 { acc += taps[k] * vertical(min(max(m + k - 3, 0), el.width - 1)) }
+            return min(max(acc >> 12, 0), 65535)
         }
 
         /// One component's pieces before any clamp: the normalised prediction, the VDR code it
@@ -174,12 +204,12 @@ struct DoviCpuModelTests {
             if !p.flags.contains(.disableResidual) {
                 if nlqActive(p.nlqCb) {
                     a.active = true
-                    a.elCode = elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true)
+                    a.elCode = elChromaCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height)
                     a.residual = inverseNlq(p.nlqCb, a.elCode)
                 }
                 if nlqActive(p.nlqCr) {
                     b.active = true
-                    b.elCode = elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true)
+                    b.elCode = elChromaCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height)
                     b.residual = inverseNlq(p.nlqCr, b.elCode)
                 }
             }
@@ -207,10 +237,10 @@ struct DoviCpuModelTests {
             var vcr = denormalize(predict(p.polyCr, p.mmrCr, blValue: cr, y: yn, u: un, v: vn))
             if !p.flags.contains(.disableResidual) {
                 if nlqActive(p.nlqCb) {
-                    vcb += inverseNlq(p.nlqCb, elCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true))
+                    vcb += inverseNlq(p.nlqCb, elChromaCode(elUV, comp: 0, x: x, y: y, baseW: blUV.width, baseH: blUV.height))
                 }
                 if nlqActive(p.nlqCr) {
-                    vcr += inverseNlq(p.nlqCr, elCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height, cosited: true))
+                    vcr += inverseNlq(p.nlqCr, elChromaCode(elUV, comp: 1, x: x, y: y, baseW: blUV.width, baseH: blUV.height))
                 }
             }
             let m = Int(p.vdrMax)

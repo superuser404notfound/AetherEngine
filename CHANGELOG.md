@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Changed
 
+- **Dual-layer Dolby Vision enhancement chroma is upsampled with the standard's default filter.** The
+  composer read the enhancement layer's chroma with a co-sited bilinear read, which matched an
+  integer model of ETSI GS CCM 001 within one 12-bit code on only 83 to 99% of chroma samples (the worst
+  clip, with a large residual, 83% Cb and 90% Cr). It now applies the Annex B.3 default filter
+  (vertical centred, horizontal co-sited 8-tap) in integers. The same model now agrees within one 12-bit code on all chroma samples of the test clips except
+  3 Cb samples of one clip (largest error 2).
+  Luma is unchanged. An enhancement layer at the base layer's size is read exactly as before.
 - **Dolby Vision FEL frames are composed on a queue of their own, and a GPU that stops completing is reported.**
   The video callback only records, pairs and enqueues; a paired frame waits for its GPU slot on a compose queue,
   with two compositions in flight and the output pool reserve independent of that limit. If the queue head waits
