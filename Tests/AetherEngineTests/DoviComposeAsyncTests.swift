@@ -228,9 +228,9 @@ struct DoviComposeAsyncTests {
         // async context, a lock held across the call is the whole point here, and a deadlock must
         // park that thread rather than the test's, so the `.timeLimit` trait can report it.
         let buffers = Buffers(bl: bl, el: el)
-        // At most three compositions outstanding, as the decoder's own in-flight limit does: it keeps
+        // At most `DoviFelComposer.maxFramesInFlight` compositions outstanding, as the decoder's own in-flight limit does: it keeps
         // the output pool from running dry (a nil output) without pacing by the wall clock.
-        let inFlight = DispatchSemaphore(value: 3)
+        let inFlight = DispatchSemaphore(value: DoviFelComposer.maxFramesInFlight)
         @Sendable func issueUnderLock() {
             for i in 0..<frames {
                 inFlight.wait()

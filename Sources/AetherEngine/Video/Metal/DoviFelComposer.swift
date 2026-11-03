@@ -683,10 +683,24 @@ final class DoviFelComposer: @unchecked Sendable {
         work.commandBuffer.commit()
     }
 
-    /// Compositions allowed to be outstanding at once. Sized against the pool's
-    /// `kCVPixelBufferPoolMinimumBufferCountKey` so a full pipeline still draws
-    /// from the preallocated set rather than growing the pool.
-    static let maxFramesInFlight = 3
+    /// Compositions allowed to be outstanding at once.
+    ///
+    /// Compositions run one after another on a single GPU queue, so a slot never raises throughput; it only
+    /// absorbs jitter in when frames arrive. The criterion is `1 + ceil(turnaround / GPU time)`, where
+    /// turnaround is the time from a completion handler to the next commit: the VideoToolbox thread waking,
+    /// the pool rental, the textures and the parameter write. GPU time per 4K compose is 3 to 5 ms on an
+    /// M2 Pro and about 12 ms on an Apple TV 4K (A12), against a 41.7 ms frame interval at 23.976 fps, so in
+    /// steady playback one composition is in flight. Two keeps the GPU busy through the burst after a seek,
+    /// when decoded frames arrive faster than the clock.
+    ///
+    /// A third slot only let a burst rent a pool buffer earlier, and that buffer then waited in the display
+    /// queue; `peakGpuSlots=3` in the 1 Hz summary showed it because a burst fills whatever limit exists,
+    /// not because the GPU needed three. Going from 3 to 2 took about one 4K buffer (about 25 MB) off the
+    /// median footprint on the Mac; the peak did not change. The pool threshold derives from this value
+    /// (one buffer less); the reserve does not (`outputPoolReserve`). A stream whose mean GPU time exceeds
+    /// one frame interval cannot be kept up with at any slot count; `DualLayerVideoDecoder` logs that once
+    /// per session.
+    static let maxFramesInFlight = 2
     /// Buffers the output pool allocates in normal running; past it `encodeCompose` draws on
     /// `outputPoolReserve`, and only with that spent too does a frame bypass to the base layer
     /// (dolby-vision-fel.md §5.6, §5.10).
@@ -698,7 +712,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// The margin is built from those holders: the one on screen, the one the layer retains,
     /// `maxFramesInFlight` compositions, and one spare. A smaller margin let a burst of in-flight compositions
     /// on top of a full look-ahead exhaust the pool (CoreVideo -6689) and fall back to the base layer.
-    /// A 4K P010 buffer is about 25 MB, so the threshold is about 375 MB.
+    /// A 4K P010 buffer is about 25 MB, so the threshold is about 350 MB.
     private static let residualSwitch = OSAllocatedUnfairLock(initialState: true)
 
     /// Whether the enhancement-layer residual (EL fetch + NLQ) is applied. Off, the composer still maps the
@@ -717,9 +731,11 @@ final class DoviFelComposer: @unchecked Sendable {
     /// Buffers the pool may grow by when the threshold refuses one. A refused buffer means a base-layer
     /// frame, a visible brightness step on real titles (`fallbackFrameDelta`); a burst composes into one of
     /// these instead. They return to the pool like any other and `kCVPixelBufferPoolMaximumBufferAgeKey`
-    /// frees them after a second unused, so the extra memory (about 25 MB each at 4K) lasts only as long as the
-    /// burst. Sized like the in-flight limit, the holder a burst's shortfall came from on the titles measured.
-    static let outputPoolReserve = maxFramesInFlight
+    /// frees them after a second unused, so the extra memory (about 25 MB each at 4K, about 75 MB for the
+    /// whole reserve) lasts only as long as the burst. Sized from the burst shortfall measured on real
+    /// titles, not from the in-flight limit: it stays 3 whatever `maxFramesInFlight` is, so the cap is the
+    /// threshold plus 3 (17 buffers, about 423 MB at 4K).
+    static let outputPoolReserve = 3
     /// With the pool and its reserve both refused, the composer retries this many times, sleeping
     /// `outputPoolRetryInterval` between attempts (never after the last): at most 9 x 4 ms, about 36 ms.
     static let outputPoolAttempts = 10
@@ -1293,7 +1309,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// Seek/flush: keeps the output pool. Dropping it here made the next frames allocate a second pool while
     /// the renderer still held the old one's buffers (the displayed image and the look-ahead the display layer
     /// had not yet let go of), so the footprint doubled for the half second a seek took to settle (about
-    /// +260 MB at 4K, where the pool holds up to 15 buffers of 25 MB). The same pool is capped by the allocation threshold,
+    /// +260 MB at 4K, where the pool holds up to 14 buffers of 25 MB). The same pool is capped by the allocation threshold,
     /// so the old buffers return to it as the renderer releases them and the new frames reuse them. Idle
     /// buffers beyond the minimum are released at once.
     func flush() {

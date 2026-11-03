@@ -307,6 +307,12 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     // `skipUntilPTS` fan-out, `open`) always run without the lock held — see the
     // ordering note on `skipUntilPTS`.
     private var timeBase: AVRational = AVRational(num: 1, den: 90000)
+    /// The stream's average frame rate in frames per second, from the container; nil when it declares none.
+    /// Only the compose check in the 1 Hz summary reads it. Guarded by `lock`.
+    private var streamFrameRate: Double?
+    /// Set once the summary has said compositions cannot keep up with the stream's frame rate, so the
+    /// line is logged once per session rather than once a second. Guarded by `lock`.
+    private var composeCannotKeepUpWarned = false
     // Stream classification (dolby-vision-fel.md §5.2, invariant I9 in §5.12): decided once, from the
     // first RPU's `el_type`, before the enhancement decoder opens. A per-frame
     // `disable_residual_flag` is a kernel flag (`DoviComposerFlags.disableResidual`,
@@ -408,8 +414,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// a frame released this far ahead of its time has room for every composition queued ahead of it,
     /// so the release costs no lateness.
     static let deadlineMarginFrames = DoviFelComposer.maxFramesInFlight
-    /// The margin never drops below this many seconds, so a high frame rate (where three intervals are
-    /// 50 ms at 60 fps) does not shrink the time a late enhancement layer has to arrive.
+    /// The margin never drops below this many seconds, so a high frame rate (where two intervals are
+    /// 33 ms at 60 fps) does not shrink the time a late enhancement layer has to arrive.
     static let deadlineMarginFloor: Double = 0.1
     /// The margin in seconds: `deadlineMarginFrames` frame intervals, or `deadlineMarginFloor`.
     /// The same figure is the longest a base frame waits for a late enhancement layer while the clock
@@ -437,8 +443,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// clock is armed): nothing is late there, so this only bounds a layer that is lost for good.
     static let heldClockWallBound: Double = 2
     /// Count backstop alongside the deadline rule. `OrderedDelivery` skips a ticket once more than
-    /// `maxFramesInFlight + maxLayerSkew + 2` frames are pending behind it (8 now), where the backstop
-    /// fires at `maxFramesInFlight + maxLayerSkewFrames + 1` newer arrivals (7): a margin of two, so
+    /// `maxFramesInFlight + maxLayerSkew + 2` frames are pending behind it (7 now), where the backstop
+    /// fires at `maxFramesInFlight + maxLayerSkewFrames + 1` newer arrivals (6): a margin of two, so
     /// the frames queued behind a waiting one cannot reach the point where the stall guard skips its
     /// ticket. Bounds the queue as well.
     static let maxDeadlineHoldFrames = DoviFelComposer.maxFramesInFlight + maxLayerSkewFrames + 1
@@ -617,6 +623,8 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         lock.lock()
         self.timeBase = stream.pointee.time_base
+        let avgRate = stream.pointee.avg_frame_rate
+        streamFrameRate = avgRate.num > 0 && avgRate.den > 0 ? Double(avgRate.num) / Double(avgRate.den) : nil
         // Only an hvcC record can build the session up front. Extradata of that size that is something
         // else (an Annex B parameter-set blob, say) takes the in-band path, where the parameter
         // sets are read from the packets, instead of throwing out of `open`.
@@ -1682,6 +1690,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                                          bypassHeldWall: totalBypassHeldWall, bypassBackstop: totalBypassBackstop)
         }
         let activeComposer = composer
+        let frameRate = streamFrameRate
         lock.unlock()
 
         let slots = activeComposer?.takePeakSlotsInUse() ?? 0
@@ -1705,6 +1714,15 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             totalsSinkForTesting?(totalsLine)
             #endif
         }
+        if let gpuMs, Self.composeCannotKeepUp(meanGpuMs: gpuMs, frameRate: frameRate) {
+            lock.lock()
+            let firstTime = !composeCannotKeepUpWarned
+            composeCannotKeepUpWarned = true
+            lock.unlock()
+            if firstTime {
+                EngineLog.emit("[DualLayerVideoDecoder] compositions cannot keep up with the stream's frame rate: mean GPU time \(String(format: "%.1f", gpuMs)) ms exceeds the frame interval \(String(format: "%.1f", 1000 / (frameRate ?? 1))) ms", category: .swPlayback)
+            }
+        }
         activeComposer?.flushTextureCache()
     }
 
@@ -1716,6 +1734,14 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// count moved since the last one (`maybeEmitSummary`).
     static func totalsLine(composed: Int, bypassDeadline: Int, bypassHeldWall: Int, bypassBackstop: Int) -> String {
         "[DualLayerVideoDecoder] totals: composed=\(composed), bypassDeadline=\(bypassDeadline), bypassHeldWall=\(bypassHeldWall), bypassBackstop=\(bypassBackstop)"
+    }
+
+    /// Whether compositions take longer than frames arrive. Compositions share one serial GPU queue, so
+    /// when the mean GPU time exceeds the frame interval no in-flight limit keeps up with the stream.
+    /// False when the frame rate is unknown.
+    static func composeCannotKeepUp(meanGpuMs: Double, frameRate: Double?) -> Bool {
+        guard let frameRate, frameRate > 0 else { return false }
+        return meanGpuMs > 1000 / frameRate
     }
 
     // MARK: - Flush & Teardown
@@ -2027,6 +2053,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         elPPS = nil
         enhancementOpenFailure = nil
         timeBase = AVRational(num: 1, den: 90000)
+        streamFrameRate = nil
         _skipUntilPTS = nil
         isClosed = true
         let epoch = _feedEpoch
