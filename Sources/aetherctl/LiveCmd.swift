@@ -192,9 +192,7 @@ func runLive(
         print("aetherctl live: --realtime-rate \(rate)x (origin keeps handing over "
               + "\(rate)x faster than the content happens, for the whole run)")
     }
-    if fastZap {
-        print("aetherctl live: --fast-zap set, LoadOptions.liveJoinProfile = .fastZap (AE#195)")
-    }
+    print("aetherctl live: LoadOptions.liveJoinProfile = \(fastZap ? ".fastZap (default)" : ".standard (--standard-join)")")
 
     let liveURL: URL
     do {

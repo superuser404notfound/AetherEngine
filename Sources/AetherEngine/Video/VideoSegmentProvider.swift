@@ -2992,8 +2992,14 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     /// Only completed, independently decodable media participates. The optional duration threshold
-    /// never cuts a GOP early or weakens the standard/full-holdback path.
+    /// never cuts a GOP early or weakens the standard/full-holdback path. A host cushion is a request to
+    /// start further back, so a shallow window qualifies only once it already holds the cushion: the
+    /// join lands at the head of that window, which is then at least the cushion behind the edge. A
+    /// cushion used to bar the bounded start outright, and a 2.5 s one on a 10 s GOP (holdback 30 s)
+    /// held every join for a third segment it did not need.
     private func hasBoundedStartupMedia(_ snapshot: (count: Int, summed: Double, maxDuration: Double)) -> Bool {
+        if let cushion = liveEdgeCushionSeconds,
+           !(LiveEdgePolicy.servedSeconds(snapshot.summed) >= cushion) { return false }
         if snapshot.count >= LiveEdgePolicy.minStartupSegments { return true }
         guard snapshot.count == 1, let minimum = singleSegmentStartupMinimumSeconds else { return false }
         return snapshot.summed.isFinite && snapshot.summed >= minimum
@@ -3047,11 +3053,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 accountForFirstServe(since: enteredAt, snapshot: snap, targetDuration: sealed)
                 return true
             }
-            // A host cushion is a request to start further back, which a shallow first window would
-            // undo on exactly the slow link it was asked for.
             if allowsBoundedDegradedStart,
                !boundedStartFloorsAtHoldback,
-               liveEdgeCushionSeconds == nil,
                hasBoundedStartupMedia(snap),
                degradedDeadline == nil {
                 let grace = startupGraceSeconds ?? LiveEdgePolicy.fastZapDegradedGraceSeconds(

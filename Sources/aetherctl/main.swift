@@ -70,7 +70,7 @@ func printUsage() {
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--fel [--fel-output]] [--upscale] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--fast-zap] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--fel [--fel-output]] [--upscale] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -129,7 +129,7 @@ func printUsage() {
       aetherctl customio --live [--rate-kbps N] [--seconds N] [--dvr-window N] [--report-size] [--no-wrap] [--malloc-census] [--foundation-reader] [--host-carry none|removeFirst|subdata] [--reload-at S] [--cancel-latches] [--reload-decode-path automatic|software] [--reader-axis absolute|join|mismatched] [--join-offset-mb N] <file.ts>
                          (AE#445: a host-owned live spool behind MediaSource.custom, paced at the mux rate,
                           never EOF, unknown size; prints physFP and its slope against that rate)
-      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--realtime-rate X] [--fast-zap] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
+      aetherctl live [--seconds N] [--seed <path>] [--dvr-window N] [--serve-only] [--measure-rss] [--report-cache-bytes] [--rewind-test] [--reload-test] [--sw] [--drop-after N] [--discontinuity-at N] [--realtime] [--realtime-rate X] [--standard-join] [--preroll N] [--rewind-hold N] [--gen-highbitrate-seed]
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N] [--live-only] [--no-blocking-reload] [--force-master]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
@@ -696,8 +696,11 @@ if first == "live" {
     let discontinuityAt = takeDoubleFlag("--discontinuity-at", from: &rest)
     // --realtime paces fixture output at ~1x wall-clock; default is as-fast-as-socket-drains.
     let realtime = takeFlag("--realtime", from: &rest)
-    // --fast-zap: LoadOptions.liveJoinProfile = .fastZap (AE#195 low-latency live join).
-    let fastZap = takeFlag("--fast-zap", from: &rest)
+    // The engine default is .fastZap (AE#195); --standard-join loads .standard for an A/B, and
+    // --fast-zap is still accepted so older scripts keep running.
+    let standardJoin = takeFlag("--standard-join", from: &rest)
+    _ = takeFlag("--fast-zap", from: &rest)
+    let fastZap = !standardJoin
     // --live-cushion N: LoadOptions.liveEdgeCushionSeconds.
     let liveFixtureCushion = takeDoubleFlag("--live-cushion", from: &rest)
     // --preroll N: backlog seconds the paced fixture bursts before 1x pacing (default 30).
@@ -788,7 +791,9 @@ if first == "play" {
     // actually runs, and it could not be driven from here at all: the TARGETDURATION floor comes from
     // the UPSTREAM's observed cadence, so what a fastZap start costs depends on an origin the raw-TS
     // fixture does not have.
-    let playFastZap = takeFlag("--fast-zap", from: &rest)
+    let playStandardJoin = takeFlag("--standard-join", from: &rest)
+    _ = takeFlag("--fast-zap", from: &rest)
+    let playFastZap = !playStandardJoin
     // AE#440: LoadOptions.liveJoinStartsImmediately. The join tail after the first serve, where AVPlayer
     // holds a presented frame still while it evaluates whether its cushion will sustain playback. The
     // hold does not reproduce on this harness (loopback answers at memory speed, so the evaluation

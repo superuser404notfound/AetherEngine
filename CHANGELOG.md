@@ -73,6 +73,16 @@ the public-API contract.
 
 ### Changed
 
+- **Loopback live joins default to `.fastZap`.** `LoadOptions.liveJoinProfile` used to default to
+  `.standard`, whose first manifest waits for the full `3 x TARGETDURATION` holdback: at least 18 s, and
+  30 s on a 10 s GOP, which a strict-realtime origin can only fill in wall-clock time. A host that never
+  chose a profile now gets the bounded join. Measured with `aetherctl live --realtime`, H.264 + AAC,
+  first picture, two runs each (standard / fastZap): 1 s GOP with no backlog 18.9 / 1.8 s; 4 s GOP with
+  no backlog 18.9 / 7.2 s; 10 s GOP with no backlog 28.8 / 19.1 s; 10 s GOP after a 22 s connect burst
+  6.9 / 1.2 s. With a burst that already covers the holdback both start in about 0.4 s. `.standard`
+  stays available for lean-back viewing that can afford the wait, and `aetherctl`'s `--standard-join`
+  loads it (`--fast-zap` is still accepted).
+
 - **Dual-layer Dolby Vision enhancement chroma is upsampled with the standard's default filter.** The
   composer read the enhancement layer's chroma with a co-sited bilinear read, which matched an
   integer model of ETSI GS CCM 001 within one 12-bit code on only 83 to 99% of chroma samples (the worst
@@ -101,6 +111,14 @@ the public-API contract.
   reported tier and whether in-place compose is on. Only with the `DualLayerDolbyVision` trait.
 
 ### Fixed
+
+- **A live edge cushion no longer switches `.fastZap`'s bounded start off.** `liveEdgeCushionSeconds` is
+  documented to floor the bounded start at the cushion, but any cushion at all barred it, so the join
+  waited for the full holdback. On a 10 s GOP that is 45 s under `.fastZap`, and a 2.5 s "network
+  buffer" made an ITV channel wait for real-time segments until the host's watchdog restarted it, every
+  time. A shallow first window now qualifies once it holds the cushion, so the join still lands at
+  least the cushion behind the edge. Same fixture, 10 s GOP, 22 s burst, 2.5 s cushion: first picture
+  26.9 s before, 1.2 to 1.4 s after.
 
 - **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD
   Atmos, so a DTS:X programme rendered into a bed (`objectAudioRendering`) never brought a receiver like a Sonos with
