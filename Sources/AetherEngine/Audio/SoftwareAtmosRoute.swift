@@ -84,15 +84,11 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         return nil
     }
 
-    /// Whether the renderer receives Dolby Atmos on this route, so `AtmosOutputActivator` may bring the
-    /// receiver to Dolby Atmos: compressed E-AC-3 JOC and TrueHD Atmos rendered into a bed are, DTS:X
-    /// rendered into a bed is not.
-    func carriesDolbyAtmos(sourceCodec: AVCodecID) -> Bool {
-        switch self {
-        case .pcm: return false
-        case .compressedEAC3JOC: return true
-        case .apac, .pcmBed: return sourceCodec == AV_CODEC_ID_TRUEHD
-        }
+    /// Whether this route needs `AtmosOutputActivator` on tvOS: compressed E-AC-3 JOC and every rendered
+    /// bed, TrueHD Atmos or DTS:X. Without it some sinks never switch to Dolby MAT and play the bed as
+    /// stereo or 7.1 PCM, heights folded away.
+    var takesAtmosOutputActivator: Bool {
+        self != .pcm
     }
 
     /// Packets of the source's head the JOC check may look at, and the bytes it may hold. The check

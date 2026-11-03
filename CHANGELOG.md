@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Rendered DTS:X lost its heights on sinks that need `AtmosOutputActivator`.** The activator ran only for TrueHD
+  Atmos, so a DTS:X programme rendered into a bed (`objectAudioRendering`) never brought a receiver like a Sonos with
+  Continuous Audio off to Dolby MAT, and the bed played as stereo PCM. tvOS carries a bed with heights over HDMI only
+  as Dolby MAT, so an intact DTS:X bed shows as Dolby Atmos on the receiver either way. The activator now runs for
+  every rendered bed, TrueHD Atmos and DTS:X, on the AVPlayer path and the software host alike; still only on a route
+  whose every output is HDMI (#834).
+
 - **Streaked band around the picture with `upscalesLowResolutionVideo` (AE#846).** The edge fix for VideoToolbox
   super resolution's ringing repeated one row and column of the ML output over the outer 12 samples, which reads
   as streaks on real footage (about 27 px top and bottom on an SD DVD at 4K, on all four sides of an anamorphic

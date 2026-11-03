@@ -387,7 +387,6 @@ extension HLSVideoEngine {
                 : "DTS:X → \(bed)"
             audioDelivery = .bridged
             audioIsRenderedBed = true
-            audioBedIsFromDolbyAtmos = source == .trueHDAtmos
             let rendering: String
             switch source {
             case .trueHDAtmos:
