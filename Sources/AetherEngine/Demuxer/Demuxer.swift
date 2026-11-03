@@ -1466,7 +1466,7 @@ public final class Demuxer: @unchecked Sendable {
         doviOriginalBaseExtradata = nil
     }
 
-    private static func replaceExtradata(of par: UnsafeMutablePointer<AVCodecParameters>, with bytes: [UInt8]) -> Bool {
+    static func replaceExtradata(of par: UnsafeMutablePointer<AVCodecParameters>, with bytes: [UInt8]) -> Bool {
         let pad = Int(AV_INPUT_BUFFER_PADDING_SIZE)
         guard let buf = av_malloc(bytes.count + pad) else { return false }
         let typed = buf.assumingMemoryBound(to: UInt8.self)
@@ -1491,7 +1491,7 @@ public final class Demuxer: @unchecked Sendable {
         doviJoinNeedsParameterSets = true
     }
 
-    /// The oldest waiting base-layer packet, once its RPU is in, or once too many wait behind it (it goes without
+    /// The oldest waiting base-layer packet, once its RPU is in, or once too many wait behind it or they span too long (it goes without
     /// one), or at the end of the source; nil while it may still be completed.
     private func releaseDolbyVisionBaseLocked(atEnd: Bool = false) -> UnsafeMutablePointer<AVPacket>? {
         if doviJoinsEnhancement { return releaseJoinedDolbyVisionLocked(atEnd: atEnd) }

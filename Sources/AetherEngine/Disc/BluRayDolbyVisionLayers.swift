@@ -121,8 +121,14 @@ struct BluRayDolbyVisionLayers {
 /// (the tracks of an MP4 can differ in timescale and rounding) rescales both to one unit first and passes the
 /// tolerance the join uses; an unknown time (`Int64.min`) pairs with nothing.
 struct DolbyVisionLayerPairing<Unit> {
-    /// How many base pictures may wait before the oldest goes out without an RPU.
-    static var holdLimit: Int { 8 }
+    /// How many base pictures may wait before the oldest goes out without an RPU. Large enough for a whole chunk of a
+    /// chunk-interleaved MP4 (libavformat hands out each track in runs of up to a second, 60 pictures at 60 fps); the
+    /// span limit below is what normally releases one.
+    static var holdLimit: Int { 128 }
+
+    /// How long, in the pairing's time unit (microseconds), the newest waiting picture may be ahead of the oldest
+    /// before the oldest goes out without an RPU. Twice the longest chunk a muxer interleaves.
+    static var holdSpan: Int64 { 2_000_000 }
 
     let tolerance: Int64
 
@@ -132,6 +138,12 @@ struct DolbyVisionLayerPairing<Unit> {
     private var earlyRPUs: [(pts: Int64, rpu: [UInt8])] = []
 
     var heldCount: Int { held.count }
+
+    private func spanExceeded(_ headPTS: Int64) -> Bool {
+        guard headPTS != Int64.min, let last = held.last?.pts, last != Int64.min else { return false }
+        let (d, overflow) = last.subtractingReportingOverflow(headPTS)
+        return !overflow && d > Self.holdSpan
+    }
 
     private func same(_ a: Int64, _ b: Int64) -> Bool {
         guard a != Int64.min, b != Int64.min else { return false }
@@ -161,10 +173,10 @@ struct DolbyVisionLayerPairing<Unit> {
         earlyRPUs.append((pts, rpu))
     }
 
-    /// The oldest base picture, once its RPU is in, once more than `holdLimit` wait, or at the end of the source;
-    /// nil while it may still be completed. `paired` is false for a picture that goes out without an RPU.
+    /// The oldest base picture, once its RPU is in, once more than `holdLimit` wait or they span more than `holdSpan`,
+    /// or at the end of the source; nil while it may still be completed. `paired` is false for a picture that goes out without an RPU.
     mutating func release(atEnd: Bool = false) -> (unit: Unit, paired: Bool)? {
-        guard let head = held.first, head.ready || atEnd || held.count > Self.holdLimit else { return nil }
+        guard let head = held.first, head.ready || atEnd || held.count > Self.holdLimit || spanExceeded(head.pts) else { return nil }
         held.removeFirst()
         return (head.unit, head.ready)
     }

@@ -46,7 +46,7 @@ struct BluRayDolbyVisionLayerFoldTests {
     private static func next(_ pairing: inout Pairing, atEnd: Bool = false) -> (unit: Picture, paired: Bool)? {
         pairing.release(atEnd: atEnd)
     }
-    private static func rpu(_ pts: Int64) -> [UInt8] { [0, 0, 1, 0x7C, 0x01, UInt8(pts)] }
+    private static func rpu(_ pts: Int64) -> [UInt8] { [0, 0, 1, 0x7C, 0x01, UInt8(truncatingIfNeeded: pts)] }
 
     @Test("A base picture waits for the enhancement unit that follows it, then goes out with its RPU")
     func rpuAfterItsPicture() throws {
@@ -110,6 +110,34 @@ struct BluRayDolbyVisionLayerFoldTests {
         let out = try #require(Self.next(&pairing))
         #expect(!out.paired && out.unit.pts == 0 && out.unit.rpu == nil)
         #expect(Self.next(&pairing) == nil)
+    }
+
+    @Test("A chunk-interleaved file holds a whole chunk of base pictures before the first RPU arrives, and pairs every one")
+    func chunkInterleavedPairsAll() throws {
+        var pairing = Pairing()
+        let step: Int64 = 16_667  // 60 fps, one second of base pictures first, then one second of enhancement units
+        let pts = (0..<60).map { Int64($0) * step }
+        for p in pts {
+            pairing.addBase(Picture(p), pts: p, attach: Self.attach)
+            #expect(Self.next(&pairing) == nil, "no picture may go out unpaired inside the chunk")
+        }
+        for p in pts { pairing.addRPU(Self.rpu(p), pts: p, attach: Self.attach) }
+        for p in pts {
+            let out = try #require(Self.next(&pairing))
+            #expect(out.paired && out.unit.pts == p && out.unit.rpu != nil)
+        }
+        #expect(Self.next(&pairing) == nil)
+    }
+
+    @Test("Pictures spanning more than the hold span release the oldest unpaired, however few are held")
+    func spanReleasesUnpaired() throws {
+        var pairing = Pairing()
+        pairing.addBase(Picture(0), pts: 0, attach: Self.attach)
+        pairing.addBase(Picture(DolbyVisionLayerPairing<Picture>.holdSpan), pts: DolbyVisionLayerPairing<Picture>.holdSpan, attach: Self.attach)
+        #expect(Self.next(&pairing) == nil)
+        pairing.addBase(Picture(DolbyVisionLayerPairing<Picture>.holdSpan + 1), pts: DolbyVisionLayerPairing<Picture>.holdSpan + 1, attach: Self.attach)
+        let out = try #require(Self.next(&pairing))
+        #expect(!out.paired && out.unit.pts == 0)
     }
 
     @Test("At the end of the source the last pictures go out whether paired or not")
