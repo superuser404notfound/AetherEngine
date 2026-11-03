@@ -478,7 +478,7 @@ static inline int2 dovi_el_code_2(texture2d<ushort, A> tex, int2 p, int2 size) {
 }
 
 // True when a plane of `el` texels is the half-size EL of a base-layer plane of `bl` samples (a base plane of
-// odd size still has its last sample, so `bl` may be one more than twice `el`).
+// odd size has a half-size plane of ceil(bl / 2) texels, so `bl` may be one less than twice `el`).
 static inline bool dovi_el_is_half(uint bl, uint el) {
     return el > 0u && (bl == 2u * el || bl + 1u == 2u * el);
 }
