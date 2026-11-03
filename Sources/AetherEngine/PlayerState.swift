@@ -367,11 +367,11 @@ public enum DeinterlaceFieldRate: String, Sendable, Equatable {
 
 /// Live-join latency profile for loopback live sessions (`LoadOptions.liveJoinProfile`, AetherEngine#195).
 public enum LiveJoinProfile: Sendable, Equatable {
-    /// Historical behavior: ~4s segment cut target, served TARGETDURATION >= 6, live-edge holdback
+    /// The pre-default behavior: ~4s segment cut target, served TARGETDURATION >= 6, live-edge holdback
     /// (and with it the first-manifest startup cushion, AE#189) >= 18s. The first playlist always
     /// waits for the full advertised holdback.
     case standard
-    /// Channel-zapping profile: cut live segments at every keyframe past 0.5s, so TARGETDURATION and
+    /// The default. Channel-zapping profile: cut live segments at every keyframe past 0.5s, so TARGETDURATION and
     /// holdback collapse to the source keyframe cadence. The first playlist prefers the full holdback,
     /// but after two finalized segments a strict-realtime source gets one observed-segment grace,
     /// clamped to 0.5...2.0s, before a shallow first window is served. The grace ends early once the
@@ -673,23 +673,22 @@ public struct LoadOptions: Sendable, Equatable {
     /// Default nil (AetherEngine#167).
     public var liveBlockingReload: Bool? = nil
 
-    /// Live-join latency profile for loopback live sessions (raw TS over HTTP, live ingest). `.standard`
-    /// (default) cuts ~4s segments, so the served TARGETDURATION lands at >= 6 and the spec-mandated
-    /// live-edge holdback (`HOLD-BACK` >= 3 x TARGETDURATION, RFC 8216bis) the first manifest is gated on
-    /// (AE#189) becomes >= 18s, which a strict-realtime origin can only fill in wall-clock time (10-18s of
-    /// black on an IPTV zap). `.fastZap` cuts at every keyframe past 0.5s instead: segments quantize to the
-    /// source keyframe cadence, TARGETDURATION follows the real GOP length with 1.5x headroom over the
-    /// longest GOP seen before the seal (a broadcast's GOPs are irregular and each segment is one whole
-    /// GOP, AE#670), and the holdback shrinks with it: 1 s GOPs serve TARGETDURATION 2, a 6 s holdback.
-    /// The first serve still prefers the full holdback, but after two finalized segments a
-    /// strict-realtime source gets one observed-segment grace clamped to 0.5...2.0s, then may serve a
-    /// shallow first window. This bounds black-screen startup but may produce one early `-16832` or a
-    /// short rebuffer. `.standard` retains the full-holdback guarantee. A smaller TARGETDURATION also
+    /// Live-join latency profile for loopback live sessions (raw TS over HTTP, live ingest). `.fastZap`
+    /// (the default) cuts at every keyframe past 0.5s: segments quantize to the source keyframe
+    /// cadence, TARGETDURATION follows the real GOP length with 1.5x headroom over the longest GOP seen
+    /// before the seal (a broadcast's GOPs are irregular and each segment is one whole GOP, AE#670), and
+    /// the holdback shrinks with it: 1 s GOPs serve TARGETDURATION 2, a 6 s holdback. The first serve
+    /// still prefers the full holdback, but after two finalized segments a strict-realtime source gets
+    /// one observed-segment grace clamped to 0.5...2.0s, then may serve a shallow first window, and the
+    /// grace ends early when the next keyframe cannot arrive inside it (AE#936). This bounds black-screen
+    /// startup but may produce one early `-16832` or a short rebuffer. A smaller TARGETDURATION also
     /// tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so an origin that stalls or
-    /// bursts mid-stream is likelier to rebuffer or error; opt in for zapping UX, keep `.standard` for
-    /// lean-back viewing. Ignored for `nativeRemoteHLS` and VOD. Default `.standard`
-    /// (AetherEngine#195/#208).
-    public var liveJoinProfile: LiveJoinProfile = .standard
+    /// bursts mid-stream is likelier to rebuffer. `.standard` cuts ~4s segments, so the served
+    /// TARGETDURATION lands at >= 6 and the first manifest waits for the full `3 x TARGETDURATION`
+    /// holdback (AE#189): >= 18 s, and 30 s on a 10 s GOP, which a strict-realtime origin can only fill in
+    /// wall-clock time. Choose it for lean-back viewing where the join may take that long. Ignored for
+    /// `nativeRemoteHLS` and VOD (AetherEngine#195/#208).
+    public var liveJoinProfile: LiveJoinProfile = .fastZap
 
     /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
     /// live, sequential-only sources and disposable frame probes retain their own policies.
@@ -1137,7 +1136,7 @@ public struct LoadOptions: Sendable, Equatable {
         audioOnly: Bool = false,
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
-        liveJoinProfile: LiveJoinProfile = .standard,
+        liveJoinProfile: LiveJoinProfile = .fastZap,
         sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveStartupGraceSeconds: Double? = nil,
         liveStartupSingleSegmentMinimumSeconds: Double? = nil,
