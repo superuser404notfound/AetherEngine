@@ -312,6 +312,11 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         if let item, let output { item.remove(output) }
         tap.discardPending()
+        // Logged here, not after the teardown below: a process that exits right after `stop()` (the CLI) would
+        // otherwise lose it. The timers are cancelled, so only a tick already running can still move a counter.
+        // The display layer's own report (frames it was given, dropped, corrupted: the presented pipeline, not
+        // AVPlayer's suppressed one) follows when it answers.
+        EngineLog.emit("[DualLayerOutputRoute] \(summary)", category: .engine)
         Self.teardownQueue.async { [self] in
             // The decoder first, so a tick still inside it finds it closed and hands nothing on. A composition
             // runs on the thread that hands the decoder the frame: the pull thread, or VideoToolbox's callback
@@ -324,11 +329,8 @@ final class DualLayerOutputRoute: VideoPacketTapReceiver, @unchecked Sendable {
             waitForTicksToEnd()
             // The converter goes after the ticks (or after the bounded wait for them): a tick that outlasted the
             // wait finds it closed, and `prepare` then fails the frame without touching the released session
-            // or pool. The summary below reads its counters, which stay readable.
+            // or pool. The summary is already logged by `stop()`.
             baseLayerConverter.tearDown()
-            // The counters are logged at once; the display layer's own report (frames it was given, dropped,
-            // corrupted: the presented pipeline, not AVPlayer's suppressed one) follows when it answers.
-            EngineLog.emit("[DualLayerOutputRoute] \(summary)", category: .engine)
             DispatchQueue.main.async { [self] in
                 MainActor.assumeIsolated {
                     if let renderer {

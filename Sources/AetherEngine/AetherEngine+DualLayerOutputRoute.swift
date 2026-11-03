@@ -30,7 +30,10 @@ extension AetherEngine {
                            category: .engine)
             return
         }
-        let inPlace = ProcessInfo.processInfo.environment["AETHER_FEL_OUTPUT_INPLACE"] == "1"
+        // In place by default, as on the software host: the composer writes into the buffer the video output
+        // vended instead of a pool buffer of its own, and still takes the pool for a frame it cannot compose
+        // in place. `AETHER_FEL_OUTPUT_INPLACE=0` turns it off for an A/B run.
+        let inPlace = ProcessInfo.processInfo.environment["AETHER_FEL_OUTPUT_INPLACE"] != "0"
         guard let route = DualLayerOutputRoute(frameRate: frameRate, composeInPlace: inPlace) else {
             EngineLog.emit("[AetherEngine] DV P7 dual-layer: the AVPlayer-output route could not start "
                            + "(no Metal composer); the session plays the 8.1 base layer", category: .engine)

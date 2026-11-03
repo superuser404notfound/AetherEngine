@@ -66,7 +66,10 @@ the public-API contract.
   with its enhancement layer (read once, in process, from the segment producer; no second connection), composes
   them with the composer the software host uses and presents the result in a display layer on the item's
   timebase. The dither parity of the compose kernels now follows the frame's position in the stream on this
-  route, so a run composes the same bits however its frames arrived. The default route is unchanged.
+  route, so a run composes the same bits however its frames arrived. The default route is unchanged. It composes in place into the
+  video output's buffers (`AETHER_FEL_OUTPUT_INPLACE=0` turns that off), which takes about 113 MB off the
+  process on the Mac; the route still needs about 1.8 times the software host's memory there, most of it
+  AVPlayer's own conversion of each frame for the video output.
 - **The AVPlayer-output route takes the player's own frame format.** Its video output no longer names `x420`,
   which keeps the system's decoder service from holding a second set of buffers (about 220 MB less in all on
   a 4K clip on the Mac, measured on an earlier base and not repeated). A frame already in `x420` goes to the
