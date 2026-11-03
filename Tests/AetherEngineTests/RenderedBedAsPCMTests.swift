@@ -88,8 +88,7 @@ struct RenderedBedAsPCMTests {
             codecID: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, sampleRate: 48_000, channels: 8,
             framesPerPacket: 0, isLive: false, rendering: .render(.l916), confirmedJOC: false,
             osSupportsAPAC: true, routeFormat: .lpcm) == expected)
-        #expect(SoftwareAtmosRoute.pcmBed(.l916).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_TRUEHD))
-        #expect(!SoftwareAtmosRoute.pcmBed(.l916).carriesDolbyAtmos(sourceCodec: AV_CODEC_ID_DTS))
+        #expect(SoftwareAtmosRoute.pcmBed(.l916).takesAtmosOutputActivator)
         #expect(AetherEngine.softwareAudioDecoderLabel(
             audioTracks: [TrackInfo(id: 1, name: "", codec: "truehd", language: nil, isDefault: true)],
             activeIndex: 1, route: .pcmBed(.l916)) == "TRUEHD Atmos → PCM 9.1.6")
