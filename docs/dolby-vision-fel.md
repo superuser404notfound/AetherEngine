@@ -465,11 +465,13 @@ the decoder's lock, and each call is O(K):
   memory, and every sample then takes the mean of its one to four stored sites with the same rounding,
   clamping and dither as before, so the output is byte-identical to the per-sample version. That is 81
   site evaluations per 256 samples instead of 1024 (0.32 per sample against 4, and 0.25 for 4:2:0). The
-  Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms (the pool path, a 4:4:4 FEL test clip played for 60 s with the debug `aetherctl` build, mean of the once-a-second summary lines after the first three; the 4:2:0 kernel measured 2.8 ms on the same Mac before and after), and the A12 numbers are in §4.7. Both
-  take the pool path, since in-place composition is 4:2:0 only. The kernel needs threadgroups of exactly
-  16 x 16, so a pipeline that allows fewer than 256 threads refuses the frame with a logged compose
-  failure; the per-window GPU time line carries the limit it saw. 4:4:4 is experimental: the spec has no
-  4:4:4 reconstruction.
+  Mac's mean GPU time for a 4:4:4 frame went from 21.0 to 3.8 ms (the pool path, a 4:4:4 FEL test clip
+  played for 60 s with the debug `aetherctl` build, mean of the once-a-second summary lines after the
+  first three; the 4:2:0 kernel measured 2.8 ms on the same Mac before and after), and the A12 numbers are
+  in §4.7. Both take the pool path, since in-place composition is 4:2:0 only. The kernel needs
+  threadgroups of exactly 16 x 16, so a pipeline that allows fewer than 256 threads refuses the frame with
+  a logged compose failure; the per-window GPU time line carries the limit it saw. 4:4:4 is experimental:
+  the spec has no 4:4:4 reconstruction.
 - **In place.** When the decoded base-layer buffer allows it, the result is written into that buffer
   instead of a pool buffer, so the output pool above is not created unless a frame is refused for in-place
   (for example a luma MMR curve). It is used when the buffer is
