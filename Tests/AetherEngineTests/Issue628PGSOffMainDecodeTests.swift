@@ -47,11 +47,15 @@ struct Issue628PGSOffMainDecodeTests {
     }
 
     private static func bytes(of image: CGImage) -> [UInt8] {
-        let data = image.dataProvider!.data! as Data
-        var out: [UInt8] = []
-        for row in 0..<image.height {
-            let start = row * image.bytesPerRow
-            out.append(contentsOf: data[start..<(start + image.width * 4)])
+        // A deferred ImageIO provider can expose straight-alpha pixels. Compare the actual
+        // rendered premultiplied RGBA contract against the original palette algorithm.
+        var out = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        out.withUnsafeMutableBytes { bytes in
+            let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                                    bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         }
         return out
     }

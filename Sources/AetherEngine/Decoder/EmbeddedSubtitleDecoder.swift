@@ -1,5 +1,7 @@
 import Foundation
 import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import Compression
 import AetherLibavcodec
 import AetherLibavformat
@@ -628,7 +630,8 @@ final class EmbeddedSubtitleDecoder {
 
     /// Render a PGS/DVB/HDMV bitmap rect into a CGImage with normalised position.
     /// Palette from libavcodec is 32-bit with alpha in the high byte and BGR below ([B,G,R,A] on little-endian);
-    /// rewritten to RGBA for CGImage's premultipliedLast. Internal for unit tests (#146).
+    /// rewritten to premultiplied RGBA, then retained losslessly with deferred pixel decoding.
+    /// Internal for unit tests (#146).
     static func imageForSubtitleRect(
         _ rect: UnsafeMutablePointer<AVSubtitleRect>,
         videoWidth: Int,
@@ -730,8 +733,41 @@ final class EmbeddedSubtitleDecoder {
             position = CGRect(x: 0.1, y: 0.8, width: 0.8, height: 0.15)
         }
 
-        return SubtitleImage(cgImage: cgImage, position: position,
+        guard let retained = retainedBitmap(cgImage) else {
+            EngineLog.emit("[subtitle] lossless bitmap storage failed size=\(cropW)x\(cropH)")
+            return nil
+        }
+        return SubtitleImage(cgImage: retained.image, position: position,
                              canvasSize: CGSize(width: Int(videoWidth), height: Int(videoHeight)),
-                             isForced: (r.flags & AV_SUBTITLE_FLAG_FORCED) != 0)
+                             isForced: (r.flags & AV_SUBTITLE_FLAG_FORCED) != 0,
+                             encodedBackingBytes: retained.encodedByteCount)
+    }
+
+    /// Retain authored bitmap history as lossless PNG for offsets and backward seeks.
+    /// Encoding runs on the subtitle decode worker; pixel decoding follows the consumer's
+    /// rendering path. Core Animation may decode during a main-thread commit and retain the
+    /// decoded pixels for the CGImage's lifetime. Disabling ImageIO caching does not prevent
+    /// renderer-side caching or bound the process footprint after presentation.
+    static func retainedBitmap(_ image: CGImage) -> (image: CGImage, encodedByteCount: Int)? {
+        autoreleasepool {
+            let data = NSMutableData()
+            guard let destination = CGImageDestinationCreateWithData(
+                data, UTType.png.identifier as CFString, 1, nil
+            ) else { return nil }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return nil }
+            let options = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let source = CGImageSourceCreateWithData(data, options),
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, options),
+                  let colorSpace = decoded.colorSpace, let provider = decoded.dataProvider,
+                  let retained = CGImage(
+                    width: decoded.width, height: decoded.height,
+                    bitsPerComponent: decoded.bitsPerComponent, bitsPerPixel: decoded.bitsPerPixel,
+                    bytesPerRow: decoded.bytesPerRow, space: colorSpace,
+                    bitmapInfo: decoded.bitmapInfo, provider: provider, decode: nil,
+                    shouldInterpolate: image.shouldInterpolate, intent: image.renderingIntent
+                  ) else { return nil }
+            return (retained, data.length)
+        }
     }
 }
