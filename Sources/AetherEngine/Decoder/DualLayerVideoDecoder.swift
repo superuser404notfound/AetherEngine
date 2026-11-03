@@ -50,6 +50,11 @@ protocol FelComposing: Sendable {
         completion: @escaping @Sendable (CVPixelBuffer?) -> Void
     )
     func acquireSlot()
+    /// Waits for a slot until `timeout`: true holding it, false on timeout with nothing taken. The
+    /// decoder's compose queue waits with this, in slices, so a GPU that stopped completing is told
+    /// apart from a slow one (`composeStallSlices`). No default: a conformer that blocked here would
+    /// silently turn the stall handling off.
+    func acquireSlot(timeout: DispatchTime) -> Bool
     func releaseSlot()
     func flush()
     func releaseOutputPool()
@@ -274,7 +279,10 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Production use: builds the Metal composer (nil when there is no Metal
     /// device, in which case every frame bypasses). Tests inject a fake to
     /// control the GPU-slot wait without a GPU.
-    init(composer: (any FelComposing)? = DoviFelComposer()) {
+    init(composer: (any FelComposing)? = DoviFelComposer(),
+         composeStallTimeout: TimeInterval = DualLayerVideoDecoder.defaultComposeStallTimeout) {
+        precondition(composeStallTimeout > 0 && composeStallTimeout.isFinite, "composeStallTimeout must be a positive, finite number of seconds")
+        self.composeStallTimeout = composeStallTimeout
         self.composer = composer
         let primary = HardwareVideoDecoder()
         primary.useCustomBlockSource = true
@@ -286,8 +294,11 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     init(
         composer: (any FelComposing)?,
         primaryDecoder: any SingleLayerVideoDecoder,
-        enhancementDecoder: (any SingleLayerVideoDecoder)?
+        enhancementDecoder: (any SingleLayerVideoDecoder)?,
+        composeStallTimeout: TimeInterval = DualLayerVideoDecoder.defaultComposeStallTimeout
     ) {
+        precondition(composeStallTimeout > 0 && composeStallTimeout.isFinite, "composeStallTimeout must be a positive, finite number of seconds")
+        self.composeStallTimeout = composeStallTimeout
         self.composer = composer
         self.primaryDecoder = primaryDecoder
         (self.primaryDecoder as? HardwareVideoDecoder)?.useCustomBlockSource = true
@@ -328,8 +339,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// one log line per keyframe; the failure is reported once, and `decode` refuses packets after it.
     /// Guarded by `lock`.
     private var primaryOpenFailure: Error?
-    /// Fired once, on the thread that called `decode`, when the primary decoder cannot be opened from
-    /// in-band parameter sets: nothing can be shown, so the host should fall back or surface an error
+    /// Fired once when the primary decoder cannot be opened from in-band parameter sets (on the thread
+    /// that called `decode`) or when the compose stall bound is exhausted (on the compose queue; the host
+    /// hops to the main actor): nothing can be shown, so the host should fall back or surface an error
     /// (the hvcC path throws the equivalent from `open(stream:)`).
     var onFatalDecodeError: (@Sendable (Error) -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return _onFatalDecodeError }
@@ -506,9 +518,20 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Frames dropped because an in-place composition failed after the GPU had started writing into the
     /// base-layer buffer. Guarded by `composeResultLock`.
     private var summaryInPlaceDropped: Int = 0
+    /// Frames sent out as the base layer, with its mapping-preserving RPU, because the compose queue was
+    /// in stall mode (`acquireSlotOrStall`). Guarded by `composeResultLock`; reset by the 1 Hz summary.
+    private var summaryBypassComposeStalled: Int = 0
+    /// Times the compose queue entered stall mode since this decoder was created; never reset, so a probe
+    /// or test can ask "did the GPU stall". Guarded by `composeResultLock`.
+    private var totalComposeStalls: Int = 0
+    /// The longest a bypass waited on `composeQueue` behind compositions, in the summary interval, in
+    /// milliseconds (`fulfilBypass`): shows on a device whether the queue's head-of-line wait matters.
+    /// Guarded by `composeResultLock`; reset by the 1 Hz summary.
+    private var summaryBypassQueueWaitMaxMs: Double = 0
     /// Compositions started, and compositions whose frame (composed or fallback) has been handed to
-    /// `orderedDelivery`. Equal when nothing is on the GPU or in a completion handler. Guarded by
-    /// `composeResultLock`; read by `drainForEndOfStream` and `quiesceForTesting`.
+    /// `orderedDelivery`. Equal when nothing is on the GPU, in a completion handler or on `composeQueue`
+    /// (bypassed frames queued there count too, `fulfilBypass`). Guarded by `composeResultLock`; read by
+    /// `drainForEndOfStream` and `quiesceForTesting`.
     private var composeRequestsStarted = 0
     private var composeRequestsHandedOff = 0
     /// Base frames sent out without a partner, by the rule that released them. Guarded by `lock`.
@@ -553,6 +576,76 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// it held; `decode(packet:)` does not take it either.
     private let lifecycleLock = NSLock()
     private let lock = NSRecursiveLock()
+    /// Where a paired frame waits for its GPU slot and is encoded and committed (`composeOnQueue`), so
+    /// the VideoToolbox callback that paired it only records, pairs and enqueues (`runCompose`). Serial:
+    /// the slot semaphore serialises the waits anyway, and one queue keeps the slots taken in hand-off
+    /// order. Ordering is still `orderedDelivery`'s, by ticket. `.userInteractive` like the delivery
+    /// queues around it; the hop costs one dispatch per composed frame.
+    ///
+    /// Lock order with the queue: `lifecycleLock` before `lock` before `composeResultLock`, as above.
+    /// Work on this queue takes `lock` (`isRetired`), `composeBacklog` and `composeResultLock` on their
+    /// own, one at a time, and waits on the composer's slot semaphore holding none of them; the slot is
+    /// released by Metal's completion handler, which takes none of them. Nothing waits on this queue (no
+    /// `sync`, no barrier), so no lock holder can be waiting behind it. `composeBacklog` is a leaf:
+    /// nothing else is taken while it is held, and nothing is logged, fulfilled or reported under it
+    /// (`flush()` and `close()` take it under `lock`, the one nesting there is).
+    private let composeQueue = DispatchQueue(label: "de.superuser404.dovi.compose", qos: .userInteractive)
+    /// Compositions handed to `composeQueue` that have not yet got their GPU slot (or been dropped as
+    /// retired). Guarded by `composeBacklog`, which `decode(packet:)` waits on (`waitForComposeBacklog`).
+    private let composeBacklog = NSCondition()
+    private var composesAwaitingSlot = 0
+    /// A mirror of `_feedEpoch`, written only by `resetComposeBacklog(epoch:)` from inside the `lock`
+    /// section of `flush()` / `close()` that bumps `_feedEpoch`; equal to it outside that section. The
+    /// feed's wait and the verdict compare against this, under `composeBacklog`, so an epoch change is
+    /// never missed between a check and a wait. Guarded by `composeBacklog`.
+    private var composeBacklogEpoch: UInt64 = 0
+    /// Stall mode: the queue head waited `composeStallSlices` slices in a row for a GPU slot, so the GPU
+    /// is taken to have stopped completing. While it lasts each queued composition takes a slot only if
+    /// one is free right now, and otherwise goes out as the base layer with its mapping-preserving RPU.
+    /// Ends when a slot is got again (progress) or on `flush()` / `close()`. Bounded: a stall that keeps
+    /// coming back or never ends is reported once as `VideoDecoderError.composerStalled`
+    /// (`reportComposerStalled`), see `maxComposeStallBypassFrames` and `maxComposeStallEpisodes`.
+    /// Guarded by `composeBacklog`.
+    private var composeStalled = false
+    /// Stall verdicts since the last healthy stretch. Not reset by `flush()`: a GPU that stops again
+    /// after every seek is the same dead GPU. Guarded by `composeBacklog`.
+    private var composeStallEpisodes = 0
+    /// Compositions that got a slot since the last stall verdict, counted up to
+    /// `composeHealthyFramesToResetStalls`. Guarded by `composeBacklog`.
+    private var composeHealthyRun = 0
+    /// Set when the bound was hit and the error handed to the host; reported once. Guarded by `composeBacklog`.
+    private var composeStallEscalated = false
+    /// Base-layer frames sent out in the current stall mode, for the resume log. Guarded by `composeBacklog`.
+    private var composeStallBypassRun = 0
+    /// The backlog past which `decode(packet:)` holds the feed back. The parked callback threads used to
+    /// be that backpressure; without it a stalled GPU would let VideoToolbox's buffers pile up on the
+    /// queue for as long as the host kept feeding. One queued frame per slot in flight. The feed waits
+    /// for room with no timeout of its own, so the backlog (and the base and enhancement buffers each
+    /// queued composition holds) is bounded by this whatever the GPU does: room appears when the head
+    /// gets a slot, is retired (within a slice of a flush or close), or reaches the stall verdict.
+    static let maxComposesAwaitingSlot = DoviFelComposer.maxFramesInFlight
+    /// How many slice waits in a row, each timing out, make the stall verdict.
+    static let composeStallSlices = 4
+    /// The bound on one stall mode: this many frames sent out as the base layer without a single slot
+    /// coming free (about 25 s of video at 24 fps) and the GPU is taken to be gone for good. Counted in
+    /// frames, never in clock time, like the verdict itself.
+    static let maxComposeStallBypassFrames = 600
+    /// The bound on a GPU that recovers and stalls again: the verdict is allowed this many times without
+    /// a healthy stretch (`composeHealthyFramesToResetStalls`) between; the next one is reported.
+    static let maxComposeStallEpisodes = 3
+    /// Compositions that must get a slot after a stall verdict (about 10 s of video at 24 fps) before the
+    /// episode count starts again from zero.
+    static let composeHealthyFramesToResetStalls = 240
+    /// The default `composeStallTimeout`: how long the queue head must have waited, in running time and
+    /// with no slot freed, before the GPU is taken to have stopped completing. Metal's own watchdog fails
+    /// a command buffer that runs away long before this, and a failed one still returns its slot, so only
+    /// work that never completes at all reaches it.
+    static let defaultComposeStallTimeout: TimeInterval = 2
+    /// The wait for a slot is cut into `composeStallSlices` slices of this length. The verdict counts
+    /// timed-out slices, never compares clock readings, so a process suspension of any length ends at
+    /// most one slice (see `acquireSlotOrStall`). Injected for tests.
+    let composeStallTimeout: TimeInterval
+    private var composeStallSlice: TimeInterval { composeStallTimeout / Double(Self.composeStallSlices) }
     private var _feedEpoch: UInt64 = 0
     /// True while `flush()` is draining the hardware decoders (dolby-vision-fel.md
     /// §5.8). `HardwareVideoDecoder.flush()` waits for the frames VideoToolbox
@@ -670,12 +763,24 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             lock.unlock()
             return
         }
+        // A reported failure (the primary decoder would not open, or the GPU stalled for good) is final:
+        // the host has been told, and more packets would only refill a backlog nothing drains.
+        if primaryOpenFailure != nil {
+            lock.unlock()
+            return
+        }
         // The epoch this packet entered under, whether or not the caller passed one: a `flush()` that
         // lands while the packet is being parsed below must stop it from touching post-flush state.
         let entryEpoch = _feedEpoch
         let primed = primaryDecoderInitialized
         let tb = timeBase
         lock.unlock()
+
+        // No lock held: the backpressure a stalled GPU used to put on the VideoToolbox callback threads
+        // lands on the feed instead. It waits for room in the compose backlog or for the epoch to move; a
+        // stalled GPU does not refuse the packet (stall mode drains the backlog on its own). False means a
+        // `flush()` or `close()` landed after this packet passed the gate above: it belongs to the old feed.
+        guard waitForComposeBacklog(entryEpoch: entryEpoch) else { return }
 
         if !primed {
             ensurePrimaryDecoder(from: packet)
@@ -1037,7 +1142,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// `ticket` (dolby-vision-fel.md §5.7): `dmNAL` so `OrderedDelivery.emit` never
     /// touches `dmRpuCache`, `epoch` so a late completion can tell a stale
     /// delivery from a current one without the decoder lock.
-    private struct ComposeRequest {
+    private struct ComposeRequest: @unchecked Sendable {
         let ticket: UInt64
         let epoch: UInt64
         let base: CVPixelBuffer
@@ -1071,21 +1176,40 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         case compose(ComposeRequest)
     }
 
-    /// Hands one bypass request straight to `orderedDelivery`. No lock held.
+    /// Hands one bypass request to `orderedDelivery` through `composeQueue`, behind every composition
+    /// handed off before it. No lock held. Sent straight to `fulfil`, bypasses overtook compositions
+    /// still queued for a GPU slot, and once more than `OrderedDelivery`'s stall threshold of later
+    /// frames had arrived ahead of one, its ticket was skipped as lost and the frame dropped. Through the
+    /// queue, a bypass can only overtake the compositions already on the GPU, as when the callback thread
+    /// parked in the slot wait. Counted like a composition, so `drainForEndOfStream` waits for it too.
     private func fulfilBypass(_ req: BypassRequest) {
-        orderedDelivery.fulfil(
-            ticket: req.ticket, epoch: req.epoch,
-            DeliveredFrame(buffer: SendableBuffer(value: req.buffer), pts: req.pts, hdr10Data: req.hdr10Data, dmNAL: req.dmNAL)
-        )
+        composeResultLock.lock(); composeRequestsStarted += 1; composeResultLock.unlock()
+        let delivery = orderedDelivery
+        let ticket = req.ticket
+        let epoch = req.epoch
+        let frame = DeliveredFrame(buffer: SendableBuffer(value: req.buffer), pts: req.pts, hdr10Data: req.hdr10Data, dmNAL: req.dmNAL)
+        let queuedAt = DispatchTime.now().uptimeNanoseconds
+        composeQueue.async { [self] in
+            let waitedMs = Double(DispatchTime.now().uptimeNanoseconds &- queuedAt) / 1_000_000
+            delivery.fulfil(ticket: ticket, epoch: epoch, frame)
+            composeResultLock.lock()
+            composeRequestsHandedOff += 1
+            if waitedMs > summaryBypassQueueWaitMaxMs { summaryBypassQueueWaitMaxMs = waitedMs }
+            composeResultLock.unlock()
+        }
     }
 
-    /// Acquires the GPU slot with no lock held, then encodes and commits. The
-    /// completed frame (or the base layer when composition fails) reaches
-    /// `orderedDelivery`, which reorders by ticket. The completion closure
-    /// captures `orderedDelivery` strongly and the decoder weakly for counters
-    /// (dolby-vision-fel.md §5.7): a completion that outlives the decoder
-    /// still calls `fulfil`, which drops it once `orderedDelivery`'s epoch has
-    /// moved on, instead of silently no-oping on a `weak self`.
+    /// Hands one composition to `composeQueue` and returns; no lock held. Runs on the VideoToolbox
+    /// output thread that paired the frame, which must not wait: VideoToolbox may make the callback on
+    /// the thread that submitted the frame, with `HardwareVideoDecoder.lock` held, and a callback that
+    /// blocks stalls that session's whole output. The GPU slot wait (`maxFramesInFlight`) and the output
+    /// pool's retry sleeps used to land here and back up decode of both layers on a GPU or pool hiccup;
+    /// they now land on `composeQueue` (`composeOnQueue`).
+    ///
+    /// Counted as started here, not on the queue, so `drainForEndOfStream` and `quiesceForTesting`
+    /// wait for a composition that is still queued as well as one on the GPU. The request keeps both
+    /// pixel buffers alive while it waits, as the parked callback thread did, and `decode(packet:)`
+    /// holds the feed back while too many are waiting (`waitForComposeBacklog`).
     private func runCompose(_ req: ComposeRequest) {
         guard let composer else {
             orderedDelivery.fulfil(
@@ -1094,15 +1218,241 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             )
             return
         }
+        composeResultLock.lock(); composeRequestsStarted += 1; composeResultLock.unlock()
+        composeBacklog.lock()
+        composesAwaitingSlot += 1
+        composeBacklog.unlock()
+        // Strong `self`: the decoder outlives a composition it queued, as it did a callback parked in it.
+        composeQueue.async { [self] in
+            composeOnQueue(req, composer: composer)
+        }
+    }
+
+    /// True once `flush()` or `close()` has moved the epoch past the one `req` was issued in: its
+    /// ticket is retired and `orderedDelivery` would drop the frame, so it is not worth a GPU slot.
+    /// Takes `lock` for a moment, from `composeQueue`; nothing holds `lock` while waiting on that queue.
+    private func isRetired(_ req: ComposeRequest) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return req.epoch != _feedEpoch
+    }
+
+    /// Waits while `maxComposesAwaitingSlot` or more compositions are queued for a GPU slot, until one
+    /// gets its slot (or is dropped as retired or sent out in stall mode), or `flush()` / `close()` moves
+    /// the epoch past `entryEpoch`. Called by `decode(packet:)` with no lock held: the feeding thread
+    /// absorbs the backpressure, never a VideoToolbox callback. Has no clock of its own: the queue head's
+    /// stall verdict guarantees room within about `composeStallTimeout` of running time, so the wait
+    /// cannot outlast a GPU that stopped. Returns false when the epoch moved (the packet is pre-seek or
+    /// post-close and is refused), true otherwise. Internal for `DualLayerGpuSlotWaitTests`.
+    @discardableResult
+    func waitForComposeBacklog(entryEpoch: UInt64) -> Bool {
+        composeBacklog.lock()
+        while composesAwaitingSlot >= Self.maxComposesAwaitingSlot, composeBacklogEpoch == entryEpoch {
+            composeBacklog.wait()
+        }
+        let current = composeBacklogEpoch == entryEpoch
+        composeBacklog.unlock()
+        return current
+    }
+
+    private func leaveComposeBacklog() {
+        composeBacklog.lock()
+        composesAwaitingSlot -= 1
+        composeBacklog.broadcast()
+        composeBacklog.unlock()
+    }
+
+    /// Moves the backlog to `epoch`, clears stall mode and releases a feed waiting on the backlog, for
+    /// `flush()` and `close()`: a seek or teardown must not wait for the GPU. The caller holds `lock`
+    /// (lock order `lock` then `composeBacklog`); this takes only `composeBacklog`, a leaf. Returns whether
+    /// stall mode was on, so the caller can log the clear once it has released `lock`.
+    private func resetComposeBacklog(epoch: UInt64) -> Bool {
+        composeBacklog.lock()
+        composeBacklogEpoch = epoch
+        let wasStalled = composeStalled
+        composeStalled = false
+        composeStallBypassRun = 0
+        composeBacklog.broadcast()
+        composeBacklog.unlock()
+        return wasStalled
+    }
+
+    private func isInStallMode() -> Bool {
+        composeBacklog.lock(); defer { composeBacklog.unlock() }
+        return composeStalled
+    }
+
+    /// The verdict: starts stall mode if `epoch` is still the current one. False when a `flush()` or
+    /// `close()` got in between (the request is retired, and the new epoch must not start stalled).
+    /// Takes `composeBacklog`, then `composeResultLock` and the log on their own, never nested.
+    private func enterStallMode(epoch: UInt64) -> Bool {
+        composeBacklog.lock()
+        guard composeBacklogEpoch == epoch else {
+            composeBacklog.unlock()
+            return false
+        }
+        composeStalled = true
+        composeStallBypassRun = 0
+        composeStallEpisodes += 1
+        composeHealthyRun = 0
+        let episodes = composeStallEpisodes
+        composeBacklog.unlock()
+        composeResultLock.lock(); totalComposeStalls += 1; composeResultLock.unlock()
+        if episodes > Self.maxComposeStallEpisodes {
+            reportComposerStalled(reason: "\(episodes - 1) stalls without \(Self.composeHealthyFramesToResetStalls) healthy compositions between")
+        }
+        let ms = Int((composeStallTimeout * 1000).rounded())
+        EngineLog.emit("[DualLayerVideoDecoder] compose stalled: no GPU slot for \(Self.composeStallSlices) waits of \(ms / Self.composeStallSlices) ms; sending frames as the base layer until the GPU frees one",
+                       category: .swPlayback)
+        return true
+    }
+
+    /// Progress: a slot came free in stall mode. Clears the flag and logs the resume.
+    private func endStallModeOnProgress() {
+        composeBacklog.lock()
+        let wasStalled = composeStalled
+        let run = composeStallBypassRun
+        composeStalled = false
+        composeStallBypassRun = 0
+        composeBacklog.unlock()
+        if wasStalled {
+            EngineLog.emit("[DualLayerVideoDecoder] compose resumed after \(run) base-layer frames", category: .swPlayback)
+        }
+    }
+
+    /// One frame sent out as the base layer in stall mode.
+    private func noteStalledBypass() {
+        composeBacklog.lock()
+        composeStallBypassRun += 1
+        let run = composeStallBypassRun
+        composeBacklog.unlock()
+        composeResultLock.lock(); summaryBypassComposeStalled += 1; composeResultLock.unlock()
+        if run >= Self.maxComposeStallBypassFrames {
+            reportComposerStalled(reason: "\(run) frames sent as the base layer without a free GPU slot")
+        }
+    }
+
+    /// A composition got its slot outside stall mode: after `composeHealthyFramesToResetStalls` of them
+    /// the GPU is taken to have recovered and the episode count restarts.
+    private func noteComposeProgress() {
+        composeBacklog.lock()
+        if composeStallEpisodes > 0 {
+            composeHealthyRun += 1
+            if composeHealthyRun >= Self.composeHealthyFramesToResetStalls {
+                composeStallEpisodes = 0
+                composeHealthyRun = 0
+            }
+        }
+        composeBacklog.unlock()
+    }
+
+    /// Hands the bound's verdict to the host, once: the GPU stopped completing and stays that way, so the
+    /// base layer is no longer a degraded picture but a stalled one. Same path as a failed primary open:
+    /// `fatalDecodeError` holds it, `onFatalDecodeError` receives it, and `decode(packet:)` refuses
+    /// packets from then on. Called from the compose queue only, with no lock held (the handler is the
+    /// host's, and delivery to it never happens under `lock`, `composeBacklog` or `composeResultLock`).
+    private func reportComposerStalled(reason: String) {
+        composeBacklog.lock()
+        let first = !composeStallEscalated
+        composeStallEscalated = true
+        composeBacklog.unlock()
+        guard first else { return }
+        let error = VideoDecoderError.composerStalled
+        lock.lock()
+        if primaryOpenFailure == nil { primaryOpenFailure = error }
+        let handler = _onFatalDecodeError
+        lock.unlock()
+        EngineLog.emit("[DualLayerVideoDecoder] compose stalled for good (\(reason)); reporting a fatal decode error", category: .swPlayback)
+        handler?(error)
+    }
+
+    private enum SlotOutcome { case acquired, retired, stalled }
+
+    /// The queue head's wait for a GPU slot, with the stall verdict. Holds no lock across the wait.
+    ///
+    /// Normally the wait is `composeStallSlices` slices of `composeStallSlice`. A slice that times out
+    /// for a request that a flush or close has retired in the meantime ends the wait at once; after
+    /// `composeStallSlices` timed-out slices in a row the verdict is stall mode. No clock readings are
+    /// compared: a stopped thread cannot start a new wait, so a process suspension of any length ends at
+    /// most one slice, and the verdict needs about (slices - 1) / slices of `composeStallTimeout` of
+    /// running time with no slot freed. Load shrinks the same way: a starved thread loses whole slices.
+    ///
+    /// In stall mode each request only tries for a slot that is free right now; getting one ends stall mode.
+    private func acquireSlotOrStall(_ req: ComposeRequest, _ composer: any FelComposing) -> SlotOutcome {
+        if isInStallMode() {
+            guard composer.acquireSlot(timeout: .now()) else {
+                return isRetired(req) ? .retired : .stalled
+            }
+            endStallModeOnProgress()
+            return .acquired
+        }
+        var timedOut = 0
+        while true {
+            if composer.acquireSlot(timeout: .now() + composeStallSlice) { return .acquired }
+            if isRetired(req) { return .retired }
+            timedOut += 1
+            if timedOut >= Self.composeStallSlices {
+                #if DEBUG
+                stallVerdictHookForTesting?()
+                #endif
+                return enterStallMode(epoch: req.epoch) ? .stalled : .retired
+            }
+        }
+    }
+
+    /// Acquires the GPU slot on `composeQueue` with no lock held, then encodes and commits. The
+    /// completed frame (or the base layer when composition fails) reaches `orderedDelivery`, which
+    /// reorders by ticket. The completion closure captures `orderedDelivery` strongly and the decoder
+    /// weakly for counters (dolby-vision-fel.md §5.7): a completion that outlives the decoder still calls
+    /// `fulfil`, which drops it once `orderedDelivery`'s epoch has moved on, instead of silently no-oping
+    /// on a `weak self`.
+    ///
+    /// A request retired by a `flush()` or `close()` while it waited is dropped without composing,
+    /// checked both before the slot wait (a queued pre-seek frame does not wait for the GPU) and after it
+    /// (nor spend one). Dropping it is safe: its ticket was retired wholesale with the epoch.
+    ///
+    /// The slot wait is `acquireSlotOrStall`: a GPU that stops completing ends in stall mode, in which a
+    /// request that finds no free slot goes out as its untouched base layer with the mapping-preserving
+    /// RPU, in queue order, instead of waiting. Compositions already on the GPU are left alone
+    /// (`OrderedDelivery`'s stall guard skips the tickets of ones that never complete, and drops a late
+    /// completion of a skipped ticket). Every outcome leaves the backlog once and counts one hand-off.
+    private func composeOnQueue(_ req: ComposeRequest, composer: any FelComposing) {
+        guard !isRetired(req) else {
+            leaveComposeBacklog()
+            composeResultLock.lock(); composeRequestsHandedOff += 1; composeResultLock.unlock()
+            return
+        }
         // A measurement run (`AETHER_FEL_MEASURE`) composes the base layer a second and third time from
         // another queue, so the base buffer has to stay intact: those runs use the output pool.
         let inPlace = FelResidualMeasure.stride == 0 && composer.canComposeInPlace(baseBuffer: req.base, params: req.params)
-        if !inPlace, let concrete = composer as? DoviFelComposer {
+        if !inPlace, !isInStallMode(), let concrete = composer as? DoviFelComposer {
             FelResidualMeasure.sampleIfDue(composer: concrete, base: req.base, enhancement: req.enhancement,
                                            params: req.params, frameIndex: req.frameIndex, pts: req.pts)
         }
-        composeResultLock.lock(); composeRequestsStarted += 1; composeResultLock.unlock()
-        composer.acquireSlot()
+        let outcome = acquireSlotOrStall(req, composer)
+        leaveComposeBacklog()
+        switch outcome {
+        case .retired:
+            composeResultLock.lock(); composeRequestsHandedOff += 1; composeResultLock.unlock()
+            return
+        case .stalled:
+            // No slot, nothing encoded: `req.base` is the intact decoded base layer (also on the in-place
+            // path, where `inPlace` only picks the encode routine), so it goes out as `.baseIntact` does,
+            // with the RPU that keeps the mapping. The composed-RPU override applies to composed frames only.
+            noteStalledBypass()
+            orderedDelivery.fulfil(
+                ticket: req.ticket, epoch: req.epoch,
+                DeliveredFrame(buffer: SendableBuffer(value: req.base), pts: req.pts, hdr10Data: req.hdr10Data, dmNAL: req.baseLayerNAL)
+            )
+            composeResultLock.lock(); composeRequestsHandedOff += 1; composeResultLock.unlock()
+            return
+        case .acquired:
+            noteComposeProgress()
+        }
+        guard !isRetired(req) else {
+            composer.releaseSlot()
+            composeResultLock.lock(); composeRequestsHandedOff += 1; composeResultLock.unlock()
+            return
+        }
         let fallback = SendableBuffer(value: req.base)
         // Scalars (plus the strongly-captured `delivery`) copied out so the
         // `@Sendable` completion captures no CoreVideo types (Swift 6 mode
@@ -1170,6 +1520,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         composeResultLock.lock()
         if success { summaryComposedFrames += 1; totalComposedFrames += 1 } else { summaryComposeFailures += 1 }
         composeResultLock.unlock()
+    }
+
+    /// Times the compose queue entered stall mode (the GPU stopped completing), since this decoder was
+    /// created; never reset. For probes and tests.
+    var composeStallCount: Int {
+        composeResultLock.lock(); defer { composeResultLock.unlock() }
+        return totalComposeStalls
     }
 
     /// Frames composed on the GPU so far (bypassed and failed frames are not counted).
@@ -1647,9 +2004,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let composed = summaryComposedFrames
         let composeFailures = summaryComposeFailures
         let inPlaceDropped = summaryInPlaceDropped
+        let composeStalledBypasses = summaryBypassComposeStalled
+        let bypassQueueWaitMaxMs = summaryBypassQueueWaitMaxMs
         summaryComposedFrames = 0
         summaryComposeFailures = 0
         summaryInPlaceDropped = 0
+        summaryBypassComposeStalled = 0
+        summaryBypassQueueWaitMaxMs = 0
         composeResultLock.unlock()
         let noELInAU = summaryBypassNoELInAU
         let deadline = summaryBypassDeadline
@@ -1699,11 +2060,11 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let gpuMs = activeComposer?.meanGPUTimeMs
         let pendingPeak = orderedDelivery.takePeakPendingCount()
         let gpuStr = gpuMs.map { String(format: "%.1f", $0) } ?? "n/a"
-        let line = "[DualLayerVideoDecoder] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoELInAU=\(noELInAU), bypassDeadline=\(deadline), bypassHeldWall=\(heldWall), bypassBackstop=\(backstop), bypassNoELDecoder=\(noELDecoder), bypassEndOfStream=\(endOfStream), bypassNoRPU=\(noRPU), mappingFallback=\(mappingFallback), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), inPlaceTotal=\(inPlaceTotal), inPlaceDropped=\(inPlaceDropped), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
+        let line = "[DualLayerVideoDecoder] summary: composed=\(composed), composeFailures=\(composeFailures), bypassNoELInAU=\(noELInAU), bypassDeadline=\(deadline), bypassHeldWall=\(heldWall), bypassBackstop=\(backstop), bypassNoELDecoder=\(noELDecoder), bypassEndOfStream=\(endOfStream), bypassNoRPU=\(noRPU), mappingFallback=\(mappingFallback), staleELDropped=\(staleEL), prunedEL=\(prunedEL), borrowedParams=\(borrowedParams), maxSkew=\(skew), peakGpuSlots=\(slots), poolBuffers=\(poolBuffers), inPlaceTotal=\(inPlaceTotal), inPlaceDropped=\(inPlaceDropped), bypassComposeStalled=\(composeStalledBypasses), bypassQueueWaitMaxMs=\(String(format: "%.1f", bypassQueueWaitMaxMs)), deliveryPendingPeak=\(pendingPeak), meanGpuMs=\(gpuStr)"
         // Once a second is a trace, not an event: it goes to OSLog's debug level only. An interval in
         // which a composition failed is the exception, so the failure reaches the default level and the
         // host handler.
-        let level: EngineLog.Level = composeFailures > 0 || inPlaceDropped > 0 ? .info : .verbose
+        let level: EngineLog.Level = composeFailures > 0 || inPlaceDropped > 0 || composeStalledBypasses > 0 ? .info : .verbose
         EngineLog.emit(line, category: .swPlayback, level: level)
         #if DEBUG
         summarySinkForTesting?(line, level)
@@ -1783,6 +2144,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.lock()
         guard !isClosed else { lock.unlock(); return }
         _feedEpoch &+= 1
+        // A feed parked on a full compose backlog returns to the seek now, and stall mode ends with the
+        // epoch (`composeBacklog` is a leaf, taken under `lock`; the log waits until `lock` is released).
+        let clearedStall = resetComposeBacklog(epoch: _feedEpoch)
         draining = true
         // Here, not with the queues below: the demux thread may feed post-seek packets while this
         // thread waits on the drain, and those must start from the next IRAP.
@@ -1814,6 +2178,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         el?.adoptFeedEpoch(epoch)
         orderedDelivery.resetAsync(epoch: epoch, nextTicket: nextTicket)
         lock.unlock()
+        if clearedStall {
+            EngineLog.emit("[DualLayerVideoDecoder] compose stall cleared by flush", category: .swPlayback)
+        }
 
         #if DEBUG
         // Test seam only: lets a test drive a ticket through the window a
@@ -1876,6 +2243,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         totalBypassDeadline += summaryBypassDeadline
         totalBypassHeldWall += summaryBypassHeldWall
         totalBypassBackstop += summaryBypassBackstop
+        composeResultLock.lock(); summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0; composeResultLock.unlock()
         summaryBypassNoELInAU = 0
         summaryBypassDeadline = 0
         summaryBypassHeldWall = 0
@@ -2004,6 +2372,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         // larger epoch.
         lock.lock()
         _feedEpoch &+= 1
+        let clearedStall = resetComposeBacklog(epoch: _feedEpoch)   // as in `flush()`: teardown never waits for the GPU
         draining = false
         deliveryNextTicket = 0
         pictureAlignment = Self.makeAlignment()
@@ -2019,7 +2388,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lastGoodBaseLayerNAL = nil
         borrowedParamsRun = 0
         sideDataRing.removeAll()
-        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; composeResultLock.unlock()
+        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0; composeResultLock.unlock()
         summaryBypassNoELInAU = 0
         summaryBypassDeadline = 0
         summaryBypassHeldWall = 0
@@ -2065,6 +2434,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         enhancementDecoder = nil
         orderedDelivery.resetAsync(epoch: epoch, nextTicket: nextTicket)
         lock.unlock()
+        if clearedStall {
+            EngineLog.emit("[DualLayerVideoDecoder] compose stall cleared by close", category: .swPlayback)
+        }
 
         // Same guarantee as `flush()`: nothing tagged with the
         // pre-close epoch reaches `onFrame` after this returns. Clearing the
@@ -2103,9 +2475,28 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// instead of waiting on a sub-microsecond production race.
     var flushRaceHookForTesting: (() -> Void)?
 
+    /// Runs on the compose queue, with no lock held, between the last retired check and the stall verdict,
+    /// so a test can land a `flush()` or `close()` in that window. Set before frames are fed.
+    var stallVerdictHookForTesting: (() -> Void)?
+
     /// Called at the top of every `flush()`, before it queues for `lifecycleLock`. Lets a test know a
     /// second flush has reached the lock without sleeping to find out.
     var flushWillTakeLifecycleLockHookForTesting: (() -> Void)?
+
+    /// The current feed epoch, for tests that call `waitForComposeBacklog(entryEpoch:)` as `decode(packet:)` does.
+    var feedEpochForTesting: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return _feedEpoch
+    }
+
+    var isComposeStalledForTesting: Bool { isInStallMode() }
+
+    /// Compositions and bypasses handed to the compose queue and not yet handed to `orderedDelivery` (or
+    /// dropped as retired): started minus handed off.
+    var outstandingComposeRequestsForTesting: Int {
+        composeResultLock.lock(); defer { composeResultLock.unlock() }
+        return composeRequestsStarted - composeRequestsHandedOff
+    }
 
     /// Waits until every composition started so far has finished and handed its frame to
     /// `orderedDelivery`, then until that queue has run everything enqueued ahead of this call. After

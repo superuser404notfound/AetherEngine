@@ -5,9 +5,10 @@ import Testing
 import Metal
 @testable import AetherEngine
 
-/// The enhancement layer is upsampled to the base-layer grid by one hardware bilinear fetch
-/// (`dovi_sample_el_1d`). These tests run the production composer and read the residual back out of the
-/// un-quantised VDR plane, so a different filter (a Catmull-Rom, or nearest) fails them.
+/// The enhancement layer is upsampled to the base-layer grid bilinearly, from explicit texel reads with exact
+/// weights, and the interpolated code is rounded half up (`dovi_upsample_el`, `dovi_el_code`). These tests run
+/// the production composer and read the residual back out of the un-quantised VDR plane, so a different filter
+/// (a Catmull-Rom, or nearest), inexact weights or another rounding fail them.
 @Suite(.offCooperativePoolOneLane, .enabled(if: MTLCreateSystemDefaultDevice() != nil, "needs a Metal device"))
 struct DoviEnhancementUpsamplerTests {
 
@@ -72,13 +73,58 @@ struct DoviEnhancementUpsamplerTests {
 
         for y in 0..<8 {
             for x in 0..<32 {
-                let tol = (x % 2 == 0) ? 0 : 1
+                // Exact on odd samples too: the half-way weight is exact, not the sampler's fixed point.
                 let gotCb = cb[y * 32 + x], wantCb = vdr(elAt(x, 16))
-                #expect(abs(gotCb - wantCb) <= tol, "Cb (\(x), \(y)): \(gotCb) vs \(wantCb)")
-                let tolR = (y % 2 == 0) ? 0 : 1
+                #expect(gotCb == wantCb, "Cb (\(x), \(y)): \(gotCb) vs \(wantCb)")
                 let gotCr = cr[y * 32 + x], wantCr = vdr(elAt(y, 4))
-                #expect(abs(gotCr - wantCr) <= tolR, "Cr (\(x), \(y)): \(gotCr) vs \(wantCr)")
+                #expect(gotCr == wantCr, "Cr (\(x), \(y)): \(gotCr) vs \(wantCr)")
             }
+        }
+    }
+
+    /// Exact bilinear EL code at base-layer column `gx` of a 64-wide row over a 32-wide EL (centre-aligned),
+    /// rounded half up.
+    private func exactLumaCode(_ gx: Int, _ elColumn: (Int) -> Int) -> Int {
+        let u = (Double(gx) + 0.5) / 2.0 - 0.5
+        let x0 = Int(floor(u)), fx = u - Double(x0)
+        let a = Double(elColumn(min(max(x0, 0), 31))), b = Double(elColumn(min(max(x0 + 1, 0), 31)))
+        return Int(floor(a * (1 - fx) + b * fx + 0.5))
+    }
+
+    @Test("luma: interpolated EL codes are exact and an exact half rounds up, not to even")
+    func lumaHalfRoundsUp() throws {
+        // Columns alternate 602 / 600: at the 2:1 quarter weights every base pixel lands on x.5
+        // (0.25 * 602 + 0.75 * 600 = 600.5, 0.75 * 602 + 0.25 * 600 = 601.5). Ties-to-even would give 600 and
+        // 602, half up gives 601 and 602. Above 512 the residual here is code - 513.
+        let column: (Int) -> Int = { $0 % 2 == 0 ? 602 : 600 }
+        let row = try composeLuma(elColumn: column)
+        for gx in 0..<64 {
+            let want = 2048 + exactLumaCode(gx, column) - 513
+            #expect(row[gx] == want, "gx \(gx): \(row[gx]) vs \(want)")
+        }
+        #expect(row.contains(2048 + 601 - 513), "the 600.5 sites round up to 601")
+    }
+
+    @Test("chroma: a half-way EL code rounds up")
+    func chromaHalfRoundsUp() throws {
+        // Quarter-resolution EL chroma alternating 601 / 600 by column: odd base samples sit half way, at 600.5,
+        // which rounds up to 601 (ties-to-even would give 600). Even samples read one texel exactly.
+        let composer = try #require(DoviFelComposer())
+        var p = DoviGpuEdgeCaseTests.params()
+        p.ditherMode = .debugRawVDR
+        let bl = try #require(H.makeBuffer(width: 64, height: 16))
+        let el = try #require(H.makeBuffer(width: 32, height: 8))
+        H.fillPlane(bl, plane: 0, components: 1) { _, _, _ in 512 }
+        H.fillPlane(bl, plane: 1, components: 2) { _, _, _ in 512 }
+        H.fillPlane(el, plane: 0, components: 1) { _, _, _ in 512 }
+        H.fillPlane(el, plane: 1, components: 2) { x, _, _ in x % 2 == 0 ? 601 : 600 }
+        let out = try #require(composer.compose(baseBuffer: bl, enhancementBuffer: el, params: p))
+        let cb = DoviTestSupport.rawVDR(out, chromaOnly: true)[1]
+        for x in 0..<32 {
+            let n = x / 2
+            let code: Int
+            if x % 2 == 0 { code = n % 2 == 0 ? 601 : 600 } else { code = n + 1 > 15 ? (n % 2 == 0 ? 601 : 600) : 601 }
+            #expect(cb[x] == 2048 + code - 513, "Cb \(x): \(cb[x]) vs \(2048 + code - 513)")
         }
     }
 

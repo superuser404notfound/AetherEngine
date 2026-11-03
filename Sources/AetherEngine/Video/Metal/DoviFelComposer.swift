@@ -69,6 +69,10 @@ final class DoviFelComposer: @unchecked Sendable {
     private let paramBuffers: [MTLBuffer]
     /// Preallocated 1024-entry luma prediction LUT buffers (dolby-vision-fel.md §5.6).
     private let lumaLutBuffers: [MTLBuffer]
+    /// Preallocated inverse-NLQ tables, one per slot: 1024 EL codes for each of Y, Cb, Cr (`populateNlqLut`).
+    private let nlqLutBuffers: [MTLBuffer]
+    /// Preallocated MMR coefficient tables, one per slot, in float (`populateMmrTable`).
+    private let mmrTableBuffers: [MTLBuffer]
     private var freeParamSlotIndices: [Int]
 
     /// Output pixel buffer pool status for 1 Hz summary diagnostics (dolby-vision-fel.md §5.11).
@@ -89,7 +93,7 @@ final class DoviFelComposer: @unchecked Sendable {
     /// One-shot latch for the `linear_deadzone_threshold != 0` diagnostic.
     ///
     /// The inverse NLQ adds the threshold to the scaled magnitude before the shift,
-    /// as the spec's pseudo-code and DoViBaker do; see `dovi_eval_inv_nlq`. Every
+    /// as the spec's pseudo-code and DoViBaker do; see `inverseNlq`. Every
     /// stream available to test against carries a zero threshold, so a non-zero one
     /// is the first content to actually exercise that term and is worth saying so
     /// out loud exactly once.
@@ -289,16 +293,24 @@ final class DoviFelComposer: @unchecked Sendable {
 
         var pBuffers: [MTLBuffer] = []
         var lutBuffers: [MTLBuffer] = []
+        var nlqBuffers: [MTLBuffer] = []
+        var mmrBuffers: [MTLBuffer] = []
         for _ in 0..<Self.maxFramesInFlight {
             guard let buf = dev.makeBuffer(length: DoviMetalParams.serializedSize, options: .storageModeShared),
-                  let lut = dev.makeBuffer(length: 1024 * MemoryLayout<Float>.stride, options: .storageModeShared) else {
+                  let lut = dev.makeBuffer(length: 1024 * MemoryLayout<Float>.stride, options: .storageModeShared),
+                  let nlq = dev.makeBuffer(length: 3 * 1024 * MemoryLayout<Int32>.stride, options: .storageModeShared),
+                  let mmr = dev.makeBuffer(length: Self.mmrTableCount * MemoryLayout<Float>.stride, options: .storageModeShared) else {
                 return nil
             }
             pBuffers.append(buf)
             lutBuffers.append(lut)
+            nlqBuffers.append(nlq)
+            mmrBuffers.append(mmr)
         }
         self.paramBuffers = pBuffers
         self.lumaLutBuffers = lutBuffers
+        self.nlqLutBuffers = nlqBuffers
+        self.mmrTableBuffers = mmrBuffers
         self.freeParamSlotIndices = Array(0..<Self.maxFramesInFlight)
     }
 
@@ -477,7 +489,8 @@ final class DoviFelComposer: @unchecked Sendable {
     /// At most ``maxFramesInFlight`` compositions are outstanding on the GPU; a
     /// caller that runs further ahead than that blocks here until one retires.
     /// That is the backpressure that keeps the pixel buffer pool from growing
-    /// without bound, and it is deliberately the decode thread that absorbs it.
+    /// without bound. (The decoder does not call this variant: it waits on its
+    /// compose queue with ``acquireSlot(timeout:)``, which gives up after a stall.)
     /// The slot is released when the command buffer retires rather than when
     /// `completion` returns, so a slow consumer can leave at most
     /// ``maxFramesInFlight`` further frames queued for delivery behind it. That
@@ -502,18 +515,25 @@ final class DoviFelComposer: @unchecked Sendable {
 
     /// Blocks until one of ``maxFramesInFlight`` compositions is free.
     ///
-    /// dolby-vision-fel.md §5.6: the decoder calls this with no lock held, on the
-    /// VideoToolbox output thread that produced the `compose` action, so the
-    /// backpressure lands on that thread instead of stalling `deliver`, the
-    /// other layer's callback, `flush()` and `close()` behind the decoder lock.
-    func acquireSlot() {
-        inFlight.wait()
+    /// dolby-vision-fel.md §5.6: the decoder calls ``acquireSlot(timeout:)`` instead, with no lock held,
+    /// on its compose queue (`DualLayerVideoDecoder.composeQueue`), so the backpressure never stalls
+    /// `deliver`, a VideoToolbox output callback, `flush()` or `close()` behind the decoder lock or the
+    /// callback thread, and a GPU that stops completing can be told apart from a slow one. This untimed
+    /// form is for callers that own their thread (`composeAsync`, `compose`).
+    func acquireSlot() { _ = acquireSlot(timeout: .distantFuture) }
+
+    /// Waits for a free slot until `timeout` (a `DispatchTime`, which does not count system sleep).
+    /// True with the slot taken (release it with ``releaseSlot()`` or by composing with it); false on
+    /// timeout, with nothing taken and no counter changed.
+    func acquireSlot(timeout: DispatchTime) -> Bool {
+        guard inFlight.wait(timeout: timeout) == .success else { return false }
         slotLock.lock()
         activeSlotsInUse += 1
         if activeSlotsInUse > peakSlotsInUse {
             peakSlotsInUse = activeSlotsInUse
         }
         slotLock.unlock()
+        return true
     }
 
     /// Releases one in-flight slot. Only for callers that acquired with
@@ -619,8 +639,9 @@ final class DoviFelComposer: @unchecked Sendable {
         work.commandBuffer.addCompletedHandler { [weak self] cb in
             // Metal runs these handlers on ONE serial queue per command queue, so
             // this block must never take a lock the caller above might be holding
-            // and must never block (dolby-vision-fel.md §4.3). The caller is inside
-            // `inFlight.wait()` while it holds the decoder's lock, and a `completion`
+            // and must never block (dolby-vision-fel.md §4.3). A caller can be inside
+            // `inFlight.wait()` while it holds a lock (the decoder did, before its compose queue
+            // took over the wait), and a `completion`
             // that reached for that same lock would block here, which would
             // stop every LATER handler from running, and one of those is the
             // signal the caller is waiting for. Signalling first only defers that
@@ -873,13 +894,13 @@ final class DoviFelComposer: @unchecked Sendable {
 
         var keepAliveTextures: [CVMetalTexture] = []
 
-        // Plane 0 is luma, plane 1 is interleaved chroma. The integer planes are
-        // bound as Uint so the kernels see raw code values; the enhancement layer
-        // is bound as Unorm because it is upsampled by the hardware bilinear sampler.
+        // Plane 0 is luma, plane 1 is interleaved chroma. Every plane is bound as Uint so the kernels see
+        // raw code values; the enhancement layer is upsampled from explicit texel reads (`dovi_upsample_el`),
+        // not by the hardware sampler.
         guard let blYTex = makeTexture(from: baseBuffer, plane: 0, format: .r16Uint, width: blW, height: blH, keepAlive: &keepAliveTextures),
               let blUvTex = makeTexture(from: baseBuffer, plane: 1, format: .rg16Uint, width: blCW, height: blCH, keepAlive: &keepAliveTextures),
-              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Unorm, width: elW, height: elH, keepAlive: &keepAliveTextures),
-              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Unorm, width: elCW, height: elCH, keepAlive: &keepAliveTextures) else {
+              let elYTex = makeTexture(from: enhancementBuffer, plane: 0, format: .r16Uint, width: elW, height: elH, keepAlive: &keepAliveTextures),
+              let elUvTex = makeTexture(from: enhancementBuffer, plane: 1, format: .rg16Uint, width: elCW, height: elCH, keepAlive: &keepAliveTextures) else {
             return nil
         }
         // In place the output planes are the base-layer planes: the same textures, bound a second time.
@@ -924,6 +945,10 @@ final class DoviFelComposer: @unchecked Sendable {
 
         let lutBuffer = lumaLutBuffers[paramSlot]
         populateLumaLut(into: lutBuffer.contents().assumingMemoryBound(to: Float.self), params: metalParams)
+        let nlqBuffer = nlqLutBuffers[paramSlot]
+        Self.populateNlqLut(into: nlqBuffer.contents().assumingMemoryBound(to: Int32.self), params: serialized)
+        let mmrBuffer = mmrTableBuffers[paramSlot]
+        Self.populateMmrTable(into: mmrBuffer.contents().assumingMemoryBound(to: Float.self), params: serialized)
 
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             returnParamSlot(paramSlot)
@@ -959,6 +984,8 @@ final class DoviFelComposer: @unchecked Sendable {
             encoder.setTexture(outYTex, index: 3)
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
             encoder.setBuffer(lutBuffer, offset: 0, index: 1)
+            encoder.setBuffer(nlqBuffer, offset: 0, index: 2)
+            encoder.setBuffer(mmrBuffer, offset: 0, index: 3)
             dispatch(encoder, width: blW, height: blH,
                      threadgroup: threadgroupSize(for: pipelines.lumaPipeline))
         }
@@ -969,6 +996,8 @@ final class DoviFelComposer: @unchecked Sendable {
             encoder.setTexture(elUvTex, index: 2)
             encoder.setTexture(outUvTex, index: 3)
             encoder.setBuffer(paramBuffer, offset: 0, index: 0)
+            encoder.setBuffer(nlqBuffer, offset: 0, index: 2)
+            encoder.setBuffer(mmrBuffer, offset: 0, index: 3)
             dispatch(encoder, width: outCW, height: outCH,
                      threadgroup: format == .yuv444 ? Self.chroma444Threadgroup : threadgroupSize(for: chromaPipeline))
         }
@@ -1237,6 +1266,74 @@ final class DoviFelComposer: @unchecked Sendable {
     /// The 4:4:4 kernel composes each 4:2:0 site once per threadgroup tile and so needs threadgroups of exactly
     /// this size (`DOVI_444_TILE` in the shader).
     static let chroma444Threadgroup = MTLSize(width: 16, height: 16, depth: 1)
+
+    /// Fills the 3 x 1024 inverse-NLQ table the kernels index (Y, Cb, Cr; one entry per 10-bit EL code), with
+    /// exactly the arithmetic of ``inverseNlq(_:elCode:)``. Only components whose residual the kernels apply
+    /// are filled: the others are never read. 3072 integer evaluations on the CPU per frame replace a 64-bit
+    /// multiply per GPU sample (UHD p010 0.82 -> 0.74 ms per frame on an M4 Pro).
+    static func populateNlqLut(into ptr: UnsafeMutablePointer<Int32>, params: DoviMetalParams) {
+        guard !params.flags.contains(.disableResidual) else { return }
+        fillNlq(ptr, params.nlqY)
+        fillNlq(ptr + 1024, params.nlqCb)
+        fillNlq(ptr + 2048, params.nlqCr)
+    }
+
+    /// Floats in the per-frame MMR table: Y, Cb, Cr, each `maxPieces` pieces of the constant and 21 terms.
+    static let mmrTableCount = 3 * DoviMmrParams.maxPieces * (1 + DoviMmrParams.coefficientsPerPiece)
+
+    /// Fills the MMR table the kernels read (`DOVI_MMR_TABLE_*` in the shader): each coefficient as
+    /// float(coef) * 2^-coef_shift, the value the kernel used to form per term per sample. The scale is a
+    /// power of two, so it is exact and the kernels' sums are bit-identical; 1056 conversions on the CPU
+    /// per frame replace an int-to-float conversion and a multiply per MMR term per GPU sample (UHD p010
+    /// about 0.045 ms per frame, measured on an M4 Pro with the fork's benchmark).
+    static func populateMmrTable(into ptr: UnsafeMutablePointer<Float>, params: DoviMetalParams) {
+        let piece = 1 + DoviMmrParams.coefficientsPerPiece
+        for (component, mmr) in [params.mmrY, params.mmrCb, params.mmrCr].enumerated() {
+            let inv = ldexpf(1, -Int32(truncatingIfNeeded: mmr.coefShift))
+            for p in 0..<DoviMmrParams.maxPieces {
+                let base = ptr + (component * DoviMmrParams.maxPieces + p) * piece
+                base[0] = Float(mmr.constant[p]) * inv
+                for t in 0..<DoviMmrParams.coefficientsPerPiece { base[1 + t] = Float(mmr.coef[p][t]) * inv }
+            }
+        }
+    }
+
+    private static func fillNlq(_ ptr: UnsafeMutablePointer<Int32>, _ nlq: DoviNlqParams) {
+        guard nlq.nlqMethod == .linear, nlq.nlqScale != 0 else { return }
+        for code in 0..<1024 { ptr[code] = inverseNlq(nlq, elCode: code) }
+    }
+
+    /// Inverse linear-deadzone quantiser for one 10-bit EL code, in VDR code units.
+    ///
+    /// The scaled magnitude is Q(coefficient_log2_denom) of the normalised residual, so the shift
+    /// by nlq_shift = coefficient_log2_denom - vdr_bit_depth lands it in VDR code
+    /// units. That reading is corroborated by the RPUs themselves: both test streams
+    /// carry linear_deadzone_slope = 2048 and vdr_in_max = 0.125 at denom 23, and
+    /// 512 * 2048 >> 11 is exactly 512, i.e. the slope is tuned so the enhancement
+    /// layer's full +/-512 swing lands precisely on vdr_in_max. Shifting by denom
+    /// instead (the convention the vc4 composer uses) collapses every residual to
+    /// zero, and no other shift makes the two fields agree.
+    ///
+    /// The threshold is ADDED to the magnitude, in the same Q(coefficient_log2_denom) domain as
+    /// (|r| - 1/2) * slope, and there is no early zero: that is the spec's pseudo-code, and DoViBaker
+    /// implements it (`dq += T * sign`). Every real stream carries linear_deadzone_threshold == 0 (RPU
+    /// survey, 9,816 RPUs), where all readings agree. Subtracting it, or zeroing anything inside the
+    /// deadzone, would be a different reading and does not match a second implementation.
+    ///
+    /// Wrapping arithmetic, as the kernels' 32/64-bit integers had: parameters no real stream carries (a
+    /// negative or huge scale, an offset far outside the code range) must give some deterministic value, not trap.
+    static func inverseNlq(_ nlq: DoviNlqParams, elCode: Int) -> Int32 {
+        guard nlq.nlqMethod == .linear, nlq.nlqScale != 0 else { return 0 }
+        let r = Int32(truncatingIfNeeded: elCode) &- nlq.nlqOffset
+        if r == 0 { return 0 }
+        // Reconstruction at the middle of the quantisation step, (|r| - 1/2) * scale, in doubled fixed
+        // point so the half step stays exact.
+        let magFp = (2 &* Int64(r.magnitude) &- 1) &* Int64(nlq.nlqScale)
+        var mag = (magFp &+ 2 &* Int64(nlq.nlqThreshold)) >> (Int64(nlq.nlqShift) + 1)
+        if nlq.vdrInMax > 0 && mag > Int64(nlq.vdrInMax) { mag = Int64(nlq.vdrInMax) }
+        let m = Int32(truncatingIfNeeded: mag)
+        return r < 0 ? 0 &- m : m
+    }
 
     /// Sizes threadgroups using the pipeline's execution width (dolby-vision-fel.md §5.6).
     private func threadgroupSize(for pipeline: MTLComputePipelineState) -> MTLSize {

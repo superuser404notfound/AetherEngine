@@ -48,6 +48,7 @@ struct DualLayerDeadlineBypassTests {
         private var _pairs: [Pair] = []
         var pairs: [Pair] { lock.lock(); defer { lock.unlock() }; return _pairs }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() {}
         func composeAsync(baseBuffer: CVPixelBuffer, enhancementBuffer: CVPixelBuffer, params: DoviMetalParams,

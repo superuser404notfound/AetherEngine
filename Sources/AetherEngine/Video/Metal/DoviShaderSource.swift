@@ -40,6 +40,10 @@ typedef int  dovi_i32;
 #define DOVI_MAPPING_POLYNOMIAL       0
 #define DOVI_MAPPING_MMR              1
 
+/* ---- per-frame MMR table (buffer 3): [Y, Cb, Cr][piece 0..7][constant, 21 coefficients] ---- */
+#define DOVI_MMR_TABLE_PIECE_STRIDE      22
+#define DOVI_MMR_TABLE_COMPONENT_STRIDE  (8 * DOVI_MMR_TABLE_PIECE_STRIDE)
+
 /* ---- flags ---- */
 #define DOVI_FLAG_DISABLE_RESIDUAL    0x1u /* disable_residual_flag, or el_type == MEL */
 #define DOVI_FLAG_LUMA_MMR            0x2u /* luma curve has at least one MMR piece */
@@ -255,15 +259,19 @@ static inline float dovi_clamp_mmr_input(constant struct DoviPolynomialParams &c
 
 // MMR piece: a regression over the seven cross terms of all three normalised
 // base-layer components, with order o contributing those terms raised to o + 1.
+// `k` is this component's slice of the per-frame MMR table (`populateMmrTable`): per piece the
+// constant then the 21 coefficients, each float(coef) * 2^-coef_shift computed once on the CPU. That
+// is the value this function used to form per term in the loop (a power-of-two scale is exact), so
+// the sum is unchanged bit for bit, without an int-to-float conversion and a multiply per term.
 static inline float dovi_eval_mmr(
     constant struct DoviPolynomialParams &curve,
-    constant struct DoviMmrParams &mmr,
+    device const float* k,
     int piece,
     float y_norm, float u_norm, float v_norm)
 {
     // y_norm, u_norm and v_norm are already clamped to their components' pivot ranges.
-    float inv = ldexp(1.0f, -int(mmr.coef_shift));
-    float s = float(mmr.mmr_constant[piece]) * inv;
+    device const float* c = k + piece * DOVI_MMR_TABLE_PIECE_STRIDE;
+    float s = c[0];
 
     float base[7] = {
         y_norm,
@@ -282,7 +290,7 @@ static inline float dovi_eval_mmr(
     uint order = min(curve.order[piece], 3u);
     for (uint o = 0u; o < order; ++o) {
         for (int k = 0; k < 7; ++k) {
-            s = fma(float(mmr.coef[piece][o * 7u + uint(k)]) * inv, t[k], s);
+            s = fma(c[1u + o * 7u + uint(k)], t[k], s);
         }
         if (o + 1u < order) {
             for (int k = 0; k < 7; ++k) {
@@ -298,7 +306,7 @@ static inline float dovi_eval_mmr(
 // means identity: the base layer passes through untouched.
 static inline float dovi_eval_curve(
     constant struct DoviPolynomialParams &curve,
-    constant struct DoviMmrParams &mmr,
+    device const float* mmr,
     constant struct DoviPolynomialParams &poly_y,
     constant struct DoviPolynomialParams &poly_cb,
     constant struct DoviPolynomialParams &poly_cr,
@@ -335,39 +343,12 @@ static inline int dovi_denormalize(float pred_norm, uint bl_max, uint vdr_scale,
    Inverse NLQ
    ========================================================================= */
 
-// Inverse linear-deadzone quantiser, in VDR code units.
-//
-// mag_fp is Q(coefficient_log2_denom) of the normalised residual, so the shift
-// by nlq_shift = coefficient_log2_denom - vdr_bit_depth lands it in VDR code
-// units. That reading is corroborated by the RPUs themselves: both test streams
-// carry linear_deadzone_slope = 2048 and vdr_in_max = 0.125 at denom 23, and
-// 512 * 2048 >> 11 is exactly 512, i.e. the slope is tuned so the enhancement
-// layer's full +/-512 swing lands precisely on vdr_in_max. Shifting by denom
-// instead (the convention the vc4 composer uses) collapses every residual to
-// zero, and no other shift makes the two fields agree.
-//
-// The threshold is ADDED to the magnitude, in the same Q(coefficient_log2_denom) domain as
-// (|r| - 1/2) * slope, and there is no early zero: that is the spec's pseudo-code, and DoViBaker
-// implements it (`dq += T * sign`). Every real stream carries linear_deadzone_threshold == 0 (RPU
-// survey, 9,816 RPUs), where all readings agree. Subtracting it, or zeroing anything inside the
-// deadzone, would be a different reading and does not match a second implementation.
-static inline int dovi_eval_inv_nlq(constant struct DoviNlqParams &nlq, int el_val) {
-    if (nlq.nlq_method != DOVI_NLQ_METHOD_LINEAR || nlq.nlq_scale == 0) {
-        return 0;
-    }
-    int r = el_val - nlq.nlq_offset;
-    if (r == 0) {
-        return 0;
-    }
-    // Reconstruction at the middle of the quantisation step, (|r| - 1/2) * scale, in doubled fixed
-    // point so the half step stays exact.
-    long mag_fp = (2L * long(abs(r)) - 1L) * long(nlq.nlq_scale);
-    long threshold2 = 2L * long(nlq.nlq_threshold);
-    long mag = (mag_fp + threshold2) >> (nlq.nlq_shift + 1u);
-    if (nlq.vdr_in_max > 0 && mag > long(nlq.vdr_in_max)) {
-        mag = long(nlq.vdr_in_max);
-    }
-    return (r < 0) ? -int(mag) : int(mag);
+// The inverse linear-deadzone quantiser depends on the 10-bit EL code alone, so the composer evaluates it
+// once per frame for all 1024 codes of each component (`DoviFelComposer.inverseNlq`, where the reading and
+// its reasons are written down) and the kernels index that table: nlq_lut[component * 1024 + code], in VDR
+// code units, Y then Cb then Cr. The 64-bit products it replaces were most of the residual's cost.
+static inline int dovi_inv_nlq(device const int* nlq_lut, uint component, int el_code) {
+    return nlq_lut[component * 1024u + uint(clamp(el_code, 0, 1023))];
 }
 
 /* ============================================================================
@@ -401,36 +382,71 @@ static inline int dovi_quantize(
    Enhancement layer upsampling
    ========================================================================= */
 
-// EL upsampling: one hardware bilinear fetch.
+// EL upsampling: bilinear, from four explicit texel reads with exact weights.
 //
 // el_spatial_resampling_filter_flag advertises that the encoder used its own
 // separable filter, whose taps the RPU does not carry, so no bit-exact inverse
 // is available from the stream. Against the DoViBaker oracle on a fine-detail set (gratings, zone plate,
 // band-limited noise) a 4-fetch Catmull-Rom bought about 0.7% of per-pixel error sd over bilinear, with chroma
-// unchanged, for four times the EL reads. `tex_size` is unused by bilinear; it is
-// kept so a wider filter can replace this one without touching the callers.
-static inline float dovi_sample_el_1d(
-    texture2d<float, access::sample> tex,
-    sampler s,
-    float2 uv,
-    float2 tex_size)
-{
-    return tex.sample(s, uv).r;
+// unchanged, for four times the EL reads.
+//
+// Not the hardware sampler: its bilinear weights are fixed point, so the interpolated code could land one
+// off the exact value (the CPU model saw it), and rounding that with rint() sent every exact half to the
+// even neighbour. A 2:1 EL interpolates at quarter weights, where halves are common (two texels 2 apart
+// mod 4), so ties-to-even was a parity-dependent bias. Here the weights for a 2:1 or 1:1 EL are exact quarters,
+// halves or zero, every product and sum of 10-bit codes at those weights is exact in float, and the caller
+// rounds half up.
+
+// One axis: the lower EL texel index and the fraction towards the next texel for base-layer sample n.
+// `centre` 0.5 puts both grids' samples at their pixel centres (luma: n_el = (n + 1/2) * el / bl - 1/2);
+// 0 co-sites the first samples (chroma: n_el = n * el / bl). For the 2:1 and 1:1 grids streams use,
+// el / bl is 0.5 or 1, so every term is exact in float.
+static inline int dovi_el_axis(uint n, float ratio, float centre, thread float &frac) {
+    float u = (float(n) + centre) * ratio - centre;
+    float i = floor(u);
+    frac = u - i;
+    return int(i);
 }
 
-static inline float2 dovi_sample_el_2d(
-    texture2d<float, access::sample> tex,
-    sampler s,
-    float2 uv,
-    float2 tex_size)
-{
-    return tex.sample(s, uv).rg;
+// Bilinear EL luma code at base-layer pixel `site` of a `bl_size` plane, edges clamped. One gather fetches the
+// 2x2 footprint: the point between the four texel centres selects it and sits half a texel from any footprint
+// boundary. A gather measured cheaper here than four reads (UHD luma 0.41 ms against 0.45 ms on an M4 Pro).
+static inline float dovi_upsample_el(texture2d<ushort, access::sample> tex, uint2 site,
+                                     uint2 bl_size, uint2 el_size) {
+    constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_edge);
+    float fx, fy;
+    int x0 = dovi_el_axis(site.x, float(el_size.x) / float(bl_size.x), 0.5f, fx);
+    int y0 = dovi_el_axis(site.y, float(el_size.y) / float(bl_size.y), 0.5f, fy);
+    // Gather order: (x0, y1), (x1, y1), (x1, y0), (x0, y0).
+    float4 c = float4(tex.gather(s, float2(float(x0 + 1), float(y0 + 1))) >> 6);
+    float top = c.w * (1.0f - fx) + c.z * fx;
+    float bot = c.x * (1.0f - fx) + c.y * fx;
+    return top * (1.0f - fy) + bot * fy;
 }
 
-// UNORM [0, 1] from a 10-in-16 MSB-aligned P010 plane back to a code value.
-// 65535 / 64 is exact: the hardware divides the stored ushort by 65535, and the
-// code value is that ushort >> 6.
-constant float dovi_unorm_to_code = 65535.0f / 64.0f;
+// Bilinear EL chroma codes (Cb, Cr) at base chroma sample `site`, co-sited, edges clamped. Four reads of the
+// interleaved plane return both components each, which measured cheaper than a gather per component.
+static inline float2 dovi_upsample_el_uv(texture2d<ushort, access::read> tex, uint2 site,
+                                         uint2 bl_size, uint2 el_size) {
+    float fx, fy;
+    int x0 = dovi_el_axis(site.x, float(el_size.x) / float(bl_size.x), 0.0f, fx);
+    int y0 = dovi_el_axis(site.y, float(el_size.y) / float(bl_size.y), 0.0f, fy);
+    int xm = int(el_size.x) - 1, ym = int(el_size.y) - 1;
+    uint xa = uint(clamp(x0, 0, xm)), xb = uint(clamp(x0 + 1, 0, xm));
+    uint ya = uint(clamp(y0, 0, ym)), yb = uint(clamp(y0 + 1, 0, ym));
+    float2 c00 = float2(tex.read(uint2(xa, ya)).rg >> 6);
+    float2 c10 = float2(tex.read(uint2(xb, ya)).rg >> 6);
+    float2 c01 = float2(tex.read(uint2(xa, yb)).rg >> 6);
+    float2 c11 = float2(tex.read(uint2(xb, yb)).rg >> 6);
+    float2 top = c00 * (1.0f - fx) + c10 * fx;
+    float2 bot = c01 * (1.0f - fx) + c11 * fx;
+    return top * (1.0f - fy) + bot * fy;
+}
+
+// Round half up: the interpolated EL code back to an integer code for the inverse NLQ.
+static inline int dovi_el_code(float v) {
+    return int(floor(v + 0.5f));
+}
 
 /* ============================================================================
    Composition kernels
@@ -448,10 +464,12 @@ constant float dovi_unorm_to_code = 65535.0f / 64.0f;
 kernel void dovi_compose_luma(
     texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
     texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_y_tex      [[texture(2)]],
+    texture2d<ushort, access::sample>      el_y_tex      [[texture(2)]],
     texture2d<ushort, access::write>       out_y_tex     [[texture(3)]],
     constant struct DoviMetalParams&       params        [[buffer(0)]],
     constant float*                        luma_lut      [[buffer(1)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
     uint2                                  gid           [[thread_position_in_grid]])
 {
     if (gid.x >= params.bl_width || gid.y >= params.bl_height) {
@@ -468,7 +486,7 @@ kernel void dovi_compose_luma(
         ushort4 bl_uv = bl_uv_tex.read(uint2(gid.x >> 1, gid.y >> 1));
         float u_norm = float(int(bl_uv.r >> 6)) / float(params.bl_max + 1u);
         float v_norm = float(int(bl_uv.g >> 6)) / float(params.bl_max + 1u);
-        pred = dovi_eval_curve(params.poly_y, params.mmr_y,
+        pred = dovi_eval_curve(params.poly_y, mmr_table,
                                params.poly_y, params.poly_cb, params.poly_cr, bl_y,
                                y_norm, u_norm, v_norm, params.bl_max + 1u);
     }
@@ -477,11 +495,10 @@ kernel void dovi_compose_luma(
     if ((params.flags & DOVI_FLAG_DISABLE_RESIDUAL) == 0u &&
         params.nlq_y.nlq_method == DOVI_NLQ_METHOD_LINEAR &&
         params.nlq_y.nlq_scale != 0) {
-        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
-        float2 uv = (float2(gid) + 0.5f) / float2(params.bl_width, params.bl_height);
-        float el = dovi_sample_el_1d(el_y_tex, s, uv,
-                                     float2(params.el_width, params.el_height)) * dovi_unorm_to_code;
-        vdr_y += dovi_eval_inv_nlq(params.nlq_y, int(rint(el)));
+        // Centre-aligned: luma samples sit at pixel centres on both grids.
+        float el = dovi_upsample_el(el_y_tex, gid, uint2(params.bl_width, params.bl_height),
+                                    uint2(params.el_width, params.el_height));
+        vdr_y += dovi_inv_nlq(nlq_lut, 0u, dovi_el_code(el));
     }
 
     vdr_y = clamp(vdr_y, 0, int(params.vdr_max));
@@ -513,8 +530,10 @@ static inline DoviChromaSite dovi_chroma_site(
     uint2                                  site,
     texture2d<ushort, access::read>        bl_y_tex,
     texture2d<ushort, access::read>        bl_uv_tex,
-    texture2d<float, access::sample>       el_uv_tex,
-    constant struct DoviMetalParams        &params)
+    texture2d<ushort, access::read>        el_uv_tex,
+    constant struct DoviMetalParams        &params,
+    device const int*                      nlq_lut,
+    device const float*                    mmr_table)
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
     uint uv_height = (params.bl_height + 1u) / 2u;
@@ -546,10 +565,10 @@ static inline DoviChromaSite dovi_chroma_site(
     float u_norm = float(bl_cb) / float(params.bl_max + 1u);
     float v_norm = float(bl_cr) / float(params.bl_max + 1u);
 
-    float pred_cb = dovi_eval_curve(params.poly_cb, params.mmr_cb,
+    float pred_cb = dovi_eval_curve(params.poly_cb, mmr_table + DOVI_MMR_TABLE_COMPONENT_STRIDE,
                                     params.poly_y, params.poly_cb, params.poly_cr, bl_cb,
                                     y_norm, u_norm, v_norm, params.bl_max + 1u);
-    float pred_cr = dovi_eval_curve(params.poly_cr, params.mmr_cr,
+    float pred_cr = dovi_eval_curve(params.poly_cr, mmr_table + 2 * DOVI_MMR_TABLE_COMPONENT_STRIDE,
                                     params.poly_y, params.poly_cb, params.poly_cr, bl_cr,
                                     y_norm, u_norm, v_norm, params.bl_max + 1u);
 
@@ -560,7 +579,6 @@ static inline DoviChromaSite dovi_chroma_site(
         bool cb_active = (params.nlq_cb.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cb.nlq_scale != 0);
         bool cr_active = (params.nlq_cr.nlq_method == DOVI_NLQ_METHOD_LINEAR && params.nlq_cr.nlq_scale != 0);
         if (cb_active || cr_active) {
-            constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
             // Chroma is co-sited with the top-left luma sample (chroma location type 2, as HDR10 and
             // Dolby Vision streams carry it), so the enhancement chroma grid and the base chroma grid
             // share their first sample rather than their outer edge: base chroma sample n sits at EL
@@ -568,14 +586,13 @@ static inline DoviChromaSite dovi_chroma_site(
             // the odd ones half way between two texels. This is DoViBaker's phase (`upsampleChromaEven`
             // copies, `upsampleChromaOdd` interpolates at 0.5); a centre-aligned fetch puts every
             // sample a quarter of an EL chroma texel up and to the left. Same-resolution EL is unchanged.
-            float2 el_uv_size = float2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u);
-            float2 uv = float2(site) / float2(uv_width, uv_height) + 0.5f / el_uv_size;
-            float2 el = dovi_sample_el_2d(el_uv_tex, s, uv, el_uv_size) * dovi_unorm_to_code;
+            float2 el = dovi_upsample_el_uv(el_uv_tex, site, uint2(uv_width, uv_height),
+                                            uint2((params.el_width + 1u) / 2u, (params.el_height + 1u) / 2u));
             if (cb_active) {
-                vdr_cb += dovi_eval_inv_nlq(params.nlq_cb, int(rint(el.r)));
+                vdr_cb += dovi_inv_nlq(nlq_lut, 1u, dovi_el_code(el.x));
             }
             if (cr_active) {
-                vdr_cr += dovi_eval_inv_nlq(params.nlq_cr, int(rint(el.g)));
+                vdr_cr += dovi_inv_nlq(nlq_lut, 2u, dovi_el_code(el.y));
             }
         }
     }
@@ -613,9 +630,11 @@ static inline void dovi_write_chroma(
 kernel void dovi_compose_chroma(
     texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
     texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
     texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
     constant struct DoviMetalParams&       params        [[buffer(0)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
     uint2                                  gid           [[thread_position_in_grid]])
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
@@ -625,7 +644,7 @@ kernel void dovi_compose_chroma(
         return;
     }
 
-    DoviChromaSite site = dovi_chroma_site(gid, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    DoviChromaSite site = dovi_chroma_site(gid, bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
     dovi_write_chroma(out_uv_tex, gid, site.cb, site.cr, params);
 }
 
@@ -636,10 +655,12 @@ static inline DoviChromaSite dovi_output_site(
     uint2                                  site,
     texture2d<ushort, access::read>        bl_y_tex,
     texture2d<ushort, access::read>        bl_uv_tex,
-    texture2d<float, access::sample>       el_uv_tex,
-    constant struct DoviMetalParams        &params)
+    texture2d<ushort, access::read>        el_uv_tex,
+    constant struct DoviMetalParams        &params,
+    device const int*                      nlq_lut,
+    device const float*                    mmr_table)
 {
-    DoviChromaSite s = dovi_chroma_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    DoviChromaSite s = dovi_chroma_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
     int lo = int(64u * params.vdr_scale);
     int hi = int(960u * params.vdr_scale);
     s.cb = clamp(s.cb, lo, hi);
@@ -653,9 +674,11 @@ static inline DoviChromaSite dovi_output_site(
 kernel void dovi_compose_chroma_422(
     texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
     texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
     texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
     constant struct DoviMetalParams&       params        [[buffer(0)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
     uint2                                  gid           [[thread_position_in_grid]])
 {
     uint uv_width = (params.bl_width + 1u) / 2u;
@@ -667,8 +690,8 @@ kernel void dovi_compose_chroma_422(
 
     uint site_y = gid.y / 2u;
     uint other_y = (gid.y & 1u) != 0u ? min(site_y + 1u, uv_height - 1u) : site_y;
-    DoviChromaSite a = dovi_output_site(uint2(gid.x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
-    DoviChromaSite b = dovi_output_site(uint2(gid.x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params);
+    DoviChromaSite a = dovi_output_site(uint2(gid.x, site_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
+    DoviChromaSite b = dovi_output_site(uint2(gid.x, other_y), bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
     dovi_write_chroma(out_uv_tex, gid, (a.cb + b.cb + 1) >> 1, (a.cr + b.cr + 1) >> 1, params);
 }
 
@@ -691,9 +714,11 @@ kernel void dovi_compose_chroma_422(
 kernel void dovi_compose_chroma_444(
     texture2d<ushort, access::read>        bl_y_tex      [[texture(0)]],
     texture2d<ushort, access::read>        bl_uv_tex     [[texture(1)]],
-    texture2d<float, access::sample>       el_uv_tex     [[texture(2)]],
+    texture2d<ushort, access::read>        el_uv_tex     [[texture(2)]],
     texture2d<ushort, access::write>       out_uv_tex    [[texture(3)]],
     constant struct DoviMetalParams&       params        [[buffer(0)]],
+    device const int*                      nlq_lut       [[buffer(2)]],
+    device const float*                    mmr_table     [[buffer(3)]],
     uint2                                  gid           [[thread_position_in_grid]],
     uint2                                  tid           [[thread_position_in_threadgroup]],
     uint2                                  tgid          [[threadgroup_position_in_grid]],
@@ -714,7 +739,7 @@ kernel void dovi_compose_chroma_444(
     for (uint i = lane; i < DOVI_444_SITES * DOVI_444_SITES; i += lanes) {
         uint2 site = uint2(min(site_x0 + i % DOVI_444_SITES, uv_width - 1u),
                            min(site_y0 + i / DOVI_444_SITES, uv_height - 1u));
-        DoviChromaSite s = dovi_output_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params);
+        DoviChromaSite s = dovi_output_site(site, bl_y_tex, bl_uv_tex, el_uv_tex, params, nlq_lut, mmr_table);
         tile_cb[i] = s.cb;
         tile_cr[i] = s.cr;
     }

@@ -3,6 +3,7 @@
 import Testing
 import Foundation
 import CoreVideo
+import Dovi
 @testable import AetherEngine
 
 /// M8: an independent model of the composition, written from the RPU syntax and the reshaping
@@ -29,7 +30,7 @@ struct DoviCpuModelTests {
         func code(_ x: Int, _ y: Int, _ c: Int = 0) -> Int {
             Int(raw[(y * width + x) * components + c] >> 6)
         }
-        /// Raw 16-bit word, for the enhancement-layer filter (the GPU filters the UNORM word).
+        /// Raw 16-bit word.
         func word(_ x: Int, _ y: Int, _ c: Int = 0) -> Double {
             Double(raw[(y * width + x) * components + c])
         }
@@ -116,7 +117,7 @@ struct DoviCpuModelTests {
         }
 
         /// Bilinear sample of an enhancement-layer plane at base-layer sample (x, y) of a plane `baseW` x
-        /// `baseH`, as a 10-bit code (the word is UNORM x 65535 / 64). Luma samples sit at pixel centres;
+        /// `baseH`: the 10-bit codes interpolated, then rounded half up. Luma samples sit at pixel centres;
         /// chroma (`cosited`) is co-sited with the top-left luma sample, so the two grids share sample 0.
         func elCode(_ el: Plane, comp: Int, x: Int, y: Int, baseW: Int, baseH: Int, cosited: Bool = false) -> Int {
             let centre = cosited ? 0.0 : 0.5
@@ -125,12 +126,11 @@ struct DoviCpuModelTests {
             let x0 = Int(floor(u)), y0 = Int(floor(v))
             let fx = u - Double(x0), fy = v - Double(y0)
             func w(_ xx: Int, _ yy: Int) -> Double {
-                el.word(min(max(xx, 0), el.width - 1), min(max(yy, 0), el.height - 1), comp)
+                Double(el.code(min(max(xx, 0), el.width - 1), min(max(yy, 0), el.height - 1), comp))
             }
             let top = w(x0, y0) * (1 - fx) + w(x0 + 1, y0) * fx
             let bot = w(x0, y0 + 1) * (1 - fx) + w(x0 + 1, y0 + 1) * fx
-            let word = top * (1 - fy) + bot * fy
-            return Int((word / 64.0).rounded(.toNearestOrEven))
+            return Int((top * (1 - fy) + bot * fy + 0.5).rounded(.down))
         }
 
         /// One component's pieces before any clamp: the normalised prediction, the VDR code it
@@ -285,13 +285,121 @@ struct DoviCpuModelTests {
         print("[m8] \(name): Y \(yStat.description)")
         print("[m8] \(name): Cb \(cbStat.description)")
         print("[m8] \(name): Cr \(crStat.description)")
-        // The enhancement-layer filter is the one place the two are not the same arithmetic (the
-        // hardware bilinear weights are fixed point), so a residual code can land one off; anything
-        // beyond that is a disagreement about the maths.
+        // The enhancement-layer filter is now the same exact arithmetic on both sides; what remains is the
+        // float curve evaluation, which can land one VDR code off; anything beyond that is a disagreement
+        // about the maths.
         for (label, st) in [("Y", yStat), ("Cb", cbStat), ("Cr", crStat)] {
             #expect(st.over1Pct < 0.5, "\(label): \(st.description)")
             #expect(st.exactPct > 90, "\(label): \(st.description)")
         }
+    }
+
+    // MARK: - MMR float precision (M9)
+
+    /// The chroma MMR exactly as `dovi_eval_mmr` evaluates it in float: coefficients converted to float and
+    /// scaled, the cross terms formed in float, fused multiply-adds in the kernel's order.
+    static func mmrFloat(_ mmr: DoviMmrParams, piece k: Int, order: Int, y: Int, u: Int, v: Int) -> Float {
+        let inv = Float(sign: .plus, exponent: -Int(mmr.coefShift), significand: 1)
+        let yn = Float(y) / 1024, un = Float(u) / 1024, vn = Float(v) / 1024
+        var s = Float(mmr.constant[k]) * inv
+        let base: [Float] = [yn, un, vn, yn * un, yn * vn, un * vn, yn * un * vn]
+        var t = base
+        for o in 0..<order {
+            for j in 0..<7 { s = s.addingProduct(Float(mmr.coef[k][o * 7 + j]) * inv, t[j]) }
+            if o + 1 < order { for j in 0..<7 { t[j] *= base[j] } }
+        }
+        return s
+    }
+
+    /// The same sum in exact integer arithmetic: every term over the common denominator 2^(coefShift + 90)
+    /// (1024^9 covers order 3 of the three-way product).
+    @available(macOS 15.0, iOS 18.0, tvOS 18.0, *)
+    static func mmrExact(_ mmr: DoviMmrParams, piece k: Int, order: Int, y: Int, u: Int, v: Int) -> Double {
+        let m: [(Int128, Int)] = [(Int128(y), 1), (Int128(u), 1), (Int128(v), 1), (Int128(y * u), 2),
+                                  (Int128(y * v), 2), (Int128(u * v), 2), (Int128(y * u * v), 3)]
+        var n = Int128(mmr.constant[k]) << 90
+        for o in 0..<order {
+            for j in 0..<7 {
+                var p: Int128 = 1
+                for _ in 0...o { p *= m[j].0 }
+                n += Int128(mmr.coef[k][o * 7 + j]) * p << (90 - 10 * m[j].1 * (o + 1))
+            }
+        }
+        return Double(n) / pow(2, Double(Int(mmr.coefShift) + 90))
+    }
+
+    /// Every real chroma MMR coefficient set the tests can reach: the clip A and clip C RPUs, dovi_tool's
+    /// `fel_orig`, and the distinct sets of the probe's 1584-RPU file when `DV_FEL_RPU_BIN` names it.
+    static func realMmrParams() -> [(String, DoviMetalParams)] {
+        func hex(_ h: String) -> [UInt8] {
+            stride(from: 0, to: h.count, by: 2).map { i in
+                let a = h.index(h.startIndex, offsetBy: i)
+                return UInt8(h[a..<h.index(a, offsetBy: 2)], radix: 16)!
+            }
+        }
+        var out: [(String, DoviMetalParams)] = []
+        for (name, nal) in [("clip A", hex(DoviFelMathTests.clipARpuHex)), ("clip C", hex(DoviFelMathTests.clipCRpuHex)),
+                            ("fel_orig", DoviComposedFrameRpuTests.felNAL)] {
+            if let rpu = dovi_parse_unspec62_nalu(nal, nal.count) {
+                if let p = DoviFelComposer.parseRpuParameters(rpu: rpu) { out.append((name, p)) }
+                dovi_rpu_free(rpu)
+            }
+        }
+        // The probe's 1584-RPU corpus is not in the tree: `DV_FEL_RPU_BIN` names it when it is available.
+        if let bin = ProcessInfo.processInfo.environment["DV_FEL_RPU_BIN"], FileManager.default.fileExists(atPath: bin),
+           let list = dovi_parse_rpu_bin_file(bin) {
+            defer { dovi_rpu_list_free(list) }
+            var seen = Set<[Int32]>()
+            for i in 0..<list.pointee.len {
+                guard let rpu = list.pointee.list?[i], let p = DoviFelComposer.parseRpuParameters(rpu: rpu) else { continue }
+                let key = [p.mmrCb, p.mmrCr].flatMap { $0.constant + $0.coef.flatMap { $0 } }
+                if seen.insert(key).inserted { out.append(("fel_1584 #\(i)", p)) }
+            }
+        }
+        return out
+    }
+
+    @Test("M9: float32 MMR evaluation stays within half a 12-bit code of the exact sum on every real coefficient set")
+    func mmrFloatPrecision() throws {
+        guard #available(macOS 15.0, iOS 18.0, tvOS 18.0, *) else { return }
+        let sets = Self.realMmrParams()
+        try #require(!sets.isEmpty)
+        var worst = 0.0, curves = 0, points = 0, codeFlips = 0
+        for (name, p) in sets {
+            for (label, curve, mmr) in [("Cb", p.polyCb, p.mmrCb), ("Cr", p.polyCr, p.mmrCr)] {
+                guard curve.numPivots >= 2 else { continue }
+                let pieces = Int(curve.numPivots) - 1
+                guard (0..<pieces).contains(where: { curve.method[$0] == DoviMapping.mmr.rawValue }) else { continue }
+                curves += 1
+                func range(_ c: DoviPolynomialParams) -> ClosedRange<Int> {
+                    c.numPivots < 2 ? 0...1023 : Int(c.pivots[0])...Int(c.pivots[Int(c.numPivots) - 1])
+                }
+                func grid(_ r: ClosedRange<Int>, _ step: Int) -> [Int] { Array(stride(from: r.lowerBound, to: r.upperBound, by: step)) + [r.upperBound] }
+                // Coarse enough to run in seconds: this grid finds 0.0017 codes, the 32 / 8 / 8 one 0.0023.
+                let ys = grid(range(p.polyY), 64), us = grid(range(p.polyCb), 16), vs = grid(range(p.polyCr), 16)
+                var curveWorst = 0.0
+                for y in ys { for u in us { for v in vs {
+                    let own = label == "Cb" ? u : v
+                    let k = Model(p).piece(curve, own)
+                    guard curve.method[k] == DoviMapping.mmr.rawValue else { continue }
+                    let order = min(Int(curve.order[k]), 3)
+                    let f = Double(Self.mmrFloat(mmr, piece: k, order: order, y: y, u: u, v: v))
+                    let e = Self.mmrExact(mmr, piece: k, order: order, y: y, u: u, v: v)
+                    let err = abs(f - e) * 4096
+                    curveWorst = max(curveWorst, err)
+                    if (f * 4096).rounded(.toNearestOrEven) != (e * 4096).rounded(.toNearestOrEven) { codeFlips += 1 }
+                    points += 1
+                } } }
+                worst = max(worst, curveWorst)
+                if !name.hasPrefix("fel_1584") || curveWorst == worst {
+                    print(String(format: "[m9] %@ %@: worst |float - exact| %.5f 12-bit codes", name, label, curveWorst))
+                }
+            }
+        }
+        print(String(format: "[m9] %d coefficient sets, %d MMR curves, %d points: worst %.5f 12-bit codes, %d rounded codes differ (%.4f%%)",
+                     sets.count, curves, points, worst, codeFlips, 100 * Double(codeFlips) / Double(max(points, 1))))
+        #expect(curves > 0)
+        #expect(worst < 0.5, "float MMR error \(worst) 12-bit codes")
     }
 
     // MARK: - Loss census (M1) and error attribution (M3, M4, M6)

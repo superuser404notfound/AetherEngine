@@ -44,6 +44,7 @@ struct DualLayerBypassRpuTests {
         let fails: Bool
         init(fails: Bool) { self.fails = fails }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() {}
         func composeAsync(baseBuffer: CVPixelBuffer, enhancementBuffer: CVPixelBuffer, params: DoviMetalParams,

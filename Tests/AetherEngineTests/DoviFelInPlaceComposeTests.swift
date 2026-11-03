@@ -389,6 +389,7 @@ struct DoviFelInPlaceComposeTests {
         private(set) var poolCalls = 0
         init(_ results: [DoviFelComposer.InPlaceResult]) { self.results = results }
         func acquireSlot() {}
+        func acquireSlot(timeout: DispatchTime) -> Bool { true }
         func releaseSlot() {}
         func flush() {}
         func canComposeInPlace(baseBuffer: CVPixelBuffer, params: DoviMetalParams) -> Bool { true }

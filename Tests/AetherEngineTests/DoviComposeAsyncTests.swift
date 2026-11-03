@@ -140,6 +140,21 @@ struct DoviComposeAsyncTests {
         for _ in 1..<DoviFelComposer.maxFramesInFlight { composer.releaseSlot() }
     }
 
+    @Test("a timed slot wait gives up with nothing taken, and succeeds once a slot is released")
+    func timedSlotWaitGivesUpWithoutSideEffect() throws {
+        let composer = try #require(DoviFelComposer())
+        for _ in 0..<DoviFelComposer.maxFramesInFlight { composer.acquireSlot() }
+        let peak = composer.takePeakSlotsInUse()
+        #expect(peak == DoviFelComposer.maxFramesInFlight)
+
+        #expect(composer.acquireSlot(timeout: .now() + 0.05) == false)
+        #expect(composer.takePeakSlotsInUse() == DoviFelComposer.maxFramesInFlight, "a timed-out wait changed the slot count")
+
+        composer.releaseSlot()
+        #expect(composer.acquireSlot(timeout: .now() + 5) == true)
+        for _ in 0..<DoviFelComposer.maxFramesInFlight { composer.releaseSlot() }
+    }
+
     @Test("composeAsync matches the blocking compose bit for bit")
     func asyncMatchesSync() async throws {
         let composer = try #require(DoviFelComposer())
