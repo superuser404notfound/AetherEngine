@@ -391,7 +391,7 @@ on macOS only: tvOS and iOS compile and are selectable, and nothing of it ran on
 | Base layer and audio | `AVPlayer` plays the engine's loopback HLS stream: the base layer with the RPU converted to Profile 8.1 and the enhancement layer dropped, as on the native route, plus the audio. The item owns the clock. The forward-buffer window of the session is capped at 10 segments (the default) on this route, see the ring below. | the native route, unchanged |
 | Base-layer frames | An `AVPlayerItemVideoOutput` asks for biplanar 10-bit (`x420`) buffers with no colour conversion and the player's own picture is hidden with `suppressesPlayerRendering` (public API). Frames are taken 0.15 s ahead of the item clock, one per frame interval, never replaced by a later one. | |
 | Enhancement layer | `VideoPacketTap` sees each source packet in the segment producer's single read, before the 8.1 conversion strips the enhancement layer, and again once the segment muxer has written it, with the instant the stream shows it. No second connection and no second demuxer. The packets go to a bounded on-disk ring (`VideoPacketHistory`, 1 GiB at most, unlinked at once so nothing outlives the process) that keeps the newest bytes, so a seek back into content the ring still holds finds its enhancement layer; the feed restarts at the nearest held keyframe at or before the clock whenever the clock jumps. The producer runs up to the forward-buffer window ahead of the playhead, and that lead is spent from the ring first, which is why the window is capped: a lead longer than the ring would leave the playhead without an enhancement layer. | the producer's read |
-| Pairing, composition, metadata | `DualLayerVideoDecoder.openExternalBaseLayer(...)` takes frames from the host instead of decoding the base layer, and from there everything is the code the software host runs: the packet split, the enhancement-layer decoder, the pairing by presentation time, `DoviFelComposer` (the Metal kernels), the per-frame RPU and display metadata, the ordered delivery. The compose target is the engine's output pool by default (no API contract says the player's buffers are writable). Composing in place on the buffer the video output handed over is an opt-in for measurement (`AETHER_FEL_OUTPUT_INPLACE=1`); on the Mac it produced the same bits and saved memory, and nothing shows it is safe on another platform's buffers, so it is not on by default. | all of it |
+| Pairing, composition, metadata | `DualLayerVideoDecoder.openExternalBaseLayer(...)` takes frames from the host instead of decoding the base layer, and from there everything is the code the software host runs: the packet split, the enhancement-layer decoder, the pairing by presentation time, `DoviFelComposer` (the Metal kernels), the per-frame RPU and display metadata, the ordered delivery. The composer writes in place into the buffer the video output handed over, as it does into VideoToolbox's buffers on the software host, and takes the engine's output pool only for a frame it cannot compose in place (the same `canComposeInPlace` check). No API contract says the player's buffers are writable: on the Mac the video output vends converted copies (below) and the in-place result is bit-identical to the pool's; whether a tvOS player ever vends a buffer it still reads is the same open question as the software host's copy opt-out, and `AETHER_FEL_OUTPUT_INPLACE=0` turns it off for that comparison. | all of it |
 | Display | `SampleBufferRenderer` feeds an `AVSampleBufferDisplayLayer` whose control timebase is a child of the item's timebase, so a pause, a rate change or a seek of the item moves both. The layer is an overlay above the `AVPlayerLayer` in `AetherPlayerView`. | the software host's renderer |
 
 **Dither is the one difference from the software host.** The compose kernels dither on the parity of a frame
@@ -426,7 +426,23 @@ What it gives up against the software host: after a seek the clock runs while th
 still decoding up to the target, so a few frames after a seek can go out as the base layer (up to 5 after one seek, and 0 to 9 in ten short seeks, forward and back, over four runs on the Mac); the
 software host holds its clock for this. What it gets: AVPlayer's audio routes (the Atmos trade-off of §3.1
 does not apply), the native seek and rate behaviour, and no software-host audio pipeline. Memory is higher
-than on the software host (about 1.6 GB against 0.7 GB for the player and the system's decoder service together on a 4K Profile 7 clip on the Mac, measured with the pool as the compose target).
+than on the software host. Measured on the Mac (M2 Pro) on a 4K 23.976 fps Profile 7 FEL clip, release `aetherctl`,
+`footprint` at 50 s of playback, the process and `VTDecoderXPCService` together:
+
+| Run | Process | Decoder service | Total |
+|---|---|---|---|
+| plain native route, no enhancement layer | 167 MB | 308 MB | 475 MB |
+| software host (in place) | 44 MB | 468 MB | 512 MB |
+| this route, pool as the compose target | 338 MB | 704 MB | 1042 MB |
+| this route, in place (the default) | 225 MB | 703 MB | 928 MB |
+
+Composing in place removes the pool (IOSurface in the process 166 to 48 MB). What remains is AVPlayer's own
+pipeline: its demuxed sample queue (`CoreMedia Memory Pool`, about 114 MB, the same as on the plain native
+route) and, in the decoder service, about 235 MB more than the base layer and enhancement layer decoders
+need. That share is the video output's: AVPlayer decodes into a lossless-compressed format (`&xv0` on the
+Mac) and converts every frame for the output into the `x420` the route asks for, holding both copies. A
+video output that asks for no format gets `&xv0` and the decoder service drops to 432 MB, but the composer
+reads the base layer as 16-bit planes, which a packed compressed buffer is not, so the route cannot take it.
 
 A composition runs on the thread that hands the decoder the frame: the route's pull thread, or VideoToolbox's callback thread when the enhancement layer arrives last (on the software host it always runs on the decoder's callback thread). A pull tick can therefore wait for a free GPU slot, a wait that ends when the GPU completes one. `stop()` detaches the route on the main thread and returns; closing the decoder and waiting for the ticks run on a teardown queue, which waits at most 2 s for a pull or feed tick. Closing the decoder itself still waits for the enhancement-layer session, as on the software host, so a GPU that never completes can still hold that queue, but not the main thread.
 
