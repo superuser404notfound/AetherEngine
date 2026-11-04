@@ -106,7 +106,7 @@ extension AetherEngine {
             info = registerExternalSubtitleTrack(admitted)
         }
         if secondary {
-            clearSecondarySubtitle()
+            clearSecondarySubtitleContent()
             loadedSecondarySidecarURL = prepared.track.url
             isSecondarySubtitleActive = true
             secondarySubtitleCues = decoded.cues

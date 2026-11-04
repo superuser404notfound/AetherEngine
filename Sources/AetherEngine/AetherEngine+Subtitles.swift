@@ -1899,6 +1899,12 @@ extension AetherEngine {
     public func clearSecondarySubtitle() {
         externalSubtitleIntentGeneration &+= 1
         hostExplicitSubtitleAction = true
+        clearSecondarySubtitleContent()
+        setSecondarySubtitleIdentity()
+    }
+
+    /// Tear down content without publishing an intermediate off selection during a replacement.
+    func clearSecondarySubtitleContent() {
         cancelSidecarTask(channel: .secondary)
         clearSubtitleDrainTarget(channel: .secondary, reason: .subtitlesCleared)   // #112 rework
         loadedSecondarySidecarURL = nil
@@ -1907,7 +1913,6 @@ extension AetherEngine {
         secondarySidecarASSHeader = nil
         pgsStaleArrivalGates[.secondary]?.reset()   // #100
         isLoadingSecondarySubtitles = false
-        setSecondarySubtitleIdentity()
     }
 
     // MARK: - Native multi-track decode (#55, all-tracks)

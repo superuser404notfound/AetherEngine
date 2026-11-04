@@ -87,11 +87,19 @@ struct SecondarySubtitleIdentityTests {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".srt")
         try Data("1\n00:00:00,000 --> 00:00:02,000\nIdentity\n\n".utf8).write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
+        var received: [Int?] = []
+        let sub = engine.$activeSecondarySubtitleTrackIndex.sink { received.append($0) }
+        defer { sub.cancel() }
         engine.selectSecondarySubtitleTrack(index: 2)
         let prepared = try await engine.prepareExternalSubtitle(.init(url: url))
         assertIdentity(engine, 2)
         let info = try engine.commitExternalSubtitle(prepared, secondary: true)
         assertIdentity(engine, info.id)
+        #expect(received == [nil, 2, info.id])
+        let again = try await engine.prepareExternalSubtitle(id: info.id)
+        let repeated = try engine.commitExternalSubtitle(again, secondary: true)
+        #expect(repeated.id == info.id)
+        #expect(received == [nil, 2, info.id])
         engine.stop()
         assertIdentity(engine, nil)
     }
@@ -117,7 +125,7 @@ struct SecondarySubtitleIdentityTests {
         #expect(received == [nil, 3, nil, external.id, nil])
     }
 
-    @Test func newLoadAndCancelledOldDecodeCannotRestoreIdentity() async throws {
+    @Test func newLoadClearsEmbeddedIdentity() async throws {
         let engine = try player()
         defer { engine.stop() }
         engine.selectSecondarySubtitleTrack(index: 3)
