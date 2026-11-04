@@ -973,6 +973,39 @@ final class NativeAVPlayerHost {
         }
         notificationObservers.append(didEndObs)
 
+        // AVKit's transport bar calls pause()/play() straight on this AVPlayer (tvOS), bypassing play()/pause()
+        // here, so playIntent stayed true under a viewer's pause and every path gated on it (item-death reload,
+        // media-playlist fallback, interruption resume, session rebuild) restarted a paused title. Mirror an
+        // explicit rate write (setRateCalled) only: end of item, a dying source and system pauses leave it alone.
+        // Only once the current item is ready to play: a rate write before that is treated as the swap's, not the
+        // viewer's, because clearing the latch there would park the session at readyToPlay+paused (issue #15).
+        let rateObs = NotificationCenter.default.addObserver(
+            forName: AVPlayer.rateDidChangeNotification,
+            object: avPlayer,
+            queue: .main
+        ) { [weak self] notification in
+            let reason = (notification.userInfo?[AVPlayer.rateDidChangeReasonKey] as? String)
+                .map(AVPlayer.RateDidChangeReason.init(rawValue:))
+            // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
+            MainActor.assumeIsolated {
+                guard let self, self.sessionID == sid else { return }
+                // Live rate, not the notification's: a play() right after a pause() must not be undone by the older echo.
+                let rate = self.avPlayer.rate
+                let ready = self.playerItem?.status == .readyToPlay
+                let old = self.playIntent
+                let intent = (self.prematureEndRecoveryInFlight || !ready)
+                    ? old
+                    : Self.playIntentAfterRateChange(reason: reason, rate: rate, current: old)
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) rate change reason=\(reason?.rawValue ?? "nil") "
+                    + "rate=\(rate) ready=\(ready) play intent \(old) -> \(intent)",
+                    category: .engine
+                )
+                self.playIntent = intent
+            }
+        }
+        notificationObservers.append(rateObs)
+
         // 100ms periodic observer drives scrub bar; Task wrapper satisfies Sendable check.
         timeObserver = avPlayer.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
@@ -1102,6 +1135,15 @@ final class NativeAVPlayerHost {
         surfaceEndFailures: Bool, hasEverPlayed: Bool
     ) -> Bool {
         !surfaceEndFailures && hasEverPlayed
+    }
+
+    /// Pure decision for the rate-change mirror: an explicit rate write (`setRateCalled`, e.g. AVKit's
+    /// transport bar) sets the intent to whether the live rate is non-zero; any other or missing reason
+    /// (end of item, interruption, background) keeps the current intent.
+    nonisolated static func playIntentAfterRateChange(
+        reason: AVPlayer.RateDidChangeReason?, rate: Float, current: Bool
+    ) -> Bool {
+        reason == .setRateCalled ? rate != 0 : current
     }
 
     /// #50: AVPlayer fires .failed for self-healing transients (loopback 404, AVIOReader reconnect) while playback advances uninterrupted (rrgomes: tcs=playing at .failed).
