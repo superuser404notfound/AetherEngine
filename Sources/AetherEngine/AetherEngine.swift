@@ -1724,12 +1724,18 @@ public final class AetherEngine: ObservableObject {
         publishingSecondarySubtitleIdentity = true
         defer { publishingSecondarySubtitleIdentity = false }
         while true {
-            let selected = activeSecondaryExternalSubtitleTrackID
-                ?? (activeSecondaryEmbeddedSubtitleStreamIndex >= 0
-                    ? Int(activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
+            let selected = secondarySubtitleSelectionIdentity
             guard activeSecondarySubtitleTrackIndex != selected else { return }
             activeSecondarySubtitleTrackIndex = selected
         }
+    }
+
+    /// The internal selection as a TrackInfo.id. Inside a reentrant willSet this is already the
+    /// newer value while the published projection still holds the old one.
+    var secondarySubtitleSelectionIdentity: Int? {
+        activeSecondaryExternalSubtitleTrackID
+            ?? (activeSecondaryEmbeddedSubtitleStreamIndex >= 0
+                ? Int(activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
     }
 
     /// True once the NativeSubtitleCueStore has at least one cue for the native mov_text track (#55).

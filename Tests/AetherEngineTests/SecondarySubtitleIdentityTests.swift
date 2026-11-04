@@ -14,11 +14,8 @@ struct SecondarySubtitleIdentityTests {
     }
 
     private func assertIdentity(_ engine: AetherEngine, _ expected: Int?) {
-        let internalID = engine.activeSecondaryExternalSubtitleTrackID
-            ?? (engine.activeSecondaryEmbeddedSubtitleStreamIndex >= 0
-                ? Int(engine.activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
         #expect(engine.activeSecondarySubtitleTrackIndex == expected)
-        #expect(engine.activeSecondarySubtitleTrackIndex == internalID)
+        #expect(engine.activeSecondarySubtitleTrackIndex == engine.secondarySubtitleSelectionIdentity)
     }
 
     @Test func embeddedIdentityIsIndependentAndDeduplicated() throws {
