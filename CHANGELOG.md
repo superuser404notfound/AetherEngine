@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Prime a cold paused VC-1 resume from a valid reference keyframe.** For seekable,
+  non-live software VC-1 at a nonzero paused start, perform a bounded lookback before
+  the decode/cache reader starts. Keep the requested target and stopped clock unchanged.
+  Unlike #973's decode-loop startup fix, this supplies the reference chain that VC-1
+  concealment needs. Public real-decoder fixture qualification remains pending.
+
 - **A paused software session shows its picture after a rebuild or a paused mount (#973).** The
   software host started decoding only on `play()`, so a `load` with `autoplay = false` and every
   rebuild of a paused session (`setAudioShaping`, `setAudioDelay`, `reloadAtCurrentPosition`, which

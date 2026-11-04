@@ -1226,7 +1226,8 @@ final class SoftwarePlaybackHost {
         dvrRetention: SoftwareDVRRetentionOptions? = nil,
         forwardBufferSegments: Int? = nil,
         packetCacheStorage: SoftwarePacketCacheStorage = .automatic,
-        sessionCacheByteBudget: Int? = nil
+        sessionCacheByteBudget: Int? = nil,
+        initiallyPaused: Bool = false
     ) async throws {
         self.demuxer = dem
         self.duration = dem.duration
@@ -1628,8 +1629,33 @@ final class SoftwarePlaybackHost {
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            let outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
+            let outcome: Demuxer.RepositionOutcome
+            if initiallyPaused, !isLive, dem.isSourceSeekable,
+               vCodecID == AV_CODEC_ID_VC1.rawValue, videoDecoder is SoftwareVideoDecoder {
+                let index = videoStreamIndex
+                let timeBase = videoTimeBaseSeconds
+                let isCurrent: @Sendable () -> Bool = { [weak self] in
+                    !Task.isCancelled && self?.stopRequested == false
+                }
+                let priming = BlockingWork.detached(priority: .userInitiated) {
+                    try SoftwareVC1PausedResume.prepare(
+                        dem: dem, target: sourceStart, origin: zero,
+                        videoIndex: index, timeBase: timeBase,
+                        isCurrent: isCurrent)
+                }
+                let keyPTS = try await withTaskCancellationHandler {
+                    try await priming.value
+                } onCancel: {
+                    priming.cancel()
+                    dem.markClosed()
+                }
+                EngineLog.emit("[SWHost] VC1 paused resume primed key=\(keyPTS) target=\(sourceStart)",
+                               category: .swPlayback)
+                outcome = .landed
+            } else {
+                outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
                                            { [weak self] in self?.stopRequested ?? true })
+            }
             // Like the others (the audio route choice, the cache setup, the primer wait), this
             // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
