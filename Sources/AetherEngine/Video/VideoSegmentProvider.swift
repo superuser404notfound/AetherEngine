@@ -1336,6 +1336,28 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return Self.itemRanges(durations: durations, residentIndexes: residentIndexes)
     }
 
+    /// AE#958: the segment covering playlist time `t` on a sequential session, from the muxed
+    /// durations. nil off the sequential path and past the finalized end, where the caller's plan
+    /// is the only estimate there is.
+    func sequentialSegmentIndex(forPlaylistTime t: Double) -> Int? {
+        guard sequentialAppendPlaylist else { return nil }
+        stateLock.lock()
+        let durations = _seqDurations
+        stateLock.unlock()
+        return Self.sequentialSegmentIndex(forPlaylistTime: t, durations: durations)
+    }
+
+    /// Zero-duration entries are plan indices a long GOP skipped; they hold no time and are never
+    /// the answer.
+    static func sequentialSegmentIndex(forPlaylistTime t: Double, durations: [Double]) -> Int? {
+        var cursor = 0.0
+        for (index, duration) in durations.enumerated() where duration > 0 {
+            cursor += duration
+            if max(t, 0) < cursor { return index }
+        }
+        return nil
+    }
+
     static func itemRanges(durations: [Double], residentIndexes: [ClosedRange<Int>]) -> [ClosedRange<Double>] {
         let resident = residentIndexes.reduce(into: IndexSet()) { set, range in
             set.insert(integersIn: range.lowerBound...range.upperBound)

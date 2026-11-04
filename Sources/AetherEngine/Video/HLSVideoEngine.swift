@@ -5104,6 +5104,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// re-anchor the producer on AVPlayer's real position after a backpressure wedge (#65). Thread-safe.
     func segmentIndexForPlaylistTime(_ seconds: Double) -> Int {
         restartLock.lock()
+        let sequentialProvider = sequentialOriginPinsProducerToZero ? provider : nil
+        restartLock.unlock()
+        // AE#958: a sequential session's playlist axis is the muxed durations, which drift from the
+        // plan by seconds, so the plan names the wrong segment for a time inside what was cut.
+        if let index = sequentialProvider?.sequentialSegmentIndex(forPlaylistTime: seconds) {
+            return index
+        }
+        restartLock.lock()
         defer { restartLock.unlock() }
         guard !segmentPlan.isEmpty else { return 0 }
         var lo = 0
