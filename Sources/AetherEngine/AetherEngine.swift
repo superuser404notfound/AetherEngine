@@ -667,6 +667,8 @@ public final class AetherEngine: ObservableObject {
     /// then the probe stream that carried the record is long gone. Read alongside
     /// `sourceDolbyVisionBaseLayerPresentable` when offering source-specific playback choices.
     /// nil means unavailable; reset on load and stop. This is source metadata, not display output.
+    /// Read after awaiting load or a successful reload. A synchronous sourceDVProfile/sourceVideoFormat
+    /// publisher callback can precede these assignments and still observe the reset snapshot.
     public internal(set) var sourceDVBLCompatID: Int? = nil
 
     /// AE#532: the profile the loaded source's own RPU reports, when the record was contradicted enough
