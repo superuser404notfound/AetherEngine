@@ -10,6 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Hosts can read Dolby Vision base-layer source capabilities.** `sourceDVBLCompatID` and
+  `sourceDolbyVisionBaseLayerPresentable` expose the engine's existing probe results read-only,
+  so a host can offer a source-appropriate choice without inferring it from the profile alone.
+  They describe the source, not the display's output; routing and reload refusal are unchanged.
+
 ### Fixed
 
 - **Failed external secondary-subtitle replacement preserves the active track.**

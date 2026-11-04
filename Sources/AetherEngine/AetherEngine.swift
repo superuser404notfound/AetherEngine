@@ -664,9 +664,11 @@ public final class AetherEngine: ObservableObject {
     /// AE#461: base-layer signal compatibility ID from the same dvcC/dvvC record as `sourceDVProfile`
     /// (0 = IPT-only, no compatible base layer). Kept because a decode-path correction has to decide
     /// whether the software path can represent this source BEFORE it tears the session down, and by
-    /// then the probe stream that carried the record is long gone. Internal: `sourceDVProfile` is the
-    /// label hosts read, this is the term only `softwarePathCannotRepresent` needs.
-    var sourceDVBLCompatID: Int? = nil
+    /// then the probe stream that carried the record is long gone. Read alongside
+    /// `sourceDolbyVisionBaseLayerPresentable` when offering source-specific playback choices.
+    /// nil means unavailable; reset on load and stop. This is source metadata, not display output.
+    /// Assigned before `sourceVideoFormat` / `sourceDVProfile`, so their publisher callbacks read it current.
+    public internal(set) var sourceDVBLCompatID: Int? = nil
 
     /// AE#532: the profile the loaded source's own RPU reports, when the record was contradicted enough
     /// to be worth checking (`DolbyVisionRecordAudit`). nil for every other source, including one whose
@@ -717,8 +719,9 @@ public final class AetherEngine: ObservableObject {
     /// .baseLayerOnly` can present (`VideoRoutingPolicy.dolbyVisionBaseLayerIsPresentable`), decided
     /// on the probe stream for the same reason as `sourceDVBLCompatID`: a correction that turns the
     /// base layer on and moves to software in one step is judged before the teardown, when the VUI it
-    /// rests on is gone.
-    var sourceDolbyVisionBaseLayerPresentable: Bool = false
+    /// rests on is gone. Reset to false on load and stop. This describes the engine's base-layer
+    /// route eligibility, not the panel's output or a guarantee that a reload will be accepted.
+    public internal(set) var sourceDolbyVisionBaseLayerPresentable: Bool = false
 
     /// Nominal source frame rate (fps) from the container's `avg_frame_rate` (falling back to `r_frame_rate`),
     /// or nil when the source has no video or libavformat couldn't derive one. Companion to `sourceVideoFormat`
@@ -4756,6 +4759,8 @@ public final class AetherEngine: ObservableObject {
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -4766,8 +4771,6 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
@@ -5173,10 +5176,11 @@ public final class AetherEngine: ObservableObject {
 
         // sourceVideoFormat = what's in the file; videoFormat = what the panel shows (published after
         // the criteria handshake; see panelHDRAfterHandshake below).
-        sourceVideoFormat = detectedFormat
-        sourceDVProfile = detectedDVProfileNum
+        // The capability pair is assigned before its publishing peers so their sinks read it current.
         sourceDVBLCompatID = detectedDVBLCompatIDNum
         sourceDolbyVisionBaseLayerPresentable = detectedDVBaseLayerPresentable
+        sourceVideoFormat = detectedFormat
+        sourceDVProfile = detectedDVProfileNum
         sourceDolbyVisionRPUProfile = detectedDVRPUProfile
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
@@ -7351,6 +7355,8 @@ public final class AetherEngine: ObservableObject {
         containerChapterSource = nil
         mediaChapters = []
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -7361,8 +7367,6 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
