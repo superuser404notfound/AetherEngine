@@ -63,7 +63,7 @@ struct VODOpenSeekIntegrationTests {
         #expect(OriginRequestBudget.shared.snapshot(for: source)?.peakInflight == 1)
     }
 
-    @Test("A forward-only VOD ignores saved position and rejects seeks without a false landing",
+    @Test("A forward-only VOD ignores saved position, rejects a seek past its resident tail, lands one inside it",
           .enabled(if: ProcessInfo.processInfo.environment["AETHER_VOD_FIXTURE"] != nil))
     func sequentialSourceHasHonestClock() async throws {
         let origin = try ProbeHTTPTestOrigin(data: fixture())
@@ -84,10 +84,22 @@ struct VODOpenSeekIntegrationTests {
         var events: [SeekEvent] = []
         let observer = engine.seekEvents.sink { events.append($0) }
         defer { observer.cancel() }
-        await engine.seek(to: 12)
+        // AE#958: a loopback seek inside the span that reaches the producer's frontier lands;
+        // anything past what is held is still refused without moving the clock.
+        let frontier = try #require(engine.residentRanges.max { $0.upperBound < $1.upperBound })
+        await engine.seek(to: frontier.upperBound + 30)
         #expect(events.map(\.outcome) == [.rejected(.sourceNotSeekable)])
         #expect(engine.currentTime < 5)
         #expect(!engine.isSeeking)
-        print("VOD_SEQUENTIAL clock=\(engine.currentTime) seekable=\(engine.canSeek) events=\(events)")
+        let inside = min(frontier.upperBound - 1, 12)
+        #expect(inside > engine.currentTime + 1, "the fixture must hold a resident target ahead of the clock")
+        events.removeAll()
+        await engine.seek(to: inside)
+        #expect(events.contains { event in
+            if case .landed(let rendered) = event.outcome { return abs(rendered - inside) < 1 }
+            return false
+        })
+        #expect(abs(engine.currentTime - inside) < 1)
+        print("VOD_SEQUENTIAL clock=\(engine.currentTime) frontier=\(frontier) seekable=\(engine.canSeek) events=\(events)")
     }
 }
