@@ -24,8 +24,8 @@ import Foundation
 /// PTS are still required; missing or late timestamps invalidate coverage for these codecs too.
 ///
 /// The MPEG1/2 candidate uses this queue without changing its invalidation rules.
-/// Field-picture packet qualification is still an open merge gate; see
-/// docs/mpeg-cache-qualification.md. Frame-coded and pulldown fixtures do not prove field pairs.
+/// Field-picture qualification and its container limits are documented in
+/// docs/mpeg-cache-qualification.md. Frame-coded and pulldown fixtures alone do not prove field pairs.
 ///
 /// This metadata-only value neither owns packets nor synchronizes access. The owner must reset it
 /// together with its packet store on seek/flush/discard. Other codecs must keep their strict packet

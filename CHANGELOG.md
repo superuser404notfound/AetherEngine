@@ -37,8 +37,9 @@ the public-API contract.
   WMV3 and other codec qualifications are unchanged.
 
 - **Draft: MPEG1/2 software-cache presentation qualification.** Reuses successor PTS
-  rather than rounded packet durations. This candidate is not merge-ready until the
-  field-picture gate in `docs/mpeg-cache-qualification.md` is satisfied.
+  rather than rounded packet durations. Generated separately coded field pairs now cover
+  Matroska cache stores and the MPEG-TS parser/decoder; qualification limits and remaining
+  CI/review gates are in `docs/mpeg-cache-qualification.md`.
 
 - **Failed external secondary-subtitle replacement preserves the active track.**
   Previously the old track was torn down before the candidate could decode. Preparation now

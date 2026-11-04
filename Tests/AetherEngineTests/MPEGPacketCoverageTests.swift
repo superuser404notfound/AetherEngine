@@ -8,9 +8,9 @@ import AetherLibavutil
 @Suite("MPEG candidate packet presentation coverage", .timeLimit(.minutes(3)), .offCooperativePool)
 struct MPEGPacketCoverageTests {
     enum Fixture: String, CaseIterable, Sendable {
-        case mpeg1, mpeg2, interlaced, pulldown
+        case mpeg1, mpeg2, interlaced, pulldown, fields
         var id: UInt32 { self == .mpeg1 ? AV_CODEC_ID_MPEG1VIDEO.rawValue : AV_CODEC_ID_MPEG2VIDEO.rawValue }
-        var count: Int { self == .pulldown ? 60 : 120 }
+        var count: Int { self == .pulldown || self == .fields ? 60 : 120 }
     }
 
     private final class Packets: @unchecked Sendable {
@@ -29,15 +29,15 @@ struct MPEGPacketCoverageTests {
 
     /// Fixed libavcodec, including a true EOF drain. This deliberately does not use the CLI
     /// probe's flush/discard operation or claim renderer/deinterlacer/device acceptance.
-    private func decodedPackets(_ codec: Fixture) throws -> [SoftwareStoredPacket] {
-        let data = try MPEGCacheFixtures.data(codec.rawValue)
+    private func decodedPackets(_ codec: Fixture, transport: Bool = false) throws -> [SoftwareStoredPacket] {
+        let data = try MPEGCacheFixtures.data(transport ? "fieldsTS" : codec.rawValue)
         let demuxer = Demuxer()
-        try demuxer.open(reader: DataIOReader(data: data), formatHint: "matroska")
+        try demuxer.open(reader: DataIOReader(data: data), formatHint: transport ? "mpegts" : "matroska")
         defer { demuxer.close() }
         let video = demuxer.videoStreamIndex
         let stream = try #require(demuxer.stream(at: video))
         #expect(stream.pointee.codecpar.pointee.codec_id.rawValue == codec.id)
-        #expect(stream.pointee.time_base.num == 1 && stream.pointee.time_base.den == 1000)
+        #expect(stream.pointee.time_base.num == 1 && stream.pointee.time_base.den == (transport ? 90000 : 1000))
         let implementation = try #require(avcodec_find_decoder(stream.pointee.codecpar.pointee.codec_id))
         var context = avcodec_alloc_context3(implementation)
         let ctx = try #require(context)
@@ -68,7 +68,13 @@ struct MPEGPacketCoverageTests {
             var owned: UnsafeMutablePointer<AVPacket>? = packet
             defer { trackedPacketFree(&owned) }
             guard packet.pointee.stream_index == video else { continue }
-            packets.append(try SoftwareStoredPacket(copying: packet))
+            let stored = try SoftwareStoredPacket(copying: packet)
+            if codec == .fields {
+                // Each presented frame must own both independently coded fields, including
+                // Matroska's complete-frame packets and TS parser output.
+                #expect(fieldPictureStructures(in: stored.bytes) == [1, 2])
+            }
+            packets.append(stored)
             try #require(avcodec_send_packet(ctx, packet) >= 0)
             try receive()
         }
@@ -78,10 +84,25 @@ struct MPEGPacketCoverageTests {
         #expect(times == packets.map(\.pts).sorted())
         #expect(!times.contains(Int64.min))
         #expect(zip(packets, packets.dropFirst()).contains { $0.pts > $1.pts }, "the fixture includes B-picture reordering")
-        if codec == .interlaced { #expect(interlaced == codec.count) }
+        if codec == .interlaced || codec == .fields { #expect(interlaced == codec.count) }
         if codec == .pulldown { #expect(repeated == 30) }
         return packets
     }
+
+    private func fieldPictureStructures(in data: Data) -> [Int] {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 7 else { return [] }
+        var structures: [Int] = []
+        for i in 0...(bytes.count - 7) where
+            bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 && bytes[i + 3] == 0xb5 {
+            // picture_coding_extension: id(4), f_code(16), intra_dc_precision(2), structure(2).
+            if bytes[i + 4] >> 4 == 8 { structures.append(Int(bytes[i + 6] & 3)) }
+        }
+        return structures
+    }
+
+    @Test("separately coded MPEG fields form complete presentation packets through the TS parser")
+    func fieldTransportParser() throws { _ = try decodedPackets(.fields, transport: true) }
 
     private func replacing(_ packet: SoftwareStoredPacket, pts: Int64) -> SoftwareStoredPacket {
         .init(pts: pts, dts: pts, duration: packet.duration, position: packet.position,
