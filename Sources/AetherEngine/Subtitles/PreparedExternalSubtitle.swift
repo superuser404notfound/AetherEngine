@@ -107,12 +107,12 @@ extension AetherEngine {
         }
         if secondary {
             clearSecondarySubtitle()
-            activeSecondaryExternalSubtitleTrackID = info.id
             loadedSecondarySidecarURL = prepared.track.url
             isSecondarySubtitleActive = true
             secondarySubtitleCues = decoded.cues
             secondarySidecarASSHeader = decoded.assHeader
             isLoadingSecondarySubtitles = false
+            setSecondarySubtitleIdentity(external: info.id)
         } else {
             cancelSubtitleOCRWorker()
             cancelSidecarTask()

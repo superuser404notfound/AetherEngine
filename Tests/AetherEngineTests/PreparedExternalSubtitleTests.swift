@@ -89,7 +89,7 @@ struct PreparedExternalSubtitleTests {
         let descriptor = ExternalSubtitleTrack(url: url)
         let first = engine.registerExternalSubtitleTrack(descriptor)
         let second = engine.registerExternalSubtitleTrack(descriptor)
-        engine.activeSecondaryExternalSubtitleTrackID = first.id
+        engine.setSecondarySubtitleIdentity(external: first.id)
         let candidate = try await engine.prepareExternalSubtitle(id: second.id)
         #expect(try engine.commitExternalSubtitle(candidate).id == second.id)
         let removed = try await engine.prepareExternalSubtitle(id: second.id)
@@ -101,7 +101,7 @@ struct PreparedExternalSubtitleTests {
         let url = try file(text)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let engine = try player()
-        engine.activeSecondaryExternalSubtitleTrackID = 8
+        engine.setSecondarySubtitleIdentity(external: 8)
         engine.secondarySubtitleCues = [SubtitleCue(id: 2, startTime: 0, endTime: 10, body: .text("Secondary"))]
         let candidate = try await engine.prepareExternalSubtitle(ExternalSubtitleTrack(url: url))
         try engine.commitExternalSubtitle(candidate)

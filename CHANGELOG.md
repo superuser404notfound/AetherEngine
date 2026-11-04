@@ -10,6 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Hosts can observe the selected secondary subtitle identity.**
+  `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external
+  track IDs across selection, clearing and rebuild restoration. One-shot URL selections have no
+  ID. Ordinary decode/failure timing and the ability to select the same track in both channels
+  are unchanged.
+
 ### Fixed
 
 - **A paused software session shows its picture after a rebuild or a paused mount (#973).** The

@@ -74,7 +74,7 @@ extension ExternalSubtitleSelectionTests {
         let engine = try AetherEngine()
         let url = URL(fileURLWithPath: "/nonexistent/subtitle.srt")
         let track = engine.addExternalSubtitleTrack(.init(url: url, name: "external"))
-        engine.activeSecondaryExternalSubtitleTrackID = track.id
+        engine.setSecondarySubtitleIdentity(external: track.id)
         engine.isSecondarySubtitleActive = true
         engine.stopInternal(resetDisplayCriteria: false)
         #expect(engine.activeSecondaryExternalSubtitleTrackID == nil)
