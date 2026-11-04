@@ -10,6 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- `LoadOptions.generatesBackgroundScrubPreviews` lets hosts opt out of the idle sparse
+  scrub-still ladder and its side reader. It defaults to true, is correctable by reload,
+  and leaves I-frame playlists, on-demand snapshots and item-swap held pictures unchanged.
+
 ### Fixed
 
 - **A paused software session shows its picture after a rebuild or a paused mount (#973).** The
