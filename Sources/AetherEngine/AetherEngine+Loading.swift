@@ -2222,7 +2222,6 @@ extension AetherEngine {
         let forwardBufferSegments = loadedOptions.forwardBufferSegments
         let sessionCacheByteBudget = loadedOptions.sessionCacheByteBudget
         let packetCacheStorage = loadedOptions.softwarePacketCacheStorage
-        let initiallyPaused = !loadedOptions.autoplay
         let dvrRetention = loadedOptions.softwareDVRRetention
         try await BlockingWork.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, requestHeaders = sessionRequestHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
@@ -2243,8 +2242,7 @@ extension AetherEngine {
                 dvrRetention: dvrRetention,
                 forwardBufferSegments: forwardBufferSegments,
                 packetCacheStorage: packetCacheStorage,
-                sessionCacheByteBudget: sessionCacheByteBudget,
-                initiallyPaused: initiallyPaused
+                sessionCacheByteBudget: sessionCacheByteBudget
             )
         }.value
         // Superseded: stop idempotently to tear down the demuxer the detached closure opened, then unwind.

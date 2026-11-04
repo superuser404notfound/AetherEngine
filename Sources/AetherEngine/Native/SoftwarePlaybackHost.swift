@@ -1226,8 +1226,7 @@ final class SoftwarePlaybackHost {
         dvrRetention: SoftwareDVRRetentionOptions? = nil,
         forwardBufferSegments: Int? = nil,
         packetCacheStorage: SoftwarePacketCacheStorage = .automatic,
-        sessionCacheByteBudget: Int? = nil,
-        initiallyPaused: Bool = false
+        sessionCacheByteBudget: Int? = nil
     ) async throws {
         self.demuxer = dem
         self.duration = dem.duration
@@ -1629,24 +1628,8 @@ final class SoftwarePlaybackHost {
             let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            let outcome: Demuxer.RepositionOutcome
-            if initiallyPaused, !isLive, dem.isSourceSeekable,
-               vCodecID == AV_CODEC_ID_VC1.rawValue, videoDecoder is SoftwareVideoDecoder {
-                let index = videoStreamIndex
-                let timeBase = videoTimeBaseSeconds
-                let isCurrent: @Sendable () -> Bool = { [weak self] in
-                    !Task.isCancelled && self?.stopRequested == false
-                }
-                let keyPTS = try await SoftwareVC1PausedResume.prepareOffMain(
-                    dem: dem, target: sourceStart, origin: zero,
-                    videoIndex: index, timeBase: timeBase, isCurrent: isCurrent)
-                EngineLog.emit("[SWHost] VC1 paused resume primed key=\(keyPTS) target=\(sourceStart)",
-                               category: .swPlayback)
-                outcome = .landed
-            } else {
-                outcome = await reposition(dem, sourceStart, Self.seekBudgetSeconds, seekQueue,
-                                           { [weak self] in self?.stopRequested ?? true })
-            }
+            let outcome = await repositionSource(dem, target: sourceStart, closesOnCancel: true,
+                isSuperseded: { [weak self] in self?.stopRequested ?? true })
             // Like the others (the audio route choice, the cache setup, the primer wait), this
             // suspension is a place a stop() can land mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
@@ -2419,6 +2402,21 @@ final class SoftwarePlaybackHost {
         return seconds + snapped - sourceSeconds
     }
 
+    /// The producer/decode loop is parked before entry; cache hits never call this.
+    private func repositionSource(_ dem: Demuxer, target: Double, closesOnCancel: Bool,
+                                  isSuperseded: @escaping @Sendable () -> Bool) async -> Demuxer.RepositionOutcome {
+        if !isLive, dem.isSourceSeekable, videoDecoder is SoftwareVideoDecoder,
+           let stream = dem.stream(at: videoStreamIndex),
+           stream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_VC1 {
+            return await SoftwareVC1ReferencePreroll.reposition(
+                dem: dem, target: target, origin: clockSessionZero,
+                videoIndex: videoStreamIndex, timeBase: videoTimeBaseSeconds,
+                budget: Self.seekBudgetSeconds, queue: seekQueue,
+                closesOnCancel: closesOnCancel, isSuperseded: isSuperseded, fallback: reposition)
+        }
+        return await reposition(dem, target, Self.seekBudgetSeconds, seekQueue, isSuperseded)
+    }
+
     /// #254: the demuxer reposition is awaited off the main actor. It used to run inline here, and
     /// because `Demuxer.readPacket` holds the access lock across the whole `av_read_frame`, a seek
     /// issued while the demux loop sat in a slow remote read parked the main thread for the length of
@@ -2530,13 +2528,14 @@ final class SoftwarePlaybackHost {
                 return .stalled
             }
         }
-        let outcome: Demuxer.RepositionOutcome
+        var outcome: Demuxer.RepositionOutcome
         if cacheHit {
             // The decode cursor now points at retained preroll. The source reader remains at its
             // existing frontier; seeking it too would duplicate or skip already retained packets.
             outcome = .landed
         } else {
-            outcome = await reposition(dem, sourceSeconds, Self.seekBudgetSeconds, seekQueue,
+            outcome = await repositionSource(dem, target: sourceSeconds, closesOnCancel: false,
+                isSuperseded:
                 { [weak self] in
                     self?.seekGeneration != generation || (self?.stopRequested ?? true)
                 })
@@ -2544,7 +2543,12 @@ final class SoftwarePlaybackHost {
         // A newer seek owns the state from here: it published its own target and clears the hold itself.
         // stop() can also land in the await now that this suspends, and re-arming the clock or flipping
         // isPlaying on a torn-down session would resurrect a loop that has already been told to quit.
-        guard seekGeneration == generation, !stopRequested, outcome != .superseded else { return .superseded }
+        guard seekGeneration == generation, !stopRequested else { return .superseded }
+        if outcome == .superseded {
+            // A cancelled caller with no newer owner must settle the window, not park it forever.
+            guard Task.isCancelled else { return .superseded }
+            outcome = .stalled
+        }
         seekInFlight = false
         EngineLog.emit("[SWReposition] flags=\(outcome == .landed ? 2 : 3)", category: .swPlayback)
         guard outcome == .landed else {

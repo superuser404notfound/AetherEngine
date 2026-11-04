@@ -21,7 +21,7 @@ struct VC1PausedResumeIntegrationTests {
         let renderer = SampleBufferRenderer()
         let host = SoftwarePlaybackHost(renderer: renderer)
         defer { host.stop() }
-        try await host.load(demuxer: dem, startPosition: position, audioSourceStreamIndex: 1, initiallyPaused: true)
+        try await host.load(demuxer: dem, startPosition: position, audioSourceStreamIndex: 1)
         host.pause()
         try await waitFor { host.framesEnqueued > 0 && host.displayedFrame() != nil }
         let displayed = host.displayedFrame()

@@ -5,7 +5,7 @@ import AetherLibavcodec
 
 /// Packet admission tests use a synthetic HEVC demuxer; they do not qualify VC-1 decoding.
 @Suite(.offCooperativePool, .timeLimit(.minutes(3)))
-struct SoftwareVC1PausedResumeTests {
+struct SoftwareVC1ReferencePrerollTests {
     private func source() throws -> Demuxer {
         let dem = Demuxer()
         try dem.open(reader: DataIOReader(data: ProbeTestFixtures.hdr10Plus()), formatHint: "mp4")
@@ -23,7 +23,7 @@ struct SoftwareVC1PausedResumeTests {
         try dem.peekPackets(maxPackets: 1) { expected = $0.pointee.pts; return true }
         let ticks = try #require(expected)
         let pts = Double(ticks) * timeBase
-        let admitted = try SoftwareVC1PausedResume.findKeyframe(
+        let admitted = try SoftwareVC1ReferencePreroll.findKeyframe(
             dem: dem, target: pts, videoIndex: dem.videoStreamIndex, timeBase: timeBase,
             deadline: .infinity, isCurrent: { true })
         #expect(admitted == pts)
@@ -42,7 +42,7 @@ struct SoftwareVC1PausedResumeTests {
             try dem.peekPackets(maxPackets: 128) { $0.pointee.flags &= ~AV_PKT_FLAG_KEY; return false }
         }
         do {
-            _ = try SoftwareVC1PausedResume.findKeyframe(
+            _ = try SoftwareVC1ReferencePreroll.findKeyframe(
                 dem: dem, target: reason == "future" ? -1 : 0,
                 videoIndex: reason == "eof" ? -1 : dem.videoStreamIndex,
                 timeBase: 1, deadline: reason == "time" ? -.infinity : .infinity,
@@ -56,7 +56,7 @@ struct SoftwareVC1PausedResumeTests {
     func cancelled() throws {
         let dem = Demuxer()
         do {
-            _ = try SoftwareVC1PausedResume.prepare(dem: dem, target: 1390, origin: 600,
+            _ = try SoftwareVC1ReferencePreroll.prepare(dem: dem, target: 1390, origin: 600,
                                                     videoIndex: 0, timeBase: 1, isCurrent: { false })
             Issue.record("cancelled preparation returned")
         } catch is CancellationError { }
@@ -64,11 +64,11 @@ struct SoftwareVC1PausedResumeTests {
 
     @Test("offset-origin targets keep the same before-target and bounded-GOP contract")
     func targetBoundary() {
-        #expect(SoftwareVC1PausedResume.acceptsKeyframe(pts: 1386, target: 1390))
-        #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: 1390.001, target: 1390))
-        #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: 1381, target: 1390))
-        #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: .nan, target: 1390))
-        #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: 1390, target: .infinity))
+        #expect(SoftwareVC1ReferencePreroll.acceptsKeyframe(pts: 1386, target: 1390))
+        #expect(!SoftwareVC1ReferencePreroll.acceptsKeyframe(pts: 1390.001, target: 1390))
+        #expect(!SoftwareVC1ReferencePreroll.acceptsKeyframe(pts: 1381, target: 1390))
+        #expect(!SoftwareVC1ReferencePreroll.acceptsKeyframe(pts: .nan, target: 1390))
+        #expect(!SoftwareVC1ReferencePreroll.acceptsKeyframe(pts: 1390, target: .infinity))
     }
 
     /// This is the load's real async cancellation boundary, with a source parked inside its
@@ -81,29 +81,81 @@ struct SoftwareVC1PausedResumeTests {
         try dem.open(reader: reader, formatHint: "mp4")
         defer { dem.close() }
         let work = Task {
-            try await SoftwareVC1PausedResume.prepareOffMain(
+            await SoftwareVC1ReferencePreroll.reposition(
                 dem: dem, target: 5, origin: 0, videoIndex: dem.videoStreamIndex,
-                timeBase: 1, isCurrent: { !Task.isCancelled })
+                timeBase: 1, budget: 30, queue: DispatchQueue(label: "vc1.cancel"),
+                closesOnCancel: true, isSuperseded: { false },
+                fallback: { dem, target, budget, queue, obsolete in
+                    await dem.seekBounded(to: target, timeout: budget, on: queue, isSuperseded: obsolete)
+                })
         }
         defer { work.cancel(); dem.markClosed() }
         try await waitFor { reader.enteredPositioning }
         #expect(!reader.wasCancelled)
         work.cancel()
-        do {
-            _ = try await withTaskCancellationHandler {
-                try await work.value
-            } onCancel: {
-                // If the production cancellation path regresses, the suite time limit must
-                // still release the parked source and report a named test failure, not a hang.
-                dem.markClosed()
-            }
-            Issue.record("cancelled preparation admitted a reference")
-        } catch is CancellationError {
-        } catch SoftwarePlaybackHost.HostError.repositionFailed {
-            // A close interrupting the seek may surface its false result before the next
-            // cancellation check. Both fail the load; neither can admit a reference.
-        }
+        let result = await withTaskCancellationHandler {
+            await work.value
+        } onCancel: { dem.markClosed() }
+        #expect(result == .superseded)
         #expect(reader.wasCancelled)
+    }
+
+    @Test("an inconclusive probe restores the original target and propagates fallback failure",
+          arguments: [true, false])
+    func fallback(succeeds: Bool) async throws {
+        let dem = try source()
+        defer { dem.close() }
+        let outcome = await SoftwareVC1ReferencePreroll.reposition(
+            dem: dem, target: 0, origin: 0, videoIndex: -1, timeBase: 1,
+            budget: 30, queue: DispatchQueue(label: "vc1.fallback"), closesOnCancel: false,
+            isSuperseded: { false }, fallback: { dem, target, remaining, queue, obsolete in
+                #expect(target == 0)
+                #expect(remaining > 0 && remaining < 30)
+                let result = await dem.seekBounded(to: target, timeout: remaining, on: queue,
+                                                  isSuperseded: obsolete)
+                #expect(result == .landed)
+                return succeeds ? result : .stalled
+            })
+        #expect(outcome == (succeeds ? .landed : .stalled))
+        var packet = try dem.readPacket()
+        defer { av_packet_free(&packet) }
+        #expect(packet != nil)
+    }
+
+    private final class Obsolete: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.withLock { value } }
+        func set() { lock.withLock { value = true } }
+    }
+
+    @Test("cancelled or superseded transport preparation leaves the reusable source open",
+          arguments: [false, true])
+    func transportCancellation(supersede: Bool) async throws {
+        let reader = try ParkedPositioningReader()
+        let dem = Demuxer()
+        try dem.open(reader: reader, formatHint: "mp4")
+        defer { dem.close() }
+        let obsolete = Obsolete()
+        let queue = DispatchQueue(label: "vc1.transport")
+        let work = Task {
+            await SoftwareVC1ReferencePreroll.reposition(
+                dem: dem, target: 5, origin: 0, videoIndex: dem.videoStreamIndex, timeBase: 1,
+                budget: 30, queue: queue, closesOnCancel: false,
+                isSuperseded: { obsolete.isSet }, fallback: { _, _, _, _, _ in
+                    Issue.record("obsolete transport performed fallback")
+                    return .landed
+                })
+        }
+        defer { work.cancel(); reader.releasePositioning() }
+        try await waitFor { reader.enteredPositioning }
+        if supersede { obsolete.set() } else { work.cancel() }
+        #expect(!reader.wasCancelled)
+        reader.releasePositioning()
+        #expect(await work.value == .superseded)
+        #expect(!reader.wasCancelled)
+        // A subsequent operation on the same serial queue must still reach the provider.
+        #expect(await dem.seekBounded(to: 0, timeout: 1, on: queue) == .landed)
     }
 
     private final class ParkedPositioningReader: TimeSeekableIOReader, @unchecked Sendable {
@@ -111,6 +163,7 @@ struct SoftwareVC1PausedResumeTests {
         private let condition = NSCondition()
         private var entered = false
         private var cancelled = false
+        private var released = false
 
         init() throws { bytes = DataIOReader(data: try ProbeTestFixtures.hdr10Plus()) }
         var mediaDuration: Double { 8 }
@@ -129,8 +182,11 @@ struct SoftwareVC1PausedResumeTests {
             entered = true
             // No timer can turn this into a successful cancellation test: only the production
             // demux close -> reader.cancel path releases the parked positioning operation.
-            while !cancelled { condition.wait() }
-            return false
+            while !cancelled && !released { condition.wait() }
+            return !cancelled
+        }
+        func releasePositioning() {
+            condition.withLock { released = true; condition.broadcast() }
         }
         func cancel() {
             condition.withLock { cancelled = true; condition.broadcast() }

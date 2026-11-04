@@ -2,10 +2,10 @@ import Foundation
 import AetherLibavcodec
 import AetherLibavutil
 
-/// A cold VC-1 decoder cannot reconstruct a paused picture from a mid-GOP packet.
+/// A flushed VC-1 decoder cannot reconstruct a target picture from a mid-GOP packet.
 /// Leave the demux cursor on a verified keyframe BEFORE the requested picture. The
 /// normal decode loop then builds its references with the original skip/clock target.
-enum SoftwareVC1PausedResume {
+enum SoftwareVC1ReferencePreroll {
     static let lookbackSeconds = 4.0
     static let maximumPrerollSeconds = 8.0
     static let budgetSeconds = 8.0
@@ -17,20 +17,51 @@ enum SoftwareVC1PausedResume {
             && target - pts <= maximumPrerollSeconds
     }
 
-    /// The actual load boundary: blocking preparation stays off the cooperative pool, and
-    /// cancelling the task awaiting it interrupts the source rather than just abandoning a wait.
-    static func prepareOffMain(dem: Demuxer, target: Double, origin: Double,
-                               videoIndex: Int32, timeBase: Double,
-                               isCurrent: @escaping @Sendable () -> Bool) async throws -> Double {
-        let priming = BlockingWork.detached(priority: .userInitiated) {
-            try prepare(dem: dem, target: target, origin: origin,
-                        videoIndex: videoIndex, timeBase: timeBase, isCurrent: isCurrent)
-        }
-        return try await withTaskCancellationHandler {
-            try await priming.value
+    private final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var cancelled: Bool { lock.withLock { value } }
+        func cancel() { lock.withLock { value = true } }
+    }
+
+    /// Both load and cache-miss seek use the host's serial seek queue. A failed probe is
+    /// inconclusive, not a failed load: the existing reposition gets the remaining budget.
+    static func reposition(dem: Demuxer, target: Double, origin: Double,
+                           videoIndex: Int32, timeBase: Double, budget: TimeInterval,
+                           queue: DispatchQueue, closesOnCancel: Bool,
+                           isSuperseded: @escaping @Sendable () -> Bool,
+                           fallback: SoftwarePlaybackHost.Reposition) async -> Demuxer.RepositionOutcome {
+        let cancellation = Cancellation()
+        let current: @Sendable () -> Bool = { !cancellation.cancelled && !isSuperseded() }
+        let deadline = ProcessInfo.processInfo.systemUptime + budget
+        return await withTaskCancellationHandler {
+            let primed: Bool = await withCheckedContinuation { continuation in
+                queue.async {
+                    guard current() else { continuation.resume(returning: false); return }
+                    do {
+                        _ = try prepare(dem: dem, target: target, origin: origin,
+                                        videoIndex: videoIndex, timeBase: timeBase,
+                                        deadline: min(deadline, ProcessInfo.processInfo.systemUptime + budgetSeconds),
+                                        isCurrent: current)
+                        continuation.resume(returning: true)
+                    } catch {
+                        // Cancellation is distinguished below; every other probe failure falls back.
+                        continuation.resume(returning: false)
+                    }
+                }
+            }
+            guard current() else { return .superseded }
+            if primed { return .landed }
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else { return .stalled }
+            // seekBounded drops peeked packets and clears latched AVIO errors before retrying.
+            let result = await fallback(dem, target, remaining, queue, { !current() })
+            return current() ? result : .superseded
         } onCancel: {
-            priming.cancel()
-            dem.markClosed()
+            cancellation.cancel()
+            // Only a cancelled whole load destroys this demuxer. A superseded transport
+            // seek leaves it open for the newer operation on the same serial queue.
+            if closesOnCancel { dem.markClosed() }
         }
     }
 
@@ -38,11 +69,13 @@ enum SoftwareVC1PausedResume {
     /// packet leaves the admitted keyframe intact for either the disk or direct route.
     static func prepare(dem: Demuxer, target: Double, origin: Double,
                         videoIndex: Int32, timeBase: Double,
+                        deadline: TimeInterval = ProcessInfo.processInfo.systemUptime + budgetSeconds,
                         isCurrent: @Sendable () -> Bool) throws -> Double {
-        let deadline = ProcessInfo.processInfo.systemUptime + budgetSeconds
+        let initialRemaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard initialRemaining > 0 else { throw SoftwarePlaybackHost.HostError.repositionFailed }
         guard isCurrent() else { throw CancellationError() }
         guard dem.seekBounded(to: max(origin, target - lookbackSeconds),
-                              timeout: budgetSeconds) else {
+                              timeout: initialRemaining) else {
             throw SoftwarePlaybackHost.HostError.repositionFailed
         }
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
@@ -85,7 +118,7 @@ enum SoftwareVC1PausedResume {
                 av_packet_free(&owned)
             }
         }
-        // Never fail open on a non-key packet or move the requested pause to a later GOP.
+        // The shared wrapper restores the original target through the fallback reposition.
         throw SoftwarePlaybackHost.HostError.repositionFailed
     }
 }

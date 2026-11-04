@@ -19,11 +19,12 @@ the public-API contract.
 
 ### Fixed
 
-- **Prime a cold paused VC-1 resume from a valid reference keyframe.** For seekable,
-  non-live software VC-1 at a nonzero paused start, perform a bounded lookback before
-  the decode/cache reader starts. Keep the requested target and stopped clock unchanged.
-  Unlike #973's decode-loop startup fix, this supplies the reference chain that VC-1
-  concealment needs. Public real-decoder fixture qualification remains pending.
+- **Restore VC-1 references after both nonzero loads and source seeks.** Seekable,
+  non-live software VC-1 uses one bounded reference-preroll path, independent of paused
+  or playing intent. Inconclusive priming falls back to the original target within the
+  remaining seek budget. Retained cache hits keep their existing preroll. Cancelling a
+  transport seek leaves its demuxer reusable; only cancelled whole loads close it.
+  This follows #973; the public real-decoder fixture gate remains open (Draft #979).
 
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed

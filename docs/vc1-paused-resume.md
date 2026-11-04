@@ -1,4 +1,4 @@
-# Paused VC-1 cold-resume qualification
+# VC-1 shared reference-preroll qualification
 
 This patch follows [#973](https://github.com/superuser404notfound/AetherEngine/issues/973),
 already present in the branch base `5e8eec74f0601888acce940e5dedabce66a6f64e`.
@@ -9,24 +9,29 @@ paused picture, silence, and continuous playback on resume on a physical Apple T
 
 ## Scope and limits
 
-Only a non-live, seekable software VC-1 session at a nonzero **paused** cold start changes.
-The demuxer is still exclusively owned by load. Seek back four seconds (not before the
-source origin), then admit a video key packet at or before the requested source PTS and
-no more than eight seconds earlier. Peeking preserves that key packet for either the disk
-cache producer or the direct reader. The existing target filter and stopped clock remain
-at the original resume time. H.264/HEVC, WMV1/2/3, autoplay and zero-start paths are unchanged.
+Non-live, seekable software VC-1 uses the same reference preparation for nonzero loads
+and transport source seeks, whether paused or playing. Cache hits keep resident preroll
+and do not touch the source. Cache misses park the producer and decode loop before entering
+the serial seek queue. Seek back four seconds (not before the source origin), and preserve
+a key packet at or before the target, at most eight seconds earlier. Existing target filters,
+clock and playback intent remain unchanged; paused seek does not start a decode loop.
 
-Preparation uses an eight-second seek/read deadline and checks cancellation, EOF, target
-crossing, 8,192 packets and 32 MiB of cumulative packet data. The byte limit is checked
-**after** reading a packet; it is not a hard allocator limit on one packet. A blocking
-`file://` filesystem read cannot promise an eight-second hard interruption. Missing or
-out-of-window keys fail reposition instead of publishing a false ready picture. Long GOPs
-without a usable key in this window are deliberately not qualified yet. No production
-pixel-content heuristic, temporary playback or FFmpeg/display-layer change is included.
+Preparation has at most eight seconds within the operation's existing 30-second budget,
+plus 8,192-packet and 32-MiB bounds. Missing/future keys, EOF, read errors or probe exhaustion
+fall back to the original reposition with the remaining budget. That seek drops peeked
+packets and clears latched AVIO errors; a failed fallback remains stalled, never ready.
+A single packet may exceed the byte limit before it is rejected. Lock waits and blocking
+filesystem reads are not hard wall-clock bounded. No production pixel heuristic is used.
+
+Generation checks reject obsolete work before admission and fallback. A cancelled whole
+load closes its demuxer because teardown follows. Superseded/cancelled transport work does
+not close the reusable demuxer; a newer queued operation clears old read state on reposition.
+Cancellation without a successor settles the host window as a failed positioning operation.
+H.264/HEVC, other codecs and zero-start loads keep the existing path.
 
 ## Evidence and remaining ready gate
 
-`SoftwareVC1PausedResumeTests` uses synthetic HEVC packets to test only key admission,
+`SoftwareVC1ReferencePrerollTests` uses synthetic HEVC packets to test only key admission,
 key preservation, EOF, cancellation and budget failures. It does **not** establish VC-1
 reference decoding. A controllably parked custom source also drives the actual off-main load
 preparation boundary: cancellation must call through demux close to the source, end the blocked
@@ -53,3 +58,14 @@ reproducible generator, record its source/license/hash, and wire real decode int
 Demonstrate failure on the exact unpatched base and success with this patch. Include offset
 origin, short/long GOP, cancellation during slow preparation, and the existing #973 paused
 first-frame regressions. Ordinary policy-test success must not close this gate.
+
+## Shared-path follow-up
+
+The same authorized local VC-1 sample reproduced a gray **first decoder output** after
+both cold open and warm decoder flush. Reference priming restored scene contrast at both
+targets in ordinary and strict-pool runs. Ordinary paused host seek retains the old layer
+and parks decoding; this is not evidence of sustained gray on a physical TV after paused seek.
+`VC1ReferencePrerollIntegrationTests` captures synchronous first outputs for cold/warm decoders;
+it shares the optional fixture contract above and does not supply the missing public sample.
+Policy tests cover successful/failed fallback, remaining budget, key bounds and a parked source:
+cancelled load closes it, cancelled/superseded transport leaves it open for the next seek.
