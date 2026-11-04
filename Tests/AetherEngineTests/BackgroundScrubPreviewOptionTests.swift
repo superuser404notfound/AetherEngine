@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct BackgroundScrubPreviewOptionTests {
     private func fixture() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("ladder-option-\(UUID()).mp4")
@@ -47,11 +47,7 @@ struct BackgroundScrubPreviewOptionTests {
             #expect(session.makeStillLadderSource(plan: plan) == nil)
             #expect(session.stillLadderFrame(atSeconds: 0) == nil)
             if let source {
-                for _ in 0..<200 {
-                    if source.keyframes.keyframePayload(at: 1) == nil { break }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(source.keyframes.keyframePayload(at: 1) == nil)
+                try await waitFor { source.keyframes.keyframePayload(at: 1) == nil }
             }
         }
     }

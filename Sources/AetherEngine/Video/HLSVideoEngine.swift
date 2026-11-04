@@ -287,11 +287,12 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// rule (keyframe-aligned plan, a reopenable URL, no serial or held origin, no disc), decided at
     /// start. A Profile 5 / 10.0 session never serves that rendition, so this is asked separately.
     private var previewReadsSource = false
+    /// Configured before start; only controls the elective sparse still ladder.
+    var generatesBackgroundScrubPreviews = true
+
     /// Sparse stills for what nothing resident covers (`KeyframeStillLadder`). Eligibility is the
     /// I-frame rule minus the serial-origin exclusion, because the ladder reads only while the origin
     /// has nothing in flight. Guarded by `restartLock`, like the reader and builder below.
-    /// Configured before start; only controls the elective sparse still ladder.
-    var generatesBackgroundScrubPreviews = true
     private var stillLadderEligible = false
     private var stillLadderSource: (keyframes: IFrameRendition, builder: PreviewKeyframeBuilder)?
     /// Rung bookkeeping, guarded by `stillLadderLock`. `stillLadderComplete` only gates the log line.

@@ -12,7 +12,8 @@ the public-API contract.
 
 ### Added
 
-- `LoadOptions.generatesBackgroundScrubPreviews` lets hosts opt out of the idle sparse
+- **Hosts can opt out of background scrub-still generation.**
+  `LoadOptions.generatesBackgroundScrubPreviews` controls the idle sparse
   scrub-still ladder and its side reader. It defaults to true, is correctable by reload,
   and leaves I-frame playlists, on-demand snapshots and item-swap held pictures unchanged.
 
