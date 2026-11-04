@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **Hosts can observe the selected secondary subtitle identity.**
+  `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external
+  track IDs across selection, clearing and rebuild restoration. One-shot URL selections have no
+  ID. Ordinary decode/failure timing and the ability to select the same track in both channels
+  are unchanged.
+
 - **Hosts can read Dolby Vision base-layer source capabilities.** `sourceDVBLCompatID` and
   `sourceDolbyVisionBaseLayerPresentable` expose the engine's existing probe results read-only,
   so a host can offer a source-appropriate choice without inferring it from the profile alone.

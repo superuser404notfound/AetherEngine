@@ -212,14 +212,13 @@ extension AetherEngine {
         if let external = externalSubtitleRegistry[index] {
             cancelSidecarTask(channel: .secondary)
             clearSubtitleDrainTarget(channel: .secondary, reason: .secondarySidecarSelected)   // #112 rework
-            activeSecondaryEmbeddedSubtitleStreamIndex = -1
-            activeSecondaryExternalSubtitleTrackID = index
+            setSecondarySubtitleIdentity(external: index)
+            guard activeSecondaryExternalSubtitleTrackID == index else { return }
             startSecondarySidecarDecode(url: external.url, httpHeaders: external.httpHeaders,
-                                        sourceStreamIndex: external.sourceStreamIndex)
+                                        sourceStreamIndex: external.sourceStreamIndex, externalTrackID: index)
             return
         }
         guard index < Self.externalSubtitleTrackIDBase else { return }
-        activeSecondaryExternalSubtitleTrackID = nil
         guard loadedURL != nil else { return }
         cancelSidecarTask(channel: .secondary)
         loadedSecondarySidecarURL = nil
@@ -230,13 +229,13 @@ extension AetherEngine {
         secondarySubtitleCues = []
         secondarySidecarASSHeader = nil
         pgsStaleArrivalGates[.secondary]?.reset()   // #100
-        activeSecondaryEmbeddedSubtitleStreamIndex = Int32(index)
         subtitleDrainTargets[.secondary] = Int32(index)
         subtitleDrainDecoders[.secondary] = nil
         subtitleDrainCursors[.secondary] = nil
         startSubtitleDrainer()
         startSubtitleForwardPrefetcher(startAt: startAt)   // #151
         isLoadingSecondarySubtitles = false
+        setSecondarySubtitleIdentity(embedded: Int32(index))
     }
 
 
@@ -1759,9 +1758,8 @@ extension AetherEngine {
         hostExplicitSubtitleAction = true
         cancelSidecarTask(channel: .secondary)
         clearSubtitleDrainTarget(channel: .secondary, reason: .secondarySidecarSelected)   // #112 rework
-        activeSecondaryEmbeddedSubtitleStreamIndex = -1
-        activeSecondaryExternalSubtitleTrackID = nil
         startSecondarySidecarDecode(url: url, httpHeaders: httpHeaders)
+        setSecondarySubtitleIdentity()
     }
 
     /// Audio rebuilds keep the registry. Restore through its id so headers and a container's
@@ -1781,7 +1779,7 @@ extension AetherEngine {
 
     /// Shared secondary sidecar-decode start (#88): the pre-#88 selectSecondarySidecarSubtitle body.
     func startSecondarySidecarDecode(url: URL, httpHeaders: [String: String]?,
-                                     sourceStreamIndex: Int32? = nil) {
+                                     sourceStreamIndex: Int32? = nil, externalTrackID: Int? = nil) {
         loadedSecondarySidecarURL = url
         isSecondarySubtitleActive = true
         secondarySubtitleCues = []
@@ -1794,7 +1792,7 @@ extension AetherEngine {
             mediaHeaders: loadedOptions.httpHeaders)
         let preserveASS = loadedOptions.preserveASSMarkup
         let sessionGeneration = loadGeneration
-        let preparationPolicy = activeSecondaryExternalSubtitleTrackID.flatMap { externalSubtitleRegistry[$0] }?.preparationPolicy
+        let preparationPolicy = externalTrackID.flatMap { externalSubtitleRegistry[$0] }?.preparationPolicy
         secondarySidecarTask = Task { [weak self] in
             let result: SidecarDecodeResult
             do {
@@ -1901,10 +1899,14 @@ extension AetherEngine {
     public func clearSecondarySubtitle() {
         externalSubtitleIntentGeneration &+= 1
         hostExplicitSubtitleAction = true
+        clearSecondarySubtitleContent()
+        setSecondarySubtitleIdentity()
+    }
+
+    /// Tear down content without publishing an intermediate off selection during a replacement.
+    func clearSecondarySubtitleContent() {
         cancelSidecarTask(channel: .secondary)
         clearSubtitleDrainTarget(channel: .secondary, reason: .subtitlesCleared)   // #112 rework
-        activeSecondaryEmbeddedSubtitleStreamIndex = -1
-        activeSecondaryExternalSubtitleTrackID = nil
         loadedSecondarySidecarURL = nil
         isSecondarySubtitleActive = false
         secondarySubtitleCues = []
