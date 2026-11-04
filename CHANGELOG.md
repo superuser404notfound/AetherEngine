@@ -18,6 +18,11 @@ the public-API contract.
   ID. Ordinary decode/failure timing and the ability to select the same track in both channels
   are unchanged.
 
+- **Hosts can opt out of background scrub-still generation.**
+  `LoadOptions.generatesBackgroundScrubPreviews` controls the idle sparse
+  scrub-still ladder and its side reader. It defaults to true, is correctable by reload,
+  and leaves I-frame playlists, on-demand snapshots and item-swap held pictures unchanged.
+
 - **Hosts can read Dolby Vision base-layer source capabilities.** `sourceDVBLCompatID` and
   `sourceDolbyVisionBaseLayerPresentable` expose the engine's existing probe results read-only,
   so a host can offer a source-appropriate choice without inferring it from the profile alone.

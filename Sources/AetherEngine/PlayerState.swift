@@ -825,6 +825,12 @@ public struct LoadOptions: Sendable, Equatable {
     /// Serve an I-frame rendition (`EXT-X-I-FRAME-STREAM-INF`) next to the master, so a stock `AVPlayerViewController` shows its own scrub thumbnails and can scan on I-frames, with no host code (AE#682). One still per served segment: the source's own keyframe at full resolution for SDR, and for HDR10, HLG and Dolby Vision a tone-mapped SDR Motion JPEG 640 pixels wide, since AVKit shows no scrub thumbnail from a PQ or Dolby Vision keyframe. Costs a second reader on the source for the whole session, opened shortly after load because AVKit asks for the first keyframe before anyone scrubs. Silently absent, with one log line naming the reason, when the session cannot answer every listed keyframe: live, a source without a trustworthy keyframe index (MPEG-TS), `sequentialOrigin`, `heldSourceConnection`, an origin limited to one request, a disc source, a custom reader that cannot clone, or media-playlist routing. A host with its own transport bar wants `scrubThumbnail` instead. A tuning field: correctable through `reloadAtCurrentPosition(applying:)`. Default `false`.
     public var serveIFramePlaylist: Bool = false
 
+    /// Pre-generate the sparse scrub-still ladder while the source is idle. Default `true`.
+    /// Set to `false` when the host does not consume scrub previews to avoid this optional
+    /// side reader. Independent of `serveIFramePlaylist`, on-demand snapshots and item-swap
+    /// held pictures, including Dolby Vision compositor/reshaping. Correctable by reload.
+    public var generatesBackgroundScrubPreviews: Bool = true
+
     /// Confirm E-AC-3 JOC (Dolby Atmos) on this session's audio tracks, so `audioTracks` carries an honest
     /// `TrackInfo.isAtmos` for a badge instead of the pre-decode guess. No container reliably declares JOC, so
     /// this runs the same bounded decode pass as `AetherEngine.probeDetectingAtmos` (see `AtmosDetectionOptions`
@@ -1149,6 +1155,7 @@ public struct LoadOptions: Sendable, Equatable {
         prepareNativeSubtitles: Bool = false,
         eagerNativeSubtitleReaders: Bool = false,
         serveIFramePlaylist: Bool = false,
+        generatesBackgroundScrubPreviews: Bool = true,
         confirmAtmos: Bool = false,
         nativeSubtitlePreferredLanguages: [String] = [],
         sequentialOrigin: Bool = false,
@@ -1213,6 +1220,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.prepareNativeSubtitles = prepareNativeSubtitles
         self.eagerNativeSubtitleReaders = eagerNativeSubtitleReaders
         self.serveIFramePlaylist = serveIFramePlaylist
+        self.generatesBackgroundScrubPreviews = generatesBackgroundScrubPreviews
         self.confirmAtmos = confirmAtmos
         self.nativeSubtitlePreferredLanguages = nativeSubtitlePreferredLanguages
         self.sequentialOrigin = sequentialOrigin
