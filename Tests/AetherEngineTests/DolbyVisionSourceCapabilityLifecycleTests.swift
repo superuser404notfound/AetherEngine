@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -37,6 +38,27 @@ struct DolbyVisionSourceCapabilityLifecycleTests {
         #expect(engine.sourceDVProfile == nil)
         #expect(engine.sourceDVBLCompatID == nil)
         #expect(!engine.sourceDolbyVisionBaseLayerPresentable)
+    }
+
+    @Test func profileSinkReadsCurrentCapabilities() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions(autoplay: false)
+        options.preferredDecodePath = .software
+        options.dolbyVisionHandling = .baseLayerOnly
+        var seen: [(Int?, Bool)] = []
+        let sink = engine.$sourceDVProfile.dropFirst().sink { profile in
+            if profile == 5 {
+                seen.append((engine.sourceDVBLCompatID, engine.sourceDolbyVisionBaseLayerPresentable))
+            }
+        }
+        defer { sink.cancel() }
+        try await engine.load(source: .custom(DataIOReader(data:
+            try SupersededProbeGeometryTests.dolbyVisionProfile5OverHDR10()), formatHint: "mp4"),
+            options: options)
+        #expect(seen.count == 1)
+        #expect(seen.first?.0 == 0)
+        #expect(seen.first?.1 == true)
     }
 
     @Test func pendingAndCancelledLoadClearPriorCapabilities() async throws {

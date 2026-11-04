@@ -667,8 +667,7 @@ public final class AetherEngine: ObservableObject {
     /// then the probe stream that carried the record is long gone. Read alongside
     /// `sourceDolbyVisionBaseLayerPresentable` when offering source-specific playback choices.
     /// nil means unavailable; reset on load and stop. This is source metadata, not display output.
-    /// Read after awaiting load or a successful reload. A synchronous sourceDVProfile/sourceVideoFormat
-    /// publisher callback can precede these assignments and still observe the reset snapshot.
+    /// Assigned before `sourceVideoFormat` / `sourceDVProfile`, so their publisher callbacks read it current.
     public internal(set) var sourceDVBLCompatID: Int? = nil
 
     /// AE#532: the profile the loaded source's own RPU reports, when the record was contradicted enough
@@ -4754,6 +4753,8 @@ public final class AetherEngine: ObservableObject {
         // Reset format/dimension state so paths that skip the probe (nativeRemoteHLS) or find no video
         // don't keep publishing the predecessor's values (e.g. Live TV after an HDR10 film kept reporting .hdr10).
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -4764,8 +4765,6 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
@@ -5171,10 +5170,11 @@ public final class AetherEngine: ObservableObject {
 
         // sourceVideoFormat = what's in the file; videoFormat = what the panel shows (published after
         // the criteria handshake; see panelHDRAfterHandshake below).
-        sourceVideoFormat = detectedFormat
-        sourceDVProfile = detectedDVProfileNum
+        // The capability pair is assigned before its publishing peers so their sinks read it current.
         sourceDVBLCompatID = detectedDVBLCompatIDNum
         sourceDolbyVisionBaseLayerPresentable = detectedDVBaseLayerPresentable
+        sourceVideoFormat = detectedFormat
+        sourceDVProfile = detectedDVProfileNum
         sourceDolbyVisionRPUProfile = detectedDVRPUProfile
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
@@ -7349,6 +7349,8 @@ public final class AetherEngine: ObservableObject {
         containerChapterSource = nil
         mediaChapters = []
         videoFormat = .sdr
+        sourceDVBLCompatID = nil
+        sourceDolbyVisionBaseLayerPresentable = false
         sourceVideoFormat = .sdr
         sourceDVProfile = nil
         dolbyVisionConversion = nil
@@ -7359,8 +7361,6 @@ public final class AetherEngine: ObservableObject {
         sourceUpscaleDisabled = nil
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
-        sourceDVBLCompatID = nil
-        sourceDolbyVisionBaseLayerPresentable = false
         sourceDolbyVisionRPUProfile = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
