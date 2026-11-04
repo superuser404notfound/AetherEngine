@@ -25,4 +25,24 @@ struct SequentialParkFrontierTests {
         // Session start: head < window makes the target negative while the frontier is still empty.
         #expect(!HLSSegmentProducer.sequentialParkWouldSelfDeadlock(target: -8, highestAdvertised: Int.min))
     }
+
+    @Test("AE#958: a playing consumer gets one segment per segment duration")
+    func trickleWhilePlaying() {
+        #expect(!HLSSegmentProducer.sequentialParkTrickleDue(parkedSeconds: 3, cadenceSeconds: 4,
+                                                            consumerRendering: true))
+        #expect(HLSSegmentProducer.sequentialParkTrickleDue(parkedSeconds: 4, cadenceSeconds: 4,
+                                                           consumerRendering: true))
+    }
+
+    @Test("AE#958: a paused or frozen consumer gets no trickle, so the wedge detector keeps its case")
+    func noTrickleWithoutRendering() {
+        #expect(!HLSSegmentProducer.sequentialParkTrickleDue(parkedSeconds: 60, cadenceSeconds: 4,
+                                                            consumerRendering: false))
+    }
+
+    @Test("AE#958: a degenerate cadence still waits a second")
+    func cadenceFloor() {
+        #expect(!HLSSegmentProducer.sequentialParkTrickleDue(parkedSeconds: 0, cadenceSeconds: 0,
+                                                            consumerRendering: true))
+    }
 }
