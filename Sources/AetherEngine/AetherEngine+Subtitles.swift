@@ -211,6 +211,7 @@ extension AetherEngine {
         hostExplicitSubtitleAction = true
         if let external = externalSubtitleRegistry[index] {
             cancelSidecarTask(channel: .secondary, preservingActiveBitmap: true)
+            pendingSecondaryExternalSubtitleTrackID = index
             startSecondarySidecarDecode(url: external.url, httpHeaders: external.httpHeaders,
                                         sourceStreamIndex: external.sourceStreamIndex,
                                         externalTrackID: index)
@@ -1654,6 +1655,10 @@ extension AetherEngine {
         subtitleTracks.removeAll { $0.id == id }
         if activeSubtitleTrackIndex == id { clearSubtitle() }
         if activeSecondaryExternalSubtitleTrackID == id { clearSecondarySubtitle() }
+        if pendingSecondaryExternalSubtitleTrackID == id {
+            cancelSidecarTask(channel: .secondary, preservingActiveBitmap: true)
+            isLoadingSecondarySubtitles = false
+        }
     }
 
     /// Fetch and decode a sidecar subtitle file (.srt / .ass / .vtt / .ssa) via `SubtitleDecoder.decodeFile`, replacing `subtitleCues` atomically. `httpHeaders` nil inherits `LoadOptions.httpHeaders` only for the same HTTP scheme, host and effective port as the media; cross-origin sidecars need explicit headers. Prefer registering via `addExternalSubtitleTrack` + `selectSubtitleTrack` (#88), which keeps the track listed and `activeSubtitleTrackIndex` populated; this API stays for compatibility and one-shot use.
@@ -1763,6 +1768,16 @@ extension AetherEngine {
         startSecondarySidecarDecode(url: url, httpHeaders: httpHeaders)
     }
 
+    /// Both reload paths snapshot selection intent, including a candidate not yet published.
+    /// This also survives a second rebuild before the first restore has finished decoding.
+    var secondarySelectionForRebuild: (externalID: Int?, sidecarURL: URL?, embeddedIndex: Int32) {
+        let external = pendingSecondaryExternalSubtitleTrackID ?? activeSecondaryExternalSubtitleTrackID
+        let embedded: Int32 = external == nil ? activeSecondaryEmbeddedSubtitleStreamIndex : -1
+        let url = external.flatMap { externalSubtitleRegistry[$0]?.url }
+            ?? (isSecondarySubtitleActive && embedded < 0 ? loadedSecondarySidecarURL : nil)
+        return (external, url, embedded)
+    }
+
     /// Audio rebuilds keep the registry. Restore through its id so headers and a container's
     /// selected subtitle stream survive; the URL-only route is only for one-shot sidecars.
     func restoreSecondarySubtitleAfterRebuild(externalID: Int?, sidecarURL: URL?,
@@ -1795,6 +1810,8 @@ extension AetherEngine {
             secondarySidecarASSHeader = nil
         }
         isLoadingSecondarySubtitles = true
+        // A synchronous loading observer may have cleared or replaced this selection.
+        if let externalTrackID, pendingSecondaryExternalSubtitleTrackID != externalTrackID { return }
 
         let effectiveHeaders = Self.resolvedSubtitleHeaders(
             for: url, explicit: httpHeaders, mediaURL: loadedURL,
@@ -1818,6 +1835,7 @@ extension AetherEngine {
                 await MainActor.run {
                     guard !Task.isCancelled, let self = self else { return }
                     guard self.loadGeneration == sessionGeneration else { return }
+                    self.pendingSecondaryExternalSubtitleTrackID = nil
                     self.isLoadingSecondarySubtitles = false
                 }
                 return
@@ -1838,15 +1856,18 @@ extension AetherEngine {
                 guard !Task.isCancelled, let self = self else { return }
                 guard self.loadGeneration == sessionGeneration else { return }
                 guard result.bitmapSource == nil || bitmapDecoder != nil else {
+                    self.pendingSecondaryExternalSubtitleTrackID = nil
                     self.isLoadingSecondarySubtitles = false
                     return
                 }
                 guard externalTrackID != nil || self.isSecondarySubtitleActive else { return }
                 if let externalTrackID,
                    self.externalSubtitleRegistry[externalTrackID] != selectedExternal {
+                    self.pendingSecondaryExternalSubtitleTrackID = nil
                     self.isLoadingSecondarySubtitles = false
                     return
                 }
+                self.pendingSecondaryExternalSubtitleTrackID = nil
                 if let externalTrackID {
                     self.clearSubtitleDrainTarget(channel: .secondary, reason: .secondarySidecarSelected)
                     self.activeSecondaryEmbeddedSubtitleStreamIndex = -1
@@ -1856,11 +1877,11 @@ extension AetherEngine {
                     self.pgsStaleArrivalGates[.secondary]?.reset()
                 }
                 if let source = result.bitmapSource {
-                    self.isLoadingSecondarySubtitles = false
                     self.secondarySubtitleCues = []
                     self.secondarySidecarASSHeader = nil
                     self.installSidecarBitmapSource(
                         source, channel: .secondary, preparedDecoder: bitmapDecoder)
+                    self.isLoadingSecondarySubtitles = false
                     return
                 }
                 self.secondarySubtitleCues = result.cues
@@ -1937,6 +1958,7 @@ extension AetherEngine {
         case .secondary:
             secondarySidecarTask?.cancel()
             secondarySidecarTask = nil
+            pendingSecondaryExternalSubtitleTrackID = nil
         }
     }
 
@@ -2650,11 +2672,10 @@ extension AetherEngine {
         carryover.activeSubtitleTrackIndex = activeSubtitleTrackIndex
         carryover.primarySidecarURL = (isSubtitleActive && activeSubtitleTrackIndex == nil
             && activeEmbeddedSubtitleStreamIndex < 0) ? loadedSidecarURL : nil
-        carryover.secondaryTrackIndex = activeSecondaryExternalSubtitleTrackID
-            ?? (activeSecondaryEmbeddedSubtitleStreamIndex >= 0
-                ? Int(activeSecondaryEmbeddedSubtitleStreamIndex) : nil)
-        carryover.secondarySidecarURL = (isSecondarySubtitleActive && carryover.secondaryTrackIndex == nil)
-            ? loadedSecondarySidecarURL : nil
+        let secondary = secondarySelectionForRebuild
+        carryover.secondaryTrackIndex = secondary.externalID
+            ?? (secondary.embeddedIndex >= 0 ? Int(secondary.embeddedIndex) : nil)
+        carryover.secondarySidecarURL = carryover.secondaryTrackIndex == nil ? secondary.sidecarURL : nil
         carryover.nativeReapplyOrdinal = nativeSubtitleReapplyOrdinal
         carryover.reapplyOrdinalMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
         return carryover

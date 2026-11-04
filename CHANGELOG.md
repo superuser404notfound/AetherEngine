@@ -13,8 +13,10 @@ the public-API contract.
 ### Fixed
 
 - **Failed external secondary-subtitle replacement preserves the active track.**
-  A registered external secondary subtitle is prepared before replacing the active one. Decode or bitmap-decoder creation failure leaves the old cues,
-  ASS header, identity and bitmap packet source intact; only a current successful candidate
+  Previously the old track was torn down before the candidate could decode. Preparation now
+  completes before replacing it; decode or bitmap-decoder creation failure leaves the old cues,
+  ASS header, identity and bitmap packet source intact. Rebuilds preserve a pending pick.
+  Only a current successful candidate
   commits. Clearing/stopping still releases immediately; one-shot URL selection is unchanged.
 
 - **A paused software session shows its picture after a rebuild or a paused mount (#973).** The

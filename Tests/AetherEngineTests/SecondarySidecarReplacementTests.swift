@@ -42,6 +42,7 @@ struct SecondarySidecarReplacementTests {
         #expect(engine.sidecarBitmapSources[.secondary] === source)
         #expect(engine.activeSecondaryExternalSubtitleTrackID == original.id)
         #expect(!engine.isLoadingSecondarySubtitles)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
         // Failure did not merely retain a picture: the old packet source can still answer a seek.
         engine.clock.sourceTime = 51
         engine.requestSubtitleDrainTick()
@@ -73,6 +74,7 @@ struct SecondarySidecarReplacementTests {
         #expect(engine.activeSecondaryExternalSubtitleTrackID == old.id)
         #expect(engine.secondarySubtitleCues.compactMap(\.text) == ["old text"])
         #expect(!engine.isLoadingSecondarySubtitles)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
         engine.secondarySidecarDecoderFactoryForTesting = nil
         #endif
         engine.selectSecondarySubtitleTrack(index: next.id)
@@ -109,6 +111,7 @@ struct SecondarySidecarReplacementTests {
         #expect(engine.loadedSecondarySidecarURL == nil)
         #expect(engine.secondarySubtitleCues.isEmpty)
         #expect(!engine.isLoadingSecondarySubtitles)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
         if action == "embedded" { #expect(engine.activeSecondaryEmbeddedSubtitleStreamIndex == 2) }
     }
 
@@ -155,5 +158,54 @@ struct SecondarySidecarReplacementTests {
         await finish(engine)
         #expect(engine.isSecondarySubtitleActive)
         #expect(!engine.isLoadingSecondarySubtitles)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
     }
+    @Test func pendingSelectionSurvivesBothSnapshotPathsAndRepeatedRestore() async throws {
+        let a = try text("A"), b = try text("B")
+        defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+        let engine = try player()
+        defer { engine.stop() }
+        let old = engine.registerExternalSubtitleTrack(.init(url: a))
+        let next = engine.registerExternalSubtitleTrack(.init(url: b))
+        engine.selectSecondarySubtitleTrack(index: old.id)
+        await finish(engine)
+        engine.selectSecondarySubtitleTrack(index: next.id)
+        // No yield: the candidate cannot have completed, just as during a slow fetch.
+        #expect(engine.activeSecondaryExternalSubtitleTrackID == old.id)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == next.id)
+        for _ in 0..<2 {
+            let audioSnapshot = engine.secondarySelectionForRebuild
+            let carryover = engine.captureSubtitleSessionCarryover()
+            #expect(audioSnapshot.externalID == next.id)
+            #expect(audioSnapshot.sidecarURL == b)
+            #expect(carryover.secondaryTrackIndex == next.id)
+            engine.stopInternal(resetDisplayCriteria: false)
+            #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
+            engine.restoreSecondarySubtitleAfterRebuild(externalID: audioSnapshot.externalID,
+                sidecarURL: audioSnapshot.sidecarURL, embeddedIndex: audioSnapshot.embeddedIndex, startAt: 11)
+            #expect(engine.activeSecondaryExternalSubtitleTrackID == nil)
+            #expect(engine.pendingSecondaryExternalSubtitleTrackID == next.id)
+        }
+        await finish(engine)
+        #expect(engine.activeSecondaryExternalSubtitleTrackID == next.id)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
+        #expect(engine.secondarySubtitleCues.compactMap(\.text) == ["B"])
+    }
+
+    @Test func pendingPickSurvivesActualSessionReload() async throws {
+        let url = try text()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        try await engine.load(source: .custom(DataIOReader(data: try ProbeTestFixtures.hdr10Plus()), formatHint: "mp4"),
+                              options: LoadOptions(autoplay: false, preferredDecodePath: .software))
+        let next = engine.registerExternalSubtitleTrack(.init(url: url))
+        engine.selectSecondarySubtitleTrack(index: next.id)
+        try await engine.reloadAtCurrentPosition()
+        await finish(engine)
+        #expect(engine.activeSecondaryExternalSubtitleTrackID == next.id)
+        #expect(engine.pendingSecondaryExternalSubtitleTrackID == nil)
+        #expect(engine.secondarySubtitleCues.compactMap(\.text) == ["replacement"])
+    }
+
 }

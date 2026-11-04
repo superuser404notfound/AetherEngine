@@ -4022,6 +4022,8 @@ public final class AetherEngine: ObservableObject {
     /// Synthetic id of the external track active on the secondary channel, nil when the secondary
     /// is off or embedded (#88).
     var activeSecondaryExternalSubtitleTrackID: Int? = nil
+    /// Selection intent is separate from the still-visible active track while preparation runs.
+    var pendingSecondaryExternalSubtitleTrackID: Int? = nil
     /// Base for synthetic external-subtitle TrackInfo ids; far above any real AVStream index.
     public static let externalSubtitleTrackIDBase = 100_000
     /// #170: true while `reloadAtCurrentPosition` runs a session-preserving reload. Host
