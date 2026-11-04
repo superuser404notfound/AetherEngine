@@ -1709,8 +1709,8 @@ public final class AetherEngine: ObservableObject {
     @Published public internal(set) var isSecondarySubtitleActive: Bool = false
 
     /// Selected secondary TrackInfo.id, embedded or registered external. nil when off or using
-    /// the one-shot URL API; nil alone does not imply inactivity. Ordinary external selection
-    /// publishes before decoding, as its internal identity already does. Not a decode-success flag.
+    /// the one-shot URL API; nil alone does not imply inactivity. A registered external publishes
+    /// when its prepared replacement commits; the previous identity stays while it decodes or fails.
     @Published public private(set) var activeSecondarySubtitleTrackIndex: Int?
     private var publishingSecondarySubtitleIdentity = false
 
@@ -2741,6 +2741,10 @@ public final class AetherEngine: ObservableObject {
 
     /// Secondary subtitle reader state mirrors (#47). Driven only through SubtitleChannel.secondary.
     var secondarySidecarTask: Task<Void, Never>?
+    #if DEBUG
+    /// Per-engine failure injection; never changes another session's decoder factory.
+    var secondarySidecarDecoderFactoryForTesting: (@Sendable (SidecarBitmapSource) -> EmbeddedSubtitleDecoder?)?
+    #endif
     private(set) var activeSecondaryEmbeddedSubtitleStreamIndex: Int32 = -1
 
     /// Source video dimensions from the probe. Used as a bitmap-subtitle canvas fallback before the first PCS
@@ -4051,6 +4055,8 @@ public final class AetherEngine: ObservableObject {
     /// Synthetic id of the external track active on the secondary channel, nil when the secondary
     /// is off or embedded (#88).
     private(set) var activeSecondaryExternalSubtitleTrackID: Int? = nil
+    /// Selection intent is separate from the still-visible active track while preparation runs.
+    var pendingSecondaryExternalSubtitleTrackID: Int? = nil
     /// Base for synthetic external-subtitle TrackInfo ids; far above any real AVStream index.
     public static let externalSubtitleTrackIDBase = 100_000
     /// #170: true while `reloadAtCurrentPosition` runs a session-preserving reload. Host

@@ -39,10 +39,16 @@ struct ExternalSubtitleSelectionTests {
     }
 
     @Test("secondary channel routes external ids")
-    func secondaryExternal() throws {
+    func secondaryExternal() async throws {
+        let url = try MultiSubtitleContainerFixture.write()
+        defer { try? FileManager.default.removeItem(at: url) }
         let engine = try AetherEngine()
-        let info = engine.addExternalSubtitleTrack(makeTrack())
+        defer { engine.stop() }
+        let info = engine.addExternalSubtitleTrack(.init(url: url,
+            sourceStreamIndex: MultiSubtitleContainerFixture.spanishStreamIndex))
         engine.selectSecondarySubtitleTrack(index: info.id)
+        #expect(engine.activeSecondaryExternalSubtitleTrackID == nil)
+        await engine.secondarySidecarTask?.value
         #expect(engine.isSecondarySubtitleActive)
         #expect(engine.activeSecondaryExternalSubtitleTrackID == info.id)
         #expect(engine.activeSecondaryEmbeddedSubtitleStreamIndex == -1)

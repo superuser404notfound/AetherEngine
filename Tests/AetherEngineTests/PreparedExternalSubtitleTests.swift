@@ -237,6 +237,16 @@ struct PreparedExternalSubtitleTests {
         }
         #expect(engine.subtitleCues.first?.text == "Old")
         #expect(engine.externalSubtitleRegistry[track.id]?.preparationPolicy != nil)
+        let oldHeader = engine.secondarySidecarASSHeader
+        let oldText = engine.secondarySubtitleCues.compactMap(\.text)
+        let bad = engine.registerExternalSubtitleTrack(.init(url: url.appendingPathExtension("missing")))
+        engine.selectSecondarySubtitleTrack(index: bad.id)
+        #expect(engine.secondarySidecarASSHeader == oldHeader)
+        await engine.secondarySidecarTask?.value
+        #expect(engine.activeSecondaryExternalSubtitleTrackID == track.id)
+        #expect(engine.secondarySidecarASSHeader == oldHeader)
+        #expect(engine.secondarySubtitleCues.compactMap(\.text) == oldText)
+        engine.stop()
     }
 
     @Test func registeredPolicyIsRetainedAndCanBeExplicitlyChanged() async throws {

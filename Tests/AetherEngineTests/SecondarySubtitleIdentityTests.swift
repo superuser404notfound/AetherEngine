@@ -44,7 +44,7 @@ struct SecondarySubtitleIdentityTests {
         let track = engine.registerExternalSubtitleTrack(.init(
             url: url, sourceStreamIndex: MultiSubtitleContainerFixture.spanishStreamIndex))
         engine.selectSecondarySubtitleTrack(index: track.id)
-        assertIdentity(engine, track.id)
+        assertIdentity(engine, nil)
         await engine.secondarySidecarTask?.value
         assertIdentity(engine, track.id)
         #expect(!engine.secondarySubtitleCues.isEmpty)
@@ -61,18 +61,38 @@ struct SecondarySubtitleIdentityTests {
         engine.selectSecondarySubtitleTrack(index: track.id)
         engine.removeExternalSubtitleTrack(id: track.id)
         assertIdentity(engine, nil)
+        #expect(engine.isSecondarySubtitleActive)
+        #expect(!engine.isLoadingSecondarySubtitles)
+        let again = engine.registerExternalSubtitleTrack(.init(
+            url: url, sourceStreamIndex: MultiSubtitleContainerFixture.spanishStreamIndex))
+        engine.selectSecondarySubtitleTrack(index: again.id)
+        await engine.secondarySidecarTask?.value
+        assertIdentity(engine, again.id)
+        engine.removeExternalSubtitleTrack(id: again.id)
+        assertIdentity(engine, nil)
         #expect(!engine.isSecondarySubtitleActive)
     }
 
-    @Test func ordinaryFailureRetainsSelectedIdentityUntilClear() async throws {
+    @Test func failedReplacementKeepsPreviousIdentityUntilClear() async throws {
+        let url = try MultiSubtitleContainerFixture.write()
+        defer { try? FileManager.default.removeItem(at: url) }
         let engine = try player()
         defer { engine.stop() }
-        let track = engine.registerExternalSubtitleTrack(.init(
+        let bad = engine.registerExternalSubtitleTrack(.init(
             url: URL(fileURLWithPath: "/nonexistent/identity-failure.srt")))
-        engine.selectSecondarySubtitleTrack(index: track.id)
-        assertIdentity(engine, track.id)
+        engine.selectSecondarySubtitleTrack(index: bad.id)
         await engine.secondarySidecarTask?.value
-        assertIdentity(engine, track.id)
+        assertIdentity(engine, nil)
+        #expect(!engine.isLoadingSecondarySubtitles)
+        let good = engine.registerExternalSubtitleTrack(.init(
+            url: url, sourceStreamIndex: MultiSubtitleContainerFixture.spanishStreamIndex))
+        engine.selectSecondarySubtitleTrack(index: good.id)
+        await engine.secondarySidecarTask?.value
+        assertIdentity(engine, good.id)
+        engine.selectSecondarySubtitleTrack(index: bad.id)
+        assertIdentity(engine, good.id)
+        await engine.secondarySidecarTask?.value
+        assertIdentity(engine, good.id)
         #expect(!engine.isLoadingSecondarySubtitles)
         engine.clearSecondarySubtitle()
         assertIdentity(engine, nil)
@@ -101,7 +121,9 @@ struct SecondarySubtitleIdentityTests {
         assertIdentity(engine, nil)
     }
 
-    @Test func synchronousSubscriberMayClearWithoutRestoringStaleIdentity() throws {
+    @Test func synchronousSubscriberMayClearWithoutRestoringStaleIdentity() async throws {
+        let url = try MultiSubtitleContainerFixture.write()
+        defer { try? FileManager.default.removeItem(at: url) }
         let engine = try player()
         defer { engine.stop() }
         var received: [Int?] = []
@@ -114,10 +136,13 @@ struct SecondarySubtitleIdentityTests {
         assertIdentity(engine, nil)
         #expect(!engine.isSecondarySubtitleActive)
         let external = engine.registerExternalSubtitleTrack(.init(
-            url: URL(fileURLWithPath: "/nonexistent/identity-reentry.srt")))
+            url: url, sourceStreamIndex: MultiSubtitleContainerFixture.spanishStreamIndex))
         engine.selectSecondarySubtitleTrack(index: external.id)
+        await engine.secondarySidecarTask?.value
         assertIdentity(engine, nil)
         #expect(!engine.isSecondarySubtitleActive)
+        #expect(!engine.isLoadingSecondarySubtitles)
+        #expect(engine.secondarySubtitleCues.isEmpty)
         #expect(engine.secondarySidecarTask == nil)
         #expect(received == [nil, 3, nil, external.id, nil])
     }

@@ -15,8 +15,8 @@ the public-API contract.
 - **Hosts can observe the selected secondary subtitle identity.**
   `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external
   track IDs across selection, clearing and rebuild restoration. One-shot URL selections have no
-  ID. Ordinary decode/failure timing and the ability to select the same track in both channels
-  are unchanged.
+  ID. A registered external ID publishes when its decoded replacement commits, so it always
+  names the cues on screen. The same track may still be selected in both channels.
 
 - **Hosts can opt out of background scrub-still generation.**
   `LoadOptions.generatesBackgroundScrubPreviews` controls the idle sparse
@@ -29,6 +29,13 @@ the public-API contract.
   They describe the source, not the display's output; routing and reload refusal are unchanged.
 
 ### Fixed
+
+- **Failed external secondary-subtitle replacement preserves the active track.**
+  Previously the old track was torn down before the candidate could decode. Preparation now
+  completes before replacing it; decode or bitmap-decoder creation failure leaves the old cues,
+  ASS header, identity and bitmap packet source intact. Rebuilds preserve a pending pick.
+  Only a current successful candidate commits. Clearing/stopping still releases immediately;
+  one-shot URL selection is unchanged.
 
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed
