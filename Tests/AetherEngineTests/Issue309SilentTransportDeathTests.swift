@@ -104,6 +104,12 @@ struct Issue309SilentTransportDeathTests {
     /// measured with this origin, 0.4 s opened and 0.8 s failed in 1.3 s, every time. That is also
     /// the shape #309's own detection test failed in on a loaded CI runner, where a first byte took
     /// longer than its 0.6 s threshold.
+    ///
+    /// One read, not a byte count: the open returns once its first bytes are in the window, so that
+    /// read is answered from them. Reading on would ask the body to flow without a 0.3 s gap, and a
+    /// runner that pauses for longer ends the flow, after which every replacement's 1.5 s first byte
+    /// is judged by the 0.3 s threshold, so the read waited out its retries and came back short
+    /// (CI 2026-11-04, reproduced by an origin that goes silent after 16 KB: 16 KB in 90 s).
     @Test("an open whose first byte is slower than the stall threshold still opens",
           .timeLimit(.minutes(3)))
     func slowFirstByteOpens() throws {
@@ -115,7 +121,9 @@ struct Issue309SilentTransportDeathTests {
                                 connStallTimeout: 0.3)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
-        #expect(Self.read(reader, bytes: 64 * 1024) == 64 * 1024)
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: 64 * 1024)
+        defer { buf.deallocate() }
+        #expect(reader.read(into: buf, size: 64 * 1024) > 0)
     }
 
     // MARK: - Detection
