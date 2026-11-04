@@ -115,5 +115,7 @@ struct SupersededProbeGeometryTests {
         await #expect(throws: CancellationError.self) { try await superseded.value }
         #expect(engine.sourceVideoWidth == 0)
         #expect(engine.sourceVideoHeight == 0)
+        #expect(engine.sourceDVBLCompatID == nil)
+        #expect(!engine.sourceDolbyVisionBaseLayerPresentable)
     }
 }
