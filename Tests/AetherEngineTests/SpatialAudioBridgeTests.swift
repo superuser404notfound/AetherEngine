@@ -477,7 +477,11 @@ struct SpatialAudioBridgeTests {
             Issue.record("the stand-in needs no parsed packet, so the cut completes")
             return nil
         }
-        return (try #require(initBytes), segment, sessionDir)
+        // Completed staging still belongs to the muxer until adopted. The fixture owns
+        // the moved file, just as SegmentCache.adopt does in a playback session.
+        let adopted = sessionDir.appendingPathComponent("probe.m4s")
+        try FileManager.default.moveItem(at: segment, to: adopted)
+        return (try #require(initBytes), adopted, sessionDir)
     }
 
     #endif
