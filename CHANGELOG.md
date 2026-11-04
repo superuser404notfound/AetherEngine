@@ -19,6 +19,11 @@ the public-API contract.
 
 ### Fixed
 
+- **A fabricated Range verdict is visible before its failed read returns.** Record the origin
+  before waking the reader, so immediate error classification and the VOD no-revive decision
+  cannot race transfer cleanup. Cancellation and origin-ticket release remain outside the
+  reader's window lock; Range detection and retry policy are unchanged.
+
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed
   true under a viewer's pause. Every path gated on it then restarted the paused title: the
