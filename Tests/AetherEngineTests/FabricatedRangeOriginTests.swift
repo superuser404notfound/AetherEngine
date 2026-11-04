@@ -114,6 +114,8 @@ struct FabricatedRangeOriginTests {
         let check = headEnd - Int64(AVIOReader.rangeCheckBytes)
         #expect(server.requestLog.contains { $0.start == check },
                 "no checked reconnect at the head's end: \(server.requestLog.map(\.start))")
+        // Deliberately immediate: a failed read must already have published its cause.
+        // Waiting for the registry would hide the wake-before-record race in AVIOReader.
         #expect(FabricatedRangeOrigins.caughtRecently(url, within: 60))
     }
 

@@ -30,6 +30,12 @@ the public-API contract.
 
 ### Fixed
 
+- **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
+  streams use the existing successor-PTS model with depth one, avoiding millisecond holes
+  from rounded Matroska durations. Disk and memory stores share the qualification; missing/late
+  PTS and genuine discontinuities remain conservative, and the last frame has no invented end.
+  WMV3 and other codec qualifications are unchanged.
+
 - **Draft: MPEG1/2 software-cache presentation qualification.** Reuses successor PTS
   rather than rounded packet durations. This candidate is not merge-ready until the
   field-picture gate in `docs/mpeg-cache-qualification.md` is satisfied.
@@ -40,6 +46,11 @@ the public-API contract.
   ASS header, identity and bitmap packet source intact. Rebuilds preserve a pending pick.
   Only a current successful candidate commits. Clearing/stopping still releases immediately;
   one-shot URL selection is unchanged.
+
+- **A fabricated Range verdict is visible before its failed read returns.** Record the origin
+  before waking the reader, so immediate error classification and the VOD no-revive decision
+  cannot race transfer cleanup. Cancellation and origin-ticket release remain outside the
+  reader's window lock; Range detection and retry policy are unchanged.
 
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed

@@ -209,13 +209,11 @@ struct MPEGPacketCoverageTests {
         }
     }
 
-    @Test("candidate qualification remains separate from WMV codecs")
+    @Test("MPEG candidate does not qualify WMV3")
     func codecBoundary() {
         for codec in Fixture.allCases {
             #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: codec.id) == 32)
         }
-        for other in [AV_CODEC_ID_WMV1, AV_CODEC_ID_WMV2, AV_CODEC_ID_WMV3] {
-            #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: other.rawValue) == nil)
-        }
+        #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: AV_CODEC_ID_WMV3.rawValue) == nil)
     }
 }

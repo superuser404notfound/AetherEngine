@@ -4161,11 +4161,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 let transfer = activeTransfer
                 activeTransfer = nil
                 let note = fabricatedBodyNoteLocked(received)
+                // The read can fail as soon as winCond is released. Publish its cause first:
+                // error classification and the no-revive decision query this registry immediately.
+                // record only takes its own short-lived lock; it cannot call back into the reader.
+                FabricatedRangeOrigins.record(url)
                 winCond.broadcast()
                 winCond.unlock()
                 transfer?.cancelTransfer()
                 transfer?.releaseOriginTicket()
-                FabricatedRangeOrigins.record(url)
                 EngineLog.emit(
                     "[AVIOReader] \(label) gen=\(generation) the 206 for bytes=\(probe.start)- carries other "
                     + "bytes than the \(probe.expected.count) B already held there\(note); this origin "
