@@ -65,7 +65,7 @@ enum SoftwareVC1ReferencePreroll {
         }
     }
 
-    /// Runs before any cache producer or decoder loop owns the demuxer. Peeking one
+    /// Runs before readers start, or while their seek window parks them. Peeking one
     /// packet leaves the admitted keyframe intact for either the disk or direct route.
     static func prepare(dem: Demuxer, target: Double, origin: Double,
                         videoIndex: Int32, timeBase: Double,

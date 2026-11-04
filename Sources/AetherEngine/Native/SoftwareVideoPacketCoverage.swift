@@ -1,6 +1,6 @@
 import Foundation
 
-/// H.264, HEVC and VC-1 compressed-packet presentation coverage matching the renderer's successor-PTS
+/// Qualified compressed-packet presentation coverage matching the renderer's successor-PTS
 /// duration.
 ///
 /// AVPacket.duration may describe decode cadence rather than how long a variable-rate picture is
@@ -19,6 +19,9 @@ import Foundation
 /// https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/hevc/ps.c#L1397-L1403
 /// https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/vc1.c#L346
 /// https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/vc1.c#L426
+/// WMV1/2 use depth 1: msmpeg4dec.c rejects pictures other than I/P for WMV1 and wmv2dec.c
+/// reads a one-bit I/P type. WMV3 is distinct and remains unqualified. Complete packets and valid
+/// PTS are still required; missing or late timestamps invalidate coverage for these codecs too.
 ///
 /// This metadata-only value neither owns packets nor synchronizes access. The owner must reset it
 /// together with its packet store on seek/flush/discard. Other codecs must keep their strict packet

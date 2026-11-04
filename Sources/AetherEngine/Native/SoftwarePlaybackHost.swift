@@ -23,6 +23,9 @@ final class SoftwarePlaybackHost {
     nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
         switch codecID {
         case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue, AV_CODEC_ID_VC1.rawValue: return 32
+        // WMV1/2 decode only I/P pictures (FFmpeg msmpeg4dec.c / wmv2dec.c): no B reorder.
+        // Still hold one successor; never invent the last picture's presentation duration.
+        case AV_CODEC_ID_WMV1.rawValue, AV_CODEC_ID_WMV2.rawValue: return 1
         default: return nil
         }
     }
