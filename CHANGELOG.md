@@ -19,6 +19,10 @@ the public-API contract.
 
 ### Fixed
 
+- **Draft: MPEG1/2 software-cache presentation qualification.** Reuses successor PTS
+  rather than rounded packet durations. This candidate is not merge-ready until the
+  field-picture gate in `docs/mpeg-cache-qualification.md` is satisfied.
+
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed
   true under a viewer's pause. Every path gated on it then restarted the paused title: the

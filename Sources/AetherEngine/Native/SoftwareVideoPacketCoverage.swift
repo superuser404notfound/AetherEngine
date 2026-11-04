@@ -20,6 +20,10 @@ import Foundation
 /// https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/vc1.c#L346
 /// https://github.com/FFmpeg/FFmpeg/blob/n8.1.2/libavcodec/vc1.c#L426
 ///
+/// The MPEG1/2 candidate uses this queue without changing its invalidation rules.
+/// Field-picture packet qualification is still an open merge gate; see
+/// docs/mpeg-cache-qualification.md. Frame-coded and pulldown fixtures do not prove field pairs.
+///
 /// This metadata-only value neither owns packets nor synchronizes access. The owner must reset it
 /// together with its packet store on seek/flush/discard. Other codecs must keep their strict packet
 /// duration coverage unless their presentation reordering has a separately established bound.

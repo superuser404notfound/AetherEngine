@@ -23,6 +23,9 @@ final class SoftwarePlaybackHost {
     nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
         switch codecID {
         case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue, AV_CODEC_ID_VC1.rawValue: return 32
+        // Candidate MPEG qualification: see docs/mpeg-cache-qualification.md for the open
+        // field-picture gate. Missing/late PTS still invalidates the existing model.
+        case AV_CODEC_ID_MPEG1VIDEO.rawValue, AV_CODEC_ID_MPEG2VIDEO.rawValue: return 32
         default: return nil
         }
     }

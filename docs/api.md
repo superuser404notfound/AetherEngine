@@ -763,6 +763,9 @@ end. Ranges are clipped against retained keyframes and discarded packet timestam
 invalid coverage stays empty. Metadata limits can conservatively omit old spans rather than claim
 packets that no longer exist.
 
+The MPEG1/2 candidate reuses the same model; its [qualification evidence and open
+field-picture gate](mpeg-cache-qualification.md) must be resolved before merge.
+
 AVI MPEG-4 sessions that suppress generated packet PTS can qualify a separate cache
 presentation axis from the existing MPEG-4 parser and the same decoder's repaired
 frame timestamps. The packet delivered to the decoder is unchanged. Unqualified
