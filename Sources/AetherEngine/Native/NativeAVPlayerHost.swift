@@ -977,6 +977,8 @@ final class NativeAVPlayerHost {
         // here, so playIntent stayed true under a viewer's pause and every path gated on it (item-death reload,
         // media-playlist fallback, interruption resume, session rebuild) restarted a paused title. Mirror an
         // explicit rate write (setRateCalled) only: end of item, a dying source and system pauses leave it alone.
+        // Only once the current item is ready to play: a rate write before that is treated as the swap's, not the
+        // viewer's, because clearing the latch there would park the session at readyToPlay+paused (issue #15).
         let rateObs = NotificationCenter.default.addObserver(
             forName: AVPlayer.rateDidChangeNotification,
             object: avPlayer,
@@ -986,10 +988,20 @@ final class NativeAVPlayerHost {
                 .map(AVPlayer.RateDidChangeReason.init(rawValue:))
             // Delivered on .main (queue: .main above), so assert MainActor to reach @MainActor state.
             MainActor.assumeIsolated {
-                guard let self, self.sessionID == sid, !self.prematureEndRecoveryInFlight else { return }
+                guard let self, self.sessionID == sid else { return }
                 // Live rate, not the notification's: a play() right after a pause() must not be undone by the older echo.
-                self.playIntent = Self.playIntentAfterRateChange(
-                    reason: reason, rate: self.avPlayer.rate, current: self.playIntent)
+                let rate = self.avPlayer.rate
+                let ready = self.playerItem?.status == .readyToPlay
+                let old = self.playIntent
+                let intent = (self.prematureEndRecoveryInFlight || !ready)
+                    ? old
+                    : Self.playIntentAfterRateChange(reason: reason, rate: rate, current: old)
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sid) rate change reason=\(reason?.rawValue ?? "nil") "
+                    + "rate=\(rate) ready=\(ready) play intent \(old) -> \(intent)",
+                    category: .engine
+                )
+                self.playIntent = intent
             }
         }
         notificationObservers.append(rateObs)
