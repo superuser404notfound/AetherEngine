@@ -30,6 +30,12 @@ the public-API contract.
 
 ### Fixed
 
+- **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
+  streams use the existing successor-PTS model with depth one, avoiding millisecond holes
+  from rounded Matroska durations. Disk and memory stores share the qualification; missing/late
+  PTS and genuine discontinuities remain conservative, and the last frame has no invented end.
+  WMV3 and other codec qualifications are unchanged.
+
 - **Failed external secondary-subtitle replacement preserves the active track.**
   Previously the old track was torn down before the candidate could decode. Preparation now
   completes before replacing it; decode or bitmap-decoder creation failure leaves the old cues,
