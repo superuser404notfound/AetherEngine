@@ -12,6 +12,17 @@ the public-API contract.
 
 ### Added
 
+- **Hosts can observe the selected secondary subtitle identity.**
+  `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external
+  track IDs across selection, clearing and rebuild restoration. One-shot URL selections have no
+  ID. A registered external ID publishes when its decoded replacement commits, so it always
+  names the cues on screen. The same track may still be selected in both channels.
+
+- **Hosts can opt out of background scrub-still generation.**
+  `LoadOptions.generatesBackgroundScrubPreviews` controls the idle sparse
+  scrub-still ladder and its side reader. It defaults to true, is correctable by reload,
+  and leaves I-frame playlists, on-demand snapshots and item-swap held pictures unchanged.
+
 - **Hosts can read Dolby Vision base-layer source capabilities.** `sourceDVBLCompatID` and
   `sourceDolbyVisionBaseLayerPresentable` expose the engine's existing probe results read-only,
   so a host can offer a source-appropriate choice without inferring it from the profile alone.
@@ -24,6 +35,13 @@ the public-API contract.
   from rounded Matroska durations. Disk and memory stores share the qualification; missing/late
   PTS and genuine discontinuities remain conservative, and the last frame has no invented end.
   WMV3 and other codec qualifications are unchanged.
+
+- **Failed external secondary-subtitle replacement preserves the active track.**
+  Previously the old track was torn down before the candidate could decode. Preparation now
+  completes before replacing it; decode or bitmap-decoder creation failure leaves the old cues,
+  ASS header, identity and bitmap packet source intact. Rebuilds preserve a pending pick.
+  Only a current successful candidate commits. Clearing/stopping still releases immediately;
+  one-shot URL selection is unchanged.
 
 - **A pause made in AVKit's own controls now survives a reload.** On tvOS the transport bar calls
   `pause()` and `play()` straight on the `AVPlayer`, past the native host, so its play intent stayed
