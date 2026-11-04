@@ -1237,9 +1237,14 @@ extension HeavyDualLayerSuites {
                     nudgeIDs.insert(ObjectIdentifier(nudge))
                     decoder.handleBaseLayerFrame(baseBuffer: nudge, pts: Self.pts(Int64(900 + i)), hdr10Data: nil)
                 }
-                try await waitFor {
+                // Bounded under the suite's limit only to say where the frames are when they do not
+                // all arrive: CI has run this wait into the limit four times since 2026-10-29 with
+                // nothing to read, and it does not reproduce locally.
+                let allDelivered = try await waitFor(upTo: .seconds(200)) {
                     deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }.count >= frames
                 }
+                let deliveredCount = deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }.count
+                try #require(allDelivered, "\(deliveredCount) of \(frames) delivered; \(decoder.stateSnapshotForTesting)")
             }
             // `allSatisfy`, not a `filter`: an enhancement-layer buffer (or
             // anything else) delivered on its own is what this catches; sent
@@ -1799,10 +1804,44 @@ extension HeavyDualLayerSuites {
 
         // MARK: - Known defects
 
-        @Test("a pruned base-layer frame cannot be delivered after a newer composed frame", .enabled(if: Self.metalAvailable, "needs a Metal device"))
+        /// Completes every composition a little later on a queue of its own, so frame 1 retires after
+        /// frame 0 has been pruned: the race this test is about, with no GPU in it. On the real composer
+        /// a command buffer that fails in place drops the frame by design, and the wait below for frame 1
+        /// then ran to the suite's five-minute limit (CI 2026-11-03 and 2026-11-04; reproduced with
+        /// `forcedCommandBufferFailure`).
+        private final class LateFakeComposer: FelComposing, @unchecked Sendable {
+            private let queue = DispatchQueue(label: "test.dovi.late-compose")
+            func acquireSlot() {}
+            func acquireSlot(timeout: DispatchTime) -> Bool { true }
+            func releaseSlot() {}
+            func flush() {}
+            func composeAsync(
+                baseBuffer: CVPixelBuffer,
+                enhancementBuffer: CVPixelBuffer,
+                params: DoviMetalParams,
+                frameIndex: UInt32,
+                completion: @escaping @Sendable (CVPixelBuffer?) -> Void
+            ) {
+                composeAsyncWithAcquiredSlot(baseBuffer: baseBuffer, enhancementBuffer: enhancementBuffer, params: params, frameIndex: frameIndex, completion: completion)
+            }
+            func composeAsyncWithAcquiredSlot(
+                baseBuffer: CVPixelBuffer,
+                enhancementBuffer: CVPixelBuffer,
+                params: DoviMetalParams,
+                frameIndex: UInt32,
+                completion: @escaping @Sendable (CVPixelBuffer?) -> Void
+            ) {
+                let buffer = SendableFrameBuffer(value: baseBuffer)
+                queue.asyncAfter(deadline: .now() + 0.05) { completion(buffer.value) }
+            }
+        }
+
+        @Test("a pruned base-layer frame cannot be delivered after a newer composed frame")
         func prunedFrameDoesNotOvertakeNewerFrames() async throws {
             let deliveries = Deliveries()
-            let decoder = Self.decoder(recordingInto: deliveries, enhancementLayer: true)
+            let decoder = DualLayerVideoDecoder(composer: LateFakeComposer())
+            decoder.onFrame = { buffer, pts, hdr10 in deliveries.record(buffer, pts, hdr10) }
+            decoder.primeForTesting(enhancementLayer: true)
             defer { decoder.close() }
 
             // Frame 0's enhancement layer is lost, so it waits in the base-layer queue.
