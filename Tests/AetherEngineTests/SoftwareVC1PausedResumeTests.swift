@@ -70,4 +70,72 @@ struct SoftwareVC1PausedResumeTests {
         #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: .nan, target: 1390))
         #expect(!SoftwareVC1PausedResume.acceptsKeyframe(pts: 1390, target: .infinity))
     }
+
+    /// This is the load's real async cancellation boundary, with a source parked inside its
+    /// positioning operation. Synthetic HEVC bytes exercise ownership/interruption only; they
+    /// deliberately do not stand in for the missing public VC-1 picture fixture.
+    @Test("cancelling an in-flight reference preparation interrupts the parked source")
+    func cancelledDuringPreparation() async throws {
+        let reader = try ParkedPositioningReader()
+        let dem = Demuxer()
+        try dem.open(reader: reader, formatHint: "mp4")
+        defer { dem.close() }
+        let work = Task {
+            try await SoftwareVC1PausedResume.prepareOffMain(
+                dem: dem, target: 5, origin: 0, videoIndex: dem.videoStreamIndex,
+                timeBase: 1, isCurrent: { !Task.isCancelled })
+        }
+        defer { work.cancel(); dem.markClosed() }
+        try await waitFor { reader.enteredPositioning }
+        #expect(!reader.wasCancelled)
+        work.cancel()
+        do {
+            _ = try await withTaskCancellationHandler {
+                try await work.value
+            } onCancel: {
+                // If the production cancellation path regresses, the suite time limit must
+                // still release the parked source and report a named test failure, not a hang.
+                dem.markClosed()
+            }
+            Issue.record("cancelled preparation admitted a reference")
+        } catch is CancellationError {
+        } catch SoftwarePlaybackHost.HostError.repositionFailed {
+            // A close interrupting the seek may surface its false result before the next
+            // cancellation check. Both fail the load; neither can admit a reference.
+        }
+        #expect(reader.wasCancelled)
+    }
+
+    private final class ParkedPositioningReader: TimeSeekableIOReader, @unchecked Sendable {
+        private let bytes: DataIOReader
+        private let condition = NSCondition()
+        private var entered = false
+        private var cancelled = false
+
+        init() throws { bytes = DataIOReader(data: try ProbeTestFixtures.hdr10Plus()) }
+        var mediaDuration: Double { 8 }
+        var discImageProbeEnabled: Bool { false }
+        var enteredPositioning: Bool { condition.withLock { entered } }
+        var wasCancelled: Bool { condition.withLock { cancelled } }
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+            bytes.read(buffer, size: size)
+        }
+        func seek(offset: Int64, whence: Int32) -> Int64 {
+            bytes.seek(offset: offset, whence: whence)
+        }
+        func seek(to seconds: Double) -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            entered = true
+            // No timer can turn this into a successful cancellation test: only the production
+            // demux close -> reader.cancel path releases the parked positioning operation.
+            while !cancelled { condition.wait() }
+            return false
+        }
+        func cancel() {
+            condition.withLock { cancelled = true; condition.broadcast() }
+        }
+        func close() { cancel() }
+    }
+
 }

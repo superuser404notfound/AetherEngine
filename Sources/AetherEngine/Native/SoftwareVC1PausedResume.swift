@@ -17,6 +17,23 @@ enum SoftwareVC1PausedResume {
             && target - pts <= maximumPrerollSeconds
     }
 
+    /// The actual load boundary: blocking preparation stays off the cooperative pool, and
+    /// cancelling the task awaiting it interrupts the source rather than just abandoning a wait.
+    static func prepareOffMain(dem: Demuxer, target: Double, origin: Double,
+                               videoIndex: Int32, timeBase: Double,
+                               isCurrent: @escaping @Sendable () -> Bool) async throws -> Double {
+        let priming = BlockingWork.detached(priority: .userInitiated) {
+            try prepare(dem: dem, target: target, origin: origin,
+                        videoIndex: videoIndex, timeBase: timeBase, isCurrent: isCurrent)
+        }
+        return try await withTaskCancellationHandler {
+            try await priming.value
+        } onCancel: {
+            priming.cancel()
+            dem.markClosed()
+        }
+    }
+
     /// Runs before any cache producer or decoder loop owns the demuxer. Peeking one
     /// packet leaves the admitted keyframe intact for either the disk or direct route.
     static func prepare(dem: Demuxer, target: Double, origin: Double,

@@ -28,7 +28,10 @@ pixel-content heuristic, temporary playback or FFmpeg/display-layer change is in
 
 `SoftwareVC1PausedResumeTests` uses synthetic HEVC packets to test only key admission,
 key preservation, EOF, cancellation and budget failures. It does **not** establish VC-1
-reference decoding. The optional `VC1PausedResumeIntegrationTests` checks an actual paused
+reference decoding. A controllably parked custom source also drives the actual off-main load
+preparation boundary: cancellation must call through demux close to the source, end the blocked
+positioning operation and refuse reference admission. This covers cancellation during preparation,
+not real VC-1 decoding or a slow HTTP server. The optional `VC1PausedResumeIntegrationTests` checks an actual paused
 software-host picture, source PTS and stopped clock, but is skipped without its fixture.
 
 That harness currently expects a VC-1/TrueHD M2TS with source origin 600 seconds and visible

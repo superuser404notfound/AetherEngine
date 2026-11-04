@@ -1637,18 +1637,9 @@ final class SoftwarePlaybackHost {
                 let isCurrent: @Sendable () -> Bool = { [weak self] in
                     !Task.isCancelled && self?.stopRequested == false
                 }
-                let priming = BlockingWork.detached(priority: .userInitiated) {
-                    try SoftwareVC1PausedResume.prepare(
-                        dem: dem, target: sourceStart, origin: zero,
-                        videoIndex: index, timeBase: timeBase,
-                        isCurrent: isCurrent)
-                }
-                let keyPTS = try await withTaskCancellationHandler {
-                    try await priming.value
-                } onCancel: {
-                    priming.cancel()
-                    dem.markClosed()
-                }
+                let keyPTS = try await SoftwareVC1PausedResume.prepareOffMain(
+                    dem: dem, target: sourceStart, origin: zero,
+                    videoIndex: index, timeBase: timeBase, isCurrent: isCurrent)
                 EngineLog.emit("[SWHost] VC1 paused resume primed key=\(keyPTS) target=\(sourceStart)",
                                category: .swPlayback)
                 outcome = .landed
