@@ -293,7 +293,7 @@ struct Issue232InterlaceProbeTests {
     // MARK: - Fixtures
 
     /// 24 progressive frames; container `fiel` atom makes codecpar.field_order read TT.
-    private static let declaredTTProgressiveBase64 = """
+    static let declaredTTProgressiveBase64 = """
     AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAxttZGF0AAACKgYF//8m
     3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBF
     Ry00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4u
@@ -329,7 +329,7 @@ struct Issue232InterlaceProbeTests {
 
     /// 24 genuinely interlaced frames (x264 --interlaced, tff): field_order=tt and every decoded
     /// frame carries AV_FRAME_FLAG_INTERLACED.
-    private static let interlacedBase64 = """
+    static let interlacedBase64 = """
     AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAABCZtZGF0AAACLAYF//8o
     3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBF
     Ry00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAtIGh0dHA6Ly93d3cudmlkZW9sYW4u
