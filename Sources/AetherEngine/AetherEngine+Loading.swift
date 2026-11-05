@@ -2725,14 +2725,17 @@ extension AetherEngine {
             preservedRequiresDeinterlaceWarmup
         }
         // AE#983: a different title is a different stream; same declaration-only evidence as above.
-        if restoredDeinterlaceWarmupDecision == nil, titleToReopen != outgoingDiscTitleID,
-           let pre = customPreopened,
-           let stream = pre.stream(at: pre.videoStreamIndex),
-           let codecpar = stream.pointee.codecpar {
-            sourceVideoScan = VideoScan.resolve(
-                codecID: codecpar.pointee.codec_id,
-                fieldOrder: codecpar.pointee.field_order,
-                spsIndicatesInterlaced: VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar))
+        if restoredDeinterlaceWarmupDecision == nil, titleToReopen != outgoingDiscTitleID {
+            if let pre = customPreopened,
+               let stream = pre.stream(at: pre.videoStreamIndex),
+               let codecpar = stream.pointee.codecpar {
+                sourceVideoScan = VideoScan.resolve(
+                    codecID: codecpar.pointee.codec_id,
+                    fieldOrder: codecpar.pointee.field_order,
+                    spsIndicatesInterlaced: VideoRoutingPolicy.spsIndicatesInterlaced(codecParameters: codecpar))
+            } else {
+                sourceVideoScan = .unknown
+            }
         }
 
         do {
