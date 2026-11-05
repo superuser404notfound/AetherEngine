@@ -37,7 +37,7 @@ struct AllocentricPanner: Sendable {
         let rows: [Row]  // sorted by y
     }
 
-    /// `excluded` removes speakers from consideration (object zone masks). A mask that removes
+    /// `excluded` removes speakers from consideration (a bed narrower than the layout). An exclusion that removes
     /// every positional speaker is ignored, because silencing an object is never what it asks for.
     init(layout: SpatialSpeakerLayout, excluded: Set<SpatialSpeaker> = []) {
         self.layout = layout
@@ -97,63 +97,6 @@ struct AllocentricPanner: Sendable {
         let angle = t * .pi / 2
         body(a, cos(angle))
         body(b, sin(angle))
-    }
-
-    // MARK: - Object
-
-    /// Gains for an object: point panning, or power-summed panning over a grid spanning `size` in
-    /// every direction (Atmos object size is 0 for a point up to 1 for the whole room), or the single
-    /// nearest speaker when the object asks to snap. Unit power in every case.
-    func objectGains(position: SIMD3<Float>, size: Float, snap: Bool, into gains: inout [Float]) {
-        if gains.count != channelCount { gains = [Float](repeating: 0, count: channelCount) }
-        for i in gains.indices { gains[i] = 0 }
-        let p = clamp(position)
-
-        if snap, let nearest = nearestChannel(to: p) {
-            gains[nearest] = 1
-            return
-        }
-        let extent = min(max(size, 0), 1)
-        guard extent > 0.001 else {
-            accumulatePoint(p, weight: 1, into: &gains)
-            return
-        }
-
-        // Power sum over an n³ grid. Squared gains are accumulated in `power` and square-rooted at
-        // the end, so overlapping contributions add as uncorrelated energy, not as amplitude.
-        let steps = extent < 0.2 ? 3 : 5
-        var power = [Float](repeating: 0, count: channelCount)
-        var point = [Float](repeating: 0, count: channelCount)
-        var samples = 0
-        for ix in 0..<steps {
-            for iy in 0..<steps {
-                for iz in 0..<steps {
-                    let offset = SIMD3<Float>(
-                        Float(ix) / Float(steps - 1) * 2 - 1,
-                        Float(iy) / Float(steps - 1) * 2 - 1,
-                        Float(iz) / Float(steps - 1) * 2 - 1) * extent
-                    for i in point.indices { point[i] = 0 }
-                    accumulatePoint(clamp(p + offset), weight: 1, into: &point)
-                    for i in point.indices { power[i] += point[i] * point[i] }
-                    samples += 1
-                }
-            }
-        }
-        let norm = 1 / Float(samples)
-        for i in gains.indices { gains[i] = (power[i] * norm).squareRoot() }
-    }
-
-    private func nearestChannel(to p: SIMD3<Float>) -> Int? {
-        var best: (channel: Int, distance: Float)?
-        for plane in planes {
-            for row in plane.rows {
-                for column in row.columns {
-                    let d = simd_distance_squared(SIMD3(column.x, row.y, plane.z), p)
-                    if best == nil || d < best!.distance { best = (column.channel, d) }
-                }
-            }
-        }
-        return best?.channel
     }
 
     private func clamp(_ p: SIMD3<Float>) -> SIMD3<Float> {

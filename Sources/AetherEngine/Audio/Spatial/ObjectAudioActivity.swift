@@ -5,7 +5,7 @@ import Foundation
 /// many objects it declares, how many of them play and how many of those sit overhead.
 ///
 /// The counts come from the object metadata, as the session log's `bed levels` line does: an active
-/// object can still be silent, and an elevated one can still snap to a floor speaker. They are what
+/// object can still be silent. They are what
 /// the renderer was asked to place, which is what a host showing "Atmos with heights" can stand on.
 public struct ObjectAudioActivity: Equatable, Sendable {
     /// The speaker bed the presentation is rendered into, `objectAudioRendering`'s layout.
@@ -14,7 +14,7 @@ public struct ObjectAudioActivity: Equatable, Sendable {
     public let objects: Int
     /// Objects with a gain above zero in the latest metadata update.
     public let activeObjects: Int
-    /// Active objects above ear level whose height speakers no zone mask excludes.
+    /// Active objects above ear level.
     public let elevatedObjects: Int
     /// Bed channels on height speakers. DTS:X's standard presentation carries its four heights this
     /// way rather than as objects, so a DTS:X track can read 0 objects and still play overhead.

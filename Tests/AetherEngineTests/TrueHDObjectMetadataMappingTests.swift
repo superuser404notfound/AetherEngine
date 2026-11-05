@@ -49,97 +49,18 @@ struct TrueHDObjectMetadataMappingTests {
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_UNKNOWN) == .object)
     }
 
-    @Test("an active elevated object keeps its position, gain and largest size dimension")
-    func plainObject() {
-        let state = TrueHDObjectAudioDecoder.state(for: element(size: (0.1, 0.3, 0.2)))
-        #expect(state.position == SIMD3(0.25, 0.5, 0.75))
-        #expect(state.gain == 0.5)
-        #expect(state.size == 0.3)
-        #expect(state.excluded.isEmpty)
-        #expect(!state.snap)
+    @Test("an element is a point at its position with its gain, and nothing else")
+    func pointSource() {
+        let flags = TRUEHD_ATMOS_ELEMENT_ACTIVE | TRUEHD_ATMOS_ELEMENT_SNAP | TRUEHD_ATMOS_ELEMENT_SCREEN_REF
+        let state = TrueHDObjectAudioDecoder.pointSource(
+            for: element(flags: flags, position: (0.8, 0.6, 1), size: (0.4, 0.4, 0.4), zone: TRUEHD_ATMOS_ZONE_NO_BACK))
+        #expect(state == ObjectAudioElementState(position: SIMD3(0.8, 0.6, 1), gain: 0.5))
+        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(flags: 0)).gain == 0)
+        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(position: (0.5, 0.5, -0.6))).position.z == 0)
+        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(kind: TRUEHD_ATMOS_ELEMENT_ISF)).position
+                == SIMD3(0.5, 0.5, 0.5))
     }
 
-    @Test("an inactive object is silent")
-    func inactiveObject() {
-        let state = TrueHDObjectAudioDecoder.state(for: element(flags: TRUEHD_ATMOS_ELEMENT_ELEVATION))
-        #expect(state.gain == 0)
-    }
-
-    @Test("an object without elevation stays off every height speaker")
-    func noElevation() {
-        let state = TrueHDObjectAudioDecoder.state(for: element(flags: TRUEHD_ATMOS_ELEMENT_ACTIVE))
-        let heights = Set(SpatialSpeaker.allCases.filter(\.isHeight))
-        #expect(heights.isSubset(of: state.excluded))
-        #expect(!state.excluded.contains(.left))
-    }
-
-    @Test("a position below the ear-level plane is clamped to it")
-    func belowEarLevel() {
-        let state = TrueHDObjectAudioDecoder.state(for: element(position: (0.5, 0.5, -0.6)))
-        #expect(state.position.z == 0)
-    }
-
-    @Test("a screen-anchored object keeps its room depth, the top of the screen halfway up the room")
-    func screenReference() {
-        let flags = TRUEHD_ATMOS_ELEMENT_ACTIVE | TRUEHD_ATMOS_ELEMENT_ELEVATION | TRUEHD_ATMOS_ELEMENT_SCREEN_REF
-        // Only x and z are screen-anchored; y is still depth, so an object flying from the screen to
-        // the back wall travels (review of eae933d0 found it pinned to the front wall).
-        let state = TrueHDObjectAudioDecoder.state(for: element(flags: flags, position: (0.8, 0.6, 1)))
-        #expect(state.position == SIMD3(0.8, 0.6, 0.5))
-    }
-
-    @Test("an ISF object, whose position is not decoded, is spread over the room")
-    func isfSpread() {
-        let state = TrueHDObjectAudioDecoder.state(for: element(kind: TRUEHD_ATMOS_ELEMENT_ISF, position: (0, 0, 0)))
-        #expect(state.position == SIMD3(0.5, 0.5, 0.5))
-        #expect(state.size == 1)
-    }
-
-    @Test("snap is carried through")
-    func snap() {
-        let flags = TRUEHD_ATMOS_ELEMENT_ACTIVE | TRUEHD_ATMOS_ELEMENT_ELEVATION | TRUEHD_ATMOS_ELEMENT_SNAP
-        #expect(TrueHDObjectAudioDecoder.state(for: element(flags: flags)).snap)
-    }
-
-    @Test("zone masks keep an object off the speakers they name")
-    func zoneMasks() {
-        let noBack = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_NO_BACK)
-        #expect(noBack.isSuperset(of: [.rearLeft, .rearRight]))
-        #expect(!noBack.contains(.sideLeft))
-        // TS 103 448 table 4: on a 3/2 floor neither no-back nor no-sides removes the surrounds.
-        #expect(!noBack.contains(.surroundLeft) && !noBack.contains(.surroundRight))
-
-        let noSides = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_NO_SIDES)
-        #expect(noSides.isSuperset(of: [.sideLeft, .sideRight]))
-        #expect(!noSides.contains(.rearLeft) && !noSides.contains(.surroundLeft))
-
-        let screen = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_SCREEN_ONLY)
-        #expect(!screen.contains(.left) && !screen.contains(.center) && !screen.contains(.right))
-        #expect(screen.isSuperset(of: [.sideLeft, .rearRight, .surroundLeft, .surroundRight]))
-
-        let surround = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_SURROUND_ONLY)
-        #expect(surround.isSuperset(of: [.left, .right, .center]))
-        #expect(!surround.contains(.sideLeft))
-
-        let centerBack = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_CENTER_BACK)
-        #expect(centerBack.isSuperset(of: [.left, .right, .sideLeft, .sideRight]))
-        #expect(!centerBack.contains(.center) && !centerBack.contains(.rearLeft))
-
-        #expect(TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_ALL).isEmpty)
-    }
-
-    @Test("a zone mask applied through the panner keeps the object's power on the allowed speakers")
-    func zoneMaskThroughPanner() {
-        let layout = SpatialSpeakerLayout.l714
-        let excluded = TrueHDObjectAudioDecoder.excludedSpeakers(zone: TRUEHD_ATMOS_ZONE_NO_BACK)
-        let panner = AllocentricPanner(layout: layout, excluded: excluded)
-        var gains: [Float] = []
-        panner.objectGains(position: SIMD3(0.1, 1, 0), size: 0, snap: false, into: &gains)
-        for (channel, speaker) in layout.speakers.enumerated() where excluded.contains(speaker) {
-            #expect(gains[channel] == 0, "\(speaker)")
-        }
-        #expect(abs(gains.reduce(0) { $0 + $1 * $1 } - 1) < 1e-5)
-    }
 
     @Test("the decoder opens, takes input and asks for more")
     func decoderLifecycle() throws {

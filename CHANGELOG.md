@@ -128,6 +128,19 @@ the public-API contract.
 
 ### Changed
 
+- **TrueHD Atmos is built from the stream's own lossless 7.1, steered by its objects (AE#731).**
+  With the `TrueHDObjectAudio` trait, `objectAudioRendering` no longer decodes the object presentation
+  exactly and mixes its objects. `BedRegression` builds every output as a per-band linear combination
+  of the stream's channel presentation (Dolby's lossless 7.1 or 5.1), `W = R · A`, with `A` the
+  regression of the object presentation on the bed and `R` the elements' layout gains; the elements
+  are decoded without matrix interpolation and used only as statistics, every element is a point source
+  (size, snap, zones, screen anchoring and the elevation switch are no longer read) and metadata updates
+  apply without a ramp. A per-band energy bound (0.9 to 1.6 times the bed) keeps an element the decode
+  got wrong from adding energy. Against the exact render on ten films and Dolby's Unfold the heights
+  stayed within 0.15 dB at a correlation of 0.997 and above on all but two extreme windows, and an A/B
+  on an Apple TV into a Sonos Arc heard no difference. Needs LibTrueHD 3.2.0, whose binary leaves
+  the interpolating decode out. The latency is 2048 frames, kept off the timeline.
+
 - **A sequential origin seeks inside what the session already holds (AE#958).** `seek(to:)` on a
   `sequentialOrigin` loopback session lands when the target lies in the resident span that reaches the
   producer's frontier, served from the segment cache without a second request; anything outside it is

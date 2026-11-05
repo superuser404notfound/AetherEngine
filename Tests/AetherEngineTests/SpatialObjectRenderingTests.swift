@@ -87,20 +87,6 @@ struct SpatialObjectRenderingTests {
         #expect(abs(power(gains) - 1) < 1e-5)
     }
 
-    @Test("snap routes to the nearest speaker; size spreads with unit power")
-    func snapAndSize() {
-        let layout = SpatialSpeakerLayout.l916
-        let panner = AllocentricPanner(layout: layout)
-        var gains: [Float] = []
-        panner.objectGains(position: SIMD3(0.05, 0.3, 0.1), size: 0, snap: true, into: &gains)
-        #expect(gains[layout.speakers.firstIndex(of: .wideLeft)!] == 1)
-        #expect(abs(power(gains) - 1) < 1e-6)
-
-        panner.objectGains(position: SIMD3(0.5, 0.5, 0.5), size: 0.6, snap: false, into: &gains)
-        #expect(abs(power(gains) - 1) < 1e-4)
-        #expect(gains.filter { $0 > 0.01 }.count >= 10, "a large object reaches most of the room")
-        #expect(gains[layout.lfeIndex] == 0)
-    }
 
     // MARK: - Renderer
 
@@ -326,25 +312,5 @@ struct SpatialObjectRenderingTests {
         #expect(abs(power(out.map { $0[0] }) - 1) < 1e-5)
     }
 
-    @Test("objects keep unit power with size and every zone mask, on every layout",
-          arguments: SpatialSpeakerLayout.allCases)
-    func unitPowerWithSizeAndZones(layout: SpatialSpeakerLayout) {
-        let masks: [Set<SpatialSpeaker>] = [
-            [], [.rearLeft, .rearRight, .surroundLeft, .surroundRight], [.sideLeft, .sideRight, .wideLeft, .wideRight],
-            [.left, .right, .wideLeft, .wideRight, .sideLeft, .sideRight],
-            Set(SpatialSpeaker.allCases.filter(\.isHeight)),
-        ]
-        var gains: [Float] = []
-        for mask in masks {
-            let panner = AllocentricPanner(layout: layout, excluded: mask)
-            for size: Float in [0, 0.1, 0.5, 1] {
-                for p in [SIMD3<Float>(0.1, 0.9, 0.7), SIMD3(0.5, 0.5, 0), SIMD3(1, 0, 1)] {
-                    panner.objectGains(position: p, size: size, snap: false, into: &gains)
-                    #expect(abs(power(gains) - 1) < 1e-4, "\(layout.rawValue) size \(size) at \(p)")
-                    #expect(gains[layout.lfeIndex] == 0)
-                }
-            }
-        }
-    }
 }
 #endif
