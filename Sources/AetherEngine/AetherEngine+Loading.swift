@@ -805,7 +805,7 @@ extension AetherEngine {
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
-        alignMELDeliveryLuminance: Bool = false,
+        alignFELDeliveryLuminance: Bool = false,
         dolbyVisionRPUProfile: Int? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
@@ -882,7 +882,7 @@ extension AetherEngine {
             keepDvh1TagWithoutDV: keepDvh1TagWithoutDV,
             forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
             dolbyVisionHandling: dolbyVisionHandling,
-            alignMELDeliveryLuminance: alignMELDeliveryLuminance,
+            alignFELDeliveryLuminance: alignFELDeliveryLuminance,
             dolbyVisionRPUProfile: dolbyVisionRPUProfile,
             matchContentEnabled: matchContentEnabled,
             panelIsInHDRMode: panelIsInHDRMode,
@@ -2809,7 +2809,7 @@ extension AetherEngine {
                     keepDvh1TagWithoutDV: loadedOptions.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: loadedOptions.forceDolbyVisionOnNonDVDisplay,
                     dolbyVisionHandling: loadedOptions.dolbyVisionHandling,
-                    alignMELDeliveryLuminance: loadedOptions.alignMELDeliveryLuminance,
+                    alignFELDeliveryLuminance: loadedOptions.alignFELDeliveryLuminance,
                     // AE#532: the verdict the load reached, not a second audit: the source has not
                     // changed and the probe that could answer it is gone.
                     dolbyVisionRPUProfile: sourceDolbyVisionRPUProfile,

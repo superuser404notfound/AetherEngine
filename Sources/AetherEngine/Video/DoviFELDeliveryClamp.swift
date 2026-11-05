@@ -3,17 +3,22 @@ import AetherLibavcodec
 import AetherLibavutil
 import Dovi
 
-/// A title-level hypothesis for MEL deliveries whose base layer has a lower mastering peak.
+/// A title-level hypothesis for FEL deliveries whose base layer has a lower mastering peak.
 /// Kept on StreamConfig so a seek cannot choose a new policy from a different scene's RPU.
-struct DoviMELDeliveryClamp: Sendable, Equatable {
+struct DoviFELDeliveryClamp: Sendable, Equatable {
     let targetNits: UInt16
     let targetPQ: UInt16
 
     /// The environment switch can disable an explicit request, never enable a default load.
-    static func shouldProbe(requested: Bool, override: String?) -> Bool {
-        requested && override != "0"
+    static func shouldProbe(requested: Bool, override: String?, enhancementLayerIsComposed: Bool = false) -> Bool {
+        #if DualLayerDolbyVision
+        requested && override != "0" && !enhancementLayerIsComposed
+        #else
+        false
+        #endif
     }
 
+    #if DualLayerDolbyVision
     static func pqCode(nits: Double) -> UInt16 {
         let p = pow(min(10000, max(0, nits)) / 10000, 2610.0 / 16384)
         return UInt16((4095 * pow((3424.0 / 4096 + 2413.0 / 128 * p)
@@ -22,7 +27,7 @@ struct DoviMELDeliveryClamp: Sendable, Equatable {
 
     static func select(profile: Int, elType: String?, masteringNits: Double?, sourceMaxPQ: UInt16,
                        enabled: Bool) -> Self? {
-        guard enabled, profile == 7, elType == "MEL", let peak = masteringNits,
+        guard enabled, profile == 7, elType == "FEL", let peak = masteringNits,
               peak.isFinite, peak >= 1, peak <= 1000,
               sourceMaxPQ >= pqCode(nits: 4000) else { return nil }
         return Self(targetNits: UInt16(peak.rounded(.down)), targetPQ: pqCode(nits: peak))
@@ -166,4 +171,5 @@ struct DoviMELDeliveryClamp: Sendable, Equatable {
         }
         return escaped
     }
+    #endif
 }

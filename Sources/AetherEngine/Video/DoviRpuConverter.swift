@@ -153,7 +153,7 @@ public enum DoviRpuConverter {
     /// would reshape a picture the composer already reshaped. The remux route leaves it off, because the frames
     /// it writes are the raw base layer, which the display does have to reshape.
     /// Only the `DualLayerDolbyVision` trait builds the removal: without it the parameter is ignored and the call is never made.
-    static func convertedUnspec62(_ rpu: OpaquePointer, removeMapping: Bool = false, deliveryClamp: DoviMELDeliveryClamp? = nil) -> UnsafePointer<DoviData>? {
+    static func convertedUnspec62(_ rpu: OpaquePointer, removeMapping: Bool = false, deliveryClamp: DoviFELDeliveryClamp? = nil) -> UnsafePointer<DoviData>? {
         guard dovi_convert_rpu_with_mode(rpu, 2) == 0 else { return nil }
         #if DualLayerDolbyVision
         if removeMapping {
@@ -161,7 +161,8 @@ public enum DoviRpuConverter {
         }
         #endif
         guard let output = dovi_write_unspec62_nalu(rpu) else { return nil }
-        guard let deliveryClamp else { return output }
+        #if DualLayerDolbyVision
+        guard let deliveryClamp, !removeMapping else { return output }
         // A valid RPU can inherit its DM from an earlier frame. It has no luminance fields to edit.
         guard let dm = dovi_rpu_get_vdr_dm_data(rpu) else { return output }
         dovi_rpu_free_vdr_dm_data(dm)
@@ -173,6 +174,9 @@ public enum DoviRpuConverter {
             defer { dovi_rpu_free(checked) }
             return dovi_write_unspec62_nalu(checked)
         }
+        #else
+        return output
+        #endif
     }
 
     #if DualLayerDolbyVision
@@ -214,7 +218,7 @@ public enum DoviRpuConverter {
         extractEL: Bool = true,
         useCustomBlockSource: Bool = false,
         extractParams: Bool = true,
-        deliveryClamp: DoviMELDeliveryClamp? = nil
+        deliveryClamp: DoviFELDeliveryClamp? = nil
     ) -> DualLayerPacketResult {
         let untouched = DualLayerPacketResult(elPacket: nil, rpuData: nil, isFEL: false, success: true)
         guard let data = packet.pointee.data, packet.pointee.size > 4 else { return untouched }
@@ -284,7 +288,8 @@ public enum DoviRpuConverter {
                 #else
                 let composedForm = false
                 #endif
-                guard let out = Self.convertedUnspec62(rpu, removeMapping: composedForm, deliveryClamp: deliveryClamp) else {
+                guard let out = Self.convertedUnspec62(rpu, removeMapping: composedForm,
+                    deliveryClamp: keepRpuBytes ? nil : deliveryClamp) else {
                     degraded = true
                     return
                 }
@@ -427,7 +432,7 @@ public enum DoviRpuConverter {
 
     static func convertPacketToProfile81(
         _ packet: UnsafeMutablePointer<AVPacket>, framing: VideoNALFraming,
-        deliveryClamp: DoviMELDeliveryClamp?
+        deliveryClamp: DoviFELDeliveryClamp?
     ) -> Bool {
         separateDualLayers(packet, framing: framing, extractEL: false, extractParams: false,
                            deliveryClamp: deliveryClamp).success
