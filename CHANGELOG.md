@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.57.0] - 2026-11-05
+
 ### Added
 
 - **Hosts can observe the selected secondary subtitle identity.**
