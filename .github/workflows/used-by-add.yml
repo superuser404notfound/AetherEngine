@@ -106,6 +106,14 @@ jobs:
           url=$(printf '%s'  "$url"  | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
           desc=$(printf '%s' "$desc" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/\.*$//')
 
+          # A bare host ("hiptv.app") renders as a relative link, which the docs
+          # link check rejects after the merge. Submitters leave the scheme out
+          # often enough that the form cannot be trusted to carry it.
+          case "$url" in
+            http://*|https://*) ;;
+            *) url="https://$url" ;;
+          esac
+
           # The markers are what the insert aims at. Without them awk would print
           # the file back unchanged and the PR step would find nothing to commit.
           if ! grep -q '<!-- used-by:start -->' README.md || ! grep -q '<!-- used-by:end -->' README.md; then
