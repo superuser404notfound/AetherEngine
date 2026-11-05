@@ -505,6 +505,12 @@ Sources/AetherEngine/
 │   │   ├── AudioShapingMatrix.swift         The cap and the centre lift as one libswresample remix matrix
 │   │   └── AudioShapingGraph.swift          The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat; runs on its own sample counter so its latency never reaches the timeline
 │   ├── Spatial/
+│   │   ├── SpatialAudioBridge.swift         TrueHD Atmos / DTS:X packets in, the layout's bed out as APAC or PCM packets on the source timeline (optional components)
+│   │   ├── BedRegression.swift              Every output built from the stream's own bed, per band, steered by the elements' cross-spectra; never an element signal (W = R · A, DTS:X folds W = D + (R − D · F) · A)
+│   │   ├── ObjectAudioPlacement.swift       Each element's gains towards the layout from its metadata, point sources, no ramps; mixes no audio
+│   │   ├── AllocentricPanner.swift          Constant-power point-source gains in the allocentric room model, TS 103 448 speaker targets
+│   │   ├── TrueHDObjectAudioDecoder.swift   LibTrueHD: the channel presentation plus the object presentation without matrix interpolation
+│   │   ├── DTSXObjectAudioDecoder.swift     FFmpeg `dca` with `x_heights`: the 7.1 bed as coded plus the four heights and their folds
 │   │   ├── SpatialBedOutput.swift           `SpatialBedFormat` (PCM or APAC, and the route rule `.render` uses), the bed buffers and packets, and `PCMBedPacker`, the 24-bit PCM sink beside `APACEncodePipeline`
 │   │   └── SoftwareAPACProducer.swift       SW path: TrueHD Atmos / DTS:X rendered into a speaker bed through `SpatialAudioBridge` as APAC or PCM, the packets handed to the audio renderer as sample buffers
 │   └── Tap/
