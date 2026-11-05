@@ -1210,7 +1210,8 @@ final class SoftwarePlaybackHost {
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
             let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
-            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval) else { return handler }
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
+            else { return handler }
             frameUpscaler = stage
             return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
         }

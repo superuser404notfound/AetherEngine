@@ -13,7 +13,8 @@ import VideoToolbox
 /// original frame. A sustained overrun of an ML + MetalFX stage first drops MetalFX (ML output at its own
 /// size); failures and any further overrun disable it for good, each logged once. A MetalFX overrun is
 /// remembered for the process (`MetalFXCostMemory`), so a later stage at least as heavy and as fast starts
-/// without MetalFX.
+/// without MetalFX. Built on `buildQueue` when one is given: starting the VT session loads the model on the
+/// Neural Engine through a synchronous XPC (~4 s cold on Apple TV), so frames pass through until it is ready.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameUpscaler: @unchecked Sendable {
 
@@ -106,10 +107,10 @@ final class FrameUpscaler: @unchecked Sendable {
     /// True once the overrun ladder dropped MetalFX; a rebuild for another size stays ML only.
     var isDegraded: Bool { stateLock.lock(); defer { stateLock.unlock() }; return _isDegraded }
 
-    var plan: UpscalePlan { processLock.lock(); defer { processLock.unlock() }; return stage.plan }
+    var plan: UpscalePlan { processLock.lock(); defer { processLock.unlock() }; return stage?.plan ?? initialPlan }
 
     /// Timed-out ML passes whose buffers are still held back for a late completion.
-    var abandonedMLPasses: Int { processLock.lock(); defer { processLock.unlock() }; return stage.abandonedMLPasses }
+    var abandonedMLPasses: Int { processLock.lock(); defer { processLock.unlock() }; return stage?.abandonedMLPasses ?? 0 }
 
     /// Test seam: replaces `VTFrameProcessor.process` for the ML pass.
     var mlSubmitOverride: MLSubmit? {
@@ -124,7 +125,9 @@ final class FrameUpscaler: @unchecked Sendable {
     private var ptsDeltas: [Double] = []
     private var lastPTS: Double?
     private let gpu: GPU
-    private var stage: Stage
+    private let initialPlan: UpscalePlan
+    /// nil while `buildQueue` builds it.
+    private var stage: Stage?
     private var lastPassThroughNote: String?
     private var recentTimes: [StageTimes] = []
     private var degraded = false
@@ -145,20 +148,47 @@ final class FrameUpscaler: @unchecked Sendable {
     private var _isDegraded = false
     private var _stats = Stats(framesUpscaled: 0, failures: 0, meanMs: 0, maxMs: 0)
 
-    init?(plan: UpscalePlan, frameInterval: Double) {
+    /// The queue the host builds its stages on, off the main actor.
+    static let stageBuildQueue = DispatchQueue(label: "AetherEngine.FrameUpscaler.build", qos: .userInitiated)
+
+    /// Without `buildQueue` the stage is built here and a failure returns nil; with it, a failure disables.
+    init?(plan: UpscalePlan, frameInterval: Double, buildQueue: DispatchQueue? = nil) {
         guard let gpu = GPU() else {
             EngineLog.emit("[Upscale] stage unavailable: no Metal device or kernels", category: .swPlayback)
             return nil
         }
-        do {
-            stage = try Stage(plan: plan, gpu: gpu)
-        } catch {
-            EngineLog.emit("[Upscale] stage unavailable: \(error)", category: .swPlayback)
-            return nil
-        }
         self.gpu = gpu
+        self.initialPlan = plan
         self.configuredInterval = frameInterval
         self.frameInterval = frameInterval
+        guard let buildQueue else {
+            do {
+                stage = try Stage(plan: plan, gpu: gpu)
+            } catch {
+                EngineLog.emit("[Upscale] stage unavailable: \(error)", category: .swPlayback)
+                return nil
+            }
+            return
+        }
+        let gpuBox = UncheckedSendable(gpu)
+        buildQueue.async { [weak self] in
+            let start = DispatchTime.now().uptimeNanoseconds
+            let built = Result { UncheckedSendable(try Stage(plan: plan, gpu: gpuBox.value)) }
+            self?.install(built, ms: elapsedMs(since: start))
+        }
+    }
+
+    private func install(_ built: Result<UncheckedSendable<Stage>, Error>, ms: Double) {
+        processLock.lock()
+        defer { processLock.unlock() }
+        switch built {
+        case let .success(box):
+            guard !isDisabled else { box.value.release(); return }
+            stage = box.value
+            EngineLog.emit(String(format: "[Upscale] stage built in %.0f ms", ms), category: .swPlayback)
+        case let .failure(error):
+            disable(reason: "stage not built: \(error)")
+        }
     }
 
     /// The overrun budget per frame, from the live frame interval.
@@ -180,6 +210,10 @@ final class FrameUpscaler: @unchecked Sendable {
         defer { processLock.unlock() }
         guard !isDisabled else { return nil }
         notePTS(pts)
+        guard let built = stage else {
+            notePassThrough("stage still building")
+            return nil
+        }
 
         let format = CVPixelBufferGetPixelFormatType(input)
         guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -188,11 +222,11 @@ final class FrameUpscaler: @unchecked Sendable {
             return nil
         }
         let picture = Self.pictureRegion(of: input)
-        if picture.width != stage.plan.sourceWidth || picture.height != stage.plan.sourceHeight {
+        if picture.width != built.plan.sourceWidth || picture.height != built.plan.sourceHeight {
             guard rebuild(for: input, width: picture.width, height: picture.height) else { return nil }
         }
         applyRememberedOverrun()
-        guard !isDisabled else { return nil }
+        guard !isDisabled, let stage else { return nil }
         lastPassThroughNote = nil
 
         let start = DispatchTime.now().uptimeNanoseconds
@@ -203,7 +237,7 @@ final class FrameUpscaler: @unchecked Sendable {
                 input, picture: picture, frameIndex: frameIndex,
                 mlTimeout: currentMLTimeout, submit: _mlSubmitOverride, times: &times)
             times.total = elapsedMs(since: start)
-            recordSuccess(times)
+            recordSuccess(times, stage: stage)
             return output
         } catch {
             recordFailure(error)
@@ -229,7 +263,7 @@ final class FrameUpscaler: @unchecked Sendable {
             return false
         }
         let sar = Self.pixelAspectRatio(of: input)
-        let display = CGSize(width: stage.plan.displayWidth, height: stage.plan.displayHeight)
+        let display = CGSize(width: initialPlan.displayWidth, height: initialPlan.displayHeight)
         guard let plan = UpscaleRouteDecision.makePlan(
                 source: SourceGeometry(width: width, height: height, sarNum: sar.0, sarDen: sar.1),
                 display: display, mlScaleFactors: Self.mlScaleFactors),
@@ -237,17 +271,19 @@ final class FrameUpscaler: @unchecked Sendable {
             notePassThrough("\(width)x\(height) is not smaller than the display")
             return false
         }
+        let rebuilt: Stage
         do {
-            stage = try Stage(plan: plan, gpu: gpu, mlOnly: degraded && plan.mlScale != nil)
+            rebuilt = try Stage(plan: plan, gpu: gpu, mlOnly: degraded && plan.mlScale != nil)
         } catch {
             disable(reason: "rebuild for \(width)x\(height) failed: \(error)")
             return false
         }
+        stage = rebuilt
         // The next upscaled frame republishes the plan.
         firstFrameSent = false
         stageFrames = 0
         timingLines = 0
-        let built = stage.plan
+        let built = rebuilt.plan
         EngineLog.emit("[Upscale] input size changed: \(width)x\(height) -> \(built.targetWidth)x\(built.targetHeight)"
                        + (built.mlScale.map { " (ML \(String(format: "%g", $0))x)" } ?? "")
                        + (degraded && !built.needsMetalFX ? ", ML only (degraded)" : ""), category: .swPlayback)
@@ -301,7 +337,7 @@ final class FrameUpscaler: @unchecked Sendable {
         return ns.domain == MTLCommandBufferErrorDomain && ns.code == Int(MTLCommandBufferError.Code.notPermitted.rawValue)
     }
 
-    private func recordSuccess(_ times: StageTimes) {
+    private func recordSuccess(_ times: StageTimes, stage: Stage) {
         consecutiveFailures = 0
         backgroundRefusalNoted = false
         totalMs += times.total
@@ -334,7 +370,7 @@ final class FrameUpscaler: @unchecked Sendable {
             let over = String(format: "%.2f ms mean over %d frames against %.2f ms",
                               windowMean.total, Self.budgetWindow, budgetMs)
             if !degraded, stage.plan.mlScale != nil, stage.plan.needsMetalFX {
-                degrade(over: over, window: windowMean)
+                degrade(over: over, window: windowMean, stage: stage)
             } else {
                 disable(reason: "over budget, " + over)
             }
@@ -342,7 +378,7 @@ final class FrameUpscaler: @unchecked Sendable {
     }
 
     /// The first rung of the overrun ladder: keep ML, drop MetalFX, start a fresh budget window.
-    private func degrade(over: String, window: StageTimes) {
+    private func degrade(over: String, window: StageTimes, stage: Stage) {
         let full = stage.plan
         guard let plan = stage.dropMetalFX() else {
             disable(reason: "over budget, " + over)
@@ -372,7 +408,7 @@ final class FrameUpscaler: @unchecked Sendable {
     /// A MetalFX stage that an earlier overrun in this process covers drops MetalFX before running, or
     /// switches off when it has no ML pass to keep.
     private func applyRememberedOverrun() {
-        guard !degraded, stage.plan.needsMetalFX,
+        guard !degraded, let stage, stage.plan.needsMetalFX,
               let overrun = MetalFXCostMemory.overrun(covering: stage.plan, frameInterval: frameInterval) else { return }
         let full = stage.plan
         let size = "\(full.targetWidth)x\(full.targetHeight)"
@@ -424,7 +460,7 @@ final class FrameUpscaler: @unchecked Sendable {
                        + (stats.framesUpscaled > 0 ? " (\(stats.stageMeanMs.breakdown))" : ""),
                        category: .swPlayback)
         handler?(.disabled(reason: reason, stats: stats))
-        stage.release()
+        stage?.release()
     }
 }
 

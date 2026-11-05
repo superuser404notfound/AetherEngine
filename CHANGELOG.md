@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The app froze for about 4 s when an upscaled video started (`upscalesLowResolutionVideo`, AE#846).** The
+  software host built the upscale stage on the main thread during `load()`, and starting VideoToolbox super
+  resolution loads its model on the Neural Engine through a synchronous XPC, about 4 s cold on Apple TV, long
+  enough for the watchdog to kill the app now and then. The stage is now built on its own queue and frames go
+  out as decoded until it is ready (`[Upscale] stage built in ... ms`). A stage that cannot be built now
+  switches itself off like a failing one, so `$activeUpscale` reports it, the plan is remembered for the
+  process and a URL VOD session that only the stage put on the software path returns to the native path.
 
 ## [7.57.0] - 2026-11-05
 

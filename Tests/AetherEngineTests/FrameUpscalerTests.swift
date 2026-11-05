@@ -114,6 +114,44 @@ struct FrameUpscalerTests {
         print(String(format: "[FrameUpscalerTests] 720x480 MetalFX -> 2880x2160: mean %.2f ms", up.stats.meanMs))
     }
 
+    /// A stage built on a queue passes frames through until it is ready (a cold VT session start hung the
+    /// main thread ~4 s on Apple TV), then upscales.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func backgroundBuildPassesFramesThroughUntilReady() throws {
+        let queue = DispatchQueue(label: "test.upscale.build")
+        queue.suspend()
+        let up = try #require(FrameUpscaler(
+            plan: try plan(720, 480, sar: (8, 9), ml: []), frameInterval: 1.0 / 24, buildQueue: queue))
+        let input = try TestFrames.nv12(720, 480, par: (8, 9))
+        #expect(up.upscale(input) == nil)
+        #expect(!up.isDisabled && up.delivered == nil)
+        queue.resume()
+        queue.sync {}
+        let out = try #require(up.upscale(input))
+        #expect(CVPixelBufferGetWidth(out) == 2880 && CVPixelBufferGetHeight(out) == 2160)
+    }
+
+    /// A stage that cannot be built on its queue disables itself with an event instead of failing the init.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func backgroundBuildFailureDisables() throws {
+        let p = UpscalePlan(sourceWidth: 1280, sourceHeight: 720, mlScale: nil, mlOutputWidth: 1280, mlOutputHeight: 720,
+                            targetWidth: 1280, targetHeight: 720, displayWidth: 1920, displayHeight: 1080)
+        #expect(FrameUpscaler(plan: p, frameInterval: 1.0 / 24) == nil)
+        let queue = DispatchQueue(label: "test.upscale.build")
+        queue.suspend()
+        let up = try #require(FrameUpscaler(plan: p, frameInterval: 1.0 / 24, buildQueue: queue))
+        let events = EventLog()
+        up.onEvent = { events.add($0) }
+        queue.resume()
+        queue.sync {}
+        #expect(up.isDisabled)
+        #expect(up.disabledReason?.contains("plan scales nothing") == true, "\(String(describing: up.disabledReason))")
+        if case .disabled = events.all.last {} else { Issue.record("last event \(String(describing: events.all.last))") }
+        #expect(up.upscale(try TestFrames.nv12(1280, 720)) == nil)
+    }
+
     /// MetalFX alone keeps every sample. VT's ML pass carries a +-1 texture (MetalFX sharpening lifts it a
     /// little) and its edge ringing falls in a cropped margin, so the ML paths get +-4 with no border exemption.
     @Test
