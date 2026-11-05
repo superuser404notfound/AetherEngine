@@ -543,6 +543,7 @@ Sources/AetherEngine/
 │   ├── AV1FilmGrain.swift                   The per-frame grain tables (templates, scaling functions, block offsets), computed on the CPU as dav1d computes them
 │   ├── AV1FilmGrainShaderSource.swift       The Metal kernels: dav1d's per-pixel grain and the P010 write
 │   ├── AV1GaussianSequence.swift            AV1's Gaussian_Sequence (specification 7.18.3.3)
+│   ├── SidecarTextFetch.swift               One plain whole-body GET for a text sidecar over HTTP, decoded from a temporary file, instead of the playback reader's ranged open and its 15 s + 25 s give-up (AE#984)
 │   ├── SubtitleDecoder.swift                Sidecar URL one-shot decode; decodes several streams of one container in a single pass (#266); a bitmap stream is read into packets instead (#921)
 │   ├── VideoDecoderTypes.swift              DecodedFrameHandler typealias + VideoDecoderError
 │   ├── DeinterlaceHardwareWarmup.swift      Demand-driven process-wide prewarm of the deinterlace filter's hardware pipeline; only potentially interlaced `.auto` loads start and await it. Progressive sources and forced-software deinterlace skip it. Same-title reloads preserve even a decoded progressive verdict; the background selection snapshot retains that decision for a custom-reader reopen, while URL reloads probe afresh. Actual disc-title changes re-evaluate reopened metadata. A source declared progressive that later supplies interlaced frames still deinterlaces on demand, paying the cold graph build at that first frame

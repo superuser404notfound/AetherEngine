@@ -37,8 +37,50 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     func setShiftSeconds(_ s: Double) { lock.lock(); shiftSeconds = s; lock.unlock() }
 
     /// Set once the reader has read the track to EOF, so a whole-program .vtt consumer knows every cue is present (Sodalite#32).
-    func markFinished() { lock.lock(); finished = true; lock.unlock() }
+    func markFinished() { lock.lock(); finished = true; externalFill = .none; lock.unlock() }
     var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+
+    /// AE#984: where a load-declared sidecar's whole-file fill stands. Only that fill sets it; a store
+    /// fed by the pump tap or a side reader stays `.none` and keeps its own readiness rules.
+    enum ExternalFill: Equatable, Sendable {
+        case none
+        /// The decode is running: a whole-program `.vtt` is answered "not yet" (404) so AVPlayer
+        /// asks again, instead of holding the request, which stalls its media loading as well.
+        case pending
+        /// The decode gave up: the `.vtt` is served as it stands (empty), at once, so a selected
+        /// rendition never strands the A/V session.
+        case failed
+    }
+    private var externalFill: ExternalFill = .none
+
+    func markExternalFillPending() {
+        lock.lock(); if !finished { externalFill = .pending }; lock.unlock()
+    }
+    func markExternalFillFailed() {
+        lock.lock(); if !finished { externalFill = .failed }; lock.unlock()
+    }
+    var externalFillState: ExternalFill { lock.lock(); defer { lock.unlock() }; return externalFill }
+
+    /// AE#984: what a whole-program `.vtt` request gets from this store right now.
+    enum WholeProgramServe: Equatable, Sendable {
+        /// Every cue is in: serve the file.
+        case complete
+        /// A sidecar fill is still running: answer 404 at once, AVPlayer retries the segment.
+        case retryLater
+        /// A sidecar fill failed: serve what there is (nothing) at once.
+        case failedFill
+        /// No sidecar fill involved: the caller's own bounded wait applies.
+        case waitForReader
+    }
+    var wholeProgramServe: WholeProgramServe {
+        lock.lock(); defer { lock.unlock() }
+        if finished { return .complete }
+        switch externalFill {
+        case .pending: return .retryLater
+        case .failed: return .failedFill
+        case .none: return .waitForReader
+        }
+    }
 
     func replaceCues(_ newCues: [SubtitleCue]) {
         lock.lock(); defer { lock.unlock() }

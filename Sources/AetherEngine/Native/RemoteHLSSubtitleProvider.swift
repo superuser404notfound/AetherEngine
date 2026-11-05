@@ -33,16 +33,8 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     private let fillLock = NSLock()
     private var fillTask: Task<Void, Never>?
 
-    /// How long a `.vtt` fetch waits for its store to finish. AVPlayer fetches a whole-program VOD
-    /// subtitle segment ONCE and never re-fetches it, so serving early means serving truncated for the
-    /// rest of the session; the fill normally completes long before the rendition is ever selected.
-    /// Mirrors the loopback path's budget.
-    static let defaultVTTFillWaitSeconds: TimeInterval = 30
-    private let vttFillWaitSeconds: TimeInterval
-
     init(tracks: [Track], masterBody: String, programDuration: Double,
-         defaultHeaders: [String: String], mediaURL: URL?,
-         vttFillWaitSeconds: TimeInterval = defaultVTTFillWaitSeconds) {
+         defaultHeaders: [String: String], mediaURL: URL?) {
         self.tracks = tracks
         self.staticMasterPlaylistBody = masterBody
         // `RemoteHLSSubtitleProxy.sumSegmentDurations` already refuses a non-finite, negative or
@@ -54,7 +46,6 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         self.programDuration = min(max(1, finiteDuration), RemoteHLSSubtitleProxy.maxProgramDurationSeconds)
         self.defaultHeaders = defaultHeaders
         self.mediaURL = mediaURL
-        self.vttFillWaitSeconds = vttFillWaitSeconds
         self.stores = tracks.map { _ in NativeSubtitleCueStore() }
     }
 
@@ -83,6 +74,7 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         cancelFill()
         let jobs = Self.fillJobs(tracks: tracks, stores: stores, defaultHeaders: defaultHeaders, mediaURL: mediaURL)
         guard !jobs.isEmpty else { return }
+        jobs.forEach { $0.markPending() }
         let task = BlockingWork.detached(priority: .utility) { [jobs] in
             for job in jobs {
                 if Task.isCancelled { return }
@@ -103,9 +95,9 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     /// Wait for the started fill to finish. Nothing in the session waits for it, the `.vtt` handler
-    /// polls the store instead; this exists so a test can assert on a finished store without racing
-    /// the wall clock. `nativeSubtitleVTT`'s wait is a budget, and a budget loses under a saturated
-    /// cooperative pool, where the detached decode does not get a thread at all.
+    /// reads the store's state instead; this exists so a test can assert on a finished store without
+    /// racing the wall clock (a saturated cooperative pool can leave the detached decode without a
+    /// thread for a long time).
     func awaitFill() async {
         await currentFillTask()?.value
     }
@@ -136,6 +128,7 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         }
         var order: [Key] = []
         var targetsByKey: [Key: [AetherEngine.ExternalSubtitleFillJob.Target]] = [:]
+        var hintByKey: [Key: String] = [:]
         for (ordinal, track) in tracks.enumerated() where ordinal < stores.count {
             let key = Key(url: track.source.url, headers: AetherEngine.resolvedSubtitleHeaders(
                 for: track.source.url, explicit: track.source.httpHeaders, mediaURL: mediaURL,
@@ -143,10 +136,12 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
             if targetsByKey[key] == nil { order.append(key) }
             targetsByKey[key, default: []].append(
                 .init(streamIndex: track.source.sourceStreamIndex, store: stores[ordinal]))
+            if hintByKey[key] == nil, let hint = track.source.formatHint { hintByKey[key] = hint }
         }
         return order.map {
             AetherEngine.ExternalSubtitleFillJob(url: $0.url, headers: $0.headers,
-                                                 targets: targetsByKey[$0] ?? [])
+                                                 targets: targetsByKey[$0] ?? [],
+                                                 formatHint: hintByKey[$0])
         }
     }
 
@@ -180,19 +175,26 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
     /// producer and therefore no playlist shift, and AVPlayer places the cues by media timestamp, so
     /// the sidecar's own absolute seconds line up with the frames. They do NOT line up with item time
     /// where an origin's segments start before their playlist slot; AE#616 measures that gap off them.
+    ///
+    /// AE#984: never held. A request held for the fill also held AVPlayer's media loading, so a slow
+    /// sidecar froze the picture of a healthy stream. While the fill runs the answer is a 404, which
+    /// AVPlayer retries every few seconds while A/V keeps loading; a failed fill is served empty at once.
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
         guard ordinal >= 0, ordinal < stores.count else { return nil }
         let store = stores[ordinal]
-        let deadline = Date().addingTimeInterval(vttFillWaitSeconds)
-        while !store.isFinished, Date() < deadline {
-            usleep(100_000)
+        let serve = store.wholeProgramServe
+        if serve == .retryLater {
+            EngineLog.emit(
+                "[AetherEngine] AE#984: subtitle rendition ord=\(ordinal) requested before its sidecar is "
+                + "decoded; answering 404 so AVPlayer asks again", category: .hlsServer)
+            return nil
         }
         let cues = store.allCues()
-        if !store.isFinished {
+        if serve != .complete {
+            let why = serve == .failedFill ? "could not be read" : "has no decode running"
             EngineLog.emit(
-                "[AetherEngine] #316: serving subtitle rendition ord=\(ordinal) before its decode finished "
-                + "(\(cues.count) cue(s)); AVPlayer does not re-fetch a whole-program .vtt",
-                category: .hlsServer)
+                "[AetherEngine] AE#984: the sidecar for subtitle rendition ord=\(ordinal) \(why); "
+                + "serving it as it stands so the A/V session is not held for it", category: .hlsServer)
         } else {
             EngineLog.emit(
                 "[AetherEngine] #316: whole-program rendition ord=\(ordinal) cues=\(cues.count)",
