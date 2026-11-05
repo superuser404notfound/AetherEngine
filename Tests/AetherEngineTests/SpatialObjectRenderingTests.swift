@@ -4,11 +4,11 @@ import Testing
 import Foundation
 @testable import AetherEngine
 
-/// TrueHD Atmos objects are rendered into a speaker bed by the engine, because Apple TV never
-/// bitstreams and the receiver only ever sees what tvOS sends it as Dolby MAT. These pin the two
-/// properties a renderer cannot get wrong without the room hearing it: an object at a speaker
-/// comes out of that speaker alone, and moving an object never changes its loudness.
-@Suite("Object audio renders into a speaker bed")
+/// The elements of TrueHD Atmos and DTS:X are placed in the layout as point sources, and
+/// `BedRegression` builds each speaker from the stream's bed by those places. These pin the two
+/// properties a placement cannot get wrong without the room hearing it: an object at a speaker
+/// belongs to that speaker alone, and moving an object never changes its loudness.
+@Suite("Object audio elements are placed in the speaker layout")
 struct SpatialObjectRenderingTests {
 
     private func power(_ g: [Float]) -> Float { g.reduce(0) { $0 + $1 * $1 } }
@@ -88,229 +88,86 @@ struct SpatialObjectRenderingTests {
     }
 
 
-    // MARK: - Renderer
+    // MARK: - Placement
 
-    private func render(
-        _ renderer: ObjectAudioRenderer, inputs: [[Float]], frames: Int, updates: [ObjectAudioMetadataUpdate]
-    ) -> [[Float]] {
-        var outputs = [[Float]](repeating: [Float](repeating: 0, count: frames), count: renderer.layout.channelCount)
-        let inPtrs = inputs.map { buf -> UnsafeMutablePointer<Float> in
-            let p = UnsafeMutablePointer<Float>.allocate(capacity: frames)
-            p.initialize(from: buf, count: frames)
-            return p
-        }
-        let outPtrs = outputs.map { _ in UnsafeMutablePointer<Float>.allocate(capacity: frames) }
-        renderer.render(inputs: inPtrs.map { UnsafePointer($0) }, frameCount: frames, updates: updates, outputs: outPtrs)
-        for c in outputs.indices { outputs[c] = Array(UnsafeBufferPointer(start: outPtrs[c], count: frames)) }
-        (inPtrs + outPtrs).forEach { $0.deallocate() }
-        return outputs
+    /// Element `index`'s gains towards the layout after `updates`.
+    private func gains(_ placement: ObjectAudioPlacement, _ index: Int) -> [Float] {
+        var snapshot = ObjectAudioGainSnapshot()
+        placement.snapshot(into: &snapshot)
+        let n = placement.layout.channelCount
+        return Array(snapshot.layoutGains[index * n..<(index + 1) * n])
     }
 
-    @Test("bed channels and LFE pass straight through to their speakers")
-    func bedPassthrough() {
+    @Test("bed channels and LFE sit on their speakers")
+    func bedOnItsSpeakers() {
         let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.bed(.left), .lfe, .bed(.topMiddleLeft)])
-        let frames = 64
-        let a = (0..<frames).map { Float($0) / 64 }
-        let b = (0..<frames).map { Float(-$0) / 64 }
-        let c = [Float](repeating: 0.25, count: frames)
-        let out = render(renderer, inputs: [a, b, c], frames: frames, updates: [])
-        #expect(out[layout.speakers.firstIndex(of: .left)!] == a)
-        #expect(out[layout.lfeIndex] == b)
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.bed(.left), .lfe, .bed(.topMiddleLeft)])
+        #expect(gains(placement, 0)[layout.speakers.firstIndex(of: .left)!] == 1)
+        #expect(power(gains(placement, 0)) == 1)
+        #expect(gains(placement, 1)[layout.lfeIndex] == 1)
+        #expect(power(gains(placement, 1)) == 1)
         // 7.1.4 has no top-middle pair: the bed's Ltm becomes a phantom between Ltf and Ltr.
-        let ltf = out[layout.speakers.firstIndex(of: .topFrontLeft)!]
-        let ltr = out[layout.speakers.firstIndex(of: .topRearLeft)!]
-        #expect(abs(ltf[0] - 0.25 * cos(Float.pi / 4)) < 1e-5)
-        #expect(abs(ltr[0] - 0.25 * cos(Float.pi / 4)) < 1e-5)
+        let ltm = gains(placement, 2)
+        #expect(abs(ltm[layout.speakers.firstIndex(of: .topFrontLeft)!] - cos(Float.pi / 4)) < 1e-5)
+        #expect(abs(ltm[layout.speakers.firstIndex(of: .topRearLeft)!] - cos(Float.pi / 4)) < 1e-5)
     }
 
-    @Test("an object is silent until its first metadata, then follows its ramps")
-    func objectRamps() {
+    @Test("an object is placed nowhere until its first metadata, then jumps to each new position")
+    func objectFollowsMetadata() {
         let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 100)
-        #expect(render(renderer, inputs: [ones], frames: 100, updates: []).allSatisfy { $0.allSatisfy { $0 == 0 } })
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.object])
+        #expect(gains(placement, 0).allSatisfy { $0 == 0 })
+        var snapshot = ObjectAudioGainSnapshot()
+        placement.snapshot(into: &snapshot)
+        #expect(snapshot.positions[0] == nil)
 
-        let left = ObjectAudioElementState(position: SIMD3(0, 0, 0))
-        let right = ObjectAudioElementState(position: SIMD3(1, 0, 0))
         let l = layout.speakers.firstIndex(of: .left)!, r = layout.speakers.firstIndex(of: .right)!
-        var out = render(renderer, inputs: [ones], frames: 100,
-                         updates: [.init(frameOffset: 10, rampFrames: 0, states: [left])])
-        #expect(out[l][9] == 0 && out[l][10] == 1 && out[r][50] == 0)
-
-        // A 100-frame ramp to the right, split across two blocks: halfway through, the gains are
-        // halfway, and the ramp resumes where it left off in the next block.
-        out = render(renderer, inputs: [ones], frames: 100,
-                     updates: [.init(frameOffset: 50, rampFrames: 100, states: [right])])
-        #expect(out[l][49] == 1)
-        #expect(abs(out[l][99] - 0.5) < 0.02 && abs(out[r][99] - 0.5) < 0.02)
-        out = render(renderer, inputs: [ones], frames: 100, updates: [])
-        #expect(abs(out[l][49]) < 1e-5 && abs(out[r][49] - 1) < 1e-5)
-        #expect(abs(out[r][99] - 1) < 1e-5)
+        placement.apply([.init(frameOffset: 10, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))])])
+        #expect(gains(placement, 0)[l] == 1)
+        placement.apply([.init(frameOffset: 0, states: [ObjectAudioElementState(position: SIMD3(1, 0, 0), gain: 0.5)])])
+        #expect(gains(placement, 0)[r] == 0.5 && gains(placement, 0)[l] == 0)
+        // A restatement that leaves the object out keeps it where it is.
+        placement.apply([.init(frameOffset: 0, states: [nil])])
+        #expect(gains(placement, 0)[r] == 0.5)
     }
 
-    @Test("an object's first metadata is a jump even when it asks for a ramp, so nothing fades in after a seek")
-    func firstMetadataJumps() {
+    @Test("a reset forgets object positions and brings beds back at unit gain")
+    func resetForgetsObjects() {
         let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 64)
-        let l = layout.speakers.firstIndex(of: .left)!
-        var out = render(renderer, inputs: [ones], frames: 64, updates: [
-            .init(frameOffset: 0, rampFrames: 1536, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))])])
-        #expect(out[l][0] == 1)
-        renderer.reset()
-        out = render(renderer, inputs: [ones], frames: 64, updates: [
-            .init(frameOffset: 0, rampFrames: 1536, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))])])
-        #expect(out[l][0] == 1, "reset forgets the position, so the next first update jumps again")
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.object, .bed(.left)])
+        placement.apply([.init(frameOffset: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0)),
+                                                        ObjectAudioElementState(gain: 0)])])
+        placement.reset()
+        #expect(gains(placement, 0).allSatisfy { $0 == 0 })
+        #expect(gains(placement, 1)[layout.speakers.firstIndex(of: .left)!] == 1)
     }
 
-    @Test("after a resync an object holds its place and jumps to its next position instead of sweeping there")
-    func discontinuityJumps() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 64)
-        let l = layout.speakers.firstIndex(of: .left)!, r = layout.speakers.firstIndex(of: .right)!
-        _ = render(renderer, inputs: [ones], frames: 64, updates: [
-            .init(frameOffset: 0, rampFrames: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))])])
-        renderer.markDiscontinuity()
-        var out = render(renderer, inputs: [ones], frames: 64, updates: [])
-        #expect(out[l][0] == 1, "holds its last position until metadata arrives")
-        out = render(renderer, inputs: [ones], frames: 64, updates: [
-            .init(frameOffset: 0, rampFrames: 1536, states: [ObjectAudioElementState(position: SIMD3(1, 0, 0))])])
-        #expect(out[r][0] == 1 && out[l][0] == 0)
-    }
-
-    @Test("an unchanged element in an update keeps its ramp running")
-    func unchangedElementKeepsRamp() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object, .object])
-        let ones = [Float](repeating: 1, count: 200)
-        let r = layout.speakers.firstIndex(of: .right)!
-        let left = ObjectAudioElementState(position: SIMD3(0, 0, 0))
-        let right = ObjectAudioElementState(position: SIMD3(1, 0, 0))
-        let out = render(renderer, inputs: [ones, [Float](repeating: 0, count: 200)], frames: 200, updates: [
-            .init(frameOffset: 0, rampFrames: 0, states: [left, left]),
-            .init(frameOffset: 0, rampFrames: 200, states: [right, nil]),
-            // Element 0 restated as unchanged halfway: its ramp must not restart.
-            .init(frameOffset: 100, rampFrames: 0, states: [nil, right]),
-        ])
-        #expect(abs(out[r][149] - 0.75) < 0.02)
-        #expect(abs(out[r][199] - 1) < 1e-5)
-    }
-
-    @Test("a new target mid-ramp starts from where the ramp had got to")
-    func retargetMidRamp() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 200)
-        let l = layout.speakers.firstIndex(of: .left)!, r = layout.speakers.firstIndex(of: .right)!
-        let out = render(renderer, inputs: [ones], frames: 200, updates: [
-            .init(frameOffset: 0, rampFrames: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))]),
-            .init(frameOffset: 0, rampFrames: 100, states: [ObjectAudioElementState(position: SIMD3(1, 0, 0))]),
-            .init(frameOffset: 50, rampFrames: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))]),
-        ])
-        #expect(abs(out[l][49] - 0.51) < 0.02 && out[r][49] > 0.4)
-        #expect(out[l][50] == 1 && out[r][50] == 0)
-    }
-
-    // MARK: - Review round 1 (#731)
-
-    @Test("a ramp lands frame by frame on (k + 1) / total of the way, and finishes on the target")
-    func rampIsExactPerFrame() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 100)
-        let l = layout.speakers.firstIndex(of: .left)!, r = layout.speakers.firstIndex(of: .right)!
-        _ = render(renderer, inputs: [ones], frames: 100, updates: [
-            .init(frameOffset: 0, rampFrames: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))])])
-        // Spread over three blocks of 40 frames, so the ramp crosses two block boundaries.
-        var left: [Float] = [], right: [Float] = []
-        for block in 0..<3 {
-            let updates: [ObjectAudioMetadataUpdate] = block == 0
-                ? [.init(frameOffset: 0, rampFrames: 100, states: [ObjectAudioElementState(position: SIMD3(1, 0, 0))])]
-                : []
-            let out = render(renderer, inputs: [[Float](repeating: 1, count: 40)], frames: 40, updates: updates)
-            left += out[l]; right += out[r]
-        }
-        for k in 0..<100 {
-            let t = Float(k + 1) / 100
-            #expect(abs(left[k] - (1 - t)) < 1e-5, "frame \(k)")
-            #expect(abs(right[k] - t) < 1e-5, "frame \(k)")
-        }
-        #expect(left[100...].allSatisfy { abs($0) < 1e-6 } && right[100...].allSatisfy { abs($0 - 1) < 1e-6 })
-    }
-
-    @Test("a resync mid-ramp freezes the object where the ramp had got to")
-    func discontinuityMidRampHolds() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.object])
-        let ones = [Float](repeating: 1, count: 50)
-        let l = layout.speakers.firstIndex(of: .left)!, r = layout.speakers.firstIndex(of: .right)!
-        _ = render(renderer, inputs: [ones], frames: 50, updates: [
-            .init(frameOffset: 0, rampFrames: 0, states: [ObjectAudioElementState(position: SIMD3(0, 0, 0))]),
-            .init(frameOffset: 0, rampFrames: 100, states: [ObjectAudioElementState(position: SIMD3(1, 0, 0))])])
-        renderer.markDiscontinuity()
-        let out = render(renderer, inputs: [ones], frames: 50, updates: [])
-        #expect(abs(out[l][0] - 0.5) < 1e-5 && abs(out[l][49] - 0.5) < 1e-5)
-        #expect(abs(out[r][0] - 0.5) < 1e-5 && abs(out[r][49] - 0.5) < 1e-5)
-    }
-
-    @Test("a reset in the middle of a bed fade brings the bed back at unit gain")
-    func resetRestoresBedGain() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.bed(.left)])
-        let ones = [Float](repeating: 1, count: 50)
-        let l = layout.speakers.firstIndex(of: .left)!
-        _ = render(renderer, inputs: [ones], frames: 50, updates: [
-            .init(frameOffset: 0, rampFrames: 100, states: [ObjectAudioElementState(gain: 0)])])
-        renderer.reset()
-        let out = render(renderer, inputs: [ones], frames: 50, updates: [])
-        #expect(out[l].allSatisfy { $0 == 1 })
-    }
-
-    @Test("a block from another configuration renders silence instead of trapping")
-    func configurationMismatchIsSilent() {
-        let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.bed(.left), .bed(.right)])
-        let out = render(renderer, inputs: [[Float](repeating: 1, count: 32)], frames: 32, updates: [])
-        #expect(out.allSatisfy { $0.allSatisfy { $0 == 0 } })
-    }
-
-    @Test("7.1 bed surrounds fold onto a 5.1 layout's surround pair, never into the front", arguments: [
+    @Test("7.1 bed surrounds sit on a 5.1 layout's surround pair, never in the front", arguments: [
         SpatialSpeakerLayout.l512, .l514])
     func bedSurroundsFoldOnFiveOne(layout: SpatialSpeakerLayout) {
-        let renderer = ObjectAudioRenderer(
-            layout: layout, roles: [.bed(.sideLeft), .bed(.rearRight)])
-        let ones = [Float](repeating: 1, count: 16)
-        let zeros = [Float](repeating: 0, count: 16)
-        var out = render(renderer, inputs: [ones, zeros], frames: 16, updates: [])
-        #expect(out[layout.speakers.firstIndex(of: .surroundLeft)!] == ones)
-        #expect(out[layout.speakers.firstIndex(of: .left)!] == zeros)
-        out = render(renderer, inputs: [zeros, ones], frames: 16, updates: [])
-        #expect(out[layout.speakers.firstIndex(of: .surroundRight)!] == ones)
-        #expect(out[layout.speakers.firstIndex(of: .right)!] == zeros)
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.bed(.sideLeft), .bed(.rearRight)])
+        #expect(gains(placement, 0)[layout.speakers.firstIndex(of: .surroundLeft)!] == 1)
+        #expect(power(gains(placement, 0)) == 1)
+        #expect(gains(placement, 1)[layout.speakers.firstIndex(of: .surroundRight)!] == 1)
+        #expect(power(gains(placement, 1)) == 1)
     }
 
-    @Test("a 5.1 bed's surrounds land on a 7.1 layout's sides")
+    @Test("a 5.1 bed's surrounds sit on a 7.1 layout's sides")
     func fiveOneSurroundsOnSevenOne() {
         let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.bed(.surroundLeft)])
-        let ones = [Float](repeating: 1, count: 16)
-        let out = render(renderer, inputs: [ones], frames: 16, updates: [])
-        #expect(out[layout.speakers.firstIndex(of: .sideLeft)!] == ones)
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.bed(.surroundLeft)])
+        #expect(gains(placement, 0)[layout.speakers.firstIndex(of: .sideLeft)!] == 1)
     }
 
-    @Test("a bed channel at a position the room names no speaker for plays without any metadata")
-    func fixedBedPlaysWithoutMetadata() {
+    @Test("a bed channel at a position the room names no speaker for is placed without any metadata")
+    func fixedBedWithoutMetadata() {
         let layout = SpatialSpeakerLayout.l714
-        let renderer = ObjectAudioRenderer(layout: layout, roles: [.fixed(SIMD3(0.5, 1, 0))])
-        let ones = [Float](repeating: 1, count: 16)
-        let out = render(renderer, inputs: [ones], frames: 16, updates: [])
+        let placement = ObjectAudioPlacement(layout: layout, roles: [.fixed(SIMD3(0.5, 1, 0))])
+        let g = gains(placement, 0)
         let half = cos(Float.pi / 4)
-        #expect(abs(out[layout.speakers.firstIndex(of: .rearLeft)!][0] - half) < 1e-5)
-        #expect(abs(out[layout.speakers.firstIndex(of: .rearRight)!][0] - half) < 1e-5)
-        #expect(abs(power(out.map { $0[0] }) - 1) < 1e-5)
+        #expect(abs(g[layout.speakers.firstIndex(of: .rearLeft)!] - half) < 1e-5)
+        #expect(abs(g[layout.speakers.firstIndex(of: .rearRight)!] - half) < 1e-5)
+        #expect(abs(power(g) - 1) < 1e-5)
     }
-
 }
 #endif

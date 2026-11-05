@@ -53,6 +53,13 @@ the public-API contract.
   they carry 0.3 % of the energy or more, 29 to 49 dB overall. Folded beds use an energy bound of 0.5
   to 2.5 times the bed. Needs FFmpegBuild 3.13.0, whose `x_heights` no longer subtracts the fold.
 
+- **Object audio can no longer mix an element signal into an output.** The object renderer is now
+  `ObjectAudioPlacement`: it keeps each element's gains towards the layout from its metadata and
+  mixes no audio, and metadata ramps are gone with it (updates already applied as jumps). A block
+  that arrives without its bed plays as silence, for every decoder; the path that panned element
+  signals onto the speakers, which neither the TrueHD nor the DTS:X decoder reached any more, is
+  removed from the build.
+
 ### Fixed
 
 - **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only

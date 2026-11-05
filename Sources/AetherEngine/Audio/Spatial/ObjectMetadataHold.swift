@@ -6,8 +6,8 @@ import Foundation
 ///
 /// After a reset (a seek, a producer restart) TrueHD decoding resumes at the next major sync, but the
 /// first OAMD payload follows it only 0 to 38 access units later (up to 32 ms on measured films).
-/// The renderer has no position for an object until then, so rendered as they came, those blocks
-/// played every object as silence: after a seek the APAC carried the LFE alone for 21 to 24 ms on
+/// The placement has no position for an object until then, so taken as they came, those blocks
+/// placed every object nowhere: after a seek the APAC carried the LFE alone for 21 to 24 ms on
 /// Nature's Fury. Held here instead, they are released when the payload arrives, the first of them
 /// carrying that payload's first state as a jump at frame 0, so they play where the stream puts the
 /// objects next. Only blocks with objects are held, at most `maxHeldFrames` of them, and none from the
@@ -67,7 +67,7 @@ final class ObjectMetadataHold {
     /// `firstStates` is every element's state as of the block's first metadata update, nil when the
     /// block carries no metadata.
     func admit(_ block: ObjectAudioDecodedBlock, firstStates: [ObjectAudioElementState?]?) -> ObjectAudioDecodedBlock? {
-        // A new configuration gets a new renderer, which starts without positions as well: what was
+        // A new configuration gets a new placement, which starts without positions as well: what was
         // held for the old one goes out as it is, and the hold starts again.
         if let generation, generation != block.configurationGeneration {
             releaseHeld()
@@ -83,7 +83,7 @@ final class ObjectMetadataHold {
         held.append(Copy(block))
         heldFrames += block.frameCount
         if hasObjects, let firstStates {
-            held[0].prepend(ObjectAudioMetadataUpdate(frameOffset: 0, rampFrames: 0, states: firstStates))
+            held[0].prepend(ObjectAudioMetadataUpdate(frameOffset: 0, states: firstStates))
             armed = false
             releaseHeld()
         } else if !hasObjects || heldFrames > Self.maxHeldFrames {

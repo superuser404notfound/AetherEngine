@@ -1,12 +1,12 @@
 import Foundation
 
-/// What the object renderer is doing while `LoadOptions.objectAudioRendering` plays TrueHD Atmos or
-/// DTS:X, published as `LiveTelemetry.objectAudio`: the bed the presentation is rendered into, how
+/// What object audio is doing while `LoadOptions.objectAudioRendering` plays TrueHD Atmos or
+/// DTS:X, published as `LiveTelemetry.objectAudio`: the bed the presentation is built into, how
 /// many objects it declares, how many of them play and how many of those sit overhead.
 ///
 /// The counts come from the object metadata, as the session log's `bed levels` line does: an active
 /// object can still be silent. They are what
-/// the renderer was asked to place, which is what a host showing "Atmos with heights" can stand on.
+/// the engine was asked to place, which is what a host showing "Atmos with heights" can stand on.
 public struct ObjectAudioActivity: Equatable, Sendable {
     /// The speaker bed the presentation is rendered into, `objectAudioRendering`'s layout.
     public let layout: SpatialSpeakerLayout

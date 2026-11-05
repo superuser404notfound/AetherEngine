@@ -213,7 +213,7 @@ final class BedRegression {
         written = 0
     }
 
-    /// Element gains into the layout, as the renderer tracks them, for the frames passed next.
+    /// Element gains into the layout, as `ObjectAudioPlacement` tracks them, for the frames passed next.
     func setGains(_ source: ObjectAudioGainSnapshot) {
         snapshot = source
         hasSnapshot = true

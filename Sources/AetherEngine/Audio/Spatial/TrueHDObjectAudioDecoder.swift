@@ -17,7 +17,7 @@ import TrueHD
 /// are not read, and every update applies as it stands, without the ramp towards it.
 ///
 /// The library's coordinates are OAMD room coordinates (ETSI TS 103 420 4.2.1): x left→right and
-/// y front→back on 0...1, z −1 floor, 0 ear level, +1 ceiling. That is the renderer's own room
+/// y front→back on 0...1, z −1 floor, 0 ear level, +1 ceiling. That is the engine's own room
 /// model above ear level; home Atmos keeps objects at z ≥ 0, and anything below is clamped to the
 /// ear-level plane, which is the lowest a home bed has.
 final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
@@ -32,7 +32,6 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
     private var roles: [ObjectAudioRole] = []
     private var rolesSerial: UInt32?
     private var planes: [UnsafePointer<Float>] = []
-    var playsBedOnly: Bool { true }
     private var bedRoles: [ObjectAudioRole] = []
     private var bedRolesSerial: UInt32?
     private var bedPlanes: [UnsafePointer<Float>] = []
@@ -133,7 +132,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
                 updates.append(ObjectAudioMetadataUpdate(
                     frameOffset: Int(update.frame_offset),
                     // Splitting the bed, each update is taken as it stands, without the ramp towards it.
-                    rampFrames: 0, states: states))
+                    states: states))
             }
         }
 
@@ -166,7 +165,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
 
     // MARK: - Mapping
 
-    /// Bed speakers the renderer's room model names route discretely; the other speaker codes
+    /// Bed speakers the engine's room model names route discretely; the other speaker codes
     /// (screen, centre back, top centre, surround direct) sit at their nominal position, so a
     /// channel-based presentation without metadata still plays them. Objects and unlabelled
     /// channels are positioned by metadata.

@@ -11,7 +11,7 @@ struct ObjectAudioDecodedBlock {
     /// or not. After a reset the decoder can only start at a major sync, so the first block of a
     /// session usually starts some way into what it was given; this is how far.
     var inputFrameOffset: Int64
-    /// Changes whenever `roles` does, so the renderer can be rebuilt for the new configuration.
+    /// Changes whenever `roles` does, so the placement can be rebuilt for the new configuration.
     var configurationGeneration: Int
     /// The decoder dropped data before this block (reset, damage, resync). The next metadata is a
     /// complete restatement to apply as a jump, not a continuation of what came before.
@@ -48,7 +48,7 @@ struct ObjectAudioBedFold: Equatable {
 }
 
 /// A decoder that turns an object-audio bitstream (TrueHD with Atmos, DTS:X) into signals plus the
-/// metadata that positions them. Kept separate from the bridge so the bridge's timeline, renderer
+/// metadata that positions them. Kept separate from the bridge so the bridge's timeline, regression
 /// and encoder handling can be exercised with a synthetic decoder.
 protocol ObjectAudioDecoding: AnyObject {
     /// Queue demuxed bytes. Any chunking.
@@ -64,14 +64,10 @@ protocol ObjectAudioDecoding: AnyObject {
     /// How often the decoder has reset ITSELF after an internal failure. Its input offsets count from
     /// zero again afterwards, so the caller has to re-anchor its timeline.
     var selfResetCount: Int { get }
-    /// The decoder's output is meant to come from its channel bed (`ObjectAudioDecodedBlock.bed`) and
-    /// nothing else: a block without one plays as silence rather than through the renderer's mix.
-    var playsBedOnly: Bool { get }
 }
 
 extension ObjectAudioDecoding {
     var selfResetCount: Int { 0 }
-    var playsBedOnly: Bool { false }
     func releaseHeldBlocks() {}
 }
 #endif

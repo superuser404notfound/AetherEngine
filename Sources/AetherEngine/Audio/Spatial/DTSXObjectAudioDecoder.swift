@@ -171,12 +171,12 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
             let plane = UnsafePointer(block.samples + c * block.frameCount)
             if c < Self.bedCount { bedPlanes.append(plane) } else { planes.append(plane) }
         }
-        // Every height sits on its speaker at unity. The renderer holds an element at zero until its
+        // Every height sits on its speaker at unity. The placement holds an element nowhere until its
         // first state, so the whole set is restated, as a jump, wherever the decoder started over.
         var updates: [ObjectAudioMetadataUpdate] = []
         if block.isDiscontinuity {
             updates.append(ObjectAudioMetadataUpdate(
-                frameOffset: 0, rampFrames: 0, states: Self.roles.map(Self.state(for:))))
+                frameOffset: 0, states: Self.roles.map(Self.state(for:))))
         }
         return ObjectAudioDecodedBlock(
             sampleRate: ObjectAudioRendering.sampleRate,
@@ -190,7 +190,6 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
             bed: ObjectAudioBed(roles: Self.bedRoles, planes: bedPlanes, folds: Self.folds))
     }
 
-    var playsBedOnly: Bool { true }
 
     func reset() {
         dropPending()

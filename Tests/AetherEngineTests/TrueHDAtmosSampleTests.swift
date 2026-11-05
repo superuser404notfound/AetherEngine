@@ -17,12 +17,14 @@ struct TrueHDAtmosSampleTests {
             .flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
     }
 
-    @Test("objects decode with positions and render into the height speakers")
+    @Test("objects decode with positions and steer the bed into the height speakers")
     func decodesAndRendersHeights() throws {
         guard let data = Self.sample else { return }
         let decoder = try TrueHDObjectAudioDecoder()
         let layout = SpatialSpeakerLayout.l714
-        var renderer: ObjectAudioRenderer?
+        var placement: ObjectAudioPlacement?
+        var regression: BedRegression?
+        var snapshot = ObjectAudioGainSnapshot()
         let out = (0..<layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: 256) }
         defer { out.forEach { $0.deallocate() } }
         var energy = [Double](repeating: 0, count: layout.channelCount)
@@ -36,17 +38,23 @@ struct TrueHDAtmosSampleTests {
                 try decoder.push(UnsafeRawBufferPointer(rebasing: raw[offset..<offset + n]))
                 offset += n
                 while let block = try decoder.nextBlock() {
-                    if renderer == nil { renderer = ObjectAudioRenderer(layout: layout, roles: block.roles); roles = block.roles }
+                    if placement == nil, let bed = block.bed {
+                        regression = BedRegression(layout: layout, bedRoles: bed.roles, folds: bed.folds)
+                    }
+                    if placement == nil { placement = ObjectAudioPlacement(layout: layout, roles: block.roles); roles = block.roles }
                     updates += block.updates.count
                     for u in block.updates {
                         raisedObjects += u.states.enumerated().filter {
                             block.roles[$0.offset] == .object && ($0.element?.position.z ?? 0) > 0.3
                         }.count
                     }
-                    renderer!.render(inputs: block.planes, frameCount: block.frameCount,
-                                     updates: block.updates, outputs: out)
+                    placement!.apply(block.updates)
+                    placement!.snapshot(into: &snapshot)
+                    regression!.setGains(snapshot)
+                    let got = regression!.process(elements: block.planes, bed: block.bed!.planes,
+                                                  frameCount: block.frameCount, output: out)
                     for c in 0..<layout.channelCount {
-                        for i in 0..<block.frameCount { energy[c] += Double(out[c][i] * out[c][i]) }
+                        for i in 0..<got { energy[c] += Double(out[c][i] * out[c][i]) }
                     }
                     frames += block.frameCount
                 }

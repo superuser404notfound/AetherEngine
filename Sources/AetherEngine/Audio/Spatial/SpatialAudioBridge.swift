@@ -55,8 +55,9 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     private let srcTimeBase: AVRational
     private let decoder: ObjectAudioDecoding
     private let sink: SpatialBedSink
-    private var renderer: ObjectAudioRenderer?
-    private var rendererGeneration = -1
+    /// The elements' places in the layout, read by `splitter`; it mixes no audio.
+    private var placement: ObjectAudioPlacement?
+    private var placementGeneration = -1
     /// What the encoder is fed, per bed channel, for the session log (see `BedLevelMeter`).
     private var levelMeter: BedLevelMeter
     /// Keeps the bed under full scale, since the encoder carries anything over it on (see `PeakLimiter`).
@@ -68,8 +69,8 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// `encodeChunkFrames` at a time (see `APACEncodePipeline`).
     private var output: SpatialBedBuffer
     private var pendingFrames = 0
-    /// Built from the first block that carries a bed: every output comes from that bed instead of
-    /// the renderer's mix (see `BedRegression`). Its latency is the frames it holds, `backlog`.
+    /// Built from the first block that carries a bed: every output comes from that bed, and from
+    /// nothing else (see `BedRegression`). Its latency is the frames it holds, `backlog`.
     private var splitter: BedRegression?
     private var gainSnapshot = ObjectAudioGainSnapshot()
     private var reportedMissingBed = false
@@ -342,7 +343,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         opLock.lock()
         defer { opLock.unlock() }
         decoder.reset()
-        renderer?.reset()
+        placement?.reset()
         splitter?.reset()
         sink.reset()
         limiter.reset()
@@ -399,19 +400,17 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
         guard block.sampleRate == Self.sampleRate else { throw BridgeError.unsupportedSampleRate(block.sampleRate) }
         guard block.frameCount > 0 else { return }
 
-        let rebuilt = renderer == nil || block.configurationGeneration != rendererGeneration
+        let rebuilt = placement == nil || block.configurationGeneration != placementGeneration
         if rebuilt {
             // Whether the presentation has an LFE element at all is the first question a missing-LFE
             // report asks.
             EngineLog.emit(
-                "[SpatialAudioBridge] object configuration\(renderer == nil ? "" : " changed, renderer rebuilt"): "
+                "[SpatialAudioBridge] object configuration\(placement == nil ? "" : " changed, placement rebuilt"): "
                     + BedLevelMeter.configurationSummary(block.roles),
                 category: .session
             )
-            renderer = ObjectAudioRenderer(layout: layout, roles: block.roles)
-            rendererGeneration = block.configurationGeneration
-        } else if block.isDiscontinuity {
-            renderer?.markDiscontinuity()
+            placement = ObjectAudioPlacement(layout: layout, roles: block.roles)
+            placementGeneration = block.configurationGeneration
         }
         levelMeter.observe(roles: block.roles, updates: block.updates, configurationChanged: rebuilt)
         levelMeter.measureInput(roles: block.roles, planes: block.planes, frameCount: block.frameCount)
@@ -446,34 +445,29 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
                     + "regressed onto the layout (latency \(BedRegression.latency) frames)",
                     category: .session)
             }
-            renderer!.advance(frameCount: block.frameCount, updates: block.updates)
-            renderer!.snapshot(into: &gainSnapshot)
+            placement!.apply(block.updates)
+            placement!.snapshot(into: &gainSnapshot)
             splitter!.setGains(gainSnapshot)
             pendingFrames += splitter!.process(
                 elements: block.planes, bed: bed.planes, frameCount: block.frameCount,
                 output: output.planes.map { $0 + pendingFrames })
         } else if let splitter {
             // A block without its bed in a stream that has one: silence on the bed's timeline.
-            renderer!.advance(frameCount: block.frameCount, updates: block.updates)
+            placement!.apply(block.updates)
             pendingFrames += splitter.process(
                 elements: nil, bed: nil, frameCount: block.frameCount,
                 output: output.planes.map { $0 + pendingFrames })
-        } else if decoder.playsBedOnly {
-            // No bed yet: silence, never a mix of the element signals. TrueHD Atmos and DTS:X always
-            // carry their bed in the same frame, so this is a damaged stream.
+        } else {
+            // No bed yet: silence, never the element signals. TrueHD Atmos and DTS:X always carry
+            // their bed in the same frame, so this is a damaged stream.
             if !reportedMissingBed {
                 reportedMissingBed = true
                 EngineLog.emit(
                     "[SpatialAudioBridge] WARNING: object presentation without a channel presentation, "
                     + "playing silence until one arrives", category: .session)
             }
-            renderer!.advance(frameCount: block.frameCount, updates: block.updates)
+            placement!.apply(block.updates)
             for plane in output.planes { (plane + pendingFrames).update(repeating: 0, count: block.frameCount) }
-            pendingFrames += block.frameCount
-        } else {
-            renderer!.render(
-                inputs: block.planes, frameCount: block.frameCount, updates: block.updates,
-                outputs: output.planes.map { $0 + pendingFrames })
             pendingFrames += block.frameCount
         }
         stats.samplesEnqueued += Int64(block.frameCount)

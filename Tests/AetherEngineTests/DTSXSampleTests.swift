@@ -75,7 +75,7 @@ struct DTSXSampleTests {
         guard let data = Self.sample("AE_DTSX_SAMPLE") else { return }
         let decoder = try DTSXObjectAudioDecoder()
         let layout = SpatialSpeakerLayout.l714
-        var renderer: ObjectAudioRenderer?
+        var placement: ObjectAudioPlacement?
         var regression: BedRegression?
         var snapshot = ObjectAudioGainSnapshot()
         let capacity = 8192
@@ -89,14 +89,14 @@ struct DTSXSampleTests {
 
         func take(_ block: ObjectAudioDecodedBlock) {
             let bed = block.bed!
-            if renderer == nil {
-                renderer = ObjectAudioRenderer(layout: layout, roles: block.roles)
+            if placement == nil {
+                placement = ObjectAudioPlacement(layout: layout, roles: block.roles)
                 regression = BedRegression(layout: layout, bedRoles: bed.roles, folds: bed.folds)
                 roles = block.roles; bedRoles = bed.roles
                 firstInputFrame = block.inputFrameOffset
             }
-            renderer!.advance(frameCount: block.frameCount, updates: block.updates)
-            renderer!.snapshot(into: &snapshot)
+            placement!.apply(block.updates)
+            placement!.snapshot(into: &snapshot)
             regression!.setGains(snapshot)
             let got = regression!.process(elements: block.planes, bed: bed.planes, frameCount: block.frameCount, output: out)
             for c in 0..<layout.channelCount { built[c].append(contentsOf: UnsafeBufferPointer(start: out[c], count: got)) }

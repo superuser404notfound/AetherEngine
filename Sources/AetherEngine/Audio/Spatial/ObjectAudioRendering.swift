@@ -25,7 +25,7 @@ import Foundation
 /// compressed, so the system's Atmos decoder gets the objects; without the setting, or for live
 /// sessions, it decodes every track to PCM as before.
 ///
-/// The renderer is an optional component: TrueHD needs the `TrueHDObjectAudio` package trait and DTS:X
+/// Object audio is an optional component: TrueHD needs the `TrueHDObjectAudio` package trait and DTS:X
 /// the `DTSXObjectAudio` trait, both off by default. Without a codec's trait `.apac` is a no-op for it
 /// (`AetherEngine.OptionalComponent.isBuiltIn` answers which are in a build).
 public enum ObjectAudioRendering: Equatable, Sendable {
