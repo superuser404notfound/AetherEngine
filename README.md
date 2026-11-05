@@ -53,7 +53,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 - [LillyPlayer](https://lillyplayer.com): The all-in-one IPTV and media player for Apple TV, iPhone and iPad (live TV, EPG, replay, Jellyfin, Plex, SMB...).
 - [Plozz](https://plozz.app): Free forever open source native app for iPhone, iPad, and Apple TV. Supports Jellyfin, Plex, Emby, Silo, IPTV, SMB, WebDAV and more.
 - [Crivid IPTV Player](https://apps.apple.com/app/id6783083716): IPTV player for M3U and Xtream on Apple TV.
-- [HipTV](hiptv.app): A cross-platform, synchronized IPTV player.
+- [HipTV](https://hiptv.app): A cross-platform, synchronized IPTV player.
 - [ZeoPlayer](https://apps.apple.com/app/id6792761598): Modern media player for iPhone, iPad, Mac, Apple TV and Apple Vision Pro with HDR, Dolby Vision, spatial audio and SMB support.
 <!-- used-by:end -->
 
