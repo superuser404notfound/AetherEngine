@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A slow external subtitle file froze the picture of a server HLS stream, and a sidecar was requested twice (AE#984).**
+  A text sidecar borrowed the playback reader, which opened two ranged requests at once and, when the first byte
+  took longer than 15 s, replaced the request with one that had 25 s left, so a server needing 25 s or more never
+  delivered it. It is now one plain GET for the whole body with a 120 s idle budget. On the `nativeRemoteHLS`
+  bypass (and the loopback master) the subtitle rendition held AVPlayer's request for up to 30 s per try, which
+  held AVPlayer's media loading as well; it now answers 404 until the sidecar is decoded, which AVPlayer retries
+  while A/V keeps playing, and serves a sidecar that could not be read empty at once.
 
 ## [7.58.0] - 2026-11-05
 

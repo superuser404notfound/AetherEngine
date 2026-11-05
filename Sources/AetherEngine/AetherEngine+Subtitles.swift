@@ -1604,6 +1604,7 @@ extension AetherEngine {
             stores: session.nativeSubtitleCueStoresForSession,
             defaultHeaders: loadedOptions.httpHeaders, mediaURL: loadedURL)
         guard !jobs.isEmpty else { return }
+        jobs.forEach { $0.markPending() }
         externalNativeStoreFillTask = BlockingWork.detached(priority: .utility) { [jobs] in
             for job in jobs {
                 if Task.isCancelled { return }
@@ -1615,12 +1616,14 @@ extension AetherEngine {
     /// #266: fill one container's stores from a single decode pass. A pass covering several streams
     /// fails as a whole (an out-of-range index throws), so on failure the targets are retried
     /// individually: one host-side index mistake must not blank the container's other tracks. A
-    /// store that could not be filled stays UNfinished, or the rendition would serve a complete but
-    /// blank .vtt.
+    /// store that could not be filled stays UNfinished, so the overlay never backfills a blank track
+    /// from it, and is marked failed (AE#984), so its rendition is answered at once instead of
+    /// holding AVPlayer for a file that is not coming.
     nonisolated static func runExternalSubtitleFill(job: ExternalSubtitleFillJob) async {
+        job.markPending()
         if let results = try? await SubtitleDecoder.decodeFile(
             url: job.url, httpHeaders: job.headers,
-            sourceStreamIndices: job.targets.map(\.streamIndex)
+            sourceStreamIndices: job.targets.map(\.streamIndex), formatHint: job.formatHint
         ) {
             for (target, result) in zip(job.targets, results) {
                 target.store.appendCues(result.cues)
@@ -1629,6 +1632,7 @@ extension AetherEngine {
             return
         }
         guard job.targets.count > 1 else {
+            if !Task.isCancelled { job.targets.forEach { $0.store.markExternalFillFailed() } }
             EngineLog.emit("[AetherEngine] external native store fill failed: \(job.url.lastPathComponent)", category: .engine)
             return
         }
@@ -1636,8 +1640,10 @@ extension AetherEngine {
         for target in job.targets {
             if Task.isCancelled { return }
             guard let result = try? await SubtitleDecoder.decodeFile(
-                url: job.url, httpHeaders: job.headers, sourceStreamIndex: target.streamIndex
+                url: job.url, httpHeaders: job.headers, sourceStreamIndex: target.streamIndex,
+                formatHint: job.formatHint
             ) else {
+                if !Task.isCancelled { target.store.markExternalFillFailed() }
                 EngineLog.emit("[AetherEngine] external native store fill failed: \(job.url.lastPathComponent) stream=\(target.streamIndex.map(String.init) ?? "auto")", category: .engine)
                 continue
             }
@@ -1699,7 +1705,9 @@ extension AetherEngine {
             for: url, explicit: httpHeaders, mediaURL: loadedURL,
             mediaHeaders: loadedOptions.httpHeaders)
         // ASS/SSA sidecars honour preserveASSMarkup so hosts can drive a styled renderer. SRT/VTT fall back to plain text regardless.
-        let preparationPolicy = externalTrackID.flatMap { externalSubtitleRegistry[$0] }?.preparationPolicy
+        let registered = externalTrackID.flatMap { externalSubtitleRegistry[$0] }
+        let preparationPolicy = registered?.preparationPolicy
+        let formatHint = registered?.formatHint
         let preserveASS = loadedOptions.preserveASSMarkup
         sidecarTask = Task { [weak self] in
             let result: SidecarDecodeResult
@@ -1708,7 +1716,7 @@ extension AetherEngine {
                     url: url, httpHeaders: effectiveHeaders,
                     preserveASSMarkup: preserveASS,
                     sourceStreamIndex: sourceStreamIndex, preparationPolicy: preparationPolicy,
-                    keepsBitmapPackets: true
+                    keepsBitmapPackets: true, formatHint: formatHint
                 )
             } catch {
                 EngineLog.emit("[AetherEngine] sidecar decode failed: \(error)", category: .engine)
@@ -1816,6 +1824,7 @@ extension AetherEngine {
             mediaHeaders: loadedOptions.httpHeaders)
         let selectedExternal = externalTrackID.flatMap { externalSubtitleRegistry[$0] }
         let preparationPolicy = selectedExternal?.preparationPolicy
+        let formatHint = selectedExternal?.formatHint
         let preserveASS = loadedOptions.preserveASSMarkup
         let sessionGeneration = loadGeneration
         #if DEBUG
@@ -1827,7 +1836,7 @@ extension AetherEngine {
                 result = try await SubtitleDecoder.decodeFile(
                     url: url, httpHeaders: effectiveHeaders, preserveASSMarkup: preserveASS,
                     sourceStreamIndex: sourceStreamIndex, preparationPolicy: preparationPolicy,
-                    keepsBitmapPackets: true)
+                    keepsBitmapPackets: true, formatHint: formatHint)
             } catch {
                 EngineLog.emit("[AetherEngine] secondary sidecar decode failed: \(error)", category: .engine)
                 await MainActor.run {
@@ -2550,6 +2559,7 @@ extension AetherEngine {
         }
         var order: [Key] = []
         var targetsByKey: [Key: [ExternalSubtitleFillJob.Target]] = [:]
+        var hintByKey: [Key: String] = [:]
         for (ordinal, entry) in table.enumerated() {
             // Phase D: OCR entries defer to the selection-time sidecar decode (OCR of a whole
             // .sup at load would violate the selection gating).
@@ -2561,9 +2571,11 @@ extension AetherEngine {
             if targetsByKey[key] == nil { order.append(key) }
             targetsByKey[key, default: []].append(
                 .init(streamIndex: track.sourceStreamIndex, store: stores[ordinal]))
+            if hintByKey[key] == nil, let hint = track.formatHint { hintByKey[key] = hint }
         }
         return order.map {
-            ExternalSubtitleFillJob(url: $0.url, headers: $0.headers, targets: targetsByKey[$0] ?? [])
+            ExternalSubtitleFillJob(url: $0.url, headers: $0.headers, targets: targetsByKey[$0] ?? [],
+                                    formatHint: hintByKey[$0])
         }
     }
 

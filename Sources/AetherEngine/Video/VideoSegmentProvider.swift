@@ -3504,9 +3504,22 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             // shape). AVKit fetches this VOD single-segment file ONCE and never re-fetches it, so it MUST be
             // complete. Wait for the reader's definitive EOF signal (isFinished) rather than a cue-count plateau
             // heuristic, which fired early during dialogue gaps and served a truncated file (device-confirmed).
-            let deadline = Date().addingTimeInterval(30.0)
-            while !store.isFinished, Date() < deadline {
-                usleep(100_000)
+            // AE#984: a load-declared sidecar's store is never waited on. Holding the request held AVPlayer's
+            // media loading with it, so a slow sidecar froze the picture; a 404 is retried every few seconds
+            // while A/V keeps loading, and a failed fill is answered at once. Reader-fed stores keep the wait.
+            switch store.wholeProgramServe {
+            case .retryLater:
+                EngineLog.emit("[HLSVideoEngine] AE#984: whole-program subtitle .vtt ord=\(ordinal) requested before "
+                               + "its sidecar is decoded; answering 404 so AVPlayer asks again", category: .hlsServer)
+                return nil
+            case .waitForReader:
+                let deadline = Date().addingTimeInterval(30.0)
+                while store.wholeProgramServe == .waitForReader, Date() < deadline {
+                    usleep(100_000)
+                }
+                if store.wholeProgramServe == .retryLater { return nil }
+            case .complete, .failedFill:
+                break
             }
             // Sodalite#32: the cues are stored at SOURCE pts; AVPlayer clock = source - shift. Apply the CURRENT
             // engine shift (read now, not the possibly-zero load-time value) so cues land on the video's axis.

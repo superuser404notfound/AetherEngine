@@ -14,6 +14,8 @@ enum SubtitleDecoderError: Error, CustomStringConvertible, LocalizedError {
     case textLimitExceeded
     case unsupportedTextCodec
     case codecOpenFailed(code: Int32)
+    /// AE#984: the whole-body fetch of a text sidecar was answered with this status.
+    case httpStatus(Int)
 
     var description: String {
         switch self {
@@ -24,6 +26,7 @@ enum SubtitleDecoderError: Error, CustomStringConvertible, LocalizedError {
         case .textLimitExceeded: "SubtitleDecoder: text resource limit"
         case .unsupportedTextCodec: "SubtitleDecoder: unsupported text codec"
         case .codecOpenFailed(let code): "SubtitleDecoder: decoder open failed (\(FFmpegErr.text(for: code)))"
+        case .httpStatus(let status): "SubtitleDecoder: the sidecar was answered with HTTP \(status)"
         }
     }
 
@@ -70,12 +73,13 @@ enum SubtitleDecoder {
         preserveASSMarkup: Bool = false,
         sourceStreamIndex: Int32? = nil,
         preparationPolicy: ExternalSubtitlePreparationPolicy? = nil,
-        keepsBitmapPackets: Bool = false
+        keepsBitmapPackets: Bool = false,
+        formatHint: String? = nil
     ) async throws -> SidecarDecodeResult {
         let results = try await decode(
             url: url, httpHeaders: httpHeaders, preserveASSMarkup: preserveASSMarkup,
             requested: sourceStreamIndex.map { [$0] }, preparationPolicy: preparationPolicy,
-            keepsBitmapPackets: keepsBitmapPackets
+            keepsBitmapPackets: keepsBitmapPackets, formatHint: formatHint
         )
         guard let only = results.first else { throw SubtitleDecoderError.noSubtitleStream }
         return only
@@ -90,12 +94,13 @@ enum SubtitleDecoder {
         url: URL,
         httpHeaders: [String: String] = [:],
         preserveASSMarkup: Bool = false,
-        sourceStreamIndices: [Int32?]
+        sourceStreamIndices: [Int32?],
+        formatHint: String? = nil
     ) async throws -> [SidecarDecodeResult] {
         guard !sourceStreamIndices.isEmpty else { return [] }
         return try await decode(
             url: url, httpHeaders: httpHeaders, preserveASSMarkup: preserveASSMarkup,
-            requested: sourceStreamIndices
+            requested: sourceStreamIndices, formatHint: formatHint
         )
     }
 
@@ -105,8 +110,16 @@ enum SubtitleDecoder {
         httpHeaders: [String: String],
         preserveASSMarkup: Bool,
         requested: [Int32?]?, preparationPolicy: ExternalSubtitlePreparationPolicy? = nil,
-        keepsBitmapPackets: Bool = false
+        keepsBitmapPackets: Bool = false, formatHint: String? = nil
     ) async throws -> [SidecarDecodeResult] {
+        // AE#984: a text sidecar over HTTP is one whole-body GET, then a local decode.
+        if preparationPolicy == nil, SidecarTextFetch.appliesTo(url, formatHint: formatHint) {
+            let local = try await SidecarTextFetch.download(url, headers: httpHeaders, formatHint: formatHint)
+            defer { try? FileManager.default.removeItem(at: local) }
+            return try await decode(
+                url: local, httpHeaders: [:], preserveASSMarkup: preserveASSMarkup,
+                requested: requested, keepsBitmapPackets: keepsBitmapPackets)
+        }
         // Task.cancel() does NOT propagate into detached tasks (isCancelled inside always false).
         // Bridge cancellation explicitly via CancelFlag so the decode loop + AVIO reader abort promptly.
         let token = CancelFlag()
