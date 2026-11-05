@@ -179,7 +179,7 @@ enum RangeFetch {
         guard let ticket = OriginRequestBudget.shared.tryAcquire(for: url, label: label) else {
             throw PrewarmDecline(reason: "no origin request slot free (#377)")
         }
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         request.setValue("bytes=\(requestedStart)-\(requestedStart + Int64(requestedLength) - 1)",
                          forHTTPHeaderField: "Range")
         for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }

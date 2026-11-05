@@ -240,7 +240,7 @@ enum HLSCarriageProbe {
     }
 
     private static func makeRequest(_ url: URL, httpHeaders: [String: String]) -> URLRequest {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in httpHeaders {
             request.setValue(value, forHTTPHeaderField: field)
         }

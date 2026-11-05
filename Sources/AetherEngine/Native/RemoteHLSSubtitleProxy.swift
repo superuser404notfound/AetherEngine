@@ -197,7 +197,7 @@ enum RemoteHLSSubtitleProxy {
     private static func fetchPlaylist(_ url: URL,
                                       session: URLSession,
                                       headers: [String: String]) async throws -> (String, URL) {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         let data: Data
         let response: URLResponse

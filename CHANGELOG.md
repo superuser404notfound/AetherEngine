@@ -20,6 +20,12 @@ the public-API contract.
   held AVPlayer's media loading as well; it now answers 404 until the sidecar is decoded, which AVPlayer retries
   while A/V keeps playing, and serves a sidecar that could not be read empty at once.
 
+- **An origin that refused the source with a short body and kept the connection open took 40 s to fail, as a timeout (AE#986).**
+  CFNetwork content-sniffs a `text/plain` or untyped response and holds it back until 512 body bytes arrive or the
+  connection ends, whatever the status, so a 500 or 403 with a 25-byte body on a held connection never reached the
+  reader: the open waited out both data budgets and reported "Request timed out" with `status=0`. Every engine
+  request now turns sniffing off, and the same origin fails the load in about a second with the HTTP status.
+
 ## [7.58.0] - 2026-11-05
 
 ### Added

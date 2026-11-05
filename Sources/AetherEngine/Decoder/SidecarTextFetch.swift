@@ -53,7 +53,7 @@ enum SidecarTextFetch {
     /// libavformat probes it exactly as it probed the URL. The caller removes the file.
     static func download(_ url: URL, headers: [String: String], formatHint: String?,
                          session: URLSession = session) async throws -> URL {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         let data: Data
         let response: URLResponse

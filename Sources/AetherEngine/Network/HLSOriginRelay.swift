@@ -131,7 +131,7 @@ final class HLSOriginRelay: @unchecked Sendable {
             configuration: config, delegate: EngineTLS.redirectDelegate, delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
-        var request = URLRequest(url: origin)
+        var request = URLRequest(engineURL: origin)
         for (field, value) in headers { request.setValue(value, forHTTPHeaderField: field) }
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         do {
@@ -430,7 +430,7 @@ final class HLSOriginRelay: @unchecked Sendable {
     private func fetch(origin: URL, headers: [String: String], range: String?, sink: Sink)
         -> Upstream
     {
-        var request = URLRequest(url: origin)
+        var request = URLRequest(engineURL: origin)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         // Forwarded verbatim rather than parsed and rebuilt: the remote HLS path leans on byte
         // ranges, and normalising or coalescing one here would quietly undo the sizing the
