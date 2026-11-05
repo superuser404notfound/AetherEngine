@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.58.0] - 2026-11-05
+
 ### Added
 
 - **Hosts can read whether the source is progressive or interlaced (AE#983).** `sourceVideoScan`
