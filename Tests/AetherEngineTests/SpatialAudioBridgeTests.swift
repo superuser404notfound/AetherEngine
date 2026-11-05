@@ -26,7 +26,7 @@ struct SpatialAudioBridgeTests {
         var dropAt: (push: Int, count: Int)?
         /// Carry the left bed channel and the LFE as the stream's channel presentation too, as the
         /// TrueHD decoder does for the bed regression.
-        var withBed = false
+        var withBed = true
         private var pushes = 0
         private var skipped = 0
         private var inputFrames: Int64 = 0
@@ -34,7 +34,7 @@ struct SpatialAudioBridgeTests {
         private let planes: [UnsafeMutablePointer<Float>] = (0..<3).map { _ in .allocate(capacity: 1 << 16) }
         private var t = 0
 
-        init(skipAfterReset: Int, dropAt: (push: Int, count: Int)? = nil, withBed: Bool = false) {
+        init(skipAfterReset: Int, dropAt: (push: Int, count: Int)? = nil, withBed: Bool = true) {
             self.skipAfterReset = skipAfterReset
             self.dropAt = dropAt
             self.withBed = withBed
@@ -73,8 +73,7 @@ struct SpatialAudioBridgeTests {
                 sampleRate: 48_000, frameCount: b.frames, inputFrameOffset: b.offset,
                 configurationGeneration: 0, roles: [.bed(.left), .lfe, .object],
                 planes: planes.map { UnsafePointer($0) },
-                updates: [.init(frameOffset: 0, rampFrames: b.frames,
-                                states: [.init(), .init(), .init(position: SIMD3(x, 0.5, 1))])],
+                updates: [.init(frameOffset: 0, states: [.init(), .init(), .init(position: SIMD3(x, 0.5, 1))])],
                 bed: withBed ? ObjectAudioBed(roles: [.bed(.left), .lfe],
                                               planes: [UnsafePointer(planes[0]), UnsafePointer(planes[1])]) : nil)
         }
@@ -101,7 +100,7 @@ struct SpatialAudioBridgeTests {
         private let plane = UnsafeMutablePointer<Float>.allocate(capacity: 1 << 16)
 
         let withBed: Bool
-        init(clickFrame: Int64, withBed: Bool = false) { self.clickFrame = clickFrame; self.withBed = withBed }
+        init(clickFrame: Int64, withBed: Bool = true) { self.clickFrame = clickFrame; self.withBed = withBed }
         deinit { plane.deallocate() }
 
         func push(_ bytes: UnsafeRawBufferPointer) throws {
@@ -120,7 +119,7 @@ struct SpatialAudioBridgeTests {
             return ObjectAudioDecodedBlock(
                 sampleRate: 48_000, frameCount: b.frames, inputFrameOffset: b.offset,
                 configurationGeneration: 0, roles: [.bed(.left)], planes: [UnsafePointer(plane)],
-                updates: stateSent ? [] : [.init(frameOffset: 0, rampFrames: 0, states: [.init()])],
+                updates: stateSent ? [] : [.init(frameOffset: 0, states: [.init()])],
                 bed: withBed ? ObjectAudioBed(roles: [.bed(.left)], planes: [UnsafePointer(plane)]) : nil)
         }
 
@@ -195,23 +194,14 @@ struct SpatialAudioBridgeTests {
     #endif
 
     #if TrueHDObjectAudio || DTSXObjectAudio
-    /// With the stream's bed the output comes from `BedRegression`, whose latency the bridge has to
-    /// keep off the timeline: the same timestamps, and the same tail at the end.
-    static let bedArms: [Bool] = {
-        #if TrueHDObjectAudio
-        [false, true]
-        #else
-        [false]
-        #endif
-    }()
-
-    @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024",
-          arguments: bedArms)
-    func anchorsOnSource(withBed: Bool) throws {
+    /// The output comes from `BedRegression`, whose latency the bridge has to keep off the timeline:
+    /// the stand-in decoders carry a bed, and the timestamps and the tail are those of the source.
+    @Test("the first packet sits at the source position of the first decodable frame, and steps by 1024")
+    func anchorsOnSource() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let bridge = try SpatialAudioBridge(
             srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
-            decoder: SyntheticDecoder(skipAfterReset: 5, withBed: withBed))
+            decoder: SyntheticDecoder(skipAfterReset: 5))
         defer { bridge.close() }
         var packets = try feed(bridge, startMs: 1000, count: 100)
         packets += bridge.flush().map { fp in
@@ -251,6 +241,38 @@ struct SpatialAudioBridgeTests {
         // Every frame the decoder produced, 16 channels of 3 bytes each, and nothing padded.
         #expect(packets.reduce(0) { $0 + Int($1.size) } == (96_000 - 200) * 16 * 3)
         #expect(packets.allSatisfy { $0.key })
+    }
+
+    @Test("a block without its bed plays silence, never its element signals")
+    func noBedNoElementSignals() throws {
+        guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
+        let bridge = try SpatialAudioBridge(
+            srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
+            decoder: ClickDecoder(clickFrame: 2_000, withBed: false), format: .lpcm)
+        defer { bridge.close() }
+        var bytes = 0, nonzero = 0
+        func count(_ packets: [UnsafeMutablePointer<AVPacket>]) {
+            for fp in packets {
+                bytes += Int(fp.pointee.size)
+                for i in 0..<Int(fp.pointee.size) where fp.pointee.data[i] != 0 { nonzero += 1 }
+                var p: UnsafeMutablePointer<AVPacket>? = fp; trackedPacketFree(&p)
+            }
+        }
+        var payload = [UInt8](repeating: 0, count: 24)
+        for i in 0..<20 {
+            let pkt = av_packet_alloc()!
+            defer { var p: UnsafeMutablePointer<AVPacket>? = pkt; av_packet_free(&p) }
+            payload.withUnsafeMutableBytes { raw in
+                _ = av_new_packet(pkt, 24)
+                pkt.pointee.data.update(from: raw.baseAddress!.assumingMemoryBound(to: UInt8.self), count: 24)
+            }
+            pkt.pointee.pts = Int64(i) * 20
+            count(try bridge.feed(packet: pkt))
+        }
+        count(bridge.flush())
+        // The click is in the element plane, inside what was fed; none of it reaches the output.
+        #expect(bytes > 0)
+        #expect(nonzero == 0)
     }
 
     /// The APAC sample entry is written before any audio, so a decoder that never finds a major sync
@@ -407,12 +429,12 @@ struct SpatialAudioBridgeTests {
         #expect(a == b)
     }
 
-    @Test("a producer restart re-anchors on the new position", arguments: bedArms)
-    func restartReanchors(withBed: Bool) throws {
+    @Test("a producer restart re-anchors on the new position")
+    func restartReanchors() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let bridge = try SpatialAudioBridge(
             srcTimeBase: AVRational(num: 1, den: 1000), layout: .l916,
-            decoder: SyntheticDecoder(skipAfterReset: 3, withBed: withBed))
+            decoder: SyntheticDecoder(skipAfterReset: 3))
         defer { bridge.close() }
         _ = try feed(bridge, startMs: 0, count: 30)
         bridge.startSegment()
@@ -421,12 +443,12 @@ struct SpatialAudioBridgeTests {
         #expect(zip(packets, packets.dropFirst()).allSatisfy { $1.pts - $0.pts == 1024 })
     }
 
-    @Test("a span the decoder drops is filled, so everything after it keeps its timestamp", arguments: bedArms)
-    func gapKeepsTimeline(withBed: Bool) throws {
+    @Test("a span the decoder drops is filled, so everything after it keeps its timestamp")
+    func gapKeepsTimeline() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         let bridge = try SpatialAudioBridge(
             srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
-            decoder: SyntheticDecoder(skipAfterReset: 0, dropAt: (push: 10, count: 12), withBed: withBed))
+            decoder: SyntheticDecoder(skipAfterReset: 0, dropAt: (push: 10, count: 12)))
         defer { bridge.close() }
         var packets = try feed(bridge, startMs: 0, count: 100)
         packets += bridge.flush().map { fp in
@@ -565,13 +587,13 @@ struct SpatialAudioBridgeTests {
     /// AVPlayer does, and has to come out where the source put it. With the encoder's priming
     /// packets dropped it came out 2048 frames (42.7 ms) early, and so did every session's audio.
     @Test("a click decodes back at its source position through AVFoundation, as APAC and as PCM",
-          arguments: [SpatialBedFormat.apac, .lpcm], bedArms)
-    func clickDecodesOnItsSourcePosition(format: SpatialBedFormat, withBed: Bool) async throws {
+          arguments: [SpatialBedFormat.apac, .lpcm])
+    func clickDecodesOnItsSourcePosition(format: SpatialBedFormat) async throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
         // The source starts at 0 and the click is 12000 frames in, so it belongs at 0.25 s.
         let bridge = try SpatialAudioBridge(
             srcTimeBase: AVRational(num: 1, den: 1000), layout: .l714,
-            decoder: ClickDecoder(clickFrame: 12_000, withBed: withBed), format: format)
+            decoder: ClickDecoder(clickFrame: 12_000), format: format)
         defer { bridge.close() }
         guard let muxed = try muxWithProbeVideo(bridge, startMs: 0, count: 30) else { return }
         let sessionDir = muxed.sessionDir
@@ -696,14 +718,14 @@ struct BedLevelMeterTests {
         var meter = BedLevelMeter(layout: .l714, sampleRate: 48_000)
         let roles: [ObjectAudioRole] = [.lfe, .object, .object, .object]
         let heights = Set(SpatialSpeaker.allCases.filter(\.isHeight))
-        let first = ObjectAudioMetadataUpdate(frameOffset: 0, rampFrames: 0, states: [
+        let first = ObjectAudioMetadataUpdate(frameOffset: 0, states: [
             .init(),
             .init(position: SIMD3(0.5, 0.5, 1)),                       // overhead
             elevationNotAllowed(heights),
             .init(position: SIMD3(0.5, 0.5, 1), gain: 0),               // muted
         ])
         // A later update restates only the muted object; the others keep their last state.
-        let second = ObjectAudioMetadataUpdate(frameOffset: 0, rampFrames: 0, states: [
+        let second = ObjectAudioMetadataUpdate(frameOffset: 0, states: [
             nil, nil, nil, .init(position: SIMD3(0, 0, 0)),
         ])
         meter.observe(roles: roles, updates: [first, second])
@@ -729,7 +751,7 @@ struct BedLevelMeterTests {
             layout: .l714, objects: 0, activeObjects: 0, elevatedObjects: 0, heightChannels: 2))
         // TrueHD Atmos: an LFE and objects, one overhead, one at ear level, one muted.
         meter.observe(roles: [.lfe, .object, .object, .object], updates: [ObjectAudioMetadataUpdate(
-            frameOffset: 0, rampFrames: 0, states: [
+            frameOffset: 0, states: [
                 .init(), .init(position: SIMD3(0.5, 0.5, 1)), .init(position: SIMD3(0.5, 0.5, 0)), .init(gain: 0),
             ])], configurationChanged: true)
         #expect(meter.activity == ObjectAudioActivity(
@@ -744,7 +766,7 @@ struct BedLevelMeterTests {
     func countsResetOnConfigurationChange() throws {
         var meter = BedLevelMeter(layout: .l714, sampleRate: 48_000)
         meter.observe(roles: [.object], updates: [ObjectAudioMetadataUpdate(
-            frameOffset: 0, rampFrames: 0, states: [.init(position: SIMD3(0.5, 0.5, 1))])])
+            frameOffset: 0, states: [.init(position: SIMD3(0.5, 0.5, 1))])])
         let first = try #require(feed(&meter, chunks: 118).first)
         #expect(first.contains("; objects: up to 1 active, 1 elevated;"))
         meter.observe(roles: [.bed(.left)], updates: [], configurationChanged: true)
@@ -760,7 +782,7 @@ struct BedLevelMeterTests {
         var meter = BedLevelMeter(layout: .l714, sampleRate: 48_000)
         let roles: [ObjectAudioRole] = [.lfe, .object]
         meter.observe(roles: roles, updates: [ObjectAudioMetadataUpdate(
-            frameOffset: 0, rampFrames: 0, states: [.init(gain: 0.5), .init(position: SIMD3(0.5, 0.5, 0))])])
+            frameOffset: 0, states: [.init(gain: 0.5), .init(position: SIMD3(0.5, 0.5, 0))])])
         let frames = 48_000
         let lfe = UnsafeMutablePointer<Float>.allocate(capacity: frames)
         let object = UnsafeMutablePointer<Float>.allocate(capacity: frames)
@@ -775,7 +797,7 @@ struct BedLevelMeterTests {
         var twoLFE = BedLevelMeter(layout: .l714, sampleRate: 48_000)
         let twoRoles: [ObjectAudioRole] = [.lfe, .lfe]
         twoLFE.observe(roles: twoRoles, updates: [ObjectAudioMetadataUpdate(
-            frameOffset: 0, rampFrames: 0, states: [.init(), .init(gain: 0.5)])])
+            frameOffset: 0, states: [.init(), .init(gain: 0.5)])])
         twoLFE.measureInput(roles: twoRoles, planes: [UnsafePointer(object), UnsafePointer(lfe)], frameCount: frames)
         let both = try #require(feed(&twoLFE, chunks: 118).first)
         #expect(both.hasSuffix("; LFE input -9.0 dBFS, metadata gain 0.0 dB/-6.0 dB"))

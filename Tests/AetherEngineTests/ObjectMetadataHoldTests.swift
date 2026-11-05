@@ -23,7 +23,7 @@ struct ObjectMetadataHoldTests {
                 return UnsafePointer(plane)
             }
             let updates = updateAt.map {
-                [ObjectAudioMetadataUpdate(frameOffset: $0, rampFrames: 1536, states: [nil, Self.state])]
+                [ObjectAudioMetadataUpdate(frameOffset: $0, states: [nil, Self.state])]
             } ?? []
             return ObjectAudioDecodedBlock(
                 sampleRate: 48_000, frameCount: frames, inputFrameOffset: Int64(number * frames),
@@ -57,7 +57,7 @@ struct ObjectMetadataHoldTests {
         #expect(out.map { $0.planes[1][39] } == [0, 1, 2, 3], "audio copied intact")
         withExtendedLifetime(copies) {}
         let prime = try #require(out.first?.updates.first)
-        #expect(prime.frameOffset == 0 && prime.rampFrames == 0)
+        #expect(prime.frameOffset == 0)
         #expect(prime.states[1] == Blocks.state)
         #expect(out[3].updates.map(\.frameOffset) == [23], "the stream's own update stays where it was")
     }

@@ -44,9 +44,9 @@ struct BedLevelMeter {
     private var maxActiveObjects = 0
     private var maxElevatedObjects = 0
 
-    /// The decoder's LFE input, before the renderer applies its metadata gain. With the bed's LFE level
+    /// The decoder's LFE input, before its metadata gain. With the bed's LFE level
     /// it splits a silent LFE into a silent source, a zero gain, or no LFE element at all.
-    /// Every LFE element: TrueHD can carry LFE2 beside LFE, and the renderer sums both.
+    /// Every LFE element: TrueHD can carry LFE2 beside LFE, and the meter sums both.
     private var lfeIndices: [Int] = []
     private var lfeInputSquares: Double = 0
     private var lfeInputFrames = 0

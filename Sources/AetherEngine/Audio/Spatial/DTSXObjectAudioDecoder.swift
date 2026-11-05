@@ -8,9 +8,12 @@ import AetherLibavutil
 /// DTS:X is carried on, in its standard presentation only. The standard presentation carries its four
 /// heights in a regular XLL channel set at the end of every frame, and the encoder folds each of them at
 /// -3 dB into the bed speaker under it. FFmpegBuild's `x_heights` option (a local patch, #798) decodes
-/// that channel set, outputs 7.1.4 and removes the fold from the bed. The alternate presentations, which
-/// carry objects, keep their plain 7.1 and are refused here. What is left is naming the twelve channels,
-/// each of which plays on its own speaker of a 7.1.4 or 9.1.6 layout.
+/// that channel set and outputs it next to the bed as coded, heights still folded in. The alternate
+/// presentations, which carry objects, keep their plain 7.1 and are refused here.
+///
+/// Every block hands over that bed with the four heights as its elements and their folds, and every
+/// output is built from the bed alone (`BedRegression`): the heights steer it, as statistics, and never
+/// play themselves. Each of the twelve channels has its own speaker in a 7.1.4 or 9.1.6 layout.
 final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
 
     struct DecoderError: Error, CustomStringConvertible {
@@ -36,7 +39,22 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         (AV_CHAN_TOP_FRONT_LEFT, .bed(.topFrontLeft)), (AV_CHAN_TOP_FRONT_RIGHT, .bed(.topFrontRight)),
         (AV_CHAN_TOP_BACK_LEFT, .bed(.topRearLeft)), (AV_CHAN_TOP_BACK_RIGHT, .bed(.topRearRight)),
     ]
-    static let roles = channels.map(\.1)
+    /// The first eight channels, the 7.1 bed as coded.
+    static let bedCount = 8
+    static let bedRoles = channels.prefix(bedCount).map(\.1)
+    /// The four heights, a block's elements.
+    static let roles = channels.dropFirst(bedCount).map(\.1)
+    /// The encoder's fold of each height into the bed: front heights into L and R, rear heights into
+    /// the rear surrounds, at gain code 23170/32768 (-3 dB). The same in every frame of all 12 DTS:X
+    /// tracks measured (8.76 million frames), so it is the format's, not read from the stream.
+    static let folds: [ObjectAudioBedFold] = [
+        (SpatialSpeaker.topFrontLeft, SpatialSpeaker.left), (.topFrontRight, .right),
+        (.topRearLeft, .rearLeft), (.topRearRight, .rearRight),
+    ].map { height, speaker in
+        ObjectAudioBedFold(element: roles.firstIndex(of: .bed(height))!,
+                           plane: bedRoles.firstIndex(of: .bed(speaker))!,
+                           gain: 23170 / 32768)
+    }
 
     /// Frames decoded after a reset only to rebuild the core's filter history, which the lossless
     /// residual is coded against. Entered mid-stream, the first frame reconstructs as distorted audio
@@ -60,6 +78,7 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
     private var pending: [Pending] = []
     private var lent: UnsafeMutablePointer<Float>?
     private var planes: [UnsafePointer<Float>] = []
+    private var bedPlanes: [UnsafePointer<Float>] = []
     /// Frames of input taken since the last reset, decoded or not.
     private var inputFrames: Int64 = 0
     private var priming = primingFrames
@@ -147,15 +166,17 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         let block = pending.removeFirst()
         lent = block.samples
         planes.removeAll(keepingCapacity: true)
+        bedPlanes.removeAll(keepingCapacity: true)
         for c in 0..<Self.channels.count {
-            planes.append(UnsafePointer(block.samples + c * block.frameCount))
+            let plane = UnsafePointer(block.samples + c * block.frameCount)
+            if c < Self.bedCount { bedPlanes.append(plane) } else { planes.append(plane) }
         }
-        // Every channel plays on its speaker at unity. The renderer holds a channel at zero until its
+        // Every height sits on its speaker at unity. The placement holds an element nowhere until its
         // first state, so the whole set is restated, as a jump, wherever the decoder started over.
         var updates: [ObjectAudioMetadataUpdate] = []
         if block.isDiscontinuity {
             updates.append(ObjectAudioMetadataUpdate(
-                frameOffset: 0, rampFrames: 0, states: Self.roles.map(Self.state(for:))))
+                frameOffset: 0, states: Self.roles.map(Self.state(for:))))
         }
         return ObjectAudioDecodedBlock(
             sampleRate: ObjectAudioRendering.sampleRate,
@@ -165,8 +186,10 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
             isDiscontinuity: block.isDiscontinuity,
             roles: Self.roles,
             planes: planes,
-            updates: updates)
+            updates: updates,
+            bed: ObjectAudioBed(roles: Self.bedRoles, planes: bedPlanes, folds: Self.folds))
     }
+
 
     func reset() {
         dropPending()

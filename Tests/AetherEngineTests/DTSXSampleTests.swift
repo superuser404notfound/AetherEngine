@@ -6,7 +6,7 @@ import AetherLibavcodec
 import AetherLibavutil
 @testable import AetherEngine
 
-/// End to end on real DTS-HD elementary streams: verdict, decode, render, encode. The samples are
+/// End to end on real DTS-HD elementary streams: verdict, decode, the bed regression, encode. The samples are
 /// not in the repository, so each test runs only when its variable names a `.dts` file:
 /// `AE_DTSX_SAMPLE` the "DTS:X Object Emulator" demo (standard 7.1.4, 95 s),
 /// `AE_DTSX_ALTERNATE_SAMPLE` Trinnov's "Experience" trailer (7.1.4 plus five moving objects, 44 s,
@@ -70,18 +70,51 @@ struct DTSXSampleTests {
         }
     }
 
-    @Test("the standard presentation plays each channel on its own speaker, the heights overhead")
-    func standardPresentationOnItsSpeakers() throws {
+    @Test("the standard presentation is built from its bed: heights overhead, the floor under them")
+    func standardPresentationFromItsBed() throws {
         guard let data = Self.sample("AE_DTSX_SAMPLE") else { return }
         let decoder = try DTSXObjectAudioDecoder()
         let layout = SpatialSpeakerLayout.l714
-        var renderer: ObjectAudioRenderer?
-        let out = (0..<layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: 4096) }
+        var placement: ObjectAudioPlacement?
+        var regression: BedRegression?
+        var snapshot = ObjectAudioGainSnapshot()
+        let capacity = 8192
+        let out = (0..<layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: capacity) }
         defer { out.forEach { $0.deallocate() } }
-        var energy = [Double](repeating: 0, count: layout.channelCount)
+        // The exact separation, bed minus the folded heights, computed here only to measure against.
+        var exact: [[Float]] = Array(repeating: [], count: layout.channelCount)
+        var built: [[Float]] = Array(repeating: [], count: layout.channelCount)
         var frames = 0, firstInputFrame: Int64 = -1
-        var roles: [ObjectAudioRole] = []
-        var misplaced = 0
+        var roles: [ObjectAudioRole] = [], bedRoles: [ObjectAudioRole] = []
+
+        func take(_ block: ObjectAudioDecodedBlock) {
+            let bed = block.bed!
+            if placement == nil {
+                placement = ObjectAudioPlacement(layout: layout, roles: block.roles)
+                regression = BedRegression(layout: layout, bedRoles: bed.roles, folds: bed.folds)
+                roles = block.roles; bedRoles = bed.roles
+                firstInputFrame = block.inputFrameOffset
+            }
+            placement!.apply(block.updates)
+            placement!.snapshot(into: &snapshot)
+            regression!.setGains(snapshot)
+            let got = regression!.process(elements: block.planes, bed: bed.planes, frameCount: block.frameCount, output: out)
+            for c in 0..<layout.channelCount { built[c].append(contentsOf: UnsafeBufferPointer(start: out[c], count: got)) }
+            for (plane, role) in bed.roles.enumerated() {
+                let speaker: SpatialSpeaker
+                if case .bed(let s) = role { speaker = s } else { speaker = .lfe }
+                var channel = Array(UnsafeBufferPointer(start: bed.planes[plane], count: block.frameCount))
+                for fold in bed.folds where fold.plane == plane {
+                    for i in channel.indices { channel[i] -= fold.gain * block.planes[fold.element][i] }
+                }
+                exact[layout.speakers.firstIndex(of: speaker)!].append(contentsOf: channel)
+            }
+            for (k, role) in block.roles.enumerated() {
+                guard case .bed(let s) = role else { continue }
+                exact[layout.speakers.firstIndex(of: s)!].append(contentsOf: UnsafeBufferPointer(start: block.planes[k], count: block.frameCount))
+            }
+            frames += block.frameCount
+        }
 
         try data.withUnsafeBytes { raw in
             var offset = 0
@@ -89,53 +122,37 @@ struct DTSXSampleTests {
                 let n = min(4096, raw.count - offset)
                 try decoder.push(UnsafeRawBufferPointer(rebasing: raw[offset..<offset + n]))
                 offset += n
-                while let block = try decoder.nextBlock() {
-                    if renderer == nil {
-                        renderer = ObjectAudioRenderer(layout: layout, roles: block.roles)
-                        roles = block.roles
-                        firstInputFrame = block.inputFrameOffset
-                    }
-                    renderer!.render(inputs: block.planes, frameCount: block.frameCount,
-                                     updates: block.updates, outputs: out)
-                    // Every bed and height channel routes discretely: each output channel is exactly
-                    // the decoded channel for its speaker.
-                    for (input, role) in block.roles.enumerated() {
-                        let speaker: SpatialSpeaker
-                        switch role {
-                        case .bed(let s): speaker = s
-                        case .lfe: speaker = .lfe
-                        default: continue
-                        }
-                        let c = layout.speakers.firstIndex(of: speaker)!
-                        for i in 0..<block.frameCount where out[c][i] != block.planes[input][i] { misplaced += 1 }
-                    }
-                    for c in 0..<layout.channelCount {
-                        for i in 0..<block.frameCount { energy[c] += Double(out[c][i] * out[c][i]) }
-                    }
-                    frames += block.frameCount
-                }
+                while let block = try decoder.nextBlock() { take(block) }
             }
         }
-        // The last frame is held until something follows it; at the end of input it is released.
         decoder.releaseHeldBlocks()
-        while let block = try decoder.nextBlock() { frames += block.frameCount }
-        let rms = energy.map { ($0 / Double(max(frames, 1))).squareRoot() }
-        print("[DTSXSample] frames=\(frames) roles=\(roles)")
-        print("[DTSXSample] 7.1.4 rms dBFS: " + zip(layout.speakers, rms).map {
-            "\($0.0.rawValue)=\(String(format: "%.1f", 20 * log10(max($0.1, 1e-9))))" }.joined(separator: " "))
+        while let block = try decoder.nextBlock() { take(block) }
+        let tail = regression!.drain(output: out)
+        for c in 0..<layout.channelCount { built[c].append(contentsOf: UnsafeBufferPointer(start: out[c], count: tail)) }
 
-        // Whole frames of 512, the first two of which only prime the decoder (8,902 frames in the
-        // Object Emulator sample, so 4,556,800 here).
+        // Whole frames of 512, the first two of which only prime the decoder.
         #expect(firstInputFrame == 1024)
         #expect(frames > 0 && frames % 512 == 0)
         #expect(frames == (try Self.decodedFrames(data)))
-        #expect(roles == [.bed(.center), .bed(.left), .bed(.right), .bed(.sideLeft), .bed(.sideRight), .lfe,
-                          .bed(.rearLeft), .bed(.rearRight), .bed(.topFrontLeft), .bed(.topFrontRight),
-                          .bed(.topRearLeft), .bed(.topRearRight)])
-        #expect(misplaced == 0)
-        for (c, speaker) in layout.speakers.enumerated() where speaker.isHeight {
-            #expect(rms[c] > 1e-3, "\(speaker.rawValue) carries its height channel")
+        #expect(roles == [.bed(.topFrontLeft), .bed(.topFrontRight), .bed(.topRearLeft), .bed(.topRearRight)])
+        #expect(bedRoles == [.bed(.center), .bed(.left), .bed(.right), .bed(.sideLeft), .bed(.sideRight), .lfe,
+                             .bed(.rearLeft), .bed(.rearRight)])
+        #expect(built.allSatisfy { $0.count == frames })
+
+        func snr(_ c: [Int]) -> Double {
+            var s = 0.0, e = 0.0
+            for ch in c { for i in 0..<frames { let r = Double(exact[ch][i]); s += r * r; e += (r - Double(built[ch][i])) * (r - Double(built[ch][i])) } }
+            return 10 * log10(s / max(e, 1e-30))
         }
+        let heights = layout.speakers.indices.filter { layout.speakers[$0].isHeight }
+        let all = Array(layout.speakers.indices)
+        let level = 10 * log10(heights.map { c in built[c].reduce(0.0) { $0 + Double($1 * $1) } }.reduce(0, +)
+                                / heights.map { c in exact[c].reduce(0.0) { $0 + Double($1 * $1) } }.reduce(0, +))
+        print("[DTSXSample] built from the bed against the exact separation: all \(String(format: "%.1f", snr(all))) dB, "
+              + "heights \(String(format: "%.1f", snr(heights))) dB, height level \(String(format: "%+.2f", level)) dB, "
+              + "per channel " + all.map { "\(layout.speakers[$0].rawValue)=\(String(format: "%.0f", snr([$0])))" }.joined(separator: " "))
+        #expect(snr(all) > 20)
+        #expect(abs(level) < 1)
     }
 
     @Test("the bridge turns the whole standard sample into contiguous APAC packets")
