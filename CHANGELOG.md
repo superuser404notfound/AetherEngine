@@ -28,6 +28,31 @@ the public-API contract.
   so a host can offer a source-appropriate choice without inferring it from the profile alone.
   They describe the source, not the display's output; routing and reload refusal are unchanged.
 
+### Changed
+
+- **TrueHD Atmos is built from the stream's own lossless 7.1, steered by its objects (AE#731).**
+  With the `TrueHDObjectAudio` trait, `objectAudioRendering` no longer decodes the object presentation
+  exactly and mixes its objects. `BedRegression` builds every output as a per-band linear combination
+  of the stream's channel presentation (Dolby's lossless 7.1 or 5.1), `W = R · A`, with `A` the
+  regression of the object presentation on the bed and `R` the elements' layout gains; the elements
+  are decoded without matrix interpolation and used only as statistics, every element is a point source
+  (size, snap, zones, screen anchoring and the elevation switch are no longer read) and metadata updates
+  apply without a ramp. A per-band energy bound (0.9 to 1.6 times the bed) keeps an element the decode
+  got wrong from adding energy. Against the exact render on ten films and Dolby's Unfold the heights
+  stayed within 0.15 dB at a correlation of 0.997 and above on all but two extreme windows, and an A/B
+  on an Apple TV into a Sonos Arc heard no difference. Needs LibTrueHD 3.2.0, whose binary leaves
+  the interpolating decode out. The latency is 2048 frames, kept off the timeline.
+
+- **DTS:X is built from its own bed, steered by its heights.** With the `DTSXObjectAudio` trait the
+  heights are no longer subtracted from the 7.1 bed and played as channels of their own. The decoder
+  hands over the bed as coded, the heights still folded into it, and `BedRegression` builds every
+  output from that bed in a new fold mode, `W = D + (R − D · F) · A`: the bed on its own speakers, and
+  each height moving the part of the bed the regression attributes to it from the speaker it is folded
+  into to its own. The heights are statistics only. Against the exact separation on 21 windows of
+  seven DTS:X films the heights stayed within 0.14 dB at a correlation of 0.994 and above wherever
+  they carry 0.3 % of the energy or more, 29 to 49 dB overall. Folded beds use an energy bound of 0.5
+  to 2.5 times the bed. Needs FFmpegBuild 3.13.0, whose `x_heights` no longer subtracts the fold.
+
 ### Fixed
 
 - **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
@@ -127,29 +152,6 @@ the public-API contract.
   AVPlayer's own conversion of each frame for the video output.
 
 ### Changed
-
-- **TrueHD Atmos is built from the stream's own lossless 7.1, steered by its objects (AE#731).**
-  With the `TrueHDObjectAudio` trait, `objectAudioRendering` no longer decodes the object presentation
-  exactly and mixes its objects. `BedRegression` builds every output as a per-band linear combination
-  of the stream's channel presentation (Dolby's lossless 7.1 or 5.1), `W = R · A`, with `A` the
-  regression of the object presentation on the bed and `R` the elements' layout gains; the elements
-  are decoded without matrix interpolation and used only as statistics, every element is a point source
-  (size, snap, zones, screen anchoring and the elevation switch are no longer read) and metadata updates
-  apply without a ramp. A per-band energy bound (0.9 to 1.6 times the bed) keeps an element the decode
-  got wrong from adding energy. Against the exact render on ten films and Dolby's Unfold the heights
-  stayed within 0.15 dB at a correlation of 0.997 and above on all but two extreme windows, and an A/B
-  on an Apple TV into a Sonos Arc heard no difference. Needs LibTrueHD 3.2.0, whose binary leaves
-  the interpolating decode out. The latency is 2048 frames, kept off the timeline.
-
-- **DTS:X is built from its own bed, steered by its heights.** With the `DTSXObjectAudio` trait the
-  heights are no longer subtracted from the 7.1 bed and played as channels of their own. The decoder
-  hands over the bed as coded, the heights still folded into it, and `BedRegression` builds every
-  output from that bed in a new fold mode, `W = D + (R − D · F) · A`: the bed on its own speakers, and
-  each height moving the part of the bed the regression attributes to it from the speaker it is folded
-  into to its own. The heights are statistics only. Against the exact separation on 21 windows of
-  seven DTS:X films the heights stayed within 0.14 dB at a correlation of 0.994 and above wherever
-  they carry 0.3 % of the energy or more, 29 to 49 dB overall. Folded beds use an energy bound of 0.5
-  to 2.5 times the bed. Needs FFmpegBuild 3.13.0, whose `x_heights` no longer subtracts the fold.
 
 - **A sequential origin seeks inside what the session already holds (AE#958).** `seek(to:)` on a
   `sequentialOrigin` loopback session lands when the target lies in the resident span that reaches the
