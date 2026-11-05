@@ -73,6 +73,7 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
     /// the renderer's mix (see `BedRegression`). Its latency is the frames it holds, `backlog`.
     private var splitter: BedRegression?
     private var gainSnapshot = ObjectAudioGainSnapshot()
+    private var reportedMissingBed = false
 #endif
     /// Frames taken from the decoder that have not reached `output` yet.
     private var heldBack: Int {
@@ -467,7 +468,14 @@ final class SpatialAudioBridge: AudioTranscodingBridge, @unchecked Sendable {
                 elements: nil, bed: nil, frameCount: block.frameCount,
                 output: output.planes.map { $0 + pendingFrames })
         } else if decoder.playsBedOnly {
-            // No bed yet: silence, never a mix of the object signals.
+            // No bed yet: silence, never a mix of the object signals. TrueHD Atmos always carries a
+            // channel presentation, decoded from the same access unit, so this is a damaged stream.
+            if !reportedMissingBed {
+                reportedMissingBed = true
+                EngineLog.emit(
+                    "[SpatialAudioBridge] WARNING: object presentation without a channel presentation, "
+                    + "playing silence until one arrives", category: .session)
+            }
             renderer!.advance(frameCount: block.frameCount, updates: block.updates)
             for plane in output.planes { (plane + pendingFrames).update(repeating: 0, count: block.frameCount) }
             pendingFrames += block.frameCount
