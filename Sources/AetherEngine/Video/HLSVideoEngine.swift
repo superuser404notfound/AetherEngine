@@ -60,6 +60,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (`VideoRoutingPolicy.presentsDolbyVisionBaseLayer`), ahead of every DV branch including AE#455.
     let dolbyVisionHandling: DolbyVisionHandling
 
+    /// Experimental title-level metadata alignment, explicitly requested by the host.
+    let alignMELDeliveryLuminance: Bool
+
     /// From `LoadOptions.stereoPresentation`: how a 3D source is presented (`StereoVideoSignal.resolve`).
     let stereoPresentation: StereoPresentation
 
@@ -1144,6 +1147,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
+        alignMELDeliveryLuminance: Bool = false,
         dolbyVisionRPUProfile: Int? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
@@ -1203,6 +1207,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling
+        self.alignMELDeliveryLuminance = alignMELDeliveryLuminance
         self.dolbyVisionRPUProfile = dolbyVisionRPUProfile
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
@@ -1488,6 +1493,48 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let av1OK = isAV1 && VTCapabilityProbe.av1Available
         guard isHEVC || isH264 || av1OK else {
             throw HLSVideoEngineError.unsupportedCodec(rawCodecID: codecpar.pointee.codec_id.rawValue)
+        }
+
+        // Read the title head before the index pass or a requested resume seek. Failure, a corrupt
+        // first RPU, or an absent MDCV leaves the hypothesis off for this entire load.
+        var melDeliveryClamp: DoviMELDeliveryClamp?
+        if DoviMELDeliveryClamp.shouldProbe(requested: alignMELDeliveryLuminance,
+                override: ProcessInfo.processInfo.environment["AETHER_DOVI_MEL_CLAMP"]),
+           dolbyVisionHandling == .automatic, isHEVC, DoviMELDeliveryClamp.profile(codecpar) == 7 {
+            var masteringPeak: Double?
+            if let extra = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+                let count = Int(codecpar.pointee.extradata_size)
+                if extra[0] == 1 {
+                    for nal in parseHVCCParameterSets(extra, count) where masteringPeak == nil {
+                        let annexB: [UInt8] = [0, 0, 0, 1] + nal
+                        masteringPeak = annexB.withUnsafeBufferPointer {
+                            DoviMELDeliveryClamp.masteringPeak($0.baseAddress!, $0.count, framing: .annexB)
+                        }
+                    }
+                } else {
+                    masteringPeak = DoviMELDeliveryClamp.masteringPeak(extra, count, framing: .annexB)
+                }
+            }
+            dem.beginReadDeadline(secondsFromNow: 2)
+            scanSourceHead(demuxer: dem, rewind: true, readBudget: 128) { packet in
+                guard packet.pointee.stream_index == videoIndex, let data = packet.pointee.data,
+                      packet.pointee.size > 0 else { return false }
+                let size = Int(packet.pointee.size)
+                let framing: VideoNALFraming
+                if VideoConfigRecord.walksAsLengthPrefixed(data, size: size) { framing = .lengthPrefixed(size: 4) }
+                else if VideoConfigRecord.startsWithStartCode(data, size: size) { framing = .annexB }
+                else { return false }
+                masteringPeak = DoviMELDeliveryClamp.masteringPeak(data, size, framing: framing) ?? masteringPeak
+                let first = DoviMELDeliveryClamp.firstRPU(data, size, framing: framing)
+                guard first.found else { return false }
+                melDeliveryClamp = DoviMELDeliveryClamp.select(profile: 7, elType: first.elType,
+                    masteringNits: masteringPeak ?? DoviMELDeliveryClamp.containerPeak(codecpar),
+                    sourceMaxPQ: first.sourceMaxPQ, enabled: true)
+                return true
+            }
+            dem.endReadDeadline()
+            EngineLog.emit("[HLSVideoEngine] MEL delivery clamp: "
+                + (melDeliveryClamp.map { "\($0.targetNits) nits (PQ \($0.targetPQ))" } ?? "off"), category: .session)
         }
 
         let videoTimeBase = videoStream.pointee.time_base
@@ -1953,6 +2000,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             codecTagOverride: codecTagOverride,
             doviConfig: doviConfig,
             convertP7ToProfile81: convertP7ToProfile81,
+            melDeliveryClamp: melDeliveryClamp,
             colorOverride: p5ColorOverride,
             extradataOverride: videoExtradataOverride,
             nalFramingOverride: measuredVideoNALFraming,
@@ -3667,6 +3715,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             },
             cleanup: { custom?.reader.close() },
             convertP7ToProfile81: cfg.convertP7ToProfile81,
+            melDeliveryClamp: cfg.melDeliveryClamp,
             nalFraming: framing)
         return IFrameRendition(
             entries: entries,

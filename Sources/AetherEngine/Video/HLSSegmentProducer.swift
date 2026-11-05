@@ -42,6 +42,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// Per-packet RPU conversion P7 -> 8.1 (HEVC P7 on DV panel). The container dvcC is a separate
         /// decision (`doviConfig`); this one rewrites the bitstream.
         let convertP7ToProfile81: Bool
+        let melDeliveryClamp: DoviMELDeliveryClamp?
         /// Optional color-signaling override forwarded to `MP4SegmentMuxer.ColorOverride`.
         let colorOverride: MP4SegmentMuxer.ColorOverride?
         /// Optional replacement for `codecpar.extradata` before write_header.
@@ -68,6 +69,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             codecTagOverride: String?,
             doviConfig: MP4SegmentMuxer.DoviConfigPolicy = .keep,
             convertP7ToProfile81: Bool = false,
+            melDeliveryClamp: DoviMELDeliveryClamp? = nil,
             colorOverride: MP4SegmentMuxer.ColorOverride? = nil,
             extradataOverride: [UInt8]? = nil,
             nalFramingOverride: VideoNALFraming? = nil,
@@ -83,6 +85,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             self.codecTagOverride = codecTagOverride
             self.doviConfig = doviConfig
             self.convertP7ToProfile81 = convertP7ToProfile81
+            self.melDeliveryClamp = melDeliveryClamp
             self.colorOverride = colorOverride
             self.extradataOverride = extradataOverride
             self.nalFramingOverride = nalFramingOverride
@@ -4557,7 +4560,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             }
                         }
                         if !DoviRpuConverter.convertPacketToProfile81(
-                            packet, framing: a53NALFraming) {
+                            packet, framing: a53NALFraming, deliveryClamp: videoConfig.melDeliveryClamp) {
                             if !loggedP7ConversionFailure {
                                 loggedP7ConversionFailure = true
                                 EngineLog.emit(

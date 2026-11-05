@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+- **Hosts can experimentally opt in to aligning MEL delivery luminance metadata.**
+  With `LoadOptions.alignMELDeliveryLuminance` (default false), the native Profile 7 to 8.1 remux
+  checks the title's first RPU and base-layer mastering metadata
+  once at open. A MEL title mastered at no more than 1000 nits whose RPU declares at least 4000
+  nits clamps source/L1 maxima and L6 luminance to the base master. Creative trims stay intact.
+  Picture benefit remains unmeasured; `AETHER_DOVI_MEL_CLAMP=0` disables an opted-in load for A/B.
 
 ## [7.57.0] - 2026-11-05
 

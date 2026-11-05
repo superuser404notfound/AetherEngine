@@ -496,6 +496,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// contradicts.
     public var dolbyVisionHandling: DolbyVisionHandling
 
+    /// Experimental opt-in to aligning eligible Profile 7 MEL luminance metadata to the base-layer
+    /// mastering peak during the native Profile 8.1 remux. Default false. The eligibility heuristic
+    /// is not proof of a mapped delivery or a picture improvement; compare against the unmodified
+    /// title before using it. FEL composition and base-layer-only playback are unchanged.
+    /// A tuning field, correctable through `reloadAtCurrentPosition(applying:)`.
+    public var alignMELDeliveryLuminance: Bool = false
+
     /// Opt in to full dual-layer Dolby Vision decoding of Profile 7 FEL streams, composed on the GPU, instead of
     /// the native route (the single-layer Profile 8.1 conversion, or the HDR10 base layer). When true, `dolbyVisionHandling` is `.automatic`, the stream's
     /// enhancement layer is FEL, VideoToolbox decodes HEVC in hardware and the stream fits the real-time
@@ -1128,6 +1135,7 @@ public struct LoadOptions: Sendable, Equatable {
         keepDvh1TagWithoutDV: Bool = false,
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
+        alignMELDeliveryLuminance: Bool = false,
         preferDualLayerDolbyVision: Bool = false,
         dualLayerRoute: DualLayerRoute = .softwareHost,
         upscalesLowResolutionVideo: Bool = false,
@@ -1193,6 +1201,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling
+        self.alignMELDeliveryLuminance = alignMELDeliveryLuminance
         self.preferDualLayerDolbyVision = preferDualLayerDolbyVision
         self.dualLayerRoute = dualLayerRoute
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo

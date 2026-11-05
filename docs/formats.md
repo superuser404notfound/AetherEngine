@@ -757,3 +757,23 @@ Things that work today but have a documented edge case, or are deferred behind a
 - **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships HW AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is meaningfully higher than HW HEVC. A Profile 10.1 source keeps its Dolby Vision there ([Dolby Vision signaling](#dolby-vision-signaling)). Film grain and the P010 conversion run on the GPU, so what stays on the CPU is dav1d's decode. On iOS 17+ / macOS 14+ AV1 routes through Apple's HW pipeline transparently. Future Apple TV chips with HW AV1 will be picked up automatically by `VTCapabilityProbe`.
 - **AV1 Dolby Vision Profile 10.0 has wrong colours when software-decoded.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) renders with incorrect colours on the SW path. Profiles 10.1 and 10.4 are unaffected because they carry an HDR10 / HLG base layer. Profile 10.0 only renders correctly through the native AVPlayer path on hosts with HW AV1 decode.
 - **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnails skip the RPU reshaping curves.** `FrameExtractor` now applies the DV colour transform (from `AV_FRAME_DATA_DOVI_METADATA`) so P5 / P10.0 stills come out with correct colour, validated against a libplacebo render. The per-frame reshaping polynomials are intentionally not applied: they are not what causes the visible green / magenta corruption, and skipping them keeps this a lightweight CPU pass rather than a full Dolby Vision compositor. Brightness / contrast can therefore differ marginally from a fully graded DV render. A frame that carries no DV metadata falls back to the standard path.
+
+### MEL delivery luminance hypothesis
+
+With `LoadOptions.alignMELDeliveryLuminance = true` (default false), the AVPlayer
+enhancement-layer-discarded Profile 7 to Profile 8.1 remux selects a luminance clamp
+once at title open, before resume or index seeks. Default loads skip the additional head scan. It requires MEL in the first RPU, a positive
+base-layer MDCV mastering peak of 1 through 1000 nits (HEVC SEI first, container metadata as
+fallback), and source maximum PQ at least 3696 (the 12-bit encoding of 4000 nits).
+A bounded head scan (128 packets, two-second read deadline) that cannot establish these facts
+leaves the clamp off for the load. A corrupt first RPU also leaves it off. This is an experimental
+mapped-delivery hypothesis; picture benefit still needs a TV comparison.
+
+When active, the remux keeps libdovi mode 2 and clamps source maximum PQ, L1 maximum PQ,
+and L6 MaxCLL/MaxFALL to the base peak; L6 mastering maximum becomes that peak. L1 minimum/average,
+L2/L8 trims, other metadata levels, and HEVC MDCV remain unchanged. Seeks and trickplay reuse the
+same selection. This affects only the native remux, not the composed-frame metadata.
+Compare an opted-in load with the default unmodified load at the same title positions.
+`AETHER_DOVI_MEL_CLAMP=0` also forces the control arm for an opted-in host; unset it to allow
+eligibility selection, then reload the title. The environment variable never enables a default load. The existing P8.1 sample entry remains profile 8, compatibility 1,
+base and RPU present, enhancement layer absent.
