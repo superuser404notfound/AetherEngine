@@ -191,9 +191,10 @@ final class RemoteHLSSubtitleProvider: HLSSegmentProvider, @unchecked Sendable {
         }
         let cues = store.allCues()
         if serve != .complete {
+            let why = serve == .failedFill ? "could not be read" : "has no decode running"
             EngineLog.emit(
-                "[AetherEngine] AE#984: the sidecar for subtitle rendition ord=\(ordinal) could not be read; "
-                + "serving it empty so the A/V session is not held for it", category: .hlsServer)
+                "[AetherEngine] AE#984: the sidecar for subtitle rendition ord=\(ordinal) \(why); "
+                + "serving it as it stands so the A/V session is not held for it", category: .hlsServer)
         } else {
             EngineLog.emit(
                 "[AetherEngine] #316: whole-program rendition ord=\(ordinal) cues=\(cues.count)",

@@ -135,11 +135,10 @@ struct Issue984SidecarFetchTests {
         defer { server.stop(); provider.cancelFill() }
         provider.startFill()
 
-        let clock = ContinuousClock()
-        let started = clock.now
+        // The status is the verdict, not the wall clock: a held request ends 200 once the fill lands
+        // (or empty at its deadline), never 404, and a timing bound flakes in a parallel run.
         let early = try await Self.get("/\(server.pathToken)/subs_0_0.vtt", port: server.port)
         #expect(early.status == 404)
-        #expect(clock.now - started < .seconds(1))
 
         await provider.awaitFill()
         let late = try await Self.get("/\(server.pathToken)/subs_0_0.vtt", port: server.port)
