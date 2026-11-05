@@ -229,7 +229,7 @@ extension AetherEngine {
     nonisolated static func fetchLiveSubtitleRenditionPlaylist(
         _ url: URL, headers: [String: String], session: URLSession = renditionSession
     ) async throws -> HLSMediaPlaylist? {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         let (data, response) = try await BoundedPlaylistFetch.data(
             for: request, session: session, limit: HLSLiveIngestReader.maximumPlaylistBytes)
@@ -247,7 +247,7 @@ extension AetherEngine {
     nonisolated static func fetchLiveSubtitleRenditionSegment(
         _ url: URL, headers: [String: String], session: URLSession = renditionSession
     ) async -> WebVTTSegment? {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (key, value) in headers { request.setValue(value, forHTTPHeaderField: key) }
         guard let (data, response) = try? await BoundedFetch.data(
                 for: request, session: session, limit: BoundedFetch.webVTTSegmentLimit),

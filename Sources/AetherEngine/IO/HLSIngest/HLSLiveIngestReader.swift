@@ -798,7 +798,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// origin is (audit NET-7), and a segment's sub-range when it has one. Internal for the
     /// header-contract tests.
     func makeRequest(_ url: URL, byteRange: HLSByteRange? = nil) -> URLRequest {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in RedirectHeaderPolicy.scoped(
             httpHeaders, grantedFor: credentialOrigin, sentTo: url) {
             request.setValue(value, forHTTPHeaderField: field)

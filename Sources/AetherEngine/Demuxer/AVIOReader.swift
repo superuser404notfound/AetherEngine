@@ -2047,7 +2047,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// 200 answer carries is cut after the one byte the request asked for (`ChunkFetchDelegate`).
     /// Demux thread, open-time only.
     private func confirmRangeIsIgnored(contentLength: Int64) -> RangeConfirmation {
-        var request = URLRequest(url: requestURL())
+        var request = URLRequest(engineURL: requestURL())
         request.setValue("bytes=1-1", forHTTPHeaderField: "Range")
         let budget = min(10, chunkRequestTimeout)
         request.timeoutInterval = budget
@@ -3312,7 +3312,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private func detourFetchBlock(from offset: Int64, size: Int) -> DetourFetch {
         let budget = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout, cap: detourFetchBudget)
         let rangeEnd = offset + Int64(size) - 1
-        var request = URLRequest(url: requestURL())
+        var request = URLRequest(engineURL: requestURL())
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
         // #93/#96: a starved backward-scrub detour fetch must abort fast (the rescue reconnect serves
         // instantly), so this path uses the tight interactive budget, not the full chunk timeout.
@@ -3469,7 +3469,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 + "earlier this session (\(reason))", category: .demux)
             return
         }
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         request.setValue("bytes=-\(Self.tailPrefetchBytes)", forHTTPHeaderField: "Range")
         request.timeoutInterval = Self.effectiveDetourBudget(chunkRequestTimeout: chunkRequestTimeout, cap: detourFetchBudget)
         applyExtraHeaders(&request)
@@ -3828,7 +3828,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         if isClosed { return }
 
-        var request = URLRequest(url: requestURL())
+        var request = URLRequest(engineURL: requestURL())
         // #93 residual: a bounded open connection asks for a finite range so an origin that dribbles
         // the open-ended `bytes=0-` stream serves it as a fast finite GET. The 206 Content-Range still
         // carries the total size, so fileSize resolution (issue #70) is unaffected.
@@ -4564,7 +4564,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     private func streamDownloadSync() {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         request.timeoutInterval = 0  // No timeout for live streams
         applyExtraHeaders(&request)
 
@@ -5024,7 +5024,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             return deadline.uptimeNanoseconds > now
                 ? min(scope.remaining, Double(deadline.uptimeNanoseconds - now) / 1_000_000_000) : 0
         }
-        var request = URLRequest(url: requestURL())
+        var request = URLRequest(engineURL: requestURL())
         request.httpMethod = method
         if let range { request.setValue(range, forHTTPHeaderField: "Range") }
         applyExtraHeaders(&request)
@@ -5086,7 +5086,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// the #126 last-resort probe for origins that answer bytes=0- without a length but honor
     /// real ranges.
     private func rangeProbeFileSize(range: String) -> Int64? {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         request.setValue(range, forHTTPHeaderField: "Range")
         request.timeoutInterval = 20
         applyExtraHeaders(&request)
@@ -5144,7 +5144,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// HEAD probe fallback for live-transcode endpoints that reject Range.
     private func headProbeFileSize() -> Int64 {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 5
         applyExtraHeaders(&request)
@@ -5186,7 +5186,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let usingCachedURL = !forceSource && cachedResolvedURL() != nil
         let target = forceSource ? url : requestURL()
         let rangeEnd = offset + Int64(size) - 1
-        var request = URLRequest(url: target)
+        var request = URLRequest(engineURL: target)
         request.setValue("bytes=\(offset)-\(rangeEnd)", forHTTPHeaderField: "Range")
         request.timeoutInterval = min(15, chunkRequestTimeout)
         applyExtraHeaders(&request)

@@ -131,7 +131,7 @@ final class DASHSourceOpener: @unchecked Sendable {
 
     /// One GET on the opener's own session, so `cancel()` reaches it.
     private func fetch(_ url: URL, range: ClosedRange<Int64>? = nil) throws -> (Data, HTTPURLResponse) {
-        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+        var request = URLRequest(engineURL: url, timeoutInterval: requestTimeout)
         for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
         if let range { request.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range") }
         let done = DispatchSemaphore(value: 0)

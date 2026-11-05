@@ -40,6 +40,11 @@ final class ThrottledOriginServer: @unchecked Sendable {
         /// Audit DMX-101: a server that cannot address bytes. Whatever range was asked for, the
         /// answer is a 200 with the whole source from byte 0 and its full Content-Length.
         case serve200
+        /// AE#986: a refusal whose body never finishes. The status line, `Content-Type` (nil sends
+        /// none) and a `Content-Length` far past the body go out at once, then `body` bytes, then
+        /// the connection is held open without a FIN, the way a proxy passes on an upstream error
+        /// that ended short of its length.
+        case statusWithHeldBody(Int, contentType: String?, body: Int)
     }
 
     let port: UInt16
@@ -308,6 +313,15 @@ final class ThrottledOriginServer: @unchecked Sendable {
                 + "Content-Length: 0\r\n"
                 + "Connection: keep-alive\r\n\r\n"
             return writeFully(fd, Array(header.utf8))
+        case .statusWithHeldBody(let code, let contentType, let body):
+            let header = "HTTP/1.1 \(code) Status\r\n"
+                + (contentType.map { "Content-Type: \($0)\r\n" } ?? "")
+                + "Content-Length: 41382012\r\n\r\n"
+            guard writeFully(fd, Array(header.utf8) + Array(repeating: UInt8(ascii: "E"), count: body)) else {
+                return false
+            }
+            while !stopped { usleep(200_000) }
+            return false
         case .redirect(let location):
             let header = "HTTP/1.1 302 Found\r\n"
                 + "Location: \(location)\r\n"

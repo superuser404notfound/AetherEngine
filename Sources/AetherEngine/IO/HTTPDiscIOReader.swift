@@ -378,7 +378,7 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     private static func rangeGet(url: URL, extraHeaders: [String: String], session: URLSession,
                                  timeout: TimeInterval, offset: Int64, length: Int) -> RangeResponse? {
         autoreleasepool {
-            var req = URLRequest(url: url, timeoutInterval: timeout)
+            var req = URLRequest(engineURL: url, timeoutInterval: timeout)
             req.httpMethod = "GET"
             req.setValue(rangeHeader(offset: offset, length: length), forHTTPHeaderField: "Range")
             for (k, v) in extraHeaders { req.setValue(v, forHTTPHeaderField: k) }

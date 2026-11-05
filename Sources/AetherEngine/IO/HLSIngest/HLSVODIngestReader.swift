@@ -694,7 +694,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     /// Credentials only where the host's playlist is (audit NET-7), and a segment's sub-range when it
     /// has one.
     func makeRequest(_ url: URL, byteRange: HLSByteRange? = nil) -> URLRequest {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in scopedHeaders(url, byteRange: byteRange) {
             request.setValue(value, forHTTPHeaderField: field)
         }

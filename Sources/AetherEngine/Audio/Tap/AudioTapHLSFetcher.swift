@@ -48,7 +48,7 @@ final class AudioTapHLSFetcher: @unchecked Sendable {
     private static let maximumSegmentBytes = BoundedFetch.segmentLimit(forDuration: 0)
 
     private func get(_ url: URL, limit: Int) async throws -> (Data, URLResponse) {
-        var request = URLRequest(url: url)
+        var request = URLRequest(engineURL: url)
         for (field, value) in credentials.headers(for: url) {
             request.setValue(value, forHTTPHeaderField: field)
         }
