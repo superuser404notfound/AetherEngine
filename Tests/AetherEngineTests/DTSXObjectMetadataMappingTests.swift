@@ -6,9 +6,9 @@ import AetherLibavutil
 @testable import AetherEngine
 
 /// FFmpeg's dca decoder returns DTS:X's standard presentation as 7.1.4 (FFmpegBuild's `x_heights`
-/// patch), and `DTSXObjectAudioDecoder` names its channels. These pin what a listener would hear
-/// wrong: a bed or height channel on the wrong speaker, or a channel outside the twelve slipping
-/// through to be panned.
+/// patch), and `DTSXObjectAudioDecoder` names its channels and the heights' folds into the bed. These
+/// pin what a listener would hear wrong: a bed or height channel on the wrong speaker, a height taken
+/// out of the wrong bed channel, or a channel outside the twelve slipping through to be panned.
 @Suite("DTS:X channels map onto the renderer's speakers")
 struct DTSXObjectMetadataMappingTests {
 
@@ -26,6 +26,16 @@ struct DTSXObjectMetadataMappingTests {
         for ((channel, role), (wantChannel, wantRole)) in zip(DTSXObjectAudioDecoder.channels, expected) {
             #expect(channel == wantChannel && role == wantRole, "\(channel.rawValue)")
         }
+    }
+
+    @Test("the bed is the first eight channels, the heights the elements, each folded into the one under it")
+    func bedAndFolds() {
+        #expect(DTSXObjectAudioDecoder.bedRoles == DTSXObjectAudioDecoder.channels.prefix(8).map(\.1))
+        #expect(DTSXObjectAudioDecoder.roles == [.bed(.topFrontLeft), .bed(.topFrontRight), .bed(.topRearLeft), .bed(.topRearRight)])
+        let under: [ObjectAudioRole] = DTSXObjectAudioDecoder.folds.map { DTSXObjectAudioDecoder.bedRoles[$0.plane] }
+        #expect(DTSXObjectAudioDecoder.folds.map(\.element) == [0, 1, 2, 3])
+        #expect(under == [.bed(.left), .bed(.right), .bed(.rearLeft), .bed(.rearRight)])
+        #expect(DTSXObjectAudioDecoder.folds.allSatisfy { $0.gain == 23170 / 32768 })
     }
 
     @Test("the standard channels play one to one on 7.1.4 and 9.1.6, and only there")

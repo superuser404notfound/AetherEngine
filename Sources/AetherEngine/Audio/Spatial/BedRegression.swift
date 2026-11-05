@@ -1,5 +1,5 @@
-// Only with the TrueHDObjectAudio trait (off by default), which links LibTrueHD.
-#if TrueHDObjectAudio
+// Only with the TrueHDObjectAudio or DTSXObjectAudio trait (both off by default).
+#if TrueHDObjectAudio || DTSXObjectAudio
 import Accelerate
 import Foundation
 
@@ -20,6 +20,14 @@ import Foundation
 /// whose own objects measure 0.7 to 1.0 in power, lands inside), so a drifting element can misplace
 /// energy but never add or remove it, and the output can never click.
 ///
+/// A stream can instead carry its elements next to a bed they are folded into at known gains (DTS:X:
+/// four heights, each in the bed speaker under it at -3 dB). Then the bed plays on its own speakers
+/// and every element moves the part of the bed the regression attributes to it from its bed speaker
+/// to its own: `W = D + (R − D · F) · A`, with `D` the bed's own speakers and `F` the folds. Still
+/// nothing but the bed reaches an output, and nothing is subtracted from it sample by sample. Such
+/// an output can carry up to twice the bed's energy (an element alone, folded at -3 dB), so the
+/// bounds are `foldedEnergyBounds`.
+///
 /// The LFE is the bed's own, on the same delay.
 ///
 /// Streaming: output frame i is input frame i − `latency`. The first `latency` frames after a reset
@@ -33,9 +41,13 @@ final class BedRegression {
     static let smoothing: Double = 0.5
     static let regularization: Double = 1e-3
     static let energyBounds: ClosedRange<Double> = 0.9...1.6
+    /// Measured on 21 DTS:X windows: inside these the output is unchanged within 0.2 dB, while
+    /// `energyBounds` cost up to 14 dB there.
+    static let foldedEnergyBounds: ClosedRange<Double> = 0.5...2.5
 
     let layout: SpatialSpeakerLayout
     let bedRoles: [ObjectAudioRole]
+    let folds: [ObjectAudioBedFold]
 
     // MARK: Configuration
 
@@ -50,6 +62,10 @@ final class BedRegression {
     /// Where each regressed bed channel plays when nothing explains it (no placed element yet): its
     /// own speaker, or the panner's spot for it. `outputs` rows of `bedInputs.count`.
     private let fallback: [Float]
+    /// Per element, `outputs` entries: −(D · F), what its fold takes from the bed's own speakers.
+    /// Empty without folds.
+    private let foldGains: [Float]
+    private let bounds: ClosedRange<Double>
     private let bandOfBin: [Int]
     private let bandCenters: [Float]
     private let bands: Int
@@ -96,9 +112,10 @@ final class BedRegression {
     private var outRe: [Float], outIm: [Float]
     private var timeBuf: [Float]
 
-    init(layout: SpatialSpeakerLayout, bedRoles: [ObjectAudioRole]) {
+    init(layout: SpatialSpeakerLayout, bedRoles: [ObjectAudioRole], folds: [ObjectAudioBedFold] = []) {
         self.layout = layout
         self.bedRoles = bedRoles
+        self.folds = folds
         outputs = layout.channelCount
         lfeOutput = layout.lfeIndex
         bedLFE = bedRoles.firstIndex(of: .lfe)
@@ -123,6 +140,16 @@ final class BedRegression {
             for c in 0..<layout.channelCount { fallback[c * bedInputs.count + j] = row[c] }
         }
         self.fallback = fallback
+        bounds = folds.isEmpty ? Self.energyBounds : Self.foldedEnergyBounds
+        let elements = (folds.map(\.element).max() ?? -1) + 1
+        var foldGains = [Float](repeating: 0, count: elements * layout.channelCount)
+        for fold in folds {
+            guard let j = bedInputs.firstIndex(of: fold.plane) else { continue }
+            for c in 0..<layout.channelCount {
+                foldGains[fold.element * layout.channelCount + c] -= fold.gain * fallback[c * bedInputs.count + j]
+            }
+        }
+        self.foldGains = foldGains
 
         var edges = [0]
         for i in 0..<Self.bandCount {
@@ -488,12 +515,17 @@ final class BedRegression {
                     ar[e * nb + i] = sr / l; ai[e * nb + i] = -(si / l)
                 }
             }
-            // W = R · A
+            // W = R · A, or with folds D + (R − D · F) · A
+            let folded = !foldGains.isEmpty
             for o in 0..<O {
-                for j in 0..<nb { wr[o * nb + j] = 0; wi[o * nb + j] = 0 }
+                for j in 0..<nb {
+                    wr[o * nb + j] = folded ? Double(fallback[o * nb + j]) : 0
+                    wi[o * nb + j] = 0
+                }
                 guard o != lfeOutput else { continue }
                 for e in 0..<K where active[e] {
-                    let g = Double(gains[e * O + o])
+                    var g = Double(gains[e * O + o])
+                    if folded, e * O + o < foldGains.count { g += Double(foldGains[e * O + o]) }
                     guard g != 0 else { continue }
                     for j in 0..<nb { wr[o * nb + j] += g * ar[e * nb + j]; wi[o * nb + j] += g * ai[e * nb + j] }
                 }
@@ -517,8 +549,8 @@ final class BedRegression {
             var g = 1.0
             if eo > 1e-15 {
                 let r = eo / trace
-                if r > Self.energyBounds.upperBound { g = (Self.energyBounds.upperBound / r).squareRoot() }
-                else if r < Self.energyBounds.lowerBound { g = (Self.energyBounds.lowerBound / r).squareRoot() }
+                if r > bounds.upperBound { g = (bounds.upperBound / r).squareRoot() }
+                else if r < bounds.lowerBound { g = (bounds.lowerBound / r).squareRoot() }
             }
             let wBase = band * O * nb
             for i in 0..<(O * nb) { weightRe[wBase + i] = Float(wr[i] * g); weightIm[wBase + i] = Float(wi[i] * g) }

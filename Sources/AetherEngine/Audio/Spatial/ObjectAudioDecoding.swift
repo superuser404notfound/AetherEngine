@@ -21,8 +21,9 @@ struct ObjectAudioDecodedBlock {
     var planes: [UnsafePointer<Float>]
     /// Metadata taking effect inside this block, sorted by frame offset.
     var updates: [ObjectAudioMetadataUpdate]
-    /// The stream's channel-based presentation of the same frames (Dolby's own 7.1 or 5.1 rendering
-    /// of the mix), when the decoder carries one: see `BedRegression`.
+    /// The stream's channel-based presentation of the same frames, when the decoder carries one:
+    /// Dolby's own 7.1 or 5.1 rendering of the mix (TrueHD), or the 7.1 bed DTS:X folds its heights
+    /// into. See `BedRegression`.
     var bed: ObjectAudioBed?
 }
 
@@ -32,6 +33,18 @@ struct ObjectAudioBed {
     var roles: [ObjectAudioRole]
     /// `frameCount` frames each, borrowed like the block's planes.
     var planes: [UnsafePointer<Float>]
+    /// Elements the encoder also folded into this bed, and where. Empty when the bed is a rendering
+    /// of its own (TrueHD) rather than a carrier of the elements (DTS:X).
+    var folds: [ObjectAudioBedFold] = []
+}
+
+/// One element of a block folded into one plane of its bed at a fixed gain.
+struct ObjectAudioBedFold: Equatable {
+    /// Index into the block's `roles`.
+    var element: Int
+    /// Index into the bed's `roles`.
+    var plane: Int
+    var gain: Float
 }
 
 /// A decoder that turns an object-audio bitstream (TrueHD with Atmos, DTS:X) into signals plus the
