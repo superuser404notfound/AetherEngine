@@ -64,6 +64,15 @@ final class DeinterlaceFilter {
 
     var isActive: Bool { graph != nil }
 
+    private var builtFilterName: String?
+
+    /// The built graph as the public report describes it (AE#983); nil while no graph is built.
+    var activeDeinterlace: VideoDeinterlace? {
+        guard let engine, let builtFilterName else { return nil }
+        return VideoDeinterlace(filter: builtFilterName, isHardware: engine == .hardware,
+                                fieldRate: engine == .hardware ? config.fieldRate : .frame)
+    }
+
     static func prewarmHardwarePipeline() -> Bool {
         guard avfilter_get_by_name("yadif_videotoolbox") != nil,
               let frame = av_frame_alloc() else {
@@ -295,6 +304,8 @@ final class DeinterlaceFilter {
         srcCtx = src
         sinkCtx = sink
         engine = wanted
+        builtFilterName = wanted == .hardware ? "yadif_videotoolbox"
+            : (avfilter_get_by_name("bwdif") != nil ? "bwdif" : "yadif")
         outputTimeBase = av_buffersink_get_time_base(sink)
         width = frame.pointee.width
         height = frame.pointee.height
@@ -348,6 +359,7 @@ final class DeinterlaceFilter {
         srcCtx = nil
         sinkCtx = nil
         engine = nil
+        builtFilterName = nil
         outputTimeBase = AVRational(num: 0, den: 1)
         width = 0
         height = 0
