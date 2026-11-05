@@ -26,10 +26,16 @@ final class ObjectMetadataHold {
 
         init(_ source: ObjectAudioDecodedBlock) {
             let frames = source.frameCount
-            storage = .allocate(capacity: max(1, source.planes.count * frames))
+            let bedPlanes = source.bed?.planes ?? []
+            storage = .allocate(capacity: max(1, (source.planes.count + bedPlanes.count) * frames))
             block = source
             block.planes = source.planes.enumerated().map { channel, plane in
                 let copy = storage + channel * frames
+                copy.update(from: plane, count: frames)
+                return UnsafePointer(copy)
+            }
+            block.bed?.planes = bedPlanes.enumerated().map { channel, plane in
+                let copy = storage + (source.planes.count + channel) * frames
                 copy.update(from: plane, count: frames)
                 return UnsafePointer(copy)
             }

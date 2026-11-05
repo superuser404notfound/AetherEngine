@@ -25,12 +25,6 @@ struct ObjectAudioElementState: Sendable, Equatable {
     var position: SIMD3<Float> = SIMD3(0.5, 0.5, 0)
     /// Linear gain.
     var gain: Float = 1
-    /// 0 = point source, 1 = whole room.
-    var size: Float = 0
-    /// Render to the single nearest speaker.
-    var snap: Bool = false
-    /// Speakers the object must not use (Atmos zone masks).
-    var excluded: Set<SpatialSpeaker> = []
 }
 
 /// A metadata change taking effect partway through a block.
@@ -45,6 +39,21 @@ struct ObjectAudioMetadataUpdate: Sendable {
     var states: [ObjectAudioElementState?]
 }
 
+/// Element gains and positions as `ObjectAudioRenderer.snapshot` reads them, reused across blocks.
+struct ObjectAudioGainSnapshot {
+    var layoutGains: [Float] = []
+    var positions: [SIMD3<Float>?] = []
+    var gains: [Float] = []
+
+    mutating func resize(elements: Int, channels: Int) {
+        if layoutGains.count != elements * channels { layoutGains = [Float](repeating: 0, count: elements * channels) }
+        if positions.count != elements {
+            positions = Array(repeating: nil, count: elements)
+            gains = [Float](repeating: 0, count: elements)
+        }
+    }
+}
+
 /// Renders object audio (beds + dynamic objects + metadata) into a `SpatialSpeakerLayout` bed.
 ///
 /// Gains are computed once per metadata update and interpolated linearly across each update's
@@ -55,7 +64,8 @@ final class ObjectAudioRenderer {
     let layout: SpatialSpeakerLayout
     private(set) var roles: [ObjectAudioRole]
 
-    private var panners: [Set<SpatialSpeaker>: AllocentricPanner] = [:]
+    /// Every element is a point source at its position, panned over the whole layout.
+    private let panner: AllocentricPanner
 
     /// Per element, per output channel: the gains currently applied, the gains being ramped
     /// towards, and how many frames of that ramp remain.
@@ -68,18 +78,23 @@ final class ObjectAudioRenderer {
     /// from, and ramping from silence would fade every object in after each seek.
     private var hasMetadata: [Bool]
 
+    /// Each object's latest state, for `snapshot`.
+    private var objectStates: [ObjectAudioElementState?]
+
     private var scratch: [Float] = []
     private var rampScratch: [Float] = []
 
     init(layout: SpatialSpeakerLayout, roles: [ObjectAudioRole]) {
         self.layout = layout
         self.roles = roles
+        panner = AllocentricPanner(layout: layout)
         let channels = layout.channelCount
         current = Array(repeating: [Float](repeating: 0, count: channels), count: roles.count)
         target = current
         rampRemaining = Array(repeating: 0, count: roles.count)
         rampTotal = rampRemaining
         hasMetadata = Array(repeating: false, count: roles.count)
+        objectStates = Array(repeating: nil, count: roles.count)
         // Beds and LFE have gains the moment the renderer exists; objects wait for metadata and are
         // silent until their first update, rather than guessing at a position. The TrueHD decoder
         // holds the blocks before that update and gives the first of them its state at frame 0
@@ -96,6 +111,7 @@ final class ObjectAudioRenderer {
         for index in roles.indices {
             rampRemaining[index] = 0
             hasMetadata[index] = false
+            objectStates[index] = nil
             if roles[index] == .object {
                 for c in current[index].indices { current[index][c] = 0 }
             } else {
@@ -154,19 +170,72 @@ final class ObjectAudioRenderer {
         for update in pending { apply(update) }
     }
 
+    /// Take `frameCount` frames of metadata and ramps forward without mixing any audio: what
+    /// `render` does to the gains, for a caller that reads them through `snapshot` instead.
+    func advance(frameCount: Int, updates: [ObjectAudioMetadataUpdate]) {
+        var cursor = 0
+        var pending = updates[...]
+        while cursor < frameCount {
+            while let next = pending.first, next.frameOffset <= cursor {
+                apply(next)
+                pending = pending.dropFirst()
+            }
+            let end = min(frameCount, pending.first?.frameOffset ?? frameCount)
+            for index in roles.indices where rampRemaining[index] > 0 {
+                rampRemaining[index] -= min(rampRemaining[index], end - cursor)
+                if rampRemaining[index] == 0 { current[index] = target[index] }
+            }
+            cursor = end
+        }
+        for update in pending { apply(update) }
+    }
+
+    /// Every element's gains towards the layout as they stand now (mid-ramp included), and where
+    /// it sits: `layoutGains` holds `roles.count` rows of `layout.channelCount`; `positions` is nil
+    /// for the LFE and for an object without metadata yet; `gains` is the element gain.
+    func snapshot(into snapshot: inout ObjectAudioGainSnapshot) {
+        let channels = layout.channelCount
+        snapshot.resize(elements: roles.count, channels: channels)
+        for index in roles.indices {
+            let row = index * channels
+            if rampRemaining[index] > 0 {
+                let t = Float(rampTotal[index] - rampRemaining[index]) / Float(rampTotal[index])
+                for c in 0..<channels {
+                    snapshot.layoutGains[row + c] = current[index][c] + (target[index][c] - current[index][c]) * t
+                }
+            } else {
+                for c in 0..<channels { snapshot.layoutGains[row + c] = current[index][c] }
+            }
+            switch roles[index] {
+            case .object:
+                snapshot.positions[index] = objectStates[index]?.position
+                snapshot.gains[index] = objectStates[index]?.gain ?? 0
+            case .bed(let speaker):
+                snapshot.positions[index] = speaker.position
+                snapshot.gains[index] = 1
+            case .fixed(let position):
+                snapshot.positions[index] = position
+                snapshot.gains[index] = 1
+            case .lfe:
+                snapshot.positions[index] = nil
+                snapshot.gains[index] = 0
+            }
+        }
+    }
+
     // MARK: - Metadata
 
     private func apply(_ update: ObjectAudioMetadataUpdate) {
         let count = min(update.states.count, roles.count)
         for index in 0..<count {
             guard let state = update.states[index] else { continue }
+            if roles[index] == .object { objectStates[index] = state }
             let jump = update.rampFrames <= 0 || !hasMetadata[index]
             hasMetadata[index] = true
             var gains = [Float](repeating: 0, count: layout.channelCount)
             switch roles[index] {
             case .object:
-                panner(excluding: state.excluded).objectGains(
-                    position: state.position, size: state.size, snap: state.snap, into: &gains)
+                panner.pointGains(state.position, into: &gains)
                 if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
             case .bed, .lfe, .fixed:
                 staticGains(for: roles[index], state: state, into: &gains)
@@ -200,11 +269,11 @@ final class ObjectAudioRenderer {
                 for c in gains.indices { gains[c] = 0 }
                 gains[direct] = state.gain
             } else {
-                panner(excluding: []).pointGains(speaker.position, into: &gains)
+                panner.pointGains(speaker.position, into: &gains)
                 if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
             }
         case .fixed(let position):
-            panner(excluding: []).pointGains(position, into: &gains)
+            panner.pointGains(position, into: &gains)
             if state.gain != 1 { for c in gains.indices { gains[c] *= state.gain } }
         case .object:
             break
@@ -225,13 +294,6 @@ final class ObjectAudioRenderer {
         case .surroundRight: return speakers.firstIndex(of: .sideRight)
         default: return nil
         }
-    }
-
-    private func panner(excluding excluded: Set<SpatialSpeaker>) -> AllocentricPanner {
-        if let cached = panners[excluded] { return cached }
-        let built = AllocentricPanner(layout: layout, excluded: excluded)
-        panners[excluded] = built
-        return built
     }
 
     // MARK: - Mixing

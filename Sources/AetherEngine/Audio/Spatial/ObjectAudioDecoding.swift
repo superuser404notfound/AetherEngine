@@ -21,6 +21,17 @@ struct ObjectAudioDecodedBlock {
     var planes: [UnsafePointer<Float>]
     /// Metadata taking effect inside this block, sorted by frame offset.
     var updates: [ObjectAudioMetadataUpdate]
+    /// The stream's channel-based presentation of the same frames (Dolby's own 7.1 or 5.1 rendering
+    /// of the mix), when the decoder carries one: see `BedRegression`.
+    var bed: ObjectAudioBed?
+}
+
+/// A channel bed decoded alongside an object presentation, sample-aligned with it.
+struct ObjectAudioBed {
+    /// One per plane: `.bed`, `.fixed` or `.lfe`, never `.object`.
+    var roles: [ObjectAudioRole]
+    /// `frameCount` frames each, borrowed like the block's planes.
+    var planes: [UnsafePointer<Float>]
 }
 
 /// A decoder that turns an object-audio bitstream (TrueHD with Atmos, DTS:X) into signals plus the
@@ -40,10 +51,14 @@ protocol ObjectAudioDecoding: AnyObject {
     /// How often the decoder has reset ITSELF after an internal failure. Its input offsets count from
     /// zero again afterwards, so the caller has to re-anchor its timeline.
     var selfResetCount: Int { get }
+    /// The decoder's output is meant to come from its channel bed (`ObjectAudioDecodedBlock.bed`) and
+    /// nothing else: a block without one plays as silence rather than through the renderer's mix.
+    var playsBedOnly: Bool { get }
 }
 
 extension ObjectAudioDecoding {
     var selfResetCount: Int { 0 }
+    var playsBedOnly: Bool { false }
     func releaseHeldBlocks() {}
 }
 #endif

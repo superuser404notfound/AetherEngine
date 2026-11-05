@@ -1,0 +1,162 @@
+// Only with the TrueHDObjectAudio trait: the regression is not built without it.
+#if TrueHDObjectAudio
+import Testing
+import Foundation
+@testable import AetherEngine
+
+/// The TrueHD bed path builds every output out of the stream's channel presentation, regressed onto
+/// the layout through the elements' cross-spectra. These pin the timeline, the LFE, the channel
+/// assignment for an element at every speaker of the layout, a 5.1 bed on a 7.1.4 layout, and the
+/// energy bound that keeps a drifting element from adding energy.
+@Suite("Bed regression")
+struct BedRegressionTests {
+
+    static let bed71: [ObjectAudioRole] = [.bed(.left), .bed(.right), .bed(.center), .lfe,
+                                           .bed(.sideLeft), .bed(.sideRight), .bed(.rearLeft), .bed(.rearRight)]
+    static let bed51: [ObjectAudioRole] = [.bed(.left), .bed(.right), .bed(.center), .lfe,
+                                           .bed(.sideLeft), .bed(.sideRight)]
+
+    static func noise(_ count: Int, seed: UInt64) -> [Float] {
+        var state = seed
+        return (0..<count).map { _ in
+            state = state &* 6364136223846793005 &+ 1442695040888963407
+            return Float(Int64(bitPattern: state >> 11) % 2000 - 1000) / 10_000
+        }
+    }
+
+    static func energy(_ x: [Float]) -> Float { x.reduce(0) { $0 + $1 * $1 } }
+    static func silent(_ count: Int) -> [Float] { [Float](repeating: 0, count: count) }
+
+    /// The bed a channel presentation would carry for elements at `positions`: each element panned at
+    /// ear level into the bed's speakers.
+    static func fold(_ elements: [[Float]], positions: [SIMD3<Float>], bedRoles: [ObjectAudioRole], frames: Int) -> [[Float]] {
+        let speakers = bedRoles.compactMap { role -> SpatialSpeaker? in if case .bed(let s) = role { return s }; return nil }
+        let bedLayout = SpatialSpeakerLayout.l916
+        let panner = AllocentricPanner(layout: bedLayout, excluded: Set(bedLayout.speakers.filter { !speakers.contains($0) }))
+        var bed = bedRoles.map { _ in silent(frames) }
+        var gains: [Float] = []
+        for (e, p) in zip(elements, positions) {
+            panner.pointGains(SIMD3(p.x, p.y, 0), into: &gains)
+            for (i, role) in bedRoles.enumerated() {
+                guard case .bed(let s) = role, let c = bedLayout.speakers.firstIndex(of: s), gains[c] != 0 else { continue }
+                for t in 0..<frames { bed[i][t] += gains[c] * e[t] }
+            }
+        }
+        return bed
+    }
+
+    static func run(layout: SpatialSpeakerLayout, bedRoles: [ObjectAudioRole], bed: [[Float]],
+                    elements: [[Float]], positions: [SIMD3<Float>], frames: Int) -> [[Float]] {
+        let regression = BedRegression(layout: layout, bedRoles: bedRoles)
+        if !elements.isEmpty {
+            var snapshot = ObjectAudioGainSnapshot()
+            snapshot.resize(elements: elements.count, channels: layout.channelCount)
+            var gains: [Float] = []
+            for (k, p) in positions.enumerated() {
+                AllocentricPanner(layout: layout).pointGains(p, into: &gains)
+                for c in 0..<layout.channelCount { snapshot.layoutGains[k * layout.channelCount + c] = gains[c] }
+                snapshot.positions[k] = p
+                snapshot.gains[k] = 1
+            }
+            regression.setGains(snapshot)
+        }
+        let out = (0..<layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: frames) }
+        defer { out.forEach { $0.deallocate() } }
+        var written = 0, offset = 0
+        let bedPointers = bed.map { $0.withUnsafeBufferPointer { UnsafeMutablePointer(mutating: $0.baseAddress!) } }
+        let elementPointers = elements.map { $0.withUnsafeBufferPointer { UnsafeMutablePointer(mutating: $0.baseAddress!) } }
+        while offset < frames {
+            let n = min(40, frames - offset)
+            written += regression.process(
+                elements: elementPointers.map { UnsafePointer($0 + offset) },
+                bed: bedPointers.map { UnsafePointer($0 + offset) }, frameCount: n,
+                output: out.map { $0 + written })
+            offset += n
+        }
+        written += regression.drain(output: out.map { $0 + written })
+        #expect(written == frames)
+        return out.map { Array(UnsafeBufferPointer(start: $0, count: written)) }
+    }
+
+    @Test("output frame i is input frame i, the LFE a pure delay, nothing lost at the end",
+          arguments: [300, 2047, 2048, 2049, 9_000])
+    func timeline(frames: Int) {
+        let layout = SpatialSpeakerLayout.l714
+        var pulse = Self.silent(frames)
+        let at = frames / 2
+        pulse[at] = 0.5
+        var bed = Self.bed71.map { _ in Self.silent(frames) }
+        bed[0] = pulse
+        bed[3] = pulse
+        // No element: the bed plays where its channels are.
+        let out = Self.run(layout: layout, bedRoles: Self.bed71, bed: bed, elements: [], positions: [], frames: frames)
+        let peak = out[0].indices.max { abs(out[0][$0]) < abs(out[0][$1]) }!
+        #expect(peak == at)
+        #expect(abs(out[0][at] - 0.5) < 1e-3)
+        let lfe = out[layout.lfeIndex]
+        #expect(lfe.indices.allSatisfy { abs(lfe[$0] - pulse[$0]) < 1e-4 })
+    }
+
+    /// Every speaker of 7.1.4 in turn: one element there, the bed its ear-level fold, the output on
+    /// that speaker alone. This is the channel assignment test.
+    static let speakerCases: [(SpatialSpeakerLayout, SpatialSpeaker)] =
+        [SpatialSpeakerLayout.l714, .l916].flatMap { layout in layout.speakers.filter { $0 != .lfe }.map { (layout, $0) } }
+
+    @Test("an element at each speaker of 7.1.4 and 9.1.6 plays from that speaker", arguments: speakerCases)
+    func channelAssignment(layout: SpatialSpeakerLayout, speaker: SpatialSpeaker) {
+        let frames = 24_000
+        let signal = Self.noise(frames, seed: 7)
+        let p = speaker.position
+        let bed = Self.fold([signal], positions: [p], bedRoles: Self.bed71, frames: frames)
+        let out = Self.run(layout: layout, bedRoles: Self.bed71, bed: bed, elements: [signal], positions: [p], frames: frames)
+        let target = layout.speakers.firstIndex(of: speaker)!
+        let total = out.map(Self.energy).reduce(0, +)
+        #expect(Self.energy(out[target]) / total > 0.97, "\(speaker): \(Self.energy(out[target]) / total)")
+        #expect(abs(total / Self.energy(signal) - 1) < 0.1)
+    }
+
+    @Test("a 5.1 bed's surround reaches the 7.1.4 side and rear an element sits between")
+    func fiveOneBed() {
+        let layout = SpatialSpeakerLayout.l714, frames = 24_000
+        let signal = Self.noise(frames, seed: 3)
+        let p = SIMD3<Float>(0, 1, 0)
+        let bed = Self.fold([signal], positions: [p], bedRoles: Self.bed51, frames: frames)
+        let out = Self.run(layout: layout, bedRoles: Self.bed51, bed: bed, elements: [signal], positions: [p], frames: frames)
+        let rear = layout.speakers.firstIndex(of: .rearLeft)!
+        let total = out.map(Self.energy).reduce(0, +)
+        #expect(Self.energy(out[rear]) / total > 0.95)
+    }
+
+    @Test("two elements on one bed channel, floor and ceiling, separate where their spectra do")
+    func floorAndCeiling() {
+        let layout = SpatialSpeakerLayout.l714, frames = 48_000
+        // Low noise on the floor, high noise overhead: both fold into the bed's left.
+        let raw1 = Self.noise(frames, seed: 11), raw2 = Self.noise(frames, seed: 12)
+        var low = Self.silent(frames), high = Self.silent(frames)
+        var a: Float = 0
+        for t in 0..<frames { a = 0.97 * a + 0.03 * raw1[t]; low[t] = a * 8 }
+        for t in 1..<frames { high[t] = raw2[t] - raw2[t - 1] }
+        let floor = SIMD3<Float>(0, 0, 0), ceiling = SpatialSpeaker.topFrontLeft.position
+        let bed = Self.fold([low, high], positions: [floor, ceiling], bedRoles: Self.bed71, frames: frames)
+        let out = Self.run(layout: layout, bedRoles: Self.bed71, bed: bed, elements: [low, high],
+                           positions: [floor, ceiling], frames: frames)
+        let tfl = layout.speakers.firstIndex(of: .topFrontLeft)!
+        #expect(abs(Self.energy(out[0]) / Self.energy(low) - 1) < 0.1)
+        #expect(abs(Self.energy(out[tfl]) / Self.energy(high) - 1) < 0.15)
+    }
+
+    @Test("an element far louder than the bed cannot add energy")
+    func energyBound() {
+        let layout = SpatialSpeakerLayout.l714, frames = 24_000
+        let signal = Self.noise(frames, seed: 5)
+        let p = SpatialSpeaker.topRearRight.position
+        let bed = Self.fold([signal], positions: [p], bedRoles: Self.bed71, frames: frames)
+        let loud = signal.map { $0 * 6 }
+        let out = Self.run(layout: layout, bedRoles: Self.bed71, bed: bed, elements: [loud], positions: [p], frames: frames)
+        let total = out.map(Self.energy).reduce(0, +)
+        let bedEnergy = bed.enumerated().filter { $0.offset != 3 }.map { Self.energy($0.element) }.reduce(0, +)
+        #expect(total / bedEnergy < Float(BedRegression.energyBounds.upperBound) * 1.05)
+    }
+}
+#endif
+
