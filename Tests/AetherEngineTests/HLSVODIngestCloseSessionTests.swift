@@ -20,3 +20,18 @@ struct HLSVODIngestCloseSessionTests {
         #expect(task.state == .canceling || task.state == .completed)
     }
 }
+
+extension HLSVODIngestCloseSessionTests {
+    /// The session is invalidated in deinit, so nothing on it may keep the reader alive.
+    @Test("a closed reader is released, so deinit gets to invalidate its session")
+    func closedReaderIsReleased() {
+        weak var weakReader: HLSVODIngestReader?
+        do {
+            let reader = HLSVODIngestReader(
+                playlistURL: URL(string: "http://127.0.0.1:9/media.m3u8")!, httpHeaders: [:])
+            weakReader = reader
+            reader.close()
+        }
+        #expect(weakReader == nil)
+    }
+}
