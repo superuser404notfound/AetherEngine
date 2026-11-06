@@ -63,8 +63,11 @@ jobs:
       # `swift test` runs XCTest and then Swift Testing, and the Swift Testing summary line says
       # nothing about the XCTest half: a red XCTest case leaves that line green and the step exits 1.
       # `grep "error: -\["` finds the XCTest failure.
+      # The watchdog samples every test process if a step outlives 10 min (it takes 2-6), so a
+      # whole-process hang leaves its stacks in the log instead of running into the job timeout
+      # with nothing to read (2026-11-04 and 2026-11-06, both in this job).
       - name: swift test
-        run: swift test --skip-build
+        run: Scripts/ci-hang-watchdog.sh 10 swift test --skip-build
 
       # The same Swift Testing suite on a ONE-thread cooperative pool. Anything that blocks a pool
       # thread (a sync read, a semaphore, a `Task.detached` around engine I/O) starves every other
@@ -73,7 +76,7 @@ jobs:
       - name: swift test (one-thread cooperative pool)
         env:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
-        run: swift test --skip-build --disable-xctest
+        run: Scripts/ci-hang-watchdog.sh 10 swift test --skip-build --disable-xctest
 
       # Standalone swiftc builds. They link FFmpegBuild out of `.build/checkouts`, so they ride in the
       # job that resolved it. Each script compiles a hand-picked file list, so a new reference in a
@@ -113,12 +116,12 @@ jobs:
         run: swift build --enable-all-traits --build-tests
 
       - name: swift test (all traits)
-        run: swift test --enable-all-traits --skip-build
+        run: Scripts/ci-hang-watchdog.sh 10 swift test --enable-all-traits --skip-build
 
       - name: swift test (all traits, one-thread cooperative pool)
         env:
           LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
-        run: swift test --enable-all-traits --skip-build --disable-xctest
+        run: Scripts/ci-hang-watchdog.sh 10 swift test --enable-all-traits --skip-build --disable-xctest
 
   build-tvos:
     name: xcodebuild (tvOS Simulator)
