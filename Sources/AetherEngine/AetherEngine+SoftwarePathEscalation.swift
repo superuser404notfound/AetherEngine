@@ -28,7 +28,8 @@ extension AetherEngine {
             availability: .init(alreadyEscalated: softwarePathEscalationBudget.isSpent,
                 preferredDecodePath: loadedOptions.preferredDecodePath,
                 nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
-                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath))
+                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath,
+                finitePlaylist: !loadedOptions.isLive))
         guard allowed else {
             if reportRefusal, !softwarePathEscalationBudget.isSpent { publishError(Self.absorbedFailure(request)) }
             return
@@ -55,7 +56,8 @@ extension AetherEngine {
                 alreadyEscalated: softwarePathEscalationBudget.isSpent,
                 preferredDecodePath: loadedOptions.preferredDecodePath,
                 nativeRemoteHLS: loadedOptions.nativeRemoteHLS,
-                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath
+                hostAllowsEscalation: loadedOptions.escalatesToSoftwarePath,
+                finitePlaylist: !loadedOptions.isLive
             )
         ) else { return }
         // The host's probe read mount-time options and the #93 rung does not consult it at all, so

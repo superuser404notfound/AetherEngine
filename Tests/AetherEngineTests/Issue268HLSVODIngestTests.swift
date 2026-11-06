@@ -273,6 +273,74 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         XCTAssertEqual(HLSVODIngestReader.prefetchWindow(forSegmentBytes: 0), 4)
     }
 
+    // MARK: - AE#990: any MPEG-TS for a session that decodes in software
+
+    func testSoftwareSessionTakesTheIngestForH264MPEGTS() async throws {
+        let root = try XCTUnwrap(URL(string: "https://vod.test/h264-sw.m3u8"))
+        Issue268URLProtocol.bodyByURL[root.absoluteString] = mediaPlaylist("h264-sw.ts")
+        Issue268URLProtocol.bodyByURL["https://vod.test/h264-sw.ts"] = transportStream(streamType: 0x1B)
+
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let reader = try await HLSVODIngestReader.makeIfMPEGTS(
+            playlistURL: root, httpHeaders: [:], session: session, accepting: .anyMPEGTS)
+        let admitted = try XCTUnwrap(reader, "an H.264 archive AVPlayer refused has to reach libavcodec")
+        defer { admitted.close() }
+        XCTAssertEqual(admitted.mediaDuration, 6, accuracy: 0.001)
+        XCTAssertTrue(admitted.seek(to: 3))
+    }
+
+    func testSoftwareSessionStillLeavesFMP4LiveAndEncryptedPlaylists() async throws {
+        let fmp4 = try XCTUnwrap(URL(string: "https://vod.test/sw-fmp4.m3u8"))
+        let live = try XCTUnwrap(URL(string: "https://vod.test/sw-live.m3u8"))
+        let aes = try XCTUnwrap(URL(string: "https://vod.test/sw-aes.m3u8"))
+        Issue268URLProtocol.bodyByURL[fmp4.absoluteString] = Data("""
+        #EXTM3U
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-MAP:URI="init.mp4"
+        #EXTINF:6,
+        segment.m4s
+        #EXT-X-ENDLIST
+        """.utf8)
+        Issue268URLProtocol.bodyByURL[live.absoluteString] = Data("""
+        #EXTM3U
+        #EXT-X-TARGETDURATION:6
+        #EXTINF:6,
+        sw-live.ts
+        """.utf8)
+        Issue268URLProtocol.bodyByURL[aes.absoluteString] = Data("""
+        #EXTM3U
+        #EXT-X-TARGETDURATION:6
+        #EXT-X-KEY:METHOD=AES-128,URI="key.bin"
+        #EXTINF:6,
+        sw-aes.ts
+        #EXT-X-ENDLIST
+        """.utf8)
+        Issue268URLProtocol.bodyByURL["https://vod.test/sw-live.ts"] = transportStream(streamType: 0x1B)
+        Issue268URLProtocol.bodyByURL["https://vod.test/sw-aes.ts"] = transportStream(streamType: 0x1B)
+
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        for url in [fmp4, live, aes] {
+            let reader = try await HLSVODIngestReader.makeIfMPEGTS(
+                playlistURL: url, httpHeaders: [:], session: session, accepting: .anyMPEGTS)
+            XCTAssertNil(reader, url.lastPathComponent)
+            reader?.close()
+        }
+    }
+
+    func testAcceptanceSeparatesTheTwoCallers() {
+        XCTAssertTrue(HLSVODIngestReader.Acceptance.hevcInMPEGTS.accepts(.hevcInMPEGTS))
+        XCTAssertFalse(HLSVODIngestReader.Acceptance.hevcInMPEGTS.accepts(.transportStreamWithoutHEVC),
+                       "AE#268 keeps H.264 in MPEG-TS on AVPlayer")
+        XCTAssertTrue(HLSVODIngestReader.Acceptance.anyMPEGTS.accepts(.hevcInMPEGTS))
+        XCTAssertTrue(HLSVODIngestReader.Acceptance.anyMPEGTS.accepts(.transportStreamWithoutHEVC))
+        for acceptance in [HLSVODIngestReader.Acceptance.hevcInMPEGTS, .anyMPEGTS] {
+            XCTAssertFalse(acceptance.accepts(.otherCarriage))
+            XCTAssertFalse(acceptance.accepts(.inconclusive), "an absence of evidence never reroutes")
+        }
+    }
+
     // MARK: - Carriage probe
 
     func testCarriageProbeReadsTheVerdictFromThePMT() {
@@ -282,7 +350,7 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         )
         XCTAssertEqual(
             MPEGTransportStreamCodecProbe.classify(transportStream(streamType: 0x1B)),
-            .otherCarriage,
+            .transportStreamWithoutHEVC,
             "H.264 in MPEG-TS is carriage AVPlayer builds itself"
         )
     }
@@ -318,14 +386,14 @@ final class Issue268HLSVODIngestTests: XCTestCase {
             XCTAssertEqual(
                 MPEGTransportStreamCodecProbe.classify(
                     transportStream(streamType: 0x06, descriptors: descriptors, declaredInfoLength: declaredLength)),
-                .otherCarriage,
+                .transportStreamWithoutHEVC,
                 label
             )
         }
         XCTAssertEqual(
             MPEGTransportStreamCodecProbe.classify(
                 transportStream(streamType: 0x1B, descriptors: [0x05, 0x04, 0x48, 0x45, 0x56, 0x43])),
-            .otherCarriage,
+            .transportStreamWithoutHEVC,
             "the registration only reinterprets private PES"
         )
     }

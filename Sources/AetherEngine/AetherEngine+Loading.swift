@@ -366,6 +366,18 @@ extension AetherEngine {
         #endif
     }
 
+    /// AE#561: hands a host's escalation request to the engine under the session it was raised for.
+    private func wireSoftwarePathEscalation(host: NativeAVPlayerHost, generation: UInt64) {
+        host.$pendingSoftwarePathEscalation
+            .compactMap { $0 }
+            .sink { [weak self] request in
+                self?.hop(for: generation) { [weak self] in
+                    await self?.escalateToSoftwarePath(request, expectedGeneration: generation)
+                }
+            }
+            .store(in: &nativeCancellables)
+    }
+
     func loadRemoteHLS(
         url: URL, options: LoadOptions, startPosition: Double? = nil, generation: UInt64? = nil
     ) async throws {
@@ -503,6 +515,21 @@ extension AetherEngine {
                 }
             }
             .store(in: &nativeCancellables)
+        // AE#990: the AE#561 rung on this route too. A finite playlist AVPlayer refuses on its media
+        // is rebuilt with `.software`, which the TS ingest serves. Assigned on every mount, because a
+        // host kept from a loopback session still carries that session's closure and budget, and
+        // with its subscriber gone an escalation it granted would swallow the failure.
+        let escalationBudget = softwarePathEscalationBudget
+        host.softwarePathAvailability = {
+            SoftwarePathEscalation.Availability(
+                alreadyEscalated: escalationBudget.isSpent,
+                preferredDecodePath: options.preferredDecodePath,
+                nativeRemoteHLS: true,
+                hostAllowsEscalation: options.escalatesToSoftwarePath,
+                finitePlaylist: !options.isLive
+            )
+        }
+        wireSoftwarePathEscalation(host: host, generation: bypassGeneration)
         startLiveWindowTimer(host: host)
         // settlePausedAtReadiness off when autostarting: the terminal host.play() runs, so readyToPlay is only a waypoint. Flipping to .paused here would drop the spinner during Jellyfin's ~10 s transcode spin-up. timeControlStatus sink holds .loading until AVPlayer renders.
         // #124: a paused mount (autoplay=false) skips that play(), so the readiness sink settles .loading -> .paused.
@@ -1857,14 +1884,7 @@ extension AetherEngine {
                 hostAllowsEscalation: escalationAllowed
             )
         }
-        host.$pendingSoftwarePathEscalation
-            .compactMap { $0 }
-            .sink { [weak self] request in
-                self?.hop(for: generation) { [weak self] in
-                    await self?.escalateToSoftwarePath(request, expectedGeneration: generation)
-                }
-            }
-            .store(in: &nativeCancellables)
+        wireSoftwarePathEscalation(host: host, generation: generation)
 
         // appliesPerFrameHDRDisplayMetadata unconditionally true: DV P5 has no HDR10 base layer, so the per-frame RPU is what AVPlayer's tone-mapper needs on a non-DV panel (DrHurt #4 2026-05-26). Prior servingMasterPlaylist gate broke P5. Apple's default is also true; explicit write surfaces the live value in diagnostics.
         // forwardBufferDuration default (4 s): deep buffer lets AVPlayer race to the live edge and hit the transcode warm-up gap head-on (-12888); 4 s PACES consumption. Verified: 8 s worsened startup pause (8-10 s vs ~1 s).
