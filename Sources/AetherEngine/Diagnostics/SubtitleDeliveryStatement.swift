@@ -59,7 +59,7 @@ enum SubtitleDeliveryStatement {
         /// Cues reached the retained array.
         case published
         /// #362: the tick stopped at a hole in the harvest and decoded nothing past it. A designed
-        /// wait with a tick budget, not a failure, but it has to name itself: without this line a
+        /// wait until the far side is due, not a failure, but it has to name itself: without this line a
         /// held tick reads as `empty`, which says the store was never fed here when in fact it was
         /// fed on both sides and the middle is on its way.
         case harvestHole
