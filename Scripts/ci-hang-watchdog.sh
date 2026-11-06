@@ -36,9 +36,12 @@ while kill -0 "$cmd" 2>/dev/null; do
       sample "$pid" 3 -mayDie 2>&1 || true
       echo "::endgroup::"
     done
-    kill -TERM "$cmd" $(descendants "$cmd") 2>/dev/null || true
+    # Listed once: after the TERM the parent may be gone and its children reparented, so a second
+    # walk would miss exactly the hung ones the KILL is for.
+    tree="$cmd $(descendants "$cmd")"
+    kill -TERM $tree 2>/dev/null || true
     sleep 5
-    kill -KILL "$cmd" $(descendants "$cmd") 2>/dev/null || true
+    kill -KILL $tree 2>/dev/null || true
     exit 124
   fi
   sleep 5
