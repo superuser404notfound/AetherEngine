@@ -93,9 +93,6 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         return nil
     }
 
-    /// Whether this route needs `AtmosOutputActivator` on tvOS: compressed E-AC-3 JOC and every rendered
-    /// bed, TrueHD Atmos or DTS:X. Without it some sinks never switch to Dolby MAT and play the bed as
-    /// stereo or 7.1 PCM, heights folded away.
     /// Whether E-AC-3 JOC is decoded here rather than handed to the renderer compressed: tvOS, where
     /// `AVSampleBufferAudioRenderer` plays the compressed stream silent (`SoftwareEAC3AtmosDecoder`).
     static var decodesJOCOnThisPlatform: Bool {
@@ -114,6 +111,9 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         }
     }
 
+    /// Whether this route needs `AtmosOutputActivator` on tvOS: compressed E-AC-3 JOC and every rendered
+    /// bed, TrueHD Atmos or DTS:X. Without it some sinks never switch to Dolby MAT and play the bed as
+    /// stereo or 7.1 PCM, heights folded away.
     var takesAtmosOutputActivator: Bool {
         self != .pcm
     }

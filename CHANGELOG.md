@@ -25,7 +25,10 @@ the public-API contract.
   form the TrueHD Atmos route already delivers (`decodedEAC3JOC`, `audioDelivery` `.bridged`). Over
   AirPlay, where the bed would be APAC, the compressed route is unchanged. Measured on that setup: the
   receiver shows Dolby Atmos, sound plays through, after a seek, and in step with the picture, at
-  1.01x on a Profile 7 FEL film.
+  1.01x on a Profile 7 FEL film. The converter trims its own lead-in and reports none of it, so the bed
+  is stamped from the first packet after each open or reset plus 224 frames, the offset measured against
+  libavcodec's decode of the same packets (L and C cross-correlated, r > 0.9999, at the start and after a
+  reset); a jump in the source's stamps moves the run's anchor by the jump. Patch by @intrepidsilence.
 - **DVD subtitles on a rescaled encode landed too low, and bottom cues were cut off (AE#993).**
   A VobSub track keeps the DVD's 720x480 or 720x576 plane, whose pixels are not square, and the engine reported
   that plane as `SubtitleImage.canvasSize`. Mapped width-aligned onto 1280x720 video it became 853 lines tall, so

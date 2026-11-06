@@ -48,10 +48,15 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
     static let jocFormatID = AudioFormatID(0x6563_2B33)
     static let sampleRate: Double = 48_000
     static let framesPerPacket = 1536
-    /// Frames the JOC decode lags the 5.1 decode of the same packets (cross-correlated centre channels,
-    /// macOS 27: 32 frames, 0.67 ms). Taken off every stamp so the bed sits where the core would.
-    /// Not measured separately on tvOS.
-    static let decoderDelayFrames: Int64 = 32
+    /// Where the converter's first frame after an open or a reset sits, in frames after the first
+    /// packet's stamp. The converter trims its own lead-in and reports none of it (`PrimeInfo` reads 0/0,
+    /// `PrimeMethod` is not settable): the first packet yields 63 frames, every later one 1536. Measured
+    /// against libavcodec's decode of the same packets (the PCM route, stamped at the packet's PTS) by
+    /// cross-correlating L and C on a DD+ JOC programme, macOS 27, at the start and after a reset: the
+    /// first frame is source frame 224, r > 0.9999. Without it the bed played 5.3 ms early.
+    static let leadingFrameOffset: Int64 = 224
+    /// A packet further than this from where the previous one ended moves the run's anchor by the gap.
+    static let reanchorThresholdSeconds = 0.1
     /// The converter's "no more input for now" answer from the input callback; not an error.
     private static let needMoreInput: OSStatus = 0x6E6D_6F72  // 'nmor'
 
@@ -79,10 +84,15 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
     private final class Pending {
         var bytes: UnsafeMutableRawPointer?
         var count = 0
-        var description = AudioStreamPacketDescription()
+        /// Heap storage: the converter reads the description through the pointer the callback hands it,
+        /// after the callback has returned, so it may not point into a temporary.
+        let description = UnsafeMutablePointer<AudioStreamPacketDescription>.allocate(capacity: 1)
         var consumed = true
         /// Set for the end-of-stream drain: the callback then reports the end, which releases the tail.
         var atEnd = false
+
+        init() { description.initialize(to: AudioStreamPacketDescription()) }
+        deinit { description.deallocate() }
     }
     private let pending = Pending()
 
@@ -147,6 +157,12 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
         } else {
             return []
         }
+        if let expected = nextSeconds, let anchor = anchorSeconds,
+           abs(seconds - expected) > Self.reanchorThresholdSeconds {
+            // The stamps run from one anchor, so a jump in the source (a splice, a lost packet) would
+            // otherwise shift every later buffer against the picture by the size of the jump.
+            anchorSeconds = anchor + (seconds - expected)
+        }
         nextSeconds = seconds + Double(Self.framesPerPacket) / Self.sampleRate
         if anchorSeconds == nil {
             anchorSeconds = seconds
@@ -154,7 +170,7 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
         }
         pending.bytes = UnsafeMutableRawPointer(data)
         pending.count = Int(packet.pointee.size)
-        pending.description = AudioStreamPacketDescription(
+        pending.description.pointee = AudioStreamPacketDescription(
             mStartOffset: 0, mVariableFramesInPacket: 0, mDataByteSize: UInt32(packet.pointee.size))
         pending.consumed = false
         defer { pending.bytes = nil }
@@ -201,16 +217,14 @@ final class SoftwareEAC3AtmosDecoder: SoftwareAudioProducing, @unchecked Sendabl
         ioData.pointee.mBuffers.mData = bytes
         ioData.pointee.mBuffers.mDataByteSize = UInt32(pending.count)
         ioData.pointee.mBuffers.mNumberChannels = 0
-        if let ioDescription {
-            withUnsafeMutablePointer(to: &pending.description) { ioDescription.pointee = $0 }
-        }
+        ioDescription?.pointee = pending.description
         return noErr
     }
 
     /// `frames` of the output buffer as one PCM sample buffer, stamped from the run's anchor.
     private func makeBuffer(frames: Int) -> CMSampleBuffer? {
         guard let anchor = anchorSeconds else { return nil }
-        let seconds = anchor + Double(producedFrames - Self.decoderDelayFrames) / Self.sampleRate
+        let seconds = anchor + Double(producedFrames + Self.leadingFrameOffset) / Self.sampleRate
         producedFrames += Int64(frames)
         let count = frames * bytesPerFrame
         var block: CMBlockBuffer?
