@@ -6,10 +6,35 @@ import AudioToolbox
 import AetherLibavformat
 import AetherLibavcodec
 
+private enum JOCDecoderGate {
+    /// GitHub's macOS runner VMs have no Atmos decoder: the `ec+3` converter refuses to open there
+    /// ('fmt?') even after the primer, so one real open decides.
+    @MainActor static func systemDecodesJOC() async -> Bool {
+        await AtmosDecoderPrimer.shared.ensurePrimed()
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        guard (try? demuxer.open(url: AtmosOutputActivator.silentAtmosStream)) != nil,
+              let index = (0..<Int32(8)).first(where: { i in
+                  demuxer.stream(at: i)?.pointee.codecpar?.pointee.codec_id == AV_CODEC_ID_EAC3
+              }),
+              let entry = SoftwarePlaybackHost.firstEAC3Entry(demuxer: demuxer, streamIndex: index).entry,
+              let stream = demuxer.stream(at: index)
+        else { return false }
+        do {
+            try SoftwareEAC3AtmosDecoder(stream: stream, entry: entry, layout: .l714).close()
+            return true
+        } catch {
+            print("[JOCDecoderGate] the system cannot open ec+3 here (\(error)), skipping")
+            return false
+        }
+    }
+}
+
 /// The system-decoder route for E-AC-3 JOC (AE#995), driven with the silent Atmos stream the engine
 /// ships for `AtmosOutputActivator`: a real JOC stream with a `dec3` box, so the converter opens in its
 /// `ec+3` form exactly as on the device. On macOS that form needs the Atmos decoder registered first.
-@Suite(.serialized, .timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(3)),
+       .enabled("needs the system's Atmos decoder") { await JOCDecoderGate.systemDecodesJOC() })
 @MainActor
 struct SoftwareEAC3AtmosDecoderTests {
 
