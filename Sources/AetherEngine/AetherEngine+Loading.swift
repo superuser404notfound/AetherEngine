@@ -937,6 +937,7 @@ extension AetherEngine {
             sourceReopenableByURL: !isCustomSource,
             customSourceReopenFactory: ingestReopenFactory,
             companionAudioReader: companionAudioReader,
+            liveSourceAnnouncesDiscontinuities: liveIngest != nil,
             // Caller-bounded probe budget (#68) for the fallback open / live reopen; the happy path reuses preopenedDemuxer.
             probesize: loadedOptions.probesize,
             maxAnalyzeDuration: loadedOptions.maxAnalyzeDuration,
