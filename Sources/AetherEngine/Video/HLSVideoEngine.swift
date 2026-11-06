@@ -5142,8 +5142,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return prov.activeMarchCovers(segmentIndexForPlaylistTime(seconds))
     }
 
-    /// #93 restart latency: phase split for the "restart took" line, so a slow restart names the
-    /// phase that ate the time (old-pump stop wait, wedged-reopen, demuxer seek, producer build).
     /// #941: whether the pump being replaced had already read up to `restartIndex`: it opened at or
     /// before it and has cut every segment in front of it. A pump writes its segments in order from
     /// where it opened, so those two facts make the stretch contiguous.
@@ -5153,6 +5151,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return runStartIndex <= restartIndex && runHighestCaptured >= restartIndex - 1
     }
 
+    /// #93 restart latency: phase split for the "restart took" line, so a slow restart names the
+    /// phase that ate the time (old-pump stop wait, wedged-reopen, demuxer seek, producer build).
     nonisolated static func restartPhaseSummary(
         stopWaitMs: Double, reopenMs: Double?, seekMs: Double, buildMs: Double
     ) -> String {
