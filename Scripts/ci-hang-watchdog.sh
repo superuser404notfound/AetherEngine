@@ -14,6 +14,9 @@ set -uo pipefail
 minutes=$1
 shift
 
+# Crash reports newer than this are the command's (Scripts/ci-print-crash-reports.py).
+marker=$(mktemp)
+
 "$@" &
 cmd=$!
 
@@ -48,3 +51,11 @@ while kill -0 "$cmd" 2>/dev/null; do
 done
 
 wait "$cmd"
+status=$?
+# Above 128 the test process died on a signal; its crash report is the only backtrace there is.
+# `swift test` folds a child's signal into a plain 1, so 1 is looked at too.
+if [ "$status" -eq 1 ] || [ "$status" -gt 128 ]; then
+  python3 "$(dirname "$0")/ci-print-crash-reports.py" "$marker" ${CRASH_REPORT_PROCESSES:-} || true
+fi
+rm -f "$marker"
+exit "$status"
