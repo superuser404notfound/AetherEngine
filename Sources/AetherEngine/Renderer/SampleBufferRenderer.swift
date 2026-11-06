@@ -900,7 +900,8 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     /// AE#711 follow-up: the newest frame handed to the layer, before the subtitle compositor, for a
     /// rebuild to hold when the layer cannot say what it is showing (off screen, or before tvOS 17.4's
-    /// readback has anything). At most one buffer, released by `flush`.
+    /// readback has anything). At most one buffer, released by a `flush` that clears the picture: one
+    /// that keeps it (seek, recovery) leaves this frame on screen, so it stays the frame to hold.
     private var _lastEnqueuedFrame: CVPixelBuffer?
     var lastEnqueuedFrame: CVPixelBuffer? {
         reorderLock.lock(); defer { reorderLock.unlock() }
@@ -919,7 +920,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.lock()
         reorderBuffer.removeAll()
         _pendingPresentation.removeAll()
-        _lastEnqueuedFrame = nil
+        if removingDisplayedImage { _lastEnqueuedFrame = nil }
         // #407: the next frame handed over will not follow the last one, so the gap between them is
         // not a cadence measurement. Left standing, every seek would report one enormous interval.
         _lastHandedPtsSeconds = nil

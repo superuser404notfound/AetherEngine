@@ -33,7 +33,10 @@ struct FabricatedRangeOriginTests {
         let server = try #require(ThrottledOriginServer(totalSize: Self.size, patternedBody: true))
         defer { server.stop() }
         let url = URL(string: "http://127.0.0.1:\(server.port)/honest-958.bin")!
-        let reader = AVIOReader(url: url)
+        // The refill under test is the one at the end of the first bounded range. An origin that
+        // outruns this byte-checking read hits the window's high water first, and that reconnect
+        // lands wherever the read stood, so the window is set above what the test reads.
+        let reader = AVIOReader(url: url, windowHighWater: 64 * 1024 * 1024)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
 
