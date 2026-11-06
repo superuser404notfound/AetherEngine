@@ -214,9 +214,18 @@ final class EmbeddedSubtitleDecoder {
         // AE#971: a DVB display covers the whole picture whatever its pixel grid (720x576 SD pixels are not
         // square on HD video), so hosts get the video frame as the canvas and stretch onto it, while the
         // position stays normalized against the decoder's own canvas.
-        let reportedCanvas: CGSize? = ctx.pointee.codec_id == AV_CODEC_ID_DVB_SUBTITLE
-            && sourceVideoWidth > 0 && sourceVideoHeight > 0
-            ? CGSize(width: Int(sourceVideoWidth), height: Int(sourceVideoHeight)) : nil
+        let reportedCanvas: CGSize?
+        switch ctx.pointee.codec_id {
+        case AV_CODEC_ID_DVB_SUBTITLE:
+            reportedCanvas = sourceVideoWidth > 0 && sourceVideoHeight > 0
+                ? CGSize(width: Int(sourceVideoWidth), height: Int(sourceVideoHeight)) : nil
+        case AV_CODEC_ID_DVD_SUBTITLE:
+            reportedCanvas = Self.dvdReportedCanvas(
+                canvas: CGSize(width: Int(canvasW), height: Int(canvasH)),
+                video: CGSize(width: Int(sourceVideoWidth), height: Int(sourceVideoHeight)))
+        default:
+            reportedCanvas = nil
+        }
 
         var bodies: [SubtitleCue.Body] = []
         var textLines: [String] = []
@@ -633,12 +642,35 @@ final class EmbeddedSubtitleDecoder {
         }
     }
 
+    /// AE#993: a DVD subpicture covers the whole display, like DVB, but its 720x480 / 720x576 plane
+    /// has non-square pixels, so on a rescaled encode (1280x720) the width-aligned mapping made the
+    /// canvas 853 lines tall and pushed bottom cues up to 67 px down and off the picture. A canvas
+    /// as wide as the coded video is the video's own pixel grid (an uncropped or a cropped-only rip),
+    /// where width-aligned is right, so nil keeps it. Otherwise the video was rescaled, and the plane
+    /// is a 4:3 or 16:9 display: a picture of that shape is the whole display, so the canvas is the
+    /// video frame; a wider one was cropped out of a 16:9 display before scaling (1280x544 from a
+    /// scope DVD), so the canvas is the 16:9 frame at the video's width, centre-anchored over it.
+    /// Covering there would squash every glyph by the crop ratio. Square video pixels are assumed:
+    /// a re-encode that changed the width is almost always square-pixel.
+    static func dvdReportedCanvas(canvas: CGSize, video: CGSize) -> CGSize? {
+        guard canvas.width > 0, canvas.height > 0, video.width > 0, video.height > 0,
+              canvas.width != video.width else { return nil }
+        let aspect = video.width / video.height
+        let widescreen: CGFloat = 16.0 / 9.0
+        let tolerance: CGFloat = 0.02
+        if aspect > widescreen * (1 + tolerance) {
+            return CGSize(width: video.width, height: (video.width / widescreen).rounded())
+        }
+        return video
+    }
+
     // MARK: - Rect → text / image
 
     /// Render a PGS/DVB/HDMV bitmap rect into a CGImage with normalised position.
     /// Palette from libavcodec is 32-bit with alpha in the high byte and BGR below ([B,G,R,A] on little-endian);
     /// rewritten to RGBA for CGImage's premultipliedLast. Internal for unit tests (#146).
-    /// `reportedCanvas` replaces `canvasSize` when the plane's shape differs from its pixel grid (AE#971, DVB).
+    /// `reportedCanvas` replaces `canvasSize` when the plane's shape differs from its pixel grid (AE#971 DVB,
+    /// AE#993 DVD).
     static func imageForSubtitleRect(
         _ rect: UnsafeMutablePointer<AVSubtitleRect>,
         videoWidth: Int,
