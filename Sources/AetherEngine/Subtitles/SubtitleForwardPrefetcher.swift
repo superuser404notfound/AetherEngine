@@ -54,6 +54,20 @@ enum SubtitleForwardPrefetcher {
             ? .byteEstimate : .failed
     }
 
+    /// #416/#941: what a reposition tells the coverage ledger. Only a completed timestamp seek says
+    /// where the reader sits (at or before `seconds`, so the anchor under-claims). A byte estimate
+    /// lands near the target on either side, and a failed or timed-out seek leaves the cursor
+    /// wherever it was, which after a backward jump is the far side of the stretch it was sent to
+    /// read. Anchoring either on the request let the next progress step claim that stretch.
+    static func noteRepositionCoverage(_ landed: Positioning, at seconds: Double,
+                                       store: SubtitlePacketStore) {
+        if landed == .seek {
+            store.noteHarvestAnchor(.prefetch, at: seconds)
+        } else {
+            store.noteHarvestPositionLost(.prefetch)
+        }
+    }
+
     /// #240: an anchor change handed to a RUNNING prefetch session, in place of tearing it down.
     ///
     /// A playhead jump used to rebuild the whole session: a fresh demuxer open, the Matroska
@@ -314,10 +328,9 @@ enum SubtitleForwardPrefetcher {
                 // as unresolved instead of validating a position the seek has not reached yet.
                 SubtitlePrefetchTelemetry.recordReanchor(seekGeneration: target.seekGeneration)
                 // #416: the run that was reading up to here is over, and everything between where
-                // it got to and this anchor is ground nobody read. Stated as the anchor the reader
-                // ASKED for, not where the seek landed: a subtitle-axis seek lands at or before the
-                // request, so this under-claims by up to one authored gap and never over-claims.
-                store.noteHarvestAnchor(.prefetch, at: target.seconds)
+                // it got to and this anchor is ground nobody read. #941: anchored only on a seek
+                // that completed, see noteRepositionCoverage.
+                noteRepositionCoverage(landed, at: target.seconds, store: store)
                 lastCoverageNoted = -Double.infinity
                 anchorGraceUntil = DispatchTime.now()
                     + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)

@@ -1034,9 +1034,9 @@ extension AetherEngine {
             fallbackDuration: engineDisplayDuration,
             timeout: Self.sideReaderSeekBudgetSeconds)
         // #416: this session reads forwards from here, and nothing below it is this reader's to
-        // claim. Stated even when the positioning fell back or failed: what the loop then reads is
-        // still forwards from wherever it sits, and the anchor is the earliest it can be.
-        store.noteHarvestAnchor(.prefetch, at: startAt)
+        // claim. #941: only when the seek completed. A failed one leaves the cursor wherever the
+        // open and the cue-index prewarm put it, which can be past `startAt`.
+        SubtitleForwardPrefetcher.noteRepositionCoverage(landed, at: startAt, store: store)
         if landed != .seek, !Task.isCancelled {  // AE#944: a cancelled session's positioning is noise
             EngineLog.emit(
                 "[AetherEngine] #151 forward prefetch seek to \(String(format: "%.2f", startAt))s timed out "
