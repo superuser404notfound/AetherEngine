@@ -1176,6 +1176,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         sourceReopenableByURL: Bool = true,
         customSourceReopenFactory: CustomSourceReopenFactory? = nil,
         companionAudioReader: IOReader? = nil,
+        liveSourceAnnouncesDiscontinuities: Bool = false,
         probesize: Int64? = nil,
         maxAnalyzeDuration: Int64? = nil,
         sequentialOrigin: Bool = false,
@@ -1250,6 +1251,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.sourceReopenableByURL = sourceReopenableByURL
         self.customSourceReopenFactory = customSourceReopenFactory
         self.companionAudioReader = companionAudioReader
+        self.liveSourceAnnouncesDiscontinuities = liveSourceAnnouncesDiscontinuities
         self.forwardWindowSegments = Self.clampedForwardWindow(forwardBufferSegments)
         self.requestedSessionCacheBudgetBytes = sessionCacheByteBudget.map { max(0, $0) }
     }
@@ -1312,6 +1314,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// URL sources and host-provided custom readers.
     public typealias CustomSourceReopenFactory = @Sendable () -> (reader: IOReader, formatHint: String?)?
     let customSourceReopenFactory: CustomSourceReopenFactory?
+
+    /// AE#996: the live source is segmented ingest (EXT-X-DISCONTINUITY may restart its clock), so a
+    /// clock restart to near zero is a seam and not, on its own, a sign of a replayed source.
+    let liveSourceAnnouncesDiscontinuities: Bool
 
     /// #199: the reader vended by `customSourceReopenFactory` that the CURRENT demuxer reads from.
     /// Guarded by `restartLock`. The original load's reader stays engine-owned (AetherEngine closes it
@@ -3821,6 +3827,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // a gap where nobody claims the link.
         prod.sideReaderLinkGate = sideReaderLinkGate
         prod.playedMediaLedger = playedMediaLedger
+        prod.sourceAnnouncesDiscontinuities = liveSourceAnnouncesDiscontinuities
         prod.onFirstHDR10PlusDetected = { [weak self] in
             self?.notifyHDR10PlusOnce()
         }

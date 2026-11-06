@@ -1808,6 +1808,13 @@ public final class Demuxer: @unchecked Sendable {
         return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO
     }
 
+    func isAudioStream(_ index: Int32) -> Bool {
+        accessLock.lock(); defer { accessLock.unlock() }
+        guard let ctx = formatContext, index >= 0, index < ctx.pointee.nb_streams,
+              let stream = ctx.pointee.streams[Int(index)] else { return false }
+        return stream.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO
+    }
+
 
     /// Best audio stream index, or -1 (same AVERROR_STREAM_NOT_FOUND clamp as videoStreamIndex).
     /// GOTCHA: av_find_best_stream skips streams with no channels/sample_rate (live MPEG-TS

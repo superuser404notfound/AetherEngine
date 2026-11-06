@@ -12,6 +12,22 @@ the public-API contract.
 
 ### Fixed
 
+- **Ad-stitched live HLS keeps its sound and stops looping at ad seams (AE#996).** Two separate faults
+  on free ad-supported channels (MediaTailor, Xumo, Amagi). First, a clock restart behind an
+  `EXT-X-DISCONTINUITY` was read as a source replay: FFmpeg's 33-bit wrap correction turns a restart at
+  2 s into `2^33 + 180000`, the #405 axis-reset check took that for a restarted origin, and the pump
+  exited for a reopen. One channel reopened six times in 9 s onto the same bumper. On segmented live
+  ingest that shape is now an ordinary seam and goes through the timeline rebase; a continuous
+  transport stream keeps the #405 reading, and a replay after a reconnect is still caught by the exact
+  payload match. Second, some ad servers carry the ad's audio on a PID of its own (programme `0x1e2`,
+  ad `0x101`, video on one PID throughout). The producer was bound to one audio stream index, so
+  after a seam every packet of the other PID was dropped as foreign and every segment was cut
+  without sound until a later break happened to bring the bound PID back. The producer now follows
+  the audio to a new stream when the bound one has gone quiet across a video seam (or for a full
+  second without one) and the new stream's ADTS frames match the track's AudioSpecificConfig; it
+  logs `audio follows the source to stream N`. Stream-copy ADTS AAC only; a bridged track or another
+  codec logs `not followed` once.
+
 - **Closing an HLS VOD ingest no longer can abort the app.** `HLSVODIngestReader.close()` invalidated
   its URL session while the cancelled producer's segment batch could still reach a fetch, and a task
   created on an invalidated session raises an Objective-C exception (`Task created in a session that has
