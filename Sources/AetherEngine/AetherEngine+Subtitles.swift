@@ -515,50 +515,23 @@ extension AetherEngine {
             // moving the cursor to its far side, which is how a stretch of the film loses its
             // subtitles entirely: after a seek the pump refills from behind the landing while an
             // island the previous run harvested sits further ahead, and the cursor never comes back.
-            // The hold is anchored on the near side and budgeted in ticks, so a boundary the harvest
-            // never closes costs a bounded delay and then decodes exactly as before.
-            var decodeEnd = batchEnd
-            var gapHoldAt: Double? = nil
-            var gapHoldSequence: UInt64 = 0
-            var gapHoldTicksLeft = 0
+            // #941: the ledger sees the holes order cannot, a forward re-anchor's above all. The
+            // playhead closing on the island is what ends a hold; see `harvestGapStep`.
             let held = subtitleDrainCursors[channel]
-            // #941: the ledger sees the holes order cannot, a forward re-anchor's above all.
-            let isRead = store.harvestReadCheck()
-            // The playhead closing on the island ends the hold whatever the budget says: from there
-            // on the island is what the viewer is about to need, and waiting would dark the overlay
-            // for content that IS stored. That, not the tick budget, is the real bound. #941: the
-            // island, not the hold position, which a refill at about 1x passes while the hole is
-            // still ahead of the playhead.
-            let releaseAt = playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds
-            if let heldAt = held?.harvestGapAt, let farSide = entries.first?.ptsSeconds, farSide > releaseAt,
-               (held?.harvestGapTicksLeft ?? 0) > 0, !isReset,
-               !SubtitleOverlayDrainer.harvestGapHoldResumes(
-                firstSequence: entries.first?.sequence,
-                heldSequence: held?.harvestGapSequence ?? 0,
-                firstPts: farSide, heldAt: heldAt, isRead: isRead) {
-                // Still waiting: the window past the hold begins with the same island as before.
-                decodeEnd = 0
-                gapHoldAt = heldAt
-                gapHoldSequence = held?.harvestGapSequence ?? 0
-                gapHoldTicksLeft = (held?.harvestGapTicksLeft ?? 0) - 1
-            } else if let cut = SubtitleOverlayDrainer.harvestGapCut(
+            let step = SubtitleOverlayDrainer.harvestGapStep(
                 count: batchEnd,
                 ptsAt: { entries[$0].ptsSeconds },
                 sequenceAt: { entries[$0].sequence },
-                resumeFrom: isReset ? nil : held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
-                notBefore: releaseAt, isRead: isRead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
-                decodeEnd = cut.index
-                gapHoldAt = cut.at
-                gapHoldSequence = cut.sequence
-                gapHoldTicksLeft = held?.harvestGapAt == cut.at
-                    ? (held?.harvestGapTicksLeft ?? 0) - 1 : Self.subtitleDrainHarvestGapTicks
-            }
+                held: held?.harvestGap,
+                resumeFrom: held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
+                isReset: isReset,
+                releaseAt: playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds,
+                isRead: store.harvestReadCheck())
             work.channels.append(SubtitleDrainChannelWork(
                 channel: channel, streamIndex: streamIndex, store: store, plan: plan, isReset: isReset,
                 window: window, coverageStart: coverageStart, retained: retained,
-                decoder: decoder, entries: entries, batchEnd: batchEnd, decodeEnd: decodeEnd,
-                gapHoldAt: gapHoldAt, gapHoldSequence: gapHoldSequence,
-                gapHoldTicksLeft: gapHoldTicksLeft))
+                decoder: decoder, entries: entries, batchEnd: batchEnd, decodeEnd: step.decodeEnd,
+                gapHold: step.hold))
         }
         return work
     }
@@ -584,9 +557,7 @@ extension AetherEngine {
             let entries = job.entries
             let batchEnd = job.batchEnd
             let decodeEnd = job.decodeEnd
-            let gapHoldAt = job.gapHoldAt
-            let gapHoldSequence = job.gapHoldSequence
-            let gapHoldTicksLeft = job.gapHoldTicksLeft
+            let gapHold = job.gapHold
             // #271: bind the channel's cue array ONCE for the whole batch. `subtitleCues` is
             // `@Published`, whose wrapper exposes get/set and no `_modify`, so passing it inout per
             // event both copy-on-writes the array and publishes it: every consumer then walks a
@@ -643,9 +614,7 @@ extension AetherEngine {
                 lastPlayhead: playhead,
                 coverageStart: coverageStart ?? window.from,
                 retained: runRetained,
-                harvestGapAt: gapHoldAt,
-                harvestGapSequence: gapHoldSequence,
-                harvestGapTicksLeft: gapHoldTicksLeft)
+                harvestGap: gapHold)
             // #143/#204: a renderable composition at/after the playhead ends reconstruction while
             // decoding above. If the pass remains active with a candidate after the whole window,
             // finalize it. Raw packet presence cannot answer this: the landing line's own zero-object
@@ -657,9 +626,9 @@ extension AetherEngine {
             // #362: a hole hold is not a partial view of the landing. Holes are honoured only at or
             // after the playhead, so everything that can seed the candidate has decoded, and the
             // remainder sits beyond a gap the harvest has not closed. Waiting for that would keep
-            // the overlay dark for the whole hold budget, which is the one thing #143 exists to
+            // the overlay dark for the whole hold, which is the one thing #143 exists to
             // prevent; the successor trims the published line when the hole does fill.
-            if decodeEnd == entries.count || gapHoldAt != nil,
+            if decodeEnd == entries.count || gapHold != nil,
                SubtitleOverlayDrainer.shouldFinalizeReconstruction(
                 reconstructing: pgsStaleArrivalGates[channel]?.reconstructing ?? false,
                 hasCandidate: pgsStaleArrivalGates[channel]?.hasReconstructionCandidate ?? false) {
@@ -679,7 +648,7 @@ extension AetherEngine {
                 }
             }
             tally.reconstructing = pgsStaleArrivalGates[channel]?.reconstructing ?? false
-            tally.harvestGapAt = gapHoldAt
+            tally.harvestGapAt = gapHold?.at
             // #362: every bitmap cue takes its end from the next packet the store holds on this
             // stream. Run over the whole retained array rather than this batch's cues: a set left
             // open by an earlier tick (its successor not harvested yet, the batch cap, the window's
@@ -3024,9 +2993,7 @@ struct SubtitleDrainChannelWork {
     let entries: [StoredSubtitlePacket]
     let batchEnd: Int
     let decodeEnd: Int
-    let gapHoldAt: Double?
-    let gapHoldSequence: UInt64
-    let gapHoldTicksLeft: Int
+    let gapHold: SubtitleOverlayDrainer.HarvestGapHold?
 }
 
 struct SubtitleDrainTickWork {

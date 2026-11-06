@@ -24,13 +24,8 @@ struct SubtitleDrainCursor: Sendable {
     /// cleared by `stopSubtitleDrainer` and by every track switch, and those are the same points
     /// that empty the channel's cue array.
     var retained: SubtitleResolutionStatement.Retention? = nil
-    /// #362: the near side of a hole in the stored window this tick stopped at, the harvest
-    /// sequence there, and the ticks it may still stop there. Anchored on a position rather than a
-    /// flag, so a hole that fills in stages starts a fresh budget at each new boundary instead of
-    /// inheriting a spent one.
-    var harvestGapAt: Double? = nil
-    var harvestGapSequence: UInt64 = 0
-    var harvestGapTicksLeft: Int = 0
+    /// #362: the near side of a hole in the stored window this tick stopped at.
+    var harvestGap: SubtitleOverlayDrainer.HarvestGapHold? = nil
 }
 
 enum SubtitleDrainPlan: Equatable, Sendable {
@@ -119,9 +114,9 @@ enum SubtitleOverlayDrainer {
     /// Stopping at the near side costs nothing visible: the drain runs a 60 s lead ahead of the
     /// playhead, a hole is only honoured while its FAR side lies past `notBefore` (the playhead plus
     /// a short release lead), so everything at or behind the playhead decodes whole and the landing
-    /// region with it, and the caller crosses the hole anyway once its tick budget is spent. #941
-    /// moved this from the near side: a refill at about 1x keeps the playhead just behind the
-    /// filling run, past the last packet before the hole while the hole itself is still ahead. What it does change is the cursor's claim: a tick that stopped at a hole no longer
+    /// region with it. #941 moved this from the near side: a refill at about 1x keeps the playhead
+    /// just behind the filling run, past the last packet before the hole while the hole itself is
+    /// still ahead. What it does change is the cursor's claim: a tick that stopped at a hole no longer
     /// reports determination past it, which is the honest reading and the one #250 asks for.
     ///
     /// `resumeFrom` is the packet the cursor sits on, i.e. the last one a steady tick decoded, and
@@ -151,6 +146,41 @@ enum SubtitleOverlayDrainer {
             previous = (ptsAt(index), sequenceAt(index))
         }
         return nil
+    }
+
+    /// #362: the near side of a hole a tick stopped at, and the harvest sequence there.
+    struct HarvestGapHold: Equatable, Sendable {
+        var at: Double
+        var sequence: UInt64
+    }
+
+    /// #362: how far one tick may decode through its window, given the hold the previous tick left.
+    /// A hold stays while the window past it still begins with the island, until the island is
+    /// due (`releaseAt`, the playhead plus the release lead) or the filling run has read up to it;
+    /// otherwise the window is checked for a hole afresh.
+    ///
+    /// #941: there is no tick budget. Ticks run on wall time and kept counting while the playhead
+    /// stood still in a seek or a rebuffer, so the hold gave up and decoded the island over the sets
+    /// the refill was about to harvest (reported: 50..68 s lost, the set at 71 s published at
+    /// 44.86 s). The release lead already ends a hold exactly when its far side is due, and nothing
+    /// before that is on screen, so a hole the harvest never closes costs no visible delay either.
+    static func harvestGapStep(count: Int, ptsAt: (Int) -> Double,
+                               sequenceAt: (Int) -> UInt64,
+                               held: HarvestGapHold?,
+                               resumeFrom: (pts: Double, sequence: UInt64)?,
+                               isReset: Bool, releaseAt: Double,
+                               isRead: (Double, Double) -> Bool) -> (decodeEnd: Int, hold: HarvestGapHold?) {
+        if let held, !isReset, count > 0, ptsAt(0) > releaseAt,
+           !harvestGapHoldResumes(firstSequence: sequenceAt(0), heldSequence: held.sequence,
+                                  firstPts: ptsAt(0), heldAt: held.at, isRead: isRead) {
+            return (0, held)
+        }
+        if let cut = harvestGapCut(count: count, ptsAt: ptsAt, sequenceAt: sequenceAt,
+                                   resumeFrom: isReset ? nil : resumeFrom,
+                                   notBefore: releaseAt, isRead: isRead) {
+            return (cut.index, HarvestGapHold(at: cut.at, sequence: cut.sequence))
+        }
+        return (count, nil)
     }
 
     /// #362: whether a tick holding at a hole may resume. The window it now sees starts past the
