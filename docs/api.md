@@ -1594,3 +1594,19 @@ Direct `HLSVideoEngine` users may call `sessionCacheStatus()` off the main threa
 ### Host-managed renderer audio activation
 
 `rendererAudioSessionActivationEnabled` defaults to `true`. Set it to `false` before loading when the host coordinates audible focus and owns `AVAudioSession.setActive(true)` across multiple players. Software and audio-renderer loads, track reloads and interruption recovery then skip engine-driven activation and channel preference changes. The host must activate the session before audible playback. The category and multichannel support are still declared off-main by the first load in the process, shared by concurrent engines and never repeated after a success, so a host that changes the mode afterwards keeps it. A session the host already put on `.playback` before that first load keeps its mode and policy. Native AVKit activation is unchanged. If the host also owns deactivation, leave `deactivatesAudioSessionOnStop` false (its default).
+
+### Whole-session segment storage admission
+
+`LoadOptions.sessionCacheHardLimitBytes` optionally bounds resident plus staging bytes for each
+loopback segment session. It is a per-session limit: N concurrent engines may use N times that
+limit; this is not a process-wide disk quota. `LoadOptions.sessionCacheFreeReserveBytes` independently
+keeps headroom on the volume, including live sessions where the hard limit is disabled. Both default
+to legacy behavior (nil/zero). Capacity is measured with `volumeAvailableCapacityKey`, consistently
+with the other engine paths; other processes can change it after a measurement.
+
+A writer blocked by the hard limit waits for consumer advancement and observes cancellation/cache
+closure. An impossible admission or a reserve denial reports `PlaybackErrorKind.storageExhausted`
+instead of exhausting muxer revives as a source/audio failure. Cancellation does not latch a storage
+error. `SessionCacheStatus.diskAdmissionWaiting` describes that disk wait; `producerParked` retains
+its existing forward-window meaning. `currentDiskBytes`, `stagingBytes`, `hardLimitBytes`,
+`freeDiskReserveBytes` and `rejectedDiskWrites` expose the admission/reservation diagnostics.
