@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **DVD subtitles on a rescaled encode landed too low, and bottom cues were cut off (AE#993).**
+  A VobSub track keeps the DVD's 720x480 or 720x576 plane, whose pixels are not square, and the engine reported
+  that plane as `SubtitleImage.canvasSize`. Mapped width-aligned onto 1280x720 video it became 853 lines tall, so
+  a cue at the bottom of the DVD frame drew up to 67 px below its place and lost its lowest lines. A DVD canvas
+  that is not as wide as the video now reports the video frame, as DVB does since #971, or the 16:9 frame at the
+  video's width when the video was cropped wider than 16:9. A rip that kept the DVD width is unchanged. The
+  `canvasSize` documentation now also states the rule for anamorphic video: map onto the coded frame, then scale
+  onto the displayed picture.
+
 - **A slow external subtitle file froze the picture of a server HLS stream, and a sidecar was requested twice (AE#984).**
   A text sidecar borrowed the playback reader, which opened two ranged requests at once and, when the first byte
   took longer than 15 s, replaced the request with one that had 25 s left, so a server needing 25 s or more never
