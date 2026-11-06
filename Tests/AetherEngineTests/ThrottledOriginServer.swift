@@ -68,6 +68,30 @@ final class ThrottledOriginServer: @unchecked Sendable {
     static func patternByte(at offset: Int64) -> UInt8 {
         UInt8(truncatingIfNeeded: offset ^ (offset >> 8) ^ (offset >> 16) ^ (offset >> 24))
     }
+
+    /// Inside an aligned 256-byte run the pattern is `i ^ c`, with `c` fixed by the run's upper bits,
+    /// so every run is one of these 256 rows. A body copied from them costs a memcpy per run; mapping
+    /// `patternByte` over it cost a closure call per byte, which a debug build ran at ~10 MB/s and a
+    /// loaded runner pushed the 72-128 MB origins past their time limits with.
+    private static let patternRows: [UInt8] = (0..<65536).map { UInt8(truncatingIfNeeded: ($0 & 0xFF) ^ ($0 >> 8)) }
+
+    /// `count` bytes of the pattern from `offset`, equal to `patternByte(at:)` byte for byte.
+    static func patternBytes(at offset: Int64, count: Int) -> [UInt8] {
+        [UInt8](unsafeUninitializedCapacity: count) { out, initialized in
+            patternRows.withUnsafeBufferPointer { rows in
+                var written = 0
+                while written < count {
+                    let position = offset + Int64(written)
+                    let row = Int(UInt8(truncatingIfNeeded: (position >> 8) ^ (position >> 16) ^ (position >> 24)))
+                    let column = Int(position & 0xFF)
+                    let n = min(256 - column, count - written)
+                    (out.baseAddress! + written).update(from: rows.baseAddress! + row * 256 + column, count: n)
+                    written += n
+                }
+            }
+            initialized = count
+        }
+    }
     private let chunkBytes: Int
     private let throttleUs: useconds_t
     private let firstByteDelayUs: @Sendable (_ isSuffix: Bool) -> useconds_t
@@ -385,7 +409,7 @@ final class ThrottledOriginServer: @unchecked Sendable {
             if let silentAfter { n = Int(min(Int64(n), silentAfter - served)) }
             if let dropAfter { n = Int(min(Int64(n), dropAfter - served)) }
             let body = patternedBody
-                ? (0..<n).map { Self.patternByte(at: offset + bodyShift + served + Int64($0)) }
+                ? Self.patternBytes(at: offset + bodyShift + served, count: n)
                 : Array(chunk[0..<n])
             guard writeBody(fd, body) else { return false }
             served += Int64(n)

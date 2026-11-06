@@ -355,7 +355,7 @@ struct ItemSwapStillTests {
         try await waitFor { !view.isHoldingStill }
         watcher.cancel()
 
-        #expect(held)
+        #expect(held, "skipped: \(engine.heldPictureLastSkip ?? "no skip recorded")")
         #expect(engine.heldPictureLastRoute == "software renderer")
         #expect(engine.heldPictureLastRelease == "first frame of the next host")
         #expect(engine.softwareHost !== host)
