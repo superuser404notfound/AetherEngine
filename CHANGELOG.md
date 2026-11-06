@@ -29,6 +29,21 @@ _Nothing yet._
 
 ### Fixed
 
+- **A finished MPEG-TS HLS playlist that AVPlayer refuses now plays in software (AE#990).** An H.264 archive with
+  five reference frames failed with `CoreMediaErrorDomain 1718449215` on iOS and tvOS, and nothing offered the
+  session to libavcodec: the AE#561 escalation excluded the remote-HLS bypass, and the bypass ignored
+  `preferredDecodePath = .software`. A finite MPEG-TS playlist loaded with `.software` (directly or through the
+  AE#154 reroute) now plays on the software host off the seekable TS ingest, start position and seeks included,
+  and the AE#561 escalation on a finite bypass is that same rebuild. Other playlists mount AVPlayer once more
+  and surface its failure; a live bypass keeps its own reroutes.
+- **PGS subtitles no longer go missing after a backward seek into a stretch a forward restart skipped (AE#941,
+  rounds 2 and 3).** The drain held at a hole in the stored packets for at most 20 ticks, which run on wall time
+  and kept counting while a seek or a rebuffer held the playhead still, then decoded across the hole and never
+  came back for the sets the refill harvested (reported: 50 to 68 s lost). The hold now ends only when the far
+  side of the hole comes within 2 s of the playhead. A pump restart that continues its run also carries its
+  coverage up to the seam instead of leaving a hole no run fills, and a side-reader reposition that did not
+  complete no longer anchors coverage. Measured on a 70 Mbit/s M2TS fixture: the set at 67.42 s was lost in 5 of
+  6 runs before, 0 of 6 after.
 - **Ad-stitched live HLS keeps its sound and stops looping at ad seams (AE#996).** Two separate faults
   on free ad-supported channels (MediaTailor, Xumo, Amagi). First, a clock restart behind an
   `EXT-X-DISCONTINUITY` was read as a source replay: FFmpeg's 33-bit wrap correction turns a restart at
