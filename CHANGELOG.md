@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **Closing an HLS VOD ingest no longer can abort the app.** `HLSVODIngestReader.close()` invalidated
+  its URL session while the cancelled producer's segment batch could still reach a fetch, and a task
+  created on an invalidated session raises an Objective-C exception (`Task created in a session that has
+  been invalidated`), which Swift cannot catch: the process aborted. Found on CI, where the abort hit an
+  unrelated XCTest case after an earlier test had closed its reader. `close()` now cancels the session's
+  tasks and the session is invalidated when the reader is released; a fetch that still starts after the
+  close ends at once through its task's cancellation.
+
 - **E-AC-3 Atmos on the tvOS software host plays with sound, as Atmos (AE#995).** The software host (Dolby Vision
   Profile 7 FEL, and video the hardware decoder cannot play) handed an E-AC-3 JOC track to
   `AVSampleBufferAudioRenderer` compressed. On an Apple TV 4K (tvOS 27) over HDMI into a Marantz

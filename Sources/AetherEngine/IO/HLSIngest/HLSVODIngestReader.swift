@@ -28,7 +28,8 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     private let diagnosticContext: SourceNetworkDiagnostics.Context?
     private let playlistURL: URL
     private let httpHeaders: [String: String]
-    private let session: URLSession
+    /// Internal for `HLSVODIngestCloseSessionTests`, which creates a task on it after `close()`.
+    let session: URLSession
     private let ownsSession: Bool
     /// AE#732: set under `LoadOptions.heldSourceConnection`. Every request of this reader then goes over
     /// one persistent HTTP/1.1 connection per origin, segments one at a time, instead of `session`.
@@ -332,6 +333,16 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         task?.cancel()
         primed?.body.abandon()
         transport?.close()
+        // Cancel, never invalidate here: a fetch the cancelled producer's segment batch has not reached
+        // yet still creates its task on this session, and a task created on an invalidated session
+        // raises an Objective-C exception that aborts the process. A task created after this point
+        // ends at once through its own task's cancellation. Invalidation waits for deinit.
+        if ownsSession {
+            session.getAllTasks { tasks in tasks.forEach { $0.cancel() } }
+        }
+    }
+
+    deinit {
         if ownsSession {
             session.invalidateAndCancel()
         }
