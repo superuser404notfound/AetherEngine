@@ -2,7 +2,8 @@ name: CI (extended)
 
 # The builds that moved out of the per-push gate (ci.yml) because they only check that a further
 # configuration still compiles, and break rarely: Release aetherctl, the device SDKs with every
-# optional component, visionOS, and the device harnesses under Probes/. Nightly against main, and by
+# optional component, visionOS, and the device harnesses under Probes/. Also the one-thread
+# cooperative pool pass over the test suite. Nightly against main, and by
 # hand before every release tag (`gh workflow run ci-extended.yml`), so a break is found the next
 # morning at the latest and never ships. A PR that touches this file runs it too.
 on:
@@ -19,6 +20,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The Swift Testing suite on a ONE-thread cooperative pool, with and without the optional
+  # components. Anything that blocks a pool thread (a sync read, a semaphore, a `Task.detached`
+  # around engine I/O) starves every other test here deterministically, instead of a different
+  # victim timing out on some later run of the 3-core runner. See docs/architecture.md, "Blocking
+  # work and the cooperative pool". It moved out of the per-push gate on 2026-11-06: the regressions
+  # it finds are rare and a night's delay is fine, while a fourth pass per push was a further draw
+  # for an unrelated flake.
+  test-one-thread-pool:
+    name: swift test (one-thread cooperative pool${{ matrix.traits && ', all traits' || '' }})
+    runs-on: xcode-27
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        traits: [false, true]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/repositories
+          key: swiftpm-repos-${{ hashFiles('Package.resolved') }}
+          restore-keys: swiftpm-repos-
+
+      - name: swift build --build-tests
+        run: swift build --build-tests ${{ matrix.traits && '--enable-all-traits' || '' }}
+
+      - name: swift test (one-thread cooperative pool)
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
+        run: Scripts/ci-hang-watchdog.sh 10 swift test --skip-build --disable-xctest ${{ matrix.traits && '--enable-all-traits' || '' }}
+
   # Every other Swift step in CI is Debug, and aetherctl is not a product, so no consumer compiles
   # it either: a DEBUG-only engine hook called without a guard kept Release broken from 7.6.0 to
   # 7.14.0 without anything noticing (AE#610).

@@ -3,7 +3,8 @@ name: CI
 # The gate every push and PR waits for: the tests on macOS with and without the optional components,
 # and the test target for the two simulator SDKs, as four parallel jobs. Everything that only builds
 # a further configuration (Release aetherctl, the device SDKs with every component, visionOS, the
-# probes) runs in `ci-extended.yml`, nightly and by hand before a release tag. The single macOS job
+# probes), and the suite's second pass on a one-thread cooperative pool, runs in `ci-extended.yml`,
+# nightly and by hand before a release tag. The single macOS job
 # that ran all of this in sequence took ~21 minutes per change; this split is ~10.
 on:
   push:
@@ -69,14 +70,9 @@ jobs:
       - name: swift test
         run: Scripts/ci-hang-watchdog.sh 10 swift test --skip-build
 
-      # The same Swift Testing suite on a ONE-thread cooperative pool. Anything that blocks a pool
-      # thread (a sync read, a semaphore, a `Task.detached` around engine I/O) starves every other
-      # test here deterministically, instead of a different victim timing out on some later run of
-      # the 3-core runner. See docs/architecture.md, "Blocking work and the cooperative pool".
-      - name: swift test (one-thread cooperative pool)
-        env:
-          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
-        run: Scripts/ci-hang-watchdog.sh 10 swift test --skip-build --disable-xctest
+      # The one-thread cooperative pool pass runs nightly in ci-extended.yml, not here: each extra
+      # pass over the suite on every push was one more draw for an unrelated flake (2 of 6 flaky reds
+      # in 2026-11-04..06 were in it) and 5.5 min on the slowest job.
 
       # Standalone swiftc builds. They link FFmpegBuild out of `.build/checkouts`, so they ride in the
       # job that resolved it. Each script compiles a hand-picked file list, so a new reference in a
@@ -117,11 +113,6 @@ jobs:
 
       - name: swift test (all traits)
         run: Scripts/ci-hang-watchdog.sh 10 swift test --enable-all-traits --skip-build
-
-      - name: swift test (all traits, one-thread cooperative pool)
-        env:
-          LIBDISPATCH_COOPERATIVE_POOL_STRICT: "1"
-        run: Scripts/ci-hang-watchdog.sh 10 swift test --enable-all-traits --skip-build --disable-xctest
 
   build-tvos:
     name: xcodebuild (tvOS Simulator)
