@@ -959,6 +959,7 @@ extension AetherEngine {
         switch route {
         case .pcm: return "libavcodec \(codec) → CoreAudio"
         case .compressedEAC3JOC: return "\(codec) Atmos → renderer (compressed)"
+        case .decodedEAC3JOC(let layout): return "\(codec) Atmos → PCM \(layout.rawValue) (system decoder)"
         case .apac(let layout):
             return codec.hasPrefix("DTS") ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
         case .pcmBed(let layout):
