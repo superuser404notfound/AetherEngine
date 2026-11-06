@@ -2699,6 +2699,43 @@ extension HeavyDualLayerSuites {
             #expect(totals.last == DualLayerVideoDecoder.totalsLine(composed: 1, bypassDeadline: 0, bypassHeldWall: 0, bypassBackstop: 0))
         }
 
+        @Test("close sends a last totals line with the interval in progress, so a bypass near the end is counted")
+        func closeSendsTheFinalTotals() throws {
+            var totals: [String] = []
+            let logLock = NSLock()
+            let decoder = DualLayerVideoDecoder(composer: ImmediateFakeComposer())
+            defer { decoder.close() }
+
+            decoder.totalsSinkForTesting = { line in
+                logLock.lock()
+                totals.append(line)
+                logLock.unlock()
+            }
+            decoder.primeForTesting(enhancementLayer: true)
+
+            let baseBuf = try #require(Self.baseLayer())
+            let elBuf = try #require(Self.enhancementLayer())
+            decoder.seedRPUForTesting(pts: Self.pts(1), params: Self.params(), displayMetadataNAL: nil)
+            decoder.handleBaseLayerFrame(baseBuffer: baseBuf, pts: Self.pts(1), hdr10Data: nil)
+            decoder.handleEnhancementLayerFrame(elBuffer: elBuf, pts: Self.pts(1))
+            decoder.quiesceForTesting()
+            // No summary has run: nothing has been counted into a totals line yet.
+            logLock.lock()
+            #expect(totals.isEmpty)
+            logLock.unlock()
+
+            decoder.close()
+            logLock.lock()
+            #expect(totals == [DualLayerVideoDecoder.totalsLine(composed: 1, bypassDeadline: 0, bypassHeldWall: 0, bypassBackstop: 0)])
+            logLock.unlock()
+
+            // Closing again, with nothing moved since, says nothing more.
+            decoder.close()
+            logLock.lock()
+            #expect(totals.count == 1)
+            logLock.unlock()
+        }
+
         @Test("the totals line names the counters a device run judges the deadline bypass by")
         func totalsLineFormat() {
             let line = DualLayerVideoDecoder.totalsLine(composed: 120, bypassDeadline: 3, bypassHeldWall: 2, bypassBackstop: 1)

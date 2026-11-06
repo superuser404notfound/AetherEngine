@@ -720,7 +720,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     ///
     /// `composeInPlace` writes the composition into the host's buffers instead of the output pool. It saves
     /// the pool (129 to 195 MB measured for 4K) and is only safe when nothing else reads those buffers again, which
-    /// the host's player does not promise, so it is an opt-in for measurement and never the default.
+    /// the host's player does not promise. The AVPlayer-output route passes it by default, on the converter's buffer (a frame already in `x420` is the player's own buffer, which nothing is known to read again).
     func openExternalBaseLayer(
         codecpar: UnsafePointer<AVCodecParameters>, timeBase: AVRational, frameRate: Double?,
         composeInPlace: Bool = false,
@@ -1576,8 +1576,9 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // the pairing queues gave up, the renderer gets it only through `delivery`, and a failure after
             // the GPU started writing drops the frame (the buffer holds half-composed pixels, so the
             // base-layer fallback below would show them). On the external-base-layer route the buffer is the
-            // host player's, so this holds only as far as that player never hands it out again, which it
-            // does not promise; the route reaches this branch only when it was opened with `composeInPlace`.
+            // converter's, which hands it to one frame, or the host player's own when the frame was already
+            // `x420` and nothing was converted; that case holds only as far as the player never hands the buffer out
+            // again, which it does not promise. The route reaches this branch only when it was opened with `composeInPlace`.
             composer.composeInPlaceAsyncWithAcquiredSlot(
                 baseBuffer: req.base,
                 enhancementBuffer: req.enhancement,
@@ -2496,7 +2497,19 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lastGoodBaseLayerNAL = nil
         borrowedParamsRun = 0
         sideDataRing.removeAll()
-        composeResultLock.lock(); summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0; composeResultLock.unlock()
+        // The counts of the interval in progress and of the last 10 s are in no totals line yet: one more
+        // goes out when any count moved since the last, so a bypass near the end of a session is counted.
+        composeResultLock.lock()
+        let closingComposed = totalComposed + summaryComposedFrames
+        summaryComposedFrames = 0; summaryComposeFailures = 0; summaryInPlaceDropped = 0; summaryBypassComposeStalled = 0; summaryBypassQueueWaitMaxMs = 0
+        composeResultLock.unlock()
+        let closingDeadline = totalBypassDeadline + summaryBypassDeadline
+        let closingHeldWall = totalBypassHeldWall + summaryBypassHeldWall
+        let closingBackstop = totalBypassBackstop + summaryBypassBackstop
+        let closingTotalsLine = closingComposed + closingDeadline + closingHeldWall + closingBackstop != lastLoggedTotalsSum
+            ? Self.totalsLine(composed: closingComposed, bypassDeadline: closingDeadline,
+                              bypassHeldWall: closingHeldWall, bypassBackstop: closingBackstop)
+            : nil
         summaryBypassNoELInAU = 0
         summaryBypassDeadline = 0
         summaryBypassHeldWall = 0
@@ -2544,6 +2557,12 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         lock.unlock()
         if clearedStall {
             EngineLog.emit("[DualLayerVideoDecoder] compose stall cleared by close", category: .swPlayback)
+        }
+        if let closingTotalsLine {
+            EngineLog.emit(closingTotalsLine, category: .swPlayback, level: .info)
+            #if DEBUG
+            totalsSinkForTesting?(closingTotalsLine)
+            #endif
         }
 
         // Same guarantee as `flush()`: nothing tagged with the

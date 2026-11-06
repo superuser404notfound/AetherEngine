@@ -530,6 +530,38 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("1 GiB at most", fel)
         assertDocumented("which waits at most 2 s for a pull or feed tick", fel)
     }
+
+    func testOutputRouteConversionBoundsMatchDocumentation() throws {
+        let docs = try felDocument()
+        // The pool limit is the frames taken ahead of the clock, the two the display holds, the compositions
+        // in flight and a spare.
+        XCTAssertEqual(DualLayerOutputRoute.pullAheadSeconds, 0.15)
+        XCTAssertEqual(BaseLayerFormatConverter.displayHeldFrames, 2)
+        XCTAssertEqual(DoviFelComposer.maxFramesInFlight, 2)
+        XCTAssertEqual(BaseLayerFormatConverter.spareBuffers, 1)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 24), 9)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 23.976), 9)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 30), 10)
+        XCTAssertEqual(BaseLayerFormatConverter.poolLimit(frameRate: 60), 14)
+        XCTAssertEqual(DoviFelComposer.outputPoolAllocationThreshold, 14)
+        XCTAssertEqual(DoviFelComposer.outputPoolReserve, 3)
+        assertDocumented("the 2 the display layer holds (the one on screen and the one it retains), the 2 compositions in flight and 1 spare, so 9 buffers at 24 fps, 10 at 30 and 14 at 60", docs)
+        assertDocumented("the composer's own output pool is 14 plus 3", docs)
+        XCTAssertEqual(DualLayerOutputRoute.refusalRunLogLimit, 5)
+        XCTAssertEqual(BaseLayerFormatConverter.idleTrimSeconds, 1.0)
+        assertDocumented("when no frame was converted for 1 s, again every idle second", docs)
+        XCTAssertEqual(DualLayerOutputRoute.conversionFailureSeconds, 0.75)
+        XCTAssertEqual(DualLayerOutputRoute.staleBehindSeconds, 0.75)
+        XCTAssertEqual(DualLayerOutputRoute.lateFrameSeconds, 0.1)
+        XCTAssertEqual(DualLayerOutputRoute.clockJumpSeconds, 0.5)
+        assertDocumented("the wait starts again after a seek (a clock that moves more than 0.5 s between two pull ticks)", docs)
+        assertDocumented("waits 0.1 s and then", docs)
+        assertDocumented("fail for 0.75 s of playback without one success", docs)
+        // The wait for a buffer is the composer's own bound for its output pool, about 36 ms.
+        XCTAssertEqual(Double(DoviFelComposer.outputPoolAttempts - 1) * DoviFelComposer.outputPoolRetryInterval,
+                       0.036, accuracy: 1e-9)
+        assertDocumented("waits at most about 36 ms for a buffer", docs)
+    }
     #endif
 
     // MARK: - Split-layer join repair (docs/dolby-vision-fel.md)
