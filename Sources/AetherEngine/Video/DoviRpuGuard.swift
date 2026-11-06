@@ -123,7 +123,7 @@ enum DoviRpuGuard {
         return scan(&r) || r.hostile
     }
 
-    private static func scan(_ r: inout Bits) -> Bool {
+    private static func scan(_ r: inout Bits, dmStart: ((Int, Bool) -> Void)? = nil) -> Bool {
         guard r.bits(6) == 2, let format = r.bits(11) else { return false }
         guard r.bits(4) != nil, r.bits(4) != nil, let seqInfo = r.bit() else { return false }
         guard seqInfo == 1 else { return false }
@@ -152,6 +152,7 @@ enum DoviRpuGuard {
             // is still parsed when vdr_dm_metadata_present_flag is set, so an invalid block must be
             // caught here too.
             guard r.ue() != nil, dmPresent == 1 else { return false }
+            dmStart?(r.pos, reserved3 == 1)
             return reachesInvalidDmBlock(&r, compressed: reserved3 == 1)
         }
         guard r.ue() != nil, r.ue() != nil, r.ue() != nil else { return false }
@@ -214,7 +215,16 @@ enum DoviRpuGuard {
             }
         }
         guard dmPresent == 1 else { return false }
+        dmStart?(r.pos, reserved3 == 1)
         return reachesInvalidDmBlock(&r, compressed: reserved3 == 1)
+    }
+
+    /// Only used after libdovi has successfully parsed and serialized the RPU.
+    static func displayMetadataStart(_ bytes: [UInt8]) -> (offset: Int, compressed: Bool)? {
+        var reader = Bits(bytes: bytes, end: bytes.count * 8, pos: 24)
+        var result: (Int, Bool)?
+        let unsafe = scan(&reader) { result = ($0, $1) }
+        return unsafe || reader.hostile ? nil : result
     }
 
     /// libdovi's `required_bits()` for level 8, 9 and 10 blocks is `unreachable!()` for any length the

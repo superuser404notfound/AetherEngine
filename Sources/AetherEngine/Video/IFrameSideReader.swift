@@ -9,6 +9,7 @@ final class IFrameSideReader: @unchecked Sendable {
     private let open: (Demuxer) throws -> Void
     private let cleanup: () -> Void
     private let convertP7ToProfile81: Bool
+    private let felDeliveryClamp: DoviFELDeliveryClamp?
     private let nalFraming: VideoNALFraming
     private let readDeadlineSeconds: TimeInterval
     private let now: () -> Date
@@ -38,12 +39,14 @@ final class IFrameSideReader: @unchecked Sendable {
     init(open: @escaping (Demuxer) throws -> Void,
          cleanup: @escaping () -> Void = {},
          convertP7ToProfile81: Bool = false,
+         felDeliveryClamp: DoviFELDeliveryClamp? = nil,
          nalFraming: VideoNALFraming = .lengthPrefixed(size: 4),
          readDeadlineSeconds: TimeInterval = 8,
          now: @escaping () -> Date = Date.init) {
         self.open = open
         self.cleanup = cleanup
         self.convertP7ToProfile81 = convertP7ToProfile81
+        self.felDeliveryClamp = felDeliveryClamp
         self.nalFraming = nalFraming
         self.readDeadlineSeconds = readDeadlineSeconds
         self.now = now
@@ -149,7 +152,7 @@ final class IFrameSideReader: @unchecked Sendable {
             guard packet.pointee.stream_index == videoIndex,
                   (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 else { continue }
             if convertP7ToProfile81 {
-                _ = DoviRpuConverter.convertPacketToProfile81(packet, framing: nalFraming)
+                _ = DoviRpuConverter.convertPacketToProfile81(packet, framing: nalFraming, deliveryClamp: felDeliveryClamp)
             }
             guard let bytes = packet.pointee.data, packet.pointee.size > 0 else { return nil }
             return Data(bytes: bytes, count: Int(packet.pointee.size))

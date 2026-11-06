@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+- **Hosts can experimentally opt in to aligning FEL delivery luminance metadata.**
+  With the `DualLayerDolbyVision` trait and `LoadOptions.alignFELDeliveryLuminance` (default false), the native Profile 7 to 8.1 remux
+  checks the title's first RPU and base-layer mastering metadata
+  once at open. A FEL title mastered at no more than 1000 nits whose RPU declares at least 4000
+  nits clamps source/L1 maxima and L6 luminance to the base master. Creative trims stay intact.
+  MEL and full FEL composition stay unchanged. Picture benefit remains unmeasured; `AETHER_DOVI_FEL_CLAMP=0` disables an opted-in load for A/B.
 
 ## [7.59.0] - 2026-11-06
 

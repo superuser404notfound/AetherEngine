@@ -11,6 +11,7 @@ struct LoadOptionsTests {
         #expect(opts.suppressDisplayCriteria == false)
         #expect(opts.httpHeaders.isEmpty)
         #expect(opts.keepDvh1TagWithoutDV == false)
+        #expect(opts.alignFELDeliveryLuminance == false)
         // Default matchContentEnabled MUST be true; flipping this would
         // silently regress HDR routing for non-tvOS callers that don't
         // query the AVDisplayManager flag.

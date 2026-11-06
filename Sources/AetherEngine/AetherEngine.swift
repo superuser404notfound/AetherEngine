@@ -6230,6 +6230,7 @@ public final class AetherEngine: ObservableObject {
                     keepDvh1TagWithoutDV: options.keepDvh1TagWithoutDV,
                     forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
                     dolbyVisionHandling: options.dolbyVisionHandling,
+                    alignFELDeliveryLuminance: options.alignFELDeliveryLuminance,
                     dolbyVisionRPUProfile: detectedDVRPUProfile,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: routingPanelHDR,
