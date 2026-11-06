@@ -97,6 +97,22 @@ extension SoftwarePlaybackHost {
                                category: .swPlayback)
                 return try pcm()
             }
+        case .decodedEAC3JOC(let layout):
+            guard let joc else { return try pcm() }
+            do {
+                // Opened at once: on tvOS the system decoder reads the objects without the registration
+                // (measured), which still runs so a later session or a route change finds it done.
+                AtmosDecoderPrimer.shared.begin()
+                let producer = try SoftwareEAC3AtmosDecoder(stream: stream, entry: joc, layout: layout)
+                EngineLog.emit("[SWHost] audio: E-AC-3 JOC decoded by the system into \(layout.rawValue) as PCM for the renderer",
+                               category: .swPlayback)
+                return (producer, route)
+            } catch {
+                // The PCM decode, not the compressed hand-off: on this platform that plays silent.
+                EngineLog.emit("[SWHost] audio: E-AC-3 JOC system decode unavailable (\(error)); PCM decode",
+                               category: .swPlayback)
+                return try pcm()
+            }
         case .apac(let layout), .pcmBed(let layout):
             guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return try pcm() }
             let format: SpatialBedFormat = route == .pcmBed(layout) ? .lpcm : .apac

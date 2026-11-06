@@ -19,6 +19,9 @@ import AetherLibavcodec
 enum SoftwareAtmosRoute: Equatable, Sendable {
     case pcm
     case compressedEAC3JOC
+    /// E-AC-3 JOC decoded by the system's Atmos decoder into the speaker bed, delivered as PCM
+    /// (`SoftwareEAC3AtmosDecoder`). tvOS, where the renderer plays the compressed stream silent.
+    case decodedEAC3JOC(SpatialSpeakerLayout)
     case apac(SpatialSpeakerLayout)
     /// The rendered bed as PCM in its own layout, as opposed to `.pcm`, the source's decode.
     case pcmBed(SpatialSpeakerLayout)
@@ -38,6 +41,7 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         rendering: ObjectAudioRendering,
         confirmedJOC: Bool,
         osSupportsAPAC: Bool = ObjectAudioRendering.isAvailable,
+        decodesJOC: Bool = SoftwareAtmosRoute.decodesJOCOnThisPlatform,
         routeFormat: @autoclosure () -> SpatialBedFormat = SpatialBedFormat.forCurrentRoute()
     ) -> SoftwareAtmosRoute {
         guard let layout = rendering.layout, !isLive else { return .pcm }
@@ -46,6 +50,11 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
             // Atmos decoder is described for. Anything else keeps the decode it has.
             guard confirmedJOC, channels == 6, sampleRate == 48_000,
                   framesPerPacket == 0 || framesPerPacket == 1536 else { return .pcm }
+            // A PCM bed only: over AirPlay the TrueHD route sends APAC, and a decoded JOC bed there is
+            // unmeasured, so that route keeps the compressed stream it had.
+            if decodesJOC, rendering.bedFormat(routeFormat: routeFormat()) == .lpcm {
+                return .decodedEAC3JOC(layout)
+            }
             return .compressedEAC3JOC
         }
         guard osSupportsAPAC,
@@ -82,6 +91,24 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
             return "DTS:X is rendered into 7.1.4 or 9.1.6 only, not \(layout.rawValue)"
         }
         return nil
+    }
+
+    /// Whether E-AC-3 JOC is decoded here rather than handed to the renderer compressed: tvOS, where
+    /// `AVSampleBufferAudioRenderer` plays the compressed stream silent (`SoftwareEAC3AtmosDecoder`).
+    static var decodesJOCOnThisPlatform: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Whether the route needs the Atmos decoder registered first (`AtmosDecoderPrimer`).
+    var needsAtmosDecoder: Bool {
+        switch self {
+        case .compressedEAC3JOC, .decodedEAC3JOC: return true
+        case .pcm, .apac, .pcmBed: return false
+        }
     }
 
     /// Whether this route needs `AtmosOutputActivator` on tvOS: compressed E-AC-3 JOC and every rendered

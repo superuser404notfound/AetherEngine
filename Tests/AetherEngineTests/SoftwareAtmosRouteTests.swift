@@ -15,12 +15,42 @@ struct SoftwareAtmosRouteTests {
     private func route(
         codec: AVCodecID, profile: Int32 = 0, rate: Int32 = 48_000, channels: Int32 = 6,
         frame: Int32 = 1536, live: Bool = false, rendering: ObjectAudioRendering = .apac(.l714),
-        joc: Bool = true, apacOS: Bool = true
+        joc: Bool = true, apacOS: Bool = true, decodesJOC: Bool = false, routeFormat: SpatialBedFormat = .lpcm
     ) -> SoftwareAtmosRoute {
         SoftwareAtmosRoute.route(
             codecID: codec, profile: profile, sampleRate: rate, channels: channels,
             framesPerPacket: frame, isLive: live, rendering: rendering, confirmedJOC: joc,
-            osSupportsAPAC: apacOS)
+            osSupportsAPAC: apacOS, decodesJOC: decodesJOC, routeFormat: routeFormat)
+    }
+
+    @Test("where the platform decodes JOC (tvOS), JOC E-AC-3 becomes a PCM bed in the asked layout")
+    func jocDecodedToBed() {
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .render(.l714), decodesJOC: true) == .decodedEAC3JOC(.l714))
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .lpcm(.l916), decodesJOC: true) == .decodedEAC3JOC(.l916))
+        #expect(route(codec: AV_CODEC_ID_EAC3, frame: 0, rendering: .render(.l514), decodesJOC: true) == .decodedEAC3JOC(.l514))
+    }
+
+    @Test("a route that takes APAC (AirPlay, or APAC asked for) keeps JOC compressed even where the platform decodes it")
+    func jocDecodedOnlyAsPCMBed() {
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .render(.l714), decodesJOC: true, routeFormat: .apac) == .compressedEAC3JOC)
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .apac(.l714), decodesJOC: true) == .compressedEAC3JOC)
+    }
+
+    @Test("a decoded JOC bed keeps every guard of the compressed route: not JOC, not 5.1, live, or off stays PCM")
+    func jocDecodedGuards() {
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .render(.l714), joc: false, decodesJOC: true) == .pcm)
+        #expect(route(codec: AV_CODEC_ID_EAC3, channels: 8, rendering: .render(.l714), decodesJOC: true) == .pcm)
+        #expect(route(codec: AV_CODEC_ID_EAC3, live: true, rendering: .render(.l714), decodesJOC: true) == .pcm)
+        #expect(route(codec: AV_CODEC_ID_EAC3, rendering: .off, decodesJOC: true) == .pcm)
+    }
+
+    @Test("only tvOS decodes JOC itself")
+    func jocDecodePlatform() {
+        #if os(tvOS)
+        #expect(SoftwareAtmosRoute.decodesJOCOnThisPlatform)
+        #else
+        #expect(!SoftwareAtmosRoute.decodesJOCOnThisPlatform)
+        #endif
     }
 
     @Test("JOC E-AC-3 goes to the renderer compressed")
@@ -114,6 +144,7 @@ struct SoftwareAtmosRouteTests {
         #expect(SoftwareAtmosRoute.apac(.l714).takesAtmosOutputActivator)
         #expect(SoftwareAtmosRoute.pcmBed(.l916).takesAtmosOutputActivator)
         #expect(SoftwareAtmosRoute.compressedEAC3JOC.takesAtmosOutputActivator)
+        #expect(SoftwareAtmosRoute.decodedEAC3JOC(.l714).takesAtmosOutputActivator)
         #expect(!SoftwareAtmosRoute.pcm.takesAtmosOutputActivator)
     }
 
@@ -240,6 +271,8 @@ struct SoftwareAtmosRouteTests {
         #expect(waits == 0)
         await SoftwarePlaybackHost.awaitAtmosPrimer(for: .compressedEAC3JOC) { waits += 1 }
         #expect(waits == 1)
+        await SoftwarePlaybackHost.awaitAtmosPrimer(for: .decodedEAC3JOC(.l714)) { waits += 1 }
+        #expect(waits == 2)
     }
 
     @Test("a PCM track stays on the PCM route whatever the rendering option says")
