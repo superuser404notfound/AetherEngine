@@ -263,7 +263,7 @@ final class Issue293LiveCarriageProbeTests: XCTestCase {
             session: session
         )
 
-        XCTAssertEqual(verdict, .otherCarriage)
+        XCTAssertEqual(verdict, .transportStreamWithoutHEVC)
     }
 
     func testEncryptedSegmentStaysInconclusive() async throws {

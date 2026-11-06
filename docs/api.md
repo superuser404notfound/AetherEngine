@@ -210,7 +210,7 @@ player.softwarePathEscalations   // PassthroughSubject<SoftwarePathEscalationEve
 options.escalatesToSoftwarePath  // default true; false declines the rebuild
 ```
 
-When AVPlayer fails a native item with a verdict on the MEDIA (`CoreMediaErrorDomain`, typically `-19602` on a sample Apple's parser refuses), every native recovery reloads the same bytes, so the engine spends one rebuild per session on `SoftwarePlaybackHost` at the session's playhead instead of making the failure terminal (AE#561). libavcodec skips the frame Apple refused and plays on. It is not taken on the remote-HLS bypass, on a session already asked onto `.software`, or for a URL-loading failure, which both paths would read through the same reader; whether the software path can serve the source at all is the same check a `preferredDecodePath` correction runs.
+When AVPlayer fails a native item with a verdict on the MEDIA (`CoreMediaErrorDomain`, typically `-19602` on a sample Apple's parser refuses), every native recovery reloads the same bytes, so the engine spends one rebuild per session on `SoftwarePlaybackHost` at the session's playhead instead of making the failure terminal (AE#561). libavcodec skips the frame Apple refused and plays on. On the remote-HLS bypass it is taken only for a finite playlist (AE#990): the rebuild is the same load with `.software`, which a playlist of MPEG-TS segments plays from the seekable TS ingest, and any other playlist mounts on AVPlayer once more and surfaces that failure. A live bypass keeps its own reroutes onto the live ingest. It is not taken on a session already asked onto `.software`, or for a URL-loading failure, which both paths would read through the same reader; whether the software path can serve the source at all is the same check a `preferredDecodePath` correction runs.
 
 The event fires the moment the rebuild is taken and carries the failure it absorbed, in the `PlaybackErrorInfo` shape it would have surfaced in (`kind` `.nativeItemFailed`), plus the position and whether a `load()` was still waiting. If the rebuild then fails, the original failure is published as `.error` the usual way; if it succeeds, `videoRoute` moves to `.software`. A startup take does not end the host's `load()` with a `CancellationError`: that call keeps waiting across the rebuild and returns the probe it already assembled.
 
@@ -413,9 +413,13 @@ Three properties worth knowing:
   `dolbyVisionUnplayableOnSoftwarePath` rather than decoding as YCbCr and rendering green/purple,
   and a demuxed-audio live source still fails rather than playing silent. An override says which
   host serves the session, not what that host can do.
-- **`nativeRemoteHLS` is a different route.** AVPlayer plays the remote playlist and the engine
-  demuxes and decodes nothing, so there is no decode path to prefer. The engine logs that it
-  ignored the preference rather than letting it look applied.
+- **`nativeRemoteHLS` is a different route, with one exception.** AVPlayer plays the remote
+  playlist and the engine demuxes and decodes nothing, so there is usually no decode path to
+  prefer, and the engine logs that it ignored the preference rather than letting it look applied.
+  A finite, unencrypted playlist of MPEG-TS segments is the exception (AE#990): with `.software` it
+  moves onto the seekable TS ingest the AE#268 HEVC route uses and decodes in software, whatever the
+  codec, with `startPosition` and seeks served by the ingest. That covers a playlist reached through
+  the AE#154 reroute of a `.url` load too. fMP4, live and encrypted playlists keep the bypass.
 - **An audio-only session honours it too.** With `audioOnly`, `.software` sends a codec AVPlayer
   could play (FLAC, ALAC, AAC, MP3, LPCM...) to the FFmpeg host (`AudioPlaybackHost`) instead of
   `AudioAVPlayerHost`, and the audio dispatch line in the log says the host asked for it. The trade

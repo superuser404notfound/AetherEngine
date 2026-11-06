@@ -85,6 +85,8 @@ enum SoftwarePathEscalation {
         let nativeRemoteHLS: Bool
         /// `LoadOptions.escalatesToSoftwarePath`: false when the host re-plans a failing title itself.
         var hostAllowsEscalation: Bool = true
+        /// AE#990: the bypass is playing a finite playlist, the one shape with an ingest to land on.
+        var finitePlaylist: Bool = false
     }
 
     /// The rebuild a still-waiting `load()` hands its wait to (AE#629). `supersededGeneration` is the
@@ -119,8 +121,10 @@ enum SoftwarePathEscalation {
         guard availability.hostAllowsEscalation else { return false }
         // Already there, or the host asked for a path this cannot improve on.
         guard availability.preferredDecodePath == .automatic else { return false }
-        // The bypass has no local muxer and decodes nothing here, so #461 ignores the option anyway.
-        guard !availability.nativeRemoteHLS else { return false }
+        // The bypass decodes nothing itself. AE#990: a finite playlist's rebuild re-runs the load with
+        // `.software`, which takes the seekable TS ingest when the playlist is MPEG-TS and otherwise
+        // mounts AVPlayer once more, whose failure then surfaces. A live one has its own reroutes.
+        guard !availability.nativeRemoteHLS || availability.finitePlaylist else { return false }
         return errorDomain == mediaErrorDomain || errorDomain == liveJoinErrorDomain
             || errorDomain == videoConfigurationErrorDomain
     }

@@ -16,11 +16,12 @@ struct SoftwarePathEscalationTests {
         escalated: Bool = false,
         path: DecodePath = .automatic,
         remoteHLS: Bool = false,
-        hostAllows: Bool = true
+        hostAllows: Bool = true,
+        finitePlaylist: Bool = false
     ) -> SoftwarePathEscalation.Availability {
         SoftwarePathEscalation.Availability(
             alreadyEscalated: escalated, preferredDecodePath: path, nativeRemoteHLS: remoteHLS,
-            hostAllowsEscalation: hostAllows)
+            hostAllowsEscalation: hostAllows, finitePlaylist: finitePlaylist)
     }
 
     private static let mediaFailure = SoftwarePathEscalation.Request(
@@ -57,12 +58,24 @@ struct SoftwarePathEscalationTests {
             errorDomain: "CoreMediaErrorDomain", availability: Self.availability(path: .software)))
     }
 
-    /// The bypass has no local muxer and the engine decodes nothing on it, so #461 ignores the
-    /// option there; escalating would spend a rebuild to arrive where it started.
-    @Test("The remote-HLS bypass is not escalated")
+    /// A live bypass has its own reroutes onto the live ingest; escalating it would spend a rebuild
+    /// to arrive where it started.
+    @Test("A live remote-HLS bypass is not escalated")
     func remoteHLSIsRefused() {
         #expect(!SoftwarePathEscalation.shouldEscalate(
             errorDomain: "CoreMediaErrorDomain", availability: Self.availability(remoteHLS: true)))
+    }
+
+    /// AE#990: a finite playlist AVPlayer refuses on its media (`CoreMediaErrorDomain 1718449215` on
+    /// the reporter's H.264 archive) is rebuilt with `.software`, which the TS ingest serves.
+    @Test("A finite remote-HLS bypass escalates a media failure, and only a media failure")
+    func finiteRemoteHLSEscalates() {
+        let finite = Self.availability(remoteHLS: true, finitePlaylist: true)
+        #expect(SoftwarePathEscalation.shouldEscalate(errorDomain: "CoreMediaErrorDomain", availability: finite))
+        #expect(!SoftwarePathEscalation.shouldEscalate(errorDomain: NSURLErrorDomain, availability: finite))
+        #expect(!SoftwarePathEscalation.shouldEscalate(
+            errorDomain: "CoreMediaErrorDomain",
+            availability: Self.availability(remoteHLS: true, hostAllows: false, finitePlaylist: true)))
     }
 
     @Test("No answer from the engine is never a reason to swallow a failure")
