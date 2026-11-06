@@ -438,7 +438,7 @@ extension AetherEngine {
             let plan = SubtitleOverlayDrainer.drainPlan(
                 cursor: subtitleDrainCursors[channel],
                 playhead: playhead,
-                lead: Self.subtitleDrainLeadSeconds,
+                lead: subtitleDrainLead(for: channel, streamIndex: streamIndex),
                 backscan: Self.subtitleDrainBackscanSeconds,
                 jumpThreshold: Self.subtitleDrainJumpThresholdSeconds,
                 elapsedSinceLastPlan: elapsed)
@@ -689,11 +689,14 @@ extension AetherEngine {
                 // AE#929: a cue the cursor has not reached yet is decoded again on the way, so past
                 // the lead it costs nothing to drop. After a backward seek that is the old
                 // position's whole floor and lead, which otherwise stays until playback gets there.
-                let reDecodedAfter = max(playhead + Self.subtitleDrainLeadSeconds
+                // AE#929: both edges follow the host's declared offset reach, see
+                // `maximumSubtitleOffsetSeconds`.
+                let reDecodedAfter = max(playhead + subtitleDrainLead(for: channel, streamIndex: streamIndex)
                                              + Self.subtitleForwardPrefetchLeadMarginSeconds,
                                          subtitleDrainCursors[channel]?.lastDecodedPts ?? .infinity)
                 if Self.pruneCues(&cues, toBitmapBytes: Self.subtitleCueBitmapByteBudget,
-                                  endedBefore: playhead - Self.subtitleCueBitmapFloorSeconds,
+                                  endedBefore: playhead - Self.bitmapCueFloorSeconds(
+                                      offsetReach: bitmapSubtitleOffsetReach),
                                   startingAfter: reDecodedAfter) {
                     didMutate = true
                 }
