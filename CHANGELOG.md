@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.59.0] - 2026-11-06
+
 ### Added
 
 - **`maximumSubtitleOffsetSeconds`: bitmap subtitle memory follows the host's offset range (AE#929).** Decoded
