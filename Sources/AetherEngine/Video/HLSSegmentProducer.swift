@@ -961,6 +961,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var pumpQoSCurrent: qos_class_t = QOS_CLASS_USER_INITIATED
     private var pumpQoSLastSeg = Int.min
     private var pumpEpochHighestStored = Int.min
+    /// #941: `pumpEpochHighestStored` for readers off the pump thread. The host reads it at a restart
+    /// to tell a run that is continued seamlessly from one that is abandoned short of the new anchor.
+    private let epochHeadLock = NSLock()
+    private var _epochHighestCaptured = Int.min
+    var epochHighestCaptured: Int {
+        epochHeadLock.lock()
+        defer { epochHeadLock.unlock() }
+        return _epochHighestCaptured
+    }
     private var pumpUnwinding = false
     /// AE#850: a segment boundary is not often enough to decide on. At 0.1x a single segment took
     /// 19 s of wall time on `.utility`, longer than the whole relaxed lead, so the promotion landed
@@ -2535,6 +2544,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             // AE#286: per-epoch head. cache.highestStoredIndex is monotonic across restarts and would
             // credit this pump with the previous epoch's production.
             pumpEpochHighestStored = max(pumpEpochHighestStored, currentMuxerSegmentIndex)
+            epochHeadLock.lock()
+            _epochHighestCaptured = pumpEpochHighestStored
+            epochHeadLock.unlock()
             if isLive {
                 let tb = muxer.muxerAudioTimeBase
                 let tick = tb.den > 0 ? Double(tb.num) / Double(tb.den) : 0
@@ -3516,6 +3528,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         pumpQoSLastSeg = Int.min
         pumpQoSNextCheckNanos = 0
         pumpEpochHighestStored = Int.min
+        epochHeadLock.lock()
+        _epochHighestCaptured = Int.min
+        epochHeadLock.unlock()
         pumpUnwinding = false
         pumpRelaxationRate.suspend()
         pthread_set_qos_class_self_np(pumpQoSCurrent, 0)

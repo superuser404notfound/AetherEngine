@@ -148,6 +148,13 @@ final class SubtitlePacketStore: @unchecked Sendable {
         coverage.noteAnchor(writer, at: seconds)
     }
 
+    /// #941: that reader repositioned and cannot say where it landed. See
+    /// `SubtitleHarvestCoverage.noteLostPosition`.
+    func noteHarvestPositionLost(_ writer: Writer) {
+        lock.lock(); defer { lock.unlock() }
+        coverage.noteLostPosition(writer)
+    }
+
     /// #416: that reader's current run has read one step further, through `seconds`.
     func noteHarvestProgress(_ writer: Writer, through seconds: Double) {
         lock.lock(); defer { lock.unlock() }
