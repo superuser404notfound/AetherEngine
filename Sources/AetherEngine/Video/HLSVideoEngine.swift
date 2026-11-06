@@ -330,6 +330,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     public var initialStartSeconds: Double?
     /// Resolved in start() from `initialStartSeconds` once the segment plan exists.
     private(set) var initialProducerBaseIndex: Int = 0
+    /// #941: the segment the running pump opened at, so a restart can tell whether it continues that
+    /// run. restartLock.
+    private var pumpRunStartIndex: Int?
     /// Set once the main demuxer sits at the initial producer's start (step 8's seek ran early).
     var demuxerAtInitialProducerStart = false
 
@@ -2469,6 +2472,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             let tb = savedVideoConfig?.timeBase ?? AVRational(num: 1, den: 1000)
             subtitlePacketStore.noteHarvestAnchor(
                 .pump, at: Double(plan[openIndex].startPts) * Double(tb.num) / Double(tb.den))
+            restartLock.lock()
+            pumpRunStartIndex = openIndex
+            restartLock.unlock()
         }
         prod.start()
         preparedServe = PreparedServe(
@@ -5138,6 +5144,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// #93 restart latency: phase split for the "restart took" line, so a slow restart names the
     /// phase that ate the time (old-pump stop wait, wedged-reopen, demuxer seek, producer build).
+    /// #941: whether the pump being replaced had already read up to `restartIndex`: it opened at or
+    /// before it and has cut every segment in front of it. A pump writes its segments in order from
+    /// where it opened, so those two facts make the stretch contiguous.
+    nonisolated static func restartContinuesHarvestRun(runStartIndex: Int?, runHighestCaptured: Int,
+                                                       restartIndex: Int) -> Bool {
+        guard let runStartIndex, runHighestCaptured >= runStartIndex else { return false }
+        return runStartIndex <= restartIndex && runHighestCaptured >= restartIndex - 1
+    }
+
     nonisolated static func restartPhaseSummary(
         stopWaitMs: Double, reopenMs: Double?, seekMs: Double, buildMs: Double
     ) -> String {
@@ -5186,6 +5201,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // connection.
         let demuxerSuspectDead = mainDemuxerSuspectDead
         mainDemuxerSuspectDead = false
+        let outgoingRunStart = pumpRunStartIndex
         restartLock.unlock()
 
         // AE#443: off `restartLock`, and before `old.stop()` releases the muxer its byte total is read
@@ -5340,12 +5356,28 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // #416: the outgoing pump's run ends where it got to and the new one begins here. Whatever
         // lies between the two was skipped, and a subtitle set stranded on the near side of that
         // gap can no longer be read as the line still on screen at the landing.
+        // #941: unless this restart only continues the outgoing run (the pump cut every segment up
+        // to the one it now opens at, the out-of-range fetch of the next segment). That run read
+        // through this anchor, not just to its last harvested subtitle packet, and without the claim
+        // the stretch between the two reads as a hole nobody will ever fill: the drain holds at it
+        // until its budget runs out and then decodes across before the new run has harvested the set
+        // that sits there.
+        let continuesRun = Self.restartContinuesHarvestRun(
+            runStartIndex: outgoingRunStart, runHighestCaptured: old?.epochHighestCaptured ?? Int.min,
+            restartIndex: idx)
+        if continuesRun {
+            subtitlePacketStore.noteHarvestReach(.pump, through: absoluteTargetSeconds)
+        }
         subtitlePacketStore.noteHarvestAnchor(.pump, at: absoluteTargetSeconds)
+        restartLock.lock()
+        pumpRunStartIndex = idx
+        restartLock.unlock()
         // build = everything after the seek (re-validation, muxer/producer construction, start).
         let buildMs = max(0, elapsedMs - stopWaitMs - (reopenMs ?? 0) - seekMs)
         EngineLog.emit(
             "[HLSVideoEngine] producer restarted at idx=\(idx) (seek=\(String(format: "%.2f", absoluteTargetSeconds))s [absolute source-PTS], restart took \(String(format: "%.0f", elapsedMs))ms; "
-            + Self.restartPhaseSummary(stopWaitMs: stopWaitMs, reopenMs: reopenMs, seekMs: seekMs, buildMs: buildMs) + ")",
+            + Self.restartPhaseSummary(stopWaitMs: stopWaitMs, reopenMs: reopenMs, seekMs: seekMs, buildMs: buildMs)
+            + (continuesRun ? "; continues run" : "") + ")",
             category: .session
         )
     }
