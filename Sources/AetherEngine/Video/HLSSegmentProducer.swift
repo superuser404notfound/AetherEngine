@@ -504,6 +504,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var lastGenuineAudioSourceDts: Int64 = Int64.min
     private var videoSourceStrideTicks: Int64 = 0
     private var audioSourceStrideTicks: Int64 = 0
+    /// AE#996: packets of the stream since its last genuine dts, so a multi-frame PES divides its
+    /// delta across every frame it carried.
+    private var videoPacketsSinceGenuineDts = 0
+    private var audioPacketsSinceGenuineDts = 0
     private var loggedFirstSynthesizedTimestamp = false
 
     /// First dts ever seen per stream; replay detection: backward rebase landing near this + recent reconnect = server replay.
@@ -837,15 +841,17 @@ final class HLSSegmentProducer: @unchecked Sendable {
         return dts
     }
 
-    /// Adopts `dts - previousDts` as the stream's stride when it is forward and inside
-    /// `maxStrideTicks`. A backward, standing or multi-second delta is a boundary or a replay, so
-    /// the stride learned before it survives.
+    /// Adopts `(dts - previousDts) / packetsSincePrevious` as the stream's stride when the delta is
+    /// forward and inside `maxStrideTicks`. A backward, standing or multi-second delta is a boundary
+    /// or a replay, so the stride learned before it survives. AE#996: a PES carrying several AAC
+    /// frames stamps only the first, so the genuine delta spans every packet in between; read as
+    /// one packet's stride it walked the synthesized run 15 PES intervals ahead of the next stamp.
     static func updatedStrideTicks(current: Int64, previousDts: Int64, dts: Int64,
-                                   maxStrideTicks: Int64) -> Int64 {
+                                   maxStrideTicks: Int64, packetsSincePrevious: Int = 1) -> Int64 {
         guard previousDts != Int64.min, dts != Int64.min, maxStrideTicks > 0 else { return current }
         let delta = dts &- previousDts
         guard delta > 0, delta <= maxStrideTicks else { return current }
-        return delta
+        return Swift.max(delta / Int64(Swift.max(packetsSincePrevious, 1)), 1)
     }
 
     /// The live cut rule, pure: a keyframe opens a new segment once its presentation time has moved
@@ -1991,6 +1997,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             category: .session)
         audioFollowPreviouslyBound.insert(audio.sourceStreamIndex)
         audioConfig?.sourceStreamIndex = candidate
+        lastGenuineAudioSourceDts = Int64.min
+        audioPacketsSinceGenuineDts = 0
         audioFollowCandidate = nil
     }
 
@@ -3861,14 +3869,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     if isVideoPkt {
                         videoSourceStrideTicks = Self.updatedStrideTicks(
                             current: videoSourceStrideTicks, previousDts: lastGenuineVideoSourceDts,
-                            dts: packet.pointee.dts, maxStrideTicks: cap)
+                            dts: packet.pointee.dts, maxStrideTicks: cap,
+                            packetsSincePrevious: videoPacketsSinceGenuineDts + 1)
                         lastGenuineVideoSourceDts = packet.pointee.dts
+                        videoPacketsSinceGenuineDts = 0
                     } else {
                         audioSourceStrideTicks = Self.updatedStrideTicks(
                             current: audioSourceStrideTicks, previousDts: lastGenuineAudioSourceDts,
-                            dts: packet.pointee.dts, maxStrideTicks: cap)
+                            dts: packet.pointee.dts, maxStrideTicks: cap,
+                            packetsSincePrevious: audioPacketsSinceGenuineDts + 1)
                         lastGenuineAudioSourceDts = packet.pointee.dts
+                        audioPacketsSinceGenuineDts = 0
                     }
+                } else if isVideoPkt {
+                    videoPacketsSinceGenuineDts += 1
+                } else if isAudioPkt {
+                    audioPacketsSinceGenuineDts += 1
                 }
 
                 // AE#432: true when this packet reached the loop with no timestamp of its own, so

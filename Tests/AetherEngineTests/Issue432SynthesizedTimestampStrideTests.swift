@@ -115,6 +115,46 @@ struct Issue432SynthesizedTimestampStrideTests {
             current: 1800, previousDts: 90_000, dts: 9_090_000, maxStrideTicks: 90_000) == 1800)
     }
 
+    @Test("AE#996: a multi-frame PES teaches the per-packet stride, not the PES interval")
+    func multiFramePESStride() {
+        // MediaTailor programme audio: 16 AAC frames of 1920 ticks per PES, only the first
+        // carries the PES timestamp. The genuine delta is 30720 over 16 packets.
+        #expect(HLSSegmentProducer.updatedStrideTicks(
+            current: 0, previousDts: 4_594_970_405, dts: 4_595_001_125,
+            maxStrideTicks: 90_000, packetsSincePrevious: 16) == 1920)
+    }
+
+    @Test("AE#996: the synthesized run of a multi-frame PES ends before the next PES timestamp")
+    func multiFramePESWalkStaysBehindNextGenuine() {
+        let framesPerPES = 16
+        let frame: Int64 = 1920
+        var stride: Int64 = 0
+        var lastGenuine = Int64.min
+        var sinceGenuine = 0
+        var anchor = Int64.min
+        var backwardJumps = 0
+        for packet in 0..<(framesPerPES * 20) {
+            let genuine = packet % framesPerPES == 0
+            if genuine {
+                let dts = Int64(packet) * frame
+                if anchor != Int64.min, dts <= anchor { backwardJumps += 1 }
+                stride = HLSSegmentProducer.updatedStrideTicks(
+                    current: stride, previousDts: lastGenuine, dts: dts,
+                    maxStrideTicks: 90_000, packetsSincePrevious: sinceGenuine + 1)
+                lastGenuine = dts
+                sinceGenuine = 0
+                anchor = dts
+            } else {
+                sinceGenuine += 1
+                let step = HLSSegmentProducer.repairStrideTicks(
+                    packetDuration: 0, observedStride: stride, fallbackDuration: 0, maxStrideTicks: 90_000)
+                anchor += step
+            }
+        }
+        #expect(backwardJumps == 0)
+        #expect(stride == frame)
+    }
+
     // MARK: - What the cutter does with the synthesized timeline
 
     /// Runs the field window through the real live cut rule: 1792 packets, a keyframe every 60
