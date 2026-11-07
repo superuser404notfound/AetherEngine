@@ -187,6 +187,5 @@ struct WMVPacketCoverageTests {
             #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: codec.id) == 1)
         }
         #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: AV_CODEC_ID_WMV3.rawValue) == nil)
-        #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: AV_CODEC_ID_MPEG2VIDEO.rawValue) == nil)
     }
 }

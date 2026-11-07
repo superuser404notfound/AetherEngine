@@ -26,6 +26,9 @@ final class SoftwarePlaybackHost {
         // WMV1/2 decode only I/P pictures (FFmpeg msmpeg4dec.c / wmv2dec.c): no B reorder.
         // Still hold one successor; never invent the last picture's presentation duration.
         case AV_CODEC_ID_WMV1.rawValue, AV_CODEC_ID_WMV2.rawValue: return 1
+        // Candidate MPEG qualification: see docs/mpeg-cache-qualification.md for field-picture
+        // evidence and container limits. Missing/late PTS still invalidates the existing model.
+        case AV_CODEC_ID_MPEG1VIDEO.rawValue, AV_CODEC_ID_MPEG2VIDEO.rawValue: return 32
         default: return nil
         }
     }
