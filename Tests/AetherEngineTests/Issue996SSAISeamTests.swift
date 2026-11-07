@@ -10,6 +10,7 @@ import Testing
 /// - `programmeLate`: the same at `-output_ts_offset 20000`, so a clock restart behind it reaches
 ///   the producer the way the field trace showed it, wrap-corrected to 2^33 + a few seconds.
 /// - `ad`: H.264 on 0x100, AAC on 0x102, clock from 1.4 s again.
+/// - `adOnProgrammeAudioPID`: the same with its AAC on 0x101.
 ///
 /// Regenerate with (`P`=0x101 or 0x102, `D` in seconds, `OFFSET` only for `programmeLate`):
 ///
@@ -121,15 +122,37 @@ struct Issue996SSAISeamTests {
         private let bytes: Data
         private let lock = NSLock()
         private var position = 0
-        init(_ bytes: Data) { self.bytes = bytes }
+        private let holdsOpen: Bool
+        private var released = false
+        private var gaveUp = false
+        /// True once the open source ran into its idle bound and ended after all.
+        var endedOnItsOwn: Bool { lock.withLock { gaveUp } }
+        /// `holdsOpen`: after the bytes, the read waits like a live source between segments
+        /// instead of ending, so nothing the end of input releases can hide a stuck pump.
+        init(_ bytes: Data, holdsOpen: Bool = false) {
+            self.bytes = bytes
+            self.holdsOpen = holdsOpen
+        }
+        func release() { lock.withLock { released = true } }
         func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
             guard let buffer, size > 0 else { return -1 }
-            return lock.withLock {
-                let count = min(Int(size), bytes.count - position)
-                guard count > 0 else { return 0 }
-                bytes.withUnsafeBytes { _ = memcpy(buffer, $0.baseAddress! + position, count) }
-                position += count
-                return Int32(count)
+            var idleMicros = 0
+            while true {
+                let result: Int32? = lock.withLock {
+                    let count = min(Int(size), bytes.count - position)
+                    guard count > 0 else { return holdsOpen && !released ? nil : 0 }
+                    bytes.withUnsafeBytes { _ = memcpy(buffer, $0.baseAddress! + position, count) }
+                    position += count
+                    return Int32(count)
+                }
+                if let result { return result }
+                // Bounded past the 10 s no-cut watchdog, whose abort cannot reach this loop.
+                idleMicros += 20_000
+                if idleMicros > 15_000_000 {
+                    lock.withLock { gaveUp = true }
+                    return 0
+                }
+                usleep(20_000)
             }
         }
         func seek(offset: Int64, whence: Int32) -> Int64 { -1 }
@@ -155,11 +178,19 @@ struct Issue996SSAISeamTests {
         /// Item-axis seconds of the last audio sample the producer muxed.
         let lastSoundSeconds: Double
         let segments: Int
+        /// The source had to end before the run got its segments.
+        let neededEndOfInput: Bool
     }
 
-    private func run(_ bytes: Data, segmented: Bool) async throws -> Run {
+    private func run(_ bytes: Data, segmented: Bool,
+                     untilSegments: Int? = nil) async throws -> Run {
+        let reader = Reader(bytes, holdsOpen: untilSegments != nil)
         let demuxer = Demuxer()
-        try demuxer.open(reader: Reader(bytes), formatHint: "mpegts")
+        // An open source has no end for the stream probe to stop at, so it gets a small budget.
+        try demuxer.open(reader: reader, formatHint: "mpegts",
+                         profile: untilSegments == nil ? .playback
+                             : DemuxerOpenProfile.playback.withProbeBudget(probesize: 32 * 1024,
+                                                                           maxAnalyzeDuration: 1_000_000))
         let videoIndex = demuxer.videoStreamIndex
         let audioIndex = demuxer.audioStreamIndex
         let video = try #require(demuxer.stream(at: videoIndex))
@@ -187,13 +218,20 @@ struct Issue996SSAISeamTests {
         producer.onLiveSegmentFinalized = { index, _, _, _ in outcome.segment(index) }
         producer.start()
         defer {
+            reader.release()
             producer.stop()
             if outcome.reason != nil { cache.close() }
         }
-        try await waitFor { outcome.reason != nil }
+        if let untilSegments {
+            // A wedged pump ends on its own: the no-cut watchdog exits it as a segment stall.
+            try await waitFor { outcome.reason != nil || outcome.segments.count >= untilSegments }
+        } else {
+            try await waitFor { outcome.reason != nil }
+        }
         return Run(exit: outcome.reason?.description,
                    lastSoundSeconds: outcome.soundSpans.map(\.last).max() ?? 0,
-                   segments: outcome.segments.count)
+                   segments: outcome.segments.count,
+                   neededEndOfInput: reader.endedOnItsOwn)
     }
 
     /// 6 s of programme, then 4 s of ad whose audio is on 0x102. Before AE#996 the producer kept
@@ -217,6 +255,27 @@ struct Issue996SSAISeamTests {
         let ingest = try await run(Self.programmeLate + Self.ad, segmented: true)
         #expect(ingest.exit == "eof")
         #expect(ingest.lastSoundSeconds > 8, "sound through the ad, got \(ingest.lastSoundSeconds)s")
+    }
+
+    /// Round 3, Kim's Convenience: the outgoing segment's last video PES reaches the demuxer
+    /// truncated, so the replay guard holds it as a damaged boundary, and the clock restart behind
+    /// it rebases first. The rebase reset the guard while the producer still held that packet, and
+    /// from then on the producer buffered every packet as part of an overlap that no longer
+    /// existed: no segment was cut until the 10 s watchdog retuned, at the same seam every time.
+    /// The source stays open here, as a live one does, because the end of input released the
+    /// buffer and let the tests above pass over the same fault.
+    @Test("a seam behind a truncated outgoing PES keeps cutting while the source stays open")
+    func damagedBoundaryAtSeamDoesNotWedge() async throws {
+        let programmeOnly = try await run(Self.programmeLate, segmented: true)
+        // The open segment of each run is finalized only by the keyframe after it, so two
+        // finalized ad segments are the most an open source can show.
+        let target = programmeOnly.segments + 2
+        let live = try await run(Self.programmeLate + Self.adOnProgrammeAudioPID, segmented: true,
+                                 untilSegments: target)
+        #expect(!live.neededEndOfInput, "the segments only came once the source ended")
+        #expect(live.exit == nil, "the pump stays on the open source, got \(live.exit ?? "nil")")
+        #expect(live.segments >= target,
+                "segments past the seam are cut before the source ends (programme \(programmeOnly.segments), got \(live.segments))")
     }
 
     // MARK: - Fixtures
@@ -287,5 +346,25 @@ struct Issue996SSAISeamTests {
             "6MJl4EyyizPe73jizJMccybAMWcCHHMmwDFnEpDPeOKpfs9nAp9J9+YzT3Vxxv8tT5xROP6/+nSX3wPf8OT3sxzzfZxjvo9z",
             "zPdxjvk+7WSR5/LJffseeezkxt6+RwqHT02iIXxr1/7qXc4Ev+aJMxLHnAlyzJkgx5wJcsyZJMsj7wz1ex45sfrMP+2vHvvq",
             "wf5qb/LI7v2miasP9pt6tN/0eqrvXtB1dKIzCx798j6z4G8=",
+    ])
+
+    /// `ad` with its audio on the programme's PID (0x101), as on the Xumo channel of round 3.
+    private static let adOnProgrammeAudioPID = inflate([
+            "7ZlNbBtFFIBnkzZNWoXGdhxTBaRpKVWEGnt3/VPHsNROaJxDKxkhcUIy4/XYXrJ/2d3ENqDIrSLUAyoXBKhcAAnOgUvFAZEc",
+            "uKC2/JcWodIeKOICyYVTJPPGjZRYlYoCyPFIXUuz82bezL55M/vN80427RtCk2uPI2EVoabQRMJGY3jGL/RNTxs2LQ88R50F",
+            "TaWiVH116stmd13ZNBpCaHmwZTsS1tATH+/5pMnHlc2B7T3LoZbtt9EaGmXJwdswisgzn77b3bZnkLgvh9Di5UXm91sINRp7",
+            "D6N9vxEmDqyxtDy5sv+nVwSYn17UStLrR15iFZWrwtsY7n17m80zP5/6/bM7N2YuvXX8Or7x2B9/1uREDI9j1XIolhJx7ERl",
+            "WcaFaDwhxglUzIRBIXImdyo7HsOZ56dAs0hVqJiy7LpOSx6WRTE6LotyHAornmenIpFqtRpe0IrU0okZzgrIZznlCHtSuOIZ",
+            "OuhZtqdZppvCKikQVRGxQ0uKhIu0oFvqrCKm4IeJSfS6S5mEDaoUNYLd+QLkRGy7dVCHNO8UFSksggok2NBqtJhnfbEWeYeY",
+            "ZapICaxWHMsgeWgqYc+huq65oJGsJYuqBxl1zoC0SEnxZcukiiwdlyRcIq6XB9v9tjur2dBws5M5O2+VSi5lDb2KA41cqNQt",
+            "a5ZUQMhvlbk6vMZbBSI2ndZjVM0gHjNFMz3q6ASUoLygzzuknlctwyYto8A/nkM0E7oARYcwnZJDDMq6qlKtXPFsyM3SOlQr",
+            "8mYmb2gmCK5KwfZoBv3XlWdSdZ6Z0zKBudahboVNmKqoTgkbBfAnmxEQlDjMBJ5jI1DEcAKyNjOmdSc1JTEBGdejthLDmg2T",
+            "A0sA5i4GEz2niKgBK5SeX0odG0PBlWxGEIU0lKygv+6u9OukuX660fvLxs0edJosqAk5LCfDkiihSdy/+nCS1Qqfbxwe2vPi",
+            "64/sqpAVBGkOdZoQ/88Ysmmfj+O9ycfx3uTjeG+KXYQN59ryIupC87Ztlwem17e2y8xF7P8QOCNvcubXlsrAj6R7SHJ/ATgT",
+            "Pbf7Hv+3nPFzzBk/x5zxc8yZuJtDQvjNznJmG0AGPzq7g3ibnj/XO/bOewifbABnYm2cOXCNJ87EueVMRki0+X3wB578foJj",
+            "vgc45nuAY74HOOZ7AuJI4bVat8eRvj7fvXFkso0zB7/niTMTHHNmmGPODHPMmWGOOXPCgzjy5gsd5sw2ggTo+zsKJJce+qDQ",
+            "QGcvAGdSbZzxfccTZ57kmDNBjjkT5JgzQY45k4R4pieR7vZ4JviFdG8881QbZwLf8sQZheP/q0+3+T34DU9+P8kx30c45vsI",
+            "x3wf4ZjvE24O9Vw4umvfIw8dXd3Z90hh/7Ex1I9vbTtfvcuZ0Nc8cUbimDMhjjkT4pgzIY45k2Jx5J3+bo8jR5ee/afz1UNf",
+            "PThf7Uwc2X7eNHr1wXlTh86b3kh33Qu6go60VsGjV+6zCv4G",
     ])
 }

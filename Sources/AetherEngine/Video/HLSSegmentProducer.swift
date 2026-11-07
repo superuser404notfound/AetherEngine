@@ -3372,6 +3372,19 @@ final class HLSSegmentProducer: @unchecked Sendable {
         EngineLog.emit("[HLSSegmentProducer] live damaged boundary unconfirmed: forwarding retained packets without resetting source history", category: .session)
     }
 
+    /// AE#996 round 3: a timeline rebase starts the replay history over, and the packets a held
+    /// damaged boundary retained belong to that history. The guard stops holding on reset, but the
+    /// pump does not: with retained packets and an idle guard it read every later packet as part of
+    /// an overlap and buffered it, so nothing was cut until the 10 s watchdog retuned (Kim's
+    /// Convenience, at every seam whose outgoing PES was truncated). The seam is the evidence the
+    /// boundary was not a replay, so its packets go out first, as an unconfirmed boundary does.
+    private func resetLiveReplayGuardAtSeam() {
+        if liveReplayGuard.isHoldingDamagedBoundary, !replayPending.isEmpty {
+            forwardUnverifiedDamagedBoundary()
+        }
+        liveReplayGuard.reset()
+    }
+
     private func freeReplayPackets() {
         for entry in replayPending + replayReady.dropFirst(replayReadyIndex) {
             var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
@@ -3984,7 +3997,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             exitReason = .sourceReplay
                             break readLoop
                         }
-                        liveReplayGuard.reset()
+                        resetLiveReplayGuardAtSeam()
                         let (newShift, continuationDts) = Self.rebasedVideoShift(
                             srcDts: packet.pointee.dts,
                             lastSrcDts: lastVideoSourceDts,
@@ -4068,7 +4081,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             exitReason = .sourceReplay
                             break readLoop
                         }
-                        liveReplayGuard.reset()
+                        resetLiveReplayGuardAtSeam()
                         if pendingAudioShiftOverride != nil {
                             EngineLog.emit(
                                 "[HLSSegmentProducer] audio rebase: discarding stale shift override (new boundary)",
