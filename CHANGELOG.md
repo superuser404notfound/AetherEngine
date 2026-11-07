@@ -10,7 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Stopping after a long watch no longer holds the main thread (AE#998).** The engine's `currentItem` observer
+  asked KVO for the new value, and the Swift overlay decodes that value through a runtime cast before the
+  closure runs. Inside the `replaceCurrentItem` of a stop after a few minutes of playback, that cast missed the
+  conformance cache and scanned every conformance record in the process, 0.4 to 0.6 s on main in the
+  reporter's samples, while a short watch paid a few milliseconds. Every engine KVO observer now reads the
+  observed object instead and requests no decoded old or new value, which removes the cast from the path
+  entirely.
 
 ## [7.59.0] - 2026-11-06
 

@@ -7544,8 +7544,11 @@ public final class AetherEngine: ObservableObject {
             return
         }
         currentAVPlayerItem = player.currentItem
-        currentItemObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, change in
-            guard let item = change.newValue else { return }
+        // AE#998: read the observed object, never the decoded change value. Decoding it casts
+        // through the Swift runtime, and that cast measured 0.4 to 0.6 s on main inside the
+        // `replaceCurrentItem` of a stop after a long watch (a conformance-cache miss).
+        currentItemObservation = player.observe(\.currentItem, options: []) { [weak self] player, _ in
+            guard let item = player.currentItem else { return }
             Task { @MainActor in self?.currentAVPlayerItem = item }
         }
     }
@@ -7606,8 +7609,8 @@ public final class AetherEngine: ObservableObject {
         externalPlaybackObservation = nil
         #if !os(visionOS) && !os(tvOS)
         guard let player = currentAVPlayer else { return }
-        externalPlaybackObservation = player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, change in
-            let active = change.newValue ?? false
+        externalPlaybackObservation = player.observe(\.isExternalPlaybackActive, options: []) { [weak self] player, _ in
+            let active = player.isExternalPlaybackActive
             Task { @MainActor in self?.handleExternalPlaybackChange(active: active) }
         }
         #endif
