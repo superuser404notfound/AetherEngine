@@ -3378,9 +3378,29 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// an overlap and buffered it, so nothing was cut until the 10 s watchdog retuned (Kim's
     /// Convenience, at every seam whose outgoing PES was truncated). The seam is the evidence the
     /// boundary was not a replay, so its packets go out first, as an unconfirmed boundary does.
-    private func resetLiveReplayGuardAtSeam() {
+    ///
+    /// Only an audio seam can forward them. A held boundary retains video alone, and a new picture
+    /// passes it only from below the boundary's timestamp, so a VIDEO seam reached while holding
+    /// leaves nothing in the buffer but the outgoing programme's last pictures. Behind the first
+    /// picture of the new one they would only rebase the stream back; they are dropped, as the
+    /// damaged packets of a confirmed overlap are.
+    private func resetLiveReplayGuardAtSeam(isVideoSeam: Bool) {
         if liveReplayGuard.isHoldingDamagedBoundary, !replayPending.isEmpty {
-            forwardUnverifiedDamagedBoundary()
+            if isVideoSeam {
+                EngineLog.emit(
+                    "[HLSSegmentProducer] live damaged boundary superseded by a video seam: "
+                    + "dropping \(replayPending.count) retained outgoing packet(s)",
+                    category: .session)
+                for entry in replayPending {
+                    var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
+                    trackedPacketFree(&packet)
+                }
+                replayPending.removeAll(keepingCapacity: true)
+                replayPendingBytes = 0
+                noCutWatchdog?.setReplayChecking(false, at: Date())
+            } else {
+                forwardUnverifiedDamagedBoundary()
+            }
         }
         liveReplayGuard.reset()
     }
@@ -3997,7 +4017,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             exitReason = .sourceReplay
                             break readLoop
                         }
-                        resetLiveReplayGuardAtSeam()
+                        resetLiveReplayGuardAtSeam(isVideoSeam: true)
                         let (newShift, continuationDts) = Self.rebasedVideoShift(
                             srcDts: packet.pointee.dts,
                             lastSrcDts: lastVideoSourceDts,
@@ -4081,7 +4101,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             exitReason = .sourceReplay
                             break readLoop
                         }
-                        resetLiveReplayGuardAtSeam()
+                        resetLiveReplayGuardAtSeam(isVideoSeam: false)
                         if pendingAudioShiftOverride != nil {
                             EngineLog.emit(
                                 "[HLSSegmentProducer] audio rebase: discarding stale shift override (new boundary)",
