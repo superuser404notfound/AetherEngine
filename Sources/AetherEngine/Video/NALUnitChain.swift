@@ -92,4 +92,33 @@ enum NALUnitChain {
         guard let base = bytes.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
         return VideoConfigRecord.walksAsLengthPrefixed(base, size: bytes.count, lengthSize: lengthPrefixSize)
     }
+
+    /// HEVC's NAL header is two bytes, even for EOS/EOB. A one-byte EOS from a
+    /// truncated transport-stream tail can have a perfectly valid length prefix,
+    /// so the overrun guard above cannot catch it. Apple's parser refuses the
+    /// entire HLS segment, while libavcodec ignores the damaged delimiter.
+    /// Return only the malformed units, preserving valid pictures and RPUs after
+    /// them. Never treat an unconfirmed Annex-B start code as a length of one.
+    static func shortHEVCHeaderRanges(
+        _ bytes: UnsafeRawBufferPointer, lengthPrefixSize: Int, framingConfirmed: Bool
+    ) -> [Range<Int>] {
+        guard (1...4).contains(lengthPrefixSize), bytes.count >= lengthPrefixSize else { return [] }
+        if !framingConfirmed, bytes.count >= 3, bytes[0] == 0, bytes[1] == 0,
+            bytes[2] == 1 || (bytes.count >= 4 && bytes[2] == 0 && bytes[3] == 1)
+        {
+            return []
+        }
+        var ranges: [Range<Int>] = []
+        var offset = 0
+        while offset + lengthPrefixSize <= bytes.count {
+            var length = 0
+            for index in 0..<lengthPrefixSize { length = (length << 8) | Int(bytes[offset + index]) }
+            let payload = offset + lengthPrefixSize
+            guard length > 0, length <= bytes.count - payload else { return [] }
+            let end = payload + length
+            if length < 2 { ranges.append(offset..<end) }
+            offset = end
+        }
+        return offset == bytes.count ? ranges : []
+    }
 }
