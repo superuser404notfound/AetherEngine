@@ -180,7 +180,7 @@ final class AudioAVPlayerHost {
 
         // Status KVO: readyToPlay publishes duration + isReady and performs the pending seek; failed publishes the
         // error. Observer hops to its own queue, so round-trip back to MainActor.
-        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+        statusObservation = item.observe(\.status, options: []) { [weak self] item, _ in
             switch item.status {
             case .readyToPlay:
                 Task { @MainActor [weak self] in
@@ -221,7 +221,7 @@ final class AudioAVPlayerHost {
         }
 
         // Mirror player rate into published `rate`. timeControlStatus and rate move together; rate is simplest.
-        rateObservation = avPlayer.observe(\.rate, options: [.new]) { [weak self] player, _ in
+        rateObservation = avPlayer.observe(\.rate, options: []) { [weak self] player, _ in
             let r = player.rate
             Task { @MainActor [weak self] in
                 self?.rate = r
@@ -230,7 +230,7 @@ final class AudioAVPlayerHost {
 
         // Mirror timeControlStatus so the engine reconciles transport on system-driven play/pause, and fold
         // it into the rebuffer flag: the first `.playing` opens the window in which a wait is a stall.
-        timeControlObservation = avPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+        timeControlObservation = avPlayer.observe(\.timeControlStatus, options: []) { [weak self] player, _ in
             let status = player.timeControlStatus
             let reason = player.reasonForWaitingToPlay?.rawValue
             Task { @MainActor [weak self] in
@@ -244,7 +244,7 @@ final class AudioAVPlayerHost {
                 self.refreshRebuffering()
             }
         }
-        waitingReasonObservation = avPlayer.observe(\.reasonForWaitingToPlay, options: [.new]) { [weak self] player, _ in
+        waitingReasonObservation = avPlayer.observe(\.reasonForWaitingToPlay, options: []) { [weak self] player, _ in
             // A cleared reason arrives just ahead of the status that ends the wait; that edge settles it.
             guard let reason = player.reasonForWaitingToPlay?.rawValue else { return }
             Task { @MainActor [weak self] in
