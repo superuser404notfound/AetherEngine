@@ -19,6 +19,14 @@ the public-API contract.
   reporter's samples, while a short watch paid a few milliseconds. Every engine KVO observer now reads the
   observed object instead and requests no decoded old or new value, which removes the cast from the path
   entirely.
+- **Ad seams on HLS live channels, rounds 2 and 3 (AE#996).** A PES carrying several AAC frames with a
+  timestamp on the first only taught the timestamp synthesizer a stride sixteen frames wide, so the audio axis
+  ran away from the picture after the audio followed an ad onto its own PID. The stride is now learned per
+  packet. Separately, a seam whose outgoing video PES arrived truncated wedged the live cutter: the replay
+  guard held that packet as a damaged boundary, the clock restart behind it reset the guard, and the producer
+  went on buffering every later packet as part of an overlap that no longer existed, until the no-cut watchdog
+  retuned 10 s later, at the same seam on every retune. The seam now forwards the held packets before the
+  guard starts over.
 
 ## [7.59.0] - 2026-11-06
 
