@@ -1419,7 +1419,7 @@ whether a setting would do anything:
 
 | Symbol | Notes |
 | --- | --- |
-| `AetherEngine.OptionalComponent` | `.trueHDObjectAudio`, `.dtsxObjectAudio` (`objectAudioRendering` per codec), `.dualLayerDolbyVision` (`preferDualLayerDolbyVision`), `.dolbyVisionStillReshaping` (stills of Dolby Vision Profile 5 / AV1 Profile 10.0 sources), `.dolbyVisionFelCurves` (a Profile 7 FEL source's enhancement layer folded into the Profile 8.1 RPU's curves on the native route; no option, on whenever built in). `CaseIterable`. |
+| `AetherEngine.OptionalComponent` | `.trueHDObjectAudio`, `.dtsxObjectAudio` (`objectAudioRendering` per codec), `.dualLayerDolbyVision` (`preferDualLayerDolbyVision`), `.dolbyVisionStillReshaping` (stills of Dolby Vision Profile 5 / AV1 Profile 10.0 sources), `.dolbyVisionFelCurves` (a Profile 7 FEL source's enhancement layer folded into the Profile 8.1 RPU on the native route, the stream's mapping kept and its luma curve lifted per scene; no option, on whenever built in). `CaseIterable`. |
 | `OptionalComponent.isBuiltIn` | Whether this build carries the component. Fixed for the process; hide a toggle whose component reads false. |
 | `OptionalComponent.traitName` | The package trait that compiles it, for a diagnostics screen. |
 

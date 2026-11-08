@@ -624,7 +624,7 @@ if first == "elsurvey" {
 #endif
 
 #if DolbyVisionFelCurves
-// A FEL source's enhancement layer folded into per-scene curves, written as Profile 8.1 RPUs: felcurves <url> <out.rpu>.
+// A FEL source folded into the luma curve of its Profile 8.1 RPUs (mapping kept), written out: felcurves <url> <out.rpu>.
 if first == "felcurves" {
     let rest = Array(args.dropFirst(2))
     guard rest.count == 2 else {

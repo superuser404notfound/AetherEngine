@@ -8,19 +8,20 @@ import CoreVideo
 import Dovi
 import Foundation
 
-/// Folds a Profile 7 FEL source's enhancement layer into per-scene reshaping curves of its Profile 8.1 RPU.
+/// Folds a Profile 7 FEL source's enhancement layer into the luma curve of its Profile 8.1 RPU, per scene.
 ///
 /// Sits between the demuxer and the segment producer and holds back one GOP at a time: every packet read
 /// (video and audio, in read order) is buffered until the next video keyframe, so each scene that starts
 /// inside the GOP can be fitted from its first picture before any of its frames is written. The packets
 /// then come out in exactly the order they were read, the video ones converted to Profile 8.1 with the
-/// curves of the scene each belongs to (the enhancement layer dropped, as the plain conversion does).
+/// stream's own mapping kept (MMR chroma included, applied by the platform decoder) and the enhancement
+/// layer dropped.
 ///
-/// A scene's curves come from one picture pair: the base and enhancement layers are decoded from the
-/// GOP's keyframe up to the scene's first frame, sampled (`FelCurveSampler`) and fitted (`FelCurveFit`).
-/// The curves then stay put for the whole scene, also across GOPs. A scene without a usable residual
-/// (`disable_residual_flag`, an MEL RPU) keeps the stream's luma curve and identity chroma; a scene whose
-/// picture could not be decoded or fitted falls back to the plain mode 2 mapping.
+/// A scene's luma residual comes from one picture pair: the base and enhancement layers are decoded from
+/// the GOP's keyframe up to the scene's first frame, sampled (`FelCurveSampler`) and fitted (`FelCurveFit`).
+/// It is then added to every frame's own luma polynomial for the whole scene, also across GOPs. A scene
+/// without a usable residual (`disable_residual_flag`, an MEL RPU), or whose picture could not be decoded,
+/// keeps the stream's mapping as it is.
 final class FelCurveLookahead {
     /// A GOP longer than this many packets is released without a fit for the scenes that start in it.
     static let maxBufferedPackets = 1_200
@@ -35,7 +36,7 @@ final class FelCurveLookahead {
     private var ready: [UnsafeMutablePointer<AVPacket>] = []
     private var readyIndex = 0
     /// The curves in force at the end of the last GOP released, carried into the next one.
-    private var carried: FelCurveSet?
+    private var carried: SceneFold?
     private var carriedValid = false
     /// Latched once any RPU raises `scene_refresh_flag`. Until then the stream says nothing about its scenes
     /// (some discs never set the flag, and their L1 does not move either), so every GOP is refitted at its
@@ -89,8 +90,8 @@ final class FelCurveLookahead {
             if isVideo, isFolding == nil {
                 isFolding = Self.rpuElementType(packet, framing: framing) == "FEL"
                 if isFolding == true {
-                    EngineLog.emit("[FelCurves] FEL source: its enhancement layer is folded into per-scene curves "
-                                   + "of the Profile 8.1 RPU", category: .session)
+                    EngineLog.emit("[FelCurves] FEL source: mapping kept in the Profile 8.1 RPU, enhancement-layer "
+                                   + "luma residual folded into its luma curve per scene", category: .session)
                 }
             }
             if isFolding == false || (!isVideo && buffered.isEmpty) {
@@ -125,6 +126,17 @@ final class FelCurveLookahead {
 
     // MARK: - One GOP
 
+    /// One scene's luma residual on the pivots of its first frame, and that frame's luma with it added, which
+    /// stands in for a frame whose own luma curve has other pivots.
+    private struct SceneFold {
+        let residual: FelCurve
+        let fallbackLuma: FelCurve
+
+        func luma(for own: FelCurve?) -> FelCurve {
+            own.flatMap { $0.adding(residual) } ?? fallbackLuma
+        }
+    }
+
     private struct Frame {
         let packet: UnsafeMutablePointer<AVPacket>
         let pts: Int64
@@ -137,21 +149,19 @@ final class FelCurveLookahead {
             let pts = packet.pointee.pts != Int64.min ? packet.pointee.pts : packet.pointee.dts
             return Frame(packet: packet, pts: pts, info: Self.rpuInfo(packet, framing: framing))
         }
-        let assignment = curves(for: frames)
-        for (frame, curves) in zip(frames, assignment) {
-            if let curves {
-                _ = DoviRpuConverter.convertPacketToProfile81(frame.packet, framing: framing) { curves.apply(to: $0) }
-            } else {
-                _ = DoviRpuConverter.convertPacketToProfile81(frame.packet, framing: framing)
-            }
+        let assignment = folds(for: frames)
+        for (frame, fold) in zip(frames, assignment) {
+            let luma = fold?.luma(for: frame.info?.luma)
+            _ = DoviRpuConverter.convertPacketToProfile81KeepingMapping(
+                frame.packet, framing: framing, rewrite: luma.map { curve in { curve.apply(to: $0, component: 0) } })
         }
         ready.append(contentsOf: buffered)
         buffered.removeAll(keepingCapacity: true)
         bufferedHasVideo = false
     }
 
-    /// The curves of each frame, in the order given (decode order).
-    private func curves(for frames: [Frame]) -> [FelCurveSet?] {
+    /// The scene fold of each frame, in the order given (decode order); nil keeps the stream's mapping.
+    private func folds(for frames: [Frame]) -> [SceneFold?] {
         guard !frames.isEmpty else { return [] }
         let display = frames.indices.sorted { frames[$0].pts < frames[$1].pts }
         // A scene starts at a frame whose RPU raises scene_refresh_flag, and at the first frame shown at all.
@@ -165,8 +175,8 @@ final class FelCurveLookahead {
             starts.append(0)
         }
 
-        var fitted: [Int: FelCurveSet?] = [:]
-        let needPictures = starts.filter { frames[$0].info?.carriesResidual == true }
+        var fitted: [Int: SceneFold?] = [:]
+        let needPictures = starts.filter { frames[$0].info?.carriesResidual == true && frames[$0].info?.luma != nil }
         let decoded = needPictures.isEmpty ? [:] : decode(frames, wanted: Set(needPictures.map { frames[$0].pts }))
         for index in starts {
             guard let info = frames[index].info else {
@@ -174,15 +184,16 @@ final class FelCurveLookahead {
                 scenesFailed += 1
                 continue
             }
-            guard let nlq = info.nlq else {
-                fitted[index] = .some(FelCurveFit.fit(FelCurveSamples(), streamLuma: info.luma, vdrBits: info.vdrBits))
+            guard let nlq = info.nlq?.first, let luma = info.luma else {
+                fitted[index] = .some(nil)
                 scenesWithoutResidual += 1
                 continue
             }
             if let pair = decoded[frames[index].pts],
                let samples = FelCurveSampler.samples(base: pair.base, enhancement: pair.enhancement,
                                                      nlq: nlq, elBits: info.elBits) {
-                fitted[index] = .some(FelCurveFit.fit(samples, streamLuma: info.luma, vdrBits: info.vdrBits))
+                let residual = FelCurveFit.lumaResidual(samples, pivots: luma.pivots, vdrBits: info.vdrBits)
+                fitted[index] = luma.adding(residual).map { SceneFold(residual: residual, fallbackLuma: $0) }
                 scenesFitted += 1
             } else {
                 fitted[index] = .some(nil)
@@ -190,7 +201,7 @@ final class FelCurveLookahead {
             }
         }
 
-        var result = [FelCurveSet?](repeating: nil, count: frames.count)
+        var result = [SceneFold?](repeating: nil, count: frames.count)
         var current = carried
         let startSet = Set(starts)
         for index in display {

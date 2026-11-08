@@ -46,54 +46,52 @@ struct FelCurveTests {
         #expect(ceiling.residual(elCode: 20) == -100)
     }
 
-    @Test("a constant residual lifts the stream's luma curve and identity chroma by that amount")
-    func constantResidual() {
+    @Test("a constant residual lifts the stream's luma curve by that amount")
+    func constantResidual() throws {
         var samples = FelCurveSamples()
         var state: UInt64 = 1
         for _ in 0..<20_000 {
             state = state &* 6364136223846793005 &+ 1
-            let code = Float(64 + Int(state >> 33) % 880)
-            for c in 0..<3 {
-                samples.base[c].append(code)
-                samples.residual[c].append(c == 0 ? 40 : -20)
-            }
+            samples.base.append(Float(64 + Int(state >> 33) % 880))
+            samples.residual.append(40)
         }
         let stream = FelCurve.identity(pivots: FelCurve.uniform(pieces: 8))
-        let set = FelCurveFit.fit(samples, streamLuma: stream)
-        #expect(set.components[0].pivots == stream.pivots)
-        #expect(set.components[1].pivots == FelCurve.uniform(pieces: 4))
+        let residual = FelCurveFit.lumaResidual(samples, pivots: stream.pivots)
+        let luma = try #require(stream.adding(residual))
+        #expect(luma.pivots == stream.pivots)
         for x in stride(from: 0.1, through: 0.9, by: 0.05) {
-            #expect(abs(set.components[0].value(at: x) - (x + 40.0 / 4095)) < 1e-6)
-            #expect(abs(set.components[1].value(at: x) - (x - 20.0 / 4095)) < 1e-6)
+            #expect(abs(luma.value(at: x) - (x + 40.0 / 4095)) < 1e-6)
         }
     }
 
-    @Test("without samples the curves are the stream's luma and identity chroma")
+    @Test("without samples the residual is zero and the stream's luma is unchanged")
     func noResidual() {
         let stream = FelCurve(pivots: [0, 512, 1023], coefs: [0.01, 0.9, 0.05, -0.02, 1.0, 0.0])
-        let set = FelCurveFit.fit(FelCurveSamples(), streamLuma: stream)
-        #expect(set.components[0] == stream)
-        #expect(set.components[1] == FelCurve.identity(pivots: FelCurve.uniform(pieces: 4)))
-        #expect(set.components[2] == FelCurve.identity(pivots: FelCurve.uniform(pieces: 4)))
+        let residual = FelCurveFit.lumaResidual(FelCurveSamples(), pivots: stream.pivots)
+        #expect(residual.coefs == [0, 0, 0, 0, 0, 0])
+        #expect(stream.adding(residual) == stream)
+    }
+
+    @Test("curves with other pivots are not added")
+    func addingNeedsSamePivots() {
+        let a = FelCurve.identity(pivots: [0, 512, 1023])
+        let b = FelCurve.identity(pivots: [0, 256, 1023])
+        #expect(a.adding(b) == nil)
     }
 
     @Test("samples bunched in part of a piece get a lower order instead of an unconstrained parabola")
     func narrowSpread() {
         var samples = FelCurveSamples()
         for i in 0..<3_000 {
-            let code = Float(300 + i % 3)
-            for c in 0..<3 {
-                samples.base[c].append(code)
-                samples.residual[c].append(Float(i % 7) - 3 + 12)
-            }
+            samples.base.append(Float(300 + i % 3))
+            samples.residual.append(Float(i % 7) - 3 + 12)
         }
-        let set = FelCurveFit.fit(samples, streamLuma: nil)
-        // Piece 2 of luma (256..384) holds every sample within 3 codes: a constant, no slope or curvature.
-        let piece = Array(set.components[0].coefs[6..<9])
-        let identity = [0.0, 1.0, 0.0]
-        #expect(abs(piece[0] - identity[0] - 12.0 / 4095) < 1e-6)
-        #expect(piece[1] == identity[1])
-        #expect(piece[2] == identity[2])
+        let residual = FelCurveFit.lumaResidual(samples, pivots: FelCurve.uniform(pieces: 8))
+        // Piece 2 (256..384) holds every sample within 3 codes: a constant, no slope or curvature.
+        let piece = Array(residual.coefs[6..<9])
+        #expect(abs(piece[0] - 12.0 / 4095) < 1e-6)
+        #expect(piece[1] == 0)
+        #expect(piece[2] == 0)
     }
 
     @Test("the RPU reader takes the stream's luma polynomial, the inverse quantiser and the residual flag")
@@ -110,51 +108,61 @@ struct FelCurveTests {
         #expect(luma.coefs.count == 3 * luma.pieces)
     }
 
-    @Test("curves written into the converted RPU read back as written and survive a write and parse")
-    func curvesRoundTrip() throws {
+    static func chromaMethods(_ rpu: OpaquePointer) -> [UInt8] {
+        guard let mapping = dovi_rpu_get_data_mapping(rpu) else { return [] }
+        defer { dovi_rpu_free_data_mapping(mapping) }
+        return [mapping.pointee.curves.1.mapping_idc, mapping.pointee.curves.2.mapping_idc]
+    }
+
+    @Test("the fold keeps the stream's chroma mapping and writes the luma curve it was given")
+    func keepsChromaWritesLuma() throws {
+        let source = try #require(Self.parse(Self.bytes(Self.felRpuHex)))
+        let sourceChroma = Self.chromaMethods(source)
+        let streamLuma = try #require(FelRpuInfo.read(source)?.luma)
+        dovi_rpu_free(source)
+
         let rpu = try #require(Self.parse(Self.bytes(Self.felRpuHex)))
         defer { dovi_rpu_free(rpu) }
-        let set = FelCurveSet(components: [
-            FelCurve(pivots: FelCurve.uniform(pieces: 8), coefs: (0..<8).flatMap { [0.001 * Double($0), 1.02, -0.01] }),
-            FelCurve(pivots: FelCurve.uniform(pieces: 4), coefs: (0..<4).flatMap { _ in [-0.004, 1.0, 0.0] }),
-            FelCurve(pivots: FelCurve.uniform(pieces: 4), coefs: (0..<4).flatMap { _ in [0.003, 0.99, 0.0] }),
-        ])
-        let out = try #require(DoviRpuConverter.convertedUnspec62(rpu, rewrite: { set.apply(to: $0) }))
+        let delta = FelCurve(pivots: streamLuma.pivots,
+                             coefs: (0..<streamLuma.pieces).flatMap { [0.001 * Double($0), 0.02, -0.01] })
+        let luma = try #require(streamLuma.adding(delta))
+        let out = try #require(DoviRpuConverter.convertedUnspec62(rpu, keepMapping: true,
+                                                                   rewrite: { luma.apply(to: $0, component: 0) }))
         defer { dovi_data_free(out) }
-        let written = [UInt8](UnsafeBufferPointer(start: out.pointee.data, count: out.pointee.len))
-        let back = try #require(Self.parse(written))
+        let back = try #require(Self.parse([UInt8](UnsafeBufferPointer(start: out.pointee.data, count: out.pointee.len))))
         defer { dovi_rpu_free(back) }
         let header = try #require(dovi_rpu_get_header(back))
         #expect(header.pointee.guessed_profile == 8)
         dovi_rpu_free_header(header)
-        let mapping = try #require(dovi_rpu_get_data_mapping(back))
-        defer { dovi_rpu_free_data_mapping(mapping) }
-        let curves = [mapping.pointee.curves.0, mapping.pointee.curves.1, mapping.pointee.curves.2]
-        for (curve, expected) in zip(curves, set.components) {
-            #expect(curve.mapping_idc == 0)
-            #expect(Int(curve.num_pivots_minus2) + 2 == expected.pivots.count)
-        }
+        #expect(Self.chromaMethods(back) == sourceChroma)
         let info = try #require(FelRpuInfo.read(back))
-        let luma = try #require(info.luma)
-        #expect(luma.pivots == set.components[0].pivots)
-        for (a, b) in zip(luma.coefs, set.components[0].coefs) {
+        #expect(!info.carriesResidual)
+        let written = try #require(info.luma)
+        #expect(written.pivots == luma.pivots)
+        for (a, b) in zip(written.coefs, luma.coefs) {
             #expect(abs(a - b) < 1e-6)
         }
-        #expect(!info.carriesResidual)
     }
 
-    @Test("a rewrite that libdovi refuses falls back to the mode 2 mapping")
-    func refusedRewriteFallsBack() throws {
+    @Test("a rewrite that libdovi refuses leaves the stream's own mapping")
+    func refusedRewriteKeepsMapping() throws {
+        let source = try #require(Self.parse(Self.bytes(Self.felRpuHex)))
+        let streamLuma = try #require(FelRpuInfo.read(source)?.luma)
+        dovi_rpu_free(source)
+
         let rpu = try #require(Self.parse(Self.bytes(Self.felRpuHex)))
         defer { dovi_rpu_free(rpu) }
-        let bad = FelCurveSet(components: [FelCurve(pivots: [0, 512, 256], coefs: [0, 1, 0, 0, 1, 0])])
-        let out = try #require(DoviRpuConverter.convertedUnspec62(rpu, rewrite: { bad.apply(to: $0) }))
+        let bad = FelCurve(pivots: [0, 512, 256], coefs: [0, 1, 0, 0, 1, 0])
+        let out = try #require(DoviRpuConverter.convertedUnspec62(rpu, keepMapping: true,
+                                                                   rewrite: { bad.apply(to: $0, component: 0) }))
         defer { dovi_data_free(out) }
         let back = try #require(Self.parse([UInt8](UnsafeBufferPointer(start: out.pointee.data, count: out.pointee.len))))
         defer { dovi_rpu_free(back) }
         let luma = try #require(FelRpuInfo.read(back)?.luma)
-        #expect(luma.pivots == [0, 1023])
-        #expect(luma.coefs == [0, 1, 0])
+        #expect(luma.pivots == streamLuma.pivots)
+        for (a, b) in zip(luma.coefs, streamLuma.coefs) {
+            #expect(abs(a - b) < 1e-6)
+        }
     }
 }
 #endif

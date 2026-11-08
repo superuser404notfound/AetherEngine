@@ -2,41 +2,32 @@
 #if DolbyVisionFelCurves
 import Foundation
 
-/// Base-layer codes and the residual the enhancement layer adds at the same place, one entry per sampled
-/// pixel and component. Codes are the base layer's own (10-bit); residuals are VDR codes as the inverse
-/// quantiser produces them.
+/// Base-layer luma codes and the luma residual the enhancement layer adds at the same place, one entry per
+/// sampled pixel. Codes are the base layer's own (10-bit); residuals are VDR codes as the inverse quantiser
+/// produces them.
 struct FelCurveSamples: Sendable {
-    var base: [[Float]] = [[], [], []]
-    var residual: [[Float]] = [[], [], []]
+    var base: [Float] = []
+    var residual: [Float] = []
 
-    var count: Int { base[0].count }
+    var count: Int { base.count }
 }
 
-/// Fits one scene's curves from a sample of its first picture.
+/// The residual a scene's enhancement layer adds to luma, as a curve over base-layer luma that is added to
+/// the stream's own luma polynomial coefficient by coefficient (`FelCurve.adding(_:)`).
 ///
-/// Each component gets the curve that best predicts "base layer plus residual" from the base layer alone,
-/// as an ordinary least-squares fit over the samples with the pivots fixed in advance: luma keeps the
-/// stream's own pivots and its own polynomial, to which the fitted mean residual is added coefficient by
-/// coefficient; chroma, whose stream mapping is not carried over, gets a fixed four-piece split and the
-/// base layer plus its mean residual. Nothing here evaluates the stream's mapping on a pixel.
+/// An ordinary least-squares fit over the samples with the pivots fixed in advance (the stream's luma
+/// pivots). Chroma is not fitted: the stream's own chroma mapping stays in the RPU and is applied by the
+/// platform decoder, and the chroma residual adds nothing measurable on top of it. Nothing here evaluates
+/// the stream's mapping on a pixel.
 enum FelCurveFit {
-    static let chromaPieces = 4
     static let lumaPieces = 8
-    /// A piece with fewer samples keeps the stream's curve (luma) or identity (chroma).
+    /// A piece with fewer samples gets no residual.
     static let minimumSamplesPerPiece = 30
 
-    static func fit(_ samples: FelCurveSamples, streamLuma: FelCurve?, baseBits: Int = 10, vdrBits: Int = 12) -> FelCurveSet {
-        let baseMax = Double((1 << baseBits) - 1)
-        let vdrMax = Double((1 << vdrBits) - 1)
-        let luma = streamLuma ?? FelCurve.identity(pivots: FelCurve.uniform(pieces: lumaPieces))
-        var components: [FelCurve] = []
-        for c in 0..<3 {
-            let start = c == 0 ? luma : FelCurve.identity(pivots: FelCurve.uniform(pieces: chromaPieces))
-            let delta = residualCurve(base: samples.base[c], residual: samples.residual[c], pivots: start.pivots,
-                                      baseMax: baseMax, vdrMax: vdrMax)
-            components.append(FelCurve(pivots: start.pivots, coefs: zip(start.coefs, delta).map { $0 + $1 }))
-        }
-        return FelCurveSet(components: components)
+    static func lumaResidual(_ samples: FelCurveSamples, pivots: [UInt16], baseBits: Int = 10, vdrBits: Int = 12) -> FelCurve {
+        let coefs = residualCurve(base: samples.base, residual: samples.residual, pivots: pivots,
+                                  baseMax: Double((1 << baseBits) - 1), vdrMax: Double((1 << vdrBits) - 1))
+        return FelCurve(pivots: pivots, coefs: coefs)
     }
 
     /// Per piece, the second-order polynomial in normalised base-layer input that best fits the normalised

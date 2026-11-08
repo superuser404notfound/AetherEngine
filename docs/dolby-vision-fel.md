@@ -941,43 +941,45 @@ The inverse-NLQ table and the MMR coefficients are read from per-frame tables bo
 ## 7. Curve fold on the native route
 
 With the `DolbyVisionFelCurves` trait (off by default) a Profile 7 FEL source on the native route no longer
-loses its enhancement layer entirely in the Profile 8.1 conversion. Its effect is folded into the RPU's own
-reshaping curves, per scene and per component, and the platform's Dolby Vision decoder applies them. No
-enhancement-layer pixel and no composed picture reaches the output; the engine decodes the enhancement layer
-only to measure it.
+loses its enhancement layer entirely in the Profile 8.1 conversion. The conversion keeps the stream's own
+mapping (luma polynomial and MMR chroma, as the disc's encoder wrote them), and the enhancement layer's luma
+residual is folded into the luma polynomial, per scene. The platform's Dolby Vision decoder applies both. No
+enhancement-layer pixel and no composed picture reaches the output, and the engine never evaluates the
+stream's mapping on a pixel; it decodes the enhancement layer only to measure it.
 
 **What it does.** `FelCurveLookahead` sits between the demuxer and the segment producer (VOD only, single
 demuxer, no enhancement-route tap) and holds back one GOP at a time: every packet read, video and audio, is
 buffered until the next video keyframe and then released in read order. Each scene that starts in the GOP
 (a frame whose RPU raises `scene_refresh_flag`, plus the first frame shown; in a stream that has not raised
-the flag at all, which some discs never do, every keyframe) is fitted from its first picture:
-both layers are decoded by VideoToolbox from the GOP's keyframe up to that frame, 100 000 positions are drawn
-on the enhancement layer's grid (`FelCurveSampler`, dark pixels and letterbox included), and each component gets the curve that
-best predicts "base layer plus inverse-quantised residual" from the base layer (`FelCurveFit`): an ordinary
-least-squares fit with the pivots fixed in advance. Luma keeps the stream's own pivots and polynomial and adds
-the fitted mean residual coefficient by coefficient; chroma, whose MMR mapping is not carried over, gets a
-fixed four-piece split around identity. The curves are written into every RPU of the scene after the mode 2
-conversion (`dovi_rpu_set_polynomial_mapping`, a LibDovi addition), and stay put until the next scene. A
-scene without a residual (`disable_residual_flag`, MEL) keeps the stream's luma curve and identity chroma; one
-whose picture cannot be decoded or fitted keeps the plain mode 2 mapping.
+the flag at all, which some discs never do, every keyframe) is measured on its first picture: both layers
+are decoded by VideoToolbox from the GOP's keyframe up to that frame, 100 000 positions are drawn on the
+enhancement layer's luma grid (`FelCurveSampler`, dark pixels and letterbox included), and the mean
+inverse-quantised luma residual is fitted as a curve over base-layer luma (`FelCurveFit`): ordinary least
+squares with the stream's own luma pivots. Every frame of the scene then carries its own luma polynomial plus
+that curve, coefficient by coefficient (`dovi_rpu_set_polynomial_mapping`, a LibDovi addition); a frame whose
+luma pivots differ from the scene's first frame carries that frame's curve instead. The conversion is mode 1
+then mode 2, so the FEL RPU's mapping survives as an MEL one's does on the plain route. A scene without a
+residual (`disable_residual_flag`, MEL) or whose picture cannot be decoded keeps the stream's mapping as it is.
+
+**Why luma only.** The chroma residual measured on the three titles below adds nothing on top of the stream's
+own MMR chroma (identical Delta E to two decimals), and folding it into the MMR terms would amount to re-fitting
+MMR parameters, which the curve fold deliberately does not do.
 
 **What it cannot do.** A curve maps every pixel of a scene with the same value the same way, so the fold
-recovers the enhancement layer's global effect (brightness and colour per tone) and none of its local detail
-(12-bit refinement, grain, texture). The chroma curves depend on chroma alone, so a grade whose colour moves
-with luma (what MMR carries) is only partly reproduced.
+recovers the enhancement layer's global effect (brightness per tone) and none of its local detail (12-bit
+refinement, grain, texture), nor a residual whose size depends on colour as well as brightness.
 
-**Measured** (60 s of a UHD Blu-ray FEL title, 28 scene cuts of which one falls on a keyframe, 60 keyframes
-against the composed FEL picture, Delta E ITP median over frames / worst frame / median p99):
+**Measured** against the composed FEL picture at every keyframe, Delta E ITP median over frames (whole
+picture / letterbox excluded):
 
-| | median | worst | p99 |
-|---|---|---|---|
-| Profile 8.1 conversion without the fold | 3.28 | 12.26 | 7.08 |
-| with the fold (`aetherctl felcurves`) | 2.15 | 3.09 | 5.87 |
-| best possible per-component curve with the FEL picture itself as target | 2.03 | 2.84 | 5.71 |
+| Sample | Profile 8.1 conversion without the fold | with the fold (`aetherctl felcurves`) |
+|---|---|---|
+| UHD Blu-ray FEL A, 60 s, 28 scene cuts | 2.46 / 3.28 | 1.49 / 2.00 |
+| UHD Blu-ray FEL B, 60 s, dark, 11 scene cuts | 8.90 / 12.12 | 0.81 / 1.03 |
+| UHD Blu-ray FEL C, 120 s, no scene marks, a new mapping every frame | 4.83 / 6.91 | 2.10 / 3.00 |
 
 On macOS `AVPlayerLayer` shows the folded stream served by `aetherctl serve` pixel-identical to the folded RPUs
-injected offline, and within 0.4 of 255 per channel of curves fitted against the composed FEL picture. The
-pass decodes one GOP prefix per scene cut; on an M1 debug build the whole 60 s title folds in 17 s.
+injected offline. On an M1 debug build the pass folds 60 s of FEL in 6 to 12 s.
 
 ## 8. Document map
 

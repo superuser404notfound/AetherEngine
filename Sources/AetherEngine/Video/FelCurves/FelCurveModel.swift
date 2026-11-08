@@ -33,21 +33,20 @@ struct FelCurve: Equatable, Sendable {
     }
 }
 
-/// The three curves one scene gets.
-struct FelCurveSet: Equatable, Sendable {
-    var components: [FelCurve]
+extension FelCurve {
+    /// This curve plus `delta`, coefficient by coefficient; nil unless both have the same pivots.
+    func adding(_ delta: FelCurve) -> FelCurve? {
+        guard pivots == delta.pivots, coefs.count == delta.coefs.count else { return nil }
+        return FelCurve(pivots: pivots, coefs: zip(coefs, delta.coefs).map { $0 + $1 })
+    }
 
-    /// Writes the curves into a Profile 8.1 RPU (after the mode 2 conversion). False when libdovi refuses one.
-    func apply(to rpu: OpaquePointer) -> Bool {
-        for (index, curve) in components.enumerated() {
-            let status = curve.pivots.withUnsafeBufferPointer { pivots in
-                curve.coefs.withUnsafeBufferPointer { coefs in
-                    dovi_rpu_set_polynomial_mapping(rpu, UInt8(index), pivots.baseAddress, pivots.count, coefs.baseAddress)
-                }
+    /// Writes the curve as one component's mapping of a Profile 8.1 RPU. False when libdovi refuses it.
+    func apply(to rpu: OpaquePointer, component: UInt8) -> Bool {
+        pivots.withUnsafeBufferPointer { p in
+            coefs.withUnsafeBufferPointer { c in
+                dovi_rpu_set_polynomial_mapping(rpu, component, p.baseAddress, p.count, c.baseAddress) == 0
             }
-            if status != 0 { return false }
         }
-        return true
     }
 }
 
