@@ -24,6 +24,27 @@ final class LiveDvrRetentionTests: XCTestCase {
         XCTAssertEqual(HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: 100 << 30), 2 << 30)
     }
 
+    /// The software live ring's budget: nil keeps the 2 GiB default, an explicit
+    /// `LoadOptions.liveDVRByteBudget` replaces it and still answers to the quarter-of-free-space
+    /// clamp and the 64 MiB playback floor. A tvheadend recording in progress, replayed into the ring
+    /// as the rewind buffer of a live session, measured 5.7 Mbps: the 2 GiB default held about 50
+    /// minutes of it, with no way for the host to ask for more.
+    func testLiveDVRByteBudgetReplacesTheDefaultCap() {
+        let free: Int64 = 100 << 30
+        XCTAssertEqual(PacketRingBuffer.liveByteBudget(volumeAvailableBytes: free), 2 << 30)
+        XCTAssertEqual(PacketRingBuffer.liveByteBudget(volumeAvailableBytes: free, requestedBytes: 10 << 30),
+                       10 << 30, "an explicit budget under the clamp is taken as asked")
+        XCTAssertEqual(PacketRingBuffer.liveByteBudget(volumeAvailableBytes: free, requestedBytes: .max),
+                       25 << 30, "an unbounded request still stops at a quarter of the free space")
+    }
+
+    func testLiveDVRByteBudgetKeepsTheSafetyBounds() {
+        XCTAssertEqual(PacketRingBuffer.liveByteBudget(volumeAvailableBytes: 100 << 30, requestedBytes: 0),
+                       PacketRingBuffer.minimumLiveByteBudget, "the ring is a playback buffer, so it keeps its floor")
+        XCTAssertEqual(PacketRingBuffer.liveByteBudget(volumeAvailableBytes: nil, requestedBytes: .max),
+                       2 << 30, "unknown capacity keeps the conservative cap")
+    }
+
     /// With a budget, edge-following playback keeps the history behind the playhead resident well
     /// past `backwardWindow`. Without one it collapsed to backwardWindow + 1 entries.
     func testHistoryBehindTheEdgeSurvivesPastBackwardWindow() {

@@ -2250,6 +2250,7 @@ extension AetherEngine {
         let sessionCacheByteBudget = loadedOptions.sessionCacheByteBudget
         let packetCacheStorage = loadedOptions.softwarePacketCacheStorage
         let dvrRetention = loadedOptions.softwareDVRRetention
+        let liveDVRByteBudget = loadedOptions.liveDVRByteBudget
         try await BlockingWork.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, requestHeaders = sessionRequestHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
@@ -2267,6 +2268,7 @@ extension AetherEngine {
                 isLive: isLive,
                 dvrWindowSeconds: dvrWindowSeconds,
                 dvrRetention: dvrRetention,
+                liveDVRByteBudget: liveDVRByteBudget,
                 forwardBufferSegments: forwardBufferSegments,
                 packetCacheStorage: packetCacheStorage,
                 sessionCacheByteBudget: sessionCacheByteBudget
