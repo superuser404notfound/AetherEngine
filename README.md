@@ -688,7 +688,7 @@ The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that 
 
 ### Optional components
 
-Four components are compiled only when a host asks for them, each behind a package trait that is **off by default**:
+Five components are compiled only when a host asks for them, each behind a package trait that is **off by default**:
 
 | Trait | Compiles and links | Without it |
 | --- | --- | --- |
@@ -696,6 +696,7 @@ Four components are compiled only when a host asks for them, each behind a packa
 | `DTSXObjectAudio` | the DTS:X decoder (FFmpeg's `dca` with FFmpegBuild's height patch, no extra library) and the bed regression that builds the layout from its 7.1 bed | DTS:X keeps the channel bridge whatever `objectAudioRendering` asks |
 | `DualLayerDolbyVision` | the Profile 7 FEL dual-layer composer (`DualLayerVideoDecoder`, its Metal composer and the per-frame display metadata) | a Profile 7 source keeps the native route whatever `preferDualLayerDolbyVision` asks |
 | `DolbyVisionStillReshaping` | the reshaping that turns a Dolby Vision Profile 5 / AV1 Profile 10.0 frame into a still | such a source has no scrub stills, I-frame stills or held picture (`supportsCacheBackedStills` is false); playback is unaffected |
+| `DolbyVisionFelCurves` | the fold of a Profile 7 FEL enhancement layer into per-scene reshaping curves of the Profile 8.1 RPU on the native route ([Dolby Vision FEL › Curve fold](docs/dolby-vision-fel.md#7-curve-fold-on-the-native-route)) | the native route's Profile 8.1 conversion drops the enhancement layer, as before |
 
 Without its trait a component is not in the binary: its code is not compiled, and a library behind it is neither linked nor resolved (it drops out of the host's `Package.resolved`). The options that ask for it stay in the API, so a host compiles the same either way; they change nothing, and the session log says why (`TrueHD Atmos rendering requested but not built in (TrueHDObjectAudio trait off)`, `DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait)`). A host that wants to hide a setting its build cannot honour asks `AetherEngine.OptionalComponent`, for example `AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn`.
 

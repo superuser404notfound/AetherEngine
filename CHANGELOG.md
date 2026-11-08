@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **FEL curve fold (`DolbyVisionFelCurves` trait, off by default).** On the native route a Profile 7 FEL
+  source's enhancement layer is no longer simply dropped in the Profile 8.1 conversion: the engine holds back
+  one GOP, decodes both layers at each scene's first frame, fits per-scene, per-component reshaping curves
+  that predict base layer plus residual, and writes them into the scene's Profile 8.1 RPUs, which the
+  platform's Dolby Vision decoder applies. Recovers the enhancement layer's global effect (Delta E ITP
+  median 3.28 to 2.15, worst frame 12.26 to 3.09 on the measured title), not its local detail.
+  `OptionalComponent.dolbyVisionFelCurves`, `aetherctl felcurves`. Needs LibDovi's
+  `dovi_rpu_set_polynomial_mapping`.
 
 ## [7.60.0] - 2026-11-08
 

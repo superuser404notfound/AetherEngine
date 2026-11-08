@@ -31,8 +31,8 @@ swift test --enable-all-traits --scratch-path .build-alltraits
 says nothing about the XCTest half, and an XCTest failure still ends the process with 1. Never judge
 a run through a pipe (`| tail` returns tail's exit code); read the real exit code.
 
-Four package traits (`TrueHDObjectAudio`, `DTSXObjectAudio`, `DualLayerDolbyVision`,
-`DolbyVisionStillReshaping`) are off by default. Code behind a trait must compile both ways; CI
+Five package traits (`TrueHDObjectAudio`, `DTSXObjectAudio`, `DualLayerDolbyVision`,
+`DolbyVisionStillReshaping`, `DolbyVisionFelCurves`) are off by default. Code behind a trait must compile both ways; CI
 builds and tests the default and the all-traits configuration, and builds tvOS + visionOS
 simulators. The simulator has no hardware video decoders, so a `-12906` there is not a device finding.
 

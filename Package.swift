@@ -25,7 +25,7 @@ let package = Package(
         // platforms. The target is preserved below so `swift build` on
         // macOS still produces the CLI for upstream development.
     ],
-    // Four optional components, all off by default. A host that wants one enables its trait
+    // Five optional components, all off by default. A host that wants one enables its trait
     // (`.package(url:..., traits: [...])`, or the package's traits in Xcode); without it the code is not
     // compiled and the library behind it is not linked. These components may be subject to third-party
     // patent licensing; an integrator that enables one is responsible for its own licensing. Off, the
@@ -44,6 +44,10 @@ let package = Package(
         .trait(
             name: "DualLayerDolbyVision",
             description: "Compile the Dolby Vision Profile 7 FEL dual-layer composer, so preferDualLayerDolbyVision can take that route."
+        ),
+        .trait(
+            name: "DolbyVisionFelCurves",
+            description: "Fold a Dolby Vision Profile 7 FEL source's enhancement layer into per-scene reshaping curves of the Profile 8.1 RPU, so the platform's Dolby Vision decoder applies most of its effect on the native route."
         ),
         .trait(
             name: "DolbyVisionStillReshaping",
