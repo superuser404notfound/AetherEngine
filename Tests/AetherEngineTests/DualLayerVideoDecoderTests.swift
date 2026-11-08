@@ -1237,15 +1237,21 @@ extension HeavyDualLayerSuites {
                     nudgeIDs.insert(ObjectIdentifier(nudge))
                     decoder.handleBaseLayerFrame(baseBuffer: nudge, pts: Self.pts(Int64(900 + i)), hdr10Data: nil)
                 }
-                // Bounded under the suite's limit only to say where the frames are when they do not
-                // all arrive: CI has run this wait into the limit four times since 2026-10-29 with
-                // nothing to read, and it does not reproduce locally.
-                let allDelivered = try await waitFor(upTo: .seconds(200)) {
-                    deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }.count >= frames
+                // A frame can also be given up by `OrderedDelivery`'s stall guard: a thread preempted
+                // between taking its ticket and `fulfil` while more than the threshold of later frames
+                // land is indistinguishable from a lost ticket, and its late `fulfil` is dropped. The
+                // unthrottled fan-out above does that on a loaded runner (CI 2026-11-08: 63 of 64,
+                // every ticket through the sent frames resolved, nothing pending). It costs exactly
+                // that frame, by design, so it is counted here instead of waited for.
+                let allResolved = try await waitFor(upTo: .seconds(200)) {
+                    let delivered = deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }.count
+                    return delivered + Int(decoder.stateSnapshotForTesting.deliveryStallSkippedTickets) >= frames
                 }
                 let deliveredCount = deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }.count
-                try #require(allDelivered, "\(deliveredCount) of \(frames) delivered; \(decoder.stateSnapshotForTesting)")
+                try #require(allResolved, "\(deliveredCount) of \(frames) delivered; \(decoder.stateSnapshotForTesting)")
             }
+            let stallSkipped = Int(decoder.stateSnapshotForTesting.deliveryStallSkippedTickets)
+            #expect(stallSkipped <= 2, "the stall guard gives up a preempted frame, not a run of them")
             // `allSatisfy`, not a `filter`: an enhancement-layer buffer (or
             // anything else) delivered on its own is what this catches; sent
             // base-layer frames and the nudges above are the only buffers ever
@@ -1254,8 +1260,8 @@ extension HeavyDualLayerSuites {
             #expect(deliveries.snapshot.allSatisfy { allowed.contains(ObjectIdentifier($0.buffer)) },
                     "only sent base-layer frames or the nudges that age out stranded ones may ever be delivered")
             let got = deliveries.snapshot.filter { sentIDs.contains(ObjectIdentifier($0.buffer)) }
-            #expect(got.count == frames)
-            #expect(Set(got.map { ObjectIdentifier($0.buffer) }).count == frames)
+            #expect(got.count == frames - stallSkipped)
+            #expect(Set(got.map { ObjectIdentifier($0.buffer) }).count == got.count)
 
             // Teardown under load: arrivals racing close() are either delivered
             // before it or dropped after it; nothing lands past the marker.
