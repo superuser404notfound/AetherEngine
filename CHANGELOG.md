@@ -32,6 +32,12 @@ _Nothing yet._
   rule `loadRemoteHLS` already followed, so a load that is going to play stays `.loading` until it does. The
   same holds for an engine rebuild that resumes playing. A seek issued during the gate now lands right after
   the start instead of before it, as it already did on the remote-HLS bypass.
+- **Audio shaping no longer corrupts the heap when it builds a downmix matrix.** `swr_build_matrix2` with a
+  positive `rematrix_volume` rescales a full 64 x 64 grid at the caller's stride, while the engine hands it a
+  buffer sized for the source and output channels only (12 coefficients for 5.1 to stereo). That
+  read-modify-write ran kilobytes past the buffer and could overwrite another thread's freed block, which showed
+  up as an intermittent `memory corruption of free block` abort in CI. The matrix is now built with a volume of
+  0, which skips the rescale and yields the same coefficients. Found with Guard Malloc at strict size.
 - **Stopping after a long watch no longer holds the main thread (AE#998).** The engine's `currentItem` observer
   asked KVO for the new value, and the Swift overlay decodes that value through a runtime cast before the
   closure runs. Inside the `replaceCurrentItem` of a stop after a few minutes of playback, that cast missed the

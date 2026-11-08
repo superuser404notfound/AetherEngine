@@ -162,7 +162,9 @@ struct Issue146PGSMultiObjectTests {
     @Test("AV_SUBTITLE_FLAG_FORCED on the decoded rect lands in SubtitleImage.isForced")
     func forcedFlagReadFromRect() {
         var pixels: [UInt8] = [1, 1]
-        var palette: [UInt8] = [0, 0, 0, 0, 255, 255, 255, 255]
+        // A full AVPALETTE_SIZE table: libavcodec always allocates 256 entries and the decoder reads them all.
+        var palette = [UInt8](repeating: 0, count: 256 * 4)
+        palette.replaceSubrange(4..<8, with: [255, 255, 255, 255])
         pixels.withUnsafeMutableBufferPointer { pix in
             palette.withUnsafeMutableBufferPointer { pal in
                 var rect = AVSubtitleRect()

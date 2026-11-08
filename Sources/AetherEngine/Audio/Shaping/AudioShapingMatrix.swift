@@ -62,10 +62,14 @@ enum AudioShapingMatrix {
         if lift == 1, av_channel_layout_compare(input, output) == 0 { return nil }
 
         var matrix = [Double](repeating: 0, count: inCount * outCount)
+        // rematrix_volume stays 0: any positive value makes swr_build_matrix2 rescale a full
+        // SWR_CH_MAX x SWR_CH_MAX grid at this stride, far past this inCount x outCount buffer, and
+        // that read-modify-write corrupted neighbouring heap blocks. 0 skips the rescale; build_matrix
+        // only reads the parameter when it is negative, so the coefficients are the same as with 1.
         let built = matrix.withUnsafeMutableBufferPointer { buf in
             swr_build_matrix2(input, output,
                               M_SQRT1_2, M_SQRT1_2, 0,
-                              Double(Int32.max), 1.0,
+                              Double(Int32.max), 0,
                               buf.baseAddress, inCount, AV_MATRIX_ENCODING_NONE, nil)
         }
         guard built >= 0 else { return nil }
