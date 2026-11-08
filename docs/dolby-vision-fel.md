@@ -949,9 +949,10 @@ only to measure it.
 **What it does.** `FelCurveLookahead` sits between the demuxer and the segment producer (VOD only, single
 demuxer, no enhancement-route tap) and holds back one GOP at a time: every packet read, video and audio, is
 buffered until the next video keyframe and then released in read order. Each scene that starts in the GOP
-(a frame whose RPU raises `scene_refresh_flag`, plus the first frame shown) is fitted from its first picture:
+(a frame whose RPU raises `scene_refresh_flag`, plus the first frame shown; in a stream that has not raised
+the flag at all, which some discs never do, every keyframe) is fitted from its first picture:
 both layers are decoded by VideoToolbox from the GOP's keyframe up to that frame, 100 000 positions are drawn
-on the enhancement layer's grid (`FelCurveSampler`, letterbox skipped), and each component gets the curve that
+on the enhancement layer's grid (`FelCurveSampler`, dark pixels and letterbox included), and each component gets the curve that
 best predicts "base layer plus inverse-quantised residual" from the base layer (`FelCurveFit`): an ordinary
 least-squares fit with the pivots fixed in advance. Luma keeps the stream's own pivots and polynomial and adds
 the fitted mean residual coefficient by coefficient; chroma, whose MMR mapping is not carried over, gets a

@@ -8,11 +8,11 @@ import Foundation
 ///
 /// Positions are drawn on the enhancement layer's luma grid, which is where its residual is coded.
 /// The base layer's luma is averaged over the block of pixels one enhancement-layer pixel covers, and
-/// chroma is read from both layers' chroma planes at the matching place. Letterbox bars (base-layer luma
-/// at or below `blackLevel`) are skipped, since the bars stay black whatever a curve does.
+/// chroma is read from both layers' chroma planes at the matching place. Every position counts, the
+/// darkest included: a dark title's enhancement layer does most of its work there, and letterbox bars,
+/// which carry no residual, only hold the curve's foot where it already is.
 enum FelCurveSampler {
     static let defaultCount = 100_000
-    static let blackLevel: Float = 70
 
     static func samples(base: CVPixelBuffer, enhancement: CVPixelBuffer, nlq: [FelNlq], elBits: Int,
                         count: Int = defaultCount, seed: UInt64 = 0x5EED) -> FelCurveSamples? {
@@ -34,9 +34,7 @@ enum FelCurveSampler {
             state = state &* 6364136223846793005 &+ 1442695040888963407
             return Int(truncatingIfNeeded: state >> 33)
         }
-        var attempts = 0
-        while out.count < count, attempts < count * 4 {
-            attempts += 1
+        while out.count < count {
             let x = next() % el.width
             let y = next() % el.height
 
@@ -45,7 +43,6 @@ enum FelCurveSampler {
                 for dx in 0..<rx { sum += bl.luma(x * rx + dx, y * ry + dy) }
             }
             let baseY = Float(sum) / Float(rx * ry)
-            if baseY <= blackLevel { continue }
 
             // Chroma: the base layer's chroma grid is half its luma grid, the enhancement layer's likewise.
             let bcx = min((x * rx) / 2, bl.width / 2 - 1), bcy = min((y * ry) / 2, bl.height / 2 - 1)
@@ -60,26 +57,20 @@ enum FelCurveSampler {
             out.residual[1].append(Float(tables[1][elCb]))
             out.residual[2].append(Float(tables[2][elCr]))
         }
-        return out.count >= 1000 ? out : nil
+        return out
     }
 
-    /// A locked bi-planar 4:2:0 buffer with 16-bit samples holding 10 significant bits at the top (P010)
-    /// or 8-bit samples.
+    /// A locked bi-planar 4:2:0 buffer with 16-bit samples holding 10 significant bits at the top (P010).
     private struct Planes {
         let buffer: CVPixelBuffer
         let width: Int, height: Int
         let y: UnsafeRawPointer, uv: UnsafeRawPointer
         let yStride: Int, uvStride: Int
-        let wide: Bool
 
         init?(_ buffer: CVPixelBuffer) {
             let format = CVPixelBufferGetPixelFormatType(buffer)
-            switch format {
-            case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange:
-                wide = true
-            default:
-                return nil
-            }
+            guard format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+                || format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange else { return nil }
             guard CVPixelBufferGetPlaneCount(buffer) == 2,
                   CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
             guard let y = CVPixelBufferGetBaseAddressOfPlane(buffer, 0),

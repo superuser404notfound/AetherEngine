@@ -37,6 +37,10 @@ final class FelCurveLookahead {
     /// The curves in force at the end of the last GOP released, carried into the next one.
     private var carried: FelCurveSet?
     private var carriedValid = false
+    /// Latched once any RPU raises `scene_refresh_flag`. Until then the stream says nothing about its scenes
+    /// (some discs never set the flag, and their L1 does not move either), so every GOP is refitted at its
+    /// keyframe, which costs one decoded picture pair.
+    private var streamMarksScenes = false
 
     private var baseDecoder: HardwareVideoDecoder?
     private var enhancementDecoder: HardwareVideoDecoder?
@@ -152,8 +156,13 @@ final class FelCurveLookahead {
         let display = frames.indices.sorted { frames[$0].pts < frames[$1].pts }
         // A scene starts at a frame whose RPU raises scene_refresh_flag, and at the first frame shown at all.
         var starts: [Int] = display.filter { frames[$0].info?.sceneRefresh == true }
+        if !starts.isEmpty { streamMarksScenes = true }
         if !carriedValid, let first = display.first, starts.first != first {
             starts.insert(first, at: 0)
+        }
+        // Without scene marks the GOP's keyframe (first in decode order) opens a curve of its own.
+        if !streamMarksScenes, !starts.contains(0) {
+            starts.append(0)
         }
 
         var fitted: [Int: FelCurveSet?] = [:]
