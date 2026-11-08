@@ -55,6 +55,7 @@ final class FelCurveLookahead {
     private(set) var scenesFitted = 0
     private(set) var scenesWithoutResidual = 0
     private(set) var scenesFailed = 0
+    private(set) var conversionFailures = 0
 
     init(videoStreamIndex: Int32, stream: UnsafeMutablePointer<AVStream>, framing: VideoNALFraming) {
         self.videoStreamIndex = videoStreamIndex
@@ -152,8 +153,16 @@ final class FelCurveLookahead {
         let assignment = folds(for: frames)
         for (frame, fold) in zip(frames, assignment) {
             let luma = fold?.luma(for: frame.info?.luma)
-            _ = DoviRpuConverter.convertPacketToProfile81KeepingMapping(
-                frame.packet, framing: framing, rewrite: luma.map { curve in { curve.apply(to: $0, component: 0) } })
+            // A refused RPU is dropped and the packet rebuilt without its enhancement layer, as on the plain
+            // route: the frame shows its HDR10 base. Logged once, since the producer skips its own conversion.
+            if !DoviRpuConverter.convertPacketToProfile81KeepingMapping(
+                frame.packet, framing: framing, rewrite: luma.map { curve in { curve.apply(to: $0, component: 0) } }) {
+                conversionFailures += 1
+                if conversionFailures == 1 {
+                    EngineLog.emit("[FelCurves] DV P7->8.1 conversion failed for a packet; dropped the RPU, "
+                                   + "degrading affected frames to the HDR10 base", category: .session)
+                }
+            }
         }
         ready.append(contentsOf: buffered)
         buffered.removeAll(keepingCapacity: true)
