@@ -45,4 +45,42 @@ struct Issue950RateSwitchRelockTests {
                 attribution: .engineRateOnly, relation: .exact(panelRate: 23.976), heldForMs: 0, preWrite: preWrite))
         }
     }
+
+    // Round 2, LG C3 on 7.58.0: a restart within ~2 s of a stop wrote while the reset's switch back to
+    // 50 Hz was running, and that switch's end settled the gate at 50.001 Hz, four times in a row.
+    @Test("An end with no start since a write made during a running switch belongs to that switch")
+    func endOfSwitchInFlightAtWriteIsNotTheWritesOwn() {
+        #expect(DisplayCriteriaController.endBelongsToInFlightSwitch(
+            switchInFlightAtWrite: true, startNotifiedSinceWrite: false))
+        #expect(!DisplayCriteriaController.endBelongsToInFlightSwitch(
+            switchInFlightAtWrite: true, startNotifiedSinceWrite: true))
+        #expect(!DisplayCriteriaController.endBelongsToInFlightSwitch(
+            switchInFlightAtWrite: false, startNotifiedSinceWrite: false))
+    }
+
+    // Round 2: one fresh start in four still flashed pink noise with a correctly observed end, 200 to 300 ms
+    // before playback, and the engine logs of the clean and the noisy start were identical.
+    @Test("A real rate switch holds for the sink after its end, measured from the end")
+    func realRateSwitchHoldsForTheSink() {
+        let margin = DisplayCriteriaController.rateSwitchSinkSettleMs
+        #expect(DisplayCriteriaController.sinkSettleHoldMs(
+            attribution: .engineRateOnly, preWrite: .different(panelRate: 50.001), msSinceEnd: 0) == margin)
+        #expect(DisplayCriteriaController.sinkSettleHoldMs(
+            attribution: .engineRateOnly, preWrite: .different(panelRate: 50.001), msSinceEnd: 400) == margin - 400)
+        #expect(DisplayCriteriaController.sinkSettleHoldMs(
+            attribution: .engineRateOnly, preWrite: .different(panelRate: 50.001), msSinceEnd: margin + 1) == 0)
+    }
+
+    @Test("No hold where the panel did not change rate, had no reading, or the write was not rate-only")
+    func noHoldWithoutARealRateSwitch() {
+        for preWrite in [nil, DisplayCriteriaController.PanelRateRelation.unmeasured, .exact(panelRate: 23.976),
+                         .multiple(panelRate: 47.952, factor: 2)] {
+            #expect(DisplayCriteriaController.sinkSettleHoldMs(
+                attribution: .engineRateOnly, preWrite: preWrite, msSinceEnd: 0) == 0)
+        }
+        for attribution in [DisplayCriteriaController.CriteriaAttribution.engineHDR, .hostDriven] {
+            #expect(DisplayCriteriaController.sinkSettleHoldMs(
+                attribution: attribution, preWrite: .different(panelRate: 50.001), msSinceEnd: 0) == 0)
+        }
+    }
 }
