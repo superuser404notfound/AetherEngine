@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.60.0] - 2026-11-08
+
 ### Added
 
 - **`isAwaitingDisplaySwitch` (AE#1000).** True while a loaded session holds its start for the display: the
