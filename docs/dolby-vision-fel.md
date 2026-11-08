@@ -4,6 +4,8 @@ How AetherEngine plays a Profile 7 dual-layer source (base layer + enhancement l
 Dolby Vision, what has been proven on device, and the design that does it with bounded CPU, GPU and
 memory while staying correct.
 
+**Recommendation.** For an app that ships to users, build the curve fold (`DolbyVisionFelCurves`, [section 7](#7-curve-fold-on-the-native-route)) rather than this route: this route reconstructs the picture itself, which evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel, steps covered by live Dolby patents (the MMR family runs to 2032). A host without a Dolby Vision licence should build `DolbyVisionFelCurves` instead, which leaves every evaluation of the stream's mapping to the platform's licensed decoder. Sections 1 to 6 describe the composer route; section 7 the fold.
+
 **Optional component.** The route and the composer are compiled only with the `DualLayerDolbyVision`
 package trait, which is off by default ([README › Optional components](../README.md#optional-components)).
 Built without it, `preferDualLayerDolbyVision` is accepted and changes nothing: the route decision
