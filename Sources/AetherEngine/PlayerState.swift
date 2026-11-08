@@ -663,6 +663,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// Nil preserves the default spool behavior.
     public var softwareDVRRetention: SoftwareDVRRetentionOptions? = nil
 
+    /// Disk budget in bytes for the software live DVR ring. Nil keeps the default (a quarter of the free
+    /// space, at most 2 GiB). An explicit value replaces the 2 GiB cap and is still clamped to a quarter of
+    /// the free space the other sessions have not claimed, with the 64 MiB playback floor. For a window
+    /// that has to hold hours of broadcast: 2 GiB is about 50 minutes of 5.7 Mbps MPEG-2. Ignored unless
+    /// `isLive` and `dvrWindowSeconds` are set and the session routes to software.
+    public var liveDVRByteBudget: Int? = nil
+
     /// LL-HLS blocking-reload (`#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD`) override for live loopback sessions.
     /// nil (default) = auto: for a `LiveIngestSourceInfo` custom reader the engine derives eligibility from
     /// the OBSERVED upstream arrival cadence (off until sustained discipline is proven, permanently off once

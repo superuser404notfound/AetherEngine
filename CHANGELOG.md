@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`LoadOptions.liveDVRByteBudget` lifts the software live DVR ring past 2 GiB.**
+  The ring that backs timeshift on the software route was capped at 2 GiB whatever `dvrWindowSeconds` asked
+  for, and `setSoftwareLiveDVRLimits` can only lower it. That is about 50 minutes of 5.7 Mbps broadcast MPEG-2,
+  so a host playing a recording still in progress as a live source, with the whole recording as the rewind
+  buffer, lost its start. An explicit budget now replaces the 2 GiB default; the quarter-of-free-space clamp,
+  the claims of other sessions and the 64 MiB floor still apply, and nil keeps today's sizing.
+
 ### Fixed
 
 - **A slow external subtitle file froze the picture of a server HLS stream, and a sidecar was requested twice (AE#984).**

@@ -39,10 +39,15 @@ final class PacketRingBuffer: @unchecked Sendable {
     static let minimumLiveByteBudget = 64 << 20
 
     /// The native path's retention funnel (min(2 GiB, a quarter of free space)) with the live floor.
-    static func liveByteBudget(volumeAvailableBytes: Int64?, capRelaxed: Bool = false) -> Int {
+    /// A host's explicit `LoadOptions.liveDVRByteBudget` replaces the 2 GiB default and keeps the
+    /// quarter-of-free-space clamp: a window meant to hold a whole recording in progress (hours of
+    /// broadcast MPEG-2) does not fit in 2 GiB.
+    static func liveByteBudget(volumeAvailableBytes: Int64?, capRelaxed: Bool = false,
+                               requestedBytes: Int? = nil) -> Int {
         max(minimumLiveByteBudget,
-            HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: volumeAvailableBytes,
-                                                       capRelaxed: capRelaxed))
+            HLSVideoEngine.resolveSessionCacheBudget(requestedBytes: requestedBytes,
+                                                     volumeAvailableBytes: volumeAvailableBytes,
+                                                     capRelaxed: capRelaxed).baseEffectiveBytes)
     }
 
     // MARK: - Private types
