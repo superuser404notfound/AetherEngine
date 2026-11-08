@@ -18,7 +18,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL[segment.absoluteString] = transportStream(streamType: 0x24)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: ["X-Fixture": "allowed"],
@@ -64,7 +63,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL[highSegment.absoluteString] = transportStream(streamType: 0x24)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -85,7 +83,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL[segment.absoluteString] = transportStream(streamType: 0x1B)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -113,7 +110,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         """.utf8)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let fmp4Reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: fmp4,
             httpHeaders: [:],
@@ -133,7 +129,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL[root.absoluteString] = mediaPlaylist("missing.ts")
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -188,7 +183,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         }
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -220,7 +214,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         }
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -241,7 +234,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL[segment.absoluteString] = transportStream(streamType: 0x24)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let made = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: root,
             httpHeaders: [:],
@@ -281,7 +273,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL["https://vod.test/h264-sw.ts"] = transportStream(streamType: 0x1B)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         let reader = try await HLSVODIngestReader.makeIfMPEGTS(
             playlistURL: root, httpHeaders: [:], session: session, accepting: .anyMPEGTS)
         let admitted = try XCTUnwrap(reader, "an H.264 archive AVPlayer refused has to reach libavcodec")
@@ -320,7 +311,6 @@ final class Issue268HLSVODIngestTests: XCTestCase {
         Issue268URLProtocol.bodyByURL["https://vod.test/sw-aes.ts"] = transportStream(streamType: 0x1B)
 
         let session = makeSession()
-        defer { session.invalidateAndCancel() }
         for url in [fmp4, live, aes] {
             let reader = try await HLSVODIngestReader.makeIfMPEGTS(
                 playlistURL: url, httpHeaders: [:], session: session, accepting: .anyMPEGTS)
@@ -417,6 +407,10 @@ final class Issue268HLSVODIngestTests: XCTestCase {
 
     private static let markerOffset = 30
 
+    /// Never invalidated: a closed reader's producer can still reach the session it was handed (the
+    /// rest of its segment batch), and a task created on an invalidated session raises an Objective-C
+    /// exception that aborts the whole xctest run. The engine never hands a reader a session it
+    /// invalidates; its own session is invalidated in deinit, after the producer is gone.
     private func makeSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Issue268URLProtocol.self]

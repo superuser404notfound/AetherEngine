@@ -114,6 +114,8 @@ final class OrderedDelivery: @unchecked Sendable {
     /// One-shot-per-stall latch so a run of consecutive missing tickets logs
     /// once for the event rather than once per skipped ticket.
     private var stallLogPending = false
+    /// Tickets the stall guard has given up on, over this instance's life. Confined to `queue`.
+    private var stallSkippedTickets: UInt64 = 0
 
     private let pendingCountLock = NSLock()
     private var pendingCount: Int = 0
@@ -284,8 +286,10 @@ final class OrderedDelivery: @unchecked Sendable {
             // spins the queue once per number when the backlog sits far ahead of the head.
             guard let oldest = pending.keys.min(), oldest > nextToEmit else {
                 nextToEmit &+= 1
+                stallSkippedTickets &+= 1
                 continue
             }
+            stallSkippedTickets &+= oldest &- nextToEmit
             nextToEmit = oldest
         }
     }
@@ -352,6 +356,7 @@ final class OrderedDelivery: @unchecked Sendable {
     /// here, only this note.
     var pendingCountForTesting: Int { queue.sync { pending.count } }
     var nextToEmitForTesting: UInt64 { queue.sync { nextToEmit } }
+    var stallSkippedTicketsForTesting: UInt64 { queue.sync { stallSkippedTickets } }
     var hasOnFrameForTesting: Bool { queue.sync { onFrame != nil } }
     var currentOnFrame: DecodedFrameHandler? { queue.sync { onFrame } }
 }

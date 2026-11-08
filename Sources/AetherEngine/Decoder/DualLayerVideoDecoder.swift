@@ -2773,6 +2773,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         var deliveryPendingCount: Int
         var deliveryNextTicket: UInt64
         var deliveryNextToEmit: UInt64
+        var deliveryStallSkippedTickets: UInt64
         var feedEpoch: UInt64
         var draining: Bool
         var timeBaseNum: Int32
@@ -2835,6 +2836,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             deliveryPendingCount: orderedDelivery.pendingCountForTesting,
             deliveryNextTicket: deliveryNextTicket,
             deliveryNextToEmit: orderedDelivery.nextToEmitForTesting,
+            deliveryStallSkippedTickets: orderedDelivery.stallSkippedTicketsForTesting,
             feedEpoch: feedEpoch,
             draining: draining,
             timeBaseNum: timeBaseNum,
