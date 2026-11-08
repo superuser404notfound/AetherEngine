@@ -56,6 +56,7 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 - [HipTV](https://hiptv.app): A cross-platform, synchronized IPTV player.
 - [ZeoPlayer](https://apps.apple.com/app/id6792761598): Modern media player for iPhone, iPad, Mac, Apple TV and Apple Vision Pro with HDR, Dolby Vision, spatial audio and SMB support.
 - [Theamo](https://theamo.app): IPTV player and TV guide for iPhone, iPad and Apple TV.
+- [Lume](https://github.com/bilipp/Lume/): SwiftUI native open source IPTV and media player for iOS, tvOS and macOS.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
