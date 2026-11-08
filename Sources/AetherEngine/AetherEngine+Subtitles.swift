@@ -671,7 +671,8 @@ extension AetherEngine {
             // authored one.
             let derivationHorizon = window.through + Self.subtitleForwardPrefetchLeadMarginSeconds
             if Self.alignCueEnds(&cues, toNextPacket: {
-                guard let pts = store.firstPTS(streamIndex: streamIndex, after: $0) else { return nil }
+                guard let pts = Self.authoredSuccessorPTS(in: store, streamIndex: streamIndex,
+                                                          afterCueStart: $0) else { return nil }
                 guard pts <= derivationHorizon else {
                     tally.endsWithheld += 1
                     return nil
@@ -1089,15 +1090,32 @@ extension AetherEngine {
             }
         }
         // Audit FEA-101: the store bounds these, but an entry is a plain value and the conversion traps.
-        pkt.pointee.pts = SourceTimestampBounds.roundedTicks(entry.ptsSeconds * 1000) ?? Int64.min
+        let ticksPerSecond = Double(storedSubtitlePacketTicksPerSecond)
+        pkt.pointee.pts = SourceTimestampBounds.roundedTicks(entry.ptsSeconds * ticksPerSecond) ?? Int64.min
         pkt.pointee.dts = pkt.pointee.pts
-        pkt.pointee.duration = max(0, SourceTimestampBounds.roundedTicks(entry.durationSeconds * 1000) ?? 0)
+        pkt.pointee.duration = max(0, SourceTimestampBounds.roundedTicks(entry.durationSeconds * ticksPerSecond) ?? 0)
         pkt.pointee.flags = entry.flags
         // #233: WebVTT placement lives in side data, not in the payload, so it has to be put back.
         if let settings = entry.webvttSettings {
             WebVTTCueSettings.attach(settings: settings, to: pkt)
         }
-        return decoder.decode(packet: pkt, streamTimeBase: AVRational(num: 1, den: 1000))
+        return decoder.decode(packet: pkt, streamTimeBase: AVRational(num: 1, den: storedSubtitlePacketTicksPerSecond))
+    }
+
+    /// The time base a stored packet is rebuilt on, so a decoded cue start is its packet's PTS
+    /// rounded to this grid, up to half a tick away from the PTS the store holds.
+    nonisolated static let storedSubtitlePacketTicksPerSecond: Int32 = 1000
+
+    /// AE#1001: the stored packet that closes a cue starting at `cueStart`. The start went through
+    /// the reconstruction's rounding and the store did not, so a start rounded DOWN sits just below
+    /// the cue's own packet, and a strict "after" returned that packet as its own successor (6.976167
+    /// decoded as 6.976, closed at 6.976167, shown for 0.167 ms). Searching from one full tick past
+    /// the start steps over the cue's own packet whichever way it rounded; no authored successor is
+    /// that close.
+    nonisolated static func authoredSuccessorPTS(in store: SubtitlePacketStore, streamIndex: Int32,
+                                                 afterCueStart cueStart: Double) -> Double? {
+        store.firstPTS(streamIndex: streamIndex,
+                       after: cueStart + 1 / Double(storedSubtitlePacketTicksPerSecond))
     }
 
     /// #271: the channel's retained array, bound once per drain tick. Reading it here and writing it
