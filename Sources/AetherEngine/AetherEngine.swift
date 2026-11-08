@@ -1122,6 +1122,30 @@ public final class AetherEngine: ObservableObject {
     /// per real step. See `StartupProgress`.
     @Published public internal(set) var startupProgress: StartupProgress?
 
+    /// AE#1000: true while a loaded session holds its start for the display, i.e. the post-load play
+    /// gate is waiting for a mode switch to settle. The first frame can already be up
+    /// (`startupProgress` reads `.presenting`) and `playbackPhase` stays `.loading`, so this is the
+    /// one signal that says the wait is the panel's, not the source's: a host that keeps its spinner
+    /// off a switch during `.preparingDisplay` can keep it off here too.
+    @Published public internal(set) var isAwaitingDisplaySwitch = false
+
+    /// The load generation whose play gate raised `isAwaitingDisplaySwitch`, so a superseded gate
+    /// that returns late cannot lower the flag its successor raised.
+    private var displaySwitchGateGeneration: UInt64?
+
+    /// AE#1000: runs a post-load play gate with `isAwaitingDisplaySwitch` raised around it.
+    func awaitingDisplaySwitch(generation: UInt64, _ gate: () async -> Void) async {
+        displaySwitchGateGeneration = generation
+        isAwaitingDisplaySwitch = true
+        await gate()
+        if displaySwitchGateGeneration == generation { clearDisplaySwitchGate() }
+    }
+
+    func clearDisplaySwitchGate() {
+        displaySwitchGateGeneration = nil
+        if isAwaitingDisplaySwitch { isAwaitingDisplaySwitch = false }
+    }
+
     /// #127: latest seek issued while the native item was pre-ready; replayed at readiness.
     ///
     /// AE#446 round 4: with the origin that asked for it. The replay goes back out through
@@ -3289,6 +3313,14 @@ public final class AetherEngine: ObservableObject {
     /// site cannot silently bypass the flag.
     nonisolated static func loadPerformsAutostart(_ options: LoadOptions) -> Bool {
         options.autoplay
+    }
+
+    /// AE#1000: whether item readiness settles a load `.loading -> .paused`. Only a paused mount: an
+    /// autostarting load still has its post-load play gate and terminal play() ahead of it, and a
+    /// `.paused` published across that gate (a display switch, about 2.5 s) reads to a host exactly
+    /// like a viewer's pause. The load stays `.loading` until the autostart writes `.playing`.
+    nonisolated static func readinessSettlesPaused(autostarts: Bool) -> Bool {
+        !autostarts
     }
 
     /// AE#464 round 2: whether a session-preserving rebuild comes back PLAYING.
@@ -6156,6 +6188,7 @@ public final class AetherEngine: ObservableObject {
                     dvrWindowSeconds: options.dvrWindowSeconds,
                     preopenedDemuxer: probeOpened ? probe : nil,
                     requiresDeinterlaceWarmup: requiresDeinterlaceWarmup,
+                    autostarts: Self.loadPerformsAutostart(options),
                     generation: gen,
                     elType: elType
                 )
@@ -6190,17 +6223,19 @@ public final class AetherEngine: ObservableObject {
                 // so without this the host starts playing into a dark panel. There is no AVPlayerItem here
                 // for AVKit to read criteria from, so a host that leaves the write to AVKit expects no
                 // inbound write.
-                await displayCriteria.waitForSwitch(
-                    startGrace: Self.playGateGrace(
-                        criteriaUnchanged: criteriaUnchanged,
-                        criteriaWrittenBeforeLoad: !options.awaitsInboundCriteriaWrite,
-                        formatKnown: probeOpened,
-                        effectiveFormat: effectiveFormat,
-                        noWriterExpected: options.sharedOutputRole == .secondary
-                            || options.awaitsInboundCriteriaWrite
-                    ),
-                    settleCap: options.isLive ? .standard : .awaitObservedEnd,
-                    isCurrent: { self.loadGeneration == gen })
+                await awaitingDisplaySwitch(generation: gen) {
+                    await displayCriteria.waitForSwitch(
+                        startGrace: Self.playGateGrace(
+                            criteriaUnchanged: criteriaUnchanged,
+                            criteriaWrittenBeforeLoad: !options.awaitsInboundCriteriaWrite,
+                            formatKnown: probeOpened,
+                            effectiveFormat: effectiveFormat,
+                            noWriterExpected: options.sharedOutputRole == .secondary
+                                || options.awaitsInboundCriteriaWrite
+                        ),
+                        settleCap: options.isLive ? .standard : .awaitObservedEnd,
+                        isCurrent: { self.loadGeneration == gen })
+                }
                 try checkLoadCurrent(gen)
                 // #124: a paused mount skips autostart; loadSoftware's host.$isReady settles .paused.
                 if Self.loadPerformsAutostart(options) {
@@ -6245,6 +6280,7 @@ public final class AetherEngine: ObservableObject {
                     // this; fresh joins keep the verified seek-to-0.
                     liveRejoin: options.isLiveRejoin,
                     preopenedDemuxer: probeOpened ? probe : nil,
+                    autostarts: Self.loadPerformsAutostart(options),
                     generation: gen,
                     resolvePanelRouting: panelRoutingSettled ? nil : {
                         try await settlePanelRouting(ownsProbe: false)
@@ -6274,19 +6310,21 @@ public final class AetherEngine: ObservableObject {
                 // #274: the 1000ms Stage 1 budget is the DV-cold-start bet on a sole-writer host's inbound
                 // write. Sessions no dynamic-range switch can reach (engine-writer, or SDR content) take the
                 // 200ms budget instead of paying it on every load.
-                await displayCriteria.waitForSwitch(
-                    startGrace: Self.playGateGrace(
-                        criteriaUnchanged: criteriaUnchanged,
-                        criteriaWrittenBeforeLoad: !options.awaitsInboundCriteriaWrite,
-                        formatKnown: probeOpened,
-                        effectiveFormat: effectiveFormat,
-                        noWriterExpected: options.sharedOutputRole == .secondary
-                    ),
-                    // Sodalite#49: this gate runs after the item is ready, so waiting out an observed switch
-                    // blocks nothing else, and the panel is dark until it ends either way. Live keeps the
-                    // standard cap: a zap must not sit behind a panel handshake.
-                    settleCap: options.isLive ? .standard : .awaitObservedEnd,
-                    isCurrent: { self.loadGeneration == gen })
+                await awaitingDisplaySwitch(generation: gen) {
+                    await displayCriteria.waitForSwitch(
+                        startGrace: Self.playGateGrace(
+                            criteriaUnchanged: criteriaUnchanged,
+                            criteriaWrittenBeforeLoad: !options.awaitsInboundCriteriaWrite,
+                            formatKnown: probeOpened,
+                            effectiveFormat: effectiveFormat,
+                            noWriterExpected: options.sharedOutputRole == .secondary
+                        ),
+                        // Sodalite#49: this gate runs after the item is ready, so waiting out an observed switch
+                        // blocks nothing else, and the panel is dark until it ends either way. Live keeps the
+                        // standard cap: a zap must not sit behind a panel handshake.
+                        settleCap: options.isLive ? .standard : .awaitObservedEnd,
+                        isCurrent: { self.loadGeneration == gen })
+                }
                 try checkLoadCurrent(gen)
                 // automaticallyWaitsToMinimizeStalling=true (default) handles play-before-ready.
                 // #35: on a real SDR->HDR switch while serving a VOD master, drive the bounded
@@ -8570,6 +8608,7 @@ public final class AetherEngine: ObservableObject {
         endRecordingIfRunning(reason: .sessionEnded)
         // Bump generation to invalidate in-flight load() checkpoints.
         loadGeneration &+= 1
+        clearDisplaySwitchGate()
         scrubPreviewSourceGeneration = UUID()
         resumeAfterInterruption = false
         playDeferredByInterruption = false

@@ -101,8 +101,9 @@ extension AetherEngine {
 
     /// Wire `$duration`, `$isReady`, `$failure`, `$didReachEnd` into the cancellable set.
     /// `isReady` always feeds the public `isSessionReady` mirror and replays a deferred pre-ready host
-    /// seek (#127); pass `settlePausedAtReadiness: false` for paths that skip the readiness -> .paused
-    /// waypoint (autostarting loadRemoteHLS, where the terminal play() runs and readiness is a waypoint).
+    /// seek (#127). `settlePausedAtReadiness` comes from `readinessSettlesPaused(autostarts:)` on every
+    /// video path: an autostarting load skips the readiness -> .paused waypoint, because its terminal
+    /// play() still runs after the post-load play gate (AE#1000).
     /// #315: fold a host's raw `isVideoReadyForDisplay` level into the load-scoped public latch.
     ///
     /// Two operators carry the whole contract. `dropFirst()` discards the value the publisher
@@ -188,7 +189,7 @@ extension AetherEngine {
     /// `videoReadyForDisplay` is the host's raw layer level (#315); nil on the audio hosts, which
     /// have nothing to display. It is folded, never mirrored: the engine's published flag is latched
     /// for the load, so the seams that reuse a host and briefly lose the picture do not surface.
-    private func wireCommonHostSinks(
+    func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
         isReady: Published<Bool>.Publisher,
         settlePausedAtReadiness: Bool = true,
@@ -536,7 +537,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
-            settlePausedAtReadiness: !Self.loadPerformsAutostart(options),
+            settlePausedAtReadiness: Self.readinessSettlesPaused(autostarts: Self.loadPerformsAutostart(options)),
             failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
@@ -842,6 +843,7 @@ extension AetherEngine {
         liveRejoin: Bool = false,
         preopenedDemuxer: Demuxer? = nil,
         keepsMediaPlaylistRoute: Bool = false,
+        autostarts: Bool,
         generation: UInt64,
         resolvePanelRouting: (() async throws -> Bool)? = nil
     ) async throws {
@@ -1563,6 +1565,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
+            settlePausedAtReadiness: Self.readinessSettlesPaused(autostarts: autostarts),
             failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
@@ -2018,6 +2021,7 @@ extension AetherEngine {
         dvrWindowSeconds: Double? = nil,
         preopenedDemuxer: Demuxer?,
         requiresDeinterlaceWarmup: Bool,
+        autostarts: Bool,
         generation: UInt64,
         elType: String? = nil
     ) async throws {
@@ -2221,6 +2225,7 @@ extension AetherEngine {
         wireCommonHostSinks(
             duration: host.$duration,
             isReady: host.$isReady,
+            settlePausedAtReadiness: Self.readinessSettlesPaused(autostarts: autostarts),
             failure: host.$failure,
             didReachEnd: host.$didReachEnd,
             videoReadyForDisplay: host.$isVideoReadyForDisplay,
@@ -2773,6 +2778,7 @@ extension AetherEngine {
                     dvrWindowSeconds: loadedOptions.dvrWindowSeconds,
                     preopenedDemuxer: customPreopened,
                     requiresDeinterlaceWarmup: reopenedRequiresDeinterlaceWarmup,
+                    autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
                     generation: gen,
                     elType: sourceElType
                 )
@@ -2856,6 +2862,7 @@ extension AetherEngine {
                     liveRejoin: loadedOptions.isLive,
                     preopenedDemuxer: customPreopened,
                     keepsMediaPlaylistRoute: keepsMediaRoute,
+                    autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
                     generation: gen
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
@@ -2872,16 +2879,18 @@ extension AetherEngine {
                 // #274: this reload preserved the criteria (resetDisplayCriteria: false) and re-applies none,
                 // so only a sole-writer host's re-write on the swapped item can still switch anything; the
                 // published (panel-clamped) format decides whether that can be a dynamic-range switch.
-                await displayCriteria.waitForSwitch(
-                    startGrace: Self.playGateGrace(
-                        criteriaUnchanged: false,
-                        criteriaWrittenBeforeLoad: !loadedOptions.awaitsInboundCriteriaWrite,
-                        formatKnown: true,
-                        effectiveFormat: videoFormat,
-                        noWriterExpected: loadedOptions.sharedOutputRole == .secondary
-                    ),
-                    settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
-                    isCurrent: { self.loadGeneration == gen })
+                await awaitingDisplaySwitch(generation: gen) {
+                    await displayCriteria.waitForSwitch(
+                        startGrace: Self.playGateGrace(
+                            criteriaUnchanged: false,
+                            criteriaWrittenBeforeLoad: !loadedOptions.awaitsInboundCriteriaWrite,
+                            formatKnown: true,
+                            effectiveFormat: videoFormat,
+                            noWriterExpected: loadedOptions.sharedOutputRole == .secondary
+                        ),
+                        settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
+                        isCurrent: { self.loadGeneration == gen })
+                }
                 try checkLoadCurrent(gen)
                 if transportIntentUnderReconstruction ?? resumesPlaying { nativeHost?.play() }
                 else { nativeHost?.pause() }
