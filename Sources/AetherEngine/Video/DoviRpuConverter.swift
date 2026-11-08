@@ -153,8 +153,18 @@ public enum DoviRpuConverter {
     /// would reshape a picture the composer already reshaped. The remux route leaves it off, because the frames
     /// it writes are the raw base layer, which the display does have to reshape.
     /// Only the `DualLayerDolbyVision` trait builds the removal: without it the parameter is ignored and the call is never made.
-    static func convertedUnspec62(_ rpu: OpaquePointer, removeMapping: Bool = false) -> UnsafePointer<DoviData>? {
+    static func convertedUnspec62(
+        _ rpu: OpaquePointer,
+        removeMapping: Bool = false,
+        keepMapping: Bool = false,
+        rewrite: ((OpaquePointer) -> Bool)? = nil
+    ) -> UnsafePointer<DoviData>? {
+        // Mode 2 drops the mapping of an FEL RPU only; mode 1 first turns it into an MEL one, so the stream's
+        // own curves (MMR chroma included) survive the conversion. An RPU mode 1 refuses keeps the plain path.
+        if keepMapping { _ = dovi_convert_rpu_with_mode(rpu, 1) }
         guard dovi_convert_rpu_with_mode(rpu, 2) == 0 else { return nil }
+        // libdovi validates a curve before it touches the RPU, so a refused rewrite leaves the converted mapping.
+        if let rewrite { _ = rewrite(rpu) }
         #if DualLayerDolbyVision
         if removeMapping {
             guard dovi_rpu_remove_mapping(rpu) == 0 else { return nil }
@@ -201,7 +211,9 @@ public enum DoviRpuConverter {
         framing: VideoNALFraming = .lengthPrefixed(size: 4),
         extractEL: Bool = true,
         useCustomBlockSource: Bool = false,
-        extractParams: Bool = true
+        extractParams: Bool = true,
+        keepMapping: Bool = false,
+        rpuRewrite: ((OpaquePointer) -> Bool)? = nil
     ) -> DualLayerPacketResult {
         let untouched = DualLayerPacketResult(elPacket: nil, rpuData: nil, isFEL: false, success: true)
         guard let data = packet.pointee.data, packet.pointee.size > 4 else { return untouched }
@@ -271,7 +283,8 @@ public enum DoviRpuConverter {
                 #else
                 let composedForm = false
                 #endif
-                guard let out = Self.convertedUnspec62(rpu, removeMapping: composedForm) else {
+                guard let out = Self.convertedUnspec62(rpu, removeMapping: composedForm, keepMapping: keepMapping,
+                                                      rewrite: rpuRewrite) else {
                     degraded = true
                     return
                 }
@@ -410,6 +423,17 @@ public enum DoviRpuConverter {
         framing: VideoNALFraming = .lengthPrefixed(size: 4)
     ) -> Bool {
         separateDualLayers(packet, framing: framing, extractEL: false, extractParams: false).success
+    }
+
+    /// `convertPacketToProfile81` that keeps the stream's mapping (an FEL RPU's included) and runs `rewrite`
+    /// on the RPU after the conversion and before it is written (`FelCurve.apply`), for the curve fold.
+    static func convertPacketToProfile81KeepingMapping(
+        _ packet: UnsafeMutablePointer<AVPacket>,
+        framing: VideoNALFraming,
+        rewrite: ((OpaquePointer) -> Bool)?
+    ) -> Bool {
+        separateDualLayers(packet, framing: framing, extractEL: false, extractParams: false,
+                           keepMapping: true, rpuRewrite: rewrite).success
     }
 
     /// Enhancement-layer type ("FEL" or "MEL") of the first unspec62 RPU in a P7 packet, or nil if

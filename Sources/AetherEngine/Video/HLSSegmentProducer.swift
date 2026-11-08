@@ -560,6 +560,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var loggedEnhancementLayerType = false
     /// Latched false at SSAI program switch (ad creatives are H.264; mirrors muxer's isReinit ? false : videoConfig.convertP7ToProfile81).
     private var convertP7Active: Bool = false
+    #if DolbyVisionFelCurves
+    /// Holds back one GOP at a time to fold a FEL source's enhancement layer into the RPU's curves
+    /// (`FelCurveLookahead`). Created on the first read of a VOD P7 conversion without a side demuxer.
+    private var felLookahead: FelCurveLookahead?
+    private var felLookaheadDecided = false
+    #endif
     private var loggedFirstDtsBump = false
     private var loggedFirstDtsDrop = false
     private var loggedFirstAudioDtsBump = false
@@ -1272,6 +1278,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
             return false
         }
         discardPregateScanState()
+        #if DolbyVisionFelCurves
+        felLookahead?.reset()
+        #endif
         effectiveGateTargetPts = aim
         EngineLog.emit(
             "[HLSSegmentProducer] boundary \(restartTargetVideoPts) is not a random-access point "
@@ -3477,6 +3486,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         mergedReadInFlight = true
         defer { mergedReadInFlight = false }
         guard let side = sideAudioDemuxer else {
+            #if DolbyVisionFelCurves
+            if let lookahead = felLookaheadForRead() {
+                let packet = try lookahead.next {
+                    guard let packet = try demuxer.readPacket() else { return nil }
+                    boundSourceTimestamps(packet)
+                    return packet
+                }
+                return packet.map { ($0, .main) }
+            }
+            #endif
             guard let packet = try demuxer.readPacket() else { return nil }
             boundSourceTimestamps(packet)
             return (packet, .main)
@@ -3513,6 +3532,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
         mergeMainLookahead = nil
         return (main, .main)
     }
+
+    #if DolbyVisionFelCurves
+    /// The fold applies to a VOD source converted from Profile 7 on this route alone: the enhancement-route tap
+    /// needs the enhancement layer intact, and a live source has no GOP to wait for.
+    private func felLookaheadForRead() -> FelCurveLookahead? {
+        if felLookaheadDecided { return felLookahead }
+        felLookaheadDecided = true
+        guard convertP7Active, !isLive, videoPacketTapProvider?() == nil,
+              let stream = demuxer.stream(at: videoStreamIndex) else { return nil }
+        felLookahead = FelCurveLookahead(videoStreamIndex: videoStreamIndex, stream: stream, framing: a53NALFraming)
+        return felLookahead
+    }
+
+    /// True when the packets reaching the pump are already Profile 8.1 with the fold's curves.
+    private var felFoldConverted: Bool { felLookahead?.isFolding == true && sideAudioDemuxer == nil }
+    #endif
 
     /// Pump-thread-only: an out-of-range source timestamp was logged once for this producer.
     private var implausibleTimestampLogged = false
@@ -4738,7 +4773,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         }
                         // Probe the enhancement-layer type once (latching on the first RPU seen, before
                         // conversion strips it); a FEL source loses refinement in the P8.1 conversion.
-                        if !loggedEnhancementLayerType,
+                        #if DolbyVisionFelCurves
+                        let alreadyConverted = felFoldConverted
+                        #else
+                        let alreadyConverted = false
+                        #endif
+                        if !loggedEnhancementLayerType, !alreadyConverted,
                            let elType = DoviRpuConverter.enhancementLayerType(
                                packet, framing: a53NALFraming) {
                             loggedEnhancementLayerType = true
@@ -4751,7 +4791,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                 )
                             }
                         }
-                        if !DoviRpuConverter.convertPacketToProfile81(
+                        if !alreadyConverted, !DoviRpuConverter.convertPacketToProfile81(
                             packet, framing: a53NALFraming) {
                             if !loggedP7ConversionFailure {
                                 loggedP7ConversionFailure = true
@@ -5009,6 +5049,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
         freeReplayPackets()
         freeMergeLookaheads()
+        #if DolbyVisionFelCurves
+        felLookahead?.reset()
+        #endif
 
         // #74: free any head-of-stream audio still buffered (e.g. the video gate never opened on a
         // corrupt or aborted source); replayed entries were already drained at the loop top.

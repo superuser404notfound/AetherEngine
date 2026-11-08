@@ -561,6 +561,14 @@ Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and w
 swift run aetherctl elframe --at 600 --out /tmp/elframe <p7-source>
 ```
 
+## felcurves
+
+Runs a whole Profile 7 FEL source through the curve fold the segment producer uses (`AetherEngine.felCurveFold`, [Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)) and writes the Profile 8.1 RPUs it produced (stream mapping kept, luma residual folded in), in presentation order, as a dovi_tool RPU file. `dovi_tool inject-rpu` puts them into the base layer for playback through the platform decoder. Prints how many scenes were fitted, had no residual or failed, and the time taken. Needs the `DolbyVisionFelCurves` trait.
+
+```bash
+swift run --traits DolbyVisionFelCurves aetherctl felcurves <p7-fel-source> /tmp/folded.rpu
+```
+
 ## pktdump
 
 Opens the demuxer under a selectable open profile, optionally seeks, and dumps raw video packet timing exactly as the demuxer delivers it (before any producer-side dts repair and before muxing): per-packet dts / pts / duration / keyframe flag samples, NOPTS and non-monotonic dts counts, and dts-delta / duration histograms. Also prints the resolved stream fields that `find_stream_info` fills (`avg_frame_rate`, `codecpar.video_delay`).

@@ -121,6 +121,7 @@ func printUsage() {
       aetherctl eltype [--parallel N]      (label<TAB>url lines on stdin)
       aetherctl elsurvey [--parallel N] [--points N]   (label<TAB>url lines on stdin; DualLayerDolbyVision trait)
       aetherctl elframe --at SECONDS --out DIR <url>   (DualLayerDolbyVision trait)
+      aetherctl felcurves <url> <out.rpu>              (FEL folded into per-scene P8.1 curves; DolbyVisionFelCurves trait)
       aetherctl extract [--at <sec>] [--preview|--snapshot] [--width <px>] [--loops <n>] <url>
       aetherctl audio [--seconds N] <url>
       aetherctl audiotap [--duration S] [--out PATH.wav] [--remote | --software] [--dialogue] <url>
@@ -619,6 +620,18 @@ if first == "elsurvey" {
     let points = takeIntFlag("--points", from: &rest) ?? 48
     rejectStrayFlags(rest, subcommand: "elsurvey")
     exit(runElSurvey(parallel: parallel, points: points))
+}
+#endif
+
+#if DolbyVisionFelCurves
+// A FEL source folded into the luma curve of its Profile 8.1 RPUs (mapping kept), written out: felcurves <url> <out.rpu>.
+if first == "felcurves" {
+    let rest = Array(args.dropFirst(2))
+    guard rest.count == 2 else {
+        print("Usage: aetherctl felcurves <url> <out.rpu>")
+        exit(64)
+    }
+    exit(runFelCurves(url: parseSourceURL(rest[0]), outPath: rest[1]))
 }
 #endif
 

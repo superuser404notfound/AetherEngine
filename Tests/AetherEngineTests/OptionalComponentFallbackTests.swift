@@ -16,7 +16,8 @@ struct OptionalComponentFallbackTests {
     @Test("the runtime query reports each component as this build was compiled")
     func runtimeQueryMatchesTheBuild() {
         #expect(AetherEngine.OptionalComponent.allCases.map(\.traitName)
-                == ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
+                == ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping",
+                    "DolbyVisionFelCurves"])
         #if TrueHDObjectAudio
         #expect(AetherEngine.OptionalComponent.trueHDObjectAudio.isBuiltIn)
         #else
@@ -36,6 +37,11 @@ struct OptionalComponentFallbackTests {
         #expect(AetherEngine.OptionalComponent.dolbyVisionStillReshaping.isBuiltIn)
         #else
         #expect(!AetherEngine.OptionalComponent.dolbyVisionStillReshaping.isBuiltIn)
+        #endif
+        #if DolbyVisionFelCurves
+        #expect(AetherEngine.OptionalComponent.dolbyVisionFelCurves.isBuiltIn)
+        #else
+        #expect(!AetherEngine.OptionalComponent.dolbyVisionFelCurves.isBuiltIn)
         #endif
         #expect(AetherEngine.linksTrueHDObjectDecoder == AetherEngine.OptionalComponent.trueHDObjectAudio.isBuiltIn)
         #expect(DualLayerRouteDecision.isBuiltIn == AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn)

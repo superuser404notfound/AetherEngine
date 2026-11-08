@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **FEL curve fold (`DolbyVisionFelCurves` trait, off by default).** On the native route a Profile 7 FEL
+  source's Profile 8.1 conversion now keeps the stream's own mapping (luma polynomial and MMR chroma, applied
+  by the platform's Dolby Vision decoder) instead of dropping it, and the engine folds the enhancement layer's
+  luma residual into the luma curve per scene: it holds back one GOP, decodes both layers at each scene's first
+  frame and fits the mean residual over base-layer luma. Delta E ITP median against the composed FEL picture on
+  three UHD Blu-ray samples: 2.46 to 1.49, 8.90 to 0.81, 4.83 to 2.10. Local detail (12-bit refinement, grain)
+  stays out of reach. `OptionalComponent.dolbyVisionFelCurves`, `aetherctl felcurves`. Needs LibDovi's
+  `dovi_rpu_set_polynomial_mapping`.
 
 ## [7.60.0] - 2026-11-08
 

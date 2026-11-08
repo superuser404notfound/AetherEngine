@@ -4,6 +4,8 @@ How AetherEngine plays a Profile 7 dual-layer source (base layer + enhancement l
 Dolby Vision, what has been proven on device, and the design that does it with bounded CPU, GPU and
 memory while staying correct.
 
+**Recommendation.** For an app that ships to users, build the curve fold (`DolbyVisionFelCurves`, [section 7](#7-curve-fold-on-the-native-route)) rather than this route: this route reconstructs the picture itself, which evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel, steps covered by live Dolby patents (the MMR family runs to 2032). A host without a Dolby Vision licence should build `DolbyVisionFelCurves` instead, which leaves every evaluation of the stream's mapping to the platform's licensed decoder. Sections 1 to 6 describe the composer route; section 7 the fold.
+
 **Optional component.** The route and the composer are compiled only with the `DualLayerDolbyVision`
 package trait, which is off by default ([README › Optional components](../README.md#optional-components)).
 Built without it, `preferDualLayerDolbyVision` is accepted and changes nothing: the route decision
@@ -31,7 +33,8 @@ HDMI to an LG OLED, 23.976 fps UHD Blu-ray remuxes.
 - [4. Evidence](#4-evidence)
 - [5. Design](#5-design)
 - [6. Verification](#6-verification)
-- [7. Document map](#7-document-map)
+- [7. Curve fold on the native route](#7-curve-fold-on-the-native-route)
+- [8. Document map](#8-document-map)
 
 ---
 
@@ -937,11 +940,54 @@ The inverse-NLQ table and the MMR coefficients are read from per-frame tables bo
   has already gone out.
 - `DoviFelComposer`'s completion handler keeps the in-flight semaphore alive past the composer.
 
-## 7. Document map
+## 7. Curve fold on the native route
+
+With the `DolbyVisionFelCurves` trait (off by default) a Profile 7 FEL source on the native route no longer
+loses its enhancement layer entirely in the Profile 8.1 conversion. The conversion keeps the stream's own
+mapping (luma polynomial and MMR chroma, as the disc's encoder wrote them), and the enhancement layer's luma
+residual is folded into the luma polynomial, per scene. The platform's Dolby Vision decoder applies both. No
+enhancement-layer pixel and no composed picture reaches the output, and the engine never evaluates the
+stream's mapping on a pixel; it decodes the enhancement layer only to measure it.
+
+**What it does.** `FelCurveLookahead` sits between the demuxer and the segment producer (VOD only, single
+demuxer, no enhancement-route tap) and holds back one GOP at a time: every packet read, video and audio, is
+buffered until the next video keyframe and then released in read order. Each scene that starts in the GOP
+(a frame whose RPU raises `scene_refresh_flag`, plus the first frame shown; in a stream that has not raised
+the flag at all, which some discs never do, every keyframe) is measured on its first picture: both layers
+are decoded by VideoToolbox from the GOP's keyframe up to that frame, 100 000 positions are drawn on the
+enhancement layer's luma grid (`FelCurveSampler`, dark pixels and letterbox included), and the mean
+inverse-quantised luma residual is fitted as a curve over base-layer luma (`FelCurveFit`): ordinary least
+squares with the stream's own luma pivots. Every frame of the scene then carries its own luma polynomial plus
+that curve, coefficient by coefficient (`dovi_rpu_set_polynomial_mapping`, a LibDovi addition); a frame whose
+luma pivots differ from the scene's first frame carries that frame's curve instead. The conversion is mode 1
+then mode 2, so the FEL RPU's mapping survives as an MEL one's does on the plain route. A scene without a
+residual (`disable_residual_flag`, MEL) or whose picture cannot be decoded keeps the stream's mapping as it is.
+
+**Why luma only.** The chroma residual measured on the three titles below adds nothing on top of the stream's
+own MMR chroma (identical Delta E to two decimals), and folding it into the MMR terms would amount to re-fitting
+MMR parameters, which the curve fold deliberately does not do.
+
+**What it cannot do.** A curve maps every pixel of a scene with the same value the same way, so the fold
+recovers the enhancement layer's global effect (brightness per tone) and none of its local detail (12-bit
+refinement, grain, texture), nor a residual whose size depends on colour as well as brightness.
+
+**Measured** against the composed FEL picture at every keyframe, Delta E ITP median over frames (whole
+picture / letterbox excluded):
+
+| Sample | Profile 8.1 conversion without the fold | with the fold (`aetherctl felcurves`) |
+|---|---|---|
+| UHD Blu-ray FEL A, 60 s, 28 scene cuts | 2.46 / 3.28 | 1.49 / 2.00 |
+| UHD Blu-ray FEL B, 60 s, dark, 11 scene cuts | 8.90 / 12.12 | 0.81 / 1.03 |
+| UHD Blu-ray FEL C, 120 s, no scene marks, a new mapping every frame | 4.83 / 6.91 | 2.10 / 3.00 |
+
+On macOS `AVPlayerLayer` shows the folded stream served by `aetherctl serve` pixel-identical to the folded RPUs
+injected offline. On an M1 debug build the pass folds 60 s of FEL in 6 to 12 s.
+
+## 8. Document map
 
 | Document | Role |
 |---|---|
 | this file | design, implementation, evidence, verification |
 | [formats.md](formats.md#dolby-vision-signaling) | Profile 7 behaviour as a host sees it |
 | [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling` |
-| [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el` |
+| [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el`, `felcurves` |

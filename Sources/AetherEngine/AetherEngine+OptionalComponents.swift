@@ -17,6 +17,9 @@ extension AetherEngine {
         /// Stills (scrub thumbnails, I-frame stills, held pictures) of Dolby Vision Profile 5 / 10.0
         /// sources, which have no base layer to show (trait `DolbyVisionStillReshaping`).
         case dolbyVisionStillReshaping = "DolbyVisionStillReshaping"
+        /// A Profile 7 FEL source's enhancement layer folded into the Profile 8.1 RPU on the native route: the
+        /// stream's mapping kept, its luma curve lifted by the scene's residual (trait `DolbyVisionFelCurves`).
+        case dolbyVisionFelCurves = "DolbyVisionFelCurves"
 
         /// The package trait that compiles the component.
         public var traitName: String { rawValue }
@@ -44,6 +47,12 @@ extension AetherEngine {
                 #endif
             case .dolbyVisionStillReshaping:
                 #if DolbyVisionStillReshaping
+                return true
+                #else
+                return false
+                #endif
+            case .dolbyVisionFelCurves:
+                #if DolbyVisionFelCurves
                 return true
                 #else
                 return false
