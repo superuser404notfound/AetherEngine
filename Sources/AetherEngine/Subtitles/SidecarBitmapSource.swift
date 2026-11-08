@@ -70,10 +70,11 @@ final class SidecarBitmapSource: @unchecked Sendable {
     /// A fresh decoder for the sidecar's stream. PGS takes its canvas from each composition; the
     /// video size is only the fallback for a codec that does not carry one.
     func makeDecoder(sourceVideoWidth: Int32 = 1920,
-                     sourceVideoHeight: Int32 = 1080) -> EmbeddedSubtitleDecoder? {
+                     sourceVideoHeight: Int32 = 1080,
+                     sourceIsPQ: Bool = false) -> EmbeddedSubtitleDecoder? {
         guard let codecpar else { return nil }
         return EmbeddedSubtitleDecoder(codecpar: codecpar, sourceVideoWidth: sourceVideoWidth,
-                                       sourceVideoHeight: sourceVideoHeight)
+                                       sourceVideoHeight: sourceVideoHeight, sourceIsPQ: sourceIsPQ)
     }
 
     /// Every cue of the sidecar, decoded in file order and handed over in batches of `batchSize`,

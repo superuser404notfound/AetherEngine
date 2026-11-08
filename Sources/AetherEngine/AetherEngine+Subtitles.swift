@@ -296,6 +296,11 @@ extension AetherEngine {
         startSubtitleDrainer()
     }
 
+    /// AE#1006: a `.sup` from a UHD disc carries the same PQ palette as the disc's own tracks.
+    var sourceIsPQForBitmapSubtitles: Bool {
+        sourceVideoStreamFormat?.transfer == av_color_transfer_name(AVCOL_TRC_SMPTE2084).map { String(cString: $0) }
+    }
+
     /// Drop a channel's bitmap sidecar together with the drain target pointing at it.
     func releaseSidecarBitmapSource(channel: SubtitleChannel) {
         guard sidecarBitmapSources[channel] != nil else { return }
@@ -304,7 +309,9 @@ extension AetherEngine {
 
     /// Build a fresh overlay decoder for the stream on whichever host owns the session demuxer.
     func makeSubtitleDrainDecoder(channel: SubtitleChannel, streamIndex: Int32) -> EmbeddedSubtitleDecoder? {
-        if let source = sidecarBitmapSources[channel] { return source.makeDecoder() }
+        if let source = sidecarBitmapSources[channel] {
+            return source.makeDecoder(sourceIsPQ: sourceIsPQForBitmapSubtitles)
+        }
         return makeSubtitleDrainDecoder(streamIndex: streamIndex)
     }
 
@@ -1817,6 +1824,7 @@ extension AetherEngine {
         let formatHint = selectedExternal?.formatHint
         let preserveASS = loadedOptions.preserveASSMarkup
         let sessionGeneration = loadGeneration
+        let sourceIsPQ = sourceIsPQForBitmapSubtitles
         #if DEBUG
         let decoderFactory = secondarySidecarDecoderFactoryForTesting
         #endif
@@ -1843,7 +1851,7 @@ extension AetherEngine {
                     #if DEBUG
                     if let decoderFactory { return PreparedSidecarDecoder(decoder: decoderFactory(source)) }
                     #endif
-                    return PreparedSidecarDecoder(decoder: source.makeDecoder())
+                    return PreparedSidecarDecoder(decoder: source.makeDecoder(sourceIsPQ: sourceIsPQ))
                 }.value
                 bitmapDecoder = prepared.decoder
             } else {

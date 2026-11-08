@@ -19,6 +19,15 @@ the public-API contract.
   buffer, lost its start. An explicit budget now replaces the 2 GiB default; the quarter-of-free-space clamp,
   the claims of other sessions and the 64 MiB floor still apply, and nil keeps today's sizing.
 
+### Fixed
+
+- **PGS subtitles of an HDR UHD Blu-ray render white instead of grey (AE#1006).** On a PQ source the disc
+  codes the PGS palette in BT.2100 PQ, and the engine published it as sRGB, so a ~294-nit white came out as 62 %
+  grey. On a PQ session each PGS palette entry is now converted once per display set: back to Y'CbCr through
+  the BT.709 matrix pgssubdec applied, to BT.2020 R'G'B', through the PQ EOTF, against the BT.2408 graphics
+  white of 203 nits, to BT.709 primaries and clipped to sRGB. Embedded tracks on both routes and `.sup`
+  sidecars are covered; HLG, SDR and every other bitmap codec are untouched.
+
 ## [7.61.1] - 2026-11-08
 
 ### Fixed

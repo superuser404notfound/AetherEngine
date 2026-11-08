@@ -433,12 +433,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let dem = demuxer else { return nil }
         let w = savedVideoConfig.map { Int32($0.codecpar.pointee.width) } ?? 1920
         let h = savedVideoConfig.map { Int32($0.codecpar.pointee.height) } ?? 1080
+        let pq = savedVideoConfig?.codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
         // Audit DMX-108: the decoder copies what it needs out of the stream inside the call, so a
         // live reopen's close() cannot free the stream underneath it.
         let made = dem.withStream(at: streamIndex) { stream in
             EmbeddedSubtitleDecoder(stream: stream,
                                     sourceVideoWidth: w > 0 ? w : 1920,
                                     sourceVideoHeight: h > 0 ? h : 1080,
+                                    sourceIsPQ: pq,
                                     preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                     teletextPage: teletextPageForSubtitleTap)
         }
@@ -519,6 +521,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let dem = demuxer else { return }
         let w = savedVideoConfig.map { Int32($0.codecpar.pointee.width) } ?? 1920
         let h = savedVideoConfig.map { Int32($0.codecpar.pointee.height) } ?? 1080
+        let pq = savedVideoConfig?.codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
         for (ordinal, sidx) in nativeSubtitleSourceStreamIndicesForSession.enumerated() {
             guard let sidx, ordinal < nativeSubtitleCueStoresForSession.count else { continue }
             // Audit DMX-108: see `makeOverlayDecoder`.
@@ -526,6 +529,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 EmbeddedSubtitleDecoder(stream: stream,
                                         sourceVideoWidth: w > 0 ? w : 1920,
                                         sourceVideoHeight: h > 0 ? h : 1080,
+                                        sourceIsPQ: pq,
                                         preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                         teletextPage: teletextPageForSubtitleTap)
             }

@@ -1820,6 +1820,7 @@ final class SoftwarePlaybackHost {
         return EmbeddedSubtitleDecoder(stream: stream,
                                        sourceVideoWidth: w > 0 ? w : 1920,
                                        sourceVideoHeight: h > 0 ? h : 1080,
+                                       sourceIsPQ: vpar?.pointee.color_trc == AVCOL_TRC_SMPTE2084,
                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                        teletextPage: teletextPageForSubtitleTap)
     }
