@@ -70,14 +70,19 @@ struct HLSLocalServerSlowPeerTests {
         for _ in 0 ..< HLSLocalServer.maxConcurrentConnections + 2 {
             if let fd = Self.connect(port: server.port, host: lanIP) { held.append(fd) }
         }
-        try await waitFor { server.activeConnectionCount >= HLSLocalServer.maxNonLoopbackConnections }
+        // Both waits are bounded under the suite's limit only to say which one stalled: CI ran this
+        // test into the limit once (2026-11-08) with nothing to read, and it does not reproduce locally.
+        let lanShareTaken = try await waitFor(upTo: .seconds(50)) {
+            server.activeConnectionCount >= HLSLocalServer.maxNonLoopbackConnections
+        }
+        try #require(lanShareTaken, "\(held.count) LAN connects succeeded, server counts \(server.activeConnectionCount)")
         #expect(server.activeConnectionCount == HLSLocalServer.maxNonLoopbackConnections)
 
         let fd = try #require(Self.connect(port: server.port, host: "127.0.0.1"))
         defer { close(fd) }
         let path = "/\(server.pathToken)/media.m3u8"
-        #expect(await Self.onOwnThread { Self.requestStatus(fd: fd, path: path) } == 200,
-                "a loopback player was refused while LAN peers held their share")
+        #expect(await Self.onOwnThread { Self.requestStatus(fd: fd, path: path, timeoutSeconds: 50) } == 200,
+                "a loopback player was refused while LAN peers held their share (0 = no answer within 50 s); server counts \(server.activeConnectionCount)")
     }
 
     @Test("The stop line names the port that was released")
@@ -164,8 +169,8 @@ struct HLSLocalServerSlowPeerTests {
 
     /// One keep-alive GET on an open connection; the status, or 0. Reads until the declared body
     /// has arrived so the next request on the same socket starts clean.
-    private static func requestStatus(fd: Int32, path: String) -> Int {
-        var timeout = timeval(tv_sec: 120, tv_usec: 0)
+    private static func requestStatus(fd: Int32, path: String, timeoutSeconds: Int = 120) -> Int {
+        var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         let request = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
         let sent = Array(request.utf8).withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
