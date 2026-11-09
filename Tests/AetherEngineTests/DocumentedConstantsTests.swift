@@ -462,7 +462,7 @@ final class DocumentedConstantsTests: XCTestCase {
         // Every install snippet, not just one: the README and docs/installation.md both carry them,
         // and a sweep that bumps one file and misses the other must not stay green.
         let installSnippet = try NSRegularExpression(
-            pattern: #"(?:superuser404notfound/AetherEngine", from: |upToNextMinor\(from: )"([^"]+)""#)
+            pattern: #"(?:superuser404notfound/AetherEngine(?:\.git)?"\s*,\s*from:\s*|upToNextMinor\(\s*from:\s*)"([^"]+)""#)
         let snippets = installSnippet.matches(in: docs, range: NSRange(docs.startIndex..., in: docs))
             .compactMap { Range($0.range(at: 1), in: docs).map { String(docs[$0]) } }
         XCTAssertFalse(snippets.isEmpty, "no install snippet found in README.md or docs/")
