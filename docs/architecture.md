@@ -609,6 +609,7 @@ Sources/AetherEngine/
 │   ├── DataIOReader.swift                   Ready-made in-memory IOReader over an immutable Data buffer
 │   ├── FileIOReader.swift                   Seekable IOReader over a local file via FileHandle (multi-GB ISO images)
 │   ├── HTTPDiscIOReader.swift               Seekable IOReader over a remote HTTP(S) disc image with adaptive read-ahead (the network-ISO counterpart to FileIOReader)
+│   ├── ProgressiveRangeStream.swift         HTTPDiscIOReader's playback path: bounded FIFO over ranges of up to 64 MiB whose bytes reach the demuxer as they arrive (#1007)
 │   └── HLSIngest/
 │       ├── HLSLiveIngestReader.swift        Public forward-only IOReader ingesting a live HLS upstream (resolver, playlist poller, segment fetcher, companion audio-rendition reader)
 │       ├── HLSPlaylist.swift                Line-oriented RFC 8216 subset parser (master / media playlists)

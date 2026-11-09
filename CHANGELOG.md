@@ -10,7 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A remote Blu-ray ISO no longer starves the demuxer at every range boundary (#1007).** `HTTPDiscIOReader`
+  refilled in serial ranges of up to 8 MiB and handed nothing on until a whole body had arrived, so each boundary
+  showed the demuxer the next request's latency plus its full transfer. On a 61 GB UHD ISO over HTTPS that held
+  the source at 61 to 67 Mb/s against a 104 Mb/s title, with the software host starved and over 2,000 dropped
+  frames in three and a half minutes. Once a read pattern is sequential at the top of the adaptive window,
+  ranges of up to 64 MiB now stream into a FIFO that the demuxer reads from as the bytes arrive, and the next
+  range starts the moment the previous one is complete. The old 8 MiB window is the FIFO's watermark, above
+  which the request is suspended, so memory stays where it was. Disc discovery and random access keep the
+  adaptive reads, a short body resumes at the next byte that has not arrived, and a range that starts anywhere
+  but where it was asked is refused as before. Thanks to @qoli for the measurements and the design.
 
 ## [7.62.0] - 2026-11-09
 
