@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.62.0] - 2026-11-09
+
 ### Added
 
 - **`LoadOptions.liveDVRByteBudget` lifts the software live DVR ring past 2 GiB.**
