@@ -155,7 +155,3 @@ If the engine is useful to you, you can support its development on [Ko-fi](https
 ## Built with
 
 AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). Nearly every commit carries a `Co-Authored-By: Claude` trailer.
-
-## Thanks
-
-To [@DrHurt](https://github.com/DrHurt) for the relentless on-device Dolby Vision and HDR testing in [#4](https://github.com/superuser404notfound/AetherEngine/issues/4), which exposed the timing race in `DisplayCriteriaController.waitForSwitch` that the two-stage poll now fixes. To [@ohjey](https://github.com/ohjey) for the SwiftUI render-storm investigation in [#29](https://github.com/superuser404notfound/AetherEngine/issues/29) that led to the `engine.clock` split and the UIKit menu-button pattern.
