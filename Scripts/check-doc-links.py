@@ -44,6 +44,12 @@ PUBLISHED = [
     "docs/formats.md",
     "docs/architecture.md",
     "docs/cli.md",
+    "docs/guide.md",
+    "docs/installation.md",
+    "docs/features.md",
+    "docs/comparison.md",
+    "docs/licensing.md",
+    "docs/dolby-vision-fel.md",
     "CHANGELOG.md",
     "README.md",
 ]

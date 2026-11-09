@@ -270,7 +270,7 @@ final class DocumentedConstantsTests: XCTestCase {
 
     // MARK: - Retention budget
 
-    /// The README's Seek row and the `forwardBufferSegments` entry both rest on the 2 GiB cap.
+    /// The Seek section of docs/features.md and the `forwardBufferSegments` entry both rest on the 2 GiB cap.
     func testRetentionBudgetCapIsTwoGiB() throws {
         let docs = try documentation()
         XCTAssertEqual(HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: nil),
@@ -456,7 +456,19 @@ final class DocumentedConstantsTests: XCTestCase {
     /// A release already rewrites three statements of the same number, so the constant is pinned to
     /// all three. A forgotten bump is a red test here rather than a log line that lies.
     func testReportedVersionMatchesEveryPublishedStatementOfIt() throws {
-        assertDocumented(#"from: "\#(AetherEngine.version)""#, try documentation())
+        let docs = try documentation()
+        assertDocumented(#"from: "\#(AetherEngine.version)""#, docs)
+
+        // Every install snippet, not just one: the README and docs/installation.md both carry them,
+        // and a sweep that bumps one file and misses the other must not stay green.
+        let installSnippet = try NSRegularExpression(
+            pattern: #"(?:superuser404notfound/AetherEngine(?:\.git)?"\s*,\s*from:\s*|upToNextMinor\(\s*from:\s*)"([^"]+)""#)
+        let snippets = installSnippet.matches(in: docs, range: NSRange(docs.startIndex..., in: docs))
+            .compactMap { Range($0.range(at: 1), in: docs).map { String(docs[$0]) } }
+        XCTAssertFalse(snippets.isEmpty, "no install snippet found in README.md or docs/")
+        for stated in snippets where stated != AetherEngine.version {
+            XCTFail("an install snippet says \(stated), the engine reports \(AetherEngine.version)")
+        }
 
         let examples = try sourceFile("Examples/README.md")
         XCTAssertTrue(examples.contains("starting from `\(AetherEngine.version)`"), """
@@ -476,7 +488,7 @@ final class DocumentedConstantsTests: XCTestCase {
             """)
     }
 
-    /// The README's Swift and Xcode rows are the toolchain CI builds and tests with, not a taste
+    /// The Swift and Xcode rows in README and docs/installation.md are the toolchain CI builds and tests with, not a taste
     /// (audit OPS-103): every macOS job runs on the `xcode-27` image and none selects another Xcode.
     /// Moving CI to another image without the rows, or the rows without CI, fails here.
     func testToolchainRowsAreTheOnesCITestsWith() throws {

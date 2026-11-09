@@ -78,7 +78,7 @@ say so and leave the call to the maintainer.
 - **Turning on a patent-sensitive optional component by default** (`TrueHDObjectAudio`,
   `DTSXObjectAudio`, `DualLayerDolbyVision`, `DolbyVisionStillReshaping`): they are off by default on
   purpose and integrators opt in.
-- README "Non-goals": no UI, no analytics, no playlist management, no subtitle drawing, no
+- "What the engine does not do" (`docs/features.md`): no UI, no analytics, no playlist management, no subtitle drawing, no
   third-party networking.
 
 ## Load-bearing facts that PRs tend to trip over

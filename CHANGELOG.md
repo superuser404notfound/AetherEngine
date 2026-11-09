@@ -5,13 +5,19 @@ changes, full fix list, acknowledgements) live on
 [GitHub Releases](https://github.com/superuser404notfound/AetherEngine/releases).
 
 Versioning follows [Semantic Versioning](https://semver.org). See
-[README › Stability and versioning](README.md#stability-and-versioning) for
+[Installation › Stability and versioning](docs/installation.md#stability-and-versioning) for
 the public-API contract.
 
 ## [Unreleased]
 
 ### Fixed
 
+- **The documentation is rewritten in plain language, and three statements in it were wrong.** The README is a
+  short overview now; its content lives in `docs/guide.md`, `docs/installation.md`, `docs/features.md`,
+  `docs/comparison.md` and `docs/licensing.md`, and every doc leads with a summary and contents list. The FEL
+  deadline margin is 2 frame intervals (`maxFramesInFlight`), not 3, and the bypass backstop is
+  `maxDeadlineHoldFrames` (6), not 7. A later upscale stage after a remembered MetalFX overrun starts degraded,
+  ML only, rather than with MetalFX. `aetherctl` has 29 subcommands, not 28.
 - **A remote Blu-ray ISO no longer starves the demuxer at every range boundary (#1007).** `HTTPDiscIOReader`
   refilled in serial ranges of up to 8 MiB and handed nothing on until a whole body had arrived, so each boundary
   showed the demuxer the next request's latency plus its full transfer. On a 61 GB UHD ISO over HTTPS that held
