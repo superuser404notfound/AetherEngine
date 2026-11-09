@@ -35,7 +35,7 @@ User-facing behaviour lives in [formats.md](formats.md#dolby-vision-signaling), 
 
 ## Build, platforms and reference device
 
-**Optional component.** The route and the composer are compiled only with the `DualLayerDolbyVision` package trait, which is off by default ([README › Optional components](../README.md#optional-components)). Built without it:
+**Optional component.** The route and the composer are compiled only with the `DualLayerDolbyVision` package trait, which is off by default ([Installation › Optional components](installation.md#optional-components)). Built without it:
 
 - `preferDualLayerDolbyVision` is accepted and changes nothing.
 - The route decision reports `not taken (built without the DualLayerDolbyVision trait)` and every Profile 7 source takes the native route.

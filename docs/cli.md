@@ -16,7 +16,7 @@
 
 ## Building with optional components
 
-`aetherctl` builds with the package's traits. The optional components ([README › Optional components](../README.md#optional-components)) are in it only when you build it with them:
+`aetherctl` builds with the package's traits. The optional components ([Installation › Optional components](installation.md#optional-components)) are in it only when you build it with them:
 
 ```bash
 swift run --traits TrueHDObjectAudio,DTSXObjectAudio,DualLayerDolbyVision,DolbyVisionStillReshaping aetherctl …

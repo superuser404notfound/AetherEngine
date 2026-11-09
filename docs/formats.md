@@ -515,7 +515,7 @@ The cross-compatible profiles are signaled this way on hardware-AV1 hosts. The `
 
 #### Profile 7
 
-Profile 7 (dual-layer, the common UHD Blu-ray remux profile) is handled according to `LoadOptions.preferDualLayerDolbyVision` (default `false`: dual-layer composition is opt-in) and `LoadOptions.dolbyVisionHandling`. The dual-layer composer is an optional component, compiled only with the `DualLayerDolbyVision` package trait (off by default, [README › Optional components](../README.md#optional-components)). Built without it, `preferDualLayerDolbyVision` changes nothing and every Profile 7 source takes the single-layer conversion.
+Profile 7 (dual-layer, the common UHD Blu-ray remux profile) is handled according to `LoadOptions.preferDualLayerDolbyVision` (default `false`: dual-layer composition is opt-in) and `LoadOptions.dolbyVisionHandling`. The dual-layer composer is an optional component, compiled only with the `DualLayerDolbyVision` package trait (off by default, [Installation › Optional components](installation.md#optional-components)). Built without it, `preferDualLayerDolbyVision` changes nothing and every Profile 7 source takes the single-layer conversion.
 
 | Route | When |
 | --- | --- |
@@ -618,7 +618,7 @@ Non-streamable codecs route through `AudioBridge` in one of two modes (`LoadOpti
 - An encoder that advertises no list (FLAC) keeps the source rate untouched. That is what keeps `.lossless` bit-perfect at 96 and 192 kHz.
 - The resampler is in the path on every bridged packet either way, so the conversion costs nothing that was not already being paid.
 
-**Object metadata.** Object metadata (TrueHD Atmos objects, DTS:X heights) is lost in either mode: FFmpeg's EAC3 encoder does not produce JOC, and FLAC has no object-channel concept. `objectAudioRendering` is the route that keeps it, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [README › Optional components](../README.md#optional-components)), rendered into a speaker bed and delivered as APAC ([TrueHD Atmos with heights](#truehd-atmos-with-heights)). If a JOC source ever falls through to the bridge, the engine logs a loud `WARNING: Atmos downgrade, ...`.
+**Object metadata.** Object metadata (TrueHD Atmos objects, DTS:X heights) is lost in either mode: FFmpeg's EAC3 encoder does not produce JOC, and FLAC has no object-channel concept. `objectAudioRendering` is the route that keeps it, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [Installation › Optional components](installation.md#optional-components)), rendered into a speaker bed and delivered as APAC ([TrueHD Atmos with heights](#truehd-atmos-with-heights)). If a JOC source ever falls through to the bridge, the engine logs a loud `WARNING: Atmos downgrade, ...`.
 
 ### Bridge lifecycle (#99)
 
@@ -751,7 +751,7 @@ The box then describes a bare 5.1 bed, and an Atmos receiver reports multichanne
 **Why it is opt-in.** It is a trade: the rendered bed, PCM or lossy APAC at several Mbit/s, in place of the lossless 7.1 the channel bridge delivers.
 
 - It applies only to TrueHD that FFmpeg marks as Atmos, at 48 kHz, on OS 26 or later. Anything else, and any failure to start, keeps `audioBridgeMode` with the audio intact.
-- The decoder and the bed regression are an optional component, compiled only with the `TrueHDObjectAudio` package trait, off by default. Built without it, TrueHD Atmos keeps the channel bridge whatever the option asks, and the session log says so ([README › Optional components](../README.md#optional-components)).
+- The decoder and the bed regression are an optional component, compiled only with the `TrueHDObjectAudio` package trait, off by default. Built without it, TrueHD Atmos keeps the channel bridge whatever the option asks, and the session log says so ([Installation › Optional components](installation.md#optional-components)).
 - Silo built the first implementation in its fork, an exact object render that this path replaced.
 
 #### PCM or APAC
@@ -874,7 +874,7 @@ The object counts reach a host too, once a second, as `LiveTelemetry.objectAudio
 
 **The problem.** DTS:X reaches the bridge the same way TrueHD Atmos does. Apple TV cannot bitstream DTS-HD, so `audioBridgeMode` decodes the lossless 7.1, and on a DTS:X track that 7.1 is a compatible downmix into which the encoder folded the four height channels.
 
-**The option.** `objectAudioRendering = .apac(layout)` keeps them, in a build with the `DTSXObjectAudio` package trait (off by default; without it DTS-HD keeps the channel bridge whatever the option asks, [README › Optional components](../README.md#optional-components)). A DTS-HD Master Audio track is decoded by FFmpeg's own `dca` decoder into the same bed regression, limiter and APAC encoder as TrueHD Atmos. The engine side is a channel mapping (`DTSXObjectAudioDecoder`). No library comes in for it: FFmpegBuild patches the decoder (#798).
+**The option.** `objectAudioRendering = .apac(layout)` keeps them, in a build with the `DTSXObjectAudio` package trait (off by default; without it DTS-HD keeps the channel bridge whatever the option asks, [Installation › Optional components](installation.md#optional-components)). A DTS-HD Master Audio track is decoded by FFmpeg's own `dca` decoder into the same bed regression, limiter and APAC encoder as TrueHD Atmos. The engine side is a channel mapping (`DTSXObjectAudioDecoder`). No library comes in for it: FFmpegBuild patches the decoder (#798).
 
 #### The standard presentation
 
@@ -1427,7 +1427,7 @@ await frames.shutdown()                            // prompt teardown of the dec
 
 **HDR stills.** PQ / HLG BT.2020 frames are tone-mapped to SDR BT.709 through a zscale + tonemap libavfilter graph before the `CGImage` is built, so HDR10 / HLG / DV P8.x stills match what the user sees instead of washed-out grey.
 
-**Dolby Vision Profile 5 and AV1 Profile 10.0** (IPT-PQ base layers with no HDR10 fallback) route through `DolbyVisionStillConverter`, an optional component compiled only with the `DolbyVisionStillReshaping` package trait (off by default, [README › Optional components](../README.md#optional-components)).
+**Dolby Vision Profile 5 and AV1 Profile 10.0** (IPT-PQ base layers with no HDR10 fallback) route through `DolbyVisionStillConverter`, an optional component compiled only with the `DolbyVisionStillReshaping` package trait (off by default, [Installation › Optional components](installation.md#optional-components)).
 
 - With the trait, the converter applies the RPU colour transform (`ycc_to_rgb` + PQ EOTF + the IPT-PQ LMS matrices carried in `AV_FRAME_DATA_DOVI_METADATA`) before tone-mapping, so their stills come out with correct colour instead of the green / magenta cast a plain YCbCr read produces.
 - Built without it, such a source yields no still at all (nil, `supportsCacheBackedStills` false, no I-frame rendition, no held picture) rather than the planes read as YCbCr.
@@ -1686,7 +1686,7 @@ Without it, a 4 s lead ran dry before every 10 s segment and the session stalled
 
 Things that work today but have a documented edge case, or are deferred behind an upstream dependency.
 
-- **The channel bridge drops TrueHD Atmos objects and DTS:X heights.** TrueHD / MLP and DTS-HD sources route through the AudioBridge (FFmpeg's EAC3 encoder does not produce JOC, and FLAC has no object channels): bed channels and surround layout survive, objects and heights do not. `LoadOptions.objectAudioRendering = .apac(layout)` keeps them, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [README › Optional components](../README.md#optional-components)). They are built into a speaker bed from the stream's own lossless 7.1 and delivered as 24-bit PCM, or APAC over AirPlay, which tvOS sends to an Atmos receiver as Dolby MAT ([TrueHD Atmos with heights](#truehd-atmos-with-heights), [DTS:X with heights](#dtsx-with-heights)). EAC3+JOC stream copy from MKV / MP4 sources is intact either way.
+- **The channel bridge drops TrueHD Atmos objects and DTS:X heights.** TrueHD / MLP and DTS-HD sources route through the AudioBridge (FFmpeg's EAC3 encoder does not produce JOC, and FLAC has no object channels): bed channels and surround layout survive, objects and heights do not. `LoadOptions.objectAudioRendering = .apac(layout)` keeps them, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [Installation › Optional components](installation.md#optional-components)). They are built into a speaker bed from the stream's own lossless 7.1 and delivered as 24-bit PCM, or APAC over AirPlay, which tvOS sends to an Atmos receiver as Dolby MAT ([TrueHD Atmos with heights](#truehd-atmos-with-heights), [DTS:X with heights](#dtsx-with-heights)). EAC3+JOC stream copy from MKV / MP4 sources is intact either way.
 - **`.surroundCompat` audio bridge caps 7.1 sources to 5.1.** FFmpeg's EAC3 encoder currently caps at 6 channels. Once [FFmpeg PR 21668](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/21668) lands, the cap and the dynamic bitrate auto-scale to 1024 kbps engage without a code change here. Use `.lossless` (FLAC) today if 7.1 matters.
 - **Manual `MPNowPlayingInfoCenter` writes race the HLS-loopback path on tvOS 26.** The combination produces a `libdispatch` race.
   - `AVPlayerViewController` with its standard transport bar surfaces Now Playing on its own, through AVKit's private MediaRemote registration, and needs nothing from the host.

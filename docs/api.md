@@ -2,7 +2,7 @@
 
 This file lists every public surface a host app uses, and the contracts that require the host to act. The README shows the shape of an integration. Use this file to check an integration against.
 
-Every public symbol is part of the [stability contract](../README.md#stability-and-versioning). `Tests/AetherEngineTests/PublicAPIDocumentationTests.swift` fails the build when a host-facing public declaration is named nowhere in the documentation, so this file cannot silently fall behind the code.
+Every public symbol is part of the [stability contract](installation.md#stability-and-versioning). `Tests/AetherEngineTests/PublicAPIDocumentationTests.swift` fails the build when a host-facing public declaration is named nowhere in the documentation, so this file cannot silently fall behind the code.
 
 The host contracts come first, because a mistake there costs a shipped app a bug report rather than a compile error. A working example of the live contracts, compiled against the engine: [`Examples/LiveHost/LiveChannelHost.swift`](../Examples/LiveHost/LiveChannelHost.swift).
 
@@ -1923,7 +1923,7 @@ What the values mean:
 
 ## Optional components
 
-Five parts of the engine are compiled only with their package trait, all off by default ([README › Optional components](../README.md#optional-components)). The options that ask for them stay in the API and are no-ops without the trait. So a host compiles the same either way, and asks at run time whether a setting would do anything:
+Five parts of the engine are compiled only with their package trait, all off by default ([Installation › Optional components](installation.md#optional-components)). The options that ask for them stay in the API and are no-ops without the trait. So a host compiles the same either way, and asks at run time whether a setting would do anything:
 
 | Symbol | Notes |
 | --- | --- |
@@ -2155,7 +2155,7 @@ Per route:
 
 #### `objectAudioRendering`
 
-Renders TrueHD Atmos and DTS:X with heights (#731). Needs a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [README › Optional components](../README.md#optional-components)). Without a codec's trait the option is accepted, that codec keeps `audioBridgeMode` (the channel bridge), and the automatic audio pick does not prefer it. `AetherEngine.OptionalComponent` tells a host which codecs a build renders.
+Renders TrueHD Atmos and DTS:X with heights (#731). Needs a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default, [Installation › Optional components](installation.md#optional-components)). Without a codec's trait the option is accepted, that codec keeps `audioBridgeMode` (the channel bridge), and the automatic audio pick does not prefer it. `AetherEngine.OptionalComponent` tells a host which codecs a build renders.
 
 **Values.**
 
@@ -2274,7 +2274,7 @@ Opt in to composing Profile 7 FEL sources on the GPU, instead of taking the nati
 
 **Not recommended for a distributed app.** The composer evaluates the RPU's MMR chroma prediction and the enhancement layer itself, steps covered by live Dolby patents. The `DolbyVisionFelCurves` trait brings most of a FEL source's enhancement layer back on the native route without that ([Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)).
 
-**Needs the `DualLayerDolbyVision` package trait** (off by default, [README › Optional components](../README.md#optional-components)). Without it the option is accepted and changes nothing, and a `reloadAtCurrentPosition(applying:)` that flips it is not refused.
+**Needs the `DualLayerDolbyVision` package trait** (off by default, [Installation › Optional components](installation.md#optional-components)). Without it the option is accepted and changes nothing, and a `reloadAtCurrentPosition(applying:)` that flips it is not refused.
 
 **When the route is taken.** When true, and all of these hold:
 
