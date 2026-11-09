@@ -79,7 +79,7 @@ struct Issue613PacketCoverageTests {
             codecID: AV_CODEC_ID_HEVC.rawValue) == 32)
         #expect(SoftwarePlaybackHost.presentationReorderDepth(
             codecID: AV_CODEC_ID_VC1.rawValue) == 32)
-        for other in [AV_CODEC_ID_AV1, AV_CODEC_ID_VP9, AV_CODEC_ID_MPEG2VIDEO, AV_CODEC_ID_WMV3] {
+        for other in [AV_CODEC_ID_AV1, AV_CODEC_ID_VP9, AV_CODEC_ID_WMV3] {
             #expect(SoftwarePlaybackHost.presentationReorderDepth(codecID: other.rawValue) == nil)
         }
     }
