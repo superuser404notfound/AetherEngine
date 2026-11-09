@@ -12,6 +12,7 @@ Two first-party hosts consume it, [Sodalite](https://github.com/superuser404notf
 
 Read before changing anything non-trivial:
 
+- `docs/guide.md` and `docs/installation.md`: how a host uses the engine (the README is only an overview).
 - `docs/architecture.md`: the playback pipelines and the **Source map** section (which file owns what).
 - `docs/api.md`: the public surface and the host contracts.
 - `docs/formats.md`: per-format behaviour, Dolby Vision / HDR, audio routes.
@@ -76,6 +77,11 @@ draws them. The engine draws no UI.
 
 - Conventional Commits (`feat(audio):`, `fix(demuxer):`, `chore(deps):`, `docs:`, `test:`, `ci:`).
 - No em-dashes anywhere (code, comments, commits, docs). Use commas, periods or parentheses.
+- Write for humans, in docs, comments, commits and changelog alike: the answer first, short sentences,
+  everyday words, one idea per paragraph, tables and lists over run-on paragraphs, no storytelling
+  (an incident becomes one clause plus its issue ref). The README stays a short overview; depth goes
+  into the right file under `docs/`. New facts are added in the same plain style, not appended as a
+  long paragraph.
 - Comments explain WHY, sparingly. Long comments exist where a measurement backs a decision; keep
   the measurement when touching such code.
 - `internal` is not public contract and can change in any release.

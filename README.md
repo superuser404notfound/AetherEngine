@@ -26,11 +26,89 @@
 
 ## What it is
 
-A player engine that gets the hard parts right (HDR, Dolby Vision, Dolby Atmos, container coverage, codec coverage) and exposes a single `AetherPlayerView` (UIKit / AppKit) or `AetherPlayerSurface` (SwiftUI) plus a handful of `async` methods. No `AVPlayerViewController`. No opinionated controls. No analytics. Bind the view, call `play()`, read the published properties for state.
+AetherEngine is a video and audio player engine for iOS, tvOS, macOS and visionOS. It plays almost any file or stream and keeps Apple's own HDR, Dolby Vision and Dolby Atmos handling intact.
 
-The view is polymorphic: under the hood the engine swaps the hosted CALayer (`AVPlayerLayer` for the native AVPlayer path, `AVSampleBufferDisplayLayer` for the SW dav1d fallback path) per session without the host having to know.
+- **FFmpeg** opens the file. **VideoToolbox** decodes in hardware. **AVPlayer** presents the picture and passes Dolby Atmos through.
+- Formats Apple cannot decode go to the engine's own software decoder (dav1d, libavcodec).
+- You get one view and a few `async` methods. You build the controls.
 
-You provide the transport bar. You provide the dropdowns. You provide the pretty.
+## Highlights
+
+- **Plays nearly everything:** MKV, MP4, WebM, MPEG-TS, AVI, WMV, DVD and Blu-ray ISOs, on-demand MPEG-DASH, and every codec FFmpeg knows. [Full list](docs/features.md)
+- **HDR done right:** HDR10, HDR10+, HLG, and Dolby Vision Profiles 5, 7, 8 and AV1 Profile 10, with the real display switch on Apple TV.
+- **Dolby Atmos:** E-AC-3 Atmos is passed through untouched, to HDMI receivers and to AirPods with spatial audio.
+- **Lossless height channels from TrueHD and DTS:X** as an optional component.
+- **Subtitles of every kind:** text, ASS, PGS, DVB, DVD, teletext, closed captions, external files, and subtitles that survive Picture in Picture and AirPlay.
+- **Live TV:** HLS ingest, DVR timeshift, recording over the same connection, and recovery when a channel breaks.
+- **Any source:** URLs, your own byte reader (`IOReader`), and SMB shares.
+- **No UI, no analytics, no surprises.** Nothing leaves the device.
+
+## Quick start
+
+Add the package:
+
+```swift
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.62.0")
+```
+
+Play a video:
+
+```swift
+import AetherEngine
+import SwiftUI
+
+let player = try AetherEngine()
+
+struct PlayerView: View {
+    var body: some View { AetherPlayerSurface(engine: player) }
+}
+
+try await player.load(url: videoURL)
+player.play()
+```
+
+Read the state from the published properties (`player.$state`, `player.clock.$currentTime`, `player.audioTracks`, `player.$subtitleCues`, ...). The [host guide](docs/guide.md) walks through everything a real player needs, and [`Examples/MinimalPlayer`](Examples/MinimalPlayer/MinimalPlayerApp.swift) is a complete single-file player to copy.
+
+**On tvOS**, read [tvOS host setup](docs/guide.md#tvos-host-setup) before you ship HDR content.
+
+## Documentation
+
+Also available as a searchable site: **[aetherengine.superuser404.de](https://aetherengine.superuser404.de)**.
+
+| Document | What is in it |
+| --- | --- |
+| [Installation](docs/installation.md) | Adding the package, requirements, optional components, versioning |
+| [Host guide](docs/guide.md) | Building a player: loading, state, tracks, subtitles, live TV, tvOS setup, logging |
+| [Features](docs/features.md) | What the engine plays and does, area by area |
+| [API reference](docs/api.md) | Every public API, and the contracts your app has to answer |
+| [Formats](docs/formats.md) | Codecs, containers, HDR, audio, subtitles, discs, known limits, in depth |
+| [Architecture](docs/architecture.md) | How the playback pipelines work, and which file does what |
+| [Dolby Vision FEL](docs/dolby-vision-fel.md) | How Profile 7 FEL is played |
+| [aetherctl](docs/cli.md) | The command-line tool that runs the real engine on a Mac |
+| [How it compares](docs/comparison.md) | AetherEngine next to AVPlayer, KSPlayer, VLCKit and libmpv, with measurements |
+| [Licensing](docs/licensing.md) | What you need to do to ship the engine and its dependencies |
+| [Changelog](CHANGELOG.md) | Every release |
+
+## Requirements
+
+| | Min |
+| --- | --- |
+| iOS | 18.0 |
+| tvOS | 18.0 |
+| macOS | 15.0 |
+| visionOS | 1.0 |
+| Swift | 6.4 |
+| Xcode | 27.0 |
+
+Details on toolchains, CI and older OS versions: [Installation › Requirements](docs/installation.md#requirements).
+
+## Optional components
+
+Five components are only built when you turn on their package trait: height channels from TrueHD (`TrueHDObjectAudio`) and DTS:X (`DTSXObjectAudio`), the Dolby Vision FEL curve fold (`DolbyVisionFelCurves`), the FEL dual-layer composer (`DualLayerDolbyVision`), and Dolby Vision stills (`DolbyVisionStillReshaping`). They may need third-party patent licences. How to turn them on and which FEL option to choose: [Installation › Optional components](docs/installation.md#optional-components).
+
+## How it compares
+
+AVPlayer has the best OS integration but plays only Apple's formats. VLCKit and libmpv play everything but bypass Apple's Dolby Vision, Atmos and HDR handling. AetherEngine combines both. Feature table and power, CPU and memory measurements: [How it compares](docs/comparison.md).
 
 ## Used by
 
@@ -62,688 +140,22 @@ You provide the transport bar. You provide the dropdowns. You provide the pretty
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
 
-## What it handles
-
-A scannable summary; the depth for each row lives in **[docs/formats.md](docs/formats.md)**.
-
-| Area | Summary |
-| --- | --- |
-| Containers | MKV, MP4, WebM, MPEG-TS, AVI, ASF / WMV, OGG, FLV, RealMedia (.rm / .rmvb), 3GP / 3G2 |
-| MPEG-DASH | Remote on-demand manifests (static, one Period, `SegmentBase`, unencrypted): the video and every audio language are laid out as one fragmented MP4, so seeks, audio switching and both playback paths work unchanged. Live and `SegmentTemplate` manifests are refused with a reason |
-| Disc | DVD-Video and Blu-ray ISO (decrypted): selectable titles and chapters, demuxed through the normal path |
-| Video (HW) | H.264, HEVC, HEVC Main10 via VideoToolbox; AV1 Main profile where HW AV1 exists |
-| Video (SW) | AV1 (dav1d) without HW, and AV1 High / Professional (4:4:4, 4:2:2, 12-bit) everywhere, VP9 (VideoToolbox hardware when supported, otherwise libavcodec) / VP8, MPEG-4 Part 2 / MPEG-2 / VC-1, QuickTime RLE, the Flash tail (Sorenson Spark, On2 VP6), RealVideo 1-4, H.263, Theora and anything else the FFmpeg build carries a decoder for (software is the default route; only HEVC, H.264 and HW-decodable AV1 go native), H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext where VideoToolbox has no HW decoder (Intel Macs, older chips), interlaced H.264 (AVPlayer does not deinterlace; on VOD the declared field order is verified against decoded frames, so progressive-in-interlaced-carriage keeps hardware decode); GPU deinterlace (yadif_videotoolbox, Metal, field-rate by default) with a CPU bwdif fallback |
-| HDR | HDR10, HDR10+ (per-frame ST 2094-40), Dolby Vision (P5, P7 on the native route as single-layer 8.1 (HDR10 base layer on a display without Dolby Vision; with the `DolbyVisionFelCurves` trait a FEL source keeps its mapping and has its enhancement layer folded into the luma curve per scene), or composed dual-layer on Metal with per-frame DV metadata for FEL when `preferDualLayerDolbyVision` is set, the `DualLayerDolbyVision` trait is on and VideoToolbox decodes HEVC in hardware, P8.1, P8.4, AV1 P10.x), HLG (declared, or named by an alternative transfer SEI as broadcast HLG is), HDR Vivid (played on its HLG / PQ base, CUVA metadata reported by `probe`) |
-| Audio | AAC, AC3, EAC3, FLAC, ALAC stream-copy lossless; TrueHD / MLP / DTS / DTS-HD MA / MP3 / MP2 / Opus / Vorbis / LPCM (incl. Blu-ray, G.711) / WMA (Standard, Pro, Lossless, Voice) / Nellymoser / ADPCM-SWF / Speex / RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8) / AMR-NB / AMR-WB / DVD LPCM bridge to EAC3 5.1 (default) or lossless FLAC |
-| Dolby Atmos | EAC3+JOC stream-copied on every route (HDMI MAT 2.0, AirPods spatial, BT downmix) except the opt-in Profile 7 FEL dual-layer route (`preferDualLayerDolbyVision`, `DualLayerDolbyVision` trait), which runs on the software host and plays an E-AC-3 JOC track as its 5.1 / 7.1 bed without the objects unless `LoadOptions.objectAudioRendering` is set (then the objects are kept: compressed JOC to the renderer, TrueHD and DTS:X object audio as a rendered bed, in a build with the object-audio traits). No container reliably declares JOC pre-decode, so an honest `TrackInfo.isAtmos` needs a bounded decode: `AetherEngine.probeDetectingAtmos(url:/source:)` answers for a details screen without starting playback, and `LoadOptions.confirmAtmos` has the running session confirm its own tracks in the background and republish `audioTracks`. Both are opt-in and neither sits on the playback-start path. TrueHD Atmos keeps its heights too, opt-in through `LoadOptions.objectAudioRendering` in a build with the `TrueHDObjectAudio` trait ([Optional components](#optional-components)): the engine decodes the Atmos objects, renders them into a speaker bed and delivers Apple Positional Audio, which tvOS sends to an Atmos receiver as Dolby MAT and iOS plays as Spatial Audio ([details](docs/formats.md#truehd-atmos-with-heights)). DTS:X takes the same route with the `DTSXObjectAudio` trait, its four heights unfolded from the compatible 7.1 into 7.1.4 or 9.1.6 ([details](docs/formats.md#dtsx-with-heights)) |
-| Height channels | TrueHD Atmos and DTS:X built into a speaker bed from the stream's own lossless 7.1, steered by its objects or heights (TrueHD 5.1.2 up to 9.1.6, DTS:X 7.1.4 and 9.1.6), delivered as lossless 24-bit PCM, or APAC when the route plays over AirPlay (`objectAudioRendering`, optional components) |
-| Surround | 5.1 / 7.1 with correct `AudioChannelLayout` |
-| Audio-only | `LoadOptions.audioOnly`: lean pipeline, no video machinery, system Now-Playing on tvOS / iOS |
-| Background audio | Audio keeps playing when the app backgrounds on iOS: native AVPlayer stays alive, the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`); a paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs. tvOS tears down immediately (wedge-safe) unless a PiP window is active, which keeps the pipeline and loopback server alive; with PiP the software path keeps decoding video too (the window needs frames). Hosts gate corrective actions on the published `isSessionReady` |
-| Picture in Picture | Native path: hosts build `AVPictureInPictureController` around `currentAVPlayer`, or around the session's own `nativePlayerLayer` when they render through `bind(view:)` rather than AVKit; while `pictureInPictureActive` a native->native load hands the AVPlayerItem over in place so the window survives next-episode transitions. Software path: published `softwarePiPSource` carries the `AVSampleBufferDisplayLayer` plus transport answers on the enqueued frames' PTS axis for sample-buffer PiP; `makePictureInPictureController()` builds the controller with a `SoftwarePiPPlaybackDelegate` over the engine's play, pause, skip and time range. While PiP is active the software path also composites active subtitle cues (text and PGS/DVB bitmaps) into the decoded frames, so the window shows subtitles the host overlay cannot reach. While PiP is active a bound `AetherPlayerView` shapes the software layer like the picture (aspect-fit, or aspect-fill clipped by the view) so the window mirrors it without offset or crop; a host mounting `softwarePiPSource.layer` itself sizes it the same way. On macOS the layer is laid out at the size of the system PiP window (found through public AppKit, followed on resize; the picture-shaped layout is kept when no window is found), and the system draws an opaque bar over the top of that window that no public API removes (Apple FB22411168). Ending the session closes the helper controller's window, and a load on the software path ends PiP (no hand-over as on the native path). On the native path, a selected bitmap track's compositions are OCR-recognized into its WebVTT rendition, so PGS subtitles render in the PiP window there as well. iOS renders sample-buffer PiP; tvOS AVKit does not evaluate sample-buffer content sources (Apple FB9751461, verified through tvOS 26) |
-| Subtitles | Text (SRT / ASS / SSA / VTT / mov_text) inline, bitmap (PGS / DVB / DVD, plus local VobSub `.idx` + `.sub` sidecars) as `CGImage`, in-band CEA-608 closed captions (field-1, from an `eia_608`/`c608` demuxable track or extracted from A53 `cc_data` embedded in the video bitstream: H.264/HEVC SEI on the native path, decoded-frame side data such as MPEG-2 on the software path, with the caption track surfacing lazily on first real caption data), DVB teletext decoded to text cues with broadcaster colour preserved and a selectable caption page (libzvbi, `LoadOptions.teletextPage` at load, `setTeletextPage(_:)` while the channel plays), external files as first-class tracks (registered, listed, selected like embedded streams), a live channel's own HLS `SUBTITLES` renditions surfaced as tracks and fetched only once one is selected, opt-in raw ASS markup + fonts; embedded-text cues harvested from the producer's own read (instant enable, no side-channel bandwidth); opt-in native WebVTT renditions (one per text track incl. load-declared external files, language-tagged) so subtitles survive PiP / AirPlay / external display (`LoadOptions.prepareNativeSubtitles`); bitmap tracks (PGS / DVB / DVD, embedded and external .sup) join as OCR-fed renditions: on-device Vision text recognition runs while the track is selected and fills a language-tagged text rendition, so bitmap subtitles survive PiP / AirPlay / external display on the native path too (lossy by design; fullscreen keeps the pixel-accurate overlay) |
-| Frames | Off-playback `FrameExtractor`: `thumbnail` (scrub preview) + `snapshot` (frame-accurate) |
-| Audio tap | Opt-in `installAudioTap()`: decoded playback audio as mono Float32 48 kHz PCM with source-PTS timestamps, off the render path (live transcription, ShazamKit); delivers on the loopback, remote-HLS (VOD + live), and software paths. The stream is bound to its session, so a session-preserving reload (audio / subtitle / disc-title switch, `reloadAtCurrentPosition`) finishes it and the host re-installs on stream end |
-| Metadata | `MediaMetadata` (title / artist / album + cover) parsed on load; a container's album artist folds into `artist` as a fallback |
-| Seek | VOD seeks into watched content are restart-free cache hits (byte-budgeted retention, 2 GiB cap); short forward scrubs ride the cached window; only never-produced targets restart the producer |
-| Streaming | One long-lived forward-streaming connection, reconnect-on-drop; CDN-stutter resilient; optional caller-bounded open-time probe budget (`LoadOptions.probesize` / `maxAnalyzeDuration`) to cut first-frame latency on sparse remote remuxes; configurable forward-buffer window (`LoadOptions.forwardBufferSegments`), from the 40 s default up to an opt-in whole-source pre-buffer that is bounded in bytes by the session's disk budget rather than in segments |
-| Prewarm | `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` fetches a source's opening bytes before anything asks to play it, for a host whose UI knows what is next. The following `load()` of that URL serves its parse reads out of RAM, takes the size with the bytes instead of probing for it, and opens its data connection at the warm frontier rather than at byte zero, so nothing waits on a first byte. Static and off the main actor: no engine instance, no audio session, no layer. It never queues for the origin, the bytes live in memory only until they are adopted and are dropped under memory pressure, and the headers are part of the key |
-| Live / DVR | Unbounded live + optional timeshift; direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling |
-| Custom input | Play any byte source via the `IOReader` protocol (`load(source:)`) |
-| Network | SMB2/3 shares via the optional `AetherEngineSMB` product (NTLMv2 / guest, read-only) |
-| Certificate trust | A media server behind a self-signed or private-CA certificate plays once the host answers for it: `EngineTLS.serverTrustEvaluator` is asked per challenge about the origin the challenge came from, so a LAN address behind a private certificate and a WAN address with a real one are decided separately. Covers every session the engine owns, and the native remote-HLS route too, where AVPlayer asks no delegate of its own: there the engine stands a loopback relay in front of the origin so the handshake runs where the evaluator is asked. The relay is mounted only for an origin the system actually refuses, and media is relayed as it arrives rather than read whole |
-
-## How it compares
-
-On Apple platforms the real choice is between AVPlayer, with deep OS integration but only the formats Apple ships, and a VLC- or mpv-derived engine, which plays almost anything but renders its own frames and bypasses the system's Dolby Vision, Atmos, and HDR handling. AetherEngine is built to give you both: FFmpeg's format breadth layered on top of VideoToolbox and AVPlayer, so Dolby Vision, Atmos, and Match Content keep working. KSPlayer is the closest analog, it reaches the same outcome through the same AVPlayer route, but it ships as a full player with its own UI, and its free build is GPL while a paid LGPL tier unlocks AV1 hardware decoding, the full demuxer and decoder set, and a list of playback features its own feature matrix enumerates; AetherEngine is an embeddable engine you drive from your own SwiftUI, with that codec and HDR breadth in the open-source core.
-
-| | AetherEngine | KSPlayer | AVPlayer | VLCKit | libmpv |
-| --- | --- | --- | --- | --- | --- |
-| **Approach** | Embeddable engine, Apple-only | Full player with bundled UI, FFmpeg + AVPlayer, Apple-only | Apple's built-in player | libVLC wrapped for Apple | libmpv, cross-platform |
-| **Container & codec breadth** | Wide, FFmpeg demux | Wide, FFmpeg demux | Narrow, Apple's set | Wide | Wide |
-| **Hardware decode** | VideoToolbox, dav1d SW fallback | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
-| **Dolby Vision** | P5, P7 as 8.1 (or opt-in FEL dual-layer), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
-| **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
-| **TrueHD / DTS:X heights** | Speaker bed up to 9.1.6 built from the stream's lossless 7.1, steered by its objects or heights, delivered as lossless 24-bit PCM, APAC on AirPlay (optional components) | 7.1 core (FFmpeg decode) | Not played | 7.1 core | 7.1 core |
-| **HDR on tvOS** | Native Match Content switch | Native Match Content on AVPlayer path, else Metal tone-map | Native Match Content | Software tone-mapping | Software tone-mapping |
-| **Rendering & UI** | OS-native, you ship SwiftUI | Own Metal renderer, bundled controls | OS-native, you ship UI | Own renderer, bundled controls | Own renderer, bundled OSC |
-| **Apple TV / App Store** | Yes, LGPL plus store exception | Free build GPL, paid LGPL tier for AV1 hardware decode and the full decoder set | Yes | Yes, LGPL | Not practical, GPL, no tvOS |
-
-The engine leans on the platform where the platform is best (hardware decode, Dolby Vision display, Atmos passthrough) and only falls back to its own software path (dav1d, libavcodec) for the formats VideoToolbox cannot handle.
-
-### Measured
-
-The table above is qualitative. The numbers below are measured on 4K HDR HEVC in Matroska, the container media servers actually serve, at 38 Mbit/s and at 90 Mbit/s, the rate of a UHD remux. Every engine plays each file twice: from local disk, and over HTTP from a local range origin with a fixed latency and a shared link rate, because media servers deliver over HTTP and an engine's network reader is not its file reader. They are produced by [aetherengine-bench](https://github.com/superuser404notfound/aetherengine-bench), which is run by this project's author, so its method, its raw data and the cases where AetherEngine does not win are all in that repository. AVPlayer does not open Matroska at all; on MP4, the one container it plays, it uses less than every engine here, see that repository's README.
-
-Measured on Apple-M1 (MacBookAir10,1), macOS 27.0, hevc-4k-hdr10.mkv (38 Mbit/s), hevc-4k-hdr10-90m.mkv (90 Mbit/s), each from local disk and over HTTP from a local range origin at 1000 Mbit/s shared, 20 ms latency per request, windowed, 3840x2160 px rendered, 60 s, median of 2.
-MacBookAir10,1 is fanless: sustained decode can reach thermal pressure, which is why the protocol has cooldowns between runs and discards throttled windows.
-
-**hevc-4k-hdr10.mkv (38 Mbit/s)**
-
-| | Source | GPU power | CPU load | RSS | Peak footprint | Plays |
-| --- | --- | --- | --- | --- | --- | --- |
-| **AetherEngine** | disk | 41 mW | 4.4% of a core | 342 MB | 323 MB | Yes |
-| | HTTP | 40 mW | 5.4% of a core | 336 MB | 350 MB | Yes |
-| **KSPlayer** | disk | 43 mW | 5.8% of a core | 333 MB | 772 MB | Yes |
-| | HTTP | 41 mW | 6.4% of a core | 357 MB | 496 MB | Yes |
-| **AVPlayer** | disk | | | | | n/a (refuses hevc-4k-hdr10.mkv: This media format is not supported.) |
-| | HTTP | | | | | n/a (refuses hevc-4k-hdr10.mkv: This media format is not supported.) |
-| **VLCKit** | disk | 266 mW | 15.0% of a core | 111 MB | 281 MB | Yes |
-| | HTTP | 244 mW | 17.0% of a core | 122 MB | 300 MB | Yes |
-| **libmpv** | disk | 887 mW | 20.7% of a core | 475 MB | 933 MB | Yes |
-| | HTTP | 892 mW | 21.5% of a core | 629 MB | 1191 MB | Yes |
-
-Launch failures on hevc-4k-hdr10.mkv (crashes that were retried, not refusals, see the README): KSPlayer 1 (HTTP).
-
-**hevc-4k-hdr10-90m.mkv (90 Mbit/s)**
-
-| | Source | GPU power | CPU load | RSS | Peak footprint | Plays |
-| --- | --- | --- | --- | --- | --- | --- |
-| **AetherEngine** | disk | 40 mW | 6.6% of a core | 577 MB | 681 MB | Yes |
-| | HTTP | 40 mW | 9.3% of a core | 557 MB | 700 MB | Yes |
-| **KSPlayer** | disk | 41 mW | 6.7% of a core | 589 MB | 1040 MB | Yes |
-| | HTTP | 41 mW | 7.6% of a core | 578 MB | 703 MB | Yes |
-| **AVPlayer** | disk | | | | | n/a (refuses hevc-4k-hdr10-90m.mkv: This media format is not supported.) |
-| | HTTP | | | | | n/a (refuses hevc-4k-hdr10-90m.mkv: This media format is not supported.) |
-| **VLCKit** | disk | 235 mW | 16.2% of a core | 117 MB | 314 MB | Yes |
-| | HTTP | 235 mW | 18.4% of a core | 135 MB | 325 MB | Yes |
-| **libmpv** | disk | 953 mW | 21.5% of a core | 501 MB | 980 MB | Yes |
-| | HTTP | 962 mW | 22.3% of a core | 684 MB | 1188 MB | Yes |
-
-Launch failures on hevc-4k-hdr10-90m.mkv (crashes that were retried, not refusals, see the README): KSPlayer 4 (disk).
-
-Frame delivery and output (median; resolution, bit depth and HDR transfer are informational per engine only, shown as 'varies across repeats' when they disagree, see the README):
-*hevc-4k-hdr10.mkv*
-- **AetherEngine, disk**: 1438/1438 delivered/expected, dropped 0, 3840x1714, 10-bit, hdr10, rendered into 3840x2160.
-- **AetherEngine, HTTP**: 1441/1438 delivered/expected, dropped 0, 3840x1714, 10-bit, hdr10, rendered into 3840x2160.
-- **KSPlayer, disk**: 1440/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, SMPTE_ST_2084_PQ, rendered into 3840x2160. Served via **KSMEPlayer**.
-- **KSPlayer, HTTP**: 1440/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, SMPTE_ST_2084_PQ, rendered into 3840x2160. Served via **KSMEPlayer**.
-- **VLCKit, disk**: 1451/1440 delivered/expected, dropped 0, 3840x1714, bit depth and color transfer not reported by this engine, rendered into 3840x2160.
-- **VLCKit, HTTP**: 1454/1440 delivered/expected, dropped 0, 3840x1714, bit depth and color transfer not reported by this engine, rendered into 3840x2160.
-- **libmpv, disk**: 1443/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, pq, rendered into 3840x2160.
-- **libmpv, HTTP**: 1443/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, pq, rendered into 3840x2160.
-*hevc-4k-hdr10-90m.mkv*
-- **AetherEngine, disk**: 1436/1438 delivered/expected, dropped 0, 3840x1714, 10-bit, hdr10, rendered into 3840x2160.
-- **AetherEngine, HTTP**: 1439/1438 delivered/expected, dropped 0, 3840x1714, 10-bit, hdr10, rendered into 3840x2160.
-- **KSPlayer, disk**: 1440/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, SMPTE_ST_2084_PQ, rendered into 3840x2160. Served via **KSMEPlayer**.
-- **KSPlayer, HTTP**: 1440/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, SMPTE_ST_2084_PQ, rendered into 3840x2160. Served via **KSMEPlayer**.
-- **VLCKit, disk**: 1454/1440 delivered/expected, dropped 0, 3840x1714, bit depth and color transfer not reported by this engine, rendered into 3840x2160.
-- **VLCKit, HTTP**: 1452/1440 delivered/expected, dropped 0, 3840x1714, bit depth and color transfer not reported by this engine, rendered into 3840x2160.
-- **libmpv, disk**: 1442/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, pq, rendered into 3840x2160.
-- **libmpv, HTTP**: 1443/1440 delivered/expected, dropped 0, 3840x1714, 10-bit, pq, rendered into 3840x2160.
-
-Versions: AetherEngine 7.15.2, KSPlayer 2.3.4, AVPlayer macOS 27.0, VLCKit 4.0.0-alpha.21, libmpv mpv v0.41.0.
-
-Power figures are package power with an idle baseline subtracted, so they are attributable to the run and not to the machine.
-CPU package power was measured for every run but is not published above: the idle baseline drifts with load enough that one engine's own repeats can disagree more than the column would be used to show between engines. For example, on hevc-4k-hdr10.mkv KSPlayer measured 76 to 267 mW of CPU package power across its own repeats, a 3.5x range. Recorded for every run in Results/; see "Known gaps" in the README for the full reasoning.
-libmpv is measured with --hwdec=auto-safe (hardware decode), not mpv's own software-decode default, see "Fairness decisions" in the README.
-Peak footprint is the kernel's lifetime maximum of the player process's physical footprint (what the system's memory limit acts on), load phase included; RSS is the mean over the measured window. Decoding that happens in a system service (VideoToolbox) is in neither.
-The hevc-4k-hdr10-90m.mkv rows come from a second run of the same protocol, build and origin on the same day and machine. A tvOS Simulator had been left running in the background for the first half of the main run, which raised idle package power to 188 to 214 mW (19 to 26 mW once it was shut down). Both hevc-4k-hdr10-90m.mkv baselines failed validation under it, so that fixture was measured again. The hevc-4k-hdr10.mkv baselines were taken under it too and passed; the GPU idle baseline stayed under 0.05 mW throughout, and CPU load, RSS and footprint are not baseline-subtracted, so none of the published columns moved with it.
-Method and raw results: https://github.com/superuser404notfound/aetherengine-bench
-
-## Quick start
-
-```swift
-import AetherEngine
-import SwiftUI
-
-let player = try AetherEngine()
-
-// SwiftUI: drop AetherPlayerSurface anywhere in the view tree
-var body: some View { AetherPlayerSurface(engine: player) }
-
-// UIKit / AppKit: bind an AetherPlayerView directly
-let surface = AetherPlayerView()
-player.bind(view: surface)
-
-try await player.load(url: videoURL)                            // or with a resume position
-try await player.load(url: videoURL, startPosition: 347.5)
-try await player.load(url: videoURL, options: .init(
-    httpHeaders: headers,              // attached to every demux + segment fetch
-    matchContentEnabled: matchContent  // tvOS Match Content master toggle
-))
-try await player.reloadAtCurrentPosition()                      // background reopen, preserves options + transport
-try await player.load(url: trackURL, options: .init(audioOnly: true))   // lean audio path
-
-// Transport
-player.play()
-player.pause()
-player.togglePlayPause()
-player.setRate(1.5)                    // clamped to player.maxSupportedRate (2x video, 3x audio-only)
-await player.seek(to: 120)
-player.stop()
-
-// State (Combine @Published)
-player.$state          // .idle, .loading, .playing, .paused, .seeking, .ended, .error(String)
-                       // .ended = played to completion (any backend); .idle = pre-load / stopped.
-                       // .ended is TERMINAL: seek is rejected and play() does not revive it, so a
-                       // replay is another load(). A VOD merely parked at its final frame is the
-                       // other case and play() rewinds it. How every other failure arrives, and
-                       // why a CancellationError out of load() is not one, is in docs/api.md.
-player.$errorInfo      // PlaybackErrorInfo?, the machine-readable half of .error: a stable
-                       // PlaybackErrorKind plus the underlying NSError domain and code. Classify on
-                       // this. The message cannot: on the native paths it is AVPlayerItem.error
-                       // .localizedDescription forwarded verbatim, so it is in the device's
-                       // language, and a substring rule over it buckets every non-English device as
-                       // unknown. Set before .error is published, cleared when the state leaves it.
-player.$duration
-player.$videoFormat    // .sdr, .hdr10, .hdr10Plus, .dolbyVision, .hlg
-player.$isSeeking      // true until a seek physically lands (programmatic + native scrubs, and
-                       // seeks stashed before the session can take them)
-player.$seekTarget     // in-flight seek destination (source-PTS), nil otherwise
-player.seekEvents      // AnyPublisher<SeekEvent, Never>: .began / .landed(renderedTime:) /
-                       // .stalled / .superseded / .rejected, each with the target it belongs to.
-                       // Use this where the FALLING edge of $isSeeking matters: the level cannot
-                       // say whether a seek landed, gave up, or was superseded, and a seek that
-                       // gave up can still land minutes later on a stalled source.
-player.$playbackPhase  // unified: .idle/.loading/.playing/.paused/.seeking/.rebuffering/
-                       // .stalled(reconnecting:)/.ended/.error. One source of truth for a status
-                       // spinner; derived from state + isBuffering + isSeeking + source reconnect.
-                       // Prefer this over stitching the raw signals or matching EngineLog text.
-player.$videoRoute     // pipeline actually serving the session: .remoteBypass (AVPlayer on the
-                       // origin URL) / .loopback / .software / .audio / .none. LoadOptions
-                       // .nativeRemoteHLS is only the request: the carriage watchdog, the
-                       // remembered verdict and the HLS reroutes move a session between the
-                       // bypass and the loopback, mid-session too. Branch on this where behaviour
-                       // differs per pipeline, above all who draws subtitles: on .remoteBypass
-                       // AVPlayer renders the origin's renditions, elsewhere the host renders.
-player.$audioDelivery  // how the audio reaches the renderer: .streamCopy / .bridged / .decoded /
-                       // .noAudioInSource / .playerManaged (AVFoundation owns it) / .none, and
-                       // .droppedNoPipeline: the source HAS audio and none of it could be
-                       // delivered (no decoder in this build, or the bridge could not be built),
-                       // so the session plays video-only and silently. That is the value a
-                       // fallback ladder demotes on, the same way it demotes on the
-                       // PlaybackErrorKind.audioBridgeProducedNoOutput at the other end of the
-                       // cascade. Classify on this; $activeAudioDecoder is the label for a human
-                       // and cannot separate a source without audio from one that lost it.
-player.$hasFirstFrameReadyForDisplay
-                       // the running path has a first frame ready for display, for the media THIS
-                       // load opened: the edge a black cover comes off on. readyToPlay is not that
-                       // edge (AVFoundation reaches it before the layer holds a picture, and it
-                       // stays true across a seek), so a cover lifted on isSessionReady lifts onto
-                       // black. Latched for the load, false again at the next load() / stop().
-                       // For "has this seek reached the screen" use seekEvents .landed instead.
-player.$startupProgress // StartupProgress?, for a determinate loading bar: .completed of .total
-                       // checkpoints, .fraction, and .stage naming the work in flight. Every value
-                       // is work some part of the load actually finished, never a timer and never an
-                       // estimate, so a slow stretch holds and a skipped one jumps. It covers the
-                       // two stretches a host cannot otherwise see: the source open (connection,
-                       // container, stream analysis) and the display-criteria handshake. Scoped to
-                       // .generation, which counts the startups a user waited through rather than
-                       // teardowns, so an engine-initiated reroute continues the bar instead of
-                       // resetting it. Monotonic and deduped; nil before the first load and after
-                       // stop(); a load that fails simply never reaches the last checkpoint.
-player.$currentAVPlayer // active AVPlayer, re-emitted on every reload (MPNowPlayingSession).
-                       // nil on the .software route: that pipeline renders into its own display
-                       // layer, and the property is cleared so AVKit cannot hold a player nothing
-                       // feeds any more. A host that only ever hands currentAVPlayer to an
-                       // AVPlayerViewController therefore gets audio and AVKit's own spinner over an
-                       // empty video plane on that route (#298). Bind a surface for it, and pick the
-                       // presentation off $videoRoute rather than off the source's codec.
-
-// System Now-Playing on the native video path (tvOS / iOS). Off by default: an
-// AVPlayerViewController host already gets this from AVKit and must NOT opt in.
-// Custom-transport hosts set it before load(), then register commands on the
-// session and stage identity through setVideoNowPlayingInfo.
-player.ownsVideoNowPlayingSession = true
-player.videoNowPlayingSession                  // MPNowPlayingSession?, nil unless opted in
-player.setVideoNowPlayingInfo([ /* MPMediaItemProperty… */ ])
-
-// Time lives on player.clock, a SEPARATE ObservableObject, so the ~10 Hz
-// ticks never fire objectWillChange on the engine (track lists / state views
-// don't re-render per tick; native tvOS Menu dropdowns stay stable).
-player.clock.$currentTime      // ~10 Hz playback clock (transport / scrub / resume)
-player.clock.$sourceTime       // source PTS of the displayed frame (render subtitles against this)
-player.clock.$bufferedPosition // source-axis position buffered ahead; draw a buffer bar as bufferedPosition / duration
-
-// Tracks
-player.audioTracks                             // [TrackInfo]
-player.selectAudioTrack(index: trackID)
-player.subtitleTracks                          // [TrackInfo], text + bitmap + external, one list
-player.selectSubtitleTrack(index: streamID)
-player.clearSubtitle()
-player.$subtitleCues                           // [SubtitleCue]: .text(String), .richText([SubtitleTextRun]), or .image(SubtitleImage)
-
-// #233: styled text arrives as .richText. A run carries colour, bold, italic, underline,
-// strikeout, font face and an ASS-relative font size; the cue carries the placement it asks
-// for (numpad alignment plus an optional [0, 1] anchor). This covers SRT, WebVTT, teletext
-// and ASS alike, because libavcodec converts them all to ASS event lines before the engine
-// sees them. A cue with no styling still arrives as .text, so handling only that case keeps
-// working. WebVTT cue settings are the exception: libavcodec does not convert them, so VTT
-// positioning does not arrive (its inline bold/italic/underline does).
-for cue in player.subtitleCues {
-    if case .richText(let runs) = cue.body { render(runs, at: cue.placement) }
-}
-
-// External subtitle files are first-class tracks (#88): they appear in subtitleTracks
-// (isExternal == true, synthetic id) and select through the same call as embedded streams.
-let track = player.addExternalSubtitleTrack(
-    ExternalSubtitleTrack(url: srtURL, name: "English", language: "en"))
-player.selectSubtitleTrack(index: track.id)
-// Declared at load instead, external tracks also join the native WebVTT renditions (PiP):
-// LoadOptions(prepareNativeSubtitles: true, externalSubtitles: [ExternalSubtitleTrack(url: srtURL, language: "en")])
-// When the URL is a container holding several subtitle streams, register one track per stream
-// with its absolute AVStream index; tracks sharing a URL are decoded in one pass (#266).
-ExternalSubtitleTrack(url: mkvURL, name: "Spanish", language: "es", sourceStreamIndex: 3)
-
-// Native WebVTT subtitle renditions (subtitles in PiP / AirPlay / external display; opt-in
-// via LoadOptions.prepareNativeSubtitles, details in docs/formats.md)
-player.$nativeSubtitleTracks                   // [NativeSubtitleTrack]: ordinal, language, displayName
-player.setNativeSubtitleSelected(track: 2)     // engage a rendition (e.g. on PiP entry); nil deselects
-
-// The SYSTEM turned captions on by itself: iOS 26 Settings > Accessibility > Subtitles & Captioning
-// > Automatic Subtitles (show when muted, on skip back, on a language mismatch). Those toggles have
-// no read API, so the selection is the only way to see the ask. The engine deselects the option (a
-// rendition rendered in fullscreen draws a caption box over the host's own subtitles) and forwards
-// the request; a host that wants the behaviour picks its own matching track. Subscribe per session.
-player.systemCaptionRequest                    // PassthroughSubject<SystemCaptionRequest, Never>
-
-// Second simultaneous subtitle track (bilingual / language learning)
-player.selectSecondarySubtitleTrack(index: streamID)
-player.selectSecondarySidecarSubtitle(url: srt2URL)
-player.clearSecondarySubtitle()
-player.$secondarySubtitleCues                  // [SubtitleCue] for the secondary track
-player.$isSecondarySubtitleActive             // Bool
-
-// Disc titles + chapters (DVD-Video / Blu-ray ISO; empty for non-disc sources)
-player.$discTitles                             // [TitleInfo]: id, name, durationSeconds, chapterCount (longest first, id 0 is the main feature)
-player.$selectedDiscTitle                      // TitleInfo?
-player.selectTitle(id: titleID)                // switch title (rebuilds from the new title's head)
-player.$discChapters                           // [ChapterInfo] for the selected title
-player.selectChapter(id: chapterID)            // seek to a chapter (disc chapters only)
-
-// Container chapters (Matroska / MP4; empty for disc sources, which publish discChapters instead)
-player.$mediaChapters                          // [ChapterInfo]; startSeconds are seek(to:) values, 0-based like currentTime
-
-// Info panel / Now Playing (iOS / tvOS)
-player.setExternalMetadata([ AVMetadataItem(/* title, artwork, etc. */) ])
-
-// Frame-accurate host rendering on the native path (#260). Cue times, chapters and sourceTime live on
-// the SOURCE axis; AVPlayerItem.currentTime() and its timebase read the ITEM axis. They differ by the
-// producer shift, which steps at every producer epoch (a seek restart, a live program boundary).
-player.presentationAxisMap                        // conversion both ways, readable off the main actor
-player.presentationAxisMap.itemSeconds(forSourceSeconds: cue.startTime)   // stamp an overlay sample
-player.presentationAxisMap.sourceSeconds(forItemSeconds: item.currentTime().seconds)
-player.$currentAVPlayerItem                       // items swap in place; this is the signal for it
-
-// Per muxed video frame, on both axes at once. Called on the producer's pump thread in DECODE order,
-// so `source` is not monotonic under B-frames; sort before using it as a frame-boundary list.
-// `epoch` rises strictly, process-wide: a restart and a load() both continue the sequence, so
-// "a higher epoch retires my older entries" separates one item's frames from the next's.
-player.setNativeVideoFrameTimeObserver { frame in
-    frame.source; frame.item; frame.segmentIndex; frame.isKeyframe; frame.epoch
-}
-
-// The same question on the software path (#311), where the engine decodes and enqueues the source
-// timestamp unchanged: one axis, no segments, and the reports arrive past the reorder buffer in
-// ASCENDING presentation order. `generation` moves on every renderer flush, i.e. on a seek, and
-// rises across a load() the same way `epoch` does.
-player.softwarePresentationTimebase               // the master clock, on the source axis
-player.setSoftwareVideoFrameTimeObserver { frame in
-    frame.presentation; frame.generation
-}
-
-// The rectangle those frames land in (#353): coded dimensions under the pixel aspect ratio the
-// decoder attached, read off the format description the renderer enqueues. `sourceVideoWidth` and
-// `sourceVideoHeight` are the CODED size, so anamorphic content laid out against them is off by the
-// pixel aspect (720x576 at 64:45 presents as 1024x576). nil off the software path and before the
-// first frame; it follows a mid-stream format change and is cleared with the session.
-player.softwareDisplaySize                        // CGSize?, @Published
-```
-
-Subtitle cues land in raw source PTS; render the overlay against `player.sourceTime` (see [docs/formats.md › Subtitles](docs/formats.md#subtitles)). A host compositing its own overlay onto the native path (libass and friends) needs the item axis too, since that is what the compositor pairs its samples against: `presentationAxisMap` converts arbitrary positions, `setNativeVideoFrameTimeObserver` reports the frames themselves. On the software path neither is needed: `softwarePresentationTimebase` hands out the clock the frames are presented against and `setSoftwareVideoFrameTimeObserver` reports them, both on the same axis as the cues, and `softwareDisplaySize` gives the rectangle to lay the overlay out in (the native path measures its own on `AVPlayerLayer.videoRect`). Both return nothing rather than a guess when no axis is established, because a defaulted shift is indistinguishable from a measured one at the call site. The 1 Hz diagnostics snapshot lives on `player.diagnostics.liveTelemetry`, off-the-engine for the same render-stability reason. Frame extraction and authored-ASS styling are documented in [docs/formats.md](docs/formats.md); the full published surface, including the contracts that require the host to act rather than to read, is [docs/api.md](docs/api.md).
-
-Install via Swift Package Manager:
-
-```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.62.0")
-```
-
-Three samples ship in `Examples/`:
-
-- [`MinimalPlayer/`](Examples/MinimalPlayer/MinimalPlayerApp.swift): a single-file SwiftUI drop-in, transport bar included. Copy it into a new tvOS / iOS / macOS app, point at a URL, run.
-- [`LiveHost/`](Examples/LiveHost/LiveChannelHost.swift): the live-TV half, the four contracts a channel needs that no compiler asks about (the `liveSourceReset` retune and its guard, `CancellationError` out of a superseded `load`, the audio tap that ends with its session).
-- [`DemoPlayerMac/`](Examples/DemoPlayerMac/README.md): a standalone macOS app for testers. Drop a file on the window, it plays. A notarized universal `.dmg` is attached to every [GitHub Release](https://github.com/superuser404notfound/AetherEngine/releases/latest).
-
-### Custom input source
-
-```swift
-final class MyArchiveReader: IOReader {
-    func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { /* ... */ }
-    func seek(offset: Int64, whence: Int32) -> Int64 { /* ... */ }  // AVSEEK_SIZE (65536) returns total size
-    func close() { /* ... */ }
-
-    // Optional requirements have defaults. Override to unlock extra features:
-    func cancel() { /* unblock a blocked read at teardown, do NOT invalidate the reader */ }
-    func makeIndependentReader() -> IOReader? { /* a fresh cursor over the same source, or nil */ }
-
-    // Optional, defaults to true. Return false when this is known to be an
-    // ordinary media file rather than a raw ISO/UDF disc image.
-    var discImageProbeEnabled: Bool { false }
-}
-
-let probe = try await engine.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
-// load() returns the probe metadata it gathered (discardable). A one-shot
-// AetherEngine.probe(source:) without starting playback works too.
-```
-
-Seekable readers support audio-track switching and background reload; embedded subtitles and scrub-preview thumbnails additionally need `makeIndependentReader()` (a second cursor). Forward-only readers support plain playback + seeking (VOD on the software path; live sessions stay native). On the native path a custom reader's bytes are re-muxed to cleartext fMP4 on the loopback cache, fine for encrypted-at-rest archives, a cleartext exposure for content-protected sources. Full contract in [docs/formats.md](docs/formats.md).
-
-#### SMB shares (optional `AetherEngineSMB` product)
-
-Playing media off an SMB2/3 share is a ready-made `IOReader`, shipped as a separate product so the SMB dependency ([SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT, pure Swift, `NWConnection`-based) only enters consumers that opt in. Add the `AetherEngineSMB` product alongside `AetherEngine`; hosts that do not need SMB link only the core. The transport is pure Swift over Network.framework rather than libsmb2, which fails with `EPERM` on tvOS/iOS.
-
-```swift
-import AetherEngineSMB
-
-let smb = try await SMBConnection.connect(
-    server: URL(string: "smb://nas.local")!, share: "media",
-    path: "Movies/film.mkv", user: "alice", password: "s3cret"
-)
-try await engine.load(source: .custom(
-    SMBIOReader(source: smb),
-    formatHint: "matroska"
-))
-```
-
-When the SMB path is known to be an ordinary media file, construct the reader with
-`discImageProbeEnabled: false` to skip ISO/UDF signature reads. Keep the default for raw disc
-images so DVD/Blu-ray recognition remains available.
-
-Read-only, NTLMv2 / guest auth (no Kerberos). On tvOS the host must declare `NSLocalNetworkUsageDescription` + the local-network entitlement to reach a LAN share. See [`aetherctl smbtest`](docs/cli.md#smbtest) to validate a share from macOS.
-
-Known limitation: SMBClient negotiates only SMB 2.0.2 and 2.1, so there is no SMB3 transport encryption or AES-CMAC signing. Servers configured SMB3-only or with `smb encrypt = required` won't connect (libsmb2 spoke 3.1.1 here, but was itself unusable on tvOS/iOS, see above).
-
-### Live TV / DVR
-
-```swift
-// Live-only (seek() is a no-op), or live + timeshift:
-try await player.load(url: streamURL, options: LoadOptions(isLive: true))
-try await player.load(url: streamURL, options: LoadOptions(isLive: true, dvrWindowSeconds: 1800))
-
-// Lean-back live that may wait for the full 3 x TARGETDURATION holdback before the first picture
-// (the default .fastZap join tracks the source keyframe cadence and bounds that wait):
-try await player.load(url: streamURL, options: LoadOptions(isLive: true, liveJoinProfile: .standard))
-
-// Drive a scrubber from the live-edge fields (they tick, so they live on player.clock):
-player.clock.$seekableLiveRange   // ClosedRange<Double>?, session-relative; nil when DVR off
-player.clock.$behindLiveSeconds   // seconds behind the edge; 0 at the edge
-player.clock.$liveEdgeTime
-await player.seekToLiveEdge()
-await player.seek(to: player.liveEdgeTime - 300)   // 5 minutes back
-
-// The retune contract: the engine parked the session and only a fresh URL revives it.
-player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
-
-// Ingest a live HLS upstream directly, no media server in the data path:
-try await player.load(
-    source: .custom(HLSLiveIngestReader(playlistURL: upstreamM3U8), formatHint: "mpegts"),
-    options: LoadOptions(isLive: true, dvrWindowSeconds: 600)
-)
-
-// Record the channel WITHOUT opening a second connection to the origin:
-try await player.startRecording(to: fileURL)
-await player.stopRecording()
-player.$recordingState            // .idle / .recording / .ended / .failed
-```
-
-`startRecording(to:)` (AetherEngine#560) writes the live source to an MPEG-TS file fed from the connection the session already holds. That is the point of it rather than a detail: an IPTV plan commonly caps an account at 1 to 3 simultaneous connections, so a host that opens its own connection to record either fails outright or knocks the viewer off the channel. It is a stream copy of the source packets taken before any audio bridging, so a TrueHD or DTS channel records its original audio while playback listens to the bridged rendition, and a file cut short by a crash is still playable up to the cut. Recording follows the source rather than the playhead, so pausing or scrubbing back inside the DVR window does not interrupt it, and a `liveSourceReset` ends it cleanly rather than writing past a seam the codecs may not survive. The one route that cannot record is `nativeRemoteHLS` (`.remoteBypass`), where AVFoundation holds the source connection and the engine never sees a byte; `startRecording` throws `.unsupportedRoute` there instead of producing an empty file. Full contract in [docs/api.md](docs/api.md#recording-a-live-stream).
-
-`liveJoinProfile` defaults to `.fastZap` (AetherEngine#195/#208), which cuts live segments at every keyframe past 0.5 s instead of the standard ~4 s, so the served `TARGETDURATION` collapses to 1.5 x the source GOP length (1 s GOPs serve 2, and so do segments up to 1.666 s; the headroom covers a broadcast's irregular GOPs, AetherEngine#670) and its live-edge holdback (`HOLD-BACK` = 3 x `TARGETDURATION`, the RFC 8216bis floor; AetherEngine#189) shrinks with it. The first manifest still prefers the full holdback. After two finalized segments, a strict-realtime source gets one observed-segment grace clamped to 0.5...2.0 s, then a shallow first window may be served so startup stays bounded. This can produce one early `-16832` or a short rebuffer. `.standard` retains the full-holdback guarantee. The smaller `TARGETDURATION` also tightens AVPlayer's unchanged-playlist patience and live-edge buffer, so origins that stall or burst mid-stream rebuffer more readily; choose `.standard` for lean-back viewing that can afford the full wait.
-
-`liveSourceReset` is live's counterpart to a terminal `state = .error`, and a host that plays live has to subscribe to it. It fires where the session cannot be revived from inside the engine and only a new URL can: a source that restarted from byte 0 (a Jellyfin transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), or an in-engine reopen transport whose budget is spent (#199). Each of those halts production first, so a dead provider stops advertising blocking reloads behind the host's back. Answer it by negotiating a fresh URL and calling `load` again, and guard that answer (one retune in flight, a minimum spacing, a bounded count per session) or a permanently dead upstream turns into a retune loop. Spend that bound out loud: a retune ladder that ends on a silent `return` leaves the same dead channel behind a counter, so surface the exhaustion the way a terminal `.error` would be surfaced.
-
-A host with no negotiation to do, an IPTV channel whose URL is fixed, answers by loading the same URL again, and that is the cheap path rather than a no-op. The #168 carriage verdict (a master advertising HEVC while delivering MPEG-TS) is remembered per exact absolute URL for six hours, 32 entries, so the retune routes straight onto the live ingest instead of re-paying the doomed native mount and its watchdog grace. A URL carrying a rotated per-session token misses that memory and re-pays the one-time discovery per retune, which is worth knowing where a first-frame budget is measured against the retune as well.
-
-Left unsubscribed it costs a channel that stops while the engine still reports a session, which from the outside is indistinguishable from a slow one.
-
-Direct ingest covers MPEG-TS with demuxed-audio and packed-audio renditions, in-line AES-128 clear-key decryption, and SSAI ad-pod direct play (versioned init segments, audio re-anchoring, no-cut watchdog). Unsupported encryption / fMP4 playlists surface a typed `HLSIngestError` so the host can fall back. Details in [docs/formats.md › Live ingest](docs/formats.md#live-ingest-aes-128-ssai).
-
-A channel whose master declares an `EXT-X-MEDIA:TYPE=SUBTITLES` group gets those renditions as ordinary entries in `subtitleTracks` (#359). The ingest demuxes the picked video variant only, so the group never reaches the demuxer; the engine reads it off the master instead and, once `selectSubtitleTrack(index:)` picks one, fetches that rendition's WebVTT segments and publishes the cues on the host-overlay surface, placed against the picture by the shared `EXT-X-PROGRAM-DATE-TIME` geometry rather than by `X-TIMESTAMP-MAP`. Nothing is fetched until a track is selected. Details in [docs/formats.md › Live HLS subtitle renditions](docs/formats.md#live-hls-subtitle-renditions-host-overlay).
-
-For an upstream AVPlayer can play natively (a standard remote `master.m3u8`, e.g. a Jellyfin live channel), `LoadOptions.nativeRemoteHLS` skips the demuxer probe and the loopback server entirely and hands the URL straight to AVPlayer, which manages the live edge and reconnect itself. Pair it with `isLive: true`. `LoadOptions.httpHeaders` rides into the `AVURLAsset` on this path, so origins that enforce per-stream `Referer` / `User-Agent` / `Authorization` headers (common for IPTV channels) work too.
-
-A live channel whose master advertises HEVC (or Dolby Vision / AV1) while delivering MPEG-TS segments is carriage AVFoundation builds no video track for, so the bypass would play it as audio over black. The engine recognizes that signature and reroutes the session onto the live ingest above (#168). The recognition runs alongside the mount: the playlist and the head of one segment are read while AVPlayer starts, so the reroute does not wait out a grace window, and a media playlist URL with no master to judge is covered too (#293). Only a codec the HLS Authoring Spec sanctions in fMP4 alone reaches that read, so an H.264 channel spends no extra request on it. `LoadOptions.nativeRemoteHLSIngestFallback = false` turns the whole recovery off.
-
-A LIVE remote `m3u8` handed to the default (loopback) path routes the other way, onto the live ingest above (#363). The raw live path reads bytes, not playlists, so it used to reject an `.m3u8` with a typed `hlsPlaylistOnRawLivePath` error naming the reader the host should have built. It builds that reader itself now, with `LoadOptions.httpHeaders` on the playlist, on every segment and on every AES key, which is what a tokenized IPTV origin enforces per request. Credential headers stay with the playlist's own origin: a segment or key on another host, or on http:// behind an https:// playlist, gets the rest of the headers but not the token. A custom `IOReader` carrying the same misroute still gets the typed error: it has no playlist URL to ingest from.
-
-If a live `nativeRemoteHLS` bypass is refused by the origin outright (HTTP 401 or 403, which reach the item as `NSURLError` -1013 / -1102), the engine hands that session to the same ingest instead of failing the load (#363). The ingest fetcher is a different client at that origin: it carries the configured headers on every request, caps itself at four concurrent fetches, and sends no AVFoundation user agent, so a UA filter or a per-token connection cap that turned AVPlayer away can still serve it. The refusal is not remembered for the next load the way a carriage verdict is; a token expires, a cap frees up. `LoadOptions.nativeRemoteHLSIngestFallback = false` turns this off along with the carriage recovery.
-
-A non-live remote `m3u8` handed to the default (loopback) path reroutes onto the AVPlayer bypass instead: the bundled FFmpeg is built without network support, so the playlist can never be demuxed locally, and remote HLS is AVPlayer's native domain anyway (#154). On the bypass the engine surfaces the stream's external WebVTT subtitle renditions (the legible `AVMediaSelectionGroup`) as `subtitleTracks`; `selectSubtitleTrack(index:)` and `clearSubtitle()` drive AVPlayer's media selection, and AVPlayer renders the cues itself.
-
-Sidecar subtitles declared in `LoadOptions.externalSubtitles` become renditions on this bypass too (#316). Media selection on an HLS asset comes from the playlist and nowhere else, so for a VOD source the engine fetches the origin master, rewrites every variant, audio and key URI to an absolute origin URL, adds one `EXT-X-MEDIA:TYPE=SUBTITLES` entry per sidecar, and serves that master from the loopback origin. AVPlayer still fetches all A/V bytes straight from the origin, so E-AC-3 / Atmos passthrough is untouched; only the master and the WebVTT renditions are local. The tracks keep the external ids they were registered under, and selecting one drives media selection instead of the host overlay, so the subtitle survives PiP, AirPlay and a wired external display. Live sources (no `EXT-X-ENDLIST`), bitmap sidecars, a playlist that will not rewrite and a slow origin all fall back to playing the origin URL with host-overlay subtitles, which is the behaviour before #316; the load is never failed over this.
-
-### IPTV timeshift / catch-up archives
-
-```swift
-// An origin that answers every Range with a plausible 206 whose body is not at that offset:
-try await player.load(url: archiveURL, options: LoadOptions(
-    sequentialOrigin: true,             // only byte 0 is addressable
-    declaredDurationSeconds: 8100       // required on VOD; the tail-read estimate is gone
-))
-```
-
-Timeshift and catch-up archives commonly fabricate range answers: `Range: bytes=X-` returns `206`
-with a body that actually sits on a coarse internal chunk boundary. No header exposes that, so the
-caller declares it (#346). The reader then runs one long-lived unranged GET with no ranged probes,
-no byte-offset reconnects and no tail read, the demuxer's pb is non-seekable, and a dropped
-connection surfaces as a read error rather than end-of-media so the host can re-request. Such a
-source keeps the native path instead of being forced to software, and the session serves an
-append-only `EVENT` playlist carrying the durations actually muxed, completed with `ENDLIST` at
-true source EOF. Every producer reposition is refused by construction, so a seek lands only
-inside what the session already holds (the resident span that reaches the producer's frontier,
-on the native path); for any other target, and for an audio track switch, re-request the archive
-with a shifted start timestamp, passing `audioSourceStreamIndex` for the chosen track (AE#958). `aetherctl play`
-gains `--sequential-origin` / `--declared-duration` for reproducing one from macOS.
-
-## Host setup on tvOS
-
-For HDR / Dolby Vision sources to play reliably on tvOS 26.5+, the engine must drive `AVDisplayManager.preferredDisplayCriteria` itself (synchronously, before the AVPlayerItem assignment). Apple Tech Talk 503 has prescribed this ordering since 2017, and tvOS 26.5 now enforces it synchronously at HLS variant validation: the validator rejects variants whose `VIDEO-RANGE` the panel can't currently host with `AVFoundationErrorDomain -11868`, before fetching the `EXT-X-MAP` init segment, producing `item.status = .failed` with zero `errorLog().events`. SDR variants are unaffected.
-
-AVKit-auto criteria (`appliesPreferredDisplayCriteriaAutomatically = true`) cannot satisfy this for HLS multivariant HDR sources, because AVKit reads criteria from `AVAsset.preferredDisplayCriteria`, which is synthesized from the chosen variant's format description, which only exists after `init.mp4` is parsed, which only happens after the variant passes the validator. Chicken-and-egg. Engine-driven sole-writer is the working pattern:
-
-```swift
-// In your AVPlayerViewController subclass
-playerVC.appliesPreferredDisplayCriteriaAutomatically = false
-
-// When loading
-try await engine.load(url: url, options: LoadOptions(
-    suppressDisplayCriteria: false,      // default; engine writes criteria
-    matchContentEnabled: matchContent,   // tvOS Match Content master toggle
-    panelIsInHDRMode: panelInHDRMode,    // assertion: the panel is presenting HDR now
-    panelPresentsDolbyVision: false      // assertion: this display presents Dolby Vision
-))
-```
-
-**Both panel flags are assertions, not readings, and both default to `false`.** `panelIsInHDRMode` is an
-OR term over the engine's own EDR-headroom readout rather than a replacement for it: that readout answers
-only around a dynamic-range transition, so an Apple TV whose output format is locked to HDR never makes one
-and reads as an SDR panel forever ([#459](https://github.com/superuser404notfound/AetherEngine/issues/459)).
-`panelPresentsDolbyVision` covers the capability the engine cannot observe at all on macOS, where
-`AVPlayer.availableHDRModes` does not exist and HDR eligibility answers HDR10 and HLG but not Dolby Vision
-([#493](https://github.com/superuser404notfound/AetherEngine/issues/493)). An assertion only ever adds, so
-neither flag can hide a capability the system reports, and a wrong one costs a single in-place
-media-playlist fallback (`-11868` / `-11848`) at the same position rather than the item.
-
-That fallback covers the failure class AVPlayer reports as an item failure, which is not the whole space,
-and the gap sits on tvOS. An asserted Profile 8.1 is served the way a DV panel is served (`dvvC` in the
-sample entry plus `SUPPLEMENTAL-CODECS`), and on an HDR10-only panel that packaging was measured to reach
-`readyToPlay`, play for a second or two and then stall with `-15628` in the item's error log
-([#4](https://github.com/superuser404notfound/AetherEngine/issues/4), 2026-05-26). A stall is not an item
-failure, so nothing catches it. On tvOS the flag for a display without Dolby Vision is
-`forceDolbyVisionOnNonDVDisplay`, which serves that source as a Profile 5 instead and is device-verified on
-exactly that panel class ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455));
-asserting DV turns it off, because it is gated on the display having none.
-
-`suppressDisplayCriteria` defaults to `false`, so the engine-driven path is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or 5 s timeout), then `replaceCurrentItem` runs against an already-correct panel.
-
-**Handoffs between items:** back-to-back `load()` calls preserve the applied criteria across the seam, so a same-mode follow-up (Dolby Vision episode to Dolby Vision episode) overwrites it in place with a single handshake instead of bouncing the panel through SDR. If your host calls `stop()` between items, pass `stop(resetDisplayCriteria: false)` to get the same behavior ([#128](https://github.com/superuser404notfound/AetherEngine/pull/128)); the plain `stop()` returns the panel to its default mode, which is what you want when leaving playback for the app UI. Audio-only sessions and suppressed hosts clear a leftover criteria automatically.
-
-**Who owns the audio session:** the engine declares the category at the first load but deliberately never activates it on the native path, because AVKit activates per playback and that is what lets tvOS negotiate the HDMI route (issue [#24](https://github.com/superuser404notfound/AetherEngine/issues/24)). It therefore never releases it either, and on an E-AC-3 / Atmos bitstream-passthrough route the sink can keep looping the last MAT frame after the player is gone. If your app owns the session (no UI sounds, TTS, or `AVAudioEngine` of its own competing with playback), set `engine.deactivatesAudioSessionOnStop = true` and the engine releases the session on a genuine final teardown, meaning `stop()`, never a reload, handoff, or live retune. It is off by default: an app that plays its own audio would otherwise have its session torn out from under it when playback ends.
-
-> **Custom chrome with a SwiftUI `Menu`?** On tvOS 26 an open `Menu`'s focused row blinks on any render transaction in the tree. Build the menu button in UIKit (`UIButton.menu` + `showsMenuAsPrimaryAction`) and guard `updateUIView` so the open dropdown never rebuilds. Pattern in [docs/architecture.md › SwiftUI Menu](docs/architecture.md#swiftui-menu-in-custom-player-chrome).
-
-## Diagnostics
-
-Every diagnostic line the engine emits goes to `os.Logger` under the subsystem `de.superuser404.AetherEngine`, one category per subsystem (`engine`, `session`, `demux`, `muxer`, `hls.server`, `audio.bridge`, `sw.playback`, `scrub`, `ffmpeg`). Release builds keep emitting; Console.app against the attached device, or `log stream --predicate 'subsystem == "de.superuser404.AetherEngine"'`, shows them without a debugger attached.
-
-A test rig that only captures stdout / stderr (`devicectl device process launch --console`, CI harnesses) sees none of that, because os_log is not stdio. Mirror the same lines into your own capture path with the host handler:
-
-```swift
-EngineLog.handler = { print($0) }   // every info-level line, verbatim
-```
-
-A log viewer that files lines by subsystem takes the same lines with their category instead of parsing the `[Prefix]` in the text:
-
-```swift
-EngineLog.structuredHandler = { line, category, level in viewer.append(line, from: category.rawValue) }
-```
-
-The first line of any session names the FFmpeg that answered, because which one does is decided by your executable's link rather than by the package graph:
-
-```
-[FFmpeg] libavcodec 62.28.102, libavformat 62.6.100, libavutil 60.13.100, libswresample 6.0.100
-```
-
-If a second FFmpeg in the app takes those symbols, that line turns into an `ERROR:` naming the mismatch and how to find it. Worth reading once per integration: the failures a wrong FFmpeg produces look like engine defects, and one cost a reporter five fixtures and two devices before anyone looked at the link. Details in [docs/api.md › One FFmpeg](docs/api.md#one-ffmpeg-and-it-has-to-be-the-engines).
-
-The handler fires from whatever thread emitted the line (demuxer, producer pump, local server, audio bridge), so it must be thread-safe and non-blocking; serialize onto a queue before writing to a file. Per-segment trace lines are emitted at `.verbose` and reach os_log's debug level only, never the handler, so the mirrored stream stays readable. `aetherctl` installs exactly this handler, which is why the CLI prints what the app hides.
-
-**Reading the log out of a GUI host is its own problem, and it is worth solving before you need it.** An
-app launched from Finder or `open` has no stdout you can read, so the handler above has nowhere to print
-to; a reporter on #493 lost most of a measurement session to this. Install the handler and write it to a
-file you can name, flushing per line, and do it on every build rather than only when hunting something:
-
-```swift
-EngineLog.handler = { line in DiagnosticFile.shared.append(line) }  // your own serial queue + flush
-```
-
-The os_log side does work and is worth knowing as the fallback, but it needs a time window: `log show
---last 10m --predicate 'subsystem == "de.superuser404.AetherEngine"'` returns the session's lines here on
-macOS 26.5. Without `--last`, or against a bare `log show`, the same predicate reads as if the engine
-never logged. Lines are emitted with `.public` privacy, so they arrive whole rather than as `<private>`,
-which is also why [`LogRedaction`](Sources/AetherEngine/Diagnostics/LogRedaction.swift) scrubs credentials
-at the funnel: what reaches your file is what reaches a sysdiagnose.
-
-## Non-goals
-
-Things AetherEngine deliberately doesn't do, so you don't have to read the source to find out:
-
-- No built-in UI: no controls, transport bar, or HUD.
-- No external analytics or session reporting. A 1 Hz `engine.diagnostics.liveTelemetry` surface is provided for host UIs that render runtime stats locally; nothing leaves the device.
-- No playlist / queue management. Call `load(url:)` for the next one.
-- No subtitle overlay. The engine emits `SubtitleCue` (text or `CGImage`); your UI paints them.
-- No Metal shaders. Everything renders through Apple's native display stack.
-- No third-party networking. `URLSession` handles bytes; TLS / HTTP-3 / proxies / MDM rules ride for free.
-
-## Documentation
-
-Browse all of this as a searchable site at **[aetherengine.superuser404.de](https://aetherengine.superuser404.de)**, or read the source Markdown here:
-
-- **[docs/api.md](docs/api.md)**: every public surface a host consumes, and the contracts that require it to act (how a load ends, `.ended`, the live retune, the audio tap, what must be set before `load`, and which FFmpeg your link hands the engine). A test fails the build when a host-facing public symbol is named nowhere in the docs.
-- **[docs/architecture.md](docs/architecture.md)**: the three playback pipelines, the source-file map, dependencies, the SwiftUI `Menu` pattern.
-- **[docs/formats.md](docs/formats.md)**: codec / container coverage, HDR routing, audio bridging, subtitles, frame extraction, disc playback, live ingest, and known limitations.
-- **[docs/cli.md](docs/cli.md)**: the `aetherctl` repro CLI (twenty-four subcommands).
-- **[CHANGELOG.md](CHANGELOG.md)**: per-release index.
-
 ## Stability and versioning
 
-AetherEngine uses [Semantic Versioning](https://semver.org). The public API surface, every `public` declaration in `Sources/AetherEngine/`, is the stability contract. **Major** removes / renames public symbols or breaks adopters; **Minor** adds public API or codec / format support; **Patch** fixes bugs with no public API change. `internal` types are not part of the contract.
-
-```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.62.0")
-```
-
-Pin to `.upToNextMinor(from: "7.62.0")` for stricter teams that prefer to opt into minor bumps explicitly.
-
-## Requirements
-
-| | Min |
-| --- | --- |
-| iOS | 18.0 |
-| tvOS | 18.0 |
-| macOS | 15.0 |
-| visionOS | 1.0 |
-| Swift | 6.4 |
-| Xcode | 27.0 |
-
-The Swift and Xcode rows are the supported toolchain CI builds and tests with (GitHub's
-`xcode-27` image): every change runs the tests on macOS and builds the test target for the iOS and
-tvOS Simulator, and a nightly job (`ci-extended.yml`, also run before each release) builds Release,
-visionOS and the device SDKs with every optional component. Older toolchains are not supported; the deployment floor above
-stays iOS / tvOS 18 and macOS 15, with newer calls behind `#available`. A weekly best-effort job
-(`xcode26-compat.yml`, also run before each release) builds the package for tvOS and iOS with
-Xcode 26.3 (Swift 6.2), so a break there is known before a release ships, but it does not block one.
-
-Supplemental AV1/VP9 registration also has a narrow compile-time guard around
-`VTRegisterSupplementalVideoDecoderIfAvailable`, first declared by the mobile SDKs in Xcode 26.2.
-The guard uses Swift 6.2.3 as a proxy for that SDK in stock Xcode bundles. It omits those calls in
-stock Xcode 26.0/26.1 while leaving hardware queries and software fallback intact; it does not
-establish that the rest of the package builds there or lower the supported toolchain above.
-A separately installed newer Swift toolchain paired with an older SDK is not covered by this
-proxy. The existing macOS registration path is unchanged.
-
-**Privacy manifest.** The engine ships a `PrivacyInfo.xcprivacy` in its resource bundle for the required-reason APIs it calls (#920): system boot time (35F9.1, `systemUptime` for elapsed time), disk space (E174.1, checked before packets spool to disk) and file timestamp (C617.1 for its own temp and cache files, 3B52.1 for local media the host opens). The FFmpeg frameworks carry their own from FFmpegBuild 3.10.2 on. Neither tracks or collects anything, so an app embedding the engine has nothing of the engine's to add to its own manifest.
-
-The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
-
-### Optional components
-
-Five components are compiled only when a host asks for them, each behind a package trait that is **off by default**:
-
-| Trait | Compiles and links | Without it |
-| --- | --- | --- |
-| `TrueHDObjectAudio` | [LibTrueHD](https://github.com/superuser404notfound/LibTrueHD) and the bed regression | TrueHD Atmos keeps the channel bridge whatever `objectAudioRendering` asks |
-| `DTSXObjectAudio` | the DTS:X decoder (FFmpeg's `dca` with FFmpegBuild's height patch, no extra library) and the bed regression that builds the layout from its 7.1 bed | DTS:X keeps the channel bridge whatever `objectAudioRendering` asks |
-| `DualLayerDolbyVision` | the Profile 7 FEL dual-layer composer (`DualLayerVideoDecoder`, its Metal composer and the per-frame display metadata); not recommended for distributed apps, see below | a Profile 7 source keeps the native route whatever `preferDualLayerDolbyVision` asks |
-| `DolbyVisionStillReshaping` | the reshaping that turns a Dolby Vision Profile 5 / AV1 Profile 10.0 frame into a still | such a source has no scrub stills, I-frame stills or held picture (`supportsCacheBackedStills` is false); playback is unaffected |
-| `DolbyVisionFelCurves` | the fold of a Profile 7 FEL enhancement layer into the Profile 8.1 RPU on the native route (the stream's mapping kept, the luma residual added to its luma curve per scene) ([Dolby Vision FEL › Curve fold](docs/dolby-vision-fel.md#7-curve-fold-on-the-native-route)) | the native route's Profile 8.1 conversion drops the enhancement layer, as before |
-
-Without its trait a component is not in the binary: its code is not compiled, and a library behind it is neither linked nor resolved (it drops out of the host's `Package.resolved`). The options that ask for it stay in the API, so a host compiles the same either way; they change nothing, and the session log says why (`TrueHD Atmos rendering requested but not built in (TrueHDObjectAudio trait off)`, `DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait)`). A host that wants to hide a setting its build cannot honour asks `AetherEngine.OptionalComponent`, for example `AetherEngine.OptionalComponent.dualLayerDolbyVision.isBuiltIn`.
-
-These components may be subject to third-party patent licensing. Integrators who enable them are responsible for their own licensing.
-
-**Profile 7 FEL: prefer `DolbyVisionFelCurves` over `DualLayerDolbyVision`.** Both bring a FEL source's enhancement layer back, in different ways. `DualLayerDolbyVision` composes the picture in the engine: the composer reconstructs the picture itself, which evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel, steps covered by live Dolby patents (the MMR family runs to 2032). A host without a Dolby Vision licence should build `DolbyVisionFelCurves` instead, which leaves every evaluation of the stream's mapping to the platform's licensed decoder. The curve fold keeps the disc's own mapping in the Profile 8.1 RPU and adds only the enhancement layer's luma residual to the luma curve, per scene, so the engine never applies a mapping to a pixel and never forms a composed picture. It runs on the native route with everything that route keeps (Picture in Picture, AirPlay, scrub stills, subtitles), and on three UHD Blu-ray samples it brings the picture to within 0.8 to 2.1 Delta E ITP of the composed FEL picture (2.5 to 8.9 without it). What it cannot carry is the enhancement layer's local detail (12-bit refinement, grain). See [Dolby Vision FEL › Curve fold](docs/dolby-vision-fel.md#7-curve-fold-on-the-native-route).
-
-To enable them, list the traits on the package dependency:
-
-```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.62.0",
-         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
-```
-
-In an Xcode project, a remote package's traits are set in the package dependency editor (Project › Package Dependencies), and Xcode stores them in the `.pbxproj`. XcodeGen cannot express them yet (2.45.4 drops a `traits:` key on a package without a word), so an XcodeGen project either patches the generated `.pbxproj` after each generate (a `traits = ( TrueHDObjectAudio, DTSXObjectAudio, );` list in the package's `XCRemoteSwiftPackageReference`, which Xcode 27 builds with), or depends on a small local package that depends on AetherEngine with the traits set and re-exports it (`@_exported import AetherEngine`). [Probes/AllTraits](Probes/AllTraits/Package.swift) is that package with every trait on, and `Probes/DolbyVisionPulse/Device/PulseEngine` one with `DualLayerDolbyVision` alone. The engine itself builds with them through `swift build --traits TrueHDObjectAudio,DTSXObjectAudio,DualLayerDolbyVision,DolbyVisionStillReshaping` (or `--enable-all-traits`); CI builds and tests both the default and the all-traits configuration, and builds the all-traits engine for tvOS and iOS through `Probes/AllTraits`.
-
-## Support
-
-If the engine is useful to you and you'd like to support its development, there's a [Ko-fi](https://ko-fi.com/superuser404).
-
-## Built with
-
-AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). The commit log is the receipt: nearly every commit carries a `Co-Authored-By: Claude` trailer.
-
-## Testing and feedback
-
-Big thanks to [@DrHurt](https://github.com/DrHurt) for the relentless on-device DV / HDR matrix testing in [#4](https://github.com/superuser404notfound/AetherEngine/issues/4), which exposed the timing race in `DisplayCriteriaController.waitForSwitch` that the two-stage poll now fixes. Thanks to [@ohjey](https://github.com/ohjey) for the SwiftUI render-storm investigation in [#29](https://github.com/superuser404notfound/AetherEngine/issues/29) that drove the `engine.clock` split and the UIKit menu-button pattern.
+AetherEngine follows [Semantic Versioning](https://semver.org). Every `public` declaration in `Sources/AetherEngine/` is part of the contract: a major version breaks it, a minor version adds to it, a patch fixes bugs. Details: [Installation › Stability and versioning](docs/installation.md#stability-and-versioning).
 
 ## License
 
-[LGPL-3.0 with Apple Store / DRM Exception](LICENSE). The exception clause grants explicit permission to distribute through application stores (Apple App Store, TestFlight, etc.) whose terms otherwise conflict with LGPL sections 4 to 6. Modifications to the engine itself still have to be released under LGPL.
+[LGPL-3.0 with an App Store exception](LICENSE): you can ship the engine in App Store apps, and changes to the engine itself stay LGPL. FFmpeg and the other dependencies keep their own licences. What you need to do: [Licensing](docs/licensing.md).
 
-The exception covers AetherEngine's own code; it does not extend to its dependencies.
+## Support
 
-**FFmpeg** reaches your app through [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) as dynamically linked frameworks under plain LGPL-2.1-or-later (no GPL components), which keeps the relink requirement satisfiable for closed-source App Store apps. See FFmpegBuild's README for the per-component licenses and the concrete adopter steps (embed dynamically, ship the license texts, link the build's source). Its [LICENSES/](https://github.com/superuser404notfound/FFmpegBuild/tree/main/LICENSES) folder is the set to reproduce, one file per component.
+If the engine is useful to you, you can support its development on [Ko-fi](https://ko-fi.com/superuser404). Questions and chat: [Discord](https://discord.gg/P7NvpzNqnG).
 
-**libdovi** reaches your app through [LibDovi](https://github.com/superuser404notfound/LibDovi) as a static library. It is the compiled `dolby_vision` crate from [dovi_tool](https://github.com/quietvoid/dovi_tool), Copyright (c) quietvoid and contributors, dual-licensed MIT OR Apache-2.0 and consumed here under the MIT option. MIT asks for that copyright notice to travel with the binary, and it is quietvoid's notice that belongs on the acknowledgements screen. The MIT text in LibDovi's own `LICENSE` covers the packaging and build scripts only; both parts are in that one file.
+## Built with
 
-**LibTrueHD** ([superuser404notfound/LibTrueHD](https://github.com/superuser404notfound/LibTrueHD)) reaches your app as a static library and decodes TrueHD for `objectAudioRendering`. Its C API, framer and packaging are MIT (Copyright Quick104, who wrote it for Silo as SiloObjectAudio, and Vincent Herbst). It compiles in the `truehd` and `oamd` crates from [truehdd](https://github.com/truehdd/truehdd), Copyright Rainbaby and the truehdd contributors, under the Apache License 2.0, which asks for the license text and LibTrueHD's `NOTICE` to travel with the binary. Apache-2.0 combines with the engine's LGPL-3.0. It comes in only through the `TrueHDObjectAudio` trait, off by default ([Optional components](#optional-components)); with the trait on it is linked whether or not a host turns the option on.
+AetherEngine is vibe-coded, designed and shipped by [Vincent Herbst](https://github.com/superuser404notfound) in close pair-programming with **Claude** (Anthropic). Nearly every commit carries a `Co-Authored-By: Claude` trailer.
 
-**DTS:X** is decoded by FFmpeg's own `dca` decoder in the FFmpeg frameworks above: FFmpegBuild carries a patch that decodes the height channels of DTS:X's standard presentation (#798), so the `DTSXObjectAudio` trait adds no library and no license of its own. Earlier releases linked LibDTSX instead, whose `dca` crate is a port of FFmpeg's decoder combined with Apache-2.0 code and therefore LGPL-3.0-or-later, which an App Store app cannot meet without an exception.
+## Thanks
 
-**SMBClient** ([kishikawakatsumi/SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT) reaches your app only if you link the `AetherEngineSMB` product. Linking `AetherEngine` alone pulls in none of its symbols, even though SwiftPM still records the package in `Package.resolved`, which describes the resolved graph rather than what the linker kept.
-
-### Linking the engine statically
-
-An SPM library product links statically by default, and for the engine itself that is the intended shape on the App Store path. LGPL-3.0 section 4(d)(0) would otherwise ask for your application's object code in a relinkable form; the exception's fourth bullet names end-user re-linking explicitly, so that half does not apply. What the exception does not waive is the source side: point at the exact tag you built against rather than the repository root, and if you patched the engine, publish the patched source under LGPL. No separate written offer is needed while that pointer resolves. The dependencies above keep their own terms either way, which is why the FFmpeg frameworks have to stay dynamically embedded in `YourApp.app/Frameworks/` instead of merged into the app binary.
-
-Being dynamic is not the same as being reached. The engine calls `avcodec_*` as ordinary external symbols, so a second FFmpeg elsewhere in the app can serve them instead: a static archive pulled in with `-force_load` becomes a definition inside your executable and beats every dylib, and a dependency that exports the same symbols (libVLC does, and CocoaPods sorts a pod ahead of a vendored framework) wins on order alone. Link AetherEngine's frameworks first. `nm -m <executable> | grep _avcodec_find_encoder` says who currently wins; the engine's own startup line says the same thing from the inside.
+To [@DrHurt](https://github.com/DrHurt) for the relentless on-device Dolby Vision and HDR testing in [#4](https://github.com/superuser404notfound/AetherEngine/issues/4), which exposed the timing race in `DisplayCriteriaController.waitForSwitch` that the two-stage poll now fixes. To [@ohjey](https://github.com/ohjey) for the SwiftUI render-storm investigation in [#29](https://github.com/superuser404notfound/AetherEngine/issues/29) that led to the `engine.clock` split and the UIKit menu-button pattern.

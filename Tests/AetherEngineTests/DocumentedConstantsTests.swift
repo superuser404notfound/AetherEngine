@@ -270,7 +270,7 @@ final class DocumentedConstantsTests: XCTestCase {
 
     // MARK: - Retention budget
 
-    /// The README's Seek row and the `forwardBufferSegments` entry both rest on the 2 GiB cap.
+    /// The Seek section of docs/features.md and the `forwardBufferSegments` entry both rest on the 2 GiB cap.
     func testRetentionBudgetCapIsTwoGiB() throws {
         let docs = try documentation()
         XCTAssertEqual(HLSVideoEngine.sessionRetentionBudgetBytes(volumeAvailableBytes: nil),
@@ -476,7 +476,7 @@ final class DocumentedConstantsTests: XCTestCase {
             """)
     }
 
-    /// The README's Swift and Xcode rows are the toolchain CI builds and tests with, not a taste
+    /// The Swift and Xcode rows in README and docs/installation.md are the toolchain CI builds and tests with, not a taste
     /// (audit OPS-103): every macOS job runs on the `xcode-27` image and none selects another Xcode.
     /// Moving CI to another image without the rows, or the rows without CI, fails here.
     func testToolchainRowsAreTheOnesCITestsWith() throws {
