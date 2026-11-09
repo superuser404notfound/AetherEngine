@@ -650,21 +650,6 @@ final class DisplayCriteriaController {
         switchInFlightAtWrite && !startNotifiedSinceWrite
     }
 
-    /// AE#950 round 2: how long a gate keeps holding after the end of a rate switch the panel really made.
-    /// tvOS posts `modeSwitchEnd` before every sink has re-locked: on an LG C3 one start in four still
-    /// flashed pink noise with a release 200 to 300 ms after a correctly observed end, and the engine logs of
-    /// the clean and the noisy start were identical. No signal reports the sink's lock, so this is a margin,
-    /// paid only where the panel was dark anyway: an engine rate-only write whose panel read another rate
-    /// before it. Measured from the end, so time the gate spent elsewhere counts against it.
-    nonisolated static func sinkSettleHoldMs(attribution: CriteriaAttribution,
-                                             preWrite: PanelRateRelation?,
-                                             msSinceEnd: Int) -> Int {
-        guard attribution == .engineRateOnly, case .different = preWrite else { return 0 }
-        return max(0, rateSwitchSinkSettleMs - msSinceEnd)
-    }
-
-    nonisolated static let rateSwitchSinkSettleMs = 1000
-
     /// An unbroken run of the same panel reading, in Stage 2 milliseconds.
     struct PanelCadenceRun: Equatable {
         let relation: PanelRateRelation
@@ -1128,12 +1113,7 @@ final class DisplayCriteriaController {
         case .settled(let before, let measured):
             // The whole switch happened while the item was being built. Before #339 this run was
             // indistinguishable from an unobservable panel and paid the full Stage 2 cap for it.
-            let holdMs = Self.sinkSettleHoldMs(
-                attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
-                preWrite: preWrite,
-                msSinceEnd: gateSnapshot.endedAt.map { Self.elapsedMs(fromNanos: $0, toNanos: entry.uptimeNanoseconds) } ?? 0)
-            EngineLog.emit("[DisplayCriteria] switch settled before the gate opened (\(Self.timingSuffix(startSignal: .preGateObserved, stage1Ms: 0, totalMs: Self.elapsedMs(since: entry), startBeforeGateMs: before, switchMs: measured)))\(holdMs > 0 ? "; #950: holding \(holdMs)ms more for the sink to re-lock" : "; nothing left to wait for")", category: .engine)
-            if holdMs > 0 { _ = await Self.gateTick(milliseconds: holdMs, isCurrent: isCurrent) }
+            EngineLog.emit("[DisplayCriteria] switch settled before the gate opened (\(Self.timingSuffix(startSignal: .preGateObserved, stage1Ms: 0, totalMs: Self.elapsedMs(since: entry), startBeforeGateMs: before, switchMs: measured))); nothing left to wait for", category: .engine)
             return
         case .running(let before):
             // Start already recorded: Stage 1 has nothing to discover, only the end is still open.
@@ -1276,11 +1256,7 @@ final class DisplayCriteriaController {
             cadenceHistory = Self.extendCadenceHistory(cadenceHistory, relation: relation, nowMs: stage2Ms)
             let heldMs = cadenceHistory.run?.heldMs(atMs: stage2Ms) ?? 0
             if observation.hasNewEnd(since: gateSnapshot) {
-                let holdMs = Self.sinkSettleHoldMs(
-                    attribution: Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR),
-                    preWrite: preWrite, msSinceEnd: 0)
-                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(relation.logDescription))\(holdMs > 0 ? "; #950: holding \(holdMs)ms more for the sink to re-lock" : "")", category: .engine)
-                if holdMs > 0 { _ = await Self.gateTick(milliseconds: holdMs, isCurrent: isCurrent) }
+                EngineLog.emit("[DisplayCriteria] switch settled via modeSwitchEnd (\(timing()), \(relation.logDescription))", category: .engine)
                 return
             }
             // #449: the panel is measurably running the rate this rate-only write asked for, so the switch
@@ -1317,9 +1293,7 @@ final class DisplayCriteriaController {
                 switch Self.criteriaAttribution(didApply: didApply, lastCriteriaWasHDR: lastCriteriaWasHDR) {
                 case .engineRateOnly:
                     // SDR rate-only criteria: refresh-rate switch settled, panel correctly stayed SDR.
-                    let holdMs = Self.sinkSettleHoldMs(attribution: .engineRateOnly, preWrite: preWrite, msSinceEnd: 0)
-                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, \(relation.logDescription), EDR headroom 1.0 as expected)\(holdMs > 0 ? "; #950: holding \(holdMs)ms more for the sink to re-lock" : "")", category: .engine)
-                    if holdMs > 0 { _ = await Self.gateTick(milliseconds: holdMs, isCurrent: isCurrent) }
+                    EngineLog.emit("[DisplayCriteria] rate-only switch settled (\(timing()), SDR, \(relation.logDescription), EDR headroom 1.0 as expected)", category: .engine)
                 case .engineHDR:
                     // Headroom 1.0 after an HDR write is NOT evidence of a refusal. The value is only raised
                     // by a dynamic-range transition, so a panel that was already in HDR reads identically to

@@ -22,6 +22,11 @@ the public-API contract.
   which the request is suspended, so memory stays where it was. Disc discovery and random access keep the
   adaptive reads, a short body resumes at the next byte that has not arrived, and a range that starts anywhere
   but where it was asked is refused as before. Thanks to @qoli for the measurements and the design.
+- **A refresh-rate switch no longer holds play 1000 ms after its end (AE#950).** The margin added in 7.61.1 did
+  not help: the noise it targeted came from tvOS quick switching, where waits of 0, 500 and 1000 ms after
+  `modeSwitchEnd` made no reliable difference over about 60 switches each, and with quick switching off no start
+  showed noise without it. A start that changes the panel's rate releases at the end again, about a second
+  sooner. The in-flight restart fix from the same release stays. Thanks to @secunit404 for the measurements.
 
 ## [7.62.0] - 2026-11-09
 
