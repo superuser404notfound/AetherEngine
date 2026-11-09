@@ -156,7 +156,7 @@ struct HTTPDiscIOReaderTests {
         MockRangeURLProtocol.stallFromOffset = Self.streamStart
         MockRangeURLProtocol.stallAfterBytes = 0
         #expect(readOffThread(r, size: Self.streamStart, within: 5)?.n == Int32(Self.streamStart))
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { r.cancel() }
+        Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.3); r.cancel() }
         let parked = try #require(readOffThread(r, size: 4096, within: 3), "cancel did not wake the read")
         #expect(parked.n == -1)
     }
