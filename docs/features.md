@@ -83,7 +83,7 @@ The one exception is the opt-in Profile 7 FEL dual-layer route (`preferDualLayer
 - `AetherEngine.probeDetectingAtmos(url:/source:)` answers for a details screen without starting playback.
 - `LoadOptions.confirmAtmos` lets the running session confirm its own tracks in the background and republish `audioTracks`.
 
-## Height channels from TrueHD and DTS:X
+## Height channels from TrueHD and DTS\:X
 
 TrueHD Atmos and DTS:X can keep their height channels. This is opt-in through `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` or `DTSXObjectAudio` trait ([Optional components](installation.md#optional-components)).
 
