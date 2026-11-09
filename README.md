@@ -136,6 +136,7 @@ AVPlayer has the best OS integration but plays only Apple's formats. VLCKit and 
 - [Theamo](https://theamo.app): IPTV player and TV guide for iPhone, iPad and Apple TV.
 - [Lume](https://github.com/bilipp/Lume/): SwiftUI native open source IPTV and media player for iOS, tvOS and macOS.
 - [Prowlogue](https://prowlogue.app/): Native Apple TV client for the Jellyfin media server.
+- [BoraMin](https://github.com/jonpurdy/boramin): A native, minimal, iCloud-syncing SMB and HTTP(S) video player for tvOS, iPhone, and Mac.
 <!-- used-by:end -->
 
 Shipping something on AetherEngine? [Submit it](https://github.com/superuser404notfound/AetherEngine/issues/new?template=used-by-submission.yml) to get listed here and on [aetherengine.superuser404.de](https://aetherengine.superuser404.de).
