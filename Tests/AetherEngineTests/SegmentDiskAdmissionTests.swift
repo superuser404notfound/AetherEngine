@@ -103,6 +103,40 @@ struct SegmentDiskAdmissionTests {
         #expect(cache.totalBytes == 0)
         #expect(status(cache).rejectedDiskWrites == 1)
     }
+
+    @Test("Available volume capacity refreshes after a write using the same URL")
+    func availableVolumeCapacityRefreshesAfterWrite() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("segment-capacity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let capacityURL = directory
+        let before = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
+        let fileURL = directory.appendingPathComponent("capacity-probe.bin")
+
+        // Deterministic, incompressible data ensures APFS cannot satisfy this with a sparse or
+        // compressed allocation. Keep the write modest while making the capacity change clear.
+        var state: UInt64 = 0x9E3779B97F4A7C15
+        let chunkSize = 1 << 20
+        let chunkCount = 32
+        let data = Data((0..<chunkSize).map { _ in
+            state ^= state << 13
+            state ^= state >> 7
+            state ^= state << 17
+            return UInt8(truncatingIfNeeded: state)
+        })
+        #expect(FileManager.default.createFile(atPath: fileURL.path, contents: nil))
+        let output = try FileHandle(forWritingTo: fileURL)
+        defer { try? output.close() }
+        for _ in 0..<chunkCount { try output.write(contentsOf: data) }
+        try output.synchronize()
+
+        let after = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
+        #expect(before - after >= Int64(chunkSize * chunkCount / 2),
+                "capacity should reflect the file written between queries")
+    }
+
     private final class StopFlag: @unchecked Sendable {
         private let lock = NSLock()
         private var stopped = false

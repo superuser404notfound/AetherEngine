@@ -584,7 +584,10 @@ final class SegmentCache: @unchecked Sendable {
 
     /// Uses the same volume capacity as the native and software playback paths.
     static func availableVolumeBytes(at url: URL) -> Int64? {
-        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+        // URL resource values can be cached on the URL instance. Admission may evict a file and
+        // query again immediately on the producer thread, so use a fresh instance to observe it.
+        let refreshedURL = URL(fileURLWithPath: url.path, isDirectory: url.hasDirectoryPath)
+        return (try? refreshedURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
             .volumeAvailableCapacity.map(Int64.init)
     }
 
