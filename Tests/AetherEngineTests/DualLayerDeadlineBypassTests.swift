@@ -773,6 +773,27 @@ struct DualLayerDeadlineBypassTests {
             #expect(line.contains(expected), "\(expected) in \(line)")
         }
     }
+
+    @Test("close sends a last totals line that carries a bypass counted since the previous one")
+    func closeSendsTheBypassesInTheFinalTotals() async throws {
+        let r = Self.rig()
+        defer { r.decoder.close() }
+        nonisolated(unsafe) var totals: [String] = []
+        r.decoder.totalsSinkForTesting = { totals.append($0) }
+        // One frame released by its deadline; no summary has run, so no totals line has counted it yet.
+        r.clocks.seconds = 0
+        _ = try Self.feedBase(r, 252)
+        r.clocks.uptime += Self.pastGrace
+        r.clocks.seconds = Self.pts(252).seconds - Self.margin
+        r.decoder.runDeadlineSweep()
+        try await waitFor { r.deliveries.count == 1 }
+        #expect(totals.isEmpty)
+        r.decoder.close()
+        #expect(totals == [DualLayerVideoDecoder.totalsLine(composed: 0, bypassDeadline: 1, bypassHeldWall: 0, bypassBackstop: 0)])
+        // Closing again, with nothing moved since, says nothing more.
+        r.decoder.close()
+        #expect(totals.count == 1)
+    }
 }
 
 #endif

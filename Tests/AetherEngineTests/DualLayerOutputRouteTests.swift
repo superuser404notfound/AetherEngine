@@ -35,7 +35,7 @@ struct DualLayerOutputRouteTests {
     }
 
     private final class RecordingDecoder: OutputRouteDecoder, @unchecked Sendable {
-        struct Submit { let pts: Double; let epoch: UInt64?; let accepted: Bool }
+        struct Submit { let pts: Double; let epoch: UInt64?; let accepted: Bool; let buffer: CVPixelBuffer }
         private let lock = NSLock()
         private var _epoch: UInt64 = 1
         private(set) var decoded: [Double] = []
@@ -43,6 +43,7 @@ struct DualLayerOutputRouteTests {
         private(set) var flushes = 0
         private(set) var closed = false
         var onFlush: (() -> Void)?
+        var onFatalDecodeError: (@Sendable (Error) -> Void)?
         /// Called from `submitBaseLayerFrame` with no lock held; a test blocks here to stand in for the
         /// composer waiting on a GPU slot.
         var onSubmit: (() -> Void)?
@@ -53,7 +54,7 @@ struct DualLayerOutputRouteTests {
         func submitBaseLayerFrame(_ buffer: CVPixelBuffer, pts: CMTime, hdr10Data: Data?, epoch: UInt64?) {
             lock.lock()
             // The real decoder drops a frame stamped with an older epoch than its own.
-            submits.append(Submit(pts: pts.seconds, epoch: epoch, accepted: epoch == nil || epoch == _epoch))
+            submits.append(Submit(pts: pts.seconds, epoch: epoch, accepted: epoch == nil || epoch == _epoch, buffer: buffer))
             lock.unlock()
             onSubmit?()
         }
@@ -69,12 +70,13 @@ struct DualLayerOutputRouteTests {
     private final class RecordingSink: OutputRouteSink, @unchecked Sendable {
         private let lock = NSLock()
         private(set) var frames: [Double] = []
+        private(set) var buffers: [CVPixelBuffer] = []
         private(set) var flushes = 0
         func enqueue(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?) {
-            lock.lock(); frames.append(pts.seconds); lock.unlock()
+            lock.lock(); frames.append(pts.seconds); buffers.append(pixelBuffer); lock.unlock()
         }
         func flushOutput(removingDisplayedImage: Bool) { lock.lock(); flushes += 1; lock.unlock() }
-        func clearRecords() { lock.lock(); frames = []; lock.unlock() }
+        func clearRecords() { lock.lock(); frames = []; buffers = []; lock.unlock() }
     }
 
     /// AVPlayer's video output in miniature: frame `n` shows `n / 24` s, is "new" once until the player
@@ -85,10 +87,12 @@ struct DualLayerOutputRouteTests {
         private var decoded: [ClosedRange<Int>] = [0...100_000]
         var onCopy: ((Double) -> Void)?
         private let buffer: CVPixelBuffer
-        init() throws {
+        init(format: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) throws {
             var out: CVPixelBuffer?
-            guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
-                                      nil, &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
+            // IOSurface-backed, as the player's buffers are: the route passes only x420 ones on untouched.
+            guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, format,
+                                      [kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
+                                      &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
             buffer = out
         }
         private func index(_ time: CMTime) -> Int { Int((time.seconds * DualLayerOutputRouteTests.fps + 1e-6).rounded(.down)) }
@@ -118,14 +122,16 @@ struct DualLayerOutputRouteTests {
     }
 
     private static func rig(packetsUntil seconds: Double = 60, skipping skipped: ClosedRange<Double>? = nil,
-                            historyBytes: Int = 1 << 20) throws -> Rig {
+                            historyBytes: Int = 1 << 20, converter: BaseLayerConverting? = nil,
+                            frameFormat: OSType = kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange) throws -> Rig {
         let history = try #require(VideoPacketHistory(capacityBytes: historyBytes))
         let decoder = RecordingDecoder()
         let sink = RecordingSink()
         let clock = ClockBox()
         let route = DualLayerOutputRoute(decoder: decoder, sink: sink, history: history, frameRate: fps,
-                                         clock: { clock.sample() })
-        let frames = try ScriptedFrames()
+                                         clock: { clock.sample() },
+                                         baseLayerConverter: converter ?? BaseLayerFormatConverter())
+        let frames = try ScriptedFrames(format: frameFormat)
         route.attachFrameSource(frames)
         let rig = Rig(route: route, decoder: decoder, sink: sink, frames: frames, clock: clock)
         store(rig, from: 0, until: seconds, skipping: skipped)
@@ -390,6 +396,350 @@ struct DualLayerOutputRouteTests {
         #expect(Self.wait(ticksDone, seconds: 10) == .success, "the released ticks ended")
         for await _ in teardown.stream {}
         #expect(rig.sink.frames.count == framesAtStop, "the released tick hands nothing to the display layer")
+    }
+
+    // MARK: Conversion of the player's frames
+
+    /// A converter whose answer the test sets: hand the buffer on as it is, hand a given one on, refuse, or fail.
+    private final class ScriptedConverter: BaseLayerConverting, @unchecked Sendable {
+        enum Mode { case passThrough, replace(CVPixelBuffer), refuse, fail }
+        private let lock = NSLock()
+        private var _mode: Mode
+        private var _prepared = 0, _trims = 0, _tornDown = 0, _preparedAfterTearDown = 0
+        /// Called from `tearDown` with no lock held.
+        var onTearDown: (() -> Void)?
+        init(_ mode: Mode) { _mode = mode }
+        var mode: Mode {
+            get { lock.lock(); defer { lock.unlock() }; return _mode }
+            set { lock.lock(); _mode = newValue; lock.unlock() }
+        }
+        var prepared: Int { lock.lock(); defer { lock.unlock() }; return _prepared }
+        var trims: Int { lock.lock(); defer { lock.unlock() }; return _trims }
+        var tornDown: Int { lock.lock(); defer { lock.unlock() }; return _tornDown }
+        var preparedAfterTearDown: Int { lock.lock(); defer { lock.unlock() }; return _preparedAfterTearDown }
+        func prepare(_ buffer: CVPixelBuffer) -> BaseLayerPreparation {
+            lock.lock(); _prepared += 1; let mode = _mode
+            // The contract of the real converter: once torn down it converts nothing and fails the frame.
+            let closed = _tornDown > 0
+            if closed { _preparedAfterTearDown += 1 }
+            lock.unlock()
+            if closed { return .failed("the converter is closed") }
+            switch mode {
+            case .passThrough: return .ready(buffer)
+            case .replace(let other): return .ready(other)
+            case .refuse: return .refused
+            case .fail: return .failed("scripted")
+            }
+        }
+        func trimIfIdle() { lock.lock(); _trims += 1; lock.unlock() }
+        func tearDown() { lock.lock(); _tornDown += 1; lock.unlock(); onTearDown?() }
+        var statistics: BaseLayerConversionStatistics { BaseLayerConversionStatistics() }
+    }
+
+    private static func makeBuffer() throws -> CVPixelBuffer {
+        var out: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                                  [kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
+                                  &out) == kCVReturnSuccess, let out else { throw CocoaError(.fileWriteUnknown) }
+        return out
+    }
+
+    @Test("the composer is handed the converted buffer, never the player's",
+          arguments: [false, true])
+    func composerGetsTheConvertedBuffer(uncovered: Bool) throws {
+        let converted = try Self.makeBuffer()
+        let rig = try Self.rig(packetsUntil: uncovered ? 0 : 60, converter: ScriptedConverter(.replace(converted)))
+        Self.play(rig, from: 0, to: 2)
+        let handedOn = uncovered ? rig.sink.buffers : rig.decoder.submits.map(\.buffer)
+        #expect(handedOn.count >= 20, "frames went on")
+        #expect(handedOn.allSatisfy { $0 === converted }, "every frame handed on is the converter's output")
+    }
+
+    @Test("a frame that cannot be converted never reaches the composer or the display layer, and the route hands back once",
+          arguments: [false, true])
+    func failedConversionHandsNothingOnAndHandsBack(uncovered: Bool) throws {
+        let converter = ScriptedConverter(.fail)
+        // Uncovered: no packets at all, so every frame is the fallback path that goes to the display layer.
+        let rig = try Self.rig(packetsUntil: uncovered ? 0 : 60, converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(reports.count == 0, "a failure run shorter than the bound hands nothing back")
+        Self.play(rig, from: 0.5, to: 3)
+        #expect(converter.prepared >= 40, "the conversion was tried on the frames")
+        #expect(rig.decoder.submits.isEmpty, "the composer was handed nothing")
+        #expect(rig.sink.frames.isEmpty, "the display layer was handed nothing")
+        #expect(reports.count == 1, "handed back once, not once per frame")
+    }
+
+    @Test("a refusal of the conversion pool skips the frame and never hands the route back")
+    func refusalIsBackpressureNotAFault() throws {
+        let converter = ScriptedConverter(.refuse)
+        let rig = try Self.rig(converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        // Far longer than the failure bound.
+        Self.play(rig, from: 0, to: 3)
+        #expect(rig.decoder.submits.isEmpty)
+        #expect(reports.count == 0)
+        // The pool frees up: the route composes again with no help.
+        converter.mode = .passThrough
+        Self.play(rig, from: 3, to: 4)
+        #expect(rig.decoder.accepted.count >= 15)
+        #expect(reports.count == 0)
+    }
+
+    @Test("two failure runs, each shorter than the bound, with a success between them hand nothing back")
+    func successEndsAFailureRun() throws {
+        let converter = ScriptedConverter(.fail)
+        let rig = try Self.rig(converter: converter)
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(rig, from: 0, to: 0.6)
+        converter.mode = .passThrough
+        Self.play(rig, from: 0.6, to: 0.7)
+        converter.mode = .fail
+        Self.play(rig, from: 0.7, to: 1.3)
+        #expect(reports.count == 0)
+        // The same failure without the success in between is a run of 1.4 s.
+        Self.play(rig, from: 1.3, to: 2.4)
+        #expect(reports.count == 1)
+    }
+
+    @Test("a failure run is cut off by a seek")
+    func seekEndsAFailureRun() throws {
+        let converter = ScriptedConverter(.fail)
+        let failing = try Self.rig(converter: converter)
+        let reports = Counter()
+        failing.route.onConversionFailure = { _ in reports.bump() }
+        Self.play(failing, from: 0, to: 0.6)
+        failing.frames.redeliver()
+        failing.clock.seconds = 30
+        failing.route.clockDidJump()
+        Self.play(failing, from: 30, to: 30.6)
+        #expect(reports.count == 0, "0.6 s before the seek and 0.6 s after are two runs, not one of 1.2 s")
+    }
+
+    @Test("the pull tick lets the converter give back idle buffers")
+    func pullTickTrimsTheConverter() throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(converter.trims >= 20)
+    }
+
+    @Test("the stop path tears the converter down once, after the decoder is closed and the ticks have ended")
+    @MainActor func stopTearsTheConverterDown() async throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        #expect(converter.tornDown == 0)
+        let decoderClosedAtTearDown = Counter()
+        converter.onTearDown = { if rig.decoder.closed { decoderClosedAtTearDown.bump() } }
+        await Self.finishStop(rig.route)
+        #expect(converter.tornDown == 1)
+        #expect(decoderClosedAtTearDown.count == 1, "the converter outlives the decoder's close")
+    }
+
+    @Test("a tick that outlasts the stop's bounded wait finds the converter closed and hands nothing on")
+    @MainActor func lateTickAfterTearDownConvertsNothing() async throws {
+        let converter = ScriptedConverter(.passThrough)
+        let rig = try Self.rig(converter: converter)
+        Self.play(rig, from: 0, to: 0.5)
+        // A pull tick sits in the composer's submit (a GPU slot wait) when the stop comes; the wait for it is
+        // bounded, so the teardown runs under it. Frames are waiting, so the tick goes on to convert the next
+        // one once released.
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        rig.decoder.onSubmit = { entered.signal(); release.wait() }
+        rig.route.stopWaitSeconds = 0.2
+        rig.frames.redeliver()
+        rig.route.clockDidJump()
+        let reports = Counter()
+        rig.route.onConversionFailure = { _ in reports.bump() }
+        rig.route.start(player: AVPlayer())
+        defer { for _ in 0..<16 { release.signal() } }
+        #expect(Self.wait(entered, seconds: 10) == .success, "a pull tick reached the composer and blocks there")
+        await Self.finishStop(rig.route)
+        #expect(converter.tornDown == 1, "the teardown ran although the tick is still inside the composer")
+        let submitsAtStop = rig.decoder.submits.count
+        let framesAtStop = rig.sink.frames.count
+        rig.decoder.onSubmit = nil
+        for _ in 0..<16 { release.signal() }
+        // The released tick takes its next frame from the source and asks the converter for it.
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while converter.preparedAfterTearDown == 0, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(converter.preparedAfterTearDown >= 1, "the released tick asked the converter for another frame")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(rig.decoder.submits.count == submitsAtStop, "the composer was handed nothing after the teardown")
+        #expect(rig.sink.frames.count == framesAtStop, "the display layer was handed nothing after the teardown")
+        #expect(reports.count == 0, "a stopped route does not report a conversion failure")
+    }
+
+
+    // MARK: The counters and the stop
+
+    @Test("stop() returns while a transfer is blocked, and the summary it logs does not wait for the transfer")
+    func stopDoesNotWaitOnABlockedTransfer() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let converter = BaseLayerFormatConverter(transfer: { _, _, _ in entered.signal(); release.wait(); return noErr })
+        // 8-bit frames: every one needs a conversion, so the pull tick goes into the (blocked) transfer.
+        let rig = try Self.rig(converter: converter, frameFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        defer { for _ in 0..<8 { release.signal() } }
+        rig.clock.seconds = 0
+        rig.route.feedTick()
+        let tickDone = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { rig.route.pullTick(); tickDone.signal() }
+        #expect(Self.wait(entered, seconds: 10) == .success, "the pull tick never reached the transfer")
+        let summaryRead = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { _ = rig.route.summary; summaryRead.signal() }
+        #expect(Self.wait(summaryRead, seconds: 3) == .success, "summary waited on the transfer")
+        rig.route.stopWaitSeconds = 0.2
+        let stopped = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        Task { @MainActor in rig.route.stop { completed.signal() }; stopped.signal() }
+        #expect(Self.wait(stopped, seconds: 3) == .success, "stop() on the main actor waited on the transfer in progress")
+        for _ in 0..<8 { release.signal() }
+        #expect(Self.wait(tickDone, seconds: 10) == .success)
+        #expect(Self.wait(completed, seconds: 10) == .success, "the teardown finished once the transfer did")
+    }
+
+    @Test("a run of pool refusals is logged when it starts, once per run, and a conversion that heals it ends the run")
+    func refusalRunsAreLoggedOnce() throws {
+        let converter = ScriptedConverter(.refuse)
+        let rig = try Self.rig(converter: converter)
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        Self.play(rig, from: 0, to: 2)
+        #expect(rig.route.refusalRunsLogged == 1, "one line for a run of many refusals")
+        #expect(!capture.matching("the conversion pool is full").isEmpty)
+        converter.mode = .passThrough
+        Self.play(rig, from: 2, to: 3)
+        converter.mode = .refuse
+        Self.play(rig, from: 3, to: 4)
+        #expect(rig.route.refusalRunsLogged == 2, "a second run after a conversion is a new line")
+        for run in 0..<(DualLayerOutputRoute.refusalRunLogLimit + 3) {
+            converter.mode = .passThrough
+            Self.play(rig, from: 4 + Double(run) * 2, to: 4.5 + Double(run) * 2)
+            converter.mode = .refuse
+            Self.play(rig, from: 4.5 + Double(run) * 2, to: 5.5 + Double(run) * 2)
+        }
+        #expect(rig.route.refusalRunsLogged == DualLayerOutputRoute.refusalRunLogLimit, "the lines are bounded")
+    }
+
+    // MARK: A decoder that cannot produce video
+
+    @Test("a fatal decoder error reaches the route's owner once, however often the decoder reports it")
+    func decoderFailureIsReportedOnce() throws {
+        let rig = try Self.rig()
+        let reports = Counter()
+        rig.route.onDecoderFailure = { _ in reports.bump() }
+        let fire = try #require(rig.decoder.onFatalDecodeError, "the route never installed its handler")
+        fire(VideoDecoderError.composerStalled)
+        fire(VideoDecoderError.composerStalled)
+        #expect(reports.count == 1)
+    }
+
+    @Test("a decoder error that arrives after the route stopped is not reported")
+    @MainActor func decoderFailureAfterStopIsIgnored() async throws {
+        let rig = try Self.rig()
+        let reports = Counter()
+        rig.route.onDecoderFailure = { _ in reports.bump() }
+        let fire = try #require(rig.decoder.onFatalDecodeError)
+        await Self.finishStop(rig.route)
+        fire(VideoDecoderError.composerStalled)
+        #expect(reports.count == 0)
+    }
+
+    @Test("the engine hands the picture back to AVPlayer when the decoder fails, and only for its own route")
+    @MainActor func engineHandsBackOnDecoderFailure() async throws {
+        let engine = try AetherEngine()
+        let failingRig = try Self.rig()
+        let failing = failingRig.route
+        engine.dualLayerOutputRoute = failing
+        engine.handBackOnDecoderFailure(of: failing)
+        let fire = try #require(failingRig.decoder.onFatalDecodeError)
+        fire(VideoDecoderError.composerStalled)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while engine.dualLayerOutputRoute != nil, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
+
+        // A report of a route that is no longer the engine's stops nothing.
+        let oldRig = try Self.rig()
+        engine.handBackOnDecoderFailure(of: oldRig.route)
+        let successor = try Self.rig().route
+        engine.dualLayerOutputRoute = successor
+        let staleFire = try #require(oldRig.decoder.onFatalDecodeError)
+        staleFire(VideoDecoderError.composerStalled)
+        await Task { @MainActor in }.value
+        #expect(engine.dualLayerOutputRoute === successor)
+        engine.stopDualLayerOutputRoute()
+    }
+
+    @Test("the engine hands the picture back to AVPlayer when the conversion fails, and only for its own route")
+    @MainActor func engineHandsBackOnConversionFailure() async throws {
+        let engine = try AetherEngine()
+        let failing = try Self.rig().route
+        engine.dualLayerOutputRoute = failing
+        engine.handBackOnConversionFailure(of: failing)
+        let report = try #require(failing.onConversionFailure)
+        report("scripted")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while engine.dualLayerOutputRoute != nil, ContinuousClock.now < deadline { await Task.yield() }
+        #expect(engine.dualLayerOutputRoute == nil, "the failed route was stopped")
+
+        // A report of a route that is no longer the engine's stops nothing.
+        let old = try Self.rig().route
+        engine.handBackOnConversionFailure(of: old)
+        let successor = try Self.rig().route
+        engine.dualLayerOutputRoute = successor
+        let staleReport = try #require(old.onConversionFailure)
+        staleReport("scripted")
+        await Task { @MainActor in }.value
+        #expect(engine.dualLayerOutputRoute === successor)
+        engine.stopDualLayerOutputRoute()
+    }
+
+    @Test("a wait for a packet starts again after a seek: the time spent at the old position does not count")
+    func seekRestartsTheWaitForAPacket() throws {
+        let rig = try Self.rig()
+        // The pull side runs ahead of the feed: no packet has been fed, so frames wait for theirs.
+        rig.clock.seconds = 1.0
+        rig.route.pullTick()
+        rig.clock.seconds = 1.05
+        rig.route.pullTick()
+        // The clock jumps forward by less than the route's own seek threshold, before the feed has run.
+        rig.clock.seconds = 2.0
+        rig.route.pullTick()
+        #expect(rig.sink.frames.isEmpty, "the frame waits for its packet; the 1 s spent at the old position is not its wait")
+        Self.tick(rig, at: 2.0)
+        Self.play(rig, from: 2.0, to: 3.0)
+        #expect(rig.sink.frames.isEmpty, "every frame was composed")
+        #expect(rig.decoder.accepted.count >= 20)
+    }
+
+    @Test("a frame whose own packet is not fed yet is not composed, even when its neighbour's packet was fed")
+    func frameWithoutItsOwnPacketGoesOutAsTheBaseLayer() throws {
+        // Frame 50 has no packet in the history; its neighbours do. The clock is a fraction into frame 50,
+        // so the probe time sits within reach of frame 51's packet.
+        let hole = 50.0 / Self.fps
+        let rig = try Self.rig(skipping: hole...hole)
+        Self.tick(rig, at: 50.4 / Self.fps)
+        let sent = Set(rig.decoder.accepted.map { Int(($0 * Self.fps).rounded()) })
+        let shown = Set(rig.sink.frames.map { Int(($0 * Self.fps).rounded()) })
+        #expect(shown.contains(50), "the frame without a packet went out as the player's frame")
+        #expect(!sent.contains(50), "it was not composed without its RPU")
+        #expect(sent.contains(51), "its neighbour, which has a packet, was composed")
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        func bump() { lock.lock(); value += 1; lock.unlock() }
     }
 }
 #endif

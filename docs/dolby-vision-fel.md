@@ -392,16 +392,16 @@ on macOS only: tvOS and iOS compile and are selectable, and nothing of it ran on
 | Part | What it does | Code it reuses |
 |---|---|---|
 | Base layer and audio | `AVPlayer` plays the engine's loopback HLS stream: the base layer with the RPU converted to Profile 8.1 and the enhancement layer dropped, as on the native route, plus the audio. The item owns the clock. The forward-buffer window of the session is capped at 10 segments (the default) on this route, see the ring below. | the native route, unchanged |
-| Base-layer frames | An `AVPlayerItemVideoOutput` asks for biplanar 10-bit (`x420`) buffers with no colour conversion and the player's own picture is hidden with `suppressesPlayerRendering` (public API). Frames are taken 0.15 s ahead of the item clock, one per frame interval, never replaced by a later one. | |
+| Base-layer frames | An `AVPlayerItemVideoOutput` with no pixel buffer attributes, so the player hands out its own buffer format, and the player's own picture is hidden with `suppressesPlayerRendering` (public API). Frames are taken 0.15 s ahead of the item clock, one per frame interval, never replaced by a later one. A frame already in `x420` (IOSurface-backed) goes to the composer as it is; any other format is transferred into a pool of `x420` buffers first (see "Converting the player's frames" below). | `BaseLayerFormatConverter` (`VTPixelTransferSession`, public API) |
 | Enhancement layer | `VideoPacketTap` sees each source packet in the segment producer's single read, before the 8.1 conversion strips the enhancement layer, and again once the segment muxer has written it, with the instant the stream shows it. No second connection and no second demuxer. The packets go to a bounded on-disk ring (`VideoPacketHistory`, 1 GiB at most, unlinked at once so nothing outlives the process) that keeps the newest bytes, so a seek back into content the ring still holds finds its enhancement layer; the feed restarts at the nearest held keyframe at or before the clock whenever the clock jumps. The producer runs up to the forward-buffer window ahead of the playhead, and that lead is spent from the ring first, which is why the window is capped: a lead longer than the ring would leave the playhead without an enhancement layer. | the producer's read |
-| Pairing, composition, metadata | `DualLayerVideoDecoder.openExternalBaseLayer(...)` takes frames from the host instead of decoding the base layer, and from there everything is the code the software host runs: the packet split, the enhancement-layer decoder, the pairing by presentation time, `DoviFelComposer` (the Metal kernels), the per-frame RPU and display metadata, the ordered delivery. The composer writes in place into the buffer the video output handed over, as it does into VideoToolbox's buffers on the software host, and takes the engine's output pool only for a frame it cannot compose in place (the same `canComposeInPlace` check). No API contract says the player's buffers are writable: on the Mac the video output vends converted copies (below) and the in-place result is bit-identical to the pool's; whether a tvOS player ever vends a buffer it still reads is the same open question as the software host's copy opt-out, and `AETHER_FEL_OUTPUT_INPLACE=0` turns it off for that comparison. | all of it |
+| Pairing, composition, metadata | `DualLayerVideoDecoder.openExternalBaseLayer(...)` takes frames from the host instead of decoding the base layer, and from there everything is the code the software host runs: the packet split, the enhancement-layer decoder, the pairing by presentation time, `DoviFelComposer` (the Metal kernels), the per-frame RPU and display metadata, the ordered delivery. The composer writes in place into the converter's buffer, or into the player's own buffer when the frame is already `x420` and nothing is converted, as it writes into VideoToolbox's buffers on the software host, and takes the engine's output pool only for a frame it cannot compose in place (the same `canComposeInPlace` check). No API contract says the player's buffers are writable: on the Mac the converter vends its own copies (below) and the in-place result is bit-identical to the pool's, and the case of a player-owned `x420` buffer was not exercised (`passedThrough` was 0 in every run); whether a tvOS player ever vends a buffer it still reads is the same open question as the software host's copy opt-out, and `AETHER_FEL_OUTPUT_INPLACE=0` turns it off for that comparison. | all of it |
 | Display | `SampleBufferRenderer` feeds an `AVSampleBufferDisplayLayer` whose control timebase is a child of the item's timebase, so a pause, a rate change or a seek of the item moves both. The layer is an overlay above the `AVPlayerLayer` in `AetherPlayerView`. | the software host's renderer |
 
 **Dither is the one difference from the software host.** The compose kernels dither on the parity of a frame
 index. The software host counts compositions; with the base layer delivered by AVPlayer that count would
 depend on which frames reached the composer and when, so on this route the index is the frame's position in
 the stream (presentation time times frame rate). With the host given the same index rule, the composed
-picture of a 91 s clip is bit-identical to this route's (0 of 2181 frames differ, every plane and every RPU
+picture of a 91 s clip is bit-identical to this route's (0 of the oracle's 2182 frames differ except frame index 3, which is never presented on this branch, nor in 3 of 4 runs of the code before it, every plane and every RPU
 attachment). Against the software host as committed, the two routes differ on about 58% of frames, by at
 most one 10-bit code in a sample, and the picture and the RPU differ in nothing else (the route's frames also carry a few extra player attachments) (23 raw frames sampled across the clip: 75.8 million of 286 million samples differ, all by exactly one code). So the two routes are not bit-identical; they
 share the maths and differ in the dither pattern.
@@ -409,7 +409,7 @@ share the maths and differ in the dither pattern.
 **Where there is no enhancement layer.** A position the history does not cover (a seek further back than it
 reaches, a packet it could not store) shows AVPlayer's own base-layer frame at once, so the screen never
 freezes while the audio plays. A base-layer frame whose enhancement packet is only late waits 0.1 s and then
-goes out as the base layer too. The composed picture resumes as soon as the layers pair again. After a seek
+goes out as the base layer too; the wait starts again after a seek (a clock that moves more than 0.5 s between two pull ticks). A frame is composed only when its own packet has been fed: one that is taken before it goes out as the base layer instead of being composed without its RPU. The composed picture resumes as soon as the layers pair again. After a seek
 beyond the ring the position stays on the base layer until the playhead reaches packets the ring holds,
 because the segment cache serves the segments without the producer reading them again. Every seek, forward or
 backward and of any length, resets the feed from the clock: the player's own time-jump notification is the
@@ -426,13 +426,16 @@ this route. A host that draws video in its own `AVPlayerViewController` gets no 
 should leave the option off.
 
 What it gives up against the software host: after a seek the clock runs while the enhancement layer is
-still decoding up to the target, so a few frames after a seek can go out as the base layer (up to 5 after one seek, and 0 to 9 in ten short seeks, forward and back, over four runs on the Mac); the
+still decoding up to the target, so a few frames after a seek can go out as the base layer (up to 5 after one seek, and 0 to 9 in ten short seeks, forward and back, over four runs on the Mac). At a landing the decoder's queue of enhancement frames can also prune the one a base frame waits for, and that single frame is then released as the base layer by the decoder (`bypassDeadline`; in two of three eight-seek runs on the Mac clip, and in the one run of main's code, always at the same landing and one frame each); the
 software host holds its clock for this. What it gets: AVPlayer's audio routes (the Atmos trade-off of §3.1
 does not apply), the native seek and rate behaviour, and no software-host audio pipeline. Memory is higher
 than on the software host. Measured on the Mac (M2 Pro) on a 4K 23.976 fps Profile 7 FEL clip, release `aetherctl`,
-`footprint` at 50 s of playback, the process and `VTDecoderXPCService` together:
+`footprint` at 50 s of playback, the process and `VTDecoderXPCService` together. The first table is the
+figures of the change that made in-place composition the default, with the video output asking for `x420`; the
+second is this change next to the same code measured again on the Mac it was written on, because the two Macs
+do not give the same absolute numbers.
 
-| Run | Process | Decoder service | Total |
+| Run (first Mac) | Process | Decoder service | Total |
 |---|---|---|---|
 | plain native route, no enhancement layer | 167 MB | 308 MB | 475 MB |
 | software host (in place) | 44 MB | 468 MB | 512 MB |
@@ -442,10 +445,45 @@ than on the software host. Measured on the Mac (M2 Pro) on a 4K 23.976 fps Profi
 Composing in place removes the pool (IOSurface in the process 166 to 48 MB). What remains is AVPlayer's own
 pipeline: its demuxed sample queue (`CoreMedia Memory Pool`, about 114 MB, the same as on the plain native
 route) and, in the decoder service, about 235 MB more than the base layer and enhancement layer decoders
-need. That share is the video output's: AVPlayer decodes into a lossless-compressed format (`&xv0` on the
-Mac) and converts every frame for the output into the `x420` the route asks for, holding both copies. A
-video output that asks for no format gets `&xv0` and the decoder service drops to 432 MB, but the composer
-reads the base layer as 16-bit planes, which a packed compressed buffer is not, so the route cannot take it.
+need. That share is the video output's: with `x420` attributes AVPlayer decodes into a lossless-compressed
+format (`&xv0` on the Mac) and converts every frame for the output into `x420`, holding both copies. A video
+output that asks for no format gets `&xv0` and the decoder service drops to 432 MB; the converter below is what
+lets the route take that output.
+
+| Run (second Mac, two runs each) | Process | Decoder service | Sum | Counted once |
+|---|---|---|---|---|
+| `x420` attributes, in place | 473 and 494 MB | 1007 and 1007 MB | 1480 and 1501 MB | 1174 and 1192 MB |
+| player's own format, converted, in place | 619 and 629 MB | 689 and 689 MB | 1308 and 1318 MB | 1040 and 1066 MB |
+
+"Sum" is the two footprints added, as in the first table; "counted once" is `footprint` of both processes in one
+call, which counts memory they share once. The decoder service drops by 318 MB, and the process takes 140 MB
+back: the converter's pool is now the compose target, and the buffers it holds live in the process, where
+AVPlayer's own conversion copies lived in the service. The saving is 170 to 185 MB by the sum, which counts the
+memory the two processes share twice, and about 140 MB counted once (108 to 191 MB across three sample times), the fairer figure; the pool is the cost of not having the
+service convert. Figures are decimal MB. The absolute numbers here are higher than the first table's; the process's CoreMedia memory pool is 360 MB at 50 s here against 114 MB there, and most of the gap in the sums is that pool counted in both footprints; a different clip (this one averages about 86 Mbps) may explain it, which is not confirmed. Both are release builds, a Mac with a load of 4 to 5 from background work and no other build or player running. The software host and the plain native route were not measured
+again on that Mac.
+
+**Converting the player's frames.** Asking the video output for `x420` buffers makes the system's decoder service keep a second, much larger set of buffers for the player, so the output is created with no attributes and the player hands out its own format. The composer reads `x420`, so `BaseLayerFormatConverter` decides per frame: an IOSurface-backed `x420` buffer goes on untouched, with no conversion; any other format (the player's lossless packed 10-bit biplanar format, `kCVPixelFormatType_Lossless_420YpCbCr10PackedBiPlanarVideoRange`, on the Mac) goes through a `VTPixelTransferSession` into a `CVPixelBufferPool` of `x420` buffers (IOSurface and Metal compatible), with the colour attachments copied across. The route does not assume which format a platform delivers: the first frame's format is logged, and a platform that hands out `x420` directly never builds the session or the pool. The pool hands out at most as many buffers as can be alive at once, which follows the frame rate: the frames taken 0.15 s ahead of the clock (rounded up), the 2 the display layer holds (the one on screen and the one it retains), the 2 compositions in flight and 1 spare, so 9 buffers at 24 fps, 10 at 30 and 14 at 60 (a ceiling, not an allocation; the composer's own output pool is 14 plus 3). It gives its idle buffers back when no frame was converted for 1 s, again every idle second, so after a pause the pool holds nothing the display layer has let go of (with the composition in place, the frames the layer still holds stay out of the pool); the session and the pool are released with the route on the teardown queue, after the ticks have ended or the bounded wait for them has run out (a tick that outlasts it finds the converter closed and skips its frame). The transfer runs on the pull thread, once per frame, never on the main thread; it neither takes the compose queue nor waits for a GPU slot. A pool at its limit (every buffer held by compositions in flight) is backpressure: the pull thread waits at most about 36 ms for a buffer (the composer's own bound for its output pool), then skips the frame and counts it. A conversion that fails (no session, no pool, a transfer error) also skips the frame and counts it, and nothing unconverted is ever handed on: the composer would read the packed samples as plain ones and show a wrong picture on every frame. When conversions fail for 0.75 s of playback without one success (the route's own bound for a frame that belongs to another position, so the picture on the layer is no longer one the clock can continue from; a success or a seek starts the count again), the route is handed back to AVPlayer as when an external screen takes the picture, with one log line carrying the counters. The route's end-of-session summary line carries `passedThrough`, `converted`, `conversionRefused`, `conversionFailed` and `conversionPeakLive`; its `baseLayerOnly` counts the frames the pull side sent as the player's frame, not the decoder's own bypasses, which are in the decoder's totals line. A converted frame is the compose target: with in place on (the default) the composer writes into the
+converter's `x420` buffer, which nothing else reads while it is written (the converter hands a buffer to one
+frame, and the pool takes it back when the display layer has let it go), and the output pool of the composer is
+not created unless a frame is refused for in-place composition. A refusal skips frames and never stops the route: the pull thread takes the next frame at the next
+tick, the first frame of each run of refusals is logged (`the conversion pool is full`, at most five runs per
+route; later runs are only in the summary's `conversionRefused`), and only conversions that fail hand the
+picture back. Measured on the Mac only, on one 4K clip of 91 s at 23.976 fps, with a debug `aetherctl` and the
+engine's local frame-dump hooks (not part of the code), against the software host's composition of the same
+clip with the same frame-index rule: in five full runs of this change the presented frames differed on 0 of
+2181 of the oracle's 2182 frames in four of them (frame index 3 is never presented, on this branch or in 3 of 4 runs of the code before this change) (every plane, every RPU attachment) and on one frame in the fifth, a frame the
+route sent out as the base layer because its enhancement layer was late (`baseLayerOnly=1`; the same class of difference occurs without the conversion: the code before this
+change did the same in two of four runs, on 2 and 3 frames), with the same colour tags on every frame
+(BT.2020, PQ, BT.2020 matrix, Dolby Vision compatibility ID 1). In three eight-seek runs one frame differed in each, the same frame at the same landing (a base-layer frame,
+see above: `bypassDeadline` in two runs and `baseLayerOnly` in the third), and the unchanged code differs on that frame too;
+no presented frame lacked its RPU, and no run converted a frame wrongly: `conversionRefused=0` and
+`conversionFailed=0` in every run, `converted` equal to the frames pulled. The conversion pool peaked at 6 or 7
+buffers in full runs (limit 9) and at 9, its limit, after seeks, without a refusal; with
+`AETHER_FEL_OUTPUT_INPLACE=0` it peaked at 4. The limit follows the frame rate by the sum above, and the
+clip is 23.976 fps: for a higher rate the limit is computed, not measured. Not measured: tvOS (whether the
+player hands out `x420` there, and what the transfer costs on the A12), any other clip or frame rate, a long
+run, and the transfer's cost on the pull thread since the lock around the counters moved.
 
 A composition runs on the thread that hands the decoder the frame: the route's pull thread, or VideoToolbox's callback thread when the enhancement layer arrives last (on the software host it always runs on the decoder's callback thread). A pull tick can therefore wait for a free GPU slot, a wait that ends when the GPU completes one. `stop()` detaches the route on the main thread and returns; closing the decoder and waiting for the ticks run on a teardown queue, which waits at most 2 s for a pull or feed tick. Closing the decoder itself still waits for the enhancement-layer session, as on the software host, so a GPU that never completes can still hold that queue, but not the main thread.
 
@@ -792,8 +830,8 @@ log stream --level debug --predicate 'subsystem == "de.superuser404.AetherEngine
 A second line, `[DualLayerVideoDecoder] totals: composed=…, bypassDeadline=…, bypassHeldWall=…, bypassBackstop=…`,
 goes out at the default level (so a host's log carries it without a debug build): the session-wide
 count of composed frames and of the base frames released by the deadline, the held-wall bound and the
-backstop. It is sent at most every 10 s and only when one of the counts moved since the last one, so a
-device run is judged from it. The software host's `[SWDiag]` line carries `skip=`, the number of frames
+backstop. It is sent at most every 10 s and only when one of the counts moved since the last one, and once more when the decoder closes if any moved since (the interval in progress is folded in), so a
+device run is judged from it, and a bypass near the end is counted. The software host's `[SWDiag]` line carries `skip=`, the number of frames
 the arrival-order path discarded below a seek's threshold (the pictures of the landing GOP before the
 target, a decision rather than a loss), next to `lost=` and `layerDrop=`.
 
