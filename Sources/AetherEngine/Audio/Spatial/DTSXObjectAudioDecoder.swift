@@ -5,11 +5,13 @@ import AetherLibavcodec
 import AetherLibavutil
 
 /// DTS:X decoder over FFmpeg's own `dca` decoder: lossless decode of the DTS-HD Master Audio stream
-/// DTS:X is carried on, in its standard presentation only. The standard presentation carries its four
-/// heights in a regular XLL channel set at the end of every frame, and the encoder folds each of them at
-/// -3 dB into the bed speaker under it. FFmpegBuild's `x_heights` option (a local patch, #798) decodes
-/// that channel set and outputs it next to the bed as coded, heights still folded in. The alternate
-/// presentations, which carry objects, keep their plain 7.1 and are refused here.
+/// DTS:X is carried on. The standard presentation carries its four heights in a regular XLL channel set
+/// at the end of every frame, and the encoder folds each of them at -3 dB into the bed speaker under it.
+/// The alternate presentations (FFmpeg labels some "DTS:X IMAX") carry the same four heights after one
+/// to five object channels. FFmpegBuild's `x_heights` option (a local patch, #798) decodes the heights
+/// of both and outputs them next to the bed as coded, heights still folded in; the objects are never
+/// decoded and stay in the bed. Which presentation the heights came from decides their fold
+/// (`foldGain(presentation:)`), and one whose fold has not been measured is refused.
 ///
 /// Every block hands over that bed with the four heights as its elements and their folds, and every
 /// output is built from the bed alone (`BedRegression`): the heights steer it, as statistics, and never
@@ -45,15 +47,36 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
     /// The four heights, a block's elements.
     static let roles = channels.dropFirst(bedCount).map(\.1)
     /// The encoder's fold of each height into the bed: front heights into L and R, rear heights into
-    /// the rear surrounds, at gain code 23170/32768 (-3 dB). The same in every frame of all 12 DTS:X
-    /// tracks measured (8.76 million frames), so it is the format's, not read from the stream.
-    static let folds: [ObjectAudioBedFold] = [
-        (SpatialSpeaker.topFrontLeft, SpatialSpeaker.left), (.topFrontRight, .right),
-        (.topRearLeft, .rearLeft), (.topRearRight, .rearRight),
-    ].map { height, speaker in
-        ObjectAudioBedFold(element: roles.firstIndex(of: .bed(height))!,
-                           plane: bedRoles.firstIndex(of: .bed(speaker))!,
-                           gain: 23170 / 32768)
+    /// the rear surrounds, at gain code 23170/32768 (-3 dB) in the standard presentation. The same in
+    /// every frame of all 12 DTS:X tracks measured (8.76 million frames), so it is the format's, not
+    /// read from the stream.
+    static let folds = folds(gain: standardFoldGain)
+    static let standardFoldGain: Float = 23170 / 32768
+    /// The same fold at unity, for the alternate presentation that folds that way.
+    static let unityFolds = folds(gain: 1)
+
+    static func folds(gain: Float) -> [ObjectAudioBedFold] {
+        [
+            (SpatialSpeaker.topFrontLeft, SpatialSpeaker.left), (.topFrontRight, .right),
+            (.topRearLeft, .rearLeft), (.topRearRight, .rearRight),
+        ].map { height, speaker in
+            ObjectAudioBedFold(element: roles.firstIndex(of: .bed(height))!,
+                               plane: bedRoles.firstIndex(of: .bed(speaker))!,
+                               gain: gain)
+        }
+    }
+
+    /// The height fold of a presentation, by the decoder's `x_presentation`: 1 the standard one, else
+    /// the low byte of the alternate presentation's syncword. The fold is the profile's, never read from
+    /// the stream's metadata. D0 (*Bad Boys for Life*, labelled "DTS:X IMAX") folds at unity, D1 and D3
+    /// at -3 dB (harletty-bridge's dca analysis, the D0 unity fold reproduced to the LSB there). D4 has
+    /// not been measured and is nil, so it is refused and plays as its 7.1 bed.
+    static func foldGain(presentation: Int64) -> Float? {
+        switch presentation {
+        case 1, 0xd1, 0xd3: return standardFoldGain
+        case 0xd0: return 1
+        default: return nil
+        }
     }
 
     /// Frames decoded after a reset only to rebuild the core's filter history, which the lossless
@@ -69,6 +92,7 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         var frameCount: Int
         var inputFrameOffset: Int64
         var isDiscontinuity: Bool
+        var foldGain: Float
     }
 
     private let context: UnsafeMutablePointer<AVCodecContext>
@@ -143,7 +167,10 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
                     return
                 }
                 if (8..<12).allSatisfy({ carries(Self.channels[$0].0) }) {
-                    verdict = .renders("7.1.4")
+                    let presentation = self.presentation
+                    verdict = Self.foldGain(presentation: presentation) != nil
+                        ? .renders("7.1.4")
+                        : .refused("DTS:X in alternate presentation 0x\(String(presentation, radix: 16)), whose height fold is not known, which plays as its 7.1 bed")
                 } else {
                     framesWithoutHeights += 1
                     if framesWithoutHeights >= Self.verdictFrames { verdict = .refused(presentationText) }
@@ -187,7 +214,8 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
             roles: Self.roles,
             planes: planes,
             updates: updates,
-            bed: ObjectAudioBed(roles: Self.bedRoles, planes: bedPlanes, folds: Self.folds))
+            bed: ObjectAudioBed(roles: Self.bedRoles, planes: bedPlanes,
+                                folds: block.foldGain == 1 ? Self.unityFolds : Self.folds))
     }
 
 
@@ -299,7 +327,8 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
             }
         }
         pending.append(Pending(samples: samples, frameCount: frames, inputFrameOffset: offset,
-                               isDiscontinuity: discontinuity))
+                               isDiscontinuity: discontinuity,
+                               foldGain: Self.foldGain(presentation: presentation) ?? Self.standardFoldGain))
         discontinuity = false
     }
 
@@ -308,11 +337,18 @@ final class DTSXObjectAudioDecoder: ObjectAudioDecoding {
         return av_channel_layout_index_from_channel(&layout, channel) >= 0
     }
 
+    /// The presentation the decoder's last heights came from (`x_presentation`). An FFmpegBuild before
+    /// the option decodes the standard presentation's heights only.
+    private var presentation: Int64 {
+        var value: Int64 = 1
+        return av_opt_get_int(context.pointee.priv_data, "x_presentation", 0, &value) >= 0 ? value : 1
+    }
+
     /// Why a decoded frame without heights is not rendered, from FFmpeg's profile.
     private var presentationText: String {
         switch context.pointee.profile {
         case AV_PROFILE_DTS_HD_MA_X_IMAX:
-            return "DTS:X in a presentation with objects, which plays as its 7.1 bed"
+            return "DTS:X in an alternate presentation without heights, which plays as its 7.1 bed"
         case AV_PROFILE_DTS_HD_MA_X:
             return "DTS:X whose heights did not decode"
         default:

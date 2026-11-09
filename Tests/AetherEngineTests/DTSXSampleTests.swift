@@ -10,7 +10,9 @@ import AetherLibavutil
 /// not in the repository, so each test runs only when its variable names a `.dts` file:
 /// `AE_DTSX_SAMPLE` the "DTS:X Object Emulator" demo (standard 7.1.4, 95 s),
 /// `AE_DTSX_ALTERNATE_SAMPLE` Trinnov's "Experience" trailer (7.1.4 plus five moving objects, 44 s,
-/// refused),
+/// alternate presentation D4, whose fold is not measured: refused),
+/// `AE_DTSX_IMAX_SAMPLE` an excerpt of a "DTS:X IMAX" track (alternate presentation D0, 7.1.4 plus one
+/// object, heights folded at unity; *Bad Boys for Life*, 60 s),
 /// `AE_DTS_HD_MA_SAMPLE` a DTS-HD Master Audio stream without DTS:X (FFmpeg's FATE
 /// `dts/master_audio_7.1_24bit.dts`). LibDTSX's README (the decoder these replaced) says where to
 /// get them.
@@ -47,14 +49,17 @@ struct DTSXSampleTests {
         }
     }
 
-    @Test("DTS:X is recognised on its head; objects and plain DTS-HD MA are refused")
+    @Test("DTS:X is recognised on its head, an IMAX D0 track too; D4 and plain DTS-HD MA are refused")
     func verdicts() throws {
         if let data = Self.sample("AE_DTSX_SAMPLE") {
             #expect(try Self.verdict(data.prefix(1 << 20)) == .renders("7.1.4"))
         }
+        if let data = Self.sample("AE_DTSX_IMAX_SAMPLE") {
+            #expect(try Self.verdict(data.prefix(1 << 20)) == .renders("7.1.4"))
+        }
         if let data = Self.sample("AE_DTSX_ALTERNATE_SAMPLE") {
             let verdict = try Self.verdict(data.prefix(1 << 20))
-            // FFmpeg does not recognise this trailer's extension at all, so it decodes as the 7.1 bed.
+            // D4's heights decode, but their fold has not been measured.
             guard case .refused = verdict else {
                 Issue.record("the alternate presentation was not refused: \(String(describing: verdict))")
                 return
@@ -73,6 +78,16 @@ struct DTSXSampleTests {
     @Test("the standard presentation is built from its bed: heights overhead, the floor under them")
     func standardPresentationFromItsBed() throws {
         guard let data = Self.sample("AE_DTSX_SAMPLE") else { return }
+        try Self.builtFromItsBed(data, foldGain: 23170 / 32768)
+    }
+
+    @Test("an IMAX D0 track is built from its bed the same way, its heights folded at unity")
+    func imaxPresentationFromItsBed() throws {
+        guard let data = Self.sample("AE_DTSX_IMAX_SAMPLE") else { return }
+        try Self.builtFromItsBed(data, foldGain: 1)
+    }
+
+    private static func builtFromItsBed(_ data: Data, foldGain: Float) throws {
         let decoder = try DTSXObjectAudioDecoder()
         let layout = SpatialSpeakerLayout.l714
         var placement: ObjectAudioPlacement?
@@ -89,6 +104,7 @@ struct DTSXSampleTests {
 
         func take(_ block: ObjectAudioDecodedBlock) {
             let bed = block.bed!
+            #expect(bed.folds.allSatisfy { $0.gain == foldGain })
             if placement == nil {
                 placement = ObjectAudioPlacement(layout: layout, roles: block.roles)
                 regression = BedRegression(layout: layout, bedRoles: bed.roles, folds: bed.folds)

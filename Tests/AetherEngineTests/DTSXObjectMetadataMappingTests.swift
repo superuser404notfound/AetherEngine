@@ -38,6 +38,20 @@ struct DTSXObjectMetadataMappingTests {
         #expect(DTSXObjectAudioDecoder.folds.allSatisfy { $0.gain == 23170 / 32768 })
     }
 
+    @Test("each presentation folds its heights at its profile's gain, and an unmeasured one has none")
+    func foldsByPresentation() {
+        let standard: Float = 23170 / 32768
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 1) == standard)
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 0xd0) == 1)
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 0xd1) == standard)
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 0xd3) == standard)
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 0xd4) == nil)
+        #expect(DTSXObjectAudioDecoder.foldGain(presentation: 0) == nil)
+        #expect(DTSXObjectAudioDecoder.unityFolds.allSatisfy { $0.gain == 1 })
+        #expect(DTSXObjectAudioDecoder.unityFolds.map(\.plane) == DTSXObjectAudioDecoder.folds.map(\.plane))
+        #expect(DTSXObjectAudioDecoder.unityFolds.map(\.element) == DTSXObjectAudioDecoder.folds.map(\.element))
+    }
+
     @Test("the standard channels play one to one on 7.1.4 and 9.1.6, and only there")
     func oneToOneLayouts() {
         for layout in SpatialSpeakerLayout.allCases {
