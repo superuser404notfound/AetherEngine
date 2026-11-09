@@ -702,7 +702,7 @@ extension AetherEngine {
                 let reDecodedAfter = max(playhead + subtitleDrainLead(for: channel, streamIndex: streamIndex)
                                              + Self.subtitleForwardPrefetchLeadMarginSeconds,
                                          subtitleDrainCursors[channel]?.lastDecodedPts ?? .infinity)
-                if Self.pruneCues(&cues, toBitmapBytes: Self.subtitleCueBitmapByteBudget,
+                if Self.pruneCues(&cues, toBitmapBytes: bitmapCueHistoryByteBudget,
                                   endedBefore: playhead - Self.bitmapCueFloorSeconds(
                                       offsetReach: bitmapSubtitleOffsetReach),
                                   startingAfter: reDecodedAfter) {

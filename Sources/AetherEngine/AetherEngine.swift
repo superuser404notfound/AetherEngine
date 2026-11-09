@@ -4246,12 +4246,29 @@ public final class AetherEngine: ObservableObject {
     /// more than `subtitleDrainLeadSeconds`. A host without an offset control should set 0; the
     /// default keeps the behavior from before this property existed. Text tracks are unaffected.
     /// Negative and non-finite values are ignored. Takes effect on the next drain tick.
+    /// A host that sets this also gives up the bitmap history behind that floor: every cue that
+    /// ended before it is dropped at once instead of being kept up to the 64 MiB budget, see
+    /// `bitmapCueHistoryByteBudget`.
     public var maximumSubtitleOffsetSeconds: Double = AetherEngine.subtitleCueBitmapFloorSeconds {
         didSet {
             if !maximumSubtitleOffsetSeconds.isFinite || maximumSubtitleOffsetSeconds < 0 {
                 maximumSubtitleOffsetSeconds = oldValue
+            } else {
+                subtitleOffsetReachDeclared = true
             }
         }
+    }
+
+    /// AE#929: true once the host assigned a valid `maximumSubtitleOffsetSeconds`.
+    private(set) var subtitleOffsetReachDeclared = false
+
+    /// AE#929: what the bitmap history behind the floor may hold. Past the floor a cue serves no
+    /// offset and no nudge, and a seek back past the jump threshold re-decodes its own window from
+    /// the packet store anyway, so a host that declared its reach keeps none of it (the reporter's
+    /// dense PGS title held 64 MiB there, which a PNG-backed history kept 42 MB smaller). The
+    /// default keeps the budget AE#879 shipped with.
+    var bitmapCueHistoryByteBudget: Int {
+        subtitleOffsetReachDeclared ? 0 : Self.subtitleCueBitmapByteBudget
     }
 
     /// AE#929: the reach the bitmap windows are sized from. The software PiP compositor applies
