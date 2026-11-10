@@ -34,17 +34,22 @@ struct SeparateDolbyVisionLayers: Equatable {
     }
 
     /// One HEVC track declaring the enhancement layer only, one declaring the base layer, the enhancement layer no
-    /// larger than the base layer. Anything ambiguous (several candidates) or unlinked is left alone: a file with two
+    /// larger than the base layer. Dolby's own dual-track MP4 layout (brand `dby1`) leaves the base track a plain
+    /// HDR10 `hvcC` without a record, so when no track declares the base layer, the one HEVC track without any record
+    /// stands in for it. Anything ambiguous (several candidates) or unlinked is left alone: a file with two
     /// unrelated HEVC video tracks is not a dual-layer source.
     static func detectTracks(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> SeparateDolbyVisionLayers? {
         guard let name = ctx.pointee.iformat?.pointee.name else { return nil }
         let formats = String(cString: name).split(separator: ",").map(String.init)
         guard formats.contains(where: { ["matroska", "webm", "mov", "mp4"].contains($0) }) else { return nil }
-        var bases: [Int32] = [], enhancements: [Int32] = []
+        var bases: [Int32] = [], enhancements: [Int32] = [], unmarked: [Int32] = []
         for i in 0..<Int32(ctx.pointee.nb_streams) {
             guard let stream = ctx.pointee.streams[Int(i)], let par = stream.pointee.codecpar,
-                  par.pointee.codec_type == AVMEDIA_TYPE_VIDEO, par.pointee.codec_id == AV_CODEC_ID_HEVC,
-                  let record = doviRecord(par) else { continue }
+                  par.pointee.codec_type == AVMEDIA_TYPE_VIDEO, par.pointee.codec_id == AV_CODEC_ID_HEVC else { continue }
+            guard let record = doviRecord(par) else {
+                unmarked.append(i)
+                continue
+            }
             guard record.dv_profile == 7 else { continue }
             if record.el_present_flag != 0 && record.bl_present_flag == 0 {
                 enhancements.append(i)
@@ -52,6 +57,7 @@ struct SeparateDolbyVisionLayers: Equatable {
                 bases.append(i)
             }
         }
+        if bases.isEmpty && enhancements.count == 1 { bases = unmarked }
         guard bases.count == 1, enhancements.count == 1,
               let b = ctx.pointee.streams[Int(bases[0])]?.pointee.codecpar,
               let e = ctx.pointee.streams[Int(enhancements[0])]?.pointee.codecpar,

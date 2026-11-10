@@ -326,7 +326,7 @@ What is measured: the Mac soak runs in the PR description (M2 Pro, debug `aether
 **Split sources.** Some sources carry the enhancement layer separately:
 
 - A UHD Blu-ray clip carries it on its own PID (`0x1015`, with its own RPUs).
-- A Matroska or MP4 file may carry it as a second video track (a `dvcC` record on each track, the enhancement track declaring the enhancement layer present and the base layer not).
+- A Matroska or MP4 file may carry it as a second video track (the enhancement track's `dvcC` declaring the enhancement layer present and the base layer not; the base track declares the base layer, or, in Dolby's own `dby1` MP4 layout, is a plain HDR10 track with no record, which counts when it is the only HEVC track without one).
 
 The dual-layer route reads one track, so the demuxer joins the two (`Demuxer.enableDolbyVisionEnhancementLayerJoin`, `DolbyVisionLayerJoin`) into the unit a single-track remux carries:
 

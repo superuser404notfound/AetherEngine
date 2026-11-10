@@ -20,6 +20,12 @@ the public-API contract.
 
 ### Changed
 
+- **Dolby's own dual-track MP4 layout plays as Dolby Vision.** A file with a plain HDR10 base track (no `dvcC`)
+  and a second track holding only the Profile 7 enhancement layer and RPU (brand `dby1`, MediaInfo
+  "Dolby Vision, Profile 7.6, EL+RPU" on track 2) was played as HDR10, because the dual-track detection wanted a
+  record on both tracks. When no track declares the base layer, the one HEVC track without any record now stands
+  in for it, and it gets the Profile 7 record the split route declares anyway.
+
 - **The FEL curve fold pauses where its RPU cannot reach the picture (#1018).** Measured on an Apple TV 4K at an
   HDR10 television: with the panel in HDR10, tvOS shows the base layer bit for bit and ignores the RPU, while a
   panel in SDR, the `forceDolbyVisionOnNonDVDisplay` route and a Mac all apply it. On tvOS without Dolby Vision,

@@ -74,6 +74,25 @@ struct SeparateDolbyVisionTrackDetectionTests {
         #expect(SeparateDolbyVisionLayers.detectTracks(swapped) == SeparateDolbyVisionLayers(base: 1, enhancement: 0, carriage: .track))
     }
 
+    @Test("Dolby's dual-track MP4 layout, a plain HDR10 base track without a record, is a split source")
+    func detectsUnmarkedBase() throws {
+        let plainBase = TrackSpec(withRecord: false)
+        let ctx = Self.makeContext(format: "mov", [plainBase, Self.enhancement])
+        defer { Self.free(ctx) }
+        #expect(SeparateDolbyVisionLayers.detectTracks(ctx) == SeparateDolbyVisionLayers(base: 0, enhancement: 1, carriage: .track))
+        // The declared base still wins over a plain track next to it.
+        let mixed = Self.makeContext(format: "mov", [plainBase, Self.base, Self.enhancement])
+        defer { Self.free(mixed) }
+        #expect(SeparateDolbyVisionLayers.detectTracks(mixed) == SeparateDolbyVisionLayers(base: 1, enhancement: 2, carriage: .track))
+        // The record a split source needs is created on the plain base.
+        let stream = try #require(ctx.pointee.streams[0])
+        #expect(SeparateDolbyVisionLayers.declareSingleTrackProfile7(stream))
+        let par = try #require(stream.pointee.codecpar)
+        #expect(par.pointee.nb_coded_side_data == 1)
+        let rec = par.pointee.coded_side_data[0].data.withMemoryRebound(to: AVDOVIDecoderConfigurationRecord.self, capacity: 1) { $0.pointee }
+        #expect(rec.dv_profile == 7 && rec.el_present_flag == 1 && rec.bl_present_flag == 1 && rec.dv_bl_signal_compatibility_id == 6)
+    }
+
     @Test("sources that are not a linked layer pair are left alone")
     func rejectsOthers() {
         let cases: [(String, [TrackSpec])] = [
@@ -82,6 +101,9 @@ struct SeparateDolbyVisionTrackDetectionTests {
             ("matroska", [Self.base, Self.enhancement, Self.enhancement]),                      // two enhancements
             ("matroska", [Self.base, TrackSpec(width: 1920, height: 1080, withRecord: false)]), // unlinked second track
             ("matroska", [Self.base, TrackSpec(width: 7680, height: 4320, el: 1, bl: 0)]),      // enhancement larger than base
+            ("mov", [TrackSpec(withRecord: false), TrackSpec(withRecord: false), Self.enhancement]), // two plain candidates
+            ("mov", [TrackSpec(width: 1280, height: 720, withRecord: false), Self.enhancement]), // plain base smaller than enhancement
+            ("mov", [TrackSpec(withRecord: false), TrackSpec(withRecord: false)]),                // no enhancement track
             ("matroska", [TrackSpec(profile: 8), Self.enhancement]),                            // base is not Profile 7
             ("mpegts", [Self.base, Self.enhancement]),                                          // not a track container
         ]

@@ -1472,7 +1472,7 @@ Decrypted disc images play through the normal decode path via a synthetic seekab
 
 - `BluRayDolbyVisionLayers` (in the demuxer) appends each RPU to the base picture with the same PTS, declares the base layer Profile 7 and keeps the enhancement packets to itself. So the clip takes the Profile 7 to 8.1 conversion like a remux, instead of playing as HDR10. On the 8.1 path the enhancement layer's pictures are not folded in.
 - When the dual-layer route is wanted, the demuxer joins the two PIDs into one unit per picture instead (`DolbyVisionLayerJoin`, see [Dolby Vision FEL](dolby-vision-fel.md)), so a FEL clip takes the dual-layer route. A clip whose layers cannot be joined (a transport stream with no parameter sets in its record) still logs `not taken (enhancement layer on its own PID ...)`.
-- A Matroska or MP4 file that carries the enhancement layer as a second video track (a `dvcC` record on each, the enhancement track declaring the enhancement layer only) is treated the same way.
+- A Matroska or MP4 file that carries the enhancement layer as a second video track (a `dvcC` record on the enhancement track declaring the enhancement layer only, and either a Profile 7 base-layer record on the other track or, as in Dolby's own `dby1` MP4 layout, a plain HDR10 base track with no record at all) is treated the same way.
 - This applies to folders as well.
 
 ### Remote disc images (AE#860)
