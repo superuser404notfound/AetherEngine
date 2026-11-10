@@ -1172,12 +1172,13 @@ See [Audio shaping](formats.md#audio-shaping) for what each setting does to the 
 - Before those, cues starting beyond the decode lead that the drain has not reached yet are dropped, furthest first (after a backward seek, the old position's cues). The drain decodes them again on its way there (AE#929).
 - A seek back re-decodes what was dropped.
 
-**`maximumSubtitleOffsetSeconds`** (default 60) sizes how much bitmap cue history the engine keeps:
+**`maximumSubtitleOffsetSeconds`** (default 60) sizes how much bitmap cue history the engine keeps, and whether embedded subtitles cost a second read of a remote source:
 
 - the history behind the playhead the 64 MiB budget never evicts, and how far ahead the drain decodes (at most 60 s). Both stay at least 15 s, and `softwareSubtitleDelaySeconds` is always covered.
 - Setting it also drops every bitmap cue that ended behind that history at once, instead of keeping them up to the 64 MiB budget. Past the floor a cue serves no offset, and a seek back re-decodes its own window anyway.
 - A host without a subtitle offset control should set 0. On a dense PGS track that keeps 15 s of decoded images on each side, instead of a protected 120 s plus 64 MiB of history (AE#929).
-- Text tracks are unaffected. Negative and non-finite values are ignored. It takes effect on the next drain tick.
+- **0 also turns off the forward subtitle prefetch (AE#1015).** That reader exists only to have cues ready for an advance offset. On a remote MKV or MP4 it downloads the video a second time: a minute of 1080p read 243.6 MB with an embedded SRT selected against 104.5 MB without. With 0, embedded subtitles come from the main reader alone, which covers a zero or positive offset. The prefetch still runs while `softwareSubtitleDelaySeconds` is negative or the OCR worker is armed (PiP, AirPlay, external display on a bitmap track), and it starts or stops at once when either changes.
+- The text drain lead is unaffected. Negative and non-finite values are ignored. It takes effect on the next drain tick.
 
 ### Native renditions (PiP, AirPlay, external display)
 

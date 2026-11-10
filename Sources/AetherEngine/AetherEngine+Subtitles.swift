@@ -760,10 +760,43 @@ extension AetherEngine {
     /// #151: forward prefetch runs for VOD sessions only (live content past the edge does not
     /// exist and the pump already rides it), needs an embedded drain target (external/sidecar
     /// tracks hold whole files, CC is tap-fed) and a loaded source to open a side demuxer on.
+    ///
+    /// AE#1015: and it needs something to serve. On an interleaved container the side reader
+    /// downloads the video a second time (measured: 104.5 MB against 243.6 MB for a minute of
+    /// 1080p MKV, the same for MP4), and the cues it buys are the ones beyond the pump's few
+    /// seconds of forward park, which only an advance offset or the OCR worker ever reads. A host
+    /// that declared no offset reach and has no negative software delay gets the pump's harvest,
+    /// which is exactly what a zero or positive offset consumes. The lead length is no lever: the
+    /// reader is sequential, so a shorter lead reads the same bytes, only later.
     nonisolated static func shouldRunSubtitleForwardPrefetch(
-        isLive: Bool, hasEmbeddedDrainTargets: Bool, hasSource: Bool
+        isLive: Bool, hasEmbeddedDrainTargets: Bool, hasSource: Bool,
+        advanceReach: Double, ocrArmed: Bool
     ) -> Bool {
-        !isLive && hasEmbeddedDrainTargets && hasSource
+        !isLive && hasEmbeddedDrainTargets && hasSource && (ocrArmed || advanceReach > 0)
+    }
+
+    /// AE#1015: how far ahead of the playhead a cue can be wanted. The host's declared reach covers
+    /// both signs (the engine cannot see which way its overlay shifts); the software PiP delay is
+    /// the engine's own, and only its negative side reads ahead.
+    var subtitleAdvanceReach: Double {
+        max(maximumSubtitleOffsetSeconds, -softwareSubtitleDelaySeconds)
+    }
+
+    /// AE#1015: re-decide the forward prefetch after the reach changed mid-session. Starts it at the
+    /// playhead when an advance appeared, stops it when the last one went away; a running session
+    /// that is still wanted is left alone.
+    func syncSubtitleForwardPrefetchWithAdvanceReach() {
+        let wanted = Self.shouldRunSubtitleForwardPrefetch(
+            isLive: isLive,
+            hasEmbeddedDrainTargets: !embeddedSubtitleDrainTargets.isEmpty,
+            hasSource: loadedURL != nil,
+            advanceReach: subtitleAdvanceReach,
+            ocrArmed: subtitleOCRArmedOrdinal != nil)
+        if wanted, subtitleForwardPrefetchTask == nil {
+            startSubtitleForwardPrefetcher()
+        } else if !wanted, subtitleForwardPrefetchTask != nil {
+            cancelSubtitleForwardPrefetcher(reason: .noAdvanceReach)
+        }
     }
 
     /// #151: a drain-tick jump with an existing cursor (seek / producer re-anchor) restarts the
@@ -800,11 +833,19 @@ extension AetherEngine {
             reanchor.request(anchor, seekGeneration: currentSeekGeneration)
             return
         }
+        // AE#1015: a session nothing reads ahead of is stopped under its own name, so the log
+        // does not read as a rebuild that never came back.
+        guard subtitleAdvanceReach > 0 || subtitleOCRArmedOrdinal != nil else {
+            cancelSubtitleForwardPrefetcher(reason: .noAdvanceReach)
+            return
+        }
         cancelSubtitleForwardPrefetcher(reason: .prefetchRebuild)
         guard Self.shouldRunSubtitleForwardPrefetch(
             isLive: isLive,
             hasEmbeddedDrainTargets: !embeddedSubtitleDrainTargets.isEmpty,
-            hasSource: loadedURL != nil),
+            hasSource: loadedURL != nil,
+            advanceReach: subtitleAdvanceReach,
+            ocrArmed: subtitleOCRArmedOrdinal != nil),
             let store = activeSubtitlePacketStore,
             let url = loadedURL else { return }
         let isCustom = isCustomSource

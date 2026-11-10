@@ -1001,6 +1001,7 @@ public final class AetherEngine: ObservableObject {
         softwareHost?.updateSubtitleCompositor(cues: subtitleCues + secondarySubtitleCues,
             enabled: pictureInPictureActive, delaySeconds: seconds)
         EngineLog.emit("[AetherEngine] software subtitle delay=\(seconds)s", category: .engine)
+        syncSubtitleForwardPrefetchWithAdvanceReach()   // AE#1015
     }
 
     /// Master enable for background playback (iOS: PiP + background audio; tvOS: PiP keepalive). Default on.
@@ -4244,8 +4245,12 @@ public final class AetherEngine: ObservableObject {
     /// much of them the engine keeps: the history the byte budget never evicts and how far ahead the
     /// drain decodes, each never less than `subtitleBitmapMinimumReachSeconds`, and the lead never
     /// more than `subtitleDrainLeadSeconds`. A host without an offset control should set 0; the
-    /// default keeps the behavior from before this property existed. Text tracks are unaffected.
-    /// Negative and non-finite values are ignored. Takes effect on the next drain tick.
+    /// default keeps the behavior from before this property existed.
+    /// AE#1015: 0 also stops the forward subtitle prefetch (#151) for text and bitmap tracks alike,
+    /// unless `softwareSubtitleDelaySeconds` is negative or the OCR worker is armed. On a remote
+    /// interleaved source that reader downloads the video a second time.
+    /// Negative and non-finite values are ignored. Takes effect on the next drain tick; the
+    /// prefetch starts or stops at once.
     /// A host that sets this also gives up the bitmap history behind that floor: every cue that
     /// ended before it is dropped at once instead of being kept up to the 64 MiB budget, see
     /// `bitmapCueHistoryByteBudget`.
@@ -4255,6 +4260,7 @@ public final class AetherEngine: ObservableObject {
                 maximumSubtitleOffsetSeconds = oldValue
             } else {
                 subtitleOffsetReachDeclared = true
+                syncSubtitleForwardPrefetchWithAdvanceReach()   // AE#1015
             }
         }
     }

@@ -160,13 +160,17 @@ struct Issue151SubtitleForwardPrefetchTests {
     @Test("prefetch runs only for VOD sessions with embedded drain targets and a source")
     func gatingRules() {
         #expect(AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true))
+            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
+            advanceReach: 60, ocrArmed: false))
         #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: true, hasEmbeddedDrainTargets: true, hasSource: true))
+            isLive: true, hasEmbeddedDrainTargets: true, hasSource: true,
+            advanceReach: 60, ocrArmed: false))
         #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: false, hasSource: true))
+            isLive: false, hasEmbeddedDrainTargets: false, hasSource: true,
+            advanceReach: 60, ocrArmed: false))
         #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: false))
+            isLive: false, hasEmbeddedDrainTargets: true, hasSource: false,
+            advanceReach: 60, ocrArmed: false))
     }
 
     @Test("prefetch holds whenever its origin is paced or serial")

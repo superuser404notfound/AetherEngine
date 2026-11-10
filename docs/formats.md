@@ -980,6 +980,8 @@ This section covers:
 
 The tap's forward coverage ends at the producer's read position (its forward park, #102), which on direct play sits only a few seconds past the playhead. On VOD sessions a background subtitle-only side reader, the forward prefetcher, therefore extends the store past the drainer's 60 s lead window, by a 15 s margin so the set at the window's forward edge still has its own successor stored (#362).
 
+It only runs when something reads ahead of the playhead: a host offset reach above 0 (`maximumSubtitleOffsetSeconds`, default 60), a negative `softwareSubtitleDelaySeconds`, or the armed OCR worker (AE#1015). On an interleaved container the side reader downloads the video a second time, so a host that declares a reach of 0 drains from the tap alone.
+
 - While a bitmap track's OCR rendition is armed, the lead is raised to 270 s, which clears the OCR worker's own 240 s window by 30 s, so the store actually holds what the worker is about to read.
 - So `subtitleCues` holds cues ahead of the playhead for a host-applied ADVANCE sync offset, text and bitmap alike.
 - Live sessions skip it: content past the edge does not exist.

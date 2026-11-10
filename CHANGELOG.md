@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **`maximumSubtitleOffsetSeconds = 0` stops the second download behind embedded subtitles (#1015).** Selecting an
+  embedded subtitle on a remote source started the forward prefetch, a second reader that downloads the video bytes
+  again: 243.6 MB against 104.5 MB for a minute of 1080p, MKV and MP4 alike. Its cues only serve an advance offset.
+  A host that declares a reach of 0 now reads subtitles from the main reader alone. The prefetch still runs for a
+  negative `softwareSubtitleDelaySeconds` and the OCR worker, and starts or stops mid-session when either changes.
+  The default (60) keeps today's behaviour.
+
 - **Pluto TV ads have sound on the native path.** Pluto muxes audio into its programme segments, stitches
   video-only ad segments on a new PID into the same variant, and carries the sound of both in its demuxed
   `AUDIO` rendition. The engine played the muxed track, so every ad segment was cut without sound. A live
