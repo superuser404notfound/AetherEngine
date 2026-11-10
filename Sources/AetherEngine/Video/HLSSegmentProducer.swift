@@ -172,6 +172,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var packedSideAudioClock: PackedAudioSynthClock?
     /// First EOF on either merge source ends the stream; draining the survivor produces silent/frozen tail.
     private var mergeMainEOF = false
+    /// Which clock run each merged source is in, so a restart at an ad seam does not interleave the
+    /// ad with the end of the programme. See `DualSourceSeamEpochs`.
+    private var mergeEpochs = DualSourceSeamEpochs()
     private var mergeSideEOF = false
     // var (not let): SSAI ad creative arrives on a new video PID mid-pump; re-pointed at the new stream.
     private var videoStreamIndex: Int32
@@ -3502,7 +3505,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
         }
         if mergeMainLookahead == nil, !mergeMainEOF {
             mergeMainLookahead = try demuxer.readPacket()
-            if let pkt = mergeMainLookahead { boundSourceTimestamps(pkt) } else { mergeMainEOF = true }
+            if let pkt = mergeMainLookahead {
+                boundSourceTimestamps(pkt)
+                // Only video moves the main clock run: the variant's other streams (muxed audio the
+                // session does not play, captions, teletext) keep clocks of their own.
+                if demuxer.isVideoStream(pkt.pointee.stream_index) {
+                    observeMergeRun(.main, micros: Self.mergeOrderingMicros(pkt, sourceVideoTimeBase))
+                }
+            } else {
+                mergeMainEOF = true
+            }
         }
         if mergeSideLookahead == nil, !mergeSideEOF {
             mergeSideLookahead = try side.readPacket()
@@ -3513,13 +3525,20 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // Stamp at lookahead fill so ordering/gates/rebase/mux all see the same TS-like values.
                 stampPackedSideAudio(pkt)
             }
+            if let pkt = mergeSideLookahead {
+                observeMergeRun(.side, micros: Self.mergeOrderingMicros(
+                    pkt, audioConfig?.sourceTimeBase ?? sourceVideoTimeBase))
+            }
         }
         guard !mergeMainEOF, !mergeSideEOF,
               let main = mergeMainLookahead, let sidePkt = mergeSideLookahead else {
             return nil
         }
         let sideTb = audioConfig?.sourceTimeBase ?? sourceVideoTimeBase
-        let sideFirst = DualSourceMergeOrder.sideFirst(
+        let sideFirst = mergeEpochs.sideFirst(
+            mainMicros: Self.mergeOrderingMicros(main, sourceVideoTimeBase),
+            sideMicros: Self.mergeOrderingMicros(sidePkt, sideTb)
+        ) ?? DualSourceMergeOrder.sideFirst(
             mainTicks: Self.mergeOrderingTicks(main),
             mainTimeBase: sourceVideoTimeBase,
             sideTicks: Self.mergeOrderingTicks(sidePkt),
@@ -3567,6 +3586,26 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private static func mergeOrderingTicks(_ packet: UnsafeMutablePointer<AVPacket>) -> Int64 {
         if packet.pointee.dts != Int64.min { return packet.pointee.dts }
         return packet.pointee.pts
+    }
+
+    /// One line per clock-run change of either merged reader, so a seam the two readers disagree on
+    /// can be read back from a field log.
+    private func observeMergeRun(_ source: DualSourceSeamEpochs.Source, micros: Int64) {
+        let before = (mergeEpochs.mainEpoch, mergeEpochs.sideEpoch, mergeEpochs.sideOffsetMicros)
+        mergeEpochs.observe(source, micros: micros)
+        let after = (mergeEpochs.mainEpoch, mergeEpochs.sideEpoch, mergeEpochs.sideOffsetMicros)
+        guard before != after else { return }
+        EngineLog.emit(
+            "[HLSSegmentProducer] merge clock run: \(source == .main ? "video" : "audio") at "
+            + String(format: "%.3f", Double(micros) / 1_000_000) + "s, runs video=\(after.0) "
+            + "audio=\(after.1), audio offset " + String(format: "%.3f", Double(after.2) / 1_000_000) + "s",
+            category: .session)
+    }
+
+    private static func mergeOrderingMicros(_ packet: UnsafeMutablePointer<AVPacket>, _ timeBase: AVRational) -> Int64 {
+        let ticks = mergeOrderingTicks(packet)
+        guard ticks != Int64.min, timeBase.num > 0, timeBase.den > 0 else { return Int64.min }
+        return av_rescale_q(ticks, timeBase, AVRational(num: 1, den: 1_000_000))
     }
 
     /// #74: whether a pre-video-gate audio packet should be buffered for in-DTS-order replay (instead of
@@ -3851,9 +3890,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 let pktStreamIdx = packet.pointee.stream_index
 
                 // SSAI program switch: ad creative uses a different video PID; re-point videoStreamIndex.
-                if isLive, origin == .main, sideAudioDemuxer == nil,
+                // With a side audio demuxer the bound audio index belongs to the other source and
+                // says nothing about this one, and the switch is needed all the same: Pluto TV moves
+                // its stitched ads onto a new video PID while their sound comes from the rendition.
+                if isLive, origin == .main,
                    pktStreamIdx != videoStreamIndex,
-                   pktStreamIdx != (audioConfig?.sourceStreamIndex ?? -1),
+                   sideAudioDemuxer != nil || pktStreamIdx != (audioConfig?.sourceStreamIndex ?? -1),
                    demuxer.isVideoStream(pktStreamIdx),
                    // Mid-stream demuxer codecpar is unparsed (width 0); only switch on a keyframe with in-band SPS/PPS.
                    let adConfig = extractAdVideoConfig(packet) {
@@ -5419,6 +5461,86 @@ final class HLSSegmentProducer: @unchecked Sendable {
 }
 
 /// Unit-testable DTS ordering for the dual-source pull-merge.
+/// Clock runs of the two merged sources (main video, side audio rendition).
+///
+/// A stitched ad restarts the clock on BOTH sources, and each source reaches the seam on its own
+/// schedule. Ordering by timestamp alone then hands out the ad (clock near zero) before the end of
+/// the programme still waiting on the other source, which scrambled the seam on Pluto TV: the
+/// programme's last audio and the whole ad's audio were cut out. So each source counts its clock
+/// restarts, and while the counts differ the source still in the older run goes first.
+///
+/// Inside one run the two clocks can still sit far apart: FFmpeg's wrap correction lifts the
+/// rendition's restart to 2^33 + x while the video's stays at x (measured on Pluto, 8590024592
+/// against 90000). Ordered by raw time that audio would wait behind the whole ad. A distance larger
+/// than any interleave between the first packets of a run is therefore taken as an offset between the
+/// two clocks and subtracted before comparing.
+///
+/// A source can see a restart the other never does (a discontinuity one playlist lacks). Waiting for
+/// it would starve the leader for good, so once the lagging source has moved `maxLagMicros` past the
+/// point where the lead began, it is moved into the leader's run.
+struct DualSourceSeamEpochs {
+    enum Source { case main, side }
+
+    /// A step back larger than any interleave or reorder window is a clock restart.
+    static let backwardJumpMicros: Int64 = 1_000_000
+    /// A step forward this large is a restart too (back from an ad onto a programme clock far ahead),
+    /// and two clocks this far apart in one run are offset from each other.
+    static let forwardJumpMicros: Int64 = 60_000_000
+    static let maxLagMicros: Int64 = 10_000_000
+
+    private(set) var mainEpoch = 0
+    private(set) var sideEpoch = 0
+    private var mainLast: Int64?
+    private var sideLast: Int64?
+    /// The lagging source's clock when the other one moved ahead.
+    private var lagStart: Int64?
+    /// First clock reading of each source in its current run.
+    private var mainRunStart: Int64?
+    private var sideRunStart: Int64?
+
+    mutating func observe(_ source: Source, micros: Int64) {
+        guard micros != Int64.min else { return }
+        let last = source == .main ? mainLast : sideLast
+        var epoch = source == .main ? mainEpoch : sideEpoch
+        let other = source == .main ? sideEpoch : mainEpoch
+        var newRun = last == nil
+        if let last, micros < last - Self.backwardJumpMicros || micros > last + Self.forwardJumpMicros {
+            epoch += 1
+            newRun = true
+            if epoch > other { lagStart = source == .main ? sideLast : mainLast }
+        } else if epoch < other {
+            if let start = lagStart, micros - start > Self.maxLagMicros {
+                epoch = other
+                newRun = true
+            }
+        }
+        if epoch == other { lagStart = nil }
+        if source == .main {
+            mainEpoch = epoch; mainLast = micros
+            if newRun { mainRunStart = micros }
+        } else {
+            sideEpoch = epoch; sideLast = micros
+            if newRun { sideRunStart = micros }
+        }
+    }
+
+    /// How far the side clock sits above the main clock in the shared run, or 0 when the two are
+    /// close enough that the timestamps can be compared as they are.
+    var sideOffsetMicros: Int64 {
+        guard mainEpoch == sideEpoch, let main = mainRunStart, let side = sideRunStart else { return 0 }
+        let distance = side - main
+        return abs(distance) > Self.forwardJumpMicros ? distance : 0
+    }
+
+    /// nil when the timestamps decide (same run, no offset).
+    func sideFirst(mainMicros: Int64, sideMicros: Int64) -> Bool? {
+        if mainEpoch != sideEpoch { return sideEpoch < mainEpoch }
+        let offset = sideOffsetMicros
+        guard offset != 0, mainMicros != Int64.min, sideMicros != Int64.min else { return nil }
+        return sideMicros - offset < mainMicros
+    }
+}
+
 enum DualSourceMergeOrder {
 
     /// Compares in a 1/1000000 common clock. Ties yield MAIN first (segment cut keys off video keyframes).

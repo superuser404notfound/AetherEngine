@@ -1641,7 +1641,7 @@ A live HLS upstream can be ingested directly via `HLSLiveIngestReader` (a public
 - **Prefetch (#177).** Segments are fetched through a bounded prefetch pipeline (up to 4 in flight, committed to the byte stream strictly in playlist order), so per-segment connection + TTFB latency overlaps and high-bitrate channels buffer ahead of real time.
 - **Supported:**
   - MPEG-TS segments, whole or as `EXT-X-BYTERANGE` sub-ranges of one resource (fetched with a `Range` request; an origin that answers 200 has the sub-range cut from the whole body),
-  - demuxed-audio variants (`EXT-X-MEDIA` audio groups, fetched by a companion reader and merged by DTS),
+  - demuxed-audio variants (`EXT-X-MEDIA` audio groups, fetched by a companion reader and merged by DTS). The rendition is the session's audio even when the variant's segments carry audio of their own, as RFC 8216 asks and AVPlayer does. On the native path only: the software path has no side-audio merge and keeps the variant's muxed audio,
   - packed-audio renditions (raw ADTS framed by ID3 timestamps),
   - AES-128 clear-key segments (below).
 - **AES-128.** Clear-key segments (`EXT-X-KEY:METHOD=AES-128`, the standard FAST-channel scheme) are decrypted in-line by `HLSSegmentDecryptor`. The key is fetched once per clip and memoised, and each segment is decrypted (AES-128-CBC / PKCS7) before demux. This is standard HLS clear-key, not FairPlay / Widevine.
@@ -1653,6 +1653,7 @@ SSAI plays through the direct path instead of bouncing to a server transcode at 
 
 - The producer detects the program switch, parses the ad's SPS/PPS by hand (`H264SPS`) to build a fresh codec config, rotates the fMP4 muxer, and emits a versioned `#EXT-X-MAP` per discontinuity, so AVPlayer resyncs cleanly across the init and resolution change.
 - Audio is re-anchored to the video timeline at every creative boundary (including amux creatives that mux audio on a separate source clock).
+- With a demuxed audio rendition (Pluto TV: muxed programme segments, video-only ad segments, the sound of both in the rendition) the video PID switch works the same way, and the merge orders the two readers by clock run before timestamp. Both clocks restart at the seam, each reader reaches it on its own schedule, and ordering by timestamp alone handed out the ad before the end of the programme. Inside one run, two clocks more than 60 s apart (FFmpeg lifts the rendition's restart to 2^33 + x while the video stays at x) are compared by their distance from the run's first packets. A restart only one reader ever shows stops holding the other back after 10 s of its media. Every run change logs `merge clock run:`.
 - An `OutputTimestampSanitizer` keeps the stream monotonic across the splice.
 
 **Stall watchdog.** A no-cut stall watchdog sits underneath as a safety net. It tells a genuinely wedged pod (reading at full rate but unable to cut) from a slow source (a trickle) by read rate. A wedge-classified stall whose video PTS is still advancing (a source delivering just below real time, #177) is held with the watchdog re-armed (bounded consecutive holds) instead of retuned. Only a genuine wedge or an exhausted hold budget escalates to a host retune.

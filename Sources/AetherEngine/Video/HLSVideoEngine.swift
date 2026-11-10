@@ -1333,6 +1333,56 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// this reader (owned by the host's main reader). nil for muxed-audio sessions.
     private let companionAudioReader: IOReader?
 
+    /// Open the side demuxer over a demuxed-audio rendition and make it the session's audio source.
+    private func openCompanionAudio(_ companion: IOReader) throws -> Demuxer {
+        let formatHint: String
+        if let info = companion as? LiveIngestSourceInfo {
+            guard let resolved = info.resolveSegmentFormatHint() else {
+                // Terminal ingest (or no first segment inside the resolve bound): the companion
+                // can't deliver audio.
+                throw HLSVideoEngineError.openFailed(
+                    reason: "demuxed-audio companion produced no classifiable first segment")
+            }
+            formatHint = resolved
+        } else {
+            // Non-ingest custom companions keep the previous TS contract.
+            formatHint = "mpegts"
+        }
+        let side = Demuxer()
+        do {
+            try side.open(reader: companion, formatHint: formatHint, isLive: true)
+        } catch {
+            throw HLSVideoEngineError.openFailed(reason: "demuxed-audio companion open failed (\(error))")
+        }
+        guard side.audioStreamIndex >= 0,
+              let sideAudioStream = side.stream(at: side.audioStreamIndex) else {
+            side.close()
+            throw HLSVideoEngineError.openFailed(reason: "demuxed-audio companion has no audio stream")
+        }
+        // Packed audio: anchor synthesized side-audio clock on the ID3 PRIV program-clock timestamp
+        // rescaled into the side stream's own time base (raw "aac" demuxer: 1/28224000).
+        if formatHint == "aac" {
+            guard let offset90k = (companion as? LiveIngestSourceInfo)?.packedAudioTimestampOffset90k else {
+                side.close()
+                throw HLSVideoEngineError.openFailed(
+                    reason: "packed-audio companion carries no program-clock timestamp")
+            }
+            let tb = sideAudioStream.pointee.time_base
+            packedSideAudioStartPts = av_rescale_q(offset90k, AVRational(num: 1, den: 90000), tb)
+        }
+        restartLock.lock()
+        sideAudioDemuxer = side
+        restartLock.unlock()
+        companionAudioTracks = side.audioTrackInfos()
+        EngineLog.emit(
+            "[HLSVideoEngine] demuxed-audio companion opened: format=\(formatHint) "
+            + "side demuxer audioStreamIndex=\(side.audioStreamIndex)"
+            + (packedSideAudioStartPts.map { " packedStartPts=\($0) (side TB)" } ?? ""),
+            category: .session
+        )
+        return side
+    }
+
     /// Host override for LL-HLS blocking-reload (`LoadOptions.liveBlockingReload`); nil = auto (#167).
     private let blockingReloadOverride: Bool?
 
@@ -2038,59 +2088,29 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // 6a-pre. Open a side demuxer for demuxed-audio live HLS ingest (separate rendition
         //     playlist). Companion classifies its first segment to select "mpegts" vs "aac"
-        //     format hint. Failure here fails the load so the host falls back to server-muxed.
+        //     format hint.
+        //
+        //     The rendition wins over audio muxed into the variant: a STREAM-INF that names an AUDIO
+        //     group with a URI plays that rendition (RFC 8216 4.3.4.1.1), and AVPlayer does the same.
+        //     Pluto TV is why it matters: its programme segments carry their own audio, its stitched
+        //     ad segments are video only, and the ad's sound exists in the rendition alone. Bound to
+        //     the muxed track, every segment of an ad break was cut silent.
+        //
+        //     Without muxed audio a companion failure fails the load so the host falls back to
+        //     server-muxed. With it the session keeps the muxed track, which is what it played before.
         let audioDem: Demuxer
-        if isLiveSession, dem.audioStreamIndex < 0, let companion = companionAudioReader {
-            let formatHint: String
-            if let info = companion as? LiveIngestSourceInfo {
-                guard let resolved = info.resolveSegmentFormatHint() else {
-                    // Terminal ingest (or no first segment inside the
-                    // resolve bound): the companion can't deliver audio.
-                    throw HLSVideoEngineError.openFailed(
-                        reason: "demuxed-audio companion produced no classifiable first segment")
-                }
-                formatHint = resolved
-            } else {
-                // Non-ingest custom companions keep the previous TS contract.
-                formatHint = "mpegts"
-            }
-            let side = Demuxer()
+        if isLiveSession, let companion = companionAudioReader {
+            let muxedFallback = dem.audioStreamIndex >= 0 ? dem : nil
             do {
-                try side.open(reader: companion, formatHint: formatHint, isLive: true)
-            } catch {
-                throw HLSVideoEngineError.openFailed(
-                    reason: "demuxed-audio companion open failed (\(error))")
+                audioDem = try openCompanionAudio(companion)
+            } catch let error as HLSVideoEngineError {
+                guard let muxedFallback else { throw error }
+                EngineLog.emit(
+                    "[HLSVideoEngine] demuxed-audio companion unusable (\(error)); keeping the audio "
+                    + "muxed into the variant (stream \(muxedFallback.audioStreamIndex))",
+                    category: .session)
+                audioDem = muxedFallback
             }
-            guard side.audioStreamIndex >= 0,
-                  let sideAudioStream = side.stream(at: side.audioStreamIndex) else {
-                side.close()
-                throw HLSVideoEngineError.openFailed(
-                    reason: "demuxed-audio companion has no audio stream")
-            }
-            // Packed audio: anchor synthesized side-audio clock on the ID3 PRIV program-clock timestamp
-            // rescaled into the side stream's own time base (raw "aac" demuxer: 1/28224000).
-            if formatHint == "aac" {
-                guard let offset90k = (companion as? LiveIngestSourceInfo)?
-                    .packedAudioTimestampOffset90k else {
-                    side.close()
-                    throw HLSVideoEngineError.openFailed(
-                        reason: "packed-audio companion carries no program-clock timestamp")
-                }
-                let tb = sideAudioStream.pointee.time_base
-                packedSideAudioStartPts = av_rescale_q(
-                    offset90k, AVRational(num: 1, den: 90000), tb)
-            }
-            restartLock.lock()
-            sideAudioDemuxer = side
-            restartLock.unlock()
-            audioDem = side
-            companionAudioTracks = side.audioTrackInfos()
-            EngineLog.emit(
-                "[HLSVideoEngine] demuxed-audio companion opened: format=\(formatHint) "
-                + "side demuxer audioStreamIndex=\(side.audioStreamIndex)"
-                + (packedSideAudioStartPts.map { " packedStartPts=\($0) (side TB)" } ?? ""),
-                category: .session
-            )
         } else {
             audioDem = dem
         }
