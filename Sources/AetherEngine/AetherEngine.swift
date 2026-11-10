@@ -7791,6 +7791,7 @@ public final class AetherEngine: ObservableObject {
     /// published format and the served stream drift apart.
     @MainActor
     func republishPanelPresentsHDR(effectiveFormat: VideoFormat, because reason: String) {
+        nativeVideoSession?.notePanelPresentsHDR(true)   // AE#1018: the FEL fold gate reads the same answer
         let corrected = Self.presentedVideoFormat(
             effectiveFormat: effectiveFormat,
             panelPresentsHDR: true,

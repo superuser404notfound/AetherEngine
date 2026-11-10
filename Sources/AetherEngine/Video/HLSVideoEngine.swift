@@ -1414,7 +1414,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let panelPresentsHDRFlag: OSAllocatedUnfairLock<Bool>
 
     func notePanelPresentsHDR(_ presents: Bool) {
-        panelPresentsHDRFlag.withLock { $0 = presents }
+        let changed = panelPresentsHDRFlag.withLock { flag -> Bool in
+            defer { flag = presents }
+            return flag != presents
+        }
+        if changed, savedVideoConfig?.convertP7ToProfile81 == true {
+            EngineLog.emit("[FelCurves] panel presents HDR: \(presents)", category: .session)
+        }
     }
 
     /// AE#1018, measured on an Apple TV 4K (tvOS 27.2) with an RPU edited to darken every other block: a
