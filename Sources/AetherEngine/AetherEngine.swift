@@ -3226,6 +3226,7 @@ public final class AetherEngine: ObservableObject {
             return
         }
         masterFallbackUsed = true
+        session.notePanelPresentsHDR(false)   // AE#1018: the fold resumes at the next keyframe
         masterRefusedByDisplay = MasterFallbackDecision.isDisplayRejectionCode(rejection.code)
             && session.servedSourceIsHDR
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
@@ -3518,6 +3519,7 @@ public final class AetherEngine: ObservableObject {
                     throw StartupGateFailure(message: startupGateFailureMessage(host))
                 }
                 masterFallbackUsed = true
+                session.notePanelPresentsHDR(false)   // AE#1018
                 session.markServingMediaAfterFallback()
                 nativeSubtitleRenditionsServed = false
                 EngineLog.emit(
@@ -6309,8 +6311,11 @@ public final class AetherEngine: ObservableObject {
                         try await settlePanelRouting(ownsProbe: false)
                         return routingPanelHDR
                     },
-                    // AE#1018: false until settled; the resolver above updates the session.
-                    panelPresentsHDR: panelRoutingSettled && panelHDRAfterHandshake
+                    panelPresentsHDR: Self.felGatePanelPresentsHDR(
+                        labelPresentsHDR: panelRoutingSettled && panelHDRAfterHandshake,
+                        hdrWriteEngagesPanel: displayCriteria.hdrWriteExpectedToEngagePanel(),
+                        engineWritesHDRCriteria: options.engineWritesDisplayCriteria && effectiveFormat != .sdr,
+                        panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
                 )
                 playbackBackend = .native
                 // Preserve source evidence for a later native-to-software recovery.

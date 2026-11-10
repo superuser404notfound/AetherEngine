@@ -21,6 +21,20 @@ struct Issue1018FelFoldGateTests {
                                                panelPresentsHDR: row.3) == row.4)
     }
 
+    @Test("an HDR write with range matching on counts as HDR from the start, unless the display refused one",
+          arguments: [
+              (false, true, true, false, true),
+              (false, true, true, true, false),     // the display refused an HDR master in this process
+              (false, false, true, false, false),   // matching off: the panel stays where it is
+              (false, true, false, false, false),   // no HDR criteria written (SDR, or a host that owns them)
+              (true, false, false, true, true),     // a proven panel wins over everything
+          ])
+    func startingAnswer(_ row: (Bool, Bool, Bool, Bool, Bool)) {
+        #expect(AetherEngine.felGatePanelPresentsHDR(labelPresentsHDR: row.0, hdrWriteEngagesPanel: row.1,
+                                                     engineWritesHDRCriteria: row.2,
+                                                     panelRefusedHDRMaster: row.3) == row.4)
+    }
+
     /// Reads until the lookahead hands out its first video packet; returns how many source reads that took.
     private static func readsToFirstVideo(unseen: Bool) throws -> (reads: Int, folding: Bool?) {
         let demuxer = Demuxer()

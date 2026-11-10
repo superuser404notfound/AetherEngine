@@ -1370,6 +1370,18 @@ final class DisplayCriteriaController {
     /// headroom above 1.0 answers it; a decayed one is answered by `panelPresentsHDR` from what this display
     /// has already proven, because HDR video on the screen pulls the value down and a replay asks while the
     /// previous session was still doing that.
+    /// AE#1018: whether an HDR criteria write is expected to put the panel in HDR, before the switch has
+    /// answered. tvOS exposes one combined matching flag, so a rate-only setup reads true here too; the
+    /// display's refusal of the HDR master corrects that within the first second.
+    func hdrWriteExpectedToEngagePanel() -> Bool {
+        #if os(tvOS)
+        guard let window = resolveWindow() else { return false }
+        return window.avDisplayManager.isDisplayCriteriaMatchingEnabled && AVPlayer.eligibleForHDRPlayback
+        #else
+        return false
+        #endif
+    }
+
     func currentPanelIsHDR() -> Bool {
         #if os(tvOS)
         guard let window = resolveWindow() else { return false }

@@ -1360,8 +1360,10 @@ extension AetherEngine {
             let routesAsHDRPanel: Bool
             do {
                 routesAsHDRPanel = try await resolvePanelRouting()
-                session.notePanelPresentsHDR(Self.sessionPanelPresentsHDR(
-                    hostAsserts: loadedOptions.panelIsInHDRMode, criteriaReadout: sessionPanelHDRReadout))
+                if Self.sessionPanelPresentsHDR(hostAsserts: loadedOptions.panelIsInHDRMode,
+                                                criteriaReadout: sessionPanelHDRReadout) {
+                    session.notePanelPresentsHDR(true)
+                }
             } catch {
                 session.stop(reason: .loadFailed)
                 throw error
@@ -2878,8 +2880,12 @@ extension AetherEngine {
                     keepsMediaPlaylistRoute: keepsMediaRoute,
                     autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
                     generation: gen,
-                    panelPresentsHDR: Self.sessionPanelPresentsHDR(
-                        hostAsserts: loadedOptions.panelIsInHDRMode, criteriaReadout: sessionPanelHDRReadout)
+                    panelPresentsHDR: Self.felGatePanelPresentsHDR(
+                        labelPresentsHDR: Self.sessionPanelPresentsHDR(
+                            hostAsserts: loadedOptions.panelIsInHDRMode, criteriaReadout: sessionPanelHDRReadout),
+                        hdrWriteEngagesPanel: displayCriteria.hdrWriteExpectedToEngagePanel(),
+                        engineWritesHDRCriteria: loadedOptions.engineWritesDisplayCriteria && videoFormat != .sdr,
+                        panelRefusedHDRMaster: Self.panelRefusedHDRMaster || masterFallbackUsed)
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native
