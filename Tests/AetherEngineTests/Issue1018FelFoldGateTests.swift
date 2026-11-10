@@ -72,6 +72,55 @@ struct Issue1018FelFoldGateTests {
         return reads
     }
 
+    private struct Stamp: Equatable { let stream: Int32; let pts: Int64; let dts: Int64 }
+
+    private static func rawOrder(limit: Int) throws -> [Stamp] {
+        let demuxer = Demuxer()
+        try demuxer.open(url: HeavyDualLayerSuites.DoviFelRealFileTests.url("fel-clip-a.mkv"))
+        defer { demuxer.close() }
+        var out: [Stamp] = []
+        while out.count < limit, let packet = try demuxer.readPacket() {
+            out.append(Stamp(stream: packet.pointee.stream_index, pts: packet.pointee.pts, dts: packet.pointee.dts))
+            var p: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&p)
+        }
+        return out
+    }
+
+    @Test("the fold leaves and rejoins at keyframes during playback, in read order",
+          .enabled(if: HeavyDualLayerSuites.DoviFelRealFileTests.available("fel-clip-a.mkv"),
+                   HeavyDualLayerSuites.DoviFelRealFileTests.needsClips))
+    func togglesBothWaysInOrder() throws {
+        let limit = 900
+        let demuxer = Demuxer()
+        try demuxer.open(url: HeavyDualLayerSuites.DoviFelRealFileTests.url("fel-clip-a.mkv"))
+        defer { demuxer.close() }
+        let index = Int32(demuxer.videoStreamIndex)
+        let stream = try #require(demuxer.stream(at: index))
+        var videoRead = 0
+        // Folding at first, unseen from video packet 150 to 450, folding again after.
+        let lookahead = FelCurveLookahead(videoStreamIndex: index, stream: stream, framing: .lengthPrefixed(size: 4),
+                                          foldIsUnseen: { videoRead >= 150 && videoRead < 450 })
+        var out: [Stamp] = []
+        var states: [Bool] = []
+        while out.count < limit, let packet = try lookahead.next(read: {
+            let p = try demuxer.readPacket()
+            if let p, p.pointee.stream_index == index { videoRead += 1 }
+            return p
+        }) {
+            out.append(Stamp(stream: packet.pointee.stream_index, pts: packet.pointee.pts, dts: packet.pointee.dts))
+            states.append(lookahead.bypassing)
+            var p: UnsafeMutablePointer<AVPacket>? = packet
+            trackedPacketFree(&p)
+        }
+        lookahead.reset()
+        #expect(out == (try Self.rawOrder(limit: out.count)))
+        let transitions = zip(states, states.dropFirst()).filter { $0 != $1 }.count
+        #expect(states.first == false)
+        #expect(states.contains(true))
+        #expect(transitions == 2)
+    }
+
     @Test("while the fold is unseen the lookahead holds nothing back",
           .enabled(if: HeavyDualLayerSuites.DoviFelRealFileTests.available("fel-clip-a.mkv"),
                    HeavyDualLayerSuites.DoviFelRealFileTests.needsClips))

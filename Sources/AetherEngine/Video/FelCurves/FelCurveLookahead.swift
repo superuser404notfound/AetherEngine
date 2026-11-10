@@ -62,7 +62,7 @@ final class FelCurveLookahead {
     /// packets pass through converted with the stream's mapping, with no GOP held back and nothing decoded.
     private let foldIsUnseen: () -> Bool
     /// Pass-through while `foldIsUnseen` held at the last GOP boundary; folding resumes at a keyframe.
-    private var bypassing = false
+    private(set) var bypassing = false
 
     init(videoStreamIndex: Int32, stream: UnsafeMutablePointer<AVStream>, framing: VideoNALFraming,
          foldIsUnseen: @escaping () -> Bool = { false }) {
@@ -107,15 +107,20 @@ final class FelCurveLookahead {
             if isFolding == false || (!isVideo && buffered.isEmpty) {
                 return packet
             }
-            if isVideo, buffered.isEmpty, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 {
+            if isVideo, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 {
+                // The held GOP goes out first, then the gate is read: a keyframe is where the fold may leave
+                // or rejoin, in either direction, without splitting a GOP.
+                if bufferedHasVideo { release() }
                 updateBypass()
             }
             if bypassing {
                 convert(packet, luma: nil)
+                // A GOP released just above is still queued in `ready`; the keyframe must not overtake it.
+                if readyIndex < ready.count {
+                    ready.append(packet)
+                    continue
+                }
                 return packet
-            }
-            if isVideo, packet.pointee.flags & AV_PKT_FLAG_KEY != 0, bufferedHasVideo {
-                release()
             }
             buffered.append(packet)
             if isVideo { bufferedHasVideo = true }
