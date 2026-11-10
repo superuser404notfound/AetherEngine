@@ -1408,9 +1408,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// From `LoadOptions.foldsDolbyVisionFEL`; handed to every producer this session builds.
     let foldsDolbyVisionFEL: Bool
 
-    /// AE#1018: the panel PROVED it presents HDR (host assertion or criteria readout, the label's
-    /// conservative answer, never the route's unproven attempt). Seeded at init, updated by
-    /// `notePanelPresentsHDR(_:)` once a running display switch has settled.
+    /// AE#1018: whether the panel presents HDR, for the FEL fold gate. Seeded at init with the load's
+    /// prediction (`AetherEngine.felGatePanelPresentsHDR`), set by an accepted HDR master or a settled
+    /// readout, cleared by a refused master (`notePanelPresentsHDR(_:)`).
     private let panelPresentsHDRFlag: OSAllocatedUnfairLock<Bool>
 
     func notePanelPresentsHDR(_ presents: Bool) {
@@ -1426,7 +1426,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// AE#1018, measured on an Apple TV 4K (tvOS 27.2) with an RPU edited to darken every other block: a
     /// panel presenting HDR10 shows the base layer bit for bit, the RPU is not applied; a panel in SDR (media
     /// or master playlist) and the AE#455 Profile 5 route both apply it. A Mac applies it too, so the
-    /// verdict is tvOS-only. Unknown counts as seen: the fold stays on until the panel has proved HDR.
+    /// verdict is tvOS-only. The panel answer is `AetherEngine.felGatePanelPresentsHDR` at load, corrected
+    /// by readyToPlay of the HDR master and cleared by its refusal.
     nonisolated static func felFoldIsUnseen(isTVOS: Bool, effectiveDvMode: Bool, servesAsProfile5: Bool,
                                            panelPresentsHDR: Bool) -> Bool {
         isTVOS && !effectiveDvMode && !servesAsProfile5 && panelPresentsHDR

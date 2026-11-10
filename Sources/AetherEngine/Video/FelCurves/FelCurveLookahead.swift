@@ -107,7 +107,7 @@ final class FelCurveLookahead {
             if isFolding == false || (!isVideo && buffered.isEmpty) {
                 return packet
             }
-            if isVideo, buffered.isEmpty, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 || bypassing {
+            if isVideo, buffered.isEmpty, packet.pointee.flags & AV_PKT_FLAG_KEY != 0 {
                 updateBypass()
             }
             if bypassing {

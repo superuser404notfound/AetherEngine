@@ -553,7 +553,7 @@ public struct LoadOptions: Sendable, Equatable {
     /// reports, or to compare the two on one build.
     ///
     /// Independent of this field, the fold pauses on its own where its RPU cannot reach the picture: on tvOS,
-    /// at a display without Dolby Vision whose panel has proved it presents HDR10, off the
+    /// at a display without Dolby Vision whose panel presents HDR10 (predicted at load, see AE#1018), off the
     /// `forceDolbyVisionOnNonDVDisplay` route (measured: tvOS hands such a panel the base layer). A Mac, a
     /// panel in SDR and the Profile 5 route all apply the RPU, so the fold stays on there.
     ///
