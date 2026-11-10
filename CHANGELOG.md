@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.62.1] - 2026-11-10
+
 ### Fixed
 
 - **`maximumSubtitleOffsetSeconds = 0` stops the second download behind embedded subtitles (#1015).** Selecting an
@@ -18,7 +22,11 @@ the public-API contract.
   A host that declares a reach of 0 now reads subtitles from the main reader alone. The prefetch still runs for a
   negative `softwareSubtitleDelaySeconds` and the OCR worker, and starts or stops mid-session when either changes.
   The default (60) keeps today's behaviour.
-
+- **A declared subtitle offset reach also bounds the bitmap history (#929).** Once a host sets
+  `maximumSubtitleOffsetSeconds`, bitmap cues that ended more than max(reach, 15 s) behind the playhead are dropped
+  at once instead of being kept up to the 64 MiB budget, since they serve no offset and a seek back re-decodes its
+  own window anyway. With a 4 MB PGS image every 3 s and a reach of 0, a seek back retains 11 images (44.4 MB)
+  instead of 16 (64.5 MB). The default (60, undeclared) keeps the AE#879 budget.
 - **Pluto TV ads have sound on the native path.** Pluto muxes audio into its programme segments, stitches
   video-only ad segments on a new PID into the same variant, and carries the sound of both in its demuxed
   `AUDIO` rendition. The engine played the muxed track, so every ad segment was cut without sound. A live
