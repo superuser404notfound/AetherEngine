@@ -6308,7 +6308,9 @@ public final class AetherEngine: ObservableObject {
                     resolvePanelRouting: panelRoutingSettled ? nil : {
                         try await settlePanelRouting(ownsProbe: false)
                         return routingPanelHDR
-                    }
+                    },
+                    // AE#1018: false until settled; the resolver above updates the session.
+                    panelPresentsHDR: panelRoutingSettled && panelHDRAfterHandshake
                 )
                 playbackBackend = .native
                 // Preserve source evidence for a later native-to-software recovery.

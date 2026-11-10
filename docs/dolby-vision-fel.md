@@ -845,11 +845,23 @@ A scene without a residual (`disable_residual_flag`, MEL) or whose picture canno
 
 On macOS, `AVPlayerLayer` shows the folded stream served by `aetherctl serve` pixel-identical to the folded RPUs injected offline. On an M1 debug build the pass folds 60 s of FEL in 6 to 12 s.
 
+**Where the folded RPU reaches the picture** (AE#1018). Measured on an Apple TV 4K (3rd generation, tvOS 27.2) at an HDR10 television without Dolby Vision, with a Profile 8.1 clip whose RPU darkens every other 2 s block, paused screenshots against the unedited clip:
+
+| Panel | Route | RPU applied |
+|---|---|---|
+| SDR (Match Content off) | media or master playlist | yes |
+| HDR10 (Match Dynamic Range on) | master playlist | no, the base layer bit for bit |
+| HDR10 | `forceDolbyVisionOnNonDVDisplay` (Profile 5) | yes, no colour shift on the unedited frames |
+
+A display that takes Dolby Vision and a Mac apply it as well. So the fold pauses in exactly one case: on tvOS, without Dolby Vision, off the Profile 5 route, once the panel has proved it presents HDR (a host assertion or the criteria readout; an unproven panel keeps the fold). The check runs at every GOP boundary. While it holds, packets pass through converted with the stream's mapping, no GOP is held back and nothing is decoded, and the log says `[FelCurves] fold paused`. A panel whose answer arrives after playback started stops the fold from the next keyframe.
+
+**Switching it off per load.** `LoadOptions.foldsDolbyVisionFEL` (default `true`) turns the fold off for one load, for a title a viewer reports or an A/B check on one build. It is a tuning field that `reloadAtCurrentPosition(applying:)` carries. Without the trait it is ignored. The load logs `[FelCurves] fold not armed: <reason>` when a Profile 7 conversion runs without the fold.
+
 ## 8. Document map
 
 | Document | Role |
 |---|---|
 | this file | design, implementation, evidence, verification |
 | [formats.md](formats.md#dolby-vision-signaling) | Profile 7 behaviour as a host sees it |
-| [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling` |
+| [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling`, `foldsDolbyVisionFEL` |
 | [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el`, `felcurves` |

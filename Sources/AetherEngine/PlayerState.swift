@@ -544,6 +544,24 @@ public struct LoadOptions: Sendable, Equatable {
     /// A tuning field, with the same fresh-load rule for a custom source as `preferDualLayerDolbyVision`.
     public var dualLayerRoute: DualLayerRoute = .softwareHost
 
+    /// Whether a Profile 7 FEL source on the native route gets its enhancement-layer luma residual folded
+    /// into the Profile 8.1 RPU's luma curve per scene (AE#988, the `DolbyVisionFelCurves` package trait).
+    /// Default true, which is the behaviour of every build with the trait. False keeps the plain mode 2
+    /// conversion: no GOP held back between demuxer and segmenter, no base- and enhancement-layer decode
+    /// per scene, so a start or a seek is as fast as on a build without the trait (AE#1018 measured a
+    /// resume 0.5 to 4 s faster on an Apple TV 4K). Use it to turn the fold off for a title a viewer
+    /// reports, or to compare the two on one build.
+    ///
+    /// Independent of this field, the fold pauses on its own where its RPU cannot reach the picture: on tvOS,
+    /// at a display without Dolby Vision whose panel has proved it presents HDR10, off the
+    /// `forceDolbyVisionOnNonDVDisplay` route (measured: tvOS hands such a panel the base layer). A Mac, a
+    /// panel in SDR and the Profile 5 route all apply the RPU, so the fold stays on there.
+    ///
+    /// Without the `DolbyVisionFelCurves` trait this field is ignored, like `preferDualLayerDolbyVision`
+    /// without `DualLayerDolbyVision`. A tuning field: `reloadAtCurrentPosition(applying:)` carries a
+    /// change, and every producer the session builds afterwards (seek, revive) reads the new value.
+    public var foldsDolbyVisionFEL: Bool = true
+
     /// Opt in to upscaling SDR video below 1080p (coded width under 1920 and height under 1080) to the
     /// display's native pixel size (#846). Such a source routes through `SoftwarePlaybackHost`, where every
     /// decoded frame runs VideoToolbox low-latency super resolution where the device and frame size allow
@@ -1137,6 +1155,7 @@ public struct LoadOptions: Sendable, Equatable {
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         preferDualLayerDolbyVision: Bool = false,
         dualLayerRoute: DualLayerRoute = .softwareHost,
+        foldsDolbyVisionFEL: Bool = true,
         upscalesLowResolutionVideo: Bool = false,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
@@ -1202,6 +1221,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.dolbyVisionHandling = dolbyVisionHandling
         self.preferDualLayerDolbyVision = preferDualLayerDolbyVision
         self.dualLayerRoute = dualLayerRoute
+        self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
