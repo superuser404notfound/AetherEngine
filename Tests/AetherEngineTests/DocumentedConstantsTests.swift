@@ -197,6 +197,16 @@ final class DocumentedConstantsTests: XCTestCase {
                          try documentation())
     }
 
+    /// docs/formats.md quotes the two bounds of the dual-reader merge (a demuxed audio rendition
+    /// across an SSAI seam).
+    func testDualSourceSeamBoundsMatchDocumentation() throws {
+        XCTAssertEqual(DualSourceSeamEpochs.forwardJumpMicros, 60_000_000)
+        XCTAssertEqual(DualSourceSeamEpochs.maxLagMicros, 10_000_000)
+        let docs = try documentation()
+        assertDocumented("two clocks more than 60 s apart", docs)
+        assertDocumented("stops holding the other back after 10 s of its media", docs)
+    }
+
     // MARK: - Documentation corpus
 
     private static var repoRoot: URL {

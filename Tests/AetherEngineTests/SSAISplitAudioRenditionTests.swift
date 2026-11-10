@@ -97,13 +97,6 @@ struct SSAISplitAudioRenditionTests {
                    segments: outcome.segments)
     }
 
-    private func waitFor(_ condition: @escaping () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(60)
-        while !condition() {
-            guard Date() < deadline else { Issue.record("timed out"); return }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-    }
 
     @Test("the ad's video PID switch works with the rendition as the audio source, and sound continues")
     func adSeamWithRenditionAudio() async throws {

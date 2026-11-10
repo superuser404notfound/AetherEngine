@@ -3525,7 +3525,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 // Stamp at lookahead fill so ordering/gates/rebase/mux all see the same TS-like values.
                 stampPackedSideAudio(pkt)
             }
-            if let pkt = mergeSideLookahead {
+            // Only the bound audio stream moves the side clock run, as only video moves the main one:
+            // a TS rendition can carry timed ID3 or data PIDs on clocks of their own.
+            if let pkt = mergeSideLookahead, pkt.pointee.stream_index == audioConfig?.sourceStreamIndex {
                 observeMergeRun(.side, micros: Self.mergeOrderingMicros(
                     pkt, audioConfig?.sourceTimeBase ?? sourceVideoTimeBase))
             }
@@ -5460,7 +5462,6 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
 }
 
-/// Unit-testable DTS ordering for the dual-source pull-merge.
 /// Clock runs of the two merged sources (main video, side audio rendition).
 ///
 /// A stitched ad restarts the clock on BOTH sources, and each source reaches the seam on its own
@@ -5541,6 +5542,7 @@ struct DualSourceSeamEpochs {
     }
 }
 
+/// Unit-testable DTS ordering for the dual-source pull-merge.
 enum DualSourceMergeOrder {
 
     /// Compares in a 1/1000000 common clock. Ties yield MAIN first (segment cut keys off video keyframes).

@@ -12,6 +12,15 @@ the public-API contract.
 
 ### Fixed
 
+- **Pluto TV ads have sound on the native path.** Pluto muxes audio into its programme segments, stitches
+  video-only ad segments on a new PID into the same variant, and carries the sound of both in its demuxed
+  `AUDIO` rendition. The engine played the muxed track, so every ad segment was cut without sound. A live
+  variant that names an `AUDIO` group with a URI now plays that rendition even when its segments carry audio
+  of their own (RFC 8216, and what AVPlayer does); a rendition that cannot be opened falls back to the muxed
+  track. The SSAI video program switch now works with the rendition in use, and the two readers are merged by
+  clock run before timestamp, so the ad is no longer handed out before the end of the programme, including when
+  FFmpeg's wrap correction puts the rendition's clock 2^33 ticks above the video's. The software path has no
+  side-audio merge and still plays such ads silent.
 - **The documentation is rewritten in plain language, and three statements in it were wrong.** The README is a
   short overview now; its content lives in `docs/guide.md`, `docs/installation.md`, `docs/features.md`,
   `docs/comparison.md` and `docs/licensing.md`, and every doc leads with a summary and contents list. The FEL
