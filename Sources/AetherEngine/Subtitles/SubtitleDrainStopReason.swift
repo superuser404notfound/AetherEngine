@@ -36,4 +36,8 @@ enum SubtitleDrainStopReason: String, Sendable {
     /// `startSubtitleForwardPrefetcher` is replacing a running session with a new one (a changed
     /// lead, or a jump the in-place re-anchor cannot serve). The one reason that is not a loss.
     case prefetchRebuild
+    /// AE#1015: the host's offset reach and the software delay no longer read ahead of the
+    /// playhead, so the second copy of the stream buys nothing. The drainer keeps running on the
+    /// pump's harvest.
+    case noAdvanceReach
 }

@@ -983,6 +983,7 @@ The tap's forward coverage ends at the producer's read position (its forward par
 - While a bitmap track's OCR rendition is armed, the lead is raised to 270 s, which clears the OCR worker's own 240 s window by 30 s, so the store actually holds what the worker is about to read.
 - So `subtitleCues` holds cues ahead of the playhead for a host-applied ADVANCE sync offset, text and bitmap alike.
 - Live sessions skip it: content past the edge does not exist.
+- **Only when something reads ahead (AE#1015).** It runs while the host's offset reach is above 0 (`maximumSubtitleOffsetSeconds`, default 60), `softwareSubtitleDelaySeconds` is negative, or the OCR worker is armed. On an interleaved container it downloads the video a second time, so with a reach of 0 the drainer reads from the tap alone.
 - It is best-effort. If it cannot open or wedges, the tap-fed behavior above is unchanged.
 - **Positioning (#234).** Its positioning seek is anchored on the subtitle stream's own timestamp axis. Left to libavformat's default reference, the anchor follows whichever stream is not fully discarded. The pacing stream that gives the park its control point (#230) would then move it onto video keyframes, and on Matroska that lands in a later cluster and drops a landing cue that starts further back than the destination.
 - **Re-anchoring.** A playhead jump re-anchors the running session in place rather than rebuilding it, since a rebuild pays an open, the Matroska cue-index prewarm and a positioning seek, each a bounded range the origin delivers in full.
