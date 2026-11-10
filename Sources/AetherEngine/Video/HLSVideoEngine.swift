@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import os
 import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
@@ -1158,6 +1159,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         undecodableAudioStreamIndices: Set<Int32> = [],
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         objectAudioRendering: ObjectAudioRendering = .off,
+        foldsDolbyVisionFEL: Bool = true,
+        panelPresentsHDR: Bool = false,
         stereoPresentation: StereoPresentation = .automatic,
         stereoOnAnySystem: Bool = false,
         isLiveSession: Bool = false,
@@ -1218,6 +1221,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.undecodableAudioStreamIndices = undecodableAudioStreamIndices
         self.audioBridgeMode = audioBridgeMode
         self.objectAudioRendering = objectAudioRendering
+        self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
+        self.panelPresentsHDRFlag = OSAllocatedUnfairLock(initialState: panelPresentsHDR)
         self.stereoPresentation = stereoPresentation
         self.stereoOnAnySystem = stereoOnAnySystem
         self.isLiveSession = isLiveSession
@@ -1399,6 +1404,34 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// TrueHD Atmos and DTS:X delivery (#731, see `ObjectAudioRendering`); consulted before `audioBridgeMode`.
     let objectAudioRendering: ObjectAudioRendering
+
+    /// From `LoadOptions.foldsDolbyVisionFEL`; handed to every producer this session builds.
+    let foldsDolbyVisionFEL: Bool
+
+    /// AE#1018: whether the panel presents HDR, for the FEL fold gate. Seeded at init with the load's
+    /// prediction (`AetherEngine.felGatePanelPresentsHDR`), set by an accepted HDR master or a settled
+    /// readout, cleared by a refused master (`notePanelPresentsHDR(_:)`).
+    private let panelPresentsHDRFlag: OSAllocatedUnfairLock<Bool>
+
+    func notePanelPresentsHDR(_ presents: Bool) {
+        let changed = panelPresentsHDRFlag.withLock { flag -> Bool in
+            defer { flag = presents }
+            return flag != presents
+        }
+        if changed, savedVideoConfig?.convertP7ToProfile81 == true {
+            EngineLog.emit("[FelCurves] panel presents HDR: \(presents)", category: .session)
+        }
+    }
+
+    /// AE#1018, measured on an Apple TV 4K (tvOS 27.2) with an RPU edited to darken every other block: a
+    /// panel presenting HDR10 shows the base layer bit for bit, the RPU is not applied; a panel in SDR (media
+    /// or master playlist) and the AE#455 Profile 5 route both apply it. A Mac applies it too, so the
+    /// verdict is tvOS-only. The panel answer is `AetherEngine.felGatePanelPresentsHDR` at load, corrected
+    /// by readyToPlay of the HDR master and cleared by its refusal.
+    nonisolated static func felFoldIsUnseen(isTVOS: Bool, effectiveDvMode: Bool, servesAsProfile5: Bool,
+                                           panelPresentsHDR: Bool) -> Bool {
+        isTVOS && !effectiveDvMode && !servesAsProfile5 && panelPresentsHDR
+    }
 
     /// Pre-opened demuxer reused by `start()` to skip `avformat_find_stream_info` (~1-3 s on slow CDN).
     /// Consumed in `start()`; unconsumed instances are closed by `stop()`.
@@ -3844,6 +3877,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // restart, live reopen, #99 revive) cuts with the offset currently in force.
             audioDelaySeconds: audioDelaySeconds,
             servesSegmentsProgressively: servesSegmentsProgressively,
+            foldsDolbyVisionFEL: foldsDolbyVisionFEL,
             epoch: producerEpoch
         )
         // #240: threaded onto every producer (initial + restart), like the wedge-detector providers
@@ -3872,6 +3906,17 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // consumer issues no forward fetch; its frozen fetch target is not a wedge). Threaded onto every
         // producer (initial + restart) so the guard survives scrub/audio-switch rebuilds.
         prod.wantsToPlayProvider = playIntentProvider
+        #if os(tvOS)
+        let isTVOS = true
+        #else
+        let isTVOS = false
+        #endif
+        let dvMode = effectiveDvMode
+        let servesAsProfile5 = cfg.doviConfig == .rewriteToProfile5
+        prod.felFoldUnseenProvider = { [panelPresentsHDRFlag] in
+            Self.felFoldIsUnseen(isTVOS: isTVOS, effectiveDvMode: dvMode, servesAsProfile5: servesAsProfile5,
+                                 panelPresentsHDR: panelPresentsHDRFlag.withLock { $0 })
+        }
         // #93 retest: the rendered clock feeds the wedge detector's fast path (park + both signals
         // frozen -> single-digit detection). Threaded onto every producer like the play-intent guard.
         prod.playbackPositionProvider = currentPlaybackPositionProvider

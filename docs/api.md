@@ -1928,7 +1928,7 @@ Five parts of the engine are compiled only with their package trait, all off by 
 
 | Symbol | Notes |
 | --- | --- |
-| `AetherEngine.OptionalComponent` | `CaseIterable`. Cases: `.trueHDObjectAudio`, `.dtsxObjectAudio` (`objectAudioRendering` per codec), `.dualLayerDolbyVision` (`preferDualLayerDolbyVision`), `.dolbyVisionStillReshaping` (stills of Dolby Vision Profile 5 / AV1 Profile 10.0 sources), `.dolbyVisionFelCurves` (a Profile 7 FEL source's enhancement layer folded into the Profile 8.1 RPU on the native route, the stream's mapping kept and its luma curve lifted per scene; no option, on whenever built in). |
+| `AetherEngine.OptionalComponent` | `CaseIterable`. Cases: `.trueHDObjectAudio`, `.dtsxObjectAudio` (`objectAudioRendering` per codec), `.dualLayerDolbyVision` (`preferDualLayerDolbyVision`), `.dolbyVisionStillReshaping` (stills of Dolby Vision Profile 5 / AV1 Profile 10.0 sources), `.dolbyVisionFelCurves` (a Profile 7 FEL source's enhancement layer folded into the Profile 8.1 RPU on the native route, the stream's mapping kept and its luma curve lifted per scene; on whenever built in, `foldsDolbyVisionFEL` turns it off per load, and it pauses on its own on a tvOS HDR10 panel without Dolby Vision, see [dolby-vision-fel.md §7](dolby-vision-fel.md#7-curve-fold-on-the-native-route)). |
 | `OptionalComponent.isBuiltIn` | Whether this build carries the component. Fixed for the process; hide a toggle whose component reads false. |
 | `OptionalComponent.traitName` | The package trait that compiles it, for a diagnostics screen. |
 
@@ -2039,6 +2039,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `dolbyVisionHandling` | `.automatic` | A `DolbyVisionHandling`. `.baseLayerOnly` presents the HDR10 / HLG base layer of a Dolby Vision source and leaves the Dolby Vision out of the container on every display. See [`dolbyVisionHandling`](#dolbyvisionhandling). |
 | `forceDolbyVisionOnNonDVDisplay` | false | **Experimental (AE#455).** Serve an HEVC Profile 8.1 source as Profile 5 on a display with no Dolby Vision of its own. See [`forceDolbyVisionOnNonDVDisplay`](#forcedolbyvisiononnondvdisplay). |
 | `preferDualLayerDolbyVision` | false | Opt in to composing Profile 7 FEL sources on the GPU. Not recommended for a distributed app. See [`preferDualLayerDolbyVision`](#preferduallayerdolbyvision). |
+| `foldsDolbyVisionFEL` | true | With the `DolbyVisionFelCurves` trait: fold a Profile 7 FEL source's enhancement layer into the Profile 8.1 RPU's luma curve. False keeps the plain conversion and its start speed (#1018). Ignored without the trait. See [dolby-vision-fel.md §7](dolby-vision-fel.md#7-curve-fold-on-the-native-route). |
 | `dualLayerRoute` | `DualLayerRoute.softwareHost` | Which route composes a Profile 7 FEL picture once `preferDualLayerDolbyVision` has taken the dual-layer route. See [`dualLayerRoute`](#duallayerroute). |
 
 ### Decode and routing

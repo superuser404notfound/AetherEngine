@@ -563,6 +563,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var loggedEnhancementLayerType = false
     /// Latched false at SSAI program switch (ad creatives are H.264; mirrors muxer's isReinit ? false : videoConfig.convertP7ToProfile81).
     private var convertP7Active: Bool = false
+    /// `LoadOptions.foldsDolbyVisionFEL`; only `felLookaheadForRead()` reads it.
+    private let foldsDolbyVisionFEL: Bool
     #if DolbyVisionFelCurves
     /// Holds back one GOP at a time to fold a FEL source's enhancement layer into the RPU's curves
     /// (`FelCurveLookahead`). Created on the first read of a VOD P7 conversion without a side demuxer.
@@ -1437,6 +1439,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
     /// false instead of misreading the frozen fetch target as a wedge (issue #65 pause false-positive).
     var wantsToPlayProvider: (@Sendable () -> Bool)?
 
+    /// AE#1018: true while a folded RPU cannot reach the picture; `FelCurveLookahead` reads it per GOP.
+    var felFoldUnseenProvider: (@Sendable () -> Bool)?
+
     /// #93 retest: reads AVPlayer's rendered (playlist-axis) position off the main actor. Feeds the
     /// backpressure wedge detector's fast path (park + flat clock + frozen fetch target -> single-digit
     /// detection instead of the 24 s counter). nil (tests, live) keeps the fast path inert.
@@ -1627,9 +1632,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
         audioMoovPrimeKnownUnobtainable: Bool = false,
         audioDelaySeconds: Double = 0,
         servesSegmentsProgressively: Bool = false,
+        foldsDolbyVisionFEL: Bool = true,
         epoch: UInt64 = 0
     ) throws {
         self.epoch = epoch
+        self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.servesSegmentsProgressively = servesSegmentsProgressively
         self.audioDelaySeconds = audioDelaySeconds
         self.audioMoovPrimeFrame = audioMoovPrimeFrame
@@ -3560,9 +3567,21 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private func felLookaheadForRead() -> FelCurveLookahead? {
         if felLookaheadDecided { return felLookahead }
         felLookaheadDecided = true
-        guard convertP7Active, !isLive, videoPacketTapProvider?() == nil,
-              let stream = demuxer.stream(at: videoStreamIndex) else { return nil }
-        felLookahead = FelCurveLookahead(videoStreamIndex: videoStreamIndex, stream: stream, framing: a53NALFraming)
+        guard convertP7Active else { return nil }
+        let skipReason: String? =
+            !foldsDolbyVisionFEL ? "switched off for this load (LoadOptions.foldsDolbyVisionFEL)"
+            : isLive ? "live source"
+            : videoPacketTapProvider?() != nil ? "the enhancement-route tap needs the layer intact"
+            : nil
+        if let skipReason {
+            EngineLog.emit("[FelCurves] fold not armed: \(skipReason); a FEL source keeps the mode 2 mapping",
+                           category: .session)
+            return nil
+        }
+        guard let stream = demuxer.stream(at: videoStreamIndex) else { return nil }
+        let unseen = felFoldUnseenProvider
+        felLookahead = FelCurveLookahead(videoStreamIndex: videoStreamIndex, stream: stream, framing: a53NALFraming,
+                                         foldIsUnseen: { unseen?() ?? false })
         return felLookahead
     }
 

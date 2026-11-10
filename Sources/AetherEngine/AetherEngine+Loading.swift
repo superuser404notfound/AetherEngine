@@ -224,6 +224,13 @@ extension AetherEngine {
                 // `liveItemPlacementPending`.
                 if ready {
                     self.noteLiveItemStart()
+                    // AE#1018: an HDR master reaching readyToPlay was accepted, and a display presenting SDR
+                    // refuses one at parse time (AE#459), so the panel presents HDR. The load-time readout
+                    // is taken mid-switch and reads 1.00 on exactly the panels this has to recognise.
+                    if let session = self.nativeVideoSession, session.servingMasterPlaylist,
+                       session.servedSourceIsHDR, !self.masterFallbackUsed {
+                        session.notePanelPresentsHDR(true)
+                    }
                     // The placement is spent here, on every path rather than only on the one that
                     // replays the stashed seek: a pre-ready seek can be superseded by a host scrub
                     // (latest-wins), and an arm left standing would be inherited by whatever item the
@@ -845,7 +852,8 @@ extension AetherEngine {
         keepsMediaPlaylistRoute: Bool = false,
         autostarts: Bool,
         generation: UInt64,
-        resolvePanelRouting: (() async throws -> Bool)? = nil
+        resolvePanelRouting: (() async throws -> Bool)? = nil,
+        panelPresentsHDR: Bool = false
     ) async throws {
         // companionAudioReader is set by the reader's resolver before any main-stream byte flows, so it is
         // final by the time loadNative runs; nil means muxed audio.
@@ -917,6 +925,8 @@ extension AetherEngine {
             undecodableAudioStreamIndices: undecodableLiveAudioStreamIndices,
             audioBridgeMode: audioBridgeMode,
             objectAudioRendering: loadedOptions.objectAudioRendering,
+            foldsDolbyVisionFEL: loadedOptions.foldsDolbyVisionFEL,
+            panelPresentsHDR: panelPresentsHDR,
             stereoPresentation: loadedOptions.stereoPresentation,
             isLiveSession: isLive,
             dvrWindowSeconds: dvrWindowSeconds,
@@ -1350,6 +1360,10 @@ extension AetherEngine {
             let routesAsHDRPanel: Bool
             do {
                 routesAsHDRPanel = try await resolvePanelRouting()
+                if Self.sessionPanelPresentsHDR(hostAsserts: loadedOptions.panelIsInHDRMode,
+                                                criteriaReadout: sessionPanelHDRReadout) {
+                    session.notePanelPresentsHDR(true)
+                }
             } catch {
                 session.stop(reason: .loadFailed)
                 throw error
@@ -2865,7 +2879,13 @@ extension AetherEngine {
                     preopenedDemuxer: customPreopened,
                     keepsMediaPlaylistRoute: keepsMediaRoute,
                     autostarts: transportIntentUnderReconstruction ?? resumesPlaying,
-                    generation: gen
+                    generation: gen,
+                    panelPresentsHDR: Self.felGatePanelPresentsHDR(
+                        labelPresentsHDR: Self.sessionPanelPresentsHDR(
+                            hostAsserts: loadedOptions.panelIsInHDRMode, criteriaReadout: sessionPanelHDRReadout),
+                        hdrWriteEngagesPanel: displayCriteria.hdrWriteExpectedToEngagePanel(),
+                        engineWritesHDRCriteria: loadedOptions.engineWritesDisplayCriteria && videoFormat != .sdr,
+                        panelRefusedHDRMaster: Self.panelRefusedHDRMaster || masterFallbackUsed)
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)
                 playbackBackend = .native

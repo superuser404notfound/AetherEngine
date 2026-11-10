@@ -845,11 +845,23 @@ A scene without a residual (`disable_residual_flag`, MEL) or whose picture canno
 
 On macOS, `AVPlayerLayer` shows the folded stream served by `aetherctl serve` pixel-identical to the folded RPUs injected offline. On an M1 debug build the pass folds 60 s of FEL in 6 to 12 s.
 
+**Where the folded RPU reaches the picture** (AE#1018). Measured on an Apple TV 4K (3rd generation, tvOS 27.2) at an HDR10 television without Dolby Vision, with a Profile 8.1 clip whose RPU darkens every other 2 s block, paused screenshots against the unedited clip:
+
+| Panel | Route | RPU applied |
+|---|---|---|
+| SDR (Match Content off) | media or master playlist | yes |
+| HDR10 (Match Dynamic Range on) | master playlist | no, the base layer bit for bit |
+| HDR10 | `forceDolbyVisionOnNonDVDisplay` (Profile 5) | yes, no colour shift on the unedited frames |
+
+A display that takes Dolby Vision and a Mac apply it as well. So the fold pauses in exactly one case: on tvOS, without Dolby Vision, off the Profile 5 route, while the panel presents HDR. The load predicts that from the start when range matching is on, the display can play HDR, the engine writes HDR criteria and no HDR master was refused in this process, because the readout taken during the display switch reads SDR on exactly these panels and the first producer would otherwise fold through the switch (measured: 0.7 s more to the first frame from a network source). An HDR master reaching readyToPlay confirms it; a refused master clears it. The check runs at every GOP keyframe. While it holds, packets pass through converted with the stream's mapping, no GOP is held back and nothing is decoded, and the log says `[FelCurves] fold paused`. A change of the answer during playback takes effect at the next keyframe in both directions.
+
+**Switching it off per load.** `LoadOptions.foldsDolbyVisionFEL` (default `true`) turns the fold off for one load, for a title a viewer reports or an A/B check on one build. It is a tuning field that `reloadAtCurrentPosition(applying:)` carries. Without the trait it is ignored. The load logs `[FelCurves] fold not armed: <reason>` when a Profile 7 conversion runs without the fold.
+
 ## 8. Document map
 
 | Document | Role |
 |---|---|
 | this file | design, implementation, evidence, verification |
 | [formats.md](formats.md#dolby-vision-signaling) | Profile 7 behaviour as a host sees it |
-| [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling` |
+| [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling`, `foldsDolbyVisionFEL` |
 | [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el`, `felcurves` |

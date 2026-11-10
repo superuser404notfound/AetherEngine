@@ -10,7 +10,24 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`LoadOptions.foldsDolbyVisionFEL` turns the FEL curve fold off per load (#1018).** Default `true`, so
+  nothing changes unless a host asks. Off, a Profile 7 FEL source gets the plain Profile 8.1 conversion: no GOP
+  held back, no decode per scene, the start and seek speed of a build without the `DolbyVisionFelCurves` trait.
+  A tuning field that `reloadAtCurrentPosition(applying:)` carries; ignored without the trait. The load logs
+  `[FelCurves] fold not armed: <reason>` when a conversion runs without it.
+
+### Changed
+
+- **The FEL curve fold pauses where its RPU cannot reach the picture (#1018).** Measured on an Apple TV 4K at an
+  HDR10 television: with the panel in HDR10, tvOS shows the base layer bit for bit and ignores the RPU, while a
+  panel in SDR, the `forceDolbyVisionOnNonDVDisplay` route and a Mac all apply it. On tvOS without Dolby Vision,
+  off the Profile 5 route, while the panel presents HDR (predicted at load from range matching and the HDR
+  criteria write, confirmed by the accepted master, cleared by a refused one), the fold now passes packets
+  through, without holding a GOP back or decoding anything. The reporter measured a resume 0.5 to 4 s slower
+  with the fold on such a display; from a network source the first load now matches the fold switched off.
+  Logged as `[FelCurves] fold paused`.
 
 ## [7.62.1] - 2026-11-10
 

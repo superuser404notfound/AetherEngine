@@ -1072,6 +1072,16 @@ extension AetherEngine {
         return .dolbyVision
     }
 
+    /// AE#1018: the panel answer the FEL fold gate starts a session with. The label alone arrives too late:
+    /// the first producer reads during the display switch, when the readout says 1.00 on the panels this
+    /// has to recognise. So an HDR criteria write with range matching on, on a display that has not refused
+    /// an HDR master in this process, counts as HDR from the start; a refusal clears it on the session.
+    nonisolated static func felGatePanelPresentsHDR(labelPresentsHDR: Bool, hdrWriteEngagesPanel: Bool,
+                                                    engineWritesHDRCriteria: Bool,
+                                                    panelRefusedHDRMaster: Bool) -> Bool {
+        labelPresentsHDR || (hdrWriteEngagesPanel && engineWritesHDRCriteria && !panelRefusedHDRMaster)
+    }
+
     /// AE#459: what this session takes the panel to be presenting, from the host's assertion and the
     /// engine's own criteria readout.
     ///
