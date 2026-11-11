@@ -29,6 +29,7 @@ struct VideoPrerollTests {
     @MainActor
     func singleLayerGate() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setReorderDepth(SampleBufferRenderer.presentationOrderReorderDepth)
         let pixels = Self.makePixelBuffer()
         #expect(renderer.prerollSatisfied(clock: 0, live: false) == false, "nothing handed over yet")
@@ -40,10 +41,30 @@ struct VideoPrerollTests {
         #expect(renderer.prerollSatisfied(clock: Self.time(2).seconds, live: false) == false)
     }
 
+    @Test("A full renderer opens the gate: nothing more can arrive until the clock runs")
+    @MainActor
+    func fullRendererOpensGate() {
+        // A rebuffer resume: the clock stopped with the layer full and the frames handed over sitting
+        // at or behind it. The decoder may not hand over more until the clock drains the layer, so a
+        // closed gate held the clock for the whole prerollTimeout after every rebuffer.
+        let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
+        renderer.setReorderDepth(SampleBufferRenderer.presentationOrderReorderDepth)
+        let pixels = Self.makePixelBuffer()
+        for i in 0...4 { renderer.enqueue(pixelBuffer: pixels, pts: Self.time(i)) }
+        let clock = Self.time(3).seconds
+        #expect(renderer.prerollSatisfied(clock: clock, live: false) == false, "room left: wait for more")
+        renderer.readyForMoreMediaDataForTesting = { false }
+        #expect(renderer.prerollSatisfied(clock: clock, live: false) == true)
+        renderer.setFELLookahead(enabled: true, frameRate: 24)
+        #expect(renderer.prerollSatisfied(clock: clock, live: false) == true, "the FEL route too")
+    }
+
     @Test("Off the FEL path a live stream does not preroll")
     @MainActor
     func singleLayerLiveHasNoGate() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         #expect(renderer.prerollSatisfied(clock: 0, live: true) == nil)
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         #expect(renderer.prerollSatisfied(clock: 0, live: true) == false, "the FEL route still does")
@@ -53,6 +74,7 @@ struct VideoPrerollTests {
     @MainActor
     func singleLayerGateAfterAResume() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setReorderDepth(SampleBufferRenderer.presentationOrderReorderDepth)
         let pixels = Self.makePixelBuffer()
         // #800: the keyframe sits 3 s before the target; everything up to it is decoded and skipped.
@@ -68,6 +90,7 @@ struct VideoPrerollTests {
     @MainActor
     func gateCountsContiguousFrames() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         renderer.setArrivalOrderHandover(frameRate: 24)
         let pixels = Self.makePixelBuffer()
@@ -88,6 +111,7 @@ struct VideoPrerollTests {
     @MainActor
     func gateRestartsAtTheSeekTarget() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         renderer.setArrivalOrderHandover(frameRate: 24)
         let pixels = Self.makePixelBuffer()
@@ -105,6 +129,7 @@ struct VideoPrerollTests {
     @MainActor
     func gateOpensAfterAnOffGridSeek(phase: Double) {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         renderer.setArrivalOrderHandover(frameRate: 24)
         let pixels = Self.makePixelBuffer()
@@ -122,6 +147,7 @@ struct VideoPrerollTests {
     @MainActor
     func prerollFitsTheLookaheadAt60() {
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setFELLookahead(enabled: true, frameRate: 60)
         renderer.setArrivalOrderHandover(frameRate: 60)
         let pixels = Self.makePixelBuffer()

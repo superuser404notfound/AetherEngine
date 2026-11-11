@@ -43,6 +43,12 @@ the public-API contract.
 
 ### Fixed
 
+- **A software session resumes from a rebuffer at once, not 2 s later.** The video preroll waited for frames past
+  the clock, but after a rebuffer the layer was full with frames at or behind the stopped clock and could take no
+  more until the clock ran, so every resume waited out the 2 s preroll timeout over a still picture while
+  `playbackPhase` already read `.playing`. A full layer now opens the preroll. Measured on a 70 % origin: the
+  timeout fired after every resume before, never after.
+
 - **A software VOD session over a source slower than real time rebuffers instead of running on (#1025).** The
   on-demand pause only armed once the audio lead had reached 2 s, which such a source never builds, so the clock
   ran on over a starved read-ahead: the audio ran dry, the picture stood or dropped frames, and `playbackPhase`
