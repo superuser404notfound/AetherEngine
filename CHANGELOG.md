@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **`SourceProbe` carries the container name, the Dolby Vision base-layer compatibility id and the disc titles
+  (#1032).** `containerFormat`, `dvBLCompatID` and `discTitles` hold the same values a loaded session publishes
+  as `sourceContainerFormat`, `sourceDVBLCompatID` and `discTitles`, read from the probe's own demuxer, so a
+  details screen has them before the first playback. The container name comes from the bytes, not the file
+  extension, and Profile 8.1 / 8.2 / 8.4 need no guess from the transfer. `aetherctl probe` prints all three.
+
 - **`ProbeDetail.dolbyVisionEnhancementLayer` reads FEL or MEL inside the controlled probe (#1030).**
   `probe(source:detecting:limits:cancellation:)` now answers the enhancement layer of a single-track Profile 7
   source in `SourceProbe.dolbyVisionEnhancementLayer`, for any source it accepts, a custom `IOReader` included,

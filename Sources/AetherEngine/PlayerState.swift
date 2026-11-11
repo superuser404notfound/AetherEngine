@@ -1321,6 +1321,18 @@ public struct SourceProbe: Sendable {
     public let isDolbyVision: Bool
     /// Dolby Vision profile number (5, 7, 8, 10) read from the dvcC/dvvC configuration record; nil when not DV.
     public let dvProfile: Int?
+    /// Base-layer signal compatibility id from the same dvcC/dvvC record as `dvProfile` (AE#1032): 1 = HDR10
+    /// base, 2 = SDR, 4 = HLG, 6 = Blu-ray HDR10 (Profile 7), 0 = no compatible base layer. nil without a
+    /// record. The same value a loaded session publishes as `sourceDVBLCompatID`.
+    public let dvBLCompatID: Int?
+    /// Container libavformat opened ("matroska,webm", "mov,mp4,m4a,3gp,3g2,mj2", "mpegts"), read from what
+    /// the bytes are, not from the file extension (AE#1032). The same string a loaded session publishes as
+    /// `sourceContainerFormat`. nil when libavformat reports no name.
+    public let containerFormat: String?
+    /// Selectable titles of a disc image or disc folder, longest first so id 0 is the main feature
+    /// (AE#1032). Empty for a source that is no disc. The same list a loaded session publishes as
+    /// `discTitles`, so an id from here is valid for `load(..., discTitleID:)`.
+    public let discTitles: [TitleInfo]
     /// AE#658: pixel format, bit depth, colour description and profile of the video stream; nil when
     /// the source has no video.
     public let videoStreamFormat: VideoStreamFormat?
@@ -1366,6 +1378,9 @@ public struct SourceProbe: Sendable {
         videoFrameRate: Double?,
         isDolbyVision: Bool,
         dvProfile: Int? = nil,
+        dvBLCompatID: Int? = nil,
+        containerFormat: String? = nil,
+        discTitles: [TitleInfo] = [],
         carriesHDR10PlusMetadata: Bool = false,
         carriesHDRVividMetadata: Bool = false,
         dolbyVisionEnhancementLayer: DolbyVisionEnhancementLayer? = nil,
@@ -1386,6 +1401,9 @@ public struct SourceProbe: Sendable {
         self.videoFrameRate = videoFrameRate
         self.isDolbyVision = isDolbyVision
         self.dvProfile = dvProfile
+        self.dvBLCompatID = dvBLCompatID
+        self.containerFormat = containerFormat
+        self.discTitles = discTitles
         self.carriesHDR10PlusMetadata = carriesHDR10PlusMetadata
         self.carriesHDRVividMetadata = carriesHDRVividMetadata
         self.dolbyVisionEnhancementLayer = dolbyVisionEnhancementLayer
