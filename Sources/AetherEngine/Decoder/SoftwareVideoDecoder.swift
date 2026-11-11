@@ -553,6 +553,20 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         flush(resetFilterGraph: true)
     }
 
+    /// AE#1024: `flush()` discards what libavcodec still holds, which at the end of a file is the last
+    /// frames of the stream (frame threading plus B-frame reorder). A session paused in the last half
+    /// second then never got a picture at all. The empty packet puts the decoder into draining mode,
+    /// the receive loop hands those frames over, and the `flush()` the host makes next takes it out of
+    /// that mode again.
+    func drainForEndOfStream() {
+        lock.lock()
+        guard let ctx = codecContext else { lock.unlock(); return }
+        let ret = avcodec_send_packet(ctx, nil)
+        lock.unlock()
+        guard ret >= 0 else { return }
+        drainDecodedFrames()
+    }
+
     func flush(resetFilterGraph: Bool) {
         lock.lock()
         defer { lock.unlock() }
