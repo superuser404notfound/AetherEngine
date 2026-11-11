@@ -103,7 +103,8 @@ public struct ProbeDetail: OptionSet, Sendable {
     public let rawValue: Int
     public init(rawValue: Int) { self.rawValue = rawValue }
 
-    /// Authoritative E-AC-3 JOC (Dolby Atmos) via a bounded decode pass. See `AtmosDetectionOptions`.
+    /// Authoritative E-AC-3 JOC (Dolby Atmos) via a bounded decode pass, and for a TrueHD target its first
+    /// major sync (`TrackInfo.trueHDAtmos`, AE#1035). Both under `AtmosDetectionOptions`.
     public static let atmos = ProbeDetail(rawValue: 1 << 0)
 
     /// HDR10+ (ST 2094-40) carriage via a bounded packet scan. See `HDR10PlusDetectionOptions`.

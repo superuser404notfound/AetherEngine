@@ -1475,6 +1475,18 @@ public struct SoftwareDecodeProbeResult: Sendable {
 }
 
 /// Audio or subtitle track metadata.
+/// AE#1035: a probe's answer to "is this TrueHD track Atmos", read from the track's own major sync rather
+/// than from libavcodec's profile, which stays unknown for a track the header probe never decoded.
+public enum TrueHDAtmosVerdict: Sendable, Equatable {
+    /// The major sync declares the Atmos presentation (four substreams, the 16-channel presentation bit).
+    case atmos
+    /// A major sync was read and declares no Atmos presentation.
+    case noAtmos
+    /// No major sync of the track turned up within `AtmosDetectionOptions`, or the source could not be read
+    /// there. Says nothing either way.
+    case unsettled
+}
+
 public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// FFmpeg AVStream index.
     public let id: Int
@@ -1530,7 +1542,13 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     public let channelLayout: String?
     /// AE#658: codec profile as libavcodec names it ("LC", "DTS-HD MA + DTS:X", "Dolby TrueHD + Dolby Atmos"),
     /// nil when undeclared. This is where DTS:X and TrueHD Atmos show up; `isAtmos` covers E-AC-3 JOC only.
-    public let profile: String?
+    /// Settable inside the module so a probe's `.atmos` pass can name TrueHD Atmos it read from the major sync.
+    public internal(set) var profile: String?
+
+    /// AE#1035, TrueHD only: what a probe's `.atmos` pass read from the track's first major sync. nil when
+    /// that pass did not run for this track (not requested, not the targeted track, not TrueHD, or a session's
+    /// track list). `.atmos` also sets `profile` to "Dolby TrueHD + Dolby Atmos".
+    public internal(set) var trueHDAtmos: TrueHDAtmosVerdict?
 
     public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isVisualImpaired: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate
