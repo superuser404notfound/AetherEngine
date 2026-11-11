@@ -677,7 +677,7 @@ aetherctl play --preserve-ass-markup --subs ger --seconds 7 file://$PWD/ass-srt.
 
 ### Audio shaping (`--audio-shaping`)
 
-`--audio-shaping <spec>` sets `LoadOptions.audioShaping` for the load. `--switch-audio-shaping <spec>[@ms]` calls `setAudioShaping(_:)` mid-session (repeatable, default +20 s). A spec is `off`, or a comma list of `ch=N`, `dialogue=DB` and `night`.
+`--audio-shaping <spec>` sets `LoadOptions.audioShaping` for the load. `--switch-audio-shaping <spec>[@ms]` calls `setAudioShaping(_:)` mid-session (repeatable, default +20 s). A spec is `off`, or a comma list of `ch=N`, `dialogue=DB`, `night`, `gain=DB` (a plain gain: a 1:1 compressor with that makeup) and `loudness=LUFS` (the loudness target, AE#1036).
 
 The run prints `shaping=` next to the audio delivery, and the log names the pipeline each rebuild chose (AE#923). On an E-AC-3 5.1 source:
 

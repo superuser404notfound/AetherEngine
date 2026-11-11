@@ -7,6 +7,8 @@ import AetherLibavutil
 /// The remix (channel cap, centre lift) happens before this, in the caller's resampler. The graph
 /// takes that interleaved Float32 and runs, in order:
 ///
+/// - the loudness target's gain (`LoudnessNormalizer`, AE#1036), applied here in Swift before the
+///   graph sees the samples, and only while the full chain (and with it the limiter) is built.
 /// - `dialoguenhance` + `pan` on a stereo output whose source has no centre: the filter extracts
 ///   the dialogue into a third channel and `pan` folds it back onto both sides at the asked gain.
 ///   Measured against a mid/side lift on a stereo mix of centred speech and wide music, it separates
@@ -46,6 +48,13 @@ final class AudioShapingGraph {
     let latency: Int
     /// The latency of the chain actually built; 0 once `reset()` fell back to the passthrough.
     private var builtLatency = 0
+    /// Whether the full chain is built, limiter included; false on the passthrough fallback.
+    private var builtFull = false
+    /// AE#1036; nil without a loudness target. Outlives `reset()`, so a seek keeps the measurement.
+    private let normalizer: LoudnessNormalizer?
+    private var gained: [Float] = []
+    /// The loudness target's gain in force, in dB; nil without a target.
+    var loudnessGainDB: Double? { normalizer?.gainDB }
 
     private var graph: UnsafeMutablePointer<AVFilterGraph>?
     private var source: UnsafeMutablePointer<AVFilterContext>?
@@ -115,11 +124,16 @@ final class AudioShapingGraph {
         self.channels = layout.pointee.nb_channels
         self.layoutDescription = layoutDescription
         self.latency = enhance ? Self.dialogueEnhanceLatency(sampleRate: sampleRate) : 0
+        self.normalizer = shaping.clamped.loudnessTargetLUFS.map {
+            LoudnessNormalizer(targetLUFS: $0, maxGainDB: AudioShaping.maxLoudnessGainDB,
+                               sampleRate: sampleRate, layout: layout)
+        }
         av_channel_layout_copy(&inputLayout, layout)
         guard build(chain, latency: latency) else {
             free()
             return nil
         }
+        builtFull = true
     }
 
     deinit {
@@ -166,7 +180,12 @@ final class AudioShapingGraph {
     /// Drop everything in flight, for a seek or a restart: the filters keep history (the limiter's
     /// lookahead, the compressor's envelope, the enhancer's window) that belongs to the old position.
     func reset() {
-        guard !build(chain, latency: latency) else { return }
+        normalizer?.resetFilters()
+        if build(chain, latency: latency) {
+            builtFull = true
+            return
+        }
+        builtFull = false
         if build(passthroughChain, latency: 0) {
             EngineLog.emit("[AudioShaping] filter graph could not be rebuilt; audio passes unshaped", category: .session)
         } else {
@@ -182,7 +201,16 @@ final class AudioShapingGraph {
                  emit: ([UnsafeMutableRawPointer?], Int, Int64?) -> Void) {
         guard frames > 0, !ended, graph != nil else { return }
         pending.append((pts, frames))
-        push(samples, frames: frames)
+        if let normalizer, builtFull {
+            let count = frames * Int(channels)
+            if gained.count < count { gained = [Float](repeating: 0, count: count) }
+            gained.withUnsafeMutableBufferPointer { out in
+                normalizer.process(samples, into: out.baseAddress!, frames: frames)
+                push(UnsafePointer(out.baseAddress!), frames: frames)
+            }
+        } else {
+            push(samples, frames: frames)
+        }
         pull(emit: emit)
     }
 

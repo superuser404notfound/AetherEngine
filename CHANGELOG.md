@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **A loudness target for quiet sources (#1036).** `AudioShaping.loudnessTargetLUFS` (-36 to -12 LUFS) raises a
+  quietly mastered film to a programme loudness: the engine measures its BS.1770 / EBU R128 integrated loudness
+  over what has played and lifts it by the difference, at most 18 dB, never lowering a source. The gain moves at
+  most 2 dB/s up and 6 dB/s down, survives a seek, adds no latency and runs in front of the compressor and the
+  limiter. `docs/formats.md` now also states that a 1:1 compressor is a supported plain gain of `makeupGainDB`,
+  with a measurement. `aetherctl --audio-shaping` takes `loudness=LUFS` and `gain=DB`.
 - **A probe settles TrueHD Atmos (#1035).** With `.atmos` requested, a TrueHD target track is read up to its
   first major sync, the way a session does since 7.40.1, so a track the header probe never decoded no longer
   looks like plain TrueHD. The answer is `TrackInfo.trueHDAtmos`: `.atmos`, `.noAtmos` or `.unsettled`, so

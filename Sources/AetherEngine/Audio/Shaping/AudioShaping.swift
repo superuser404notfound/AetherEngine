@@ -1,7 +1,8 @@
 import Foundation
 
 /// AE#923: how a host asks the engine to shape decoded audio before it reaches the output: a ceiling
-/// on the channel count, a lift for the dialogue, and dynamic-range compression ("night mode").
+/// on the channel count, a lift for the dialogue, dynamic-range compression ("night mode"), and a
+/// loudness target that raises a quiet source (AE#1036).
 ///
 /// The default value shapes nothing, and a session whose shaping is inactive is byte-for-byte the
 /// session it was before this existed: stream copy stays stream copy. Shaping needs PCM, so while it
@@ -30,11 +31,28 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     /// Dynamic-range compression; nil is off.
     public var compressor: Compressor?
 
-    public init(maxChannels: Int? = nil, dialogueGainDB: Double = 0, compressor: Compressor? = nil) {
+    /// AE#1036: programme loudness to raise a quiet source to, in LUFS (clamped to
+    /// `loudnessTargetRange`); nil is off. The engine measures the source's integrated loudness
+    /// (ITU-R BS.1770 / EBU R128) over what it has played and raises it by the difference, by at
+    /// most `maxLoudnessGainDB`, in front of the compressor and the limiter. It only ever raises:
+    /// a source at or above the target plays as it was. The gain moves over seconds, never per
+    /// scene, and adds no latency. Typical values are -24 (broadcast loudness) and -16 (louder).
+    public var loudnessTargetLUFS: Double?
+
+    public init(maxChannels: Int? = nil, dialogueGainDB: Double = 0, compressor: Compressor? = nil,
+                loudnessTargetLUFS: Double? = nil) {
         self.maxChannels = maxChannels
         self.dialogueGainDB = dialogueGainDB
         self.compressor = compressor
+        self.loudnessTargetLUFS = loudnessTargetLUFS
     }
+
+    /// The targets the engine takes. Below it no source is quiet enough to need a lift, above it
+    /// the limiter would carry every loud scene.
+    public static let loudnessTargetRange: ClosedRange<Double> = -36 ... -12
+
+    /// The largest lift the loudness target applies, in dB.
+    public static let maxLoudnessGainDB: Double = 18
 
     /// The largest dialogue lift the engine applies. Past it a centre channel stops sounding raised
     /// and starts sounding like a separate speaker.
@@ -96,14 +114,16 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     public var clamped: AudioShaping {
         AudioShaping(maxChannels: maxChannels.map { min(max($0, 1), 8) },
                      dialogueGainDB: Compressor.clamp(dialogueGainDB, 0, Self.maxDialogueGainDB, fallback: 0),
-                     compressor: compressor?.clamped)
+                     compressor: compressor?.clamped,
+                     loudnessTargetLUFS: loudnessTargetLUFS.flatMap { t in
+                         t.isFinite ? min(max(t, Self.loudnessTargetRange.lowerBound), Self.loudnessTargetRange.upperBound) : nil })
     }
 
     /// Whether this value asks for anything at all. An inactive value leaves every route as it was.
     /// A cap of 8 is no cap: nothing the engine carries has more.
     public var isActive: Bool {
         let c = clamped
-        return (c.maxChannels ?? 8) < 8 || c.dialogueGainDB > 0 || c.compressor != nil
+        return (c.maxChannels ?? 8) < 8 || c.dialogueGainDB > 0 || c.compressor != nil || c.loudnessTargetLUFS != nil
     }
 
     /// The channel count a source of `sourceChannels` is shaped into. Never above the source.
@@ -125,6 +145,7 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
         if let k = c.compressor {
             parts.append(String(format: "compressor %.0f dB %.1f:1 makeup %+.1f dB", k.thresholdDB, k.ratio, k.makeupGainDB))
         }
+        if let t = c.loudnessTargetLUFS { parts.append(String(format: "loudness %.0f LUFS", t)) }
         return parts.isEmpty ? "off" : parts.joined(separator: ", ")
     }
 }

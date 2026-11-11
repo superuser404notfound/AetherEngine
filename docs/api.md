@@ -1137,7 +1137,8 @@ It is a no-op (every refusal is logged, so a picker that does nothing is explain
 
 - a channel cap (`maxChannels`)
 - a dialogue lift (`dialogueGainDB`)
-- night-mode compression (`compressor`; `AudioShaping.Compressor.night` is the engine's preset)
+- night-mode compression (`compressor`; `AudioShaping.Compressor.night` is the engine's preset). With `ratio: 1` it is a plain gain of `makeupGainDB` into the limiter.
+- a loudness target (`loudnessTargetLUFS`, clamped to `AudioShaping.loudnessTargetRange`, -36 to -12 LUFS): raises a quiet source to that programme loudness by at most `AudioShaping.maxLoudnessGainDB` (18 dB), never lowers one (AE#1036)
 
 Values are clamped and read back clamped. The default shapes nothing and leaves every route as it was.
 
