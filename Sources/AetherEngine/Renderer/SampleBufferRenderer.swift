@@ -207,7 +207,14 @@ final class SampleBufferRenderer: @unchecked Sendable {
     /// clock run from the audio there. On the arrival-order path only the frontier counts, the newest
     /// timestamp with every earlier slot handed over, so a frame that came early past a gap does not
     /// open the gate.
+    ///
+    /// A full layer opens it too: nothing more can be handed over until the clock drains the layer,
+    /// so waiting only runs out `AudioOutput.prerollTimeout`. That is the resume after a rebuffer, whose
+    /// frames sit at or behind the stopped clock (AE#1025 follow-up: 2 s of standstill after every
+    /// rebuffer). A start or a seek begins with a flushed layer, which is not full.
     func prerollSatisfied(clock: Double, live: Bool) -> Bool? {
+        // Read outside `reorderLock`: the queue target answers it under its own locks.
+        let layerFull = !isReadyForMoreMediaData
         reorderLock.lock()
         defer { reorderLock.unlock() }
         guard clock.isFinite else { return nil }
@@ -215,6 +222,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         if rate == nil, live { return nil }
         let handed = arrivalFloor != nil ? arrivalFloor?.frontier : _lastReleasedPtsSeconds
         guard let handed else { return false }
+        if layerFull { return true }
         guard let rate else { return handed - clock >= Self.videoPrerollSeconds }
         return handed + 1 / rate - clock >= Self.felPrerollSeconds(frameRate: rate)
     }

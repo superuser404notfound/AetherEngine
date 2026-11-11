@@ -285,6 +285,7 @@ struct DualLayerDeadlineBypassTests {
         r.clocks.prerolling = true
         defer { r.decoder.close() }
         let renderer = SampleBufferRenderer()
+        renderer.readyForMoreMediaDataForTesting = { true }  // a layer with room, as on a device
         renderer.setFELLookahead(enabled: true, frameRate: 24)
         renderer.setArrivalOrderHandover(frameRate: 24)
         // The seek lands at 20.0 s with the clock held at rate 0. Frame 1's enhancement layer is lost;
