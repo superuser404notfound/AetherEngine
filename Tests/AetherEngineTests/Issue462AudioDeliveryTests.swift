@@ -201,6 +201,19 @@ struct AudioDeliveryClassificationTests {
         #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: trueHD, activeIndex: 1)
                 == "libavcodec TRUEHD → CoreAudio")
     }
+
+    /// AE#1027: the demuxer publishes the decoder name, `dca` for DTS, so a real DTS:X bed was
+    /// labelled "DCA Atmos → PCM 7.1.4". The test above only passed because it spelled the codec `dts`.
+    @Test("a DTS:X bed is named DTS:X under the decoder name the demuxer publishes")
+    func dtsxBedIsNamedUnderTheDecoderName() {
+        let dca = [TrackInfo(id: 1, name: "", codec: "dca", language: "eng", channels: 8, isDefault: true)]
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: dca, activeIndex: 1, route: .pcmBed(.l714))
+                == "DTS:X → PCM 7.1.4")
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: dca, activeIndex: 1, route: .apac(.l714))
+                == "DTS:X → APAC 7.1.4")
+        #expect(AetherEngine.softwareAudioDecoderLabel(audioTracks: dca, activeIndex: 1)
+                == "libavcodec DCA → CoreAudio")
+    }
 }
 
 /// Engine-level wiring: the published fact is derived from `playbackBackend`, the session options and
