@@ -313,6 +313,12 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("defaults 50 MB / 60 s", docs)
     }
 
+    /// docs/formats.md states when the MPEG-TS header wait for a PMT that never arrives is released.
+    func testMissingPMTReleaseWindowMatchesDocumentation() throws {
+        XCTAssertEqual(TransportStreamHeaderWait.releaseAfterNanoseconds, 2_500_000_000, "documented as 2.5 s")
+        assertDocumented("once the stream analysis has run 2.5 s", try documentation())
+    }
+
     // MARK: - Startup ladder
 
     /// docs/api.md prints the ladder as a table AND states the total under it, which is the number a

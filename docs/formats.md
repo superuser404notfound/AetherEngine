@@ -1684,6 +1684,15 @@ Without it, a 4 s lead ran dry before every 10 s segment and the session stalled
 - `SourceProbe.isLive` flags no-duration network streams, so hosts can detect and reload.
 - **Mid-stream joins (#107).** Sources joined mid-stream deliver their first samples at arbitrary PTS hours past zero. They anchor the clock at the first decoded sample on every session shape (live, live+DVR, and a plain VOD open of the same URL or of a mid-broadcast capture file), publishing session-relative positions while `sourceTime` stays on the source axis for subtitles.
 
+**A PAT program that never sends its PMT.** The TS demuxer only knows its stream list is complete once every program its PAT lists has sent a PMT. Until then `avformat_find_stream_info` cannot take its "all info found" exit. Some IPTV panels and restreamers pass on a multiplex fragment whose PAT still lists a program they do not carry, and such a channel used to read the whole playback budget (50 MiB / 60 s) after every stream it had was resolved.
+
+- The engine releases that wait once the stream analysis has run 2.5 s while one program still has no PMT and another has its PMT and streams. 2.5 s is five missed repetitions of the 0.5 s PMT interval ETSI TR 101 290 expects.
+- The release is what the demuxer does itself when the last PMT arrives, and it interrupts nothing. The analysis still stops only once every stream has its parameters, so late audio and a late keyframe are still waited for under the same budget, and no stream is dropped.
+- A TS whose programs all send their PMT, and every other format, are untouched.
+- A PMT that first arrives after the release adds its streams during playback, as a PMT version change does.
+
+Measured through `aetherctl play --live` on a live-paced synthetic channel, median of 5: the stream analysis went from 58.7 s (32 MB, three requests, because the reader reconnects at the end of the 30 s fixture and the pass runs on to its 60 s cap) to 2.5 s (1.6 MB, one request), with both tracks. With audio that starts 5 s late it takes 4.9 s, and with a join 3 s into a 10 s GOP 7.6 s, the same as those channels without the silent program.
+
 ## Known limitations
 
 Things that work today but have a documented edge case, or are deferred behind an upstream dependency.
