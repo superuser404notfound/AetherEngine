@@ -43,6 +43,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A subtitle track selected at load is decoded ahead of the playhead again (#1021).** With the forward
+  prefetch running from the session's start, the main reader re-read each prefetched packet a few seconds
+  ahead of the playhead, and the drain read every such pair as a hole in the store. `subtitleCues` then never
+  held a cue more than about 4 s ahead, text and PGS alike, so a host's advance offset showed nothing until the
+  first seek. Where the coverage ledger knows a span was read, it now decides alone; harvest order is the rule
+  only on a store whose readers report no coverage.
+
 - **A live MPEG-TS whose PAT lists a program that never sends its PMT no longer reads the whole probe budget
   before it plays.** The TS demuxer waits for a header until every listed program has sent its PMT, so
   `find_stream_info` could not stop once the streams it had were resolved, and ran to 50 MiB / 60 s on a live
