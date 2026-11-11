@@ -18,6 +18,12 @@ the public-API contract.
   A tuning field that `reloadAtCurrentPosition(applying:)` carries; ignored without the trait. The load logs
   `[FelCurves] fold not armed: <reason>` when a conversion runs without it.
 
+- **The `open timings` line says how the stream analysis ended.** After the probe budget it appends
+  `; probe stop=..., unresolved=..., programs=..., pmtMissing=..., headerWait=..., probeBytes=...,
+  closeToReturn=...`, so a slow open can be told apart: a pass that waited out its budget, one that hit the end
+  of the input or a read error, one a close ended (and how fast), or one that released a header wait. No URL,
+  header or payload. Parsers that read the existing prefix are unaffected.
+
 ### Changed
 
 - **Dolby's own dual-track MP4 layout plays as Dolby Vision.** A file with a plain HDR10 base track (no `dvcC`)
@@ -34,6 +40,17 @@ the public-API contract.
   through, without holding a GOP back or decoding anything. The reporter measured a resume 0.5 to 4 s slower
   with the fold on such a display; from a network source the first load now matches the fold switched off.
   Logged as `[FelCurves] fold paused`.
+
+### Fixed
+
+- **A live MPEG-TS whose PAT lists a program that never sends its PMT no longer reads the whole probe budget
+  before it plays.** The TS demuxer waits for a header until every listed program has sent its PMT, so
+  `find_stream_info` could not stop once the streams it had were resolved, and ran to 50 MiB / 60 s on a live
+  channel (58.7 s and 32 MB on a live-paced synthetic channel). After 2.5 s of stream analysis with one program
+  still silent and another with its PMT and streams, the engine now releases that wait the way the demuxer does
+  when the last PMT arrives. The analysis still waits for late audio and late keyframes, drops no stream and keeps
+  its budget; the same channel opens in 2.5 s with both tracks and one request instead of three. Every other
+  format, and a TS whose PMTs all arrive, is unchanged.
 
 ## [7.62.1] - 2026-11-10
 

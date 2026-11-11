@@ -1864,6 +1864,21 @@ A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, with its or
 
 AVPlayer's own internal network requests are not exposed, and a source path without instrumentation or captured context cannot be attributed by this API.
 
+### The `open timings` line
+
+Every playback, probe and restart open logs one `[Demuxer] open timings (<reader>)` line in the `demux` category: `connect`, `open_input`, `find_stream_info` and `total` in ms, the stream count and the probe budget (`probesize N MiB, analyzeduration N s`).
+
+An open that ran the stream analysis appends how it ended, after the budget:
+
+`; probe stop=<complete|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->`
+
+- `stop` is the first cause that applies: a close (`stopped`), a probe limit or cancellation (`interrupted`), a read error, the end of the input, nothing left to wait for (`complete`), the byte budget, otherwise the duration budget.
+- `unresolved` counts the audio and video streams still missing their size, or their sample rate and channels.
+- `pmtMissing` counts the MPEG-TS programs whose PMT never arrived, and `headerWait` says when the engine released the wait for one (see [A PAT program that never sends its PMT](formats.md#raw-live-mpeg-ts-and-the-live-join)).
+- `probeBytes` is what the analysis read from the source, `closeToReturn` how long it took to end after a close.
+
+A failed analysis adds `; find_stream_info failed (<code>)` after those fields. The line carries no URL, header or payload.
+
 ### Native video frame diagnostics and recovery
 
 **`LoadOptions.nativeVideoFrameDiagnostics`** opts into decoded-frame observation on SDR native loopback playback. Default `false`.
