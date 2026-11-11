@@ -43,6 +43,18 @@ the public-API contract.
 
 ### Fixed
 
+- **A paused software session rebuilt in the last half second stays `.paused` and shows its frame (#1024).**
+  An audio-track switch or another paused rebuild there runs the loops only for the frame at the playhead, and
+  with the decoder still holding that frame they read to the end of the file first. Two things went wrong
+  there:
+  - The end-of-file branch set `didReachEnd`, so the session went `.ended` though nobody had pressed play.
+    Under a host pause the end is now owed to the next `play()`, which finishes the session once the clock
+    runs again; a seek drops it.
+  - `SoftwareVideoDecoder` had no end-of-stream drain, and its `flush()` discards what libavcodec still
+    holds. The last frames of every file on the libavcodec route were lost (eight on an MPEG-4 Part 2
+    fixture with frame threading), which in the last half second meant no picture at all. It now drains
+    before that flush. VideoToolbox already delivered them, so HEVC and H.264 on hardware were not affected.
+
 - **A subtitle track selected at load is decoded ahead of the playhead again (#1021).** With the forward
   prefetch running from the session's start, the main reader re-read each prefetched packet a few seconds
   ahead of the playhead, and the drain read every such pair as a hole in the store. `subtitleCues` then never
