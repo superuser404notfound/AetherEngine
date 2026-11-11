@@ -1495,6 +1495,8 @@ It needs an origin that honours HTTP `Range`, because a disc image is a filesyst
 
 A disc ripped as a `BDMV` folder rather than an image plays the same way, through `MediaSource.custom` with a `DiscDirectoryReader`: the host lists the folder's files (path relative to the disc root, and size) and opens any one of them on request. `HTTPDiscDirectoryReader` is the ready-made one, with one URL per file, so an origin serves the disc as plain files over `Range` and never remuxes it.
 
+The engine recognizes a folder by its conformance, so `discImageProbeEnabled` does not matter for it: that flag gates signature reads on a byte source, and a folder has none. A probe with `ProbeLimits` reads a folder too, and counts the clips' bytes against `maxInputBytes`.
+
 Recognition is the image path with files in place of UDF extents:
 
 - the same bounded playlist scan and title selection,

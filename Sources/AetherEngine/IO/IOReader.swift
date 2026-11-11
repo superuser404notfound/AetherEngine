@@ -24,7 +24,7 @@ public protocol IOReader: AnyObject, Sendable {
     /// opening it as an ordinary media container. Keep the default for raw disc images. Remote
     /// readers that already know they represent a regular media file can return `false` to avoid
     /// the sparse signature reads performed by disc recognition. Independent readers should
-    /// preserve the same value.
+    /// preserve the same value. A `DiscDirectoryReader` is recognized as a disc whatever it returns.
     var discImageProbeEnabled: Bool { get }
 }
 

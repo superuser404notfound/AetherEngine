@@ -799,18 +799,34 @@ public final class Demuxer: @unchecked Sendable {
     /// no filename is available. `isLive` suppresses SEEK_END that latches EOF
     /// on forward-only readers (38ad60b). AetherEngine#36: DiscReader adapts
     /// DVD/BD ISOs to VOB/MPEGTS concat streams unless the reader opts out via
-    /// `discImageProbeEnabled`.
+    /// `discImageProbeEnabled`. A `DiscDirectoryReader` is a disc whatever that flag
+    /// says (AE#1028): the flag gates signature reads, and a folder has no bytes to read.
     func open(reader: IOReader, formatHint: String? = nil, profile: DemuxerOpenProfile = .playback, isLive: Bool = false, selectTitleID: Int? = nil, discCacheKey: String? = nil) throws {
         if isCloseRequested { throw DemuxerError.openFailed(code: -1) }
         self.openProfile = profile
         beginOpenTiming()
         self.auditSource = nil
-        if reader.discImageProbeEnabled,
-           let discInfo = try DiscReader.wrap(reader, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
+        // A controlled probe hands the folder in behind its counting wrapper, which hides the conformance.
+        let counted = reader as? ProbeIOReader
+        let folder = counted?.discDirectory ?? reader as? DiscDirectoryReader
+        if let discSource = folder ?? (reader.discImageProbeEnabled ? reader : nil),
+           let discInfo = try DiscReader.wrap(discSource, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
             adoptDiscInfo(discInfo)
-            let bridge = CustomIOReaderBridge(reader: discInfo.reader, preservesSourcePosition: isLive)
+            var stream = discInfo.reader
+            if folder != nil {
+                // The folder's clips are files of their own, opened behind the wrapper: count them
+                // here, and own their reader, since neither the bridge nor the host closes it.
+                adoptOwnedSourceReader(discInfo.reader)
+                if let counted { stream = counted.counting(discInfo.reader) }
+            }
+            let bridge = CustomIOReaderBridge(reader: stream, preservesSourcePosition: isLive)
             let inputFormat = av_find_input_format(discInfo.formatHint)
-            try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
+            do {
+                try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
+            } catch {
+                if folder != nil { releaseOwnedSourceReader() }
+                throw error
+            }
             return
         }
         let bridge = CustomIOReaderBridge(reader: reader, preservesSourcePosition: isLive)

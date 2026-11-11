@@ -37,6 +37,39 @@ struct BluRayFolderTests {
         func close() {}
     }
 
+    /// AE#1028: the flag's docs tell a host to return false for a source that is no disc IMAGE, and a
+    /// folder is none, so a host folder reader may well do that.
+    final class OptedOutFolder: DiscDirectoryReader, @unchecked Sendable {
+        let base: MemoryFolder
+        init(_ base: MemoryFolder) { self.base = base }
+        var discFiles: [(path: String, size: Int64)] { base.discFiles }
+        var preferredPlaylist: String? { base.preferredPlaylist }
+        var discImageProbeEnabled: Bool { false }
+        private let lock = NSLock()
+        private var files: [ClosingReader] = []
+        var unclosedFiles: Int { lock.withLock { files.filter { !$0.isClosed }.count } }
+        func openDiscFile(_ path: String) -> IOReader? {
+            guard let reader = base.openDiscFile(path) else { return nil }
+            let tracked = ClosingReader(reader)
+            lock.withLock { files.append(tracked) }
+            return tracked
+        }
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { -1 }
+        func seek(offset: Int64, whence: Int32) -> Int64 { -1 }
+        func close() {}
+    }
+
+    final class ClosingReader: IOReader, @unchecked Sendable {
+        let base: IOReader
+        private let lock = NSLock()
+        private var closed = false
+        init(_ base: IOReader) { self.base = base }
+        var isClosed: Bool { lock.withLock { closed } }
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { base.read(buffer, size: size) }
+        func seek(offset: Int64, whence: Int32) -> Int64 { base.seek(offset: offset, whence: whence) }
+        func close() { lock.withLock { closed = true }; base.close() }
+    }
+
     private static func be16(_ v: Int) -> [UInt8] { [UInt8((v >> 8) & 0xff), UInt8(v & 0xff)] }
     private static func be32(_ v: Int) -> [UInt8] {
         [UInt8((v >> 24) & 0xff), UInt8((v >> 16) & 0xff), UInt8((v >> 8) & 0xff), UInt8(v & 0xff)]
@@ -355,5 +388,33 @@ struct BluRayFolderTests {
         #expect(probe.videoCodecName == "h264")
         #expect(abs(probe.durationSeconds - 8) < 1)
         #expect(folder.openedPaths.contains("BDMV/STREAM/00002.m2ts"))
+    }
+
+    @Test("a folder is recognized even when it opts out of disc-image probing (AE#1028)")
+    func folderThatOptsOutOfImageProbing() throws {
+        let (folder, _) = Self.tinyStreamFolder()
+        let optedOut = OptedOutFolder(folder)
+        let demuxer = Demuxer()
+        try demuxer.open(reader: optedOut)
+        #expect(demuxer.discTitles.count == 2)
+        #expect(optedOut.unclosedFiles > 0)
+        demuxer.close()
+        #expect(optedOut.unclosedFiles == 0)
+        let probe = try AetherEngine.probe(source: .custom(OptedOutFolder(Self.tinyStreamFolder().folder)))
+        #expect(probe.videoCodecName == "h264")
+    }
+
+    @Test("a probe with limits still reads a folder source (AE#1028)")
+    func limitedProbeOfAFolder() throws {
+        let (folder, _) = Self.tinyStreamFolder()
+        let probe = try AetherEngine.probe(source: .custom(folder), limits: ProbeLimits())
+        #expect(probe.videoCodecName == "h264")
+        #expect(abs(probe.durationSeconds - 8) < 1)
+
+        // The clips are counted against the input budget like any other source's bytes.
+        #expect(throws: ProbeError.self) {
+            try AetherEngine.probe(source: .custom(Self.tinyStreamFolder().folder),
+                                   limits: ProbeLimits(maxInputBytes: 4096))
+        }
     }
 }
