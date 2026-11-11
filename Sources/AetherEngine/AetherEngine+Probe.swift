@@ -211,7 +211,8 @@ extension AetherEngine {
                         // their own timeouts, and the byte budget, which counts one source, does not apply.
                         reader.close()
                         ownedReader = nil
-                        try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                        try demuxer.open(url: u, extraHeaders: options.httpHeaders,
+                                         profile: probeOpenProfile(limits: nil, options: options))
                     } else {
                         try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits, options: options))
                     }
