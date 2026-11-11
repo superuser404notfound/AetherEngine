@@ -2316,7 +2316,7 @@ A Profile 7 MEL source, and anything the device cannot decode twice in real time
 **Audio.** The route runs on the software host, whose audio is decoded by FFmpeg and played through the sample-buffer audio renderer.
 
 - With `objectAudioRendering` off (the default), an E-AC-3 (JOC) track plays as its channel-bed core (5.1 or 7.1), without the objects.
-- With `.apac(layout)` on (and the object-audio traits built in), JOC goes to the renderer compressed, and TrueHD Atmos and DTS:X are rendered as APAC (verified on macOS; the tvOS behaviour is unmeasured).
+- With `objectAudioRendering` set (and the object-audio traits built in), TrueHD Atmos and DTS:X are rendered into the bed, PCM or APAC as the option picks ([Atmos on the receiver](formats.md#atmos-on-the-receiver-tvos)). E-AC-3 JOC goes to the renderer compressed; on tvOS with a PCM bed the system's Atmos decoder turns it into the bed instead, since the renderer plays compressed JOC silent there.
 
 **The display is not consulted.** With the flag on and a display that does not take Dolby Vision, the route is still taken: the composed full-FEL picture is presented with its attached metadata, and how tvOS presents it is up to the platform. (The native route would have played the HDR10 base layer there.) The audio notes above apply there too.
 
