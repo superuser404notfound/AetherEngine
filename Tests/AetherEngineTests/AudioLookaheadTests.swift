@@ -122,6 +122,26 @@ struct AudioLookaheadStateTests {
         #expect(s.lastFedAudioPTS == 100.0)
     }
 
+    @Test("AE#1025: the pause arm stays shut at a realtime origin's start offset")
+    func pauseArmShutAtStartOffset() {
+        #expect(!AudioLookaheadPolicy.pauseArmOpens(wasOpen: false, lead: 0.1))
+        #expect(!AudioLookaheadPolicy.pauseArmOpens(wasOpen: false, lead: -0.4))
+    }
+
+    @Test("AE#1025: a source that once built the resume lead opens the pause arm")
+    func pauseArmOpensOnRealLead() {
+        #expect(AudioLookaheadPolicy.pauseArmOpens(
+            wasOpen: false, lead: AudioLookaheadPolicy.rebufferResumeLeadSeconds))
+    }
+
+    @Test("AE#1025: a source slower than real time from the first byte opens the pause arm")
+    func pauseArmOpensOnStarvedLead() {
+        // Measured: a 70 % origin peaked at 0.83 s of lead and then fell through -1 s at clk 5.7.
+        #expect(AudioLookaheadPolicy.pauseArmOpens(
+            wasOpen: false, lead: AudioLookaheadPolicy.starvedLeadSeconds))
+        #expect(AudioLookaheadPolicy.pauseArmOpens(wasOpen: true, lead: 0.1))
+    }
+
     @Test("advance is compare-and-set: a concurrent reset wins and the fed PTS is not committed")
     func advanceCASLosesToReset() {
         let s = AudioLookaheadState()

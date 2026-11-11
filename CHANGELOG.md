@@ -43,6 +43,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A software VOD session over a source slower than real time rebuffers instead of running on (#1025).** The
+  on-demand pause only armed once the audio lead had reached 2 s, which such a source never builds, so the clock
+  ran on over a starved read-ahead: the audio ran dry, the picture stood or dropped frames, and `playbackPhase`
+  stayed `.playing`. The pause now also arms once the clock has run a second past the last audio fed. Its read
+  also stopped waiting on the source indefinitely while video was parked, which had fed the renderer a third of
+  the frame rate. Measured on a 70 % origin: before, the audio lead fell to -17 s with no rebuffer in 55 s;
+  after, the session cycles through `.rebuffering` with the video within half a second of the clock.
+
 - **A seek on a paused software session shows the frame it landed on (#1023).** The software host kept the
   pre-seek picture on screen until `play()`: the seek flush holds the last frame (#90) and the loops stay parked
   under a pause, so nothing was decoded at the landing. A paused landing now runs the loops at the stopped clock

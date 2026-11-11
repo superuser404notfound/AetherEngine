@@ -32,6 +32,19 @@ enum AudioLookaheadPolicy {
     static let underrunPauseLeadSeconds = 0.15
     static let rebufferResumeLeadSeconds = 2.0
 
+    /// AE#1025: a lead this far below zero means the clock has run a full second past the last
+    /// audio fed, which an exactly-realtime origin (whose lead sits at its start offset) never
+    /// reaches. It opens the on-demand pause arm for a source that is slower than real time from
+    /// the first byte and therefore never builds `rebufferResumeLeadSeconds` to latch it.
+    static let starvedLeadSeconds = -1.0
+
+    /// Whether the software host's on-demand pause arm is open. It stays open once opened, until
+    /// a seek resets it: either the source proved it can deliver a real lead, or it proved it
+    /// cannot keep up at all.
+    static func pauseArmOpens(wasOpen: Bool, lead: Double) -> Bool {
+        wasOpen || lead >= rebufferResumeLeadSeconds || lead <= starvedLeadSeconds
+    }
+
     enum ClockAction: Equatable {
         case none
         case pauseForRebuffer
