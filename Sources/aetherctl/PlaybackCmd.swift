@@ -548,6 +548,22 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         }
     }.store(in: &cancellables)
 
+    // AE#1022: CUE says a cue ARRIVED, which is not what a viewer sees. A cue kept across a seek
+    // never arrives again, and one that arrives after its own end is never seen at all. ONSCREEN
+    // samples what a host overlay draws (the cues covering the playhead) four times a second and
+    // prints each change, which is the observable a landing report is measured in.
+    var lastOnScreen: [Double]? = nil
+    Timer.publish(every: 0.25, on: .main, in: .common).autoconnect().sink { _ in
+        let playhead = engine.sourceTime
+        let covering = engine.subtitleCues
+            .filter { $0.startTime <= playhead && $0.endTime > playhead }
+            .map(\.startTime).sorted()
+        guard covering != lastOnScreen else { return }
+        lastOnScreen = covering
+        let starts = covering.isEmpty ? "-" : covering.map { String(format: "%.2f", $0) }.joined(separator: ",")
+        print(String(format: "  ONSCREEN %@ at=%.2f", starts, playhead))
+    }.store(in: &cancellables)
+
     // #315: the cover-lift edge, stamped from the load call. Both transitions are printed: the
     // false is the load un-latching it, the true is the running path reporting a first frame ready
     // for display. Nothing here binds a render surface, so a true means the pipeline is ready, not

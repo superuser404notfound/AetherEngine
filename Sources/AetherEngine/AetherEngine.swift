@@ -1586,6 +1586,11 @@ public final class AetherEngine: ObservableObject {
     /// side-reader starvation). Reset wherever the cue arrays reset (track switch, seek re-anchor,
     /// clear, load/stop) so a hold can never leak across subtitle sessions.
     var pgsStaleArrivalGates: [SubtitleChannel: PGSStaleArrivalGate] = [:]
+    /// AE#1022: the start of a landing line the #416 ground check refused, per channel. The refusal
+    /// drops the candidate, so a landing whose ground is read only afterwards (by the forward
+    /// prefetch's landing window, which the landing tick itself sends there) would otherwise stay
+    /// dark until the next composition. The drain reconstructs the landing once that ground reads.
+    var subtitleLandingAwaitingGround: [SubtitleChannel: Double] = [:]
 
     /// #112 rework: per-channel embedded overlay targets served by the playhead-paced
     /// drainer (SubtitleOverlayDrainer) from the session's SubtitlePacketStore. Replaces
@@ -1644,6 +1649,13 @@ public final class AetherEngine: ObservableObject {
     /// #240: the lead the running session was started with. A changed lead (the OCR worker arming)
     /// is the one anchor change that still needs a rebuild, since the loop captures it at start.
     var subtitleForwardPrefetchActiveLead: Double?
+    /// AE#1022: the role the running session was started in. A change rebuilds it, like the lead.
+    var subtitleForwardPrefetchActiveRole: SubtitleForwardPrefetchRole?
+    /// AE#1022: the landing the running prefetch session was last sent to, and the seek generation
+    /// that sent it, so the drain tick's jump after that seek does not send it there a second time.
+    /// Scoped to the generation: a request from an earlier seek or the session start says nothing
+    /// about where the reader is now.
+    var subtitlePrefetchLandingRequestedAt: (seconds: Double, seekGeneration: UInt64)?
     /// #496: why the last live prefetch session was cancelled. Set only when a task was actually
     /// running, so it names a real teardown rather than the many no-op cancels on the way through
     /// a selection. Mirrors the log line; kept as state so a test can assert the routing.
@@ -1681,6 +1693,14 @@ public final class AetherEngine: ObservableObject {
     /// expired while a seek or a rebuffer kept the playhead still.
     nonisolated static let subtitleDrainHarvestGapReleaseLeadSeconds: Double = 2
     nonisolated static let subtitleDrainBackscanSeconds: Double = 15
+    /// AE#1022: where the forward prefetch reads after each positioning. Behind is the drain's
+    /// backscan, the furthest back the drain looks for a landing line. The landing role parks a
+    /// margin past the landing, over the pump's own run, which opens at the landing: the ledger
+    /// joins two runs only within `SubtitleHarvestCoverage.seamSeconds`.
+    nonisolated static let subtitleLandingWindow = SubtitleForwardPrefetcher.LandingWindow(
+        behindSeconds: subtitleDrainBackscanSeconds, aheadSeconds: 2)
+    nonisolated static let subtitleReadAheadWindow = SubtitleForwardPrefetcher.LandingWindow(
+        behindSeconds: subtitleDrainBackscanSeconds, aheadSeconds: nil)
     nonisolated static let subtitleDrainJumpThresholdSeconds: Double = 2.5
     nonisolated static let subtitleDrainTickNanoseconds: UInt64 = 500_000_000
     /// #271: per-tick decode cap for the overlay drainer, extended to the next PTS boundary
@@ -1704,6 +1724,7 @@ public final class AetherEngine: ObservableObject {
     /// instead of one long MainActor pass.
     nonisolated static let subtitleOCRMaxPacketsPerTick: Int = 48
     nonisolated static let subtitleForwardPrefetchParkPollNanoseconds: UInt64 = 500_000_000
+    nonisolated static let subtitleLandingWindowParkPollNanoseconds: UInt64 = 100_000_000
     /// #231: a prefetch session that dies on a read error is restarted, bounded. Consecutive
     /// failures are what a dead link looks like; the total ceiling covers a source that fails in a
     /// loop after harvesting a packet each time.
@@ -4248,9 +4269,11 @@ public final class AetherEngine: ObservableObject {
     /// drain decodes, each never less than `subtitleBitmapMinimumReachSeconds`, and the lead never
     /// more than `subtitleDrainLeadSeconds`. A host without an offset control should set 0; the
     /// default keeps the behavior from before this property existed.
-    /// AE#1015: 0 also stops the forward subtitle prefetch (#151) for text and bitmap tracks alike,
-    /// unless `softwareSubtitleDelaySeconds` is negative or the OCR worker is armed. On a remote
-    /// interleaved source that reader downloads the video a second time.
+    /// AE#1015: 0 also stops the forward subtitle prefetch (#151) from reading ahead, unless
+    /// `softwareSubtitleDelaySeconds` is negative or the OCR worker is armed. On a remote
+    /// interleaved source that reader downloads the video a second time. AE#1022: on a bitmap
+    /// track it still reads the 15 s behind each seek landing and then parks, so a line a seek
+    /// lands inside is found and shown.
     /// Negative and non-finite values are ignored. Takes effect on the next drain tick; the
     /// prefetch starts or stops at once.
     /// A host that sets this also gives up the bitmap history behind that floor: every cue that
@@ -6977,8 +7000,13 @@ public final class AetherEngine: ObservableObject {
             // no unannounced-advance guard to catch the gap. On a mid-stream-joined source that
             // silently extends one run over the whole offset, which is exactly the claim
             // `SubtitleHarvestCoverage` exists to refuse.
-            softwareSubtitlePacketStore?.noteHarvestAnchor(
-                .pump, at: host.sourceSeconds(forSession: clockTarget))
+            let landingSource = host.sourceSeconds(forSession: clockTarget)
+            softwareSubtitlePacketStore?.noteHarvestAnchor(.pump, at: landingSource)
+            // AE#1022: the landing read goes out with the seek, not with the first drain tick after
+            // it, which comes only once the landed frame has prerolled (measured 0.67 s). The ground
+            // behind the landing is then read by the time that tick asks about it.
+            closeOpenEndedSubtitleCues(atSeekLanding: landingSource)
+            requestSubtitlePrefetchLanding(at: landingSource)
             hostReposition = await host.seek(to: clockTarget)
         } else {
             // #93 retest: remember the target as recovery intent BEFORE awaiting; a wedged seek

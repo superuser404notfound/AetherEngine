@@ -85,6 +85,20 @@ the public-API contract.
     fixture with frame threading), which in the last half second meant no picture at all. It now drains
     before that flush. VideoToolbox already delivered them, so HEVC and H.264 on hardware were not affected.
 
+- **A PGS line a seek lands inside is shown with `maximumSubtitleOffsetSeconds = 0` (#1022).** Since #1015 a
+  reach of 0 stopped the forward prefetch, and nothing read the ground behind a landing: the main reader repositions
+  on a video keyframe, so a set that began before it was never read, and one it did read was refused by the #416
+  check. Measured on a 150 s MKV with a 3 s PGS set every 5 s, four seeks: no landing line before, all four after,
+  within 0.0 to 0.4 s. On a bitmap track the prefetch now keeps a landing role at reach 0: it reads from 15 s
+  before each landing to 2 s past it, then parks. Cost per seek is that window plus up to one 32 MiB range (four
+  seeks over HTTP: 168 MB against 87 MB; the default reach read 299 MB). Text tracks at reach 0 are unchanged.
+  - A software seek sends the reader with the seek, so the ground is read before the first drain tick.
+  - A landing the check refused anyway comes back once its ground reads, instead of staying dark.
+  - A set left open before a seek is closed at the landing as the seek goes out, so it is no longer drawn over
+    the landing for a moment.
+  - Every prefetch session reads from 15 s behind its landing, at any reach. A start inside a set
+    (`startPosition` or a far seek) now shows that set at the default reach too, which it never did.
+  - `aetherctl play` prints `ONSCREEN` lines: the cues covering the playhead, four times a second.
 - **A subtitle track selected at load is decoded ahead of the playhead again (#1021).** With the forward
   prefetch running from the session's start, the main reader re-read each prefetched packet a few seconds
   ahead of the playhead, and the drain read every such pair as a hole in the store. `subtitleCues` then never
