@@ -68,6 +68,16 @@ struct MissingPMTReleaseDecisionTests {
                                     programs: programs))
     }
 
+    @Test("a stall counts as one PMT interval, so the window runs on time in which data arrived")
+    func stallCountsOnce() {
+        let gap = TransportStreamHeaderWait.maxCountedGapNanoseconds
+        #expect(gap == 500_000_000)
+        #expect(Wait.counted(0, gap: 40_000_000) == 40_000_000)
+        #expect(Wait.counted(1_000_000_000, gap: 30_000_000_000) == 1_000_000_000 + gap)
+        // Ten seconds of nothing after one second of data is still short of the window.
+        #expect(Wait.counted(1_000_000_000, gap: 10_000_000_000) < Self.due)
+    }
+
     @Test("several silent programs next to several with streams")
     func manyPrograms() {
         let programs = [Program(pmtVersion: -1, streamCount: 0), Program(pmtVersion: 1, streamCount: 0),
@@ -89,7 +99,7 @@ struct ProbeStopReportTests {
 
     @Test("each cause, and the order in which they win")
     func order() {
-        #expect(stop() == .complete)
+        #expect(stop() == .resolved)
         #expect(stop(noHeader: true) == .analyzeduration)
         #expect(stop(unresolved: 1) == .analyzeduration)
         #expect(stop(unresolved: 1, probeBytes: 50 * 1_048_576) == .probesize)
@@ -125,10 +135,10 @@ struct ProbeStopReportTests {
 
     @Test("the fields, in the order downstream parsers read them")
     func fields() {
-        let released = ProbeReport(stop: .complete, unresolved: 0, programs: 2, pmtMissing: 1,
+        let released = ProbeReport(stop: .resolved, unresolved: 0, programs: 2, pmtMissing: 1,
                                    headerWaitReleasedAfter: 2_504_900_000, probeBytes: 1_814_528,
                                    closeToReturn: nil)
-        #expect(released.logFields == "probe stop=complete, unresolved=0, programs=2, pmtMissing=1, "
+        #expect(released.logFields == "probe stop=resolved, unresolved=0, programs=2, pmtMissing=1, "
                 + "headerWait=released@2504ms, probeBytes=1814528, closeToReturn=-")
         let stopped = ProbeReport(stop: .stopped, unresolved: 1, programs: 0, pmtMissing: 0,
                                   headerWaitReleasedAfter: nil, probeBytes: 0, closeToReturn: 3_200_000)
@@ -150,7 +160,7 @@ struct MissingPMTLiveOpenTests {
     func programWithoutPMT() async throws {
         let ts = TransportStreamEdit.listingSilentProgram(try LongGOPTransportStreamFixture.data())
         let open = try await PacedOpen.run(ts, label: "j3")
-        #expect(open.field("stop") == "complete")
+        #expect(open.field("stop") == "resolved")
         // Never before the window: the release is for a PMT five repetitions late, not a slow one.
         #expect((open.releasedAfterMs ?? 0) >= 2_500)
         #expect(open.field("programs") == "2")
@@ -164,7 +174,7 @@ struct MissingPMTLiveOpenTests {
         let base = TransportStreamEdit.listingSilentProgram(try LongGOPTransportStreamFixture.data())
         let ts = TransportStreamEdit.dropping(pid: TransportStreamEdit.audioPID, before: 5, in: base)
         let open = try await PacedOpen.run(ts, label: "j34")
-        #expect(open.field("stop") == "complete")
+        #expect(open.field("stop") == "resolved")
         #expect((open.releasedAfterMs ?? 0) >= 2_500)
         #expect(open.tracks == .both)
     }
@@ -174,7 +184,7 @@ struct MissingPMTLiveOpenTests {
         let base = TransportStreamEdit.listingSilentProgram(try LongGOPTransportStreamFixture.data())
         let ts = TransportStreamEdit.joined(after: 3, in: base)
         let open = try await PacedOpen.run(ts, label: "j35")
-        #expect(open.field("stop") == "complete")
+        #expect(open.field("stop") == "resolved")
         #expect((open.releasedAfterMs ?? 0) >= 2_500)
         #expect(open.tracks == .both)
     }
@@ -182,7 +192,7 @@ struct MissingPMTLiveOpenTests {
     @Test("a TS whose PMTs all arrive is never released")
     func everyPMTArrives() async throws {
         let open = try await PacedOpen.run(try LongGOPTransportStreamFixture.data(), label: "j1")
-        #expect(open.field("stop") == "complete")
+        #expect(open.field("stop") == "resolved")
         #expect(open.field("headerWait") == "-")
         #expect(open.field("programs") == "1")
         #expect(open.field("pmtMissing") == "0")
@@ -193,7 +203,7 @@ struct MissingPMTLiveOpenTests {
     func lateKeyframeWithEveryPMT() async throws {
         let ts = TransportStreamEdit.joined(after: 3, in: try LongGOPTransportStreamFixture.data())
         let open = try await PacedOpen.run(ts, label: "j5")
-        #expect(open.field("stop") == "complete")
+        #expect(open.field("stop") == "resolved")
         #expect(open.field("headerWait") == "-")
         #expect(open.tracks == .both)
     }

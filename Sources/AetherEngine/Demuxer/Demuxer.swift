@@ -3692,12 +3692,19 @@ private final class DemuxInterrupt: @unchecked Sendable {
     private var headerWaitContext: UnsafeMutablePointer<AVFormatContext>?
     private var headerWaitIsMPEGTS = false
     private var headerWaitStart: UInt64 = 0
+    /// The window runs on time in which the input delivered data (`TransportStreamHeaderWait.counted`).
+    private var headerWaitCounted: UInt64 = 0
+    private var headerWaitLastProgress: UInt64 = 0
+    private var headerWaitBytes: Int64?
     private var headerWaitReleasedAfter: UInt64?
 
     func armHeaderWait(_ ctx: UnsafeMutablePointer<AVFormatContext>, startedAt: UInt64) {
         headerWaitContext = ctx
         headerWaitIsMPEGTS = ctx.pointee.iformat.map { String(cString: $0.pointee.name) == "mpegts" } ?? false
         headerWaitStart = startedAt
+        headerWaitCounted = 0
+        headerWaitLastProgress = startedAt
+        headerWaitBytes = ctx.pointee.pb?.pointee.bytes_read
         headerWaitReleasedAfter = nil
     }
 
@@ -3717,15 +3724,21 @@ private final class DemuxInterrupt: @unchecked Sendable {
         let noHeader = (ctx.pointee.ctx_flags & AVFMTCTX_NOHEADER) != 0
         guard noHeader else { return }
         let now = DispatchTime.now().uptimeNanoseconds
-        let elapsed = now &- min(now, headerWaitStart)
+        let bytes = ctx.pointee.pb?.pointee.bytes_read
+        if bytes == nil || bytes != headerWaitBytes {
+            headerWaitCounted = TransportStreamHeaderWait.counted(
+                headerWaitCounted, gap: now &- min(now, headerWaitLastProgress))
+            headerWaitLastProgress = now
+            headerWaitBytes = bytes
+        }
         let programs = (0..<Int(ctx.pointee.nb_programs)).lazy.compactMap { ctx.pointee.programs[$0] }
             .map { TransportStreamHeaderWait.Program(pmtVersion: $0.pointee.pmt_version,
                                                      streamCount: $0.pointee.nb_stream_indexes) }
         guard TransportStreamHeaderWait.shouldRelease(isMPEGTS: headerWaitIsMPEGTS, noHeader: noHeader,
-                                                      elapsedNanoseconds: elapsed, programs: programs)
+                                                      elapsedNanoseconds: headerWaitCounted, programs: programs)
         else { return }
         ctx.pointee.ctx_flags &= ~AVFMTCTX_NOHEADER
-        headerWaitReleasedAfter = elapsed
+        headerWaitReleasedAfter = now &- min(now, headerWaitStart)
     }
 
     /// Local (URLContext) inputs only: a provider-backed input never consults this callback per read.
@@ -3766,7 +3779,8 @@ private final class DemuxInterrupt: @unchecked Sendable {
 ///
 /// The release is due once all of these hold:
 /// - the input is MPEG-TS and still has `AVFMTCTX_NOHEADER`;
-/// - the pass has run `releaseAfterNanoseconds`;
+/// - the pass has received data for `releaseAfterNanoseconds` (`counted`: a stall counts as at most
+///   one PMT interval, so a source that stops delivering does not run the window down);
 /// - a program has no PMT (`AVProgram.pmt_version == -1`) while another has one with streams.
 ///
 /// A TS whose programs all send their PMT, every other format and a TS with no streams at all are
@@ -3776,6 +3790,15 @@ enum TransportStreamHeaderWait {
     /// ETSI TR 101 290 expects a PMT at least every 0.5 s, so this is five missed repetitions. The
     /// PAT itself is already parsed by `avformat_open_input`.
     static let releaseAfterNanoseconds: UInt64 = 2_500_000_000
+
+    /// The PMT interval TR 101 290 allows. A longer gap between two reads that moved data counts as
+    /// this much, since no PMT could have arrived while nothing did.
+    static let maxCountedGapNanoseconds: UInt64 = 500_000_000
+
+    /// Advances the window by the time since the input last delivered data, capped at one PMT interval.
+    static func counted(_ counted: UInt64, gap: UInt64) -> UInt64 {
+        counted &+ min(gap, maxCountedGapNanoseconds)
+    }
 
     struct Program: Equatable, Sendable {
         /// `AVProgram.pmt_version`: -1 until the program's PMT has been parsed.
@@ -3808,8 +3831,10 @@ enum TransportStreamHeaderWait {
 /// codec-private data or payload.
 struct ProbeReport: Equatable, Sendable {
     enum Stop: String, Sendable {
-        /// Nothing left to wait for: no header wait and every audio / video stream has parameters.
-        case complete
+        /// No header wait left and every audio / video stream has its parameters. FFmpeg's own frame
+        /// rate and first-timestamp checks are not visible from public state, so a pass that spent its
+        /// duration budget on those reads `resolved` too.
+        case resolved
         case probesize
         case analyzeduration
         case eof
@@ -3843,14 +3868,14 @@ struct ProbeReport: Equatable, Sendable {
 
     /// The first cause that applies, in the order a pass can end: a close or an interrupt ends it
     /// wherever it is, a read error or the end of the input ends it before any budget, and only a
-    /// pass with nothing left to wait for counts as complete.
+    /// pass with every stream resolved and no header wait counts as resolved.
     static func stop(closeRequested: Bool, interrupted: Bool, readError: Bool, eofReached: Bool,
                      noHeader: Bool, unresolved: Int, probeBytes: Int64, probesize: Int64) -> Stop {
         if closeRequested { return .stopped }
         if interrupted { return .interrupted }
         if readError { return .readError }
         if eofReached { return .eof }
-        if !noHeader && unresolved == 0 { return .complete }
+        if !noHeader && unresolved == 0 { return .resolved }
         if probeBytes >= probesize { return .probesize }
         return .analyzeduration
     }

@@ -316,7 +316,10 @@ final class DocumentedConstantsTests: XCTestCase {
     /// docs/formats.md states when the MPEG-TS header wait for a PMT that never arrives is released.
     func testMissingPMTReleaseWindowMatchesDocumentation() throws {
         XCTAssertEqual(TransportStreamHeaderWait.releaseAfterNanoseconds, 2_500_000_000, "documented as 2.5 s")
-        assertDocumented("once the stream analysis has run 2.5 s", try documentation())
+        XCTAssertEqual(TransportStreamHeaderWait.maxCountedGapNanoseconds, 500_000_000, "documented as 0.5 s")
+        let docs = try documentation()
+        assertDocumented("once the stream analysis has received data for 2.5 s", docs)
+        assertDocumented("A stall counts as at most 0.5 s of that window", docs)
     }
 
     // MARK: - Startup ladder

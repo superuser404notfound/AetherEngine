@@ -1870,9 +1870,9 @@ Every playback, probe and restart open logs one `[Demuxer] open timings (<reader
 
 An open that ran the stream analysis appends how it ended, after the budget:
 
-`; probe stop=<complete|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->`
+`; probe stop=<resolved|probesize|analyzeduration|eof|read-error|stopped|interrupted>, unresolved=<n>, programs=<n>, pmtMissing=<n>, headerWait=<released@Nms|->, probeBytes=<n>, closeToReturn=<Nms|->`
 
-- `stop` is the first cause that applies: a close (`stopped`), a probe limit or cancellation (`interrupted`), a read error, the end of the input, nothing left to wait for (`complete`), the byte budget, otherwise the duration budget.
+- `stop` is the first cause that applies: a close (`stopped`), a probe limit or cancellation (`interrupted`), a read error, the end of the input, every stream resolved with no header wait left (`resolved`; FFmpeg's own frame-rate and first-timestamp checks are not visible here, so a pass that spent its duration budget on those reads `resolved` too), the byte budget, otherwise the duration budget.
 - `unresolved` counts the audio and video streams still missing their size, or their sample rate and channels.
 - `pmtMissing` counts the MPEG-TS programs whose PMT never arrived, and `headerWait` says when the engine released the wait for one (see [A PAT program that never sends its PMT](formats.md#raw-live-mpeg-ts-and-the-live-join)).
 - `probeBytes` is what the analysis read from the source, `closeToReturn` how long it took to end after a close.

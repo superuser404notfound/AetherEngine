@@ -46,7 +46,7 @@ the public-API contract.
 - **A live MPEG-TS whose PAT lists a program that never sends its PMT no longer reads the whole probe budget
   before it plays.** The TS demuxer waits for a header until every listed program has sent its PMT, so
   `find_stream_info` could not stop once the streams it had were resolved, and ran to 50 MiB / 60 s on a live
-  channel (58.7 s and 32 MB on a live-paced synthetic channel). After 2.5 s of stream analysis with one program
+  channel (58.7 s and 32 MB on a live-paced synthetic channel). After 2.5 s of stream analysis that received data (a stall counts as at most 0.5 s) with one program
   still silent and another with its PMT and streams, the engine now releases that wait the way the demuxer does
   when the last PMT arrives. The analysis still waits for late audio and late keyframes, drops no stream and keeps
   its budget; the same channel opens in 2.5 s with both tracks and one request instead of three. Every other

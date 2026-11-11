@@ -1686,7 +1686,8 @@ Without it, a 4 s lead ran dry before every 10 s segment and the session stalled
 
 **A PAT program that never sends its PMT.** The TS demuxer only knows its stream list is complete once every program its PAT lists has sent a PMT. Until then `avformat_find_stream_info` cannot take its "all info found" exit. Some IPTV panels and restreamers pass on a multiplex fragment whose PAT still lists a program they do not carry, and such a channel used to read the whole playback budget (50 MiB / 60 s) after every stream it had was resolved.
 
-- The engine releases that wait once the stream analysis has run 2.5 s while one program still has no PMT and another has its PMT and streams. 2.5 s is five missed repetitions of the 0.5 s PMT interval ETSI TR 101 290 expects.
+- The engine releases that wait once the stream analysis has received data for 2.5 s while one program still has no PMT and another has its PMT and streams. 2.5 s is five missed repetitions of the 0.5 s PMT interval ETSI TR 101 290 expects.
+- A stall counts as at most 0.5 s of that window, since no PMT can arrive while no data does. A source that stops delivering mid-analysis therefore does not run the window down.
 - The release is what the demuxer does itself when the last PMT arrives, and it interrupts nothing. The analysis still stops only once every stream has its parameters, so late audio and a late keyframe are still waited for under the same budget, and no stream is dropped.
 - A TS whose programs all send their PMT, and every other format, are untouched.
 - A PMT that first arrives after the release adds its streams during playback, as a PMT version change does.
