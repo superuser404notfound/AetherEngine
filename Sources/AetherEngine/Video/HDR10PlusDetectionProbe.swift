@@ -73,12 +73,18 @@ struct HDR10PlusDetectionOutcome: Sendable, Equatable {
     /// What the pass confirmed. `.found` means every requested format was; a cap can still end a pass
     /// that confirmed one of two, and that confirmation stands. Defaults to the single-target reading.
     let found: ProbeDetail
+    /// Set exactly when `found` contains `.dolbyVisionEnhancementLayer`.
+    let enhancementLayer: DolbyVisionEnhancementLayer?
 
-    init(stopReason: StopReason, packetsRead: Int, bytesRead: Int64, found: ProbeDetail? = nil) {
+    init(
+        stopReason: StopReason, packetsRead: Int, bytesRead: Int64, found: ProbeDetail? = nil,
+        enhancementLayer: DolbyVisionEnhancementLayer? = nil
+    ) {
         self.stopReason = stopReason
         self.packetsRead = packetsRead
         self.bytesRead = bytesRead
         self.found = found ?? (stopReason == .found ? .hdr10Plus : [])
+        self.enhancementLayer = enhancementLayer
     }
 
     /// A negative is never authoritative and is never published as one: only a validated payload sets a
@@ -106,6 +112,12 @@ public struct ProbeDetail: OptionSet, Sendable {
     /// HDR Vivid (CUVA T/UWA 005.1) carriage in HEVC via the same bounded packet scan as `.hdr10Plus`,
     /// sharing its `HDR10PlusDetectionOptions` budget. See `SourceProbe.carriesHDRVividMetadata`.
     public static let hdrVivid = ProbeDetail(rawValue: 1 << 2)
+
+    /// The enhancement layer of a single-track Dolby Vision Profile 7 source, FEL or MEL, from its first
+    /// RPU's `el_type` (AE#1030). Read in the same packet pass and under the same `HDR10PlusDetectionOptions`
+    /// budget as `.hdr10Plus`, and only when the container declares Profile 7; any other source reads no
+    /// packet for it. See `SourceProbe.dolbyVisionEnhancementLayer`.
+    public static let dolbyVisionEnhancementLayer = ProbeDetail(rawValue: 1 << 3)
 }
 
 extension AetherEngine {
@@ -170,7 +182,7 @@ extension AetherEngine {
         targets: ProbeDetail = .hdr10Plus,
         now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) -> HDR10PlusDetectionOutcome {
-        let targets = targets.intersection([.hdr10Plus, .hdrVivid])
+        var targets = targets.intersection([.hdr10Plus, .hdrVivid, .dolbyVisionEnhancementLayer])
         guard videoIndex >= 0, let stream = demuxer.stream(at: videoIndex),
               let codecpar = stream.pointee.codecpar,
               codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO else {
@@ -195,22 +207,30 @@ extension AetherEngine {
         var bytesRead: Int64 = 0
         var packetsSeen = 0
         var found: ProbeDetail = []
+        var enhancementLayer: DolbyVisionEnhancementLayer?
+        func outcome(_ reason: HDR10PlusDetectionOutcome.StopReason) -> HDR10PlusDetectionOutcome {
+            HDR10PlusDetectionOutcome(
+                stopReason: reason, packetsRead: packetsRead, bytesRead: bytesRead, found: found,
+                enhancementLayer: enhancementLayer)
+        }
         let fuse = Self.hdr10PlusForeignPacketFuse(maxPackets: options.maxPackets)
+        let rpuFraming = targets.contains(.dolbyVisionEnhancementLayer)
+            ? A53SEIParser.nalFraming(
+                codec: .hevc, extradata: codecpar.pointee.extradata, size: Int(codecpar.pointee.extradata_size))
+            : .lengthPrefixed(size: 4)
 
         while true {
             if let cap = Self.hdr10PlusScanCapReached(
                 packetsRead: packetsRead, bytesRead: bytesRead, elapsed: elapsed(), options: options
             ) {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: cap, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(cap)
             }
 
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 packet = try demuxer.readPacket()
             } catch {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: readEnded(.demuxError), packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(readEnded(.demuxError))
             }
             defer {
                 if let packet {
@@ -219,24 +239,20 @@ extension AetherEngine {
                 }
             }
             guard elapsed() < options.timeBudget else {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(.timeCap)
             }
             guard let pkt = packet else {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: readEnded(.demuxEOF), packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(readEnded(.demuxEOF))
             }
 
             packetsSeen += 1
             if pkt.pointee.stream_index == videoIndex {
                 let packetBytes = Int64(pkt.pointee.size)
                 guard packetBytes >= 0 else {
-                    return HDR10PlusDetectionOutcome(
-                    stopReason: .demuxError, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                    return outcome(.demuxError)
                 }
                 guard packetBytes <= options.maxBytes - bytesRead else {
-                    return HDR10PlusDetectionOutcome(
-                    stopReason: .byteCap, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                    return outcome(.byteCap)
                 }
                 packetsRead += 1
                 bytesRead += packetBytes
@@ -248,24 +264,33 @@ extension AetherEngine {
                    HDRVividMetadataScan.packetCarriesHDRVivid(pkt, codecParameters: codecpar) {
                     found.insert(.hdrVivid)
                 }
+                if targets.contains(.dolbyVisionEnhancementLayer), !found.contains(.dolbyVisionEnhancementLayer) {
+                    if let layer = DoviRpuConverter.enhancementLayerType(pkt, framing: rpuFraming)
+                        .flatMap(DolbyVisionEnhancementLayer.init(rawValue:)) {
+                        enhancementLayer = layer
+                        found.insert(.dolbyVisionEnhancementLayer)
+                    } else if packetsRead >= DolbyVisionRecordAudit.auditPacketBudget {
+                        // Every Profile 7 picture carries an RPU, so the load path's own walk gives up here,
+                        // and so does this one: the rest of the budget belongs to the dynamic HDR targets.
+                        targets.remove(.dolbyVisionEnhancementLayer)
+                        if targets.isEmpty { return outcome(.packetCap) }
+                    }
+                }
             }
             // Evidence in hand outranks the soft budget. The caps exist to bound what this pass SPENDS,
             // and a confirmation is already paid for; dropping it would turn an overrun into a false
             // negative on a slow origin, which the caller cannot tell apart from "this source has none".
             if !targets.isEmpty, found.isSuperset(of: targets) {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: .found, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(.found)
             }
 
             guard elapsed() < options.timeBudget else {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: .timeCap, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(.timeCap)
             }
 
             // AVDISCARD_ALL is advisory, so a container that keeps handing back foreign packets still ends.
             if packetsSeen >= fuse {
-                return HDR10PlusDetectionOutcome(
-                    stopReason: .packetCap, packetsRead: packetsRead, bytesRead: bytesRead, found: found)
+                return outcome(.packetCap)
             }
         }
     }

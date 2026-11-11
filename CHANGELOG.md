@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **`ProbeDetail.dolbyVisionEnhancementLayer` reads FEL or MEL inside the controlled probe (#1030).**
+  `probe(source:detecting:limits:cancellation:)` now answers the enhancement layer of a single-track Profile 7
+  source in `SourceProbe.dolbyVisionEnhancementLayer`, for any source it accepts, a custom `IOReader` included,
+  counted against the caller's `ProbeLimits` and stopped by its `ProbeCancellation`. It rides the HDR10+ packet
+  pass and its `HDR10PlusDetectionOptions` budget, starting on the packets the header probe already queued, and
+  reads nothing for a source that does not declare Profile 7. `aetherctl probe --detect-dv-el` shows it.
+
 - **`LoadOptions.foldsDolbyVisionFEL` turns the FEL curve fold off per load (#1018).** Default `true`, so
   nothing changes unless a host asks. Off, a Profile 7 FEL source gets the plain Profile 8.1 conversion: no GOP
   held back, no decode per scene, the start and seek speed of a build without the `DolbyVisionFelCurves` trait.

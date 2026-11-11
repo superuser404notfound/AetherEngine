@@ -85,13 +85,14 @@ Opens the demuxer, prints what it finds, then exits. No HLS server is started. I
 - the subtitle track list,
 - the parsed container metadata (`MediaMetadata`: title / artist / album / albumArtist, and whether embedded cover art is present).
 
-**Usage:** `aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-atmos] <url>`
+**Usage:** `aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>`
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--detect-hdr10plus` | Adds the HDR10+ detail pass of `AetherEngine.probe(url:detecting:)`. | off |
 | `--detect-atmos` | Adds the Atmos detail pass. | off |
 | `--detect-hdr-vivid` | Adds the HDR Vivid (CUVA) check to the same packet pass. Prints `HDR Vivid: CUVA metadata seen`. | off |
+| `--detect-dv-el` | Adds the Dolby Vision enhancement-layer check to the same packet pass (#1030). Prints `DV EL: FEL` or `DV EL: MEL`; `not Profile 7` when the container declares no Profile 7, `no RPU seen` when none turned up in the budget. | off |
 
 ```bash
 swift run aetherctl probe --detect-hdr10plus /path/to/hdr10plus.mkv

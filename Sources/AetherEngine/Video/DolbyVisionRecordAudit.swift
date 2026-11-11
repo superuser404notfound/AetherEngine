@@ -161,7 +161,7 @@ public enum DolbyVisionRecordAudit {
 
     /// How many video packets to walk before giving up. Every frame of a Dolby Vision source carries an
     /// RPU, so the answer is in the first one; the slack is for a container whose head is audio.
-    private static let auditPacketBudget = 16
+    static let auditPacketBudget = 16
 
     /// The same for the recordless gate, where the slack is paid by the wrong sources. #532 reads packets
     /// only for a record its own VUI already contradicts, which is a source that is broken either way;
