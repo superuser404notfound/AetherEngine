@@ -43,6 +43,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A `DiscDirectoryReader` is a disc whatever `discImageProbeEnabled` says (#1028).** A folder reader that
+  returned `false`, as the flag's docs suggest for anything that is no disc image, was opened as a byte source
+  with no bytes and failed. The flag now only gates signature reads on a byte source. Two neighbours of the same
+  check are fixed with it: a probe with `ProbeLimits` hid every folder behind its counting wrapper and failed on
+  it (now it reads the folder and counts the clips against `maxInputBytes`), and the reader that joins a folder's
+  clips was never closed, so their files stayed open after the session.
+
 - **A software session resumes from a rebuffer at once, not 2 s later.** The video preroll waited for frames past
   the clock, but after a rebuffer the layer was full with frames at or behind the stopped clock and could take no
   more until the clock ran, so every resume waited out the 2 s preroll timeout over a still picture while

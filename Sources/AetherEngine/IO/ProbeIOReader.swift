@@ -13,6 +13,12 @@ final class ProbeIOReader: IOReader, @unchecked Sendable {
 
     var discImageProbeEnabled: Bool { reader.discImageProbeEnabled }
 
+    /// The wrapped source when it is a disc folder, which the demuxer recognizes by conformance (AE#1028).
+    var discDirectory: DiscDirectoryReader? { reader as? DiscDirectoryReader }
+
+    /// `other` counted against the same control; its cancel replaces the wrapped reader's as the interrupt.
+    func counting(_ other: IOReader) -> IOReader { ProbeIOReader(reader: other, control: control) }
+
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
         do {
             let allowed = try control.inputAllowance(size)

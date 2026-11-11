@@ -8,6 +8,8 @@ import Foundation
 ///
 /// A folder carries no bytes of its own: `read` is never called on it. The engine recognizes the
 /// conformance before it reads anything and opens the files it needs through `openDiscFile(_:)`.
+/// `discImageProbeEnabled` does not apply: it gates signature reads on a byte source, and a folder is
+/// recognized by its conformance alone, so either value works.
 public protocol DiscDirectoryReader: IOReader {
     /// Every file of the disc that can be read: its path relative to the disc root, with `/` as the
     /// separator (`BDMV/STREAM/00001.m2ts`, `VIDEO_TS/VTS_01_1.VOB`), and its size in bytes.
