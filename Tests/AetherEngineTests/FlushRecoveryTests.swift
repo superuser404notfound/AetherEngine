@@ -926,8 +926,11 @@ struct FlushRecoveryHostTests {
     @Test("video dropped in the background takes the parked keyframes with it, so the owed recovery sees the hole")
     func backgroundDropFreesLedger() async throws {
         // A long clip, read through a source that stops answering half way: the end of media also frees what
-        // is parked, and would pass this test with the background drop taken out.
-        let data = try syntheticVideoFixture(keyFlags: (0..<8000).map { $0 % 30 == 0 }, withAudio: true)
+        // is parked, and would pass this test with the background drop taken out. Its only keyframe is the
+        // first: the read-ahead still holds packets read before the source stopped, and the foreground
+        // return clears the background flag before it judges the debt, so a keyframe among them could be
+        // parked in between and read as one at hand (a CI run saw `.flushVideoOnly`).
+        let data = try syntheticVideoFixture(keyFlags: (0..<8000).map { $0 == 0 }, withAudio: true)
         let reader = GatedIOReader(data: data, blockFrom: data.count / 2)
         let dem = Demuxer()
         try dem.open(reader: reader, formatHint: "mp4")
