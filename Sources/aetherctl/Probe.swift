@@ -74,7 +74,8 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
             let kind = (track.isVisualImpaired ? " (audio description)" : "") + (track.isCommentary ? " (commentary)" : "")
             print("  [\(track.id)] codec=\(track.codec) channels=\(track.channels) lang=\(lang)\(atmos)\(def)\(kind)")
             print("       rate=\(track.sampleRate) Hz bits=\(track.bitsPerSample) fmt=\(track.sampleFormat ?? "-") "
-                  + "layout=\(track.channelLayout ?? "-") profile=\(track.profile ?? "-")")
+                  + "layout=\(track.channelLayout ?? "-") profile=\(track.profile ?? "-")"
+                  + (track.trueHDAtmos.map { " truehd-atmos=\($0)" } ?? ""))
             print("       title=\(track.name)")
         }
     }

@@ -278,6 +278,22 @@ extension AetherEngine {
             if outcome.confirmedAtmos {
                 probe = Self.enrichAtmos(base: probe, confirmedTrackID: Int(targetIndex))
             }
+        } else if detecting.contains(.atmos),
+                  demuxer.stream(at: targetIndex)?.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD {
+            // AE#1035: TrueHD Atmos sits in the major sync, which the header probe reads only for a track
+            // it decoded a frame of. A profile it did name is already the answer and costs no read.
+            let named = probe.audioTracks.first(where: { $0.id == Int(targetIndex) })?.profile
+                == Self.trueHDAtmosProfileName
+            var verdict = TrueHDAtmosVerdict.atmos
+            if !named {
+                try control?.check()
+                // Same queue flush as the E-AC-3 pass, for the same reason.
+                demuxer.seekBounded(to: 0, timeout: Self.atmosProbeFlushSeekTimeout)
+                try control?.check()
+                verdict = Self.detectTrueHDAtmos(demuxer: demuxer, targetIndex: targetIndex, options: atmosDetection).verdict
+                try control?.check()
+            }
+            probe = Self.enrichTrueHDAtmos(base: probe, trackID: Int(targetIndex), verdict: verdict)
         }
 
         closeInput()
@@ -796,7 +812,7 @@ extension AetherEngine {
             && track.profile == trueHDAtmosProfileName
     }
 
-    nonisolated private static let trueHDAtmosProfileName =
+    nonisolated static let trueHDAtmosProfileName =
         VideoStreamFormat.profileName(codecID: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS)
 
     /// DTS that FFmpeg labelled DTS:X while probing, and not a commentary or an audio description. FFmpeg

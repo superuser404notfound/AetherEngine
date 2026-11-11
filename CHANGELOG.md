@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **A probe settles TrueHD Atmos (#1035).** With `.atmos` requested, a TrueHD target track is read up to its
+  first major sync, the way a session does since 7.40.1, so a track the header probe never decoded no longer
+  looks like plain TrueHD. The answer is `TrackInfo.trueHDAtmos`: `.atmos`, `.noAtmos` or `.unsettled`, so
+  "not settled within the budget" is told apart from "no Atmos". `.atmos` also names the profile "Dolby TrueHD +
+  Dolby Atmos". No decoder is opened. Under `ProbeLimits` the byte budget covers this pass too.
+  `aetherctl probe --detect-atmos` prints `truehd-atmos=`.
+
 - **`SourceProbe` carries the container name, the Dolby Vision base-layer compatibility id and the disc titles
   (#1032).** `containerFormat`, `dvBLCompatID` and `discTitles` hold the same values a loaded session publishes
   as `sourceContainerFormat`, `sourceDVBLCompatID` and `discTitles`, read from the probe's own demuxer, so a

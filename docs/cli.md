@@ -90,7 +90,7 @@ Opens the demuxer, prints what it finds, then exits. No HLS server is started. I
 | Flag | Meaning | Default |
 |---|---|---|
 | `--detect-hdr10plus` | Adds the HDR10+ detail pass of `AetherEngine.probe(url:detecting:)`. | off |
-| `--detect-atmos` | Adds the Atmos detail pass. | off |
+| `--detect-atmos` | Adds the Atmos detail pass: E-AC-3 JOC, and for TrueHD the major sync, printed as `truehd-atmos=atmos|noAtmos|unsettled` (#1035). | off |
 | `--detect-hdr-vivid` | Adds the HDR Vivid (CUVA) check to the same packet pass. Prints `HDR Vivid: CUVA metadata seen`. | off |
 | `--detect-dv-el` | Adds the Dolby Vision enhancement-layer check to the same packet pass (#1030). Prints `DV EL: FEL` or `DV EL: MEL`; `not Profile 7` when the container declares no Profile 7, `no RPU seen` when none turned up in the budget. | off |
 

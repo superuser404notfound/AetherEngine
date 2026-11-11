@@ -315,3 +315,102 @@ extension AetherEngine {
         }
     }
 }
+
+/// Result of `AetherEngine.detectTrueHDAtmos`. Internal for the same reason as `AtmosDetectionOutcome`.
+struct TrueHDAtmosDetectionOutcome: Sendable, Equatable {
+    /// From the first major sync of the target track, or `.unsettled` when none was read.
+    let verdict: TrueHDAtmosVerdict
+    /// Why the pass stopped. `.frameDecoded` stands for "a major sync was read"; no decoder is opened.
+    let stopReason: AtmosDetectionOutcome.StopReason
+    let packetsRead: Int
+    let bytesRead: Int64
+}
+
+extension AetherEngine {
+    /// AE#1035: settle TrueHD Atmos in a probe the way a session does (PR #838), from the track's own major
+    /// sync instead of libavcodec's profile, which stays unknown for a track the header probe never decoded.
+    /// Reads demuxed packets of `targetIndex` only, under the same caps, discard and input budget as
+    /// `detectAtmos`, and opens no decoder: `TrueHDMajorSync.isAtmos` reads the packet bytes.
+    ///
+    /// Read from the start of the track, the first access unit carries a major sync, so the default caps
+    /// settle a track at once. A demuxer that entered the track mid-way meets one within 128 access units.
+    /// Never throws: a read failure or a cap is `.unsettled`, never `.noAtmos`.
+    nonisolated static func detectTrueHDAtmos(
+        demuxer: Demuxer,
+        targetIndex: Int32,
+        options: AtmosDetectionOptions
+    ) -> TrueHDAtmosDetectionOutcome {
+        func unsettled(_ reason: AtmosDetectionOutcome.StopReason, _ packets: Int = 0, _ bytes: Int64 = 0)
+            -> TrueHDAtmosDetectionOutcome {
+            TrueHDAtmosDetectionOutcome(verdict: .unsettled, stopReason: reason, packetsRead: packets, bytesRead: bytes)
+        }
+        guard targetIndex >= 0, let codecpar = demuxer.stream(at: targetIndex)?.pointee.codecpar,
+              codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO else {
+            return unsettled(.noAudioTrack)
+        }
+        guard codecpar.pointee.codec_id == AV_CODEC_ID_TRUEHD else { return unsettled(.notEAC3) }
+
+        let start = DispatchTime.now()
+        func elapsed() -> TimeInterval { Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1e9 }
+        var packetsRead = 0
+        var bytesRead: Int64 = 0
+        var packetsSeen = 0
+        let fuse = Self.atmosForeignPacketFuse(maxPackets: options.maxPackets)
+
+        demuxer.discardAllStreamsExcept([targetIndex])
+        demuxer.beginInputByteBudget(Self.atmosInputByteBudget(maxBytes: options.maxBytes))
+        defer { demuxer.endInputByteBudget() }
+
+        while true {
+            if let cap = Self.atmosDecodeCapReached(
+                packetsRead: packetsRead, bytesRead: bytesRead, elapsed: elapsed(), options: options) {
+                return unsettled(cap, packetsRead, bytesRead)
+            }
+            let packet: UnsafeMutablePointer<AVPacket>?
+            do {
+                packet = try demuxer.readPacket()
+            } catch {
+                return unsettled(demuxer.inputByteBudgetExhausted ? .byteCap : .demuxError, packetsRead, bytesRead)
+            }
+            guard let pkt = packet else {
+                return unsettled(demuxer.inputByteBudgetExhausted ? .byteCap : .demuxEOF, packetsRead, bytesRead)
+            }
+            defer {
+                av_packet_unref(pkt)
+                av_packet_free_safe(pkt)
+            }
+            packetsSeen += 1
+            if pkt.pointee.stream_index == targetIndex, let data = pkt.pointee.data, pkt.pointee.size > 0 {
+                guard Int64(pkt.pointee.size) <= options.maxBytes - bytesRead else {
+                    return unsettled(.byteCap, packetsRead, bytesRead)
+                }
+                packetsRead += 1
+                bytesRead += Int64(pkt.pointee.size)
+                // A major sync already read is evidence the pass paid for, so the wall clock does not
+                // retract it (same rule as a confirmed JOC frame in `detectAtmos`).
+                if let isAtmos = TrueHDMajorSync.isAtmos(UnsafeRawBufferPointer(start: data, count: Int(pkt.pointee.size))) {
+                    return TrueHDAtmosDetectionOutcome(
+                        verdict: isAtmos ? .atmos : .noAtmos, stopReason: .frameDecoded,
+                        packetsRead: packetsRead, bytesRead: bytesRead)
+                }
+            }
+            if packetsSeen >= fuse { return unsettled(.packetCap, packetsRead, bytesRead) }
+        }
+    }
+
+    /// Record a TrueHD verdict on the one track it is about. `.atmos` also names the Atmos profile, so a host
+    /// that labels from `profile` and the engine's own `isRenderableTrueHDAtmos` read the same answer.
+    nonisolated static func enrichTrueHDAtmos(
+        base: SourceProbe, trackID: Int, verdict: TrueHDAtmosVerdict
+    ) -> SourceProbe {
+        var probe = base
+        probe.audioTracks = base.audioTracks.map { track in
+            guard track.id == trackID else { return track }
+            var settled = track
+            settled.trueHDAtmos = verdict
+            if verdict == .atmos { settled.profile = trueHDAtmosProfileName }
+            return settled
+        }
+        return probe
+    }
+}
