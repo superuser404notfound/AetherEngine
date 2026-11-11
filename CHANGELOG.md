@@ -116,8 +116,9 @@ the public-API contract.
   before it plays.** The TS demuxer waits for a header until every listed program has sent its PMT, so
   `find_stream_info` could not stop once the streams it had were resolved, and ran to 50 MiB / 60 s on a live
   channel (58.7 s and 32 MB on a live-paced synthetic channel). After 2.5 s of stream analysis that received data (a stall counts as at most 0.5 s) with one program
-  still silent and another with its PMT and streams, the engine now releases that wait the way the demuxer does
-  when the last PMT arrives. The analysis still waits for late audio and late keyframes, drops no stream and keeps
+  still silent and another with its PMT and an audio or video stream, the engine now releases that wait the way
+  the demuxer does when the last PMT arrives. A program whose PMT declares only data, SCTE-35 or teletext does
+  not count, so a data service cannot release the wait for the TV program's late PMT. The analysis still waits for late audio and late keyframes, drops no stream and keeps
   its budget; the same channel opens in 2.5 s with both tracks and one request instead of three. Every other
   format, and a TS whose PMTs all arrive, is unchanged.
 
