@@ -808,9 +808,13 @@ public final class Demuxer: @unchecked Sendable {
         self.auditSource = nil
         // A controlled probe hands the folder in behind its counting wrapper, which hides the conformance.
         let counted = reader as? ProbeIOReader
-        let folder = counted?.discDirectory ?? reader as? DiscDirectoryReader
-        if let discSource = folder ?? (reader.discImageProbeEnabled ? reader : nil),
-           let discInfo = try DiscReader.wrap(discSource, selectTitleID: selectTitleID, cacheKey: discCacheKey) {
+        let scan = counted.flatMap { probe in probe.discDirectory.map { probe.countingScan(of: $0) } }
+        let folder: DiscDirectoryReader? = scan ?? reader as? DiscDirectoryReader
+        let wrapped = try (folder ?? (reader.discImageProbeEnabled ? reader : nil)).flatMap {
+            try DiscReader.wrap($0, selectTitleID: selectTitleID, cacheKey: discCacheKey)
+        }
+        scan?.endScan()
+        if let discInfo = wrapped {
             adoptDiscInfo(discInfo)
             var stream = discInfo.reader
             if folder != nil {

@@ -4,10 +4,13 @@ import Foundation
 final class ProbeIOReader: IOReader, @unchecked Sendable {
     private let reader: IOReader
     private let control: ProbeControl
+    private let closesReader: Bool
 
-    init(reader: IOReader, control: ProbeControl) {
+    /// `closesReader` for a reader the probe opened itself, whose caller closes this wrapper instead.
+    init(reader: IOReader, control: ProbeControl, closesReader: Bool = false) {
         self.reader = reader
         self.control = control
+        self.closesReader = closesReader
         control.interrupt { reader.cancel() }
     }
 
@@ -18,6 +21,11 @@ final class ProbeIOReader: IOReader, @unchecked Sendable {
 
     /// `other` counted against the same control; its cancel replaces the wrapped reader's as the interrupt.
     func counting(_ other: IOReader) -> IOReader { ProbeIOReader(reader: other, control: control) }
+
+    /// The folder with the files its recognition scan opens counted against the same control (AE#1033).
+    func countingScan(of folder: DiscDirectoryReader) -> ProbeDiscDirectory {
+        ProbeDiscDirectory(folder: folder, control: control)
+    }
 
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
         do {
@@ -39,6 +47,37 @@ final class ProbeIOReader: IOReader, @unchecked Sendable {
 
     // A synchronous probe has no in-flight read at normal teardown, and never owns a host reader.
     func cancel() {}
+    func close() { if closesReader { reader.close() } }
+}
+
+/// A disc folder as a controlled probe sees it (AE#1033). The playlists, IFOs and clip infos that
+/// recognition opens count against the probe's limits, and a stopped probe opens no further file.
+/// `endScan()` hands the clips back uncounted: the demuxer counts their joined stream as one source,
+/// whose cancel reaches every open clip, where a per-file wrapper would count them twice.
+final class ProbeDiscDirectory: DiscDirectoryReader, @unchecked Sendable {
+    private let folder: DiscDirectoryReader
+    private let control: ProbeControl
+    private let lock = NSLock()
+    private var scanning = true
+
+    init(folder: DiscDirectoryReader, control: ProbeControl) {
+        self.folder = folder
+        self.control = control
+    }
+
+    var discFiles: [(path: String, size: Int64)] { folder.discFiles }
+    var preferredPlaylist: String? { folder.preferredPlaylist }
+
+    func endScan() { lock.withLock { scanning = false } }
+
+    func openDiscFile(_ path: String) -> IOReader? {
+        guard lock.withLock({ scanning }) else { return folder.openDiscFile(path) }
+        guard !control.isStopped, let file = folder.openDiscFile(path) else { return nil }
+        return ProbeIOReader(reader: file, control: control, closesReader: true)
+    }
+
+    func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { -1 }
+    func seek(offset: Int64, whence: Int32) -> Int64 { -1 }
     func close() {}
 }
 

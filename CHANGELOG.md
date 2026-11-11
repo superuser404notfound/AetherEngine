@@ -93,6 +93,12 @@ the public-API contract.
   channel bridge that drops the objects. It now carries the layout and the object counts, as on the loopback
   route.
 
+- **A controlled probe counts a disc folder's playlist scan (#1033).** With `limits` or `cancellation` set, the
+  `.mpls`, IFO and `.clpi` files that folder recognition opens were read outside the probe's accounting, so a
+  BDMV folder with hundreds of playlists could read far past `maxInputBytes`, and a cancellation only landed once
+  the scan was done. Those reads now count against the budget, and a stopped probe opens no further file. The
+  clips are still counted once, as the joined stream.
+
 - **A `DiscDirectoryReader` is a disc whatever `discImageProbeEnabled` says (#1028).** A folder reader that
   returned `false`, as the flag's docs suggest for anything that is no disc image, was opened as a byte source
   with no bytes and failed. The flag now only gates signature reads on a byte source. Two neighbours of the same
