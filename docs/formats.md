@@ -1509,7 +1509,7 @@ It needs an origin that honours HTTP `Range`, because a disc image is a filesyst
 
 A disc ripped as a `BDMV` folder rather than an image plays the same way, through `MediaSource.custom` with a `DiscDirectoryReader`: the host lists the folder's files (path relative to the disc root, and size) and opens any one of them on request. `HTTPDiscDirectoryReader` is the ready-made one, with one URL per file, so an origin serves the disc as plain files over `Range` and never remuxes it.
 
-The engine recognizes a folder by its conformance, so `discImageProbeEnabled` does not matter for it: that flag gates signature reads on a byte source, and a folder has none. A probe with `ProbeLimits` reads a folder too, and counts the clips' bytes against `maxInputBytes`.
+The engine recognizes a folder by its conformance, so `discImageProbeEnabled` does not matter for it: that flag gates signature reads on a byte source, and a folder has none. A controlled probe (`limits` or `cancellation`) reads a folder too: the playlists, IFOs and clip infos that recognition opens and the clips' bytes all count against `maxInputBytes`, and a cancellation or a spent budget stops the scan before the next file opens.
 
 Recognition is the image path with files in place of UDF extents:
 
@@ -1518,7 +1518,7 @@ Recognition is the image path with files in place of UDF extents:
 - the same multi-clip timeline, chapters and STN track languages,
 - the same seek by the clips' EP maps when the folder carries `BDMV/CLIPINF`.
 
-A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The name to pass is `TitleInfo.playlist` from an earlier open, so a host can store it at the first open and skip the scan of every `.mpls` from then on. The concatenating reader opens a clip's file when the read reaches it, and keeps at most three open. A controlled probe (`limits` or `cancellation`) does not recognize a folder yet. An uncontrolled `probe(source:)` and `load(source:)` do.
+A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The name to pass is `TitleInfo.playlist` from an earlier open, so a host can store it at the first open and skip the scan of every `.mpls` from then on. The concatenating reader opens a clip's file when the read reaches it, and keeps at most three open.
 
 ### DVD-Video folders
 

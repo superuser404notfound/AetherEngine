@@ -441,4 +441,52 @@ struct BluRayFolderTests {
                                    limits: ProbeLimits(maxInputBytes: 4096))
         }
     }
+
+    /// AE#1033: the scan's files behind the probe's wrapper are still closed, here and in the clips.
+    @Test("a probe with limits closes the files of the folder's playlist scan (AE#1033)")
+    func limitedProbeClosesScanFiles() throws {
+        let folder = OptedOutFolder(Self.tinyStreamFolder().folder)
+        let probe = try AetherEngine.probe(source: .custom(folder), limits: ProbeLimits())
+        #expect(probe.videoCodecName == "h264")
+        #expect(folder.unclosedFiles == 0)
+    }
+
+    /// AE#1033: a playlist the size of the whole budget used to be read for free. Now it spends the budget,
+    /// and the scan opens nothing after it.
+    @Test("a folder's playlist scan counts against maxInputBytes (AE#1033)")
+    func limitedProbeCountsTheScan() throws {
+        let budget: Int64 = 256 * 1024
+        let base = Self.tinyStreamFolder().folder
+        let folder = MemoryFolder([("BDMV/PLAYLIST/00500.mpls", Data(count: Int(budget)))]
+                                  + base.order.map { ($0, base.files[$0]!) })
+        #expect(throws: ProbeError.inputLimit) {
+            try AetherEngine.probe(source: .custom(folder), limits: ProbeLimits(maxInputBytes: budget))
+        }
+        #expect(!folder.openedPaths.contains("BDMV/PLAYLIST/00800.mpls"))
+    }
+
+    /// Cancels the probe from inside the scan, the way a press on Play would while playlists load.
+    final class CancellingFolder: DiscDirectoryReader, @unchecked Sendable {
+        let base: MemoryFolder
+        let cancellation = ProbeCancellation()
+        init(_ base: MemoryFolder) { self.base = base }
+        var discFiles: [(path: String, size: Int64)] { base.discFiles }
+        var preferredPlaylist: String? { nil }
+        func openDiscFile(_ path: String) -> IOReader? {
+            defer { cancellation.cancel() }
+            return base.openDiscFile(path)
+        }
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { -1 }
+        func seek(offset: Int64, whence: Int32) -> Int64 { -1 }
+        func close() {}
+    }
+
+    @Test("a cancelled probe stops a folder's playlist scan (AE#1033)")
+    func cancelledProbeStopsTheScan() throws {
+        let folder = CancellingFolder(Self.tinyStreamFolder().folder)
+        #expect(throws: CancellationError.self) {
+            try AetherEngine.probe(source: .custom(folder), cancellation: folder.cancellation)
+        }
+        #expect(folder.base.openedPaths == ["BDMV/PLAYLIST/00000.mpls"])
+    }
 }
