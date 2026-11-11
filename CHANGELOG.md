@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Added
 
+- **A probe can skip Matroska attachments (#1029).** `AetherEngine.probe(...)` now reads
+  `LoadOptions.skipsContainerAttachments`, as `load` has since 7.55.0 (#956), on every open: controlled,
+  uncontrolled, URL and custom reader. A probe of a Matroska file with large fonts used to read all of them, so
+  under a `ProbeLimits.maxInputBytes` smaller than the fonts it stopped with `ProbeError.inputLimit` instead of
+  answering from the header. Off by default, because it also drops a Matroska cover image from `metadata`.
 - **A loudness target for quiet sources (#1036).** `AudioShaping.loudnessTargetLUFS` (-36 to -12 LUFS) raises a
   quietly mastered film to a programme loudness: the engine measures its BS.1770 / EBU R128 integrated loudness
   over what has played and lifts it by the difference, at most 18 dB, never lowering a source. The gain moves at

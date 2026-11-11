@@ -15,7 +15,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source (`file://`, `http://`, or `https://`).
-    ///   - options: Forwarded for `httpHeaders` only; other flags ignored (no playback session).
+    ///   - options: Read for `httpHeaders` and `skipsContainerAttachments`; other flags ignored (no playback session).
     ///   - limits: Optional shared input, packet and monotonic time limits.
     ///   - cancellation: Optional one-shot token, callable from another thread or a task cancellation handler.
     /// - Throws: Open errors, `ProbeError` for a controlled stop, or `CancellationError`.
@@ -66,7 +66,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source, forwarded verbatim to `probe(url:)`.
-    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only; other flags ignored, same as `probe(url:)`).
+    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` and `skipsContainerAttachments` only, same as `probe(url:)`).
     ///   - atmosDetection: Bounds + optional explicit track override for the decode pass. Defaults resolve the
     ///     demuxer's own default audio track (`Demuxer.audioStreamIndex`) and cap the decode attempt at 64
     ///     packets / 8 MiB / 2 s wall clock (soft -- see `AtmosDetectionOptions` doc for the same
@@ -126,7 +126,7 @@ extension AetherEngine {
     ///
     /// - Parameters:
     ///   - url: Media source, forwarded verbatim to `probe(url:)`.
-    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only).
+    ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` and `skipsContainerAttachments` only).
     ///   - detecting: Which extra passes to run. Empty is the header probe with the same controls.
     ///   - atmosDetection: Bounds + optional track override for the Atmos decode pass. Ignored without `.atmos`.
     ///   - hdr10PlusDetection: Bounds for the HDR10+ / HDR Vivid / enhancement-layer scan. Ignored without
@@ -213,18 +213,20 @@ extension AetherEngine {
                         ownedReader = nil
                         try demuxer.open(url: u, extraHeaders: options.httpHeaders)
                     } else {
-                        try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits))
+                        try demuxer.open(reader: counted, profile: probeOpenProfile(limits: limits, options: options))
                     }
                 } else {
-                    try demuxer.open(url: u, extraHeaders: options.httpHeaders)
+                    try demuxer.open(url: u, extraHeaders: options.httpHeaders,
+                                     profile: probeOpenProfile(limits: nil, options: options))
                 }
             case .custom(let reader, let formatHint):
                 displayURL = URL(string: "aether-custom://source")!
                 if let control {
                     try demuxer.open(reader: ProbeIOReader(reader: reader, control: control),
-                                     formatHint: formatHint, profile: probeOpenProfile(limits: limits))
+                                     formatHint: formatHint, profile: probeOpenProfile(limits: limits, options: options))
                 } else {
-                    try demuxer.open(reader: reader, formatHint: formatHint)
+                    try demuxer.open(reader: reader, formatHint: formatHint,
+                                     profile: probeOpenProfile(limits: nil, options: options))
                 }
             }
             try control?.check()
@@ -316,9 +318,14 @@ extension AetherEngine {
     /// this probe's budget and cancellation do not reach, and `open(reader:)` clears `auditSource`
     /// regardless. A controlled probe of an untagged 10-bit HEVC source therefore reports no Dolby
     /// Vision record where an uncontrolled one does (AE#567).
-    private nonisolated static func probeOpenProfile(limits: ProbeLimits?) -> DemuxerOpenProfile {
-        guard let limits else { return .playback }
-        var profile = DemuxerOpenProfile.playback
+    ///
+    /// `LoadOptions.skipsContainerAttachments` applies to every probe open (AE#1029), controlled or not:
+    /// a Matroska file's fonts otherwise cost the probe their whole size, which is more than any byte
+    /// budget sized for a header.
+    private nonisolated static func probeOpenProfile(limits: ProbeLimits?, options: LoadOptions) -> DemuxerOpenProfile {
+        let base = DemuxerOpenProfile.playback.skippingAttachments(options.skipsContainerAttachments)
+        guard let limits else { return base }
+        var profile = base
         // FFmpeg has a minimum probe size. The input seam still enforces smaller caller limits.
         profile.probesize = max(32, min(profile.probesize, limits.maxInputBytes))
         profile.auditsRecordlessDolbyVision = false
