@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Added
 
+- **A disc title names its playlist or title set (#1034).** `TitleInfo.playlist` is the `.mpls` file a Blu-ray
+  title plays ("00800.mpls"), `TitleInfo.titleSet` the `VTS_NN` a DVD title plays, for images and folders alike.
+  `id` is only the title's place in the current scan, so a host that stores a title (a resume point, an "other
+  titles" entry) can now check at a later open that it is still the same one, and pass `playlist` back as
+  `DiscDirectoryReader.preferredPlaylist` so a folder reads one playlist instead of all of them. Both are new
+  optional fields with defaults in `TitleInfo.init`, and `aetherctl probe` prints them. A Blu-ray playlist
+  listed in upper case (`.MPLS`) is now read on an image too, as it already was in a folder.
 - **The subtitle offset reach can be set per direction (#1031).** `maximumSubtitleDelaySeconds` sizes the
   bitmap history a LATER offset needs, `maximumSubtitleAdvanceSeconds` the lead and the forward prefetch an
   EARLIER one needs. A host that shifts subtitles later can now keep 60 s of PGS history without the prefetch

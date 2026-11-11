@@ -12,12 +12,21 @@ public struct TitleInfo: Identifiable, Sendable, Equatable {
     public let name: String
     public let durationSeconds: Double
     public let chapterCount: Int
+    /// Blu-ray: the playlist file this title is, as the disc lists it ("00800.mpls"). Unlike `id`, it
+    /// names something on the disc, so a host can store it, recognize the title at a later open, and
+    /// pass it back as `DiscDirectoryReader.preferredPlaylist`. Nil for a DVD title.
+    public let playlist: String?
+    /// DVD: the title set (the `NN` of `VTS_NN_*`) whose VOBs this title plays. Nil for a Blu-ray title.
+    public let titleSet: Int?
 
-    public init(id: Int, name: String, durationSeconds: Double, chapterCount: Int) {
+    public init(id: Int, name: String, durationSeconds: Double, chapterCount: Int,
+                playlist: String? = nil, titleSet: Int? = nil) {
         self.id = id
         self.name = name
         self.durationSeconds = durationSeconds
         self.chapterCount = chapterCount
+        self.playlist = playlist
+        self.titleSet = titleSet
     }
 }
 
@@ -81,6 +90,8 @@ struct DiscTitle: Sendable, Equatable {
     /// Blu-ray: each play item's `in_time` (45 kHz, on its clip's own clock), parallel to `bdClipIDs`.
     /// A seek by the clips' EP maps turns title time back into clip time with it (`DiscSeekTable`).
     let bdClipInTimes: [UInt64]?
+    /// Blu-ray: the `.mpls` file name this title came from, as the disc lists it (#1034).
+    let bdPlaylist: String?
 
     init(id: Int, durationTicks: UInt64, chapters: [DiscChapter] = [],
          bdClipIDs: [String]? = nil, bdClipSubtractTicks: [Int64]? = nil,
@@ -88,7 +99,8 @@ struct DiscTitle: Sendable, Equatable {
          dvdVTSN: Int? = nil, dvdTitleNumber: Int? = nil,
          streamLanguages: [Int: String] = [:],
          dvdSubpictureStreamIDs: [Int]? = nil,
-         bdClipInTimes: [UInt64]? = nil) {
+         bdClipInTimes: [UInt64]? = nil,
+         bdPlaylist: String? = nil) {
         self.id = id
         self.durationTicks = durationTicks
         self.chapters = chapters
@@ -100,6 +112,7 @@ struct DiscTitle: Sendable, Equatable {
         self.streamLanguages = streamLanguages
         self.dvdSubpictureStreamIDs = dvdSubpictureStreamIDs
         self.bdClipInTimes = bdClipInTimes
+        self.bdPlaylist = bdPlaylist
     }
 }
 
@@ -230,7 +243,9 @@ extension DiscTitle {
             id: id,
             name: "Title \(id + 1)",
             durationSeconds: Double(durationTicks) / discTickRate,
-            chapterCount: chapters.count
+            chapterCount: chapters.count,
+            playlist: bdPlaylist,
+            titleSet: dvdVTSN
         )
     }
 }

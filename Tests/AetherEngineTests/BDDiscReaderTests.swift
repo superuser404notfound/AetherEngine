@@ -27,6 +27,7 @@ final class BDDiscReaderTests: XCTestCase {
         XCTAssertEqual(info.formatHint, "mpegts")
         XCTAssertEqual(info.titles.count, 1)  // single-playlist fixture -> one title
         XCTAssertEqual(info.selectedTitleIndex, 0)
+        XCTAssertEqual(info.titles.first?.titleInfo().playlist, "00000.mpls")  // #1034: the name in the UDF directory
         XCTAssertTrue(info.clipTimeline.isEmpty)  // AE#105: single-clip title needs no normalization (no-op)
         var buf = [UInt8](repeating: 0, count: 5)
         _ = buf.withUnsafeMutableBufferPointer { info.reader.read($0.baseAddress, size: 5) }

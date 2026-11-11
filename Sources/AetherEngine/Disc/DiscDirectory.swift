@@ -293,7 +293,7 @@ extension DiscReader {
             }
         }
         let parsed = scanPlaylists(playlists,
-                                   name: { $0.path.lowercased() },
+                                   name: { $0.path },
                                    extents: { [(offset: 0, length: $0.size)] },
                                    read: { entry, extents in
                                        guard let reader = folder.openDiscFile(entry.path) else { return [] }
@@ -327,7 +327,7 @@ extension DiscReader {
             clipTimeline = []
         }
         let totalBytes = segments.reduce(Int64(0)) { $0 + $1.size }
-        EngineLog.emit("[disc] Blu-ray folder recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) files=\(segments.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) preferred=\(folder.preferredPlaylist ?? "-")", category: .demux)
+        EngineLog.emit("[disc] Blu-ray folder recognized: \(titles.count) title(s), selected \(selectedIndex) playlist=\(selected.bdPlaylist ?? "-") clips=\(selected.bdClipIDs ?? []) files=\(segments.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) preferred=\(folder.preferredPlaylist ?? "-")", category: .demux)
         let seekTable = buildSeekTable(title: selected, resolved: assembled.resolved) { clip in
             guard let info = file("BDMV/CLIPINF/\(clip).clpi"), info.size > 0,
                   let reader = folder.openDiscFile(info.path) else { return nil }

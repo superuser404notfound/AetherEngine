@@ -50,7 +50,8 @@ enum BDTitleSelector {
                                  bdClipSubtractTicks: clipSubtractTicks(playlist),
                                  bdClipCumulativeBeforeTicks: playlist.cumulativeBefore.count == playlist.clipIDs.count ? playlist.cumulativeBefore : nil,
                                  streamLanguages: playlist.streamLanguages,
-                                 bdClipInTimes: playlist.inTimes.count == playlist.clipIDs.count ? playlist.inTimes : nil)
+                                 bdClipInTimes: playlist.inTimes.count == playlist.clipIDs.count ? playlist.inTimes : nil,
+                                 bdPlaylist: playlist.fileName)
             }
     }
 

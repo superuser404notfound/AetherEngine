@@ -166,6 +166,30 @@ struct BluRayFolderTests {
         #expect(folder.openedPaths.filter { $0.contains("/PLAYLIST/") } == ["BDMV/PLAYLIST/00800.mpls"])
     }
 
+    @Test("each title names its playlist file, and that name opens the same title as the preferred playlist (#1034)")
+    func titlesNameTheirPlaylist() throws {
+        let (folder, _) = Self.tinyStreamFolder()
+        let info = try #require(try DiscReader.wrap(folder))
+        let published = info.titles.map { $0.titleInfo() }
+        #expect(published.map(\.playlist) == ["00800.mpls", "00000.mpls"])
+        #expect(published.allSatisfy { $0.titleSet == nil })
+
+        let (again, _) = Self.tinyStreamFolder(preferredPlaylist: try #require(published.first?.playlist))
+        let reopened = try #require(try DiscReader.wrap(again))
+        #expect(reopened.titles.map { $0.titleInfo().playlist } == ["00800.mpls"])
+        #expect(reopened.selectedTitle?.bdClipIDs == info.selectedTitle?.bdClipIDs)
+    }
+
+    @Test("a playlist listed in upper case is still read, and keeps the case it was listed in")
+    func upperCasePlaylistName() throws {
+        let folder = MemoryFolder([
+            ("BDMV/PLAYLIST/00007.MPLS", Self.mpls([(id: "00001", inT: 0, outT: 900_000)])),
+            ("BDMV/STREAM/00001.m2ts", Self.clipBytes(1, count: 1000)),
+        ])
+        let info = try #require(try DiscReader.wrap(folder))
+        #expect(info.selectedTitle?.titleInfo().playlist == "00007.MPLS")
+    }
+
     @Test("a preferred playlist missing from the listing falls back to scanning every playlist")
     func missingPreferredPlaylistScansAll() throws {
         let (folder, _) = Self.tinyStreamFolder(preferredPlaylist: "00042.mpls")
