@@ -350,6 +350,7 @@ extension AetherEngine {
         var width: Int32 = 0
         var height: Int32 = 0
         var dvProfileNum: Int? = nil
+        var dvBLCompatID: Int? = nil
         var streamFormat: VideoStreamFormat? = nil
         let videoIdx = demuxer.videoStreamIndex
         if videoIdx >= 0, let stream = demuxer.stream(at: videoIdx) {
@@ -358,7 +359,9 @@ extension AetherEngine {
             detectedCodecID = stream.pointee.codecpar.pointee.codec_id
             width = stream.pointee.codecpar.pointee.width
             height = stream.pointee.codecpar.pointee.height
-            dvProfileNum = Self.dvProfile(stream: stream)
+            let dvRecord = Self.dvConfig(stream: stream)
+            dvProfileNum = dvRecord?.profile
+            dvBLCompatID = dvRecord?.blCompatID
             streamFormat = VideoStreamFormat(codecpar: stream.pointee.codecpar)
         }
         let codecName: String? = {
@@ -384,6 +387,9 @@ extension AetherEngine {
             videoFrameRate: snappedRate,
             isDolbyVision: detectedFormat == .dolbyVision,
             dvProfile: dvProfileNum,
+            dvBLCompatID: dvBLCompatID,
+            containerFormat: demuxer.containerFormatName,
+            discTitles: demuxer.discTitleInfos(),
             audioTracks: demuxer.audioTrackInfos(),
             subtitleTracks: demuxer.subtitleTrackInfos(),
             metadata: demuxer.mediaMetadata(),

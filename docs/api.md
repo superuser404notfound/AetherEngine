@@ -2382,7 +2382,7 @@ Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothin
 
 | Type | Carries |
 | --- | --- |
-| `SourceProbe` | `url`, `durationSeconds`, `videoFormat`, `videoCodecID` / `videoCodecName`, `videoWidth` / `videoHeight`, `videoFrameRate`, `isDolbyVision`, `dvProfile`, `carriesHDR10PlusMetadata`, `carriesHDRVividMetadata`, `audioTracks`, `subtitleTracks`, `metadata`, `isLive`, `videoStreamFormat` (the same `VideoStreamFormat` a session publishes as `$sourceVideoStreamFormat`). See below. |
+| `SourceProbe` | `url`, `durationSeconds`, `containerFormat`, `videoFormat`, `videoCodecID` / `videoCodecName`, `videoWidth` / `videoHeight`, `videoFrameRate`, `isDolbyVision`, `dvProfile`, `dvBLCompatID`, `carriesHDR10PlusMetadata`, `carriesHDRVividMetadata`, `dolbyVisionEnhancementLayer`, `discTitles`, `audioTracks`, `subtitleTracks`, `metadata`, `isLive`, `videoStreamFormat` (the same `VideoStreamFormat` a session publishes as `$sourceVideoStreamFormat`). See below. |
 | `DolbyVisionEnhancementLayer` | `.fel` (the residual changes the picture; only the dual-layer route shows it) or `.mel` (the residual is empty; the base layer and RPU are the picture). Returned by `probeDolbyVisionEnhancementLayer`, and in `SourceProbe.dolbyVisionEnhancementLayer` by a probe asked for `.dolbyVisionEnhancementLayer`. |
 | `TrackInfo` | See [`TrackInfo`](#trackinfo). |
 | `MediaMetadata` | `title`, `artist`, `album`, `artworkData`, `hasDisplayMetadata`. There is no separate album-artist field: a container's album artist is a fallback the parser folds into `artist`. |
@@ -2415,6 +2415,8 @@ Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothin
 | `FontAttachment` | Attached font files for authored ASS rendering: `filename`, `mimeType`, `data`. |
 
 **`SourceProbe` HDR flags.** `carriesHDR10PlusMetadata` is `false` unless the probe was asked for `.hdr10Plus`, and a `false` means "not asked, or not seen inside the budget", never "proven absent". When it is true and the container said HDR10, `videoFormat` reads `.hdr10Plus`; a Dolby Vision source keeps `.dolbyVision` and carries the flag alongside. `carriesHDRVividMetadata` follows the same contract for `.hdrVivid` (#699) and never moves `videoFormat`: HDR Vivid rides an HLG or PQ base, which stays the label. `dolbyVisionEnhancementLayer` is nil unless the probe was asked for `.dolbyVisionEnhancementLayer`; nil also covers "not Profile 7" and "no RPU inside the budget", so it never means MEL (#1030).
+
+**`SourceProbe` container facts (#1032).** Three fields carry what a loaded session publishes, read from the same open demuxer, so a details screen has them before the first playback. `containerFormat` is the libavformat name (`"matroska,webm"`, `"mov,mp4,m4a,3gp,3g2,mj2"`, `"mpegts"`), the same string as `sourceContainerFormat`, and it names what the bytes are: an MP4 renamed to `.mkv` reads `"mov,mp4,..."`. `dvBLCompatID` is the base-layer signal compatibility id from the `dvcC` / `dvvC` record, the same value as `sourceDVBLCompatID` (1 HDR10, 2 SDR, 4 HLG, 6 Blu-ray HDR10, 0 none; nil without a record), so Profile 8.1 / 8.2 / 8.4 need no guess from the transfer. `discTitles` is the same list as the session's `discTitles`, longest first, empty for a source that is no disc; an id from it is valid for `load(..., discTitleID:)`.
 
 ### `TrackInfo`
 

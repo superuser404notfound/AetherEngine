@@ -28,6 +28,7 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
     let rate = probe.videoFrameRate.map { String(format: "%.3f", $0) } ?? "n/a"
     let codec = probe.videoCodecName ?? "(unknown)"
 
+    print("Container:   \(probe.containerFormat ?? "(unknown)")")
     print("Duration:    \(duration)s")
     print("Video:       codec=\(codec) resolution=\(res) fps=\(rate)")
     print("  format:    \(probe.videoFormat)")
@@ -37,7 +38,9 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
               + "matrix=\(f.matrixLabel ?? "-") range=\(f.rangeLabel ?? "-")")
     }
     if probe.isDolbyVision {
-        print("  HDR/DV:    Dolby Vision signaled")
+        print("  HDR/DV:    Dolby Vision signaled"
+              + (probe.dvProfile.map { " profile=\($0)" } ?? "")
+              + (probe.dvBLCompatID.map { " blCompatID=\($0)" } ?? ""))
     }
     if detecting.contains(.hdr10Plus) {
         // A negative here means "not seen inside the scan budget", never "proven absent".
@@ -50,6 +53,13 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
         let layer = probe.dolbyVisionEnhancementLayer?.rawValue
             ?? (probe.dvProfile == 7 ? "no RPU seen" : "not Profile 7")
         print("  DV EL:     \(layer)")
+    }
+    if !probe.discTitles.isEmpty {
+        print("Disc titles:")
+        for title in probe.discTitles {
+            print("  [\(title.id)] \(title.name) " + String(format: "%.1fs", title.durationSeconds)
+                  + " chapters=\(title.chapterCount)")
+        }
     }
     print("")
 
