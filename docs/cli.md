@@ -652,6 +652,15 @@ The engine states what the change reached: `re-decoding N channel(s)` or `no act
 - the default retains 41 images (165 MB),
 - a declared reach of 0 or 10 keeps only the 15 s on each side, 11 images (44 MB), with the landing cue of a seek back still in the next tick.
 
+`play` with `--subs` also prints `ONSCREEN <starts> at=<playhead>` whenever the set of cues covering the playhead changes, sampled four times a second (`-` for none). That is what a host overlay draws, and it is the observable for a landing: a `CUE` line only says a cue arrived, and a cue kept across a seek or one that arrives after its own end never shows up as one. AE#1022 was measured this way, at reach 0 on a 150 s MKV with a 3 s PGS set every 5 s:
+
+```bash
+aetherctl play --sw --subs pgssub --subtitle-offset-reach 0 --seconds 40 \
+  --seek-every 6 --seek-count 4 --seek-pattern 63,79.4,93.2,33.9 file://$PWD/film.mkv
+```
+
+Before the fix no landing line was shown and the set before the seek was drawn over two landings. After it, `ONSCREEN` names the landing set within 0.0 to 0.4 s of each landing, the same as the default reach.
+
 ### ASS markup (`--preserve-ass-markup`)
 
 `--preserve-ass-markup` sets `LoadOptions.preserveASSMarkup` for the load, so the cue log shows which codecs the flag reaches. An ASS track prints the raw nine-field event line (`0,0,Default,,0,0,0,,{\i1}line{\i0}`); every other text codec prints extracted text, in the same session.

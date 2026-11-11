@@ -159,18 +159,15 @@ struct Issue151SubtitleForwardPrefetchTests {
 
     @Test("prefetch runs only for VOD sessions with embedded drain targets and a source")
     func gatingRules() {
-        #expect(AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
-            advanceReach: 60, ocrArmed: false))
-        #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: true, hasEmbeddedDrainTargets: true, hasSource: true,
-            advanceReach: 60, ocrArmed: false))
-        #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: false, hasSource: true,
-            advanceReach: 60, ocrArmed: false))
-        #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: false,
-            advanceReach: 60, ocrArmed: false))
+        func role(isLive: Bool = false, targets: Bool = true, source: Bool = true) -> SubtitleForwardPrefetchRole? {
+            AetherEngine.subtitleForwardPrefetchRole(
+                isLive: isLive, hasEmbeddedDrainTargets: targets, hasSource: source,
+                advanceReach: 60, ocrArmed: false, hasBitmapDrainTarget: true)
+        }
+        #expect(role() == .readAhead)
+        #expect(role(isLive: true) == nil)
+        #expect(role(targets: false) == nil)
+        #expect(role(source: false) == nil)
     }
 
     @Test("prefetch holds whenever its origin is paced or serial")
@@ -328,17 +325,19 @@ struct SubtitleForwardPrefetchAdvanceReachTests {
         return engine
     }
 
-    @Test("AE#1015: no advance reach and no OCR worker means no prefetch, either one brings it back")
+    @Test("AE#1015: no advance reach and no OCR worker means no read-ahead, either one brings it back")
     func gating() {
-        #expect(!AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
-            advanceReach: 0, ocrArmed: false))
-        #expect(AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
-            advanceReach: 0, ocrArmed: true))
-        #expect(AetherEngine.shouldRunSubtitleForwardPrefetch(
-            isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
-            advanceReach: 2, ocrArmed: false))
+        func role(reach: Double, ocr: Bool, bitmap: Bool = false) -> SubtitleForwardPrefetchRole? {
+            AetherEngine.subtitleForwardPrefetchRole(
+                isLive: false, hasEmbeddedDrainTargets: true, hasSource: true,
+                advanceReach: reach, ocrArmed: ocr, hasBitmapDrainTarget: bitmap)
+        }
+        #expect(role(reach: 0, ocr: false) == nil)
+        #expect(role(reach: 0, ocr: true) == .readAhead)
+        #expect(role(reach: 2, ocr: false) == .readAhead)
+        // AE#1022: a bitmap track keeps the reader, in the landing role only.
+        #expect(role(reach: 0, ocr: false, bitmap: true) == .landingWindow)
+        #expect(role(reach: 2, ocr: false, bitmap: true) == .readAhead)
     }
 
     @Test("AE#1015: the default reach keeps today's prefetch")

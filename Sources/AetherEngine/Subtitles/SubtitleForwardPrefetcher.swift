@@ -26,6 +26,25 @@ enum SubtitleForwardPrefetcher {
     /// dense track does not take the store's lock per packet for it).
     static let coverageNoteStepSeconds: Double = 0.5
 
+    /// AE#1022: where a session reads after each positioning, and whether it then parks.
+    ///
+    /// Every session reads from `behindSeconds` before the landing. The pump repositions on a
+    /// video keyframe at or before the target, so a bitmap set that began before that keyframe is
+    /// never read by it, and one it does read has no proven ground behind it, which the #416
+    /// landing check refuses. Behind covers the drain's own backscan, the furthest back a landing
+    /// line is ever looked for.
+    ///
+    /// With `aheadSeconds` set the session reads that far past the landing and parks there until
+    /// the next positioning instead of following the playhead. That is the role for a bitmap track
+    /// nothing reads ahead of (AE#1015): the landing is served, and the source is not read a second
+    /// time during playback.
+    struct LandingWindow: Equatable, Sendable {
+        let behindSeconds: Double
+        let aheadSeconds: Double?
+
+        func readStart(for landing: Double) -> Double { max(0, landing - behindSeconds) }
+    }
+
     /// Where a positioning attempt landed. The byte estimate is a fallback, not a failure: the
     /// reader keeps working from wherever it put the cursor, it just cannot trust timestamps.
     enum Positioning: Equatable {
@@ -247,6 +266,9 @@ enum SubtitleForwardPrefetcher {
         link: SideReaderLinkArbiter? = nil,
         reanchor: SideReaderReanchor? = nil,
         fence: SubtitleResolutionStatement.Fence = .init(),
+        landingWindow: LandingWindow? = nil,
+        landing: Double = 0,
+        landingWindowRead: (@Sendable () async -> Void)? = nil,
         playhead: @Sendable () async -> Double?
     ) async -> Outcome {
         guard var playheadSnapshot = await playhead() else {
@@ -256,6 +278,15 @@ enum SubtitleForwardPrefetcher {
         var timeBaseCache: [Int32: AVRational] = [:]
         var timeBaseFailures = 0
         var exit = Exit.cancelled
+        /// AE#1022: the landing the read window is measured from, moved by each re-anchor.
+        var currentLanding = landing
+        /// AE#1022: the window around `currentLanding` has not been reported read yet.
+        var landingReadOwed = landingWindow?.aheadSeconds != nil
+        /// Where the read parks: past the landing for a session with `aheadSeconds`, `leadSeconds`
+        /// past the playhead otherwise.
+        func parkEdge() -> Double {
+            landingWindow?.aheadSeconds.map { currentLanding + $0 } ?? playheadSnapshot + leadSeconds
+        }
         /// #416: the last read position reported to the store's coverage ledger. Reported in steps
         /// rather than per packet: the ledger only has to be able to tell a hole of authored size
         /// from continuous reading, and a step keeps this off the store's lock on a dense track.
@@ -315,7 +346,10 @@ enum SubtitleForwardPrefetcher {
             // and since the bounded ranges of #220 every one of those seeks costs a full 32 MiB
             // range off the link. A seek burst rebuilt the session once per jump.
             if let reanchor, let target = reanchor.take() {
-                let landed = reposition(demuxer: demuxer, to: target.seconds,
+                let readFrom = landingWindow?.readStart(for: target.seconds) ?? target.seconds
+                currentLanding = target.seconds
+                landingReadOwed = landingWindow?.aheadSeconds != nil
+                let landed = reposition(demuxer: demuxer, to: readFrom,
                                         anchorStreamIndex: reanchor.anchorStreamIndex,
                                         fallbackDuration: reanchor.fallbackDuration,
                                         timeout: reanchor.seekTimeout)
@@ -330,7 +364,7 @@ enum SubtitleForwardPrefetcher {
                 // #416: the run that was reading up to here is over, and everything between where
                 // it got to and this anchor is ground nobody read. #941: anchored only on a seek
                 // that completed, see noteRepositionCoverage.
-                noteRepositionCoverage(landed, at: target.seconds, store: store)
+                noteRepositionCoverage(landed, at: readFrom, store: store)
                 lastCoverageNoted = -Double.infinity
                 anchorGraceUntil = DispatchTime.now()
                     + (link?.anchorGraceSeconds ?? SideReaderLinkPolicy.anchorGraceSeconds)
@@ -411,7 +445,7 @@ enum SubtitleForwardPrefetcher {
                 lastCoverageNoted = position
             }
             var didPark = false
-            while !Task.isCancelled, position > playheadSnapshot + leadSeconds {
+            while !Task.isCancelled, position > parkEdge() {
                 // #496: a backward seek leaves the read position far past the new playhead, so this
                 // condition stays true for as long as the viewer stays behind it, and the loop never
                 // reaches the point where the move is taken. The pending move is what voids the
@@ -420,14 +454,34 @@ enum SubtitleForwardPrefetcher {
                 if !didPark {
                     didPark = true
                     SubtitlePrefetchTelemetry.recordPark(true)
+                    // AE#1022: the claim reaches the park position, not the last step below it. A
+                    // landing window is only a couple of seconds past the landing, and a step short
+                    // of it could leave a seam the pump's run does not close.
+                    if position > lastCoverageNoted {
+                        store.noteHarvestProgress(.prefetch, through: position)
+                        lastCoverageNoted = position
+                    }
+                    // AE#1022: a landing line refused for want of this ground is waiting on it.
+                    if landingReadOwed {
+                        landingReadOwed = false
+                        await landingWindowRead?()
+                    }
                 }
                 guard let fresh = await playhead() else { break readLoop }
                 playheadSnapshot = fresh
-                if position <= playheadSnapshot + leadSeconds { break }
+                if position <= parkEdge() { break }
                 do { try await Task.sleep(nanoseconds: parkPollNanoseconds) } catch { break readLoop }
             }
             if didPark { SubtitlePrefetchTelemetry.recordPark(false) }
         }
         return Outcome(exit: exit, harvested: harvested)
     }
+}
+
+/// AE#1022: what a forward prefetch session is for. `readAhead` fills the store past the playhead
+/// for an advance offset or the OCR worker (#151). `landingWindow` only reads around each landing
+/// and otherwise stays parked, for a bitmap track nothing reads ahead of (AE#1015).
+enum SubtitleForwardPrefetchRole: Equatable, Sendable {
+    case readAhead
+    case landingWindow
 }
