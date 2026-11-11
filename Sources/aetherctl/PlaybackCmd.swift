@@ -55,7 +55,8 @@ struct AudioShapingSwitchRequest {
     let delayMilliseconds: Int
 }
 
-/// `off`, or a comma list of `ch=N`, `dialogue=DB` and `night` (the engine's night preset).
+/// `off`, or a comma list of `ch=N`, `dialogue=DB`, `night` (the engine's night preset),
+/// `gain=DB` (a plain gain: a 1:1 compressor with that makeup) and `loudness=LUFS` (AE#1036).
 func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
     var shaping = AudioShaping()
     guard spec != "off" else { return shaping }
@@ -65,6 +66,10 @@ func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
         case ("ch", let v?): guard let n = Int(v) else { return nil }; shaping.maxChannels = n
         case ("dialogue", let v?): guard let db = Double(v) else { return nil }; shaping.dialogueGainDB = db
         case ("night", nil): shaping.compressor = .night
+        case ("gain", let v?):
+            guard let db = Double(v) else { return nil }
+            shaping.compressor = .init(thresholdDB: 0, ratio: 1, makeupGainDB: db)
+        case ("loudness", let v?): guard let lufs = Double(v) else { return nil }; shaping.loudnessTargetLUFS = lufs
         default: return nil
         }
     }

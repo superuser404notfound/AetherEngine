@@ -639,13 +639,14 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 ### Audio shaping
 
-`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Three settings, in any combination:
+`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Four settings, in any combination:
 
 | Setting | Field | What it does |
 | --- | --- | --- |
 | Channel cap | `maxChannels` | Folds the source to at most that many channels |
 | Dialogue lift | `dialogueGainDB` | Raises dialogue, up to 12 dB |
 | Night mode | `compressor` | Compresses dynamics |
+| Loudness target | `loudnessTargetLUFS` | Raises a quiet source to a programme loudness (AE#1036) |
 
 **Channel cap (`maxChannels`).** The source is folded to at most that many channels with libswresample's own downmix (centre and surrounds at -3 dB, LFE dropped), the same fold the route would otherwise make. A cap decides the bridge encoder as a source with that many channels would, so a 5.1 source capped to stereo is FLAC, not stereo E-AC-3. A source is never upmixed.
 
@@ -658,11 +659,22 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 **Night mode (`compressor`).** libavfilter's `acompressor`, peak detection, one gain for all channels so the image does not move. The `night` preset compresses everything above -30 dBFS 4:1 and adds 10 dB. Measured on a steady 1 kHz tone: 0 dBFS in comes out at -12.2 dBFS, -20 at -17.2, -40 at -30.0.
 
+**Plain gain.** A compressor with `ratio: 1` compresses nothing, so `AudioShaping(compressor: .init(thresholdDB: 0, ratio: 1, makeupGainDB: g))` is a plain gain of `g` dB (up to 24) into the limiter. This is a supported use. Measured on a steady 997 Hz tone: -20 dBFS at +6 dB comes out at -14.0 dBFS, 0 dBFS at +12 dB stays at the -1 dBFS ceiling. A fixed gain is the same for every film; the loudness target below adapts it per film.
+
+**Loudness target (`loudnessTargetLUFS`, -36 to -12 LUFS).** Raises a quietly mastered source to a programme loudness, for example -24 (broadcast loudness) or -16 (louder).
+
+- **What is measured.** The integrated loudness of ITU-R BS.1770 / EBU R128 (K-weighting, 400 ms blocks every 100 ms, absolute gate -70 LUFS, relative gate -10 LU) over everything the source has played so far, after the channel cap and the dialogue lift. The LFE does not count, surrounds count 1.41 times a front. Measured against the standard's reference: a 0 dBFS 997 Hz tone reads 0.0 LUFS on both fronts and -3.01 on one, at 44.1, 48 and 96 kHz alike.
+- **What is applied.** The difference to the target, never below 0 dB and never above 18 dB, in front of the compressor and the limiter. A source already at or above the target plays as it was. Measured on a steady -36 dBFS tone with a -24 target: it settles at -24.0; at -50 dBFS it stops at the 18 dB cap.
+- **How fast.** The gain rises at most 2 dB per second and falls at most 6 dB per second, so the start of a quiet film fades up over a few seconds instead of stepping. Because the measurement covers the whole film so far, one loud or quiet scene barely moves it, and silence (below the gates) does not move it at all.
+- **Seeks.** A seek keeps the measurement and the gain: the source is still the same programme. A new track or a new session measures from scratch.
+- **No latency.** Each chunk plays at the gain the audio before it asked for, and is measured afterwards. libavfilter's `loudnorm` was not used because its dynamic mode only takes 192 kHz input and holds back 3 s of audio before its first output, which every start, seek and live tune would pay.
+- The limiter keeps the lifted audio under -1 dBFS. A loud scene in a film lifted by 18 dB is limited hard, so the target is best kept moderate.
+
 **Limiter.** Whenever shaping is active, libavfilter's `alimiter` runs last, at -1 dBFS with a 5 ms lookahead and its own latency compensation. That is what lets the fold stay unnormalized (normalizing a 5.1 fold costs 7.6 dB of level, the opposite of what someone who cannot hear the dialogue asked for) and lets the makeup gain be generous. It replaced an instant-attack limiter after a measurement: on a steady overload its THD was -155 dB against -48.6, and on two tones under limiting bass hits its splatter above 3 kHz was -67 dB against -42 (relative to the tones), at the input's own floor.
 
 **Timing.** `dialoguenhance` delays its content by three quarters of its FFT window (1536 samples at 48 kHz, 3072 at 96 kHz) and stamps its output with its input's timestamps regardless. The engine therefore runs the graph on a sample counter of its own, drops the delay's priming, pushes the same number of silent samples at the end of the stream and carries the timestamps itself, so output sample k is input sample k. Measured: an impulse at sample 60000 of a stereo source comes out of the bridge at sample 60000 with 96000 samples in and out, and the software decoder presents it at 1.25000 s, its source time.
 
-**Requirements.** The graph (`AudioShapingGraph`) needs FFmpegBuild 3.11.0 or later, which adds `abuffer`, `abuffersink`, `aformat`, `aresample`, `pan`, `dialoguenhance`, `acompressor` and `alimiter`. Where it cannot be built, the remix still applies and the log says the dynamics do not.
+**Requirements.** The graph (`AudioShapingGraph`) needs FFmpegBuild 3.11.0 or later, which adds `abuffer`, `abuffersink`, `aformat`, `aresample`, `pan`, `dialoguenhance`, `acompressor` and `alimiter`. The loudness target needs no filter of its own (it is Swift, `LoudnessNormalizer`). Where the graph cannot be built, the remix still applies and the log says the dynamics do not; the loudness target is then off as well, because without the limiter its gain could clip.
 
 **What it costs.** Shaping needs PCM.
 
