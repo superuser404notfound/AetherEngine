@@ -43,6 +43,12 @@ the public-API contract.
 
 ### Fixed
 
+- **`LiveTelemetry.objectAudio` is reported on the software host (#1026).** A TrueHD Atmos or DTS:X track
+  rendered into a bed there (`objectAudioRendering`, which every Profile 7 FEL session under
+  `preferDualLayerDolbyVision` takes) left the field nil, so with `audioDelivery == .bridged` it read like the
+  channel bridge that drops the objects. It now carries the layout and the object counts, as on the loopback
+  route.
+
 - **A `DiscDirectoryReader` is a disc whatever `discImageProbeEnabled` says (#1028).** A folder reader that
   returned `false`, as the flag's docs suggest for anything that is no disc image, was opened as a byte source
   with no bytes and failed. The flag now only gates signature reads on a byte source. Two neighbours of the same

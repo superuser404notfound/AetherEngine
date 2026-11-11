@@ -296,6 +296,8 @@ final class SoftwarePlaybackHost {
     /// Swapped per codec at load(): SoftwareVideoDecoder for AV1 and unsupported hardware formats, HardwareVideoDecoder for HEVC/VP9. Protocol keeps the demux loop codec-agnostic.
     private var videoDecoder: any VideoDecodingPipeline
     private var audioDecoder: (any SoftwareAudioProducing)?
+    /// What the object renderer is doing on this host; nil unless TrueHD Atmos or DTS:X is rendered.
+    var objectAudioActivity: ObjectAudioActivity? { audioDecoder?.objectAudioActivity }
     /// How this session's audio reaches the renderer (`SoftwareAtmosRoute`), for the logs and the tests.
     private(set) var audioRoute: SoftwareAtmosRoute = .pcm
     /// The route needs `AtmosOutputActivator` (`SoftwareAtmosRoute.takesAtmosOutputActivator`).

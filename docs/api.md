@@ -1794,7 +1794,7 @@ A certificate the host does not accept still reaches the host as `PlaybackErrorK
 - `avSyncGapMs` and `observedFps` are nil.
 - The loopback counters (`producerRestartCount`, `muxedBytesLifetime`, `serverBytesSentLifetime`, `serverRequestCount`, `demuxerBytesFetched`) read 0 because there is no loopback.
 
-**`LiveTelemetry.objectAudio`** is nil on every other audio path, and always nil in a build without the `TrueHDObjectAudio` / `DTSXObjectAudio` traits. It reports:
+**`LiveTelemetry.objectAudio`** is reported on the loopback route and on the software host alike. It is nil on every other audio path, and always nil in a build without the `TrueHDObjectAudio` / `DTSXObjectAudio` traits. It reports:
 
 - `layout`: the bed the presentation is rendered into
 - `objects`: the objects it declares
