@@ -81,7 +81,7 @@ enum DiscReader {
             clipTimeline = []
         }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
-        EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) stnLanguages=\(selected.streamLanguages.count)", category: .demux)
+        EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) playlist=\(selected.bdPlaylist ?? "-") clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) stnLanguages=\(selected.streamLanguages.count)", category: .demux)
         let clipInfoDir = (try? udf.list(path: ["BDMV", "CLIPINF"])) ?? []
         let seekTable = buildSeekTable(title: selected, resolved: assembled.resolved) { clip in
             guard let entry = clipInfoDir.first(where: { $0.name.caseInsensitiveCompare("\(clip).clpi") == .orderedSame }),
@@ -136,7 +136,7 @@ enum DiscReader {
         var bytesRead: Int64 = 0
         var items = 0
         var shortReads = 0
-        for e in entries where name(e).hasSuffix(".mpls") {
+        for e in entries where name(e).lowercased().hasSuffix(".mpls") {
             examined += 1
             guard examined <= maxPlaylistFiles else {
                 EngineLog.emit("[disc] PLAYLIST scan stopped at \(maxPlaylistFiles) .mpls entries", category: .demux)
@@ -161,7 +161,8 @@ enum DiscReader {
             } else {
                 shortReads = 0
             }
-            guard let pl = MPLSParser.parse(bytes) else { continue }
+            guard var pl = MPLSParser.parse(bytes) else { continue }
+            pl.fileName = name(e).split(separator: "/").last.map(String.init)
             items += pl.clipIDs.count
             guard items <= maxPlaylistItems else {
                 EngineLog.emit("[disc] PLAYLIST scan stopped after \(maxPlaylistItems) PlayItems", category: .demux)

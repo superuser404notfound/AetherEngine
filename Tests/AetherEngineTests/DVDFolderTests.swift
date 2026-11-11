@@ -32,6 +32,8 @@ struct DVDFolderTests {
         let info = try #require(try DiscReader.wrap(folder))
         #expect(info.formatHint == "mpeg")
         #expect(info.titles.map(\.dvdVTSN) == [1, 2])
+        #expect(info.titles.map { $0.titleInfo().titleSet } == [1, 2])  // #1034
+        #expect(info.titles.allSatisfy { $0.titleInfo().playlist == nil })
         #expect(BluRayFolderTests.readToEnd(info.reader) == Self.bytes(5, 7000) + Self.bytes(6, 4000))
         #expect(info.reader.seek(offset: 0, whence: 65536) == 11000)
         // The menu VOBs are never opened, and no Blu-ray path is tried.

@@ -17,6 +17,9 @@ struct MPLSPlaylist: Equatable {
     /// Blu-ray keeps its track languages here, not in the clip's PMT, so this is the only place a
     /// demuxed m2ts can learn them. Empty when no PlayItem declares one. See `parseSTNLanguages` (#527).
     var streamLanguages: [Int: String] = [:]
+    /// The playlist's file name as the disc lists it ("00800.mpls"). Set by `DiscReader.scanPlaylists`,
+    /// which is where the name is known; nil for a playlist parsed from bytes alone (#1034).
+    var fileName: String? = nil
 }
 
 enum MPLSParser {

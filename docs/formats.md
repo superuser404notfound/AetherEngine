@@ -1518,7 +1518,7 @@ Recognition is the image path with files in place of UDF extents:
 - the same multi-clip timeline, chapters and STN track languages,
 - the same seek by the clips' EP maps when the folder carries `BDMV/CLIPINF`.
 
-A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The concatenating reader opens a clip's file when the read reaches it, and keeps at most three open. A controlled probe (`limits` or `cancellation`) does not recognize a folder yet. An uncontrolled `probe(source:)` and `load(source:)` do.
+A host that already knows the main playlist names it in `preferredPlaylist`, and only that playlist is read and published as the title. The name to pass is `TitleInfo.playlist` from an earlier open, so a host can store it at the first open and skip the scan of every `.mpls` from then on. The concatenating reader opens a clip's file when the read reaches it, and keeps at most three open. A controlled probe (`limits` or `cancellation`) does not recognize a folder yet. An uncontrolled `probe(source:)` and `load(source:)` do.
 
 ### DVD-Video folders
 
@@ -1526,7 +1526,8 @@ A listing that holds `VIDEO_TS/` files and no playable Blu-ray title is read as 
 
 ### Title selection
 
-- `engine.discTitles` (`@Published [TitleInfo]`) lists the disc's titles (id, name, duration, chapter count).
+- `engine.discTitles` (`@Published [TitleInfo]`) lists the disc's titles (id, name, duration, chapter count, and what the title is on the disc: `playlist` on Blu-ray, `titleSet` on DVD).
+- `id` is the title's position in this scan, longest first, and can name another title after the disc was replaced. `playlist` and `titleSet` come from the disc itself, so a host stores those to recognize a title at a later open.
 - `engine.selectedDiscTitle` is the active one.
 - `engine.selectTitle(id:)` switches title, rebuilding the pipeline from the new title's head.
 

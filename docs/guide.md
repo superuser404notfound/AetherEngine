@@ -197,7 +197,7 @@ For bilingual viewing and language learning.
 
 ```swift
 // DVD-Video / Blu-ray ISO (empty for other sources)
-player.$discTitles             // [TitleInfo]: id, name, durationSeconds, chapterCount (longest first, id 0 is the main feature)
+player.$discTitles             // [TitleInfo]: id, name, durationSeconds, chapterCount, playlist (Blu-ray .mpls), titleSet (DVD VTS) (longest first, id 0 is the main feature)
 player.$selectedDiscTitle      // TitleInfo?
 player.selectTitle(id: titleID)       // switch title (rebuilds from the new title's start)
 player.$discChapters           // [ChapterInfo] for the selected title

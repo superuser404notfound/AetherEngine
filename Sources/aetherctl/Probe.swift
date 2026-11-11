@@ -58,7 +58,9 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
         print("Disc titles:")
         for title in probe.discTitles {
             print("  [\(title.id)] \(title.name) " + String(format: "%.1fs", title.durationSeconds)
-                  + " chapters=\(title.chapterCount)")
+                  + " chapters=\(title.chapterCount)"
+                  + (title.playlist.map { " playlist=\($0)" } ?? "")
+                  + (title.titleSet.map { " titleSet=\($0)" } ?? ""))
         }
     }
     print("")
