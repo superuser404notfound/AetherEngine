@@ -946,6 +946,7 @@ extension AetherEngine {
     /// asked for; a session whose decoder refused to open serves none, and this label used to name one
     /// for it. `route` is the host's `audioRoute`: the PCM decode is libavcodec into CoreAudio, the Atmos
     /// routes are named the way the loopback route names its own APAC ("TRUEHD Atmos → APAC 7.1.4").
+    /// AE#1027: DTS arrives as the decoder name `dca`, so DTS:X is told by both names like `isRenderableDTSX`.
     nonisolated static func softwareAudioDecoderLabel(
         audioTracks: [TrackInfo],
         activeIndex: Int32,
@@ -956,14 +957,15 @@ extension AetherEngine {
             return nil
         }
         let codec = track.codec.uppercased()
+        let isDTS = ["dca", "dts"].contains(track.codec.lowercased())
         switch route {
         case .pcm: return "libavcodec \(codec) → CoreAudio"
         case .compressedEAC3JOC: return "\(codec) Atmos → renderer (compressed)"
         case .decodedEAC3JOC(let layout): return "\(codec) Atmos → PCM \(layout.rawValue) (system decoder)"
         case .apac(let layout):
-            return codec.hasPrefix("DTS") ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
+            return isDTS ? "DTS:X → APAC \(layout.rawValue)" : "\(codec) Atmos → APAC \(layout.rawValue)"
         case .pcmBed(let layout):
-            return codec.hasPrefix("DTS") ? "DTS:X → PCM \(layout.rawValue)" : "\(codec) Atmos → PCM \(layout.rawValue)"
+            return isDTS ? "DTS:X → PCM \(layout.rawValue)" : "\(codec) Atmos → PCM \(layout.rawValue)"
         }
     }
 
