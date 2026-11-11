@@ -25,6 +25,15 @@ enum PausedFirstFrame {
         loaded && !loopsStarted
     }
 
+    /// AE#1024: whether an end of file the loops just reached waits for `play()` instead of ending the
+    /// session. Under a host pause the loops only read for the picture, and a paused rebuild in the last
+    /// half second reads to the end before that picture is in. `.ended` is terminal and means a running
+    /// clock got there (#164 settles a seek landing on the end to `.paused` for the same reason), so the
+    /// end is owed to the next `play()`.
+    static func endOfMediaWaitsForPlay(transportPlaying: Bool, pausedByHost: Bool) -> Bool {
+        pausedByHost && !transportPlaying
+    }
+
     /// Whether the loops may read and decode.
     static func loopsMayRun(isPlaying: Bool, pausedBeforeFirstFrame: Bool) -> Bool {
         isPlaying || pausedBeforeFirstFrame

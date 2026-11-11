@@ -805,6 +805,10 @@ final class SoftwarePlaybackHost {
     /// park is deferred by the queued audio tail, so the guard covers a second arrival mid-defer.
     private var didParkClockAtEnd = false
 
+    /// AE#1024: the seek generation whose end of file arrived under a host pause, or nil. `play()` finishes
+    /// it; a seek drops it, and the generation check keeps a queued end from landing on a later position.
+    private var endOfMediaOwedOnPlay: UInt64?
+
     /// Invoked on the main-actor time-update cadence with the current
     /// session-relative live edge (seconds since first frame) while live.
     /// Wired by the engine to `publishLiveWindow(edgeSessionTime:)`.
@@ -1780,6 +1784,10 @@ final class SoftwarePlaybackHost {
         rate = lastRate
         isPlaying = true
         inFlightSeekResumeIntent = true
+        if let owed = endOfMediaOwedOnPlay {
+            endOfMediaOwedOnPlay = nil
+            if owed == seekGeneration { finishAtEndOfMedia() }
+        }
     }
 
     private var demuxLoopStarted: Bool = false
@@ -1840,6 +1848,8 @@ final class SoftwarePlaybackHost {
         audioOutput = output
         clockArmed = armed
     }
+
+    var endOfMediaOwedOnPlayForTesting: Bool { endOfMediaOwedOnPlay != nil }
 
     func finishClockOutputForTesting() {
         didReachEnd = true
@@ -1943,6 +1953,13 @@ final class SoftwarePlaybackHost {
                 category: .swPlayback
             )
         }
+    }
+
+    private func finishAtEndOfMedia() {
+        endOfMediaOwedOnPlay = nil
+        parkClockAtEndOfMedia()
+        didReachEnd = true
+        isPlaying = false
     }
 
     /// AE#374: stop the master clock on the last sample instead of letting it free-run past the end.
@@ -2424,6 +2441,7 @@ final class SoftwarePlaybackHost {
         let generation = seekGeneration
         residentRangePublication.invalidate()
         didReachEnd = false
+        endOfMediaOwedOnPlay = nil
         didParkClockAtEnd = false
         didEmitParkedDiag = false
         let packetSource = vodPacketReadAhead
@@ -2953,9 +2971,14 @@ final class SoftwarePlaybackHost {
                 // Only current EOF may mark the diagnostic source exhausted or stop playback.
                 // A queued pre-seek EOF task must not end a freshly positioned generation.
                 self.demuxDiag.markSourceExhausted()
-                self.parkClockAtEndOfMedia()
-                self.didReachEnd = true
-                self.isPlaying = false
+                if PausedFirstFrame.endOfMediaWaitsForPlay(transportPlaying: self.isPlaying,
+                                                           pausedByHost: self.pausedByHost) {
+                    self.endOfMediaOwedOnPlay = generation
+                    EngineLog.emit("[SWHost] AE#1024 end of file under a pause: the session ends once play() runs the clock there",
+                                   category: .swPlayback)
+                    return
+                }
+                self.finishAtEndOfMedia()
             }
         }
         let onError: @Sendable (String) -> Void = { [weak self] message in
