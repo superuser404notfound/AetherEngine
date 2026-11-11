@@ -266,6 +266,16 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.unlock()
     }
 
+    /// The host's own hook on the same moment, kept apart from the public #311 observer: the source
+    /// timestamp of every frame the queue target accepted, whether it left the reorder buffer on its own
+    /// or in a drain. Same locking as the observer.
+    private var _handoverHook: (@Sendable (Double) -> Void)?
+    func setHandoverHook(_ hook: (@Sendable (Double) -> Void)?) {
+        reorderLock.lock()
+        _handoverHook = hook
+        reorderLock.unlock()
+    }
+
     /// AE#395: the session's renderer axis, shared with the `AudioOutput` whose synchronizer this
     /// renderer runs on. Only the stamp on the sample buffer moves onto it; the reorder buffer, the
     /// frontier and the frame-time reports stay on the source axis. Guarded by `reorderLock`.
@@ -1051,8 +1061,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         reorderLock.lock()
         let observer = _frameEnqueuedObserver
         let generation = _flushGeneration
+        let handoverHook = accepted ? _handoverHook : nil
         reorderLock.unlock()
         observer?(SoftwareVideoFrameTime(presentation: pts, generation: generation))
+        if let handoverHook, pts.isNumeric { handoverHook(CMTimeGetSeconds(pts)) }
 
         reorderLock.lock()
         enqueueCount += 1

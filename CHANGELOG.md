@@ -43,6 +43,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A seek on a paused software session shows the frame it landed on (#1023).** The software host kept the
+  pre-seek picture on screen until `play()`: the seek flush holds the last frame (#90) and the loops stay parked
+  under a pause, so nothing was decoded at the landing. A paused landing now runs the loops at the stopped clock
+  until the frame at the target is in, then parks them again, the way a paused load does since #973. That hold,
+  and the one before a session's first frame, now ends at the first frame the renderer hands over rather than
+  the first one decoded: VideoToolbox answers in coding order, so the old drain showed a later P-frame, moved the
+  stopped clock past the target and dropped the B-frames in between. A host no longer needs a reload to update
+  the picture after a paused jump.
+
 - **A paused software session rebuilt in the last half second stays `.paused` and shows its frame (#1024).**
   An audio-track switch or another paused rebuild there runs the loops only for the frame at the playhead, and
   with the decoder still holding that frame they read to the end of the file first. Two things went wrong
