@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Added
 
+- **The subtitle offset reach can be set per direction (#1031).** `maximumSubtitleDelaySeconds` sizes the
+  bitmap history a LATER offset needs, `maximumSubtitleAdvanceSeconds` the lead and the forward prefetch an
+  EARLIER one needs. A host that shifts subtitles later can now keep 60 s of PGS history without the prefetch
+  reading a remote source a second time. `maximumSubtitleOffsetSeconds` still sets both and reads back the larger,
+  so existing hosts behave as before. A positive `softwareSubtitleDelaySeconds` now widens only the history and a
+  negative one only the lead. `aetherctl play` takes `--subtitle-delay-reach` and `--subtitle-advance-reach`.
 - **A probe can skip Matroska attachments (#1029).** `AetherEngine.probe(...)` now reads
   `LoadOptions.skipsContainerAttachments`, as `load` has since 7.55.0 (#956), on every open: controlled,
   uncontrolled, URL and custom reader. A probe of a Matroska file with large fonts used to read all of them, so

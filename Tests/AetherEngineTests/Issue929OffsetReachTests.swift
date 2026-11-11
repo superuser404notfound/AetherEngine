@@ -18,8 +18,8 @@ struct Issue929OffsetReachTests {
     func defaultUnchanged() throws {
         let engine = try AetherEngine()
         #expect(engine.maximumSubtitleOffsetSeconds == AetherEngine.subtitleCueBitmapFloorSeconds)
-        #expect(AetherEngine.bitmapCueFloorSeconds(offsetReach: engine.bitmapSubtitleOffsetReach) == 60)
-        #expect(AetherEngine.subtitleDrainLead(isBitmap: true, offsetReach: engine.bitmapSubtitleOffsetReach)
+        #expect(AetherEngine.bitmapCueFloorSeconds(offsetReach: engine.bitmapSubtitleHistoryReach) == 60)
+        #expect(AetherEngine.subtitleDrainLead(isBitmap: true, offsetReach: engine.subtitleAdvanceReach)
                 == AetherEngine.subtitleDrainLeadSeconds)
     }
 
@@ -54,7 +54,11 @@ struct Issue929OffsetReachTests {
         let engine = try AetherEngine()
         engine.maximumSubtitleOffsetSeconds = 0
         engine.setSoftwareSubtitleDelay(-25)
-        #expect(engine.bitmapSubtitleOffsetReach == 25)
+        #expect(engine.subtitleAdvanceReach == 25)
+        #expect(engine.bitmapSubtitleHistoryReach == 0)
+        engine.setSoftwareSubtitleDelay(25)
+        #expect(engine.bitmapSubtitleHistoryReach == 25)
+        #expect(engine.subtitleAdvanceReach == 0)
     }
 
     @Test("negative and non-finite reaches are ignored")

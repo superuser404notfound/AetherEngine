@@ -4264,25 +4264,50 @@ public final class AetherEngine: ObservableObject {
     nonisolated static let subtitleBitmapMinimumReachSeconds: Double = 15
 
     /// AE#929: the largest subtitle offset, of either sign, the host applies to its overlay against
-    /// `clock.sourceTime`. Bitmap cues (PGS/DVB/DVD) are retained as decoded RGBA, so this sets how
-    /// much of them the engine keeps: the history the byte budget never evicts and how far ahead the
-    /// drain decodes, each never less than `subtitleBitmapMinimumReachSeconds`, and the lead never
-    /// more than `subtitleDrainLeadSeconds`. A host without an offset control should set 0; the
-    /// default keeps the behavior from before this property existed.
-    /// AE#1015: 0 also stops the forward subtitle prefetch (#151) from reading ahead, unless
-    /// `softwareSubtitleDelaySeconds` is negative or the OCR worker is armed. On a remote
-    /// interleaved source that reader downloads the video a second time. AE#1022: on a bitmap
-    /// track it still reads the 15 s behind each seek landing and then parks, so a line a seek
-    /// lands inside is found and shown.
-    /// Negative and non-finite values are ignored. Takes effect on the next drain tick; the
-    /// prefetch starts or stops at once.
-    /// A host that sets this also gives up the bitmap history behind that floor: every cue that
-    /// ended before it is dropped at once instead of being kept up to the 64 MiB budget, see
-    /// `bitmapCueHistoryByteBudget`.
-    public var maximumSubtitleOffsetSeconds: Double = AetherEngine.subtitleCueBitmapFloorSeconds {
+    /// `clock.sourceTime`. Reading it gives the larger of `maximumSubtitleDelaySeconds` and
+    /// `maximumSubtitleAdvanceSeconds`; setting it sets both. A host whose offsets run further one
+    /// way than the other sets those two instead (AE#1031). Negative and non-finite values are
+    /// ignored.
+    public var maximumSubtitleOffsetSeconds: Double {
+        get { max(maximumSubtitleDelaySeconds, maximumSubtitleAdvanceSeconds) }
+        set {
+            guard newValue.isFinite, newValue >= 0 else { return }
+            maximumSubtitleAdvanceSeconds = newValue
+            maximumSubtitleDelaySeconds = newValue
+        }
+    }
+
+    /// AE#1031: the largest LATER offset the host applies (cues shown after their time). Bitmap cues
+    /// (PGS/DVB/DVD) are retained as decoded RGBA, so this sets the history behind the playhead the
+    /// byte budget never evicts, never less than `subtitleBitmapMinimumReachSeconds`. It starts no
+    /// second reader: a later offset only needs cues the main reader has already passed. Default 60.
+    /// Negative and non-finite values are ignored. Takes effect on the next drain tick.
+    /// A host that sets this, or either of the other two, also gives up the bitmap history behind
+    /// that floor: every cue that ended before it is dropped at once instead of being kept up to the
+    /// 64 MiB budget, see `bitmapCueHistoryByteBudget`.
+    public var maximumSubtitleDelaySeconds: Double = AetherEngine.subtitleCueBitmapFloorSeconds {
         didSet {
-            if !maximumSubtitleOffsetSeconds.isFinite || maximumSubtitleOffsetSeconds < 0 {
-                maximumSubtitleOffsetSeconds = oldValue
+            if !maximumSubtitleDelaySeconds.isFinite || maximumSubtitleDelaySeconds < 0 {
+                maximumSubtitleDelaySeconds = oldValue
+            } else {
+                subtitleOffsetReachDeclared = true
+            }
+        }
+    }
+
+    /// AE#1031: the largest EARLIER offset the host applies (cues shown before their time). It sets
+    /// how far ahead a bitmap channel decodes (at least `subtitleBitmapMinimumReachSeconds`, at most
+    /// `subtitleDrainLeadSeconds`) and whether the forward subtitle prefetch runs. Default 60.
+    /// AE#1015: 0 stops that prefetch (#151) from reading ahead, unless `softwareSubtitleDelaySeconds`
+    /// is negative or the OCR worker is armed. On a remote interleaved source that reader downloads
+    /// the video a second time. AE#1022: on a bitmap track it still reads the 15 s behind each seek
+    /// landing and then parks, so a line a seek lands inside is found and shown.
+    /// Negative and non-finite values are ignored. Takes effect on the next drain tick; the prefetch
+    /// starts or stops at once.
+    public var maximumSubtitleAdvanceSeconds: Double = AetherEngine.subtitleCueBitmapFloorSeconds {
+        didSet {
+            if !maximumSubtitleAdvanceSeconds.isFinite || maximumSubtitleAdvanceSeconds < 0 {
+                maximumSubtitleAdvanceSeconds = oldValue
             } else {
                 subtitleOffsetReachDeclared = true
                 syncSubtitleForwardPrefetchWithAdvanceReach()   // AE#1015
@@ -4290,7 +4315,7 @@ public final class AetherEngine: ObservableObject {
         }
     }
 
-    /// AE#929: true once the host assigned a valid `maximumSubtitleOffsetSeconds`.
+    /// AE#929: true once the host assigned a valid subtitle offset reach, either direction.
     private(set) var subtitleOffsetReachDeclared = false
 
     /// AE#929: what the bitmap history behind the floor may hold. Past the floor a cue serves no
@@ -4302,11 +4327,11 @@ public final class AetherEngine: ObservableObject {
         subtitleOffsetReachDeclared ? 0 : Self.subtitleCueBitmapByteBudget
     }
 
-    /// AE#929: the reach the bitmap windows are sized from. The software PiP compositor applies
-    /// `softwareSubtitleDelaySeconds` itself, so that offset is covered even when the host
-    /// declared less.
-    var bitmapSubtitleOffsetReach: Double {
-        max(maximumSubtitleOffsetSeconds, abs(softwareSubtitleDelaySeconds))
+    /// AE#929: the history behind the playhead a bitmap channel keeps. The software PiP compositor
+    /// applies `softwareSubtitleDelaySeconds` itself, so a positive delay is covered even when the
+    /// host declared less. AE#1031: only the later direction counts here.
+    var bitmapSubtitleHistoryReach: Double {
+        max(maximumSubtitleDelaySeconds, softwareSubtitleDelaySeconds)
     }
 
     /// AE#929: history behind the playhead the bitmap byte budget never evicts.
@@ -4331,7 +4356,7 @@ public final class AetherEngine: ObservableObject {
 
     func subtitleDrainLead(for channel: SubtitleChannel, streamIndex: Int32) -> Double {
         Self.subtitleDrainLead(isBitmap: subtitleDrainChannelIsBitmap(channel, streamIndex: streamIndex),
-                               offsetReach: bitmapSubtitleOffsetReach)
+                               offsetReach: subtitleAdvanceReach)
     }
 
     /// #357: shortest window that can only be FFmpeg's open-ended placeholder, not an authored
