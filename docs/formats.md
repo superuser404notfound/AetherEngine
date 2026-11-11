@@ -1179,7 +1179,7 @@ A PGS composition carries no end of its own. It is published with FFmpeg's open-
 - An authored duration is never touched.
 - The #100 stale-arrival hold is dropped on the same tick, for the same reason.
 
-#### Holes in the packet store (#362, #941)
+#### Holes in the packet store (#362, #941, #1021)
 
 **The problem.** After a seek, the pump restarts behind the landing and fills forward, while the store still holds an island the previous run harvested further ahead. The drain window then reads as "packets, hole, packets". Decoding across that hole carries the drain cursor to its far side, and the cursor only moves forward: the hole's packets land a second later and are never read. A stretch of the film then carries no subtitles at all until some later seek resets the window behind it, and the set before the hole is closed at the island rather than at its own clear (report: eleven authored sets delivered as two).
 
@@ -1194,7 +1194,11 @@ A PGS composition carries no end of its own. It is published with FFmpeg's open-
 
 **Three runs meeting (#941).** Order still sees only half of it. Seek past the producer's front and straight back into the stretch that jump skipped, and three runs meet: the original one up to just past the landing, the forward one's island further on, and the restart behind the landing that has not written anything yet. The island was harvested after the near side, so the sequence ASCENDS across the hole, no pair descends, and the first tick decoded straight across, losing every set the restart then harvested in between (report: seven consecutive sets on a 1x link). A re-harvest of the island does the same to a wait that did fire, because it stamps the island newer than the held position.
 
-The coverage ledger ([below](#the-landing-after-a-seek-416)) knows both cases. `harvestGapCut` also stops at a pair whose span no reader has read, and a wait resumes only when the order AND the ledger agree that the ground up to the next entry was read.
+The coverage ledger ([below](#the-landing-after-a-seek-416)) knows both cases. `harvestGapCut` also stops at a pair whose span no reader has read.
+
+**The ledger decides alone (#1021).** Order also sees holes that are not there. A track selected at load starts the forward prefetch with the session, so the prefetch stores the next 75 s first. The main reader then reads each of those packets again a few seconds ahead of the playhead, and a re-harvest takes the fresh sequence. Every pair at the main reader's front descends, and the drain stopped at each one: it never got more than about 4 s ahead of the playhead, so a host's advance offset showed nothing until the first seek.
+
+So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait: a pair whose span some run read is decoded through, and one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
 
 Two more things had to hold for that to work on a link near the media bitrate:
 
@@ -1212,7 +1216,7 @@ Two more things had to hold for that to work on a link near the media bitrate:
 - The forward prefetcher reports its own read position.
 - The pump's run begins where the producer opens or restarts, and reaches at least the playhead, since playback is rendering there.
 - A set whose ground up to the playhead is not covered cannot claim the landing (`landingWithheld=` on the delivery line), and the pass ends on the next authored set as it would have anyway.
-- A store nobody reports to answers every span with yes, so a path without coverage notes behaves exactly as it did.
+- A store nobody reports to has no ledger to ask (`harvestReadCheck()` is nil), so a path without coverage notes behaves exactly as it did: the landing is not withheld and holes are read from harvest order.
 
 **Cost.** The landing line is lost in the case where a set really is still up and the proof is missing, which needs an authored dwell long enough to span the whole unread stretch. The alternative was paying that for every normally authored set that ends inside one.
 

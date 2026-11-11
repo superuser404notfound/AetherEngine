@@ -38,11 +38,11 @@ struct Issue941PrefetchLostPositionTests {
 
     @Test("a failed or estimated move leaves the stretch behind the reader unread",
           arguments: [SubtitleForwardPrefetcher.Positioning.failed, .byteEstimate])
-    func lostMoveClaimsNothing(_ landed: SubtitleForwardPrefetcher.Positioning) {
+    func lostMoveClaimsNothing(_ landed: SubtitleForwardPrefetcher.Positioning) throws {
         let store = SubtitlePacketStore()
         pumpRuns(store)
         sideReaderBackAt40(landed, store: store)
-        let isRead = store.harvestReadCheck()
+        let isRead = try #require(store.harvestReadCheck())
         #expect(!isRead(49.0, 71.0))
         // The run it is really on is still recorded, from its first observed step.
         #expect(isRead(71.4, 72.5))

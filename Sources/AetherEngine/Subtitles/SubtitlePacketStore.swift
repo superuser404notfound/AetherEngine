@@ -180,10 +180,12 @@ final class SubtitlePacketStore: @unchecked Sendable {
     }
 
     /// #941: `hasReadSpan` as a snapshot, for a drain tick that asks once per stored pair and
-    /// should not take the lock for each. Same answer on a silent ledger: everything reads as read.
-    func harvestReadCheck() -> @Sendable (Double, Double) -> Bool {
+    /// should not take the lock for each. #1021: nil on a silent ledger rather than "everything
+    /// read", because the drain treats a spoken ledger as the whole answer and falls back to
+    /// harvest order only when there is none.
+    func harvestReadCheck() -> (@Sendable (Double, Double) -> Bool)? {
         lock.lock(); defer { lock.unlock() }
-        guard !coverage.isEmpty else { return { _, _ in true } }
+        guard !coverage.isEmpty else { return nil }
         let spans = coverage.sortedSpans()
         return { SubtitleHarvestCoverage.covers(spans, from: $0, through: $1) }
     }

@@ -81,7 +81,7 @@ func printUsage() {
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
              [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]]
-                     [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext] <url>
+                     [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext,subsatload] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
                       FEL dual-layer route (off by default, as in the engine, and only in
                       a build with the DualLayerDolbyVision trait); --upscale opts into

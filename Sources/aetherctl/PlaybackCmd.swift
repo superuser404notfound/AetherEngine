@@ -542,7 +542,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                 body = "'\(flat)' [\(colours) colour run(s)]"
             case .image: body = "[bitmap]"
             }
-            print(String(format: "  CUE #%d %.2f-%.2f %@", cue.id, cue.startTime, cue.endTime, body))
+            // AE#1021: the clock at arrival, so how far ahead of the playhead a cue lands is readable.
+            print(String(format: "  CUE #%d %.2f-%.2f %@ at=%.2f", cue.id, cue.startTime, cue.endTime, body,
+                         engine.currentTime))
         }
     }.store(in: &cancellables)
 
@@ -987,6 +989,21 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     print("")
 
     var subsSelected = false
+    // AE#1021: `--host-calls subsatload` picks the `--subs` track as soon as `load` returns, before
+    // the first frame, the way a host restoring a remembered track does. The default tick-5 pick is
+    // a mid-session start, which takes a different path through the prefetch and the drain.
+    if let subsPick, hostCalls.contains("subsatload") {
+        let match = engine.subtitleTracks.first { track in
+            if let wanted = Int(subsPick) { return track.id == wanted }
+            return track.codec.localizedCaseInsensitiveContains(subsPick)
+                || (track.language?.localizedCaseInsensitiveContains(subsPick) ?? false)
+        }
+        if let match {
+            print("  SELECT (at load) subtitle id=\(match.id) codec=\(match.codec) clock=\(String(format: "%.2f", engine.currentTime))")
+            engine.selectSubtitleTrack(index: match.id)
+            subsSelected = true
+        }
+    }
     var seekPatternIndex = 0
     var seekLandings: [Double] = []
 

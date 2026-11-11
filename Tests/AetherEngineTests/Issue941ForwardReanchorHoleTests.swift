@@ -119,21 +119,20 @@ struct Issue941ForwardReanchorHoleTests {
             isRead: { coverage.covers(from: $0, through: $1) }) == nil)
     }
 
-    @Test("a store that never heard from a reader answers every span as read")
+    @Test("a store that never heard from a reader has no ledger to ask")
     func silentLedgerChangesNothing() {
         let store = SubtitlePacketStore()
-        let isRead = store.harvestReadCheck()
-        #expect(isRead(49, 71))
+        #expect(store.harvestReadCheck() == nil)
     }
 
     @Test("the store's snapshot answers like the ledger it was taken from")
-    func storeSnapshotMatchesLedger() {
+    func storeSnapshotMatchesLedger() throws {
         let store = SubtitlePacketStore()
         store.noteHarvestAnchor(.pump, at: 0)
         store.noteHarvestReach(.pump, through: 49)
         store.noteHarvestAnchor(.pump, at: 69.42)
         store.noteHarvestReach(.pump, through: 74)
-        let isRead = store.harvestReadCheck()
+        let isRead = try #require(store.harvestReadCheck())
         #expect(!isRead(49, 71))
         #expect(isRead(41, 47))
         #expect(isRead(70, 73))

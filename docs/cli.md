@@ -503,6 +503,7 @@ Other lines `play` prints:
 | `nativesubs` | Sets `LoadOptions.prepareNativeSubtitles`. |
 | `nativerender@N` | The host call a player makes when the picture leaves its own layer (PiP, AirPlay, a wired display). |
 | `subsoff@N`, `subson@N` | The viewer turning subtitles off and back on while the picture is away. |
+| `subsatload` | Picks the `--subs` track the moment `load` returns, before the first frame, like a host restoring a remembered track. The default pick at t=5 is a mid-session start, which the prefetch and the drain handle differently (#1021). `CUE` lines end in `at=<clock>`, so the lead a cue arrived with is readable. |
 | `lanreload@N` | Fires `reloadAtCurrentPosition()` (AE#955). |
 
 **`pausestart`.** This is the shape of a host that holds a fresh load paused. A software session used to answer it with eight ticks of `enq=+0 status=unknown r4d=n`: a black picture under a paused clock. Now the `[SWHost] #104` lines show the first frame presented at a stopped clock, and `startup 8/8 presenting` arrives while paused.
