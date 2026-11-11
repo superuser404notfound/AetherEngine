@@ -243,7 +243,7 @@ The log line says which it was: `[HLSVideoEngine] i-frame rendition: served segm
 - The log carries `TrueHD Atmos: objects rendered into …` (or `DTS:X: bed and heights routed one to one into …`) and the `[SpatialAudioBridge] bed levels` lines.
 - A DTS-HD MA track whose frames do not decode as DTS:X logs `DTS-HD MA track is not DTS:X this engine renders (…); keeping the channel bridge` instead.
 
-With `--bed-format lpcm` it sets `.lpcm(layout)` instead, which serves the bed as 24-bit PCM (`CODECS="…,ipcm"`, log `delivered as ipcm (lossless 24-bit PCM)`).
+With `--bed-format lpcm` it sets `.lpcm(layout)` instead, which serves the bed as 24-bit PCM (`CODECS="…,ipcm"`, log `delivered as ipcm (lossless 24-bit PCM)`). With `--bed-format auto` it sets `.render(layout)`, the form a host should use: PCM, or APAC when the route plays over AirPlay.
 
 `--audio-index <n>` serves source stream `n`, the way a host's audio picker would. Example with Dolby's Unfold demo, whose TrueHD Atmos track is stream 1:
 

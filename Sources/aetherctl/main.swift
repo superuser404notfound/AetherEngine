@@ -67,7 +67,7 @@ func printUsage() {
 
     Usage:
       aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>
-      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
+      aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
       aetherctl play [--fel [--fel-output]] [--upscale] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
@@ -80,7 +80,7 @@ func printUsage() {
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
-             [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]]
+             [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto]]
                      [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext,subsatload] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
                       FEL dual-layer route (off by default, as in the engine, and only in
@@ -322,7 +322,8 @@ func printUsage() {
 // MARK: - Object audio
 
 /// `--atmos-bed 7.1.4`: TrueHD Atmos or DTS:X rendered into that bed and delivered as APAC
-/// (`LoadOptions.objectAudioRendering`, #731), or with `--bed-format lpcm` as 24-bit PCM. Without it
+/// (`LoadOptions.objectAudioRendering`, #731), with `--bed-format lpcm` as 24-bit PCM, with `auto` as the
+/// route picks (`.render`). Without it
 /// the channel bridge plays them.
 private func objectAudioRendering(_ flag: String?, format: String? = nil) -> ObjectAudioRendering {
     guard let flag else { return .off }
@@ -336,8 +337,9 @@ private func objectAudioRendering(_ flag: String?, format: String? = nil) -> Obj
     switch format {
     case nil, "apac": return .apac(layout)
     case "lpcm": return .lpcm(layout)
+    case "auto": return .render(layout)
     default:
-        print("ERROR: --bed-format expects apac or lpcm, got '\(format!)'")
+        print("ERROR: --bed-format expects apac, lpcm or auto, got '\(format!)'")
         exit(64)
     }
 }
