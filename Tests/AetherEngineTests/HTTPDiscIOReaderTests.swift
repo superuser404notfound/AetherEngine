@@ -139,6 +139,42 @@ struct HTTPDiscIOReaderTests {
         #expect(back.bytes == Array(src[100..<200]))
     }
 
+    @Test("#1007: once playback streamed, any sequential continuation streams; discovery still ramps")
+    func playbackStreamsEveryContinuation() {
+        // Discovery: a continuation below the top of the window keeps ramping.
+        #expect(!HTTPDiscIOReader.streams(position: 8192, lastFetchEnd: 8192, nextChunk: 8192,
+                                          maxChunk: 65536, streamRange: 262_144))
+        #expect(HTTPDiscIOReader.streams(position: 8192, lastFetchEnd: 8192, nextChunk: 8192,
+                                         maxChunk: 65536, streamRange: 262_144, playback: true))
+        // A jump is never a continuation, playback or not: the first read after a seek stays small.
+        #expect(!HTTPDiscIOReader.streams(position: 900_000, lastFetchEnd: 8192, nextChunk: 4096,
+                                          maxChunk: 65536, streamRange: 262_144, playback: true))
+    }
+
+    @Test("#1007: after a seek in playback, the continuation streams instead of re-ramping")
+    func seekInPlaybackRestreams() throws {
+        // The reader floors its base window at 64 KiB, so the ramp is 64, 128, 256, 512 KiB.
+        let base = 64 * 1024, range = 1024 * 1024
+        let src = (0..<(4 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 11) }
+        let r = try #require(makeReader(src, base: base, maxChunk: 512 * 1024, streamRange: range))
+        defer { r.cancel() }
+        let played = readAll(r, count: 2 * 1024 * 1024)
+        #expect(played == Array(src[0..<played.count]))
+        // Backwards, so the target is outside what the stream holds (the mock ignores suspend and
+        // buffers ahead to EOF).
+        let target = 128 * 1024
+        #expect(r.seek(offset: Int64(target), whence: SEEK_SET) == Int64(target))
+        let first = try #require(readOffThread(r, size: base, within: 3))
+        #expect(first.bytes == Array(src[target..<(target + base)]))
+        let next = try #require(readOffThread(r, size: 4096, within: 3))
+        #expect(next.bytes == Array(src[(target + base)..<(target + base + 4096)]))
+        let ranges = MockRangeURLProtocol.requestedRanges
+        #expect(ranges.contains("bytes=\(target)-\(target + base - 1)"), "\(ranges)")
+        let streamed = ranges.last { $0.hasPrefix("bytes=\(target + base)-") }
+        #expect(streamed == "bytes=\(target + base)-\(target + base + range - 1)",
+                "the continuation re-ramped instead of streaming: \(ranges)")
+    }
+
     @Test("#1007: a streamed range that starts elsewhere is refused")
     func misplacedStreamRangeIsRefused() throws {
         let src = (0..<(1 << 20)).map { UInt8(truncatingIfNeeded: $0) }

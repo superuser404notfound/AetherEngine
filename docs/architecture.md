@@ -1087,7 +1087,7 @@ Notes:
 | `DataIOReader.swift` | Ready-made in-memory `IOReader` over an immutable `Data` buffer. |
 | `FileIOReader.swift` | Seekable `IOReader` over a local file via `FileHandle` (multi-GB ISO images). |
 | `HTTPDiscIOReader.swift` | Seekable `IOReader` over a remote HTTP(S) disc image with adaptive read-ahead (the network counterpart to `FileIOReader`). |
-| `ProgressiveRangeStream.swift` | `HTTPDiscIOReader`'s playback path: a bounded FIFO over ranges of up to 64 MiB whose bytes reach the demuxer as they arrive (#1007). |
+| `ProgressiveRangeStream.swift` | `HTTPDiscIOReader`'s playback path: a bounded FIFO over ranges of up to 64 MiB whose bytes reach the demuxer as they arrive (#1007). Once it has run, a seek pays one base-size fetch and the continuation streams again. Each stream logs one summary line at close (rate while not held, ranges, worst time to first byte, holds, read waits). |
 
 #### `IO/HLSIngest/`
 

@@ -52,6 +52,10 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
     /// The sequential stream (#1007), guarded by `lock`; `cancelLock` keeps a second reference so
     /// `cancel()` can wake a read parked in it without taking `lock`.
     private var stream: ProgressiveRangeStream?
+    /// Set by the first stream: disc discovery is over. From then on a sequential continuation
+    /// streams at once, so a seek pays one `baseChunkSize` fetch instead of re-ramping through
+    /// ~16 MiB of serial whole-body requests (#1007 retest: 3/5 seeks resumed late).
+    private var playbackStreaming = false
     private var cancellableStream: ProgressiveRangeStream?
     /// This reader's own share of `lifetimeFetchedBytes`: every response body `fetchWithRetry`
     /// received, a rejected or retried one included, since it crossed the link either way.
@@ -268,7 +272,8 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
             // Stop at the next warmed span: its bytes are already here.
             let limit = residentSpans.lazy.map(\.start).filter { $0 > self.position }.min() ?? totalSize
             if Self.streams(position: position, lastFetchEnd: lastFetchEnd, nextChunk: currentChunkSize,
-                            maxChunk: maxChunkSize, streamRange: streamRangeSize),
+                            maxChunk: maxChunkSize, streamRange: streamRangeSize,
+                            playback: playbackStreaming),
                limit - position > Int64(maxChunkSize) {
                 guard startStreamLocked(end: limit) else { return -1 }
                 buffer = []
@@ -324,9 +329,12 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
 
     /// True when the refill at `position` is a sequential continuation that reaches the top of the
     /// adaptive window, which is where disc discovery has ended and playback has begun (#1007).
+    /// Once `playback` is set any sequential continuation streams: the first read after a seek
+    /// still goes through the small adaptive fetch, so the demuxer's seek bisection stays cheap.
     static func streams(position: Int64, lastFetchEnd: Int64, nextChunk: Int, maxChunk: Int,
-                        streamRange: Int) -> Bool {
-        streamRange > maxChunk && position == lastFetchEnd && lastFetchEnd >= 0 && nextChunk >= maxChunk
+                        streamRange: Int, playback: Bool = false) -> Bool {
+        streamRange > maxChunk && position == lastFetchEnd && lastFetchEnd >= 0
+            && (nextChunk >= maxChunk || playback)
     }
 
     private func startStreamLocked(end: Int64) -> Bool {
@@ -347,6 +355,7 @@ final class HTTPDiscIOReader: IOReader, SourceTransferCounting, @unchecked Senda
             return false
         }
         stream = s
+        playbackStreaming = true
         return true
     }
 

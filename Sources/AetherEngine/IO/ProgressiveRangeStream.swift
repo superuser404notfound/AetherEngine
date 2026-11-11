@@ -45,6 +45,19 @@ final class ProgressiveRangeStream: @unchecked Sendable {
     private var failed = false
     private var closed = false
 
+    // One summary line at close, so a field log tells a slow link from a stalled consumer (#1007).
+    private let startOffset: Int64
+    private let openedAt = ProcessInfo.processInfo.systemUptime
+    private var ranges = 0
+    private var requestStartedAt: TimeInterval = 0
+    private var awaitingFirstByte = false
+    private var firstByteMax: TimeInterval = 0
+    private var suspends = 0
+    private var suspendedAt: TimeInterval = 0
+    private var heldTime: TimeInterval = 0
+    private var readWaits = 0
+    private var readWaitTime: TimeInterval = 0
+
     init(url: URL, extraHeaders: [String: String], session: URLSession, timeout: TimeInterval,
          start: Int64, end: Int64, rangeSize: Int, watermark: Int, maxRetries: Int,
          onReceived: @escaping (Int) -> Void) {
@@ -59,6 +72,7 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         self.end = end
         self.readOffset = start
         self.frontier = start
+        self.startOffset = start
         cond.lock()
         startRequestLocked()
         cond.unlock()
@@ -83,6 +97,14 @@ final class ProgressiveRangeStream: @unchecked Sendable {
     /// stream failed or was closed.
     func read(into out: UnsafeMutablePointer<UInt8>, size: Int) -> Int {
         cond.lock(); defer { cond.unlock() }
+        let waitStart: TimeInterval? = buffered == 0 && !closed && !failed && readOffset < end
+            ? ProcessInfo.processInfo.systemUptime : nil
+        defer {
+            if let waitStart {
+                readWaits += 1
+                readWaitTime += ProcessInfo.processInfo.systemUptime - waitStart
+            }
+        }
         while buffered == 0 {
             if closed || failed { return -1 }
             if readOffset >= end { return 0 }
@@ -100,6 +122,7 @@ final class ProgressiveRangeStream: @unchecked Sendable {
 
     func close() {
         cond.lock()
+        let summary = closed ? nil : summaryLocked()
         closed = true
         let t = task
         task = nil
@@ -108,6 +131,20 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         cond.broadcast()
         cond.unlock()
         t?.cancel()
+        if let summary { EngineLog.emit(summary, category: .demux) }
+    }
+
+    private func summaryLocked() -> String {
+        let now = ProcessInfo.processInfo.systemUptime
+        let held = heldTime + (suspended ? now - suspendedAt : 0)
+        let life = now - openedAt
+        let bytes = frontier - startOffset
+        let active = max(life - held, 0.001)
+        func s(_ t: TimeInterval) -> String { String(format: "%.2fs", t) }
+        return "[HTTPDiscIOReader] \(url.lastPathComponent): stream at \(startOffset) closed after \(s(life)): "
+            + "\(bytes / 1_048_576) MiB, \(String(format: "%.1f", Double(bytes) * 8 / active / 1_000_000)) Mb/s "
+            + "while not held, \(ranges) range(s), first byte max \(Int(firstByteMax * 1000)) ms, "
+            + "\(suspends) hold(s) for \(s(held)), \(readWaits) read wait(s) for \(s(readWaitTime)) (#1007)"
     }
 
     // MARK: - Buffer
@@ -133,6 +170,7 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         readOffset += Int64(count)
         if suspended, buffered <= watermark / 2, let t = task {
             suspended = false
+            heldTime += ProcessInfo.processInfo.systemUptime - suspendedAt
             t.resume()
         }
     }
@@ -153,8 +191,16 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         let t = session.dataTask(with: req)
         t.delegate = delegate
         task = t
-        suspended = false
+        endHoldLocked()
+        ranges += 1
+        requestStartedAt = ProcessInfo.processInfo.systemUptime
+        awaitingFirstByte = true
         t.resume()
+    }
+
+    private func endHoldLocked() {
+        if suspended { heldTime += ProcessInfo.processInfo.systemUptime - suspendedAt }
+        suspended = false
     }
 
     private func failLocked() {
@@ -171,6 +217,10 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         guard g == generation, !closed else { return }
         let room = Int(requestEnd - frontier)
         let take = min(room, data.count)
+        if awaitingFirstByte {
+            awaitingFirstByte = false
+            firstByteMax = max(firstByteMax, ProcessInfo.processInfo.systemUptime - requestStartedAt)
+        }
         if take > 0 {
             chunks.append(take < data.count ? data.prefix(take) : data)
             buffered += take
@@ -187,6 +237,8 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         }
         if buffered >= watermark, !suspended {
             suspended = true
+            suspends += 1
+            suspendedAt = ProcessInfo.processInfo.systemUptime
             t.suspend()
         }
     }
@@ -195,7 +247,7 @@ final class ProgressiveRangeStream: @unchecked Sendable {
         cond.lock(); defer { cond.unlock() }
         guard g == generation, !closed, !failed else { return }
         task = nil
-        suspended = false
+        endHoldLocked()
         if frontier >= requestEnd {
             startRequestLocked()
             return
