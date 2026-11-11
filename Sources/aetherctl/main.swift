@@ -66,7 +66,7 @@ func printUsage() {
     aetherctl: standalone AetherEngine repro harness
 
     Usage:
-      aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-atmos] <url>
+      aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
@@ -1219,6 +1219,7 @@ if ["probe", "serve", "validate", "swdecode", "extract", "audio", "customio"].co
     var probeDetail: ProbeDetail = []
     if takeFlag("--detect-hdr10plus", from: &rest) { probeDetail.insert(.hdr10Plus) }
     if takeFlag("--detect-hdr-vivid", from: &rest) { probeDetail.insert(.hdrVivid) }
+    if takeFlag("--detect-dv-el", from: &rest) { probeDetail.insert(.dolbyVisionEnhancementLayer) }
     if takeFlag("--detect-atmos", from: &rest) { probeDetail.insert(.atmos) }
     let inMemory = takeFlag("--memory", from: &rest)
     let forwardOnly = takeFlag("--forward-only", from: &rest)

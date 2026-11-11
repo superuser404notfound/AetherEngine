@@ -111,7 +111,9 @@ extension AetherEngine {
     /// - **HDR10+**, whose ST 2094-40 metadata rides an in-band ITU-T T.35 SEI that no demuxer parses
     ///   (`.hdr10Plus`, see `HDR10PlusDetectionOptions`), and
     /// - **HDR Vivid**, whose CUVA metadata rides the same kind of SEI in HEVC (`.hdrVivid`, scanned in
-    ///   the same pass and under the same `HDR10PlusDetectionOptions` budget).
+    ///   the same pass and under the same `HDR10PlusDetectionOptions` budget), and
+    /// - **the Dolby Vision enhancement layer**, FEL or MEL, which only the first RPU's `el_type` says
+    ///   (`.dolbyVisionEnhancementLayer`, same pass and budget, Profile 7 only).
     ///
     /// Both cost reads past `avformat_find_stream_info`, which is why `probe(url:)` does neither.
     /// Neither is for the playback-start critical path. Asking for both runs both
@@ -119,7 +121,7 @@ extension AetherEngine {
     /// queued, then the queue-flushing seek the Atmos decode pass needs.
     ///
     /// Both passes are additive and one-directional. They can only ever SET `isAtmos` /
-    /// `carriesHDR10PlusMetadata` / `carriesHDRVividMetadata`, never clear what the container already declared, and a pass that hits a cap
+    /// `carriesHDR10PlusMetadata` / `carriesHDRVividMetadata` / `dolbyVisionEnhancementLayer`, never clear what the container already declared, and a pass that hits a cap
     /// leaves the base probe's answer exactly where it was.
     ///
     /// - Parameters:
@@ -127,7 +129,8 @@ extension AetherEngine {
     ///   - options: Forwarded verbatim to `probe(url:)` (`httpHeaders` only).
     ///   - detecting: Which extra passes to run. Empty is the header probe with the same controls.
     ///   - atmosDetection: Bounds + optional track override for the Atmos decode pass. Ignored without `.atmos`.
-    ///   - hdr10PlusDetection: Bounds for the HDR10+ / HDR Vivid scan. Ignored without either.
+    ///   - hdr10PlusDetection: Bounds for the HDR10+ / HDR Vivid / enhancement-layer scan. Ignored without
+    ///     any of them.
     ///   - limits: Whole-probe limits, shared across open, stream analysis, seeks and both passes.
     ///   - cancellation: Cancellation reaches HTTP I/O or the custom reader's `cancel()`.
     /// - Throws: Open errors, `ProbeError` for whole-probe stops, or `CancellationError`. Ordinary
@@ -235,7 +238,12 @@ extension AetherEngine {
         // HDR10+ first, and before any seek: `avformat_find_stream_info` leaves its packets queued and
         // `av_read_frame` hands those back first, so at the head of a container the scan gets video packets
         // that have already been paid for. Running it after the Atmos pass would mean re-reading them.
-        let dynamicTargets = detecting.intersection([.hdr10Plus, .hdrVivid])
+        // AE#1030: the enhancement layer rides the same walk, but only a declared Profile 7 has one, so
+        // any other source reads no packet for it.
+        var dynamicTargets = detecting.intersection([.hdr10Plus, .hdrVivid])
+        if detecting.contains(.dolbyVisionEnhancementLayer), probe.dvProfile == 7 {
+            dynamicTargets.insert(.dolbyVisionEnhancementLayer)
+        }
         if !dynamicTargets.isEmpty {
             let outcome = Self.detectHDR10Plus(
                 demuxer: demuxer, videoIndex: demuxer.videoStreamIndex, options: hdr10PlusDetection,
@@ -247,6 +255,7 @@ extension AetherEngine {
             if outcome.carriesHDRVivid {
                 probe.carriesHDRVividMetadata = true
             }
+            probe.dolbyVisionEnhancementLayer = outcome.enhancementLayer
         }
 
         let targetIndex = Self.atmosDecodeTargetIndex(

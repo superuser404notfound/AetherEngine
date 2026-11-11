@@ -10,6 +10,7 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
         var passes: [String] = []
         if detecting.contains(.hdr10Plus) { passes.append("hdr10plus (packet scan)") }
         if detecting.contains(.hdrVivid) { passes.append("hdr-vivid (packet scan)") }
+        if detecting.contains(.dolbyVisionEnhancementLayer) { passes.append("dv-el (packet scan)") }
         if detecting.contains(.atmos) { passes.append("atmos (bounded decode)") }
         print("detail passes: \(passes.joined(separator: ", "))")
     }
@@ -44,6 +45,11 @@ func runProbe(url: URL, detecting: ProbeDetail = []) -> Int32 {
     }
     if detecting.contains(.hdrVivid) {
         print("  HDR Vivid: \(probe.carriesHDRVividMetadata ? "CUVA metadata seen" : "not seen")")
+    }
+    if detecting.contains(.dolbyVisionEnhancementLayer) {
+        let layer = probe.dolbyVisionEnhancementLayer?.rawValue
+            ?? (probe.dvProfile == 7 ? "no RPU seen" : "not Profile 7")
+        print("  DV EL:     \(layer)")
     }
     print("")
 

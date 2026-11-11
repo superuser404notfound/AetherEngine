@@ -1341,6 +1341,12 @@ public struct SourceProbe: Sendable {
     /// `.hlg` / `.hdr10`. Apple platforms do not apply the dynamic metadata; the flag exists so a host can
     /// label the source.
     public internal(set) var carriesHDRVividMetadata: Bool
+    /// The enhancement layer of a single-track Dolby Vision Profile 7 source, read from its first RPU
+    /// (AE#1030). Always nil unless the probe was asked for `.dolbyVisionEnhancementLayer`, and nil also
+    /// when `dvProfile` is not 7 or no RPU turned up inside the scan budget, so nil never means "MEL" or
+    /// "no enhancement layer". An enhancement layer on its own track or PID is out of scope, as it is
+    /// for `AetherEngine.probeDolbyVisionEnhancementLayer(url:options:)`.
+    public internal(set) var dolbyVisionEnhancementLayer: DolbyVisionEnhancementLayer?
     /// Settable inside the module so `probeDetectingAtmos` can enrich one track without rebuilding the struct field by field.
     public internal(set) var audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
@@ -1362,6 +1368,7 @@ public struct SourceProbe: Sendable {
         dvProfile: Int? = nil,
         carriesHDR10PlusMetadata: Bool = false,
         carriesHDRVividMetadata: Bool = false,
+        dolbyVisionEnhancementLayer: DolbyVisionEnhancementLayer? = nil,
         audioTracks: [TrackInfo],
         subtitleTracks: [TrackInfo],
         metadata: MediaMetadata = MediaMetadata(title: nil, artist: nil, album: nil, artworkData: nil),
@@ -1381,6 +1388,7 @@ public struct SourceProbe: Sendable {
         self.dvProfile = dvProfile
         self.carriesHDR10PlusMetadata = carriesHDR10PlusMetadata
         self.carriesHDRVividMetadata = carriesHDRVividMetadata
+        self.dolbyVisionEnhancementLayer = dolbyVisionEnhancementLayer
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
         self.metadata = metadata
