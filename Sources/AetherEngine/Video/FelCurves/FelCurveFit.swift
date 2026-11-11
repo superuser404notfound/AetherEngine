@@ -63,18 +63,45 @@ enum FelCurveFit {
             lo[piece] = min(lo[piece], x)
             hi[piece] = max(hi[piece], x)
         }
-        var out: [Double] = []
+        var fitted: [[Double]?] = []
         for p in 0..<pieces {
             // A parabola fitted to samples bunched in part of a piece is unconstrained over the rest of it,
             // where another frame of the scene may well have pixels, so a narrow spread gets a lower order.
             let width = Double(pivots[p + 1] - pivots[p]) / baseMax
             let spread = n[p] > 0 ? (hi[p] - lo[p]) / width : 0
             let order = spread >= 0.5 ? 3 : (spread >= 0.1 ? 2 : 1)
-            guard n[p] >= minimumSamplesPerPiece, let w = solve(sx[p], sy[p], maxTerms: order) else {
-                out.append(contentsOf: [0, 0, 0])
-                continue
+            fitted.append(n[p] >= minimumSamplesPerPiece ? solve(sx[p], sy[p], maxTerms: order) : nil)
+        }
+        return bridgeEmptyPieces(fitted, pivots: pivots, baseMax: baseMax).flatMap { $0 }
+    }
+
+    /// The fit sees one frame per scene, so a scene that opens dark leaves its bright pieces without samples.
+    /// A zero residual there dropped later highlights back to base-layer level with a step at the pivot
+    /// (Minions, 45 to 65 VDR codes too dark above code 512). An empty piece therefore holds the edge value
+    /// of its fitted neighbour, or runs straight between both neighbours' edges, so the curve stays continuous.
+    /// Without any fitted piece the residual stays zero.
+    static func bridgeEmptyPieces(_ fitted: [[Double]?], pivots: [UInt16], baseMax: Double) -> [[Double]] {
+        func value(_ w: [Double], _ x: Double) -> Double { w[0] + w[1] * x + w[2] * x * x }
+        func x(_ pivot: Int) -> Double { Double(pivots[pivot]) / baseMax }
+        var out = fitted.map { $0 ?? [0, 0, 0] }
+        var p = 0
+        while p < fitted.count {
+            guard fitted[p] == nil else { p += 1; continue }
+            var end = p
+            while end + 1 < fitted.count, fitted[end + 1] == nil { end += 1 }
+            let left = p > 0 ? fitted[p - 1].map { value($0, x(p)) } : nil
+            let right = end + 1 < fitted.count ? fitted[end + 1].map { value($0, x(end + 1)) } : nil
+            let line: [Double]
+            switch (left, right) {
+            case let (l?, r?):
+                let slope = (r - l) / (x(end + 1) - x(p))
+                line = [l - slope * x(p), slope, 0]
+            case let (l?, nil): line = [l, 0, 0]
+            case let (nil, r?): line = [r, 0, 0]
+            case (nil, nil): line = [0, 0, 0]
             }
-            out.append(contentsOf: w)
+            for q in p...end { out[q] = line }
+            p = end + 1
         }
         return out
     }
