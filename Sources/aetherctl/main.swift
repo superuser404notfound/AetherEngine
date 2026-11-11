@@ -74,7 +74,7 @@ func printUsage() {
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
-                 [--subtitle-offset-reach SECONDS]
+                 [--subtitle-offset-reach SECONDS] [--subtitle-delay-reach SECONDS] [--subtitle-advance-reach SECONDS]
                  [--audio-delay <ms>] [--switch-audio-delay <ms>[@ms]]... [--paused]
                  [--audio-shaping <spec>] [--switch-audio-shaping <spec>[@ms]]...
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
@@ -993,7 +993,11 @@ if first == "play" {
                                   delayMilliseconds: parts.count == 2 ? (Int(parts[1]) ?? 20) : 20)
     }
     let teletextPage = takeIntFlag("--teletext-page", from: &rest)
-    let subtitleOffsetReach = takeDoubleFlag("--subtitle-offset-reach", in: 0...600, from: &rest)
+    // AE#1031: the two directions can be set apart; a direction left out keeps the offset reach.
+    let subtitleReach = SubtitleReachRequest(
+        offset: takeDoubleFlag("--subtitle-offset-reach", in: 0...600, from: &rest),
+        delay: takeDoubleFlag("--subtitle-delay-reach", in: 0...600, from: &rest),
+        advance: takeDoubleFlag("--subtitle-advance-reach", in: 0...600, from: &rest))
     // #364: `<page|auto>[@ms]`. The default delay is 20 s, not the audio switch's 20 ms: this one has
     // to land on a channel that is already showing a teletext track, else the run proves nothing the
     // load option did not already prove.
@@ -1179,7 +1183,7 @@ if first == "play" {
                  censusThresholdMB: censusThresholdMB, censusHz: censusHz, frameTimes: frameTimes, presentTimes: presentTimes, servedURL: servedURL, pictureProbe: pictureProbe, pictureOrigin: pictureOrigin, nativeVideoFrameDiagnostics: nativeVideoFrameDiagnostics, nativeVideoFrameRecovery: nativeVideoFrameRecovery, sidecars: sidecars,
                  audioSwitch: audioSwitch,
                  teletextPage: teletextPage, teletextSwitch: teletextSwitch,
-                 subtitleOffsetReach: subtitleOffsetReach,
+                 subtitleReach: subtitleReach,
                  audioDelayMs: audioDelayMs, audioDelaySwitches: audioDelaySwitches,
                  audioShaping: audioShaping, audioShapingSwitches: audioShapingSwitches,
                  pausedMount: pausedMount,

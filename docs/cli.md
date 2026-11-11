@@ -416,6 +416,7 @@ Other lines `play` prints:
 | `--teletext-page N` | `LoadOptions.teletextPage`. | none |
 | `--switch-teletext-page <page\|auto>[@ms]` | Changes the teletext page on a playing channel. | +20 s |
 | `--subtitle-offset-reach SECONDS` | Sets `maximumSubtitleOffsetSeconds` before the load (0 to 600). | engine default |
+| `--subtitle-delay-reach SECONDS`, `--subtitle-advance-reach SECONDS` | Set `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` before the load (0 to 600), after `--subtitle-offset-reach` (AE#1031). | engine default |
 | `--preserve-ass-markup` | `LoadOptions.preserveASSMarkup`. | off |
 | `--skip-attachments` | `LoadOptions.skipsContainerAttachments` (AE#956). | off |
 
@@ -648,7 +649,7 @@ The engine states what the change reached: `re-decoding N channel(s)` or `no act
 
 ### Subtitle offset reach
 
-`--subtitle-offset-reach SECONDS` sets `maximumSubtitleOffsetSeconds` before the load. Every tick line then carries `bmp=<count>/<MB>`: the decoded bitmap cues `$subtitleCues` retains. With `--malloc-census` or the memprobe line, this is the A/B for AE#929. On a 300 s fixture with an opaque 1120x900 PGS image every 3 s:
+`--subtitle-offset-reach SECONDS` sets `maximumSubtitleOffsetSeconds` before the load; `--subtitle-delay-reach` and `--subtitle-advance-reach` then override one direction each (AE#1031), and the run prints `SUBTITLE offset reach later=… earlier=…`. Every tick line then carries `bmp=<count>/<MB>`: the decoded bitmap cues `$subtitleCues` retains. With `--malloc-census` or the memprobe line, this is the A/B for AE#929. On a 300 s fixture with an opaque 1120x900 PGS image every 3 s:
 
 - the default retains 41 images (165 MB),
 - a declared reach of 0 or 10 keeps only the 15 s on each side, 11 images (44 MB), with the landing cue of a seek back still in the next tick.

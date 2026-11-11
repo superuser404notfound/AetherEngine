@@ -709,14 +709,14 @@ extension AetherEngine {
                 // AE#929: a cue the cursor has not reached yet is decoded again on the way, so past
                 // the lead it costs nothing to drop. After a backward seek that is the old
                 // position's whole floor and lead, which otherwise stays until playback gets there.
-                // AE#929: both edges follow the host's declared offset reach, see
-                // `maximumSubtitleOffsetSeconds`.
+                // AE#929: both edges follow the host's declared offset reach. AE#1031: the lead
+                // follows `maximumSubtitleAdvanceSeconds`, the floor `maximumSubtitleDelaySeconds`.
                 let reDecodedAfter = max(playhead + subtitleDrainLead(for: channel, streamIndex: streamIndex)
                                              + Self.subtitleForwardPrefetchLeadMarginSeconds,
                                          subtitleDrainCursors[channel]?.lastDecodedPts ?? .infinity)
                 if Self.pruneCues(&cues, toBitmapBytes: bitmapCueHistoryByteBudget,
                                   endedBefore: playhead - Self.bitmapCueFloorSeconds(
-                                      offsetReach: bitmapSubtitleOffsetReach),
+                                      offsetReach: bitmapSubtitleHistoryReach),
                                   startingAfter: reDecodedAfter) {
                     didMutate = true
                 }
@@ -813,11 +813,11 @@ extension AetherEngine {
             hasBitmapDrainTarget: hasEmbeddedBitmapDrainTarget)
     }
 
-    /// AE#1015: how far ahead of the playhead a cue can be wanted. The host's declared reach covers
-    /// both signs (the engine cannot see which way its overlay shifts); the software PiP delay is
-    /// the engine's own, and only its negative side reads ahead.
+    /// AE#1015: how far ahead of the playhead a cue can be wanted: the host's declared advance
+    /// (AE#1031: its later offsets need only history, which reads nothing twice) and the negative
+    /// side of the software PiP delay. It sizes the bitmap decode lead too.
     var subtitleAdvanceReach: Double {
-        max(maximumSubtitleOffsetSeconds, -softwareSubtitleDelaySeconds)
+        max(maximumSubtitleAdvanceSeconds, -softwareSubtitleDelaySeconds)
     }
 
     /// AE#1015: re-decide the forward prefetch after the reach changed mid-session. Starts it at the
