@@ -30,6 +30,9 @@ protocol SoftwareAudioProducing: AnyObject, Sendable {
     /// PCM for the audio tap, which feeds on decoded audio whatever the renderer was given.
     /// `produced` is what `decode` returned for `packet`; a PCM producer hands it straight back.
     func tapBuffers(for packet: UnsafeMutablePointer<AVPacket>, produced: [CMSampleBuffer]) -> [CMSampleBuffer]
+    /// `LiveTelemetry.objectAudio`: what the object renderer is doing. nil for every producer but the
+    /// APAC one, which renders TrueHD Atmos and DTS:X.
+    var objectAudioActivity: ObjectAudioActivity? { get }
 }
 
 extension SoftwareAudioProducing {
@@ -46,6 +49,7 @@ extension SoftwareAudioProducing {
     func tapBuffers(for packet: UnsafeMutablePointer<AVPacket>, produced: [CMSampleBuffer]) -> [CMSampleBuffer] {
         produced
     }
+    var objectAudioActivity: ObjectAudioActivity? { nil }
 }
 
 extension AudioDecoder: SoftwareAudioProducing {}

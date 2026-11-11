@@ -19,6 +19,10 @@ import AetherLibavutil
 final class SoftwareAPACProducer: SoftwareAudioProducing, @unchecked Sendable {
 
     private let bridge: SpatialAudioBridge
+
+    /// AE#1026: the bridge's own activity, so a rendered bed on this host reports its objects as the
+    /// loopback route does. Behind the bridge's activity lock, never its feed lock.
+    var objectAudioActivity: ObjectAudioActivity? { bridge.objectAudioActivity }
     private let sampleRate = Double(SpatialAudioBridge.sampleRate)
     private let stream: UnsafeMutablePointer<AVStream>
     /// PCM for the audio tap, which wants the 7.1 channel presentation the renderer is not given.
