@@ -512,7 +512,7 @@ Other lines `play` prints:
 
 **`pausehold`** (Sodalite#104). Pauses at t=10 and HOLDS until ten seconds before the end, printing the playhead, the edge and the resident depth every second. This measures a session paused longer than its own DVR window without waiting out a real one. Pair it with `--dvr-window 30` and `--seconds 90`, and the ninety-minute question becomes a ninety-second run.
 
-**`pauseseek`.** With `--sw`, the five paused ticks between landing and resume show what the `[SWDiag]` line reports while the pump is parked and has not heard of the seek (the AE#479 shape).
+**`pauseseek`.** With `--sw`, the paused ticks between landing and resume show the landed frame being decoded at the stopped clock (AE#1023): `[SWHost] AE#1023 paused landing` at the seek, then `#104 first frame in under the pause` with the frame's timestamp, and `enq=+N r4d=y` on the next `[SWDiag]` line while `cur=` stays on the target. Before AE#1023 those ticks read `enq=+0 r4d=n` until `play()`. After the frame is in the pump parks again, so the remaining ticks still show the AE#479 shape of a pump that reads nothing.
 
 **`still`** (#544). On a live session it asks for a scrub still at three aims: 20 s behind the playhead at t=15, 5 s behind at t=20, and at the edge at t=25. Each is written to `aetherctl-still-<tick>.png` in aetherctl's private per-user temporary directory (the path is printed), with hit or MISS and the decode time.
 

@@ -387,7 +387,8 @@ final class SoftwarePlaybackHost {
     nonisolated(unsafe) private var _stopRequested: Bool = false
 
     /// Sodalite#104 round 4: a pause arrived before the first frame, so the loops keep reading until one
-    /// is in (`PausedFirstFrame`). Set by `pause()`, cleared by `play()`, `stop()` and that frame.
+    /// is in (`PausedFirstFrame`). Set by `pause()` and by a seek that lands paused (AE#1023), cleared by
+    /// `play()`, `stop()`, a seek that lands playing, and the next frame the renderer takes.
     nonisolated private var pausedBeforeFirstFrame: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _pausedBeforeFirstFrame }
         set { flagsLock.lock(); _pausedBeforeFirstFrame = newValue; flagsLock.unlock() }
@@ -1444,12 +1445,6 @@ final class SoftwarePlaybackHost {
             // First-frame milestone: demux reached a video packet + decoder produced a pixel buffer.
             if self.bumpFramesEnqueued() == 0 {
                 self.noteFirstFrameEnqueuedForDisplayFallback()
-                if self.takePausedBeforeFirstFrame() {
-                    // The reorder buffer holds frames before it hands one to the layer, and the
-                    // loops park again from here: without the drain the frame never leaves it.
-                    self.renderer.drainReorderBuffer()
-                    self.presentFirstFrameUnderPause(pts: pts.seconds, generation: self.decodeGeneration)
-                }
                 let pfType = CVPixelBufferGetPixelFormatType(pixelBuffer)
                 EngineLog.emit(
                     "[SWHost] first video frame enqueued: "
@@ -1459,6 +1454,17 @@ final class SoftwarePlaybackHost {
                     category: .swPlayback
                 )
             }
+        }
+
+        // The hold ends at the first frame the renderer hands over, not the first one decoded: a
+        // decoder that answers in coding order (VideoToolbox) delivers a later P-frame before the
+        // B-frames at the target, and draining the reorder buffer on it moved the stopped clock
+        // past them and lost them (AE#1023, measured `27.042s arrived after 27.125s was handed
+        // over` on a landing at 27.02). The skip threshold already kept everything before the target
+        // out, and the end-of-stream drains reach this hook too.
+        renderer.setHandoverHook { [weak self] ptsSeconds in
+            guard let self, self.takePausedBeforeFirstFrame() else { return }
+            self.presentFirstFrameUnderPause(pts: ptsSeconds, generation: self.decodeGeneration)
         }
 
         let onFrame = upscaledFrameHandler(
@@ -2480,7 +2486,8 @@ final class SoftwarePlaybackHost {
         renderer.flush(removingDisplayedImage: false)
         audioOutput?.flush()
         // AE#479: the flush just emptied the queue the diag marker describes, and the pump learns of
-        // this seek only at its next iteration, which a paused landing never reaches until play().
+        // this seek only at its next iteration, which a paused landing reaches only for the landed
+        // frame (AE#1023) and otherwise not until play().
         demuxDiag.audioFlushed(generation: generation)
         keyframeLedger.reset()
 
@@ -2592,6 +2599,7 @@ final class SoftwarePlaybackHost {
             audioOutput?.seekClock(to: targetTime, rate: 0)
             pausedByHost = true
         }
+        holdForLandedFrame(paused: !inFlightSeekResumeIntent)
         // Arm now so the demux loop doesn't re-arm at stale initialClockTime (a pre-first-audio seek snapped back to session start without this).
         clockArmed = true
         // The source stands at the target and the clock is anchored on it: everything the loop
@@ -2600,6 +2608,25 @@ final class SoftwarePlaybackHost {
         if let cacheGeneration { packetSource?.endSeek(cacheGeneration, sourceClock: sourceSeconds) }
         refreshSnapKeyframes()
         return outcome
+    }
+
+    /// AE#1023: a landing at a stopped clock runs the loops until the frame at the target is in, then
+    /// they park again; a landing that plays drops a hold an earlier paused landing left standing, or
+    /// the clock would arm at rate 0 under a running transport. Set before the seek window closes,
+    /// whose broadcast is what wakes the parked loops.
+    private func holdForLandedFrame(paused: Bool) {
+        guard paused else {
+            _ = takePausedBeforeFirstFrame()
+            return
+        }
+        guard !stopRequested, PausedFirstFrame.holdsAfterPausedLanding(
+            loopsStarted: demuxLoopStarted,
+            hasVideo: videoStreamIndex >= 0 && !backgroundAudioOnly) else { return }
+        pausedBeforeFirstFrame = true
+        EngineLog.emit(
+            "[SWHost] AE#1023 paused landing: the loops read at a stopped clock until the landed frame presents",
+            category: .swPlayback
+        )
     }
 
     /// AE#595: the extractor, built on the first ask and kept for the rest of the session.
@@ -2750,6 +2777,7 @@ final class SoftwarePlaybackHost {
             audioOutput?.seekClock(to: targetTime, rate: 0)
             pausedByHost = true
         }
+        holdForLandedFrame(paused: !wasPlaying)
         clockArmed = true
 
         // Reposition cursor to the newest keyframe at or before target. If the target precedes every
