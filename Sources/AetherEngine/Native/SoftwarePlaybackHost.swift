@@ -1131,6 +1131,12 @@ final class SoftwarePlaybackHost {
     /// software VOD session). It is bounded by the time the read gate needs to open (the lead's excess
     /// over its target at the playback rate), never below 5 ms, and never above 20 ms: a renderer queue
     /// of about ten frames cannot drain in that, so the parked video still reaches the decoder in time.
+    /// AE#1025: how long a VOD read waits for the source while video is parked. A source slower
+    /// than real time keeps the read waiting for whole seconds, and the loop is the only thread that
+    /// moves parked video into the renderer, so an unbounded wait let a ten-frame queue run dry and
+    /// fed it 7 to 10 frames a second of a 24 fps stream. 20 ms is the parked wait's own ceiling.
+    nonisolated static let parkedVideoReadWaitSeconds: TimeInterval = 0.020
+
     nonisolated static func parkedRendererWaitSeconds(
         clockArmed: Bool, lastAudioPts: Double, clockSeconds: Double, rate: Float
     ) -> TimeInterval {
@@ -4001,9 +4007,9 @@ final class SoftwarePlaybackHost {
         var lastEnqueuedAudioPtsSec = Double.nan
         var rebuffering = false
         // The pause/rebuffer arm stays off until the source has proven it can deliver a real
-        // lead once: an exactly-realtime origin whose lead never leaves the start offset must
-        // not eat a rebuffer pause at every session start.
-        var everHadLead = false
+        // lead once, or that it cannot keep up at all (AE#1025): an exactly-realtime origin whose
+        // lead never leaves the start offset must not eat a rebuffer pause at every session start.
+        var pauseArmOpen = false
         var parkedSeekGeneration = seekGeneration()
         let decoupleAudio = (!isLive || directLiveSource != nil) && audioDecoder != nil && audioOutput != nil
         // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
@@ -4176,14 +4182,14 @@ final class SoftwarePlaybackHost {
         // Pause the master clock when the audio lead is genuinely exhausted, resume once the
         // rebuffer target is met. In this loop there is no ring to distinguish decode lag
         // from a dry source, so a sub-threshold lead IS treated as source-starved - the
-        // everHadLead latch keeps that from firing on realtime-paced sources that never had
+        // pauseArmOpen latch keeps that from firing on realtime-paced sources that never had
         // a lead to lose.
         func applyAudioClockAction() {
             guard !isLive, decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
-            if lead >= AudioLookaheadPolicy.rebufferResumeLeadSeconds { everHadLead = true }
-            guard everHadLead, isPlaying() || rebuffering else { return }
+            pauseArmOpen = AudioLookaheadPolicy.pauseArmOpens(wasOpen: pauseArmOpen, lead: lead)
+            guard pauseArmOpen, isPlaying() || rebuffering else { return }
             switch AudioLookaheadPolicy.clockAction(
                 rebuffering: rebuffering,
                 lastFedAudioPTS: lastEnqueuedAudioPtsSec,
@@ -4275,7 +4281,7 @@ final class SoftwarePlaybackHost {
                     rebuffering = false
                     // The lead is zero again after a seek, so the latch has to earn itself back:
                     // keeping it set pauses the clock for a rebuffer on the first post-seek check.
-                    everHadLead = false
+                    pauseArmOpen = false
                 }
                 if backgroundAudioOnly() {
                     // A full parked queue cannot drain off-screen. Retire it before any read gate,
@@ -4321,10 +4327,17 @@ final class SoftwarePlaybackHost {
                         diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
                                      rebuffering: false, generation: diagAudioPtsGeneration)
                     }
+                    let maximumWait: TimeInterval?
+                    if parkedVideo.isEmpty {
+                        maximumWait = nil
+                    } else if directLiveSource != nil {
+                        maximumWait = readyVideo ? 0 : 0.01
+                    } else {
+                        maximumWait = rebuffering ? nil : Self.parkedVideoReadWaitSeconds
+                    }
                     packet = try readAhead.read(
                         isCurrent: { admitsRead(genBeforeRead) },
-                        maximumWait: directLiveSource == nil || parkedVideo.isEmpty
-                            ? nil : (readyVideo ? 0 : 0.01)
+                        maximumWait: maximumWait
                     )?.makeAVPacket()
                 } else {
                     if replayGeneration != genBeforeRead {
@@ -4347,7 +4360,7 @@ final class SoftwarePlaybackHost {
                 if case SoftwarePacketReadAhead.ReadError.interrupted = error { return true }
                 if case SoftwarePacketReadAhead.ReadError.idle = error {
                     diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
-                                 rebuffering: false, generation: diagAudioPtsGeneration)
+                                 rebuffering: rebuffering, generation: diagAudioPtsGeneration)
                     return true
                 }
                 EngineLog.emit("[SWHost] demux read failed: \(error)", category: .swPlayback)
