@@ -20,7 +20,8 @@ the public-API contract.
   `setNowPlayingTrackCommands(next:previous:)` adds a playlist's next and previous. Several engines in one
   process hand the shared surface to the one that played or was claimed last (`claimNowPlaying()`), and
   `nowPlayingCommandInterceptor` lets a host answer a single command itself (play after the end). A remote
-  play reactivates the audio session first, and the card stays up between two items instead of blinking out.
+  play reactivates the audio session first on iOS and tvOS (the platforms where the engine activates it at
+  all), and the card stays up between two items instead of blinking out.
   All opt-in; nothing changes for a host that sets none of it. visionOS gets the `MPNowPlayingSession` paths
   iOS has. See `docs/api.md`, "Now Playing and the audio session".
 
