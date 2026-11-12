@@ -80,7 +80,7 @@ The audio columns describe the native path. The software host decodes every trac
 | FLAC, ALAC | Yes | Stream copy | FLAC with `min_blocksize` below 192 bridges |
 | TrueHD, MLP, DTS, DTS-HD MA | Yes | Bridge | Atmos objects and DTS:X heights only with `objectAudioRendering` and its trait ([TrueHD Atmos](#truehd-atmos-with-heights), [DTS:X](#dtsx-with-heights)) |
 | MP3, MP2, MPEG-1 Layer I, Opus, Vorbis | Yes | Bridge | |
-| PCM: 8, 16, 24 and 32-bit integer and 32 / 64-bit float (little and big endian), unsigned 8-bit, G.711, Blu-ray and DVD LPCM | Yes | Bridge | |
+| PCM: signed 8, 16, 24 and 32-bit integer and 32 / 64-bit float (either byte order), unsigned 8-bit, G.711, Blu-ray and DVD LPCM | Yes | Bridge | |
 | WMA family, Nellymoser, ADPCM-SWF, Speex, RealAudio, AMR-NB / AMR-WB | Yes | Bridge | |
 | AC-4, MPEG-H 3D Audio | No | | Track is listed, plays silent ([Audio a build has no decoder for](#audio-a-build-has-no-decoder-for)) |
 
