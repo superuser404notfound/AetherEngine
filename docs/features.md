@@ -9,11 +9,11 @@ What AetherEngine plays and what it does for a host, one section per area. Each 
 - [Dolby Atmos](#dolby-atmos)
 - [Height channels from TrueHD and DTS:X](#height-channels-from-truehd-and-dtsx)
 - [Subtitles](#subtitles)
-- [Picture in Picture](#picture-in-picture)
-- [Background audio](#background-audio)
-- [Seeking, streaming and prewarm](#seeking-streaming-and-prewarm)
 - [Live TV and DVR](#live-tv-and-dvr)
 - [Inputs: custom readers, SMB, certificates](#inputs-custom-readers-smb-certificates)
+- [Seeking, streaming and prewarm](#seeking-streaming-and-prewarm)
+- [Picture in Picture](#picture-in-picture)
+- [Background audio](#background-audio)
 - [Frames, metadata and the audio tap](#frames-metadata-and-the-audio-tap)
 - [What the engine does not do](#what-the-engine-does-not-do)
 
@@ -69,7 +69,7 @@ On tvOS the engine drives the display switch (Match Content) itself. A host has 
 | Handling | Codecs |
 | --- | --- |
 | Stream-copied, lossless | AAC, AC3, EAC3, FLAC, ALAC |
-| Bridged (decoded, then re-encoded to EAC3 5.1 by default, or to lossless FLAC) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
+| Bridged (decoded, then re-encoded: by default surround to EAC3 5.1 and stereo to lossless FLAC; with `audioBridgeMode = .lossless`, FLAC up to 7.1) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
 
 - **Surround:** 5.1 and 7.1 with the correct `AudioChannelLayout`.
 - **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery.
@@ -120,30 +120,22 @@ More:
 
 The host draws the overlay itself. See [formats.md › Subtitles](formats.md#subtitles).
 
-## Picture in Picture
+## Live TV and DVR
 
-**Native path.** The host builds an `AVPictureInPictureController` around `currentAVPlayer`, or around the session's own `nativePlayerLayer` when it renders through `bind(view:)` instead of AVKit. While `pictureInPictureActive` is set, a native-to-native load hands the `AVPlayerItem` over in place, so the window survives the move to the next episode. A selected bitmap track is OCR-recognized into its WebVTT rendition, so PGS subtitles show in the PiP window here too.
+- Unbounded live, with optional timeshift (DVR).
+- Direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling.
+- Recording a channel over the connection the session already holds.
 
-**Software path.**
+How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr). Format detail: [formats.md › Live ingest](formats.md#live-ingest-aes-128-ssai).
 
-- The published `softwarePiPSource` carries the `AVSampleBufferDisplayLayer` plus transport answers on the enqueued frames' PTS axis, for sample-buffer PiP.
-- `makePictureInPictureController()` builds the controller with a `SoftwarePiPPlaybackDelegate` over the engine's play, pause, skip and time range.
-- While PiP is active, the engine composites the active subtitle cues (text and PGS / DVB bitmaps) into the decoded frames, because the host overlay cannot reach the window.
-- A bound `AetherPlayerView` shapes the software layer like the picture (aspect-fit, or aspect-fill clipped by the view), so the window mirrors it without offset or crop. A host that mounts `softwarePiPSource.layer` itself sizes it the same way.
-- Ending the session closes the helper controller's window. A load on the software path ends PiP (there is no hand-over as on the native path).
+## Inputs: custom readers, SMB, certificates
 
-**Platform limits.**
-
-- iOS renders sample-buffer PiP. tvOS AVKit does not evaluate sample-buffer content sources (Apple FB9751461, verified through tvOS 26).
-- On macOS the layer is laid out at the size of the system PiP window (found through public AppKit and followed on resize; the picture-shaped layout is kept when no window is found). The system draws an opaque bar over the top of that window that no public API removes (Apple FB22411168).
-
-## Background audio
-
-- **iOS:** audio keeps playing when the app goes to the background. The native AVPlayer stays alive; the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`).
-- A paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs.
-- **tvOS:** tears down immediately (wedge-safe), unless a PiP window is active. PiP keeps the pipeline and the loopback server alive, and on the software path it keeps decoding video too, because the window needs frames.
-- Hosts gate corrective actions on the published `isSessionReady`.
-- **Now Playing (opt-in):** the engine can own the system Now Playing card and the remote commands on every platform and route (`ownsAudioNowPlaying`, `ownsVideoNowPlayingSession` with `ownsVideoNowPlayingCommands`, `ownsSoftwareNowPlaying`). `setNowPlayingInfo(_:)` sets the title and artwork, `setNowPlayingTrackCommands(next:previous:)` adds playlist buttons. See [guide.md › Now Playing](guide.md#now-playing).
+- **Custom input:** play any byte source through the `IOReader` protocol (`load(source:)`). See [guide.md › Custom input](guide.md#custom-input).
+- **SMB:** SMB shares (SMB 2.0.2 and 2.1) through the optional `AetherEngineSMB` product (NTLMv2, guest or anonymous, read-only). See [guide.md › SMB shares](guide.md#smb-shares).
+- **Certificate trust:** a media server behind a self-signed or private-CA certificate plays once the host vouches for it.
+  - `EngineTLS.serverTrustEvaluator` is asked per challenge, about the origin that challenge came from. A LAN address with a private certificate and a WAN address with a real one are decided separately.
+  - It covers every session the engine owns, and the native remote-HLS route too. AVPlayer asks no delegate of its own there, so the engine puts a loopback relay in front of the origin, where the handshake can be checked.
+  - The relay is mounted only for an origin the system actually refuses, and media is relayed as it arrives rather than read whole.
 
 ## Seeking, streaming and prewarm
 
@@ -161,22 +153,23 @@ The host draws the overlay itself. See [formats.md › Subtitles](formats.md#sub
 - Static and off the main actor: no engine instance, no audio session, no layer.
 - It never queues for the origin. The bytes live only in memory until they are adopted and are dropped under memory pressure. The HTTP headers are part of the cache key.
 
-## Live TV and DVR
+## Picture in Picture
 
-- Unbounded live, with optional timeshift (DVR).
-- Direct HLS ingest with AES-128 clear-key and SSAI ad-pod handling.
-- Recording a channel over the connection the session already holds.
+PiP works on both playback paths. The host builds the controller; the engine keeps the pipeline alive and gets subtitles into the window.
 
-How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr). Format detail: [formats.md › Live ingest](formats.md#live-ingest-aes-128-ssai).
+- **Native path:** an `AVPictureInPictureController` around `currentAVPlayer` or the engine's `nativePlayerLayer`. A native-to-native load hands the `AVPlayerItem` over in place, so the window survives the move to the next episode. Subtitles reach the window as native renditions, bitmap tracks through OCR.
+- **Software path:** `softwarePiPSource` builds a sample-buffer controller (`makePictureInPictureController()`, with a `SoftwarePiPPlaybackDelegate`). While PiP is active the engine draws the subtitle cues (text and PGS / DVB bitmaps) into the frames. Each load on this path ends PiP.
+- **Platforms:** iOS and macOS. tvOS AVKit does not show sample-buffer content (Apple FB9751461, checked through tvOS 26), so on tvOS only the native path has PiP. On macOS the system draws an opaque bar over the top of the window (Apple FB22411168).
 
-## Inputs: custom readers, SMB, certificates
+How to wire it: [guide.md › Picture in Picture](guide.md#picture-in-picture). Layer geometry, lifecycle and the macOS window: [api.md › Picture in Picture on the software path](api.md#picture-in-picture-on-the-software-path).
 
-- **Custom input:** play any byte source through the `IOReader` protocol (`load(source:)`). See [guide.md › Custom input](guide.md#custom-input).
-- **SMB:** SMB shares (SMB 2.0.2 and 2.1) through the optional `AetherEngineSMB` product (NTLMv2, guest or anonymous, read-only). See [guide.md › SMB shares](guide.md#smb-shares).
-- **Certificate trust:** a media server behind a self-signed or private-CA certificate plays once the host vouches for it.
-  - `EngineTLS.serverTrustEvaluator` is asked per challenge, about the origin that challenge came from. A LAN address with a private certificate and a WAN address with a real one are decided separately.
-  - It covers every session the engine owns, and the native remote-HLS route too. AVPlayer asks no delegate of its own there, so the engine puts a loopback relay in front of the origin, where the handshake can be checked.
-  - The relay is mounted only for an origin the system actually refuses, and media is relayed as it arrives rather than read whole.
+## Background audio
+
+- **iOS:** audio keeps playing when the app goes to the background. The native AVPlayer stays alive; the software path drops video and keeps decoding audio (`backgroundPlaybackEnabled` / `pictureInPictureActive`).
+- A paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs.
+- **tvOS:** tears down immediately (wedge-safe), unless a PiP window is active. PiP keeps the pipeline and the loopback server alive, and on the software path it keeps decoding video too, because the window needs frames.
+- Hosts gate corrective actions on the published `isSessionReady`.
+- **Now Playing (opt-in):** the engine can own the system Now Playing card and the remote commands on every platform and route (`ownsAudioNowPlaying`, `ownsVideoNowPlayingSession` with `ownsVideoNowPlayingCommands`, `ownsSoftwareNowPlaying`). `setNowPlayingInfo(_:)` sets the title and artwork, `setNowPlayingTrackCommands(next:previous:)` adds playlist buttons. See [guide.md › Now Playing](guide.md#now-playing).
 
 ## Frames, metadata and the audio tap
 

@@ -81,7 +81,7 @@ A composed frame handed to the display layer must look like this.
 - `kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange` (P010), BT.2020 primaries, PQ transfer, colour attachments copied from the base layer.
 - Reconstruction runs at 12-bit precision (reshaped base plus inverse-NLQ residual).
 - An ordered 8×8 Bayer dither takes it to 10 bits. The dither is inverted on odd frames and phase-offset between Cb and Cr.
-- Luma is clamped to 64–940, chroma to 64–960.
+- Luma is clamped to 64 to 940, chroma to 64 to 960.
 
 **Metadata, on every frame.**
 
@@ -157,7 +157,7 @@ A bypassed frame carries the Profile 8.1 RPU that keeps the source's mapping, so
 
 ### 3.1 Audio
 
-A known trade-off of the route, documented at the maintainer's request rather than worked around.
+A known trade-off of the route.
 
 - The dual-layer route runs on `SoftwarePlaybackHost`. Its audio is the host's own `AudioDecoder` (FFmpeg decode to PCM, played through the sample-buffer audio renderer), never AVPlayer.
 - On tvOS only AVPlayer emits Dolby Atmos objects, and the platform does not pass a bitstream through.
@@ -213,7 +213,7 @@ Playback first ran with `compose` ending in `waitUntilCompleted()` under the dec
 
 | | Blocking compose | `composeAsync` + one encoder |
 |---|---|---|
-| Delivered rate | 21.4–22.0 fps | real time, ~26.6 fps while catching up after a seek |
+| Delivered rate | 21.4 to 22.0 fps | real time, ~26.6 fps while catching up after a seek |
 | Video lead | slipping 0.09 s per second | flat at about +0.5 s |
 | Display drops | +3…+7 every second | flat after seek settling |
 | GPU time per frame | 28 ms end to end, serialized | 14.3 → 12.9 ms, off-thread |
@@ -475,7 +475,7 @@ With a clock (the software host installs one) the rule is the deadline:
 | *Deadline* | A waiting frame is released as its base layer once its presentation time less a margin has been reached on the running clock. The margin is `maxFramesInFlight` (2) frame intervals, at least 100 ms. Its presentation time is the earliest of its own and those of the frames behind it, since delivery is ordered by ticket and none of them can show first. |
 | *Grace* | A frame is given one frame interval, clamped to 15 to 50 ms, from its arrival before the deadline may release it. The two layers decode on separate sessions, so the partner of a frame that arrives already inside its margin is normally a moment behind, not lost. A frame already at or past its presentation time gets none. |
 | *Held clock* | With no running clock there is no time to count down to. While a preroll waits on the renderer, a frame waits the margin of wall time at most. For a pause, or before the clock is armed, it waits 2 s at most (this only bounds a layer that is lost for good). |
-| *Backstop* | With a clock, `maxDeadlineHoldFrames` = 6 newer arrivals release a frame in every mode. It sits two below the point (`maxFramesInFlight + maxLayerSkew + 2` = 7 pending frames) at which `OrderedDelivery`'s stall guard skips a ticket, so the frames queued behind a waiting one can never reach the guard, and it bounds the queue. |
+| *Backstop* | With a clock, `maxDeadlineHoldFrames` = 6 newer arrivals release a frame in every mode. `OrderedDelivery`'s stall guard skips a ticket once more than `maxFramesInFlight + maxLayerSkew + 2` = 7 pending frames are queued, so it fires at 8. The backstop releases at 6, two short of that, so the frames queued behind a waiting one can never reach the guard, and it bounds the queue. |
 | *Sweep* | A timer re-checks what waits (every 2 to 250 ms, only while something waits). Every arrival re-arms it, since an arrival can lower a waiting frame's deadline. |
 | *No enhancement layer in the access unit* | An access unit that carries no enhancement-layer NAL has no picture to wait for, so its base frame is released at once (`bypassNoELInAU`). This is judged only while the layers' pictures sit in the same units. Once the alignment has restamped any (a reordered stream), a unit without one says nothing about its own frame. A reordered stream is recognised only after its first restamp, so a frame in that start-up stretch (the opening of a play and of each seek) can be released early and shown as its base layer. |
 
@@ -658,7 +658,7 @@ Our process alone falls by about 300 MB; the decoder service gains about 170 MB.
 | Side-data lookup | the 32-entry ring, no sorting |
 | Shader compilation | once per process, lazily |
 
-**GPU:** 12.9–14.3 ms per frame measured on the A12 (§4.2), against a 41.7 ms budget at 23.976 fps. A 59.94 fps source (16.7 ms budget) has far less headroom.
+**GPU:** 12.9 to 14.3 ms per frame measured on the A12 (§4.2), against a 41.7 ms budget at 23.976 fps. A 59.94 fps source (16.7 ms budget) has far less headroom.
 
 ### 5.11 Observability
 
@@ -736,7 +736,7 @@ swift test --filter "Dovi|DualLayer|OrderedDelivery|FrameSideDataRing"
 | `DoviShaderSyncTests` | every kernel present, parameter block size, one pipeline per process |
 | `DoviRpuConverterTests` | NAL surgery, framing, degradation to HDR10 |
 
-**CLI** ([cli.md](cli.md)): `aetherctl feltest` (pixel and metadata verdicts, exit codes 0–5), `dvsurvey`, `dovitest`, and `play --cycle-el` to flip the residual on a timer.
+**CLI** ([cli.md](cli.md)): `aetherctl feltest` (pixel and metadata verdicts, exit codes 0 to 5), `dvsurvey`, `dovitest`, and `play --cycle-el` to flip the residual on a timer.
 
 **Device.** With `DEVELOPER_DIR` pointing at an Xcode that has `devicectl`:
 
@@ -863,7 +863,12 @@ On macOS, `AVPlayerLayer` shows the folded stream served by `aetherctl serve` pi
 | HDR10 (Match Dynamic Range on) | master playlist | no, the base layer bit for bit |
 | HDR10 | `forceDolbyVisionOnNonDVDisplay` (Profile 5) | yes, no colour shift on the unedited frames |
 
-A display that takes Dolby Vision and a Mac apply it as well. So the fold pauses in exactly one case: on tvOS, without Dolby Vision, off the Profile 5 route, while the panel presents HDR. The load predicts that from the start when range matching is on, the display can play HDR, the engine writes HDR criteria and no HDR master was refused in this process, because the readout taken during the display switch reads SDR on exactly these panels and the first producer would otherwise fold through the switch (measured: 0.7 s more to the first frame from a network source). An HDR master reaching readyToPlay confirms it; a refused master clears it. The check runs at every GOP keyframe. While it holds, packets pass through converted with the stream's mapping, no GOP is held back and nothing is decoded, and the log says `[FelCurves] fold paused`. A change of the answer during playback takes effect at the next keyframe in both directions.
+A display that takes Dolby Vision and a Mac apply it as well. So the fold pauses in exactly one case:
+
+- **When it pauses:** on tvOS, without Dolby Vision, off the Profile 5 route, while the panel presents HDR.
+- **How the load predicts it:** from the start, when range matching is on, the display can play HDR, the engine writes HDR criteria and no HDR master was refused in this process. The readout taken during the display switch reads SDR on exactly these panels, so without the prediction the first producer would fold through the switch (measured: 0.7 s more to the first frame from a network source).
+- **What confirms or clears it:** an HDR master reaching readyToPlay confirms it; a refused master clears it. The check runs at every GOP keyframe, and a change of the answer during playback takes effect at the next keyframe in both directions.
+- **What happens meanwhile:** packets pass through converted with the stream's mapping, no GOP is held back and nothing is decoded. The log says `[FelCurves] fold paused`.
 
 **Switching it off per load.** `LoadOptions.foldsDolbyVisionFEL` (default `true`) turns the fold off for one load, for a title a viewer reports or an A/B check on one build. It is a tuning field that `reloadAtCurrentPosition(applying:)` carries. Without the trait it is ignored. The load logs `[FelCurves] fold not armed: <reason>` when a Profile 7 conversion runs without the fold.
 

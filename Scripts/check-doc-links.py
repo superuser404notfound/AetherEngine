@@ -43,6 +43,9 @@ PUBLISHED = [
     "docs/api.md",
     "docs/formats.md",
     "docs/architecture.md",
+    "docs/architecture-native.md",
+    "docs/architecture-software.md",
+    "docs/source-map.md",
     "docs/cli.md",
     "docs/guide.md",
     "docs/installation.md",
@@ -50,6 +53,7 @@ PUBLISHED = [
     "docs/comparison.md",
     "docs/licensing.md",
     "docs/dolby-vision-fel.md",
+    "docs/measurements.md",
     "CHANGELOG.md",
     "README.md",
 ]

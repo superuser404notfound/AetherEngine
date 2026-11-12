@@ -1,7 +1,7 @@
 import Foundation
 import AVFAudio
 
-/// Opt-in decoded PCM audio tap (#95). See docs/architecture.md, "Audio tap".
+/// Opt-in decoded PCM audio tap (#95). See docs/architecture-software.md, "Audio tap".
 extension AetherEngine {
 
     /// Install the tap on the currently loaded item and return its buffer stream.
