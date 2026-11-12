@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.65.0] - 2026-11-12
+
 ### Added
 
 - **A stereo downmix can keep the LFE (AE#1044).** `AudioShaping.lfeMixDB` mixes the LFE into the fold
@@ -71,6 +75,13 @@ the public-API contract.
   GPU deinterlacing is the default, `IOReader.discImageProbeEnabled` defaults to true, plain
   `reloadAtCurrentPosition()` throws on a custom source, rendered object audio leaves as linear PCM (APAC only
   over AirPlay), the display switch waits up to 2 s, and the README and guide quick starts compile.
+- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends (#1042, thanks @yucelokan).**
+  The decoder opened with one thread per core, and under frame threading every thread past the first
+  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
+  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
+  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
+  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
+  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
 
 ## [7.64.0] - 2026-11-12
 
@@ -200,14 +211,6 @@ the public-API contract.
   Logged as `[FelCurves] fold paused`.
 
 ### Fixed
-
-- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends.**
-  The decoder opened with one thread per core, and under frame threading every thread past the first
-  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
-  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
-  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
-  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
-  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
 
 - **The upscale stage measures the frame rate correctly behind a hardware decoder (#846).** VideoToolbox
   hands frames over in decode order, and the stage took the gap between two arrivals for the frame period:
