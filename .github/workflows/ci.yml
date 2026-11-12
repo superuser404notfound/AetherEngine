@@ -92,7 +92,8 @@ jobs:
           command -v ffmpeg >/dev/null || brew install ffmpeg
           bash Scripts/test-h264-partial-composition-controls.sh
 
-  # The optional components (TrueHDObjectAudio, DTSXObjectAudio, DualLayerDolbyVision) are off by
+  # The optional components (TrueHDObjectAudio, DTSXObjectAudio, DualLayerDolbyVision,
+  # DolbyVisionStillReshaping, DolbyVisionFelCurves) are off by
   # default, so the job above builds and tests without them. This one keeps the opt-in code compiling
   # and its tests running, in parallel instead of after the default run.
   test-macos-all-traits:

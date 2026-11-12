@@ -15,8 +15,8 @@ AetherEngine aims for both: FFmpeg's format coverage on top of VideoToolbox and 
 | --- | --- | --- | --- | --- | --- |
 | **Approach** | Embeddable engine, Apple-only | Full player with bundled UI, FFmpeg + AVPlayer, Apple-only | Apple's built-in player | libVLC wrapped for Apple | libmpv, cross-platform |
 | **Container & codec breadth** | Wide, FFmpeg demux | Wide, FFmpeg demux | Narrow, Apple's set | Wide | Wide |
-| **Hardware decode** | VideoToolbox, dav1d SW fallback | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
-| **Dolby Vision** | P5, P7 as 8.1 (or opt-in FEL dual-layer), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
+| **Hardware decode** | VideoToolbox, dav1d / libavcodec software | VideoToolbox, FFmpeg SW fallback | VideoToolbox | VideoToolbox plus software | VideoToolbox plus software |
+| **Dolby Vision** | P5, P7 as 8.1 (with the FEL folded into its curves, or composed dual-layer, both optional), P8.1, P8.4, AV1 P10.x, real display switch | P5, P8 via AVPlayer; their matrix lists P5 HDR display without overheating as paid LGPL | P5 and P8.1 only | Tone-maps, no DV display | Tone-maps, no DV display |
 | **Dolby Atmos** | EAC3+JOC stream-copied (HDMI MAT, spatial) | EAC3+JOC via AVPlayer | EAC3+JOC passthrough | Decodes to PCM, no object passthrough | No Atmos passthrough on Apple |
 | **TrueHD / DTS:X heights** | Speaker bed up to 9.1.6 built from the stream's lossless 7.1, steered by its objects or heights, delivered as lossless 24-bit PCM, APAC on AirPlay (optional components) | 7.1 core (FFmpeg decode) | Not played | 7.1 core | 7.1 core |
 | **HDR on tvOS** | Native Match Content switch | Native Match Content on AVPlayer path, else Metal tone-map | Native Match Content | Software tone-mapping | Software tone-mapping |
@@ -25,7 +25,7 @@ AetherEngine aims for both: FFmpeg's format coverage on top of VideoToolbox and 
 
 ## Measured
 
-The table above is qualitative. The numbers below are measured on 4K HDR HEVC in Matroska, the container media servers actually serve, at 38 Mbit/s and at 90 Mbit/s (the rate of a UHD remux).
+The table above is qualitative. The numbers below are a snapshot taken on 2026-09-24 with AetherEngine 7.15.2; later releases are not re-measured here. They are measured on 4K HDR HEVC in Matroska, the container media servers actually serve, at 38 Mbit/s and at 90 Mbit/s (the rate of a UHD remux).
 
 How it was measured:
 

@@ -57,17 +57,26 @@ Play a video:
 import AetherEngine
 import SwiftUI
 
-let player = try AetherEngine()
-
 struct PlayerView: View {
-    var body: some View { AetherPlayerSurface(engine: player) }
-}
+    // Create the engine once with `try AetherEngine()` and keep it for the app's lifetime.
+    let engine: AetherEngine
+    let url: URL
 
-try await player.load(url: videoURL)
-player.play()
+    var body: some View {
+        AetherPlayerSurface(engine: engine)
+            .task {
+                do {
+                    try await engine.load(url: url)
+                    engine.play()
+                } catch {
+                    print("Load failed: \(error)")
+                }
+            }
+    }
+}
 ```
 
-Read the state from the published properties (`player.$state`, `player.clock.$currentTime`, `player.audioTracks`, `player.$subtitleCues`, ...). The [host guide](docs/guide.md) walks through everything a real player needs, and [`Examples/MinimalPlayer`](Examples/MinimalPlayer/MinimalPlayerApp.swift) is a complete single-file player to copy.
+Read the state from the published properties (`engine.$state`, `engine.clock.$currentTime`, `engine.audioTracks`, `engine.$subtitleCues`, ...). The [host guide](docs/guide.md) walks through everything a real player needs, and [`Examples/MinimalPlayer`](Examples/MinimalPlayer/MinimalPlayerApp.swift) is a complete single-file player to copy.
 
 **On tvOS**, read [tvOS host setup](docs/guide.md#tvos-host-setup) before you ship HDR content.
 
@@ -126,7 +135,7 @@ AVPlayer has the best OS integration but plays only Apple's formats. VLCKit and 
 - [stashy](https://stashy.shelf.am/): iOS/tvOS native player for stash.
 - [Gflix](https://gflixhub.app/): A flawless media app for your media.
 - [Melon Video](https://apps.apple.com/ca/app/melon-video/id6811750997): Video Player for Vision Pro.
-- [WUW IPTV Player](https://apps.apple.com/tr/app/wuw-iptv-player-smart-m3u-tv/id6759220800): Watch U Want — or simply WUW — your IPTV player for iPhone, iPad, Mac, Apple TV and Apple Vision Pro.
+- [WUW IPTV Player](https://apps.apple.com/tr/app/wuw-iptv-player-smart-m3u-tv/id6759220800): Watch U Want (WUW), an IPTV player for iPhone, iPad, Mac, Apple TV and Apple Vision Pro.
 - [GiVo Stream](https://givostreamapp.com): media player for iPhone, iPad and Apple TV with bring-your-own playlists, live timeshift, DVR and VOD.
 - [LillyPlayer](https://lillyplayer.com): The all-in-one IPTV and media player for Apple TV, iPhone and iPad (live TV, EPG, replay, Jellyfin, Plex, SMB...).
 - [Plozz](https://plozz.app): Free forever open source native app for iPhone, iPad, and Apple TV. Supports Jellyfin, Plex, Emby, Silo, IPTV, SMB, WebDAV and more.

@@ -10,7 +10,22 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **A correction can no longer flip `sharedOutputRole` on a running session.** The field was on the list of
+  options that name a session, but `reloadAtCurrentPosition(applying:)` never compared it, so a changed role was
+  applied instead of refused. It is now refused with `loadIdentityNotCorrectable` like the other identity
+  fields, and a test keeps the list and the check from drifting apart again.
+- **`aetherctl elframe`, `elsurvey` and `felcurves` say which trait they need.** Built without it, they fell
+  through to the bare-URL `serve` alias and tried to serve a file named after the command. They now exit 64
+  with the same message `feltest` and `dmpass` give. `Probes/AllTraits` now builds `DolbyVisionFelCurves` too,
+  so the curve fold is compiled for the device SDKs as well.
+- **The documentation matches the code again.** An audit against the source corrected about 80 wrong or stale
+  statements across the README, `docs/` and the Swift doc comments. The biggest: codecs outside the native and
+  software lists route to software instead of failing the load, AV1 plays natively where the chip decodes it,
+  GPU deinterlacing is the default, `IOReader.discImageProbeEnabled` defaults to true, plain
+  `reloadAtCurrentPosition()` throws on a custom source, rendered object audio leaves as linear PCM (APAC only
+  over AirPlay), the display switch waits up to 2 s, and the README and guide quick starts compile.
 
 ## [7.64.0] - 2026-11-12
 

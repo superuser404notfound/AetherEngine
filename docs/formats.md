@@ -1,6 +1,6 @@
 # Formats, codecs, and playback detail
 
-This page is the detail behind the README's "What it handles" matrix: which formats play, which decode path each one takes, how HDR and Dolby Vision are signaled, how audio is bridged, how subtitles work, and the documented edge cases. For the pipeline shapes these routes run through, see [docs/architecture.md](architecture.md).
+This page is the detail behind the matrix in [features.md](features.md): which formats play, which decode path each one takes, how HDR and Dolby Vision are signaled, how audio is bridged, how subtitles work, and the documented edge cases. For the pipeline shapes these routes run through, see [docs/architecture.md](architecture.md).
 
 Contents:
 
@@ -67,11 +67,12 @@ Native AVPlayer path, VideoToolbox:
 | MS-MPEG4 v1 / v2 / v3, WMV1 / WMV2 / WMV3 | Legacy Microsoft tail (FFmpegBuild 2.4.3) | libavcodec |
 | FLV1, VP6 / VP6F / VP6A | Flash tail (FFmpegBuild 3.2.0) | libavcodec |
 | RealVideo 1 to 4, H.263, Theora | 2000s tail (FFmpegBuild 3.8.0) | libavcodec |
+| QuickTime RLE (`qtrle`) | Not on the native allowlist (FFmpegBuild 2.4.1) | libavcodec |
 | Interlaced H.264 | tvOS AVPlayer does not deinterlace | libavcodec + deinterlacer |
 | H.264 High 4:2:2 / 4:4:4 / High-10, HEVC Rext, where VideoToolbox lacks the profile | Native path renders nothing | libavcodec |
 | H.264 with both MVC stereo views in one track | VideoToolbox renders nothing | libavcodec (base view) |
 
-Any video codec not on this list and not on the native allowlist fails the load (see [Every other video codec](#every-other-video-codec)).
+Any other video codec not on the native allowlist also takes the software path. It plays when the FFmpeg build has a decoder for it and fails the load when it does not (see [Every other video codec](#every-other-video-codec)).
 
 #### AV1
 
@@ -125,10 +126,10 @@ The same all-or-nothing rule as WMA and Flash applies. None of the audio is fMP4
 
 #### Every other video codec
 
-Every other video codec fails the load by default. The native path has an allowlist of its own (HEVC, H.264, hardware-decodable AV1), and `HLSVideoEngine` refuses the rest with `unsupportedCodec`. So a codec that is merely absent from the lists above does not fall back to native, it fails the load.
+Every other video codec takes the software path by default. The native path has an allowlist of its own (HEVC, H.264, hardware-decodable AV1), and `HLSVideoEngine` refuses the rest with `unsupportedCodec`, so a codec that is merely absent from the lists above is routed to software rather than to native (FFmpegBuild#1).
 
-- QuickTime RLE (`qtrle`, FFmpegBuild 2.4.1) is the case that surfaced this. ProRes, MJPEG, Cinepak and rawvideo have the same shape.
-- Whether such a source then plays depends on the FFmpeg build. With no decoder compiled in, it fails at `SoftwareVideoDecoder` with `Unsupported video codec`, which is at least the honest error.
+- Whether such a source then plays depends on the FFmpeg build. QuickTime RLE (`qtrle`, FFmpegBuild 2.4.1) has a decoder and plays.
+- With no decoder compiled in, the load fails at `SoftwareVideoDecoder` with `Unsupported video codec`, which is at least the honest error. ProRes, MJPEG, Cinepak, rawvideo and MPEG-1 video are not in the build and fail this way.
 - `AV_CODEC_ID_NONE` is the one default-native case, since an audio-only source probes as NONE.
 
 #### Interlaced H.264
@@ -165,7 +166,7 @@ H.264 that carries both stereo views inside one track, which is how a 3D Blu-ray
 
 ### Deinterlacing
 
-Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent bwdif graph (yadif fallback). It engages on the first interlaced frame and costs nothing on progressive content.
+Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent graph. By default it runs on the GPU (`yadif_videotoolbox`, a Metal kernel, at field rate), with CPU bwdif (yadif on older builds) as the fallback. It engages on the first interlaced frame and costs nothing on progressive content.
 
 The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`). It is gated per source on `VTCapabilityProbe`, the codec id, the declared field order, and on VOD the decode sample that verifies it.
 
@@ -348,13 +349,13 @@ An HDR master playlist is only served when the panel is ready for it.
 | iOS | The built-in panel engages EDR on demand with no display mode switch, so `AVPlayer.eligibleForHDRPlayback` counts as readiness. SDR-only devices read ineligible and stay media-direct. |
 | macOS | Same as iOS for readiness. See [the macOS capability table](#macos-capability-table) below. |
 
-`DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see the README's "Host setup on tvOS" section.)
+`DisplayCriteriaController` issues the HDMI content-frame-rate and dynamic-range hint via `AVDisplayManager` before the first segment is fetched, so the receiver-side handshake is in flight by the time `AVPlayer` is ready to render. (For why this ordering is mandatory on tvOS, see [guide › tvOS host setup](guide.md#tvos-host-setup).)
 
 **Frame rate is required (#130).** An HDR master also needs a known source frame rate. AVPlayer filters a `VIDEO-RANGE=PQ`/`HLG` variant that carries no `FRAME-RATE` attribute out of the master at parse time, and fails the item with `-1002` without ever fetching the media playlist (SDR variants are accepted without it). The manifest frame rate uses the probe's `avg_frame_rate` with an `r_frame_rate` fallback. A source where both are unset (some live MPEG-TS ingests) routes media-direct instead of serving a master AVPlayer would provably reject.
 
 #### Per-mode capability table
 
-The per-mode capability split (HDR10, HLG, Dolby Vision) still comes from `AVPlayer.availableHDRModes`. The 26 SDKs deprecate it in favor of the eligibility Bool but ship no per-mode replacement, and the DV5 `-11868` guard needs exactly that distinction, so the engine keeps the deprecated read until Apple obsoletes it.
+The per-mode capability split (HDR10, HLG, Dolby Vision) still comes from `AVPlayer.availableHDRModes`. The 26 SDKs deprecate it in favor of the eligibility Bool but ship no per-mode replacement, and Dolby Vision support needs exactly that distinction (the AV1 Dolby Vision packaging is gated on it, for one), so the engine keeps the deprecated read until Apple obsoletes it.
 
 - **The table may only ADD a mode, never subtract one (since 6.82.0).** `supportsHDR10` and `supportsHLG` take `eligibleForHDRPlayback` as their floor, because the table under-reports HLG over HDMI. Measured on a Samsung whose EDID advertises Hybrid Log-Gamma and which plays HLG in the TV's own player, connected straight to an Apple TV: the table reported `.hlg` absent. A second Apple TV on a different Samsung agreed, and an iPhone 17 Pro on its built-in panel reported it present, so the absence is about the HDMI path rather than the panel (AE#459).
 - **What that floor reaches is one source.** `effectiveVideoFormat` guards on Dolby Vision, so `supportsHLG` is consulted only for a DV Profile 8.4. That source previously resolved to SDR on such a display while the manifest served `VIDEO-RANGE=HLG`. A plain HLG title was never clamped.
@@ -424,7 +425,7 @@ For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationReco
 
 Profile 5 (DV-only, IPT-PQ, no base layer) emits a bare `dvh1.05.<dvLevel>` codec tag in the primary `CODECS` attribute, with the `dvcC` box preserved.
 
-`dvh1` is forced even on non-DV panels: AVPlayer's system DV decoder tone-maps IPT-PQ internally, and without `dvh1` the IPT chroma reads as YCbCr and shows a green / purple cast. So P5 on a non-DV panel is routed through a media playlist to avoid the `-11868` variant rejection.
+`dvh1` is forced even on non-DV panels: AVPlayer's system DV decoder tone-maps IPT-PQ internally, and without `dvh1` the IPT chroma reads as YCbCr and shows a green / purple cast. P5 has no routing special case: it follows the normal HDR rule, a master on a panel ready for HDR (where the system's DV decoder tone-maps it, also on an HDR10 panel) and the media playlist on an SDR route.
 
 #### Profiles 8.1 and 8.4
 
@@ -826,7 +827,7 @@ With the option on, the automatic audio pick prefers a TrueHD Atmos track over t
 - It never crosses a language or a dub (a region or script both tags state and disagree on).
 - It never picks a commentary or an audio description for it.
 - It applies only where the bed can be rendered: a VOD video session, on the loopback route or the software host, on OS 26 or later.
-- An explicit `audioSourceStreamIndexOverride` still wins.
+- An explicit `audioSourceStreamIndex` passed to `load` still wins.
 
 Without this, a film carrying DTS-HD and TrueHD Atmos in one language usually opened on whichever the container listed first.
 
@@ -952,7 +953,7 @@ The decoder therefore decodes the first two frames after a start or seek without
 
 Over Jellyfin on an Apple TV 4K (tvOS 27.2), *8 Mile* and *The Bourne Identity* played as APAC with the soundbar showing Atmos, from the middle of the film and across seeks (back to playing in 0.7 to 2.2 s), with the same `AtmosOutputActivator` TrueHD Atmos uses. *Arrival*, plain DTS-HD MA, was refused on its first frame and showed PCM.
 
-Those runs predate the decoder in FFmpeg, and the activator no longer runs for DTS:X: a DTS programme is not Dolby Atmos. So a sink that needs the activator to show Atmos now shows multichannel PCM for DTS:X, with the heights still in it.
+Those runs predate the decoder in FFmpeg. The activator still runs for a rendered DTS:X bed, like for every rendered bed (7.56.0), see [Atmos on the receiver](#atmos-on-the-receiver-tvos).
 
 #### What the session log says (DTS:X)
 
@@ -977,7 +978,7 @@ This section covers:
 - how the cue list stays correct across seeks,
 - native WebVTT renditions for PiP / AirPlay / external display, live HLS renditions, and authored ASS styling.
 
-**Render against `player.sourceTime`.** Subtitle cues land in raw source PTS. On the native path, AVPlayer's HLS clock sits at `source_pts - producer.videoShiftPts`: the producer applies a per-session shift to align the first segment's tfdt with the playlist origin, and the shift can change on every restart. Rendering the overlay against `player.sourceTime` keeps cues matched to the spoken audio regardless of which producer session is active.
+**Render against `engine.sourceTime`.** Subtitle cues land in raw source PTS. On the native path, AVPlayer's HLS clock sits at `source_pts - producer.videoShiftPts`: the producer applies a per-session shift to align the first segment's tfdt with the playlist origin, and the shift can change on every restart. Rendering the overlay against `engine.sourceTime` keeps cues matched to the spoken audio regardless of which producer session is active.
 
 ### How embedded cues are collected
 
@@ -1089,7 +1090,7 @@ CEA-608 is host-overlay only (no PiP / AirPlay), like the bitmap codecs.
 
 External subtitle files register with the engine and appear in `subtitleTracks` next to the embedded streams, so a host keeps one track list and one selection call (#88).
 
-- **Registration.** `LoadOptions.externalSubtitles: [ExternalSubtitleTrack]` declares files at load. `addExternalSubtitleTrack(_:)` registers one at any time mid-session and returns the created `TrackInfo`. The descriptor carries `url`, optional `name` / `language` / disposition flags, per-track `httpHeaders` (nil forwards the session's), and a `formatHint` for URLs whose path hides the extension.
+- **Registration.** `LoadOptions.externalSubtitles: [ExternalSubtitleTrack]` declares files at load. `addExternalSubtitleTrack(_:)` registers one at any time mid-session and returns the created `TrackInfo`. The descriptor carries `url`, optional `name` / `language` / disposition flags, per-track `httpHeaders` (nil inherits the session's only for a same-origin URL), and a `formatHint` for URLs whose path hides the extension.
 - **Containers with several subtitle streams.** An external URL can be a container rather than a sidecar (an MKV holding English, English SDH and Spanish).
   - `ExternalSubtitleTrack.sourceStreamIndex` names which stream to decode, as an ABSOLUTE `AVStream` index inside that container, so a host registers one track per stream against the same URL. nil decodes the container's first subtitle stream.
   - An index that is out of range or names a non-subtitle stream fails the decode rather than falling back, which would be indistinguishable from leaving it nil.
@@ -1153,7 +1154,7 @@ The media never moves: AVPlayer fetches A/V from the origin exactly as before, w
 
 **Shared with the native renditions.** The same resolution picks the `DEFAULT=YES` native rendition from `nativeSubtitlePreferredLanguages`, so the inline overlay and the PiP / AirPlay rendition cannot disagree about which track was meant.
 
-**Inputs and outputs.** Nothing is inferred from `TrackInfo.name`, `ExternalSubtitleTrack.name` or a sidecar filename: the structured `language` field is the whole input. The resolved tracks are published on `player.activeAudioTrackIndex` / `player.activeSubtitleTrackIndex` (both match `TrackInfo.id`). Every `TrackInfo` carries `isDefault` / `isForced` / `isHearingImpaired` / `isCommentary` / `isVisualImpaired` (from container dispositions), so a host can rank or filter the track lists the same way.
+**Inputs and outputs.** Nothing is inferred from `TrackInfo.name`, `ExternalSubtitleTrack.name` or a sidecar filename: the structured `language` field is the whole input. The resolved tracks are published on `engine.activeAudioTrackIndex` / `engine.activeSubtitleTrackIndex` (both match `TrackInfo.id`). Every `TrackInfo` carries `isDefault` / `isForced` / `isHearingImpaired` / `isCommentary` / `isVisualImpaired` (from container dispositions), so a host can rank or filter the track lists the same way.
 
 ### Second simultaneous subtitle track (bilingual)
 
@@ -1264,7 +1265,6 @@ A `SUBTITLES` rendition can only live in a master playlist, so native subtitles 
 | SDR source, any panel | Yes |
 | HDR / DV source on an HDR-ready panel | Yes |
 | HDR on an SDR panel | No (media-direct, no master) |
-| DV Profile 5 on a non-DV panel | No (media-direct, no master) |
 | Live sources | No: their own `SUBTITLES` renditions reach the host through the overlay ([below](#live-hls-subtitle-renditions-host-overlay)) |
 | Software decode path (AV1 without hardware decode, VP9) | No: there is no `AVPlayerItem` for a legible group to live on, so `prepareNativeSubtitles` is inert and the host overlay owns subtitles on every surface |
 
@@ -1384,7 +1384,7 @@ Required before tagging a release:
 - No double subtitles while inline; no rendition is auto-selected on session start.
 - Timing: no constant offset between audio and subtitle cues, before and after seeks.
 - SDR / HDR10 picture behavior unchanged with `prepareNativeSubtitles = true` (the renditions only add master tags + subtitle endpoints).
-- HDR-on-SDR-panel and DV Profile 5 on non-DV panels still play (media-direct, no renditions there by design).
+- HDR on an SDR panel still plays (media-direct, no renditions there by design).
 - Memory bounded by total cue count across all tracks.
 
 ### Live HLS subtitle renditions (host overlay)
@@ -1448,7 +1448,7 @@ await frames.shutdown()                            // prompt teardown of the dec
 
 **Dolby Vision Profile 5 and AV1 Profile 10.0** (IPT-PQ base layers with no HDR10 fallback) route through `DolbyVisionStillConverter`, an optional component compiled only with the `DolbyVisionStillReshaping` package trait (off by default, [Installation › Optional components](installation.md#optional-components)).
 
-- With the trait, the converter applies the RPU colour transform (`ycc_to_rgb` + PQ EOTF + the IPT-PQ LMS matrices carried in `AV_FRAME_DATA_DOVI_METADATA`) before tone-mapping, so their stills come out with correct colour instead of the green / magenta cast a plain YCbCr read produces.
+- With the trait, the converter applies the full reconstruction from the RPU in `AV_FRAME_DATA_DOVI_METADATA`: the reshaping curves first, then `ycc_to_rgb` + the IPT-PQ LMS matrices, then a BT.2390 tone curve. Their stills come out with correct colour instead of the green / magenta cast a plain YCbCr read produces.
 - Built without it, such a source yields no still at all (nil, `supportsCacheBackedStills` false, no I-frame rendition, no held picture) rather than the planes read as YCbCr.
 
 **Lifecycle.**
@@ -1638,7 +1638,7 @@ has been repositioned by the seekability probe
 
 ## Network sources (SMB)
 
-The optional `AetherEngineSMB` product plays media off an SMB2/3 share through the normal decode path, with no server-side mount.
+The optional `AetherEngineSMB` product plays media off an SMB share (SMB 2.0.2 and 2.1) through the normal decode path, with no server-side mount.
 
 - `SMBConnection` (backed by [SMBClient](https://github.com/kishikawakatsumi/SMBClient), MIT, a pure-Swift SMB2 client over `NWConnection`) is a `ByteRangeSource`.
 - `SMBIOReader` adapts it to the engine's `IOReader`, bridging each synchronous demux-thread read to SMBClient's async API across a happens-before semaphore edge.
@@ -1733,6 +1733,6 @@ Things that work today but have a documented edge case, or are deferred behind a
   - The native video path lets the host's `AVPlayerViewController` activate the session per playback. The renderer paths (software decode, audio-only) activate it themselves, off the main actor and before their host is built (AE#538). Hosts that mount the engine's bare `AVPlayerLayer` instead of an `AVPlayerViewController` should make sure the session is active at playback.
   - A genuine sink-side ch=2 (an AVR caching its HDMI EDID incorrectly after standby) can still force a downmix. Power-cycling the sink restores it.
   - Atmos passthrough is unaffected either way, because EAC3+JOC ships as MAT 2.0 over a 2-channel carrier.
-- **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships hardware AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is meaningfully higher than hardware HEVC. Film grain and the P010 conversion run on the GPU, so what stays on the CPU is dav1d's decode. A Profile 10.1 source keeps its Dolby Vision there ([Dolby Vision signaling](#dolby-vision-signaling)). On iOS 17+ / macOS 14+ AV1 routes through Apple's hardware pipeline transparently. Future Apple TV chips with hardware AV1 will be picked up automatically by `VTCapabilityProbe`.
-- **AV1 Dolby Vision Profile 10.0 has wrong colours when software-decoded.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) renders with incorrect colours on the software path. Profiles 10.1 and 10.4 are unaffected, because they carry an HDR10 / HLG base layer. Profile 10.0 only renders correctly through the native AVPlayer path on hosts with hardware AV1 decode.
-- **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnails skip the RPU reshaping curves.** `FrameExtractor` applies the DV colour transform (from `AV_FRAME_DATA_DOVI_METADATA`), so P5 / P10.0 stills come out with correct colour, validated against a libplacebo render. The per-frame reshaping polynomials are intentionally not applied: they are not what causes the visible green / magenta corruption, and skipping them keeps this a lightweight CPU pass rather than a full Dolby Vision compositor. Brightness / contrast can therefore differ slightly from a fully graded DV render. A frame that carries no DV metadata falls back to the standard path.
+- **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships hardware AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is meaningfully higher than hardware HEVC. Film grain and the P010 conversion run on the GPU, so what stays on the CPU is dav1d's decode. A Profile 10.1 source keeps its Dolby Vision there ([Dolby Vision signaling](#dolby-vision-signaling)). Where the chip decodes AV1 (A17 Pro, M3 and later), Main profile AV1 takes the native route; High and Professional stay on software. Future Apple TV chips with hardware AV1 will be picked up automatically by `VTCapabilityProbe`.
+- **AV1 Dolby Vision Profile 10.0 does not play on the software path.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) would show a green / purple picture there. The load fails instead, with `AetherEngineError.dolbyVisionUnplayableOnSoftwarePath` and the error kind `.dolbyVisionRequiresHardware`. HEVC Profile 5 is refused the same way when it reaches the software path (#176). Profiles 10.1 and 10.4 are unaffected, because they carry an HDR10 / HLG base layer. Profile 10.0 only plays through the native AVPlayer path on hosts with hardware AV1 decode.
+- **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnails need the `DolbyVisionStillReshaping` trait.** Without it such a source yields no still ([Frame extraction](#frame-extraction)). A frame that carries no DV metadata falls back to the standard path.

@@ -46,9 +46,10 @@ extension AetherEngine {
     /// rebuild, so the internal reopens that follow (audio switch, background reload) replay the
     /// correction rather than reverting to the load-time value.
     ///
-    /// Unlike `reloadAtCurrentPosition()`, which returns silently when there is nothing to rebuild,
-    /// this one throws `AetherEngineError.sessionNotReloadable`: a host correcting a session needs
-    /// to tell "corrected" from "did nothing" to decide whether to fall through to a fresh load.
+    /// Unlike `reloadAtCurrentPosition()`, which returns silently when a URL source has no session
+    /// to rebuild (it throws only for a custom source, AE#526), this one always throws
+    /// `AetherEngineError.sessionNotReloadable`: a host correcting a session needs to tell
+    /// "corrected" from "did nothing" to decide whether to fall through to a fresh load.
     ///
     /// A correction whose every changed field is the session's own (`autoplay`) is answered without
     /// a rebuild: there is nothing for one to carry, and the teardown it used to spend was a visible
@@ -221,8 +222,9 @@ extension AetherEngine {
     /// Why `reloadAtCurrentPosition` would rebuild nothing for this session, or nil when it can
     /// rebuild it (#460).
     ///
-    /// `reloadAtCurrentPosition()` returns silently in both of these cases. Read this to tell that
-    /// silence apart from a rebuild that ran, without having to time one out.
+    /// `reloadAtCurrentPosition()` returns silently for `.noActiveSession` on a URL source and throws
+    /// `sessionNotReloadable` on a custom source (AE#526). Read this to know beforehand, without
+    /// having to time a rebuild out.
     public var sessionReloadRefusal: SessionReloadRefusal? {
         guard loadedURL != nil else { return .noActiveSession }
         if isCustomSource, !customSourceIsSeekable { return .customSourceNotSeekable }
@@ -365,6 +367,11 @@ enum SessionOptionCorrection {
         // accepted and then not happen until something else reopened the source.
         if proposed.heldSourceConnection != current.heldSourceConnection {
             refused.append("heldSourceConnection")
+        }
+        // The role decides which process-wide outputs the session claimed at load (panel, Now
+        // Playing); a rebuild cannot hand them over or give them back.
+        if proposed.sharedOutputRole != current.sharedOutputRole {
+            refused.append("sharedOutputRole")
         }
         return refused
     }

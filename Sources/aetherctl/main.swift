@@ -625,6 +625,11 @@ if first == "elsurvey" {
     rejectStrayFlags(rest, subcommand: "elsurvey")
     exit(runElSurvey(parallel: parallel, points: points))
 }
+#else
+if first == "elframe" || first == "elsurvey" {
+    print("ERROR: \(first) needs the DualLayerDolbyVision trait (swift build --traits DualLayerDolbyVision)")
+    exit(64)
+}
 #endif
 
 #if DolbyVisionFelCurves
@@ -636,6 +641,11 @@ if first == "felcurves" {
         exit(64)
     }
     exit(runFelCurves(url: parseSourceURL(rest[0]), outPath: rest[1]))
+}
+#else
+if first == "felcurves" {
+    print("ERROR: felcurves needs the DolbyVisionFelCurves trait (swift build --traits DolbyVisionFelCurves)")
+    exit(64)
 }
 #endif
 

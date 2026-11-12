@@ -16,13 +16,15 @@ import Foundation
 /// not the engine's.
 ///
 /// Applies to TrueHD sources FFmpeg identifies as Atmos (profile 30) and to DTS-HD Master Audio that
-/// decodes as DTS:X in its standard presentation on its first frame, at 48 kHz, and only on OS 26 and later, where the
+/// decodes as DTS:X on its first frame (the standard presentation, and since 7.62.0 the alternate ones such as
+/// DTS:X IMAX), at 48 kHz, and only on OS 26 and later, where the
 /// APAC encoder API exists. Everything else keeps `audioBridgeMode`.
 ///
 /// The software playback host (the route Dolby Vision Profile 7 FEL and video the hardware decoder
-/// cannot play take) honours the same setting on VOD sessions. It renders TrueHD Atmos and DTS:X as APAC
-/// for the sample-buffer audio renderer, and it hands an E-AC-3 JOC track to that renderer
-/// compressed, so the system's Atmos decoder gets the objects; without the setting, or for live
+/// cannot play take) honours the same setting on VOD sessions. It renders TrueHD Atmos and DTS:X into
+/// the same bed (linear PCM, APAC over AirPlay) for the sample-buffer audio renderer. An E-AC-3 JOC
+/// track goes to the system's Atmos decoder: compressed over AirPlay and on macOS, and on tvOS as the
+/// PCM bed that decoder produces (AE#995); without the setting, or for live
 /// sessions, it decodes every track to PCM as before.
 ///
 /// Object audio is an optional component: TrueHD needs the `TrueHDObjectAudio` package trait and DTS:X

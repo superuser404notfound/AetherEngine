@@ -26,10 +26,12 @@ swift run --traits TrueHDObjectAudio,DTSXObjectAudio,DualLayerDolbyVision,DolbyV
 |---|---|
 | `TrueHDObjectAudio`, `DTSXObjectAudio` | `--atmos-bed` |
 | `DualLayerDolbyVision` | `play --fel`, `--cycle-el`, `--dv-pin`, `feltest`, `elsurvey`, `elframe`, `dmpass` |
-| `DolbyVisionStillReshaping` | Profile 5 / 10.0 stills in `extract` and `play --host-calls` (without it those stills print as nil) |
+| `DolbyVisionStillReshaping` | Profile 5 / 10.0 stills in `extract` and `play --host-calls` (without it those stills print as nil). Leave it out for the default `scrubpreview` mode, which fails with it. |
 | `DolbyVisionFelCurves` | `felcurves` |
 
 Some drills (`bgaudio`, `play --host-calls stallclock`, `play --dv-pin`) use DEBUG-only engine hooks. Build a debug binary for them with `swift build --product aetherctl`.
+
+Every subcommand except `hlsfixture` exits 64 on an unknown flag or a bad flag value.
 
 Most subcommands take a media source URL (`file://` or `http(s)://`). `live`, `dvr`, `hlsfixture` and `hlslive` run against built-in synthetic fixtures.
 
@@ -55,7 +57,7 @@ Twenty-nine subcommands plus the bare-URL `serve` alias.
 | [`audiotap <url>`](#audiotap) | Decode the PCM audio tap headless and write a mono 48 kHz WAV (#95). |
 | [`bgaudio <url>`](#bgaudio) | SW-path background-audio keepalive probe (iOS background behavior). |
 | [`customio <path>`](#customio) | Exercise the custom `IOReader` path end to end. |
-| [`smbtest <smb-url>`](#smbtest) | Play a file off an SMB2/3 share through the `AetherEngineSMB` reader. |
+| [`smbtest <smb-url>`](#smbtest) | Play a file off an SMB share (SMB 2.0.2 / 2.1) through the `AetherEngineSMB` reader. |
 | [`live`](#live) | Live MPEG-TS session against the built-in fixture. |
 | [`dvr`](#dvr) | DVR rewind matrix across the native and SW paths. |
 | [`hlsfixture <ts>`](#hlsfixture) | Local HLS live fixture with fault knobs and an ingest self-test. |
@@ -80,10 +82,14 @@ swift run aetherctl <url>                # same as serve
 
 Opens the demuxer, prints what it finds, then exits. No HLS server is started. It prints:
 
-- the video track's codec, resolution and frame rate,
-- the audio track list (codec, channels, language, Atmos flag),
-- the subtitle track list,
-- the parsed container metadata (`MediaMetadata`: title / artist / album / albumArtist, and whether embedded cover art is present).
+- the container format and the duration,
+- the video track: codec, resolution, frame rate, pixel format, bit depth and profile (`pixels:`), primaries, transfer, matrix and range (`colour:`), and for Dolby Vision the profile and `blCompatID` (#1032),
+- for a disc image, the titles with chapter count, `playlist=` and `titleSet=` (#1032, #1034),
+- the audio track list: codec, channels, language, Atmos flag, `(default)`, `(audio description)`, `(commentary)`, then sample rate, bit depth, sample format, channel layout, profile and the track title,
+- the subtitle track list with language, `(default)` and title,
+- the parsed container metadata (`MediaMetadata`): title, artist, album, and the size of embedded cover art (`artwork: N bytes`).
+
+Exit 0, or 1 when the probe fails.
 
 **Usage:** `aetherctl probe [--detect-hdr10plus] [--detect-hdr-vivid] [--detect-dv-el] [--detect-atmos] <url>`
 
@@ -132,7 +138,7 @@ swift run aetherctl pktdump --at 660 --count 300 --profile stillExtraction <url>
 
 **Reading it.** Compare profiles. If one profile shows `video_delay=0` plus NOPTS or non-monotonic dts while another is clean, that profile's open path cannot rebuild decode-order dts for B-frame content. That was the root cause of the #93 post-recovery judder. Use `stillExtraction` to compare what a still-extraction open resolves against what playback resolves.
 
-Backed by the public `PacketTimingProbe.run(url:seekSeconds:packetCount:profileName:)`.
+Backed by the public `PacketTimingProbe.run(url:seekSeconds:packetCount:profileName:)`. Exit 0, or 1 when the probe fails.
 
 ## disc-inspect
 
@@ -180,7 +186,7 @@ open 'http://127.0.0.1:<port>/<token>/master.m3u8'   # macOS QuickTime
 | `--start-position S` | Starts the session at S seconds. | 0 |
 | `--throttle-kbps N` | TEST-ONLY: caps source-IO delivery to N kbit/s. | no cap |
 | `--atmos-bed <layout>` | Renders TrueHD Atmos or DTS:X into a speaker bed. | off |
-| `--bed-format apac\|lpcm` | How the bed is delivered. | `apac` |
+| `--bed-format apac\|lpcm\|auto` | How the bed is delivered. | `apac` |
 | `--audio-index <n>` | Serves source audio stream `n`. | engine choice |
 | `--stereo auto\|mono\|sbs\|ou` | `LoadOptions.stereoPresentation` for a 3D source. | what this system gets |
 | `--audio-delay <ms>` | Parks the server with the AE#464 audio offset in its muxer. | 0 |
@@ -278,6 +284,8 @@ Runs `serve`, then runs `xcrun mediastreamvalidator` against the loopback manife
 
 The flags mean the same as on [serve](#dolby-vision-routes). `validate` also runs the AE#532 record audit first.
 
+Exit code: `mediastreamvalidator`'s own, or 1 when the engine or `xcrun` could not start.
+
 ## segverify
 
 Checks that every loopback segment can be decoded on its own. It fetches `init.mp4`, then each media segment in turn, and SW-decodes each segment **in isolation**: a fresh decoder per segment, no carried reference frames. It reports how many are independently decodable.
@@ -294,7 +302,7 @@ A segment that yields `framesDecoded == 0` is not self-contained. Its first samp
 | `--force-dv`, `--dv-base-layer` | As on [serve](#dolby-vision-routes). | off |
 | `--dump <dir>` | Writes each fetched segment for offline inspection. | off |
 
-Exit 0 when every tested segment is independent, 2 when any is not.
+Exit 0 when every tested segment is independent, 2 when any is not, 1 when the engine or `init.mp4` failed or no segment was tested.
 
 **Checking contiguity.** `--dump` also feeds `Scripts/segment-spans.py`, which answers the neighbouring question: not whether each segment stands alone, but whether the run of them is contiguous. For every `moof` it prints `[tfdt, tfdt + sum(sample_duration)]` per track, and flags any gap or overlap against the previous segment of the same track.
 
@@ -361,14 +369,15 @@ Other lines `play` prints:
 | Exit | Meaning |
 |---|---|
 | 0 | `VERDICT: OK`. |
+| 1 | The engine could not be created, or the load failed (`LOAD FAILED`). |
 | 2 | The clock does not advance. |
 | 2 | A native session with a video track runs its clock but never has a frame ready for display (black picture with audio, #938). |
 | 2 | A resume lands more than a second behind its anchor: `VERDICT: resume clock fell behind its anchor` (AE#724, see [Resume landing](#resume-landing-ae724)). |
 | 2 | The session goes to `.error` (for example the declining arm of `--no-sw-escalation`). |
-| 3 | A selected subtitle track produces no cues. |
+| 3 | The `--subs` track was never found, or a selected subtitle track produces no cues. |
 | 3 | A requested `--record` was refused, produced no bytes, or ended `.failed`. |
-| 4 | An `overlapseek` drill failed, or a reload drill (`pausereload`, `playreload`, `extplayreload`) moved the clock when it should not or stood still when it should not. |
-| 5 | An `overlapseek` drill was inconclusive, or the `still` drill's session ended before its first aim. |
+| 4 | An `overlapseek` drill failed, a reload drill (`pausereload`, `playreload`, `extplayreload`) moved the clock when it should not or stood still when it should not, `ratehold` lost the rate at the resume or later, or `stallclock` reproduced AE#549. |
+| 5 | An `overlapseek`, `ratehold` or `stallclock` drill was inconclusive, a reload drill ran shorter than about 20 s, or the `still` drill's session ended before its first aim. |
 | 6 | The `still` drill: nothing hit. |
 | 64 | A flag the build cannot honour: `--cycle-el` without the `DualLayerDolbyVision` trait, `--dv-pin` in a release build or without the trait, or a `--dv-pin` spec with no capture rule. |
 
@@ -429,7 +438,7 @@ Other lines `play` prints:
 | `--switch-audio-delay <ms>[@ms]` | Calls `setAudioDelay(_:)` mid-session. Repeatable. | +20 s |
 | `--audio-shaping <spec>` | `LoadOptions.audioShaping` at load. | off |
 | `--switch-audio-shaping <spec>[@ms]` | Calls `setAudioShaping(_:)` mid-session. Repeatable. | +20 s |
-| `--atmos-bed <layout>`, `--bed-format apac\|lpcm` | Object-audio bed, as on [serve](#object-audio---atmos-bed). | off, `apac` |
+| `--atmos-bed <layout>`, `--bed-format apac\|lpcm\|auto` | Object-audio bed, as on [serve](#object-audio---atmos-bed). | off, `apac` |
 | `--drop-audio` | Forces every audio pipeline to fail (AE#462). | off |
 | `--audio-stats` | Installs the audio tap and reports PCM continuity and audio lead. | off |
 
@@ -524,7 +533,7 @@ Other lines `play` prints:
 - Exit 6 when nothing hit, 5 when the session ended before the first aim.
 - On a VOD session (AE#605) the three aims go through `scrubThumbnail`: 10.5 s behind the playhead, 4.5 s ahead of it, and 600 s past it. The third is EXPECTED to miss, because a frame the cache does not hold yet must not be answered with the one before it. `--sw` against an HTTP source is the software packet-cache case. The testsrc fixture's counter in the PNG proves the still decoded to the target instead of snapping to its keyframe.
 
-**`stallclock`** (AE#549). Stops the master clock at t=4 behind the host's back, the way an interrupted audio session does. It then calls a plain `play()` at t=7 and reads whether the playhead moves again. The interruption itself cannot be staged on macOS, but its outcome can. Without the `RendererClockResume` branch the run ends with the clock standing exactly where the stall left it, which is the field log's shape. The drill drives DEBUG-only engine hooks, so a Release `aetherctl` prints a notice and ends inconclusive. Build it with `swift build --product aetherctl`.
+**`stallclock`** (AE#549). Stops the master clock at t=4 behind the host's back, the way an interrupted audio session does. It then calls a plain `play()` at t=7 and reads whether the playhead moves again. The interruption itself cannot be staged on macOS, but its outcome can. Without the `RendererClockResume` branch the run ends with the clock standing exactly where the stall left it, which is the field log's shape. The drill drives DEBUG-only engine hooks, so a Release `aetherctl` prints a notice and ends inconclusive (exit 5). Build it with `swift build --product aetherctl`.
 
 **`pausereload`, `playreload`, `extplayreload`** (#623). Each forces the #93/#65 stage-2 item reload at t=10:
 
@@ -982,6 +991,8 @@ The verdict tells three outcomes apart:
 | Decoder opened but no frames produced | Pixel-format conversion, or no IDR in the window. |
 | SW decode end-to-end healthy | If real playback still hangs, the failure is downstream: `SoftwarePlaybackHost` frame enqueue, display-layer attach, or audio-clock sync. |
 
+Exit 0 healthy, 1 probe error, 2 decoder open failed, 3 no frames produced.
+
 Backed by the public static API `AetherEngine.swDecodeProbe(url:maxPackets:options:)`, which returns `SoftwareDecodeProbeResult`. Hosts can use the same probe in their own diagnostic overlays.
 
 ## seektest
@@ -1007,7 +1018,7 @@ Drives a real AVPlayer (native loopback-HLS path) through a burst of rapid seeks
 
 The burst is serialised, so every seek here ends before the next is issued. To put a seek on top of an unsettled one, use `play --seek-every 1 --seek-count N` against an origin below media rate: `phase=seeking` then holds across the run and the ledger shows supersedes.
 
-**Exit code.** 1 when a printed `<-- FAIL` line is among the `#37` bounce, the `#38` `isSeeking` window, the `#38` event pair and the unpaired-`began` ledger, or when the `#65` block ends in `PRODUCER WEDGE (UNRECOVERED)`. The final `VERDICT` line then names them. The restart tallies are informational: they are for comparing two builds, and a run that only prints them exits 0.
+**Exit code.** 1 when the load fails or the source is 30 s or shorter. Also 1 when a printed `<-- FAIL` line is among the `#37` bounce, the `#38` `isSeeking` window, the `#38` event pair and the unpaired-`began` ledger, or when the `#65` block ends in `PRODUCER WEDGE (UNRECOVERED)`. The final `VERDICT` line then names them. The restart tallies are informational: they are for comparing two builds, and a run that only prints them exits 0.
 
 **Parks versus wedges (the `#65` block).** It separates two parks that look alike in a log and mean opposite things (AE#528):
 
@@ -1044,7 +1055,9 @@ leaks --atExit -- .build/debug/aetherctl extract --loops 8 <url>   # leak sweep
 
 Tests scrub previews. By default it covers Dolby Vision Profile 5 / 10.0 sources, whose previews the compositor draws in a view. With `--stills` it covers any source.
 
-**Usage:** `aetherctl scrubpreview [--warm S] [--at s1,s2,...] [--keep DIR] [--stills] [--throttle-kbps N] [--max-concurrent-requests N] [--forward-buffer-segments N] <url>`
+The default mode needs a build WITHOUT the `DolbyVisionStillReshaping` trait. With the trait such a source serves reshaped stills instead of drawing in a view, so the default mode fails with exit 1; use `--stills` there.
+
+**Usage:** `aetherctl scrubpreview [--warm S] [--at s1,s2,...] [--keep DIR] [--throttle-kbps N] [--stills [--max-concurrent-requests N] [--forward-buffer-segments N]] <url>`
 
 | Flag | Meaning | Default |
 |---|---|---|
@@ -1053,8 +1066,8 @@ Tests scrub previews. By default it covers Dolby Vision Profile 5 / 10.0 sources
 | `--keep DIR` | Copies the session's preview files out before teardown. | off |
 | `--throttle-kbps N` | Caps source delivery, which keeps the producer close to the playhead. | no cap |
 | `--stills` | Asks `scrubPreviewFrame` instead, for any source. | off |
-| `--max-concurrent-requests N` | Passes through to `LoadOptions`. | engine default |
-| `--forward-buffer-segments N` | Passes through to `LoadOptions`. | engine default |
+| `--max-concurrent-requests N` | Passes through to `LoadOptions`. Only with `--stills`. | engine default |
+| `--forward-buffer-segments N` | Passes through to `LoadOptions`. Only with `--stills`. | engine default |
 
 **Default mode.** Loads the source on the native path, plays it for `--warm` seconds, then asks `showScrubPreview(atSeconds:in:)` for each position. For each it prints whether a picture came, how long it took, the span it stands for, and whether the position was resident.
 
@@ -1096,6 +1109,8 @@ Plays a source through the audio-only pipeline (`LoadOptions.audioOnly`) and rep
 | Flag | Meaning | Default |
 |---|---|---|
 | `--seconds N` | Run length. | 10 |
+
+Exit 0 when the clock advanced on the audio host, 1 otherwise (load failed, wrong backend, silent clock, or the engine left `.playing` early).
 
 ## audiotap
 
@@ -1139,7 +1154,7 @@ The dialogue WAV must carry the 440 Hz tone and none of the 220 Hz one.
 
 ## bgaudio
 
-Verifies SW-path background audio (the iOS keepalive) headless on macOS, where the `UIApplication` background lifecycle that normally drives it does not exist. The flag and counters are exposed through DEBUG-only engine hooks, so this command is not available in a Release build.
+Verifies SW-path background audio (the iOS keepalive) headless on macOS, where the `UIApplication` background lifecycle that normally drives it does not exist. The flag and counters are exposed through DEBUG-only engine hooks, so this command is not available in a Release build: there it prints a notice and exits 2. Otherwise it exits 0 on a healthy run and 1 on any failure.
 
 **Usage:** `aetherctl bgaudio [--fg N] [--bg N] [--lose-session] <url>`
 
@@ -1185,9 +1200,11 @@ Wraps a local file in a custom `IOReader` and plays it through `load(source:)`.
 | `--reload` | Exercises background reload. | off |
 | `--switch-audio` | Exercises an audio-track switch. | off |
 | `--select-subs` | Exercises embedded subtitles. | off |
-| `--extract` | Exercises scrub preview. | off |
+| `--extract` | Pulls a 320 px `FrameExtractor` thumbnail at 1 s. | off |
 | `--audio-index N` | Names the audio stream at LOAD, and prints what it asked for next to what it got. | none |
 | `--reload-decode-path automatic\|software` | Makes the reload's correction the decode path (AE#461). Works with `--reload`, and with `--live --reload-at`. | none |
+
+Exit 0 when the custom source plays and every requested exercise passed. 1: load failed or timed out. 5: `--reload` failed. 6: `--switch-audio` failed. 7: `--select-subs` found no track or no cues. 8: `--extract` got no thumbnail.
 
 **`--audio-index` with `--forward-only`.** This pair answers the one question a live host has: `selectAudioTrack` refuses such a source (it would mean rebuilding a drained FIFO), so naming the stream at load is the only way onto another track. This is where that was measured, not assumed (Sodalite#64).
 
@@ -1316,7 +1333,7 @@ A carry whose `count` is under one TS packet while its slice's lower bound track
 
 ## smbtest
 
-Connects to an SMB2/3 share with `SMBConnection` (SMBClient backend), wraps the file in `SMBIOReader`, and runs a sequential-throughput pass plus a random-seek check. It validates the SMB byte source without a device. macOS only. Needs the optional `AetherEngineSMB` product (`swift build --product aetherctl` pulls it in).
+Connects to an SMB share (SMB 2.0.2 / 2.1) with `SMBConnection` (SMBClient backend), wraps the file in `SMBIOReader`, and runs a sequential-throughput pass plus a random-seek check. It validates the SMB byte source without a device. macOS only. Needs the optional `AetherEngineSMB` product (`swift build --product aetherctl` pulls it in).
 
 **Usage:** `aetherctl smbtest [--reads N] <smb-url>`
 
@@ -1343,7 +1360,7 @@ Runs a live MPEG-TS session against a built-in fixture. The fixture serves an en
 | `--seconds N` | Run length. | 20 |
 | `--seed <ts>` | Overrides the seed clip. | `Fixtures/user/h264-ts-sample.ts` |
 | `--sw` | Forces the software live path. | off |
-| `--dvr-window N` | Timeshift (`LoadOptions.dvrWindowSeconds`). | none (live-only, bounded by the 60 s floor) |
+| `--dvr-window N` | Timeshift (`LoadOptions.dvrWindowSeconds`). | per mode: none on the plain run (live-only, bounded by the 60 s floor), 60 with `--rewind-test` or `--rewind-hold`, 600 with `--reload-test`, 1800 with `--freeze-after` |
 | `--live-only` | Loads with no DVR window at all. | off |
 | `--start-position S` | Loads with a resume anchor. | none |
 | `--standard-join` | `LoadOptions.liveJoinProfile = .standard`. | `.fastZap` |
@@ -1361,7 +1378,7 @@ Runs a live MPEG-TS session against a built-in fixture. The fixture serves an en
 | `--discontinuity-at N` | Program-boundary PTS / PCR jump. | off |
 | `--freeze-after N` | Freezes the upstream with the connection still open. | off |
 | `--unfreeze-after N` | Lets the frozen upstream deliver again after N seconds. | off |
-| `--rewind-before-freeze N` | Parks the playhead inside the DVR window first. | off |
+| `--rewind-before-freeze N` | Parks the playhead N seconds inside the DVR window first, at `max(5, freeze - 12)` s. Only with `--freeze-after`; `--live-only` skips the rewind. | 300 |
 | **Tests and measurement** | | |
 | `--reload-test` | Live rejoin end to end, including the full-backlog replay shape some origins serve on reconnect. | off |
 | `--rewind-test` | The DVR rewind-and-return matrix variant. | off |
@@ -1370,9 +1387,9 @@ Runs a live MPEG-TS session against a built-in fixture. The fixture serves an en
 | `--measure-rss` | Sliding-window retention: prints phys_footprint + resident_size every 30 s. | off |
 | `--report-cache-bytes` | Tracks the on-disk DVR footprint every 60 s. | off |
 | `--serve-only` | Parks the fixture without attaching an engine (for raw `curl` / `ffprobe` inspection). | off |
-| `--gen-highbitrate-seed` | Generates a ~22 Mbps 1080p H.264 MPEG-TS seed (for RSS-retention measurement), then exits. | off |
+| `--gen-highbitrate-seed` | Generates a ~22 Mbps 1080p H.264 MPEG-TS seed (for RSS-retention measurement) at `--seed`, or `Fixtures/user/highbitrate-1080p.ts`, then exits 0 (1 on failure). | off |
 
-Without `--serve-only` and the test flags, the run reports whether `isLive` is true, state is `.playing`, and currentTime advanced past ~15 s.
+When several test flags are given, the first of `--rewind-test`, `--reload-test`, `--rewind-hold`, `--freeze-after` runs and the others are ignored. Without `--serve-only` and the test flags, the run reports whether `isLive` is true, state is `.playing`, and currentTime advanced past ~15 s.
 
 ### Origin pacing
 
@@ -1447,15 +1464,17 @@ Runs the DVR rewind matrix across the native and SW paths.
 
 Slices a local `.ts` into a sliding live HLS playlist and serves it over loopback, with fault knobs. `--self-test` runs `HLSLiveIngestReader` against it end to end. Every request is logged as one `[HLSFixture] REQ <path>` line, so what a load actually costs the origin can be counted.
 
-**Usage:** `aetherctl hlsfixture <input.ts> [flags]`
+**Usage:** `aetherctl hlsfixture (<input.ts> | --segments-dir <dir>) [flags]`
+
+It prints the entry URL: `/media.m3u8`, `/master.m3u8` with `--master`, or `/entry.m3u8` with `--redirect-entry`. Unlike every other subcommand, an unknown argument only prints a warning. A bad value (`--segment-seconds` below 1, `--target-duration` below `--segment-seconds`, `--window` below 3, a `--require-header` without a colon) exits 64.
 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--port N` | Listening port. | 8090 |
 | `--segment-seconds N` | Slice length. | 4 |
-| `--target-duration N` | Advertised `#EXT-X-TARGETDURATION`, independent of the real cut size. | from the cut |
+| `--target-duration N` | Advertised `#EXT-X-TARGETDURATION`, independent of the real cut size. Must be at least `--segment-seconds`. | from the cut |
 | `--window N` | Segments the sliding window keeps visible (minimum 3). | 6 |
-| `--segments-dir <dir>` | Serves pre-cut segments instead of byte slices. | off |
+| `--segments-dir <dir>` | Serves pre-cut segments instead of byte slices. Replaces `<input.ts>`. | off |
 | `--master` | Adds a master playlist with two variants: low (404) and high (the media playlist). | off |
 | `--codecs <list>` | Writes `CODECS=` onto both `EXT-X-STREAM-INF` lines. | none |
 | `--resolution WxH` | Writes `RESOLUTION=` onto both `EXT-X-STREAM-INF` lines. | none |
@@ -1700,6 +1719,8 @@ Replays a synthetic SSAI ad-pod feed through the live-direct-play path to reprod
 | `--segment-seconds N` | Segment length. | 5 |
 | `--disc i,j` | Segment indices that carry a leading `#EXT-X-DISCONTINUITY`. | auto-detected on every file change |
 
+Exit 0 when the run completes, 1 when a segment cannot be read, the server or the load fails, or the engine errors, 64 without `--segments`.
+
 ## dovitest
 
 Runs the Dolby Vision Profile 7 to 8.1 converter over every video packet of the source and writes the converted elementary stream (Annex B). It reports packets processed, conversions and failures. Use it to confirm offline, without a DV panel, that the in-engine `DoviRpuConverter` (libdovi) output matches the `dovi_tool -m 2` ground truth.
@@ -1709,6 +1730,8 @@ Runs the Dolby Vision Profile 7 to 8.1 converter over every video packet of the 
 | Flag | Meaning | Default |
 |---|---|---|
 | `--out PATH.hevc` | Output path. | `aetherctl-dovitest.hevc` in aetherctl's private per-user temporary directory |
+
+Exit 0, 1 on an error, 2 when the source has no video stream, 3 on converter failures.
 
 The temporary directory is `$TMPDIR/aetherctl-<uid>`, mode 0700, the same on every run. The next run overwrites the file instead of leaving a second copy of the film. The path is printed.
 
@@ -1741,7 +1764,7 @@ The verdict also requires at least one frame the composer actually reconstructed
 
 | Exit | Meaning |
 |---|---|
-| 0 | Verified. |
+| 0 | Verified, or the source is not FEL (the `VERDICT: NOT FEL` line says so). |
 | 1 | Probe error. |
 | 2 | No frames output. |
 | 3 | Chroma collapsed to a flat 64. |
@@ -1801,7 +1824,7 @@ Reads `label<TAB>url` lines from stdin and measures what each title's enhancemen
 - the share of pixels moved by a 10-bit step or more,
 - the nits change at the average and peak levels.
 
-A TSV row prints as each title finishes. Needs the `DualLayerDolbyVision` trait.
+A TSV row prints as each title finishes. Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so.
 
 **Usage:** `aetherctl elsurvey [--points N] [--parallel N] < titles.tsv`
 
@@ -1816,7 +1839,7 @@ swift run aetherctl elsurvey --points 24 --parallel 4 < titles.tsv
 
 ## elframe
 
-Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and without its residual. It writes `frame.json` and the full-precision P010 planes to a directory: `fel_y.bin`, `fel_uv.bin`, `mel_y.bin`, `mel_uv.bin` (little-endian 16-bit words, the 10-bit code in the top bits and the finer bits below). Needs the `DualLayerDolbyVision` trait.
+Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and without its residual. It writes `frame.json` and the full-precision P010 planes to a directory: `fel_y.bin`, `fel_uv.bin`, `mel_y.bin`, `mel_uv.bin` (little-endian 16-bit words, the 10-bit code in the top bits and the finer bits below). Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so. Otherwise it exits 0, or 1 on an error.
 
 **Usage:** `aetherctl elframe --at SECONDS --out DIR <p7-source>`
 
@@ -1833,7 +1856,7 @@ swift run aetherctl elframe --at 600 --out /tmp/elframe <p7-source>
 
 ## felcurves
 
-Runs a whole Profile 7 FEL source through the curve fold the segment producer uses (`AetherEngine.felCurveFold`, [Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)). It writes the Profile 8.1 RPUs it produced (stream mapping kept, luma residual folded in), in presentation order, as a dovi_tool RPU file. `dovi_tool inject-rpu` puts them into the base layer for playback through the platform decoder. It prints how many scenes were fitted, had no residual or failed, and the time taken. Needs the `DolbyVisionFelCurves` trait.
+Runs a whole Profile 7 FEL source through the curve fold the segment producer uses (`AetherEngine.felCurveFold`, [Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)). It writes the Profile 8.1 RPUs it produced (stream mapping kept, luma residual folded in), in presentation order, as a dovi_tool RPU file. `dovi_tool inject-rpu` puts them into the base layer for playback through the platform decoder. It prints how many scenes were fitted, had no residual or failed, and the time taken. Exit 0, or 1 on an error. Needs the `DolbyVisionFelCurves` trait; without it the subcommand exits 64 and says so.
 
 **Usage:** `aetherctl felcurves <p7-fel-source> <out.rpu>`
 
@@ -1843,7 +1866,7 @@ swift run --traits DolbyVisionFelCurves aetherctl felcurves <p7-fel-source> /tmp
 
 ## dmpass
 
-Checks whether the Dolby Vision Profile 7 FEL route keeps the source's display-management metadata when it converts the RPU to Profile 8.1 and attaches it to the composed frame. Needs the `DualLayerDolbyVision` trait.
+Checks whether the Dolby Vision Profile 7 FEL route keeps the source's display-management metadata when it converts the RPU to Profile 8.1 and attaches it to the composed frame. Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so.
 
 **Usage:** `aetherctl dmpass [--frames N] [--out PATH.jsonl] <p7-source>`
 
@@ -1868,7 +1891,7 @@ swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp
 
 - Fields the profile conversion is defined to change (the profile and enhancement-layer labels, the two residual flags, the mapping) are listed as expected.
 - Mode 2 also resets the YCC to RGB matrix and offsets, the RGB to LMS matrix and the signal colour space to the Profile 8.1 values. That is reported as a separate "normalised" category: the frame still passes, and the field names and counts are printed. It shows nothing when the source already carries those values.
-- Any other difference fails the run. The exit code is 0 when every frame passes.
+- Any other difference fails the run. The exit code is 0 when every frame passes, 1 when any fails, 2 on a probe error.
 
 **Environment variables.** All of these exist only with the `DualLayerDolbyVision` trait. They are off by default and cost nothing then.
 
@@ -1880,4 +1903,6 @@ swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp
 
 ## Fixtures
 
-For repeatable runs, `Scripts/fetch-fixtures.sh` generates a small set of synthetic FFmpeg test clips in `./Fixtures/` (H.264 SDR, HEVC HDR10, AV1, VP9). They cover both the native AVPlayer path and the software fallback. Real-world DV / Atmos / multichannel sources go in `./Fixtures/user/` (gitignored).
+For repeatable runs, `Scripts/fetch-fixtures.sh` generates synthetic FFmpeg test clips in `./Fixtures/`: the four codec paths (H.264 SDR, HEVC HDR10, AV1, VP9) plus clips for specific tests (restart witnesses, A/53 captions, in-band parameter sets, B-frame cue axis, long first GOP, EAC3 bridge, audio tail). The script's header lists each file. Real-world DV / Atmos / multichannel sources go in `./Fixtures/user/` (gitignored).
+
+**Seeds for `live` and `dvr`.** Nothing generates these. `live` and the native leg of `dvr` read an H.264 MPEG-TS clip at `Fixtures/user/h264-ts-sample.ts` (`live --seed` overrides it), and exit 1 without it. The software leg of `dvr` also needs `Fixtures/user/h264-aac-ts-sample.ts`; when it is missing, `dvr` prints the ffmpeg command that derives it from the first.

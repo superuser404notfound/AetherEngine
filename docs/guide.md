@@ -25,20 +25,20 @@ How to build a player on AetherEngine, from the first frame to live TV. Each sec
 import AetherEngine
 import SwiftUI
 
-let player = try AetherEngine()
+struct PlayerScreen: View {
+    let player: AetherEngine   // one engine for the app's lifetime: `try AetherEngine()`
+    let videoURL: URL
 
-// SwiftUI: put AetherPlayerSurface anywhere in the view tree
-var body: some View { AetherPlayerSurface(engine: player) }
-
-// UIKit / AppKit: bind an AetherPlayerView
-let surface = AetherPlayerView()
-player.bind(view: surface)
-
-try await player.load(url: videoURL)
-player.play()
+    var body: some View {
+        AetherPlayerSurface(engine: player)
+            .task { try? await player.load(url: videoURL) }   // plays on its own: `autoplay` defaults to true
+    }
+}
 ```
 
-The engine gives you one view (`AetherPlayerView` for UIKit / AppKit, `AetherPlayerSurface` for SwiftUI) and a set of `async` methods. There is no `AVPlayerViewController`, no built-in controls and no analytics. You bind the view, call `play()`, and read the published properties for state. You build the transport bar and menus.
+In UIKit / AppKit, create an `AetherPlayerView`, call `player.bind(view:)` with it, then `load`. The complete runnable app is [`Examples/MinimalPlayer`](../Examples/MinimalPlayer/MinimalPlayerApp.swift).
+
+The engine gives you one view (`AetherPlayerView` for UIKit / AppKit, `AetherPlayerSurface` for SwiftUI) and a set of `async` methods. There is no `AVPlayerViewController`, no built-in controls and no analytics. You bind the view, load, and read the published properties for state. Create the engine once and reuse it for every title. Call `play()` yourself only after a load with `autoplay: false`. You build the transport bar and menus.
 
 The view adapts by itself: per session the engine swaps the hosted layer (`AVPlayerLayer` on the native AVPlayer path, `AVSampleBufferDisplayLayer` on the software dav1d path). The host does not need to know which one is active.
 
@@ -210,16 +210,18 @@ player.$mediaChapters          // [ChapterInfo]; startSeconds are seek(to:) valu
 ## Now Playing
 
 ```swift
-// Info panel / Now Playing (iOS, tvOS)
+// Info panel (AVPlayerViewController hosts; AVKit also republishes it as Now Playing)
 player.setExternalMetadata([ AVMetadataItem(/* title, artwork, ... */) ])
 
-// System Now-Playing on the native video path, for hosts with their own transport
-player.ownsVideoNowPlayingSession = true        // set before load()
-player.videoNowPlayingSession                   // MPNowPlayingSession?, nil unless opted in
-player.setVideoNowPlayingInfo([ /* MPMediaItemProperty... */ ])
+// System Now Playing for hosts with their own transport, on every platform. Set before load().
+player.ownsVideoNowPlayingSession = true        // native video
+player.ownsVideoNowPlayingCommands = true       // the engine also answers the remote commands
+player.ownsSoftwareNowPlaying = true            // software host (no AVPlayer)
+player.ownsAudioNowPlaying = true               // audio-only sessions
+player.setNowPlayingInfo([ /* MPMediaItemProperty... */ ])   // identity for whichever route load() picks
 ```
 
-`ownsVideoNowPlayingSession` is off by default. A host using `AVPlayerViewController` already gets Now Playing from AVKit and must **not** opt in. A host with its own transport sets it before `load()`, registers commands on the session and sets the item's identity through `setVideoNowPlayingInfo`.
+Every opt-in is off by default. A host using `AVPlayerViewController` already gets Now Playing from AVKit and must **not** set `ownsVideoNowPlayingSession`. A host with its own transport sets the ones it needs before `load()` and stages the item's identity with `setNowPlayingInfo`. Without `ownsVideoNowPlayingCommands`, the host registers the commands itself on `videoNowPlayingSession.remoteCommandCenter`. Playlists, command interception and several engines in one process: [api.md › Now Playing and the audio session](api.md#now-playing-and-the-audio-session).
 
 ## Drawing your own overlay in sync
 
@@ -298,7 +300,7 @@ let smb = try await SMBConnection.connect(
     path: "Movies/film.mkv", user: "alice", password: "s3cret"
 )
 try await engine.load(source: .custom(
-    SMBIOReader(source: smb),
+    SMBIOReader(source: smb, discImageProbeEnabled: false),   // an ordinary file, not a disc image
     formatHint: "matroska"
 ))
 ```
@@ -306,7 +308,7 @@ try await engine.load(source: .custom(
 SMB support is a ready-made `IOReader` in the separate `AetherEngineSMB` product. Add that product next to `AetherEngine` only if you need it; hosts without SMB link only the core. It uses [SMBClient](https://github.com/kishikawakatsumi/SMBClient) (MIT, pure Swift, built on `NWConnection` over Network.framework), not libsmb2, which fails with `EPERM` on tvOS and iOS.
 
 - **Ordinary media files:** construct the reader with `discImageProbeEnabled: false` to skip the ISO/UDF signature reads. Keep the default for raw disc images, so DVD and Blu-ray recognition still works.
-- **Auth:** read-only, NTLMv2 or guest. No Kerberos.
+- **Auth:** read-only, NTLMv2, guest or anonymous (an empty user tries guest, then anonymous). No Kerberos.
 - **tvOS:** the host must declare `NSLocalNetworkUsageDescription` and the local-network entitlement to reach a LAN share.
 - **Testing a share from macOS:** [`aetherctl smbtest`](cli.md#smbtest).
 - **Known limit:** SMBClient negotiates only SMB 2.0.2 and 2.1. There is no SMB3 transport encryption or AES-CMAC signing, so servers set to SMB3-only or `smb encrypt = required` do not connect. (libsmb2 spoke 3.1.1, but does not work on tvOS / iOS at all.)
@@ -357,15 +359,17 @@ try await player.load(
 
 - the source restarted from byte 0 (a Jellyfin transcode respawn),
 - the playlist is still frozen after the stall ladder's last reload step (#65),
-- an in-engine reopen transport has used up its budget (#199).
+- an in-engine reopen transport has used up its budget (#199),
+- a verified replay cannot reach new media (unless you opt into `hostRetriesExhaustedLiveReplay`, which publishes `liveSourceReplayExhausted` instead; see [api.md › Live: exhausted verified replay](api.md#live-exhausted-verified-replay)).
 
 In each case the engine stops production first, so a dead provider no longer advertises blocking reloads behind the host's back.
 
 How to answer it:
 
-1. Negotiate a fresh URL and call `load` again.
-2. Guard the answer: one retune in flight, a minimum spacing, a bounded count per session. Otherwise a permanently dead upstream turns into a retune loop.
-3. When the bound runs out, show it the way you would show a terminal `.error`. A retune ladder that ends on a silent `return` leaves the dead channel on screen behind a counter.
+1. After your own backoff, call `retryLiveSourceRecovery()`. It renews the source in place and keeps the DVR window.
+2. If it returns `false`, negotiate a fresh URL and call `load` again.
+3. Guard the answer: one recovery in flight, a minimum spacing, a bounded count per session. Otherwise a permanently dead upstream turns into a retune loop.
+4. When the bound runs out, show it the way you would show a terminal `.error`. A retune ladder that ends on a silent `return` leaves the dead channel on screen behind a counter.
 
 **A host with a fixed URL** (an IPTV channel) answers by loading the same URL again. That is cheap, not a no-op. The #168 carriage verdict (a master advertising HEVC while delivering MPEG-TS) is remembered per exact absolute URL for six hours, 32 entries, so the retune goes straight onto the live ingest and skips the doomed native mount and its watchdog grace. A URL with a rotated per-session token misses that memory and pays the one-time discovery again on every retune. Keep that in mind if you measure a first-frame budget against the retune.
 
@@ -458,7 +462,7 @@ playerVC.appliesPreferredDisplayCriteriaAutomatically = false
 
 // When loading
 try await engine.load(url: url, options: LoadOptions(
-    suppressDisplayCriteria: false,      // default; the engine writes the criteria
+    displayCriteriaOwner: .engine,       // default; the engine writes the criteria
     matchContentEnabled: matchContent,   // tvOS Match Content master switch
     panelIsInHDRMode: panelInHDRMode,    // assertion: the panel is presenting HDR now
     panelPresentsDolbyVision: false      // assertion: this display presents Dolby Vision
@@ -469,7 +473,17 @@ Why: Apple Tech Talk 503 has prescribed this order since 2017, and tvOS 26.5 enf
 
 AVKit's automatic criteria (`appliesPreferredDisplayCriteriaAutomatically = true`) cannot solve this for HLS multivariant HDR sources. AVKit reads the criteria from `AVAsset.preferredDisplayCriteria`, which comes from the chosen variant's format description, which exists only after `init.mp4` is parsed, which only happens after the variant passed the validator. A chicken-and-egg problem. The engine as the sole writer of the criteria is the pattern that works.
 
-`suppressDisplayCriteria` defaults to `false`, so this is the default: `apply()` runs synchronously inside `load(url:)`, `waitForSwitch` blocks until the panel reaches the target mode (or a 5 s timeout), and only then does `replaceCurrentItem` run, against a panel already in the right mode.
+`displayCriteriaOwner` defaults to `.engine`, so this is the default. The engine writes the criteria before it assigns the item and waits up to about 2 s for the switch to start and settle. A VOD load keeps producing segments meanwhile; a live load waits behind it. `play()` is then held until the switch ends, and `isAwaitingDisplaySwitch` is true during that hold.
+
+`displayCriteriaOwner` has three values ([AE#842](https://github.com/superuser404notfound/AetherEngine/issues/842)):
+
+| Owner | Who writes the criteria | Pick it when |
+| --- | --- | --- |
+| `.engine` (default) | The engine, before the item loads | Almost always, for the reason above |
+| `.avKit` | AVKit, from the item (`appliesPreferredDisplayCriteriaAutomatically = true`). The engine holds `play()` up to a second for that write on HDR and Dolby Vision content | You keep AVKit's automatic criteria |
+| `.host` | You, before `load()`, or nobody. The engine never writes and waits only for a switch it sees running | The panel should stay in the output format the user chose in tvOS Settings, or you write rate-only criteria yourself |
+
+`suppressDisplayCriteria: true` is the older spelling of `.avKit` and still works.
 
 ### The two panel flags
 
@@ -478,7 +492,11 @@ AVKit's automatic criteria (`appliesPreferredDisplayCriteriaAutomatically = true
 - **`panelIsInHDRMode`** is OR-ed with the engine's own EDR-headroom reading. That reading only answers around a dynamic-range change, so an Apple TV whose output is locked to HDR never makes one and reads as an SDR panel forever ([#459](https://github.com/superuser404notfound/AetherEngine/issues/459)).
 - **`panelPresentsDolbyVision`** covers what the engine cannot observe at all on macOS: there is no `AVPlayer.availableHDRModes`, and HDR eligibility answers HDR10 and HLG but not Dolby Vision ([#493](https://github.com/superuser404notfound/AetherEngine/issues/493)).
 
-**A gap on tvOS.** The fallback covers what AVPlayer reports as an item failure, and that is not every failure. An asserted Profile 8.1 is packaged the way a Dolby Vision panel expects (`dvvC` in the sample entry plus `SUPPLEMENTAL-CODECS`). On an HDR10-only panel that packaging was measured to reach `readyToPlay`, play for a second or two, then stall with `-15628` in the item's error log ([#4](https://github.com/superuser404notfound/AetherEngine/issues/4), 2026-05-26). A stall is not an item failure, so nothing catches it. On tvOS, the option for a display without Dolby Vision is `forceDolbyVisionOnNonDVDisplay`, which serves such a source as Profile 5 instead and is verified on exactly that panel class ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455)). Asserting Dolby Vision turns it off, because it only applies to displays without it.
+**What `panelPresentsDolbyVision` still changes.** For a Profile 5, 8.1 or 8.4 source nothing in the packaging: since 6.72.0 / 6.73.0 those serve the same manifests and segments with or without the claim. It still gates the Profile 7 to 8.1 conversion, the AV1 Dolby Vision record, and HDR readiness on the route. The `-15628` stall an HDR10-only panel once showed on Dolby Vision packaging ([#4](https://github.com/superuser404notfound/AetherEngine/issues/4)) did not reproduce on tvOS 26.6.
+
+**`attemptsHDRMasterOnUnprovenPanel`** (default `true`) is the engine's own answer to the unreliable headroom reading above: it serves the HDR master to an HDR-eligible display whose mode is unproven and lets AVFoundation's acceptance or refusal decide. A refusal costs one in-place fallback, once per process.
+
+**Dolby Vision on a panel without it.** `forceDolbyVisionOnNonDVDisplay` is **experimental** and off by default. It serves a Profile 8.1 (or converted Profile 7) source as Profile 5, so AVPlayer composes the Dolby Vision itself instead of handing the panel the HDR10 base layer ([#455](https://github.com/superuser404notfound/AetherEngine/issues/455)). The risk: a tvOS build that reads the base layer's colours from the profile field would show a green / violet cast. Asserting `panelPresentsDolbyVision` turns it off. Details in [api.md › forceDolbyVisionOnNonDVDisplay](api.md#forcedolbyvisiononnondvdisplay).
 
 ### Between items
 

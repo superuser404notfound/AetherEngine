@@ -49,6 +49,28 @@ struct Issue460SessionOptionCorrectionTests {
         #expect(SessionOptionCorrection.refusedFields(from: base, to: hls) == ["nativeRemoteHLS"])
         var sequential = base; sequential.sequentialOrigin = true
         #expect(SessionOptionCorrection.refusedFields(from: base, to: sequential) == ["sequentialOrigin"])
+        var held = base; held.heldSourceConnection = true
+        #expect(SessionOptionCorrection.refusedFields(from: base, to: held) == ["heldSourceConnection"])
+        var secondary = base; secondary.sharedOutputRole = .secondary
+        #expect(SessionOptionCorrection.refusedFields(from: base, to: secondary) == ["sharedOutputRole"])
+    }
+
+    /// `loadIdentityFields` is the documented list and `refusedFields` the enforcement, written
+    /// separately on purpose (typed comparison). `sharedOutputRole` once sat in the list without a
+    /// comparison and was silently applied; this keeps the two from drifting apart again.
+    @Test("changing every identity field at once refuses exactly the identity list")
+    func everyIdentityFieldIsCompared() {
+        let base = LoadOptions()
+        var proposed = base
+        proposed.sourceDiagnosticsContext = .init(playbackID: UUID(), attemptID: UUID())
+        proposed.isLive = true
+        proposed.audioOnly = true
+        proposed.nativeRemoteHLS = true
+        proposed.sequentialOrigin = true
+        proposed.heldSourceConnection = true
+        proposed.sharedOutputRole = .secondary
+        #expect(SessionOptionCorrection.refusedFields(from: base, to: proposed)
+                == SessionOptionCorrection.loadIdentityFields)
     }
 
     @Test("diagnostic identity cannot be added, removed or changed by an internal reload")

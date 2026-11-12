@@ -20,7 +20,8 @@ let package = Package(
         .package(
             name: "AetherEngine",
             path: "../..",
-            traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"]
+            traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping",
+                     "DolbyVisionFelCurves"]
         ),
     ],
     targets: [

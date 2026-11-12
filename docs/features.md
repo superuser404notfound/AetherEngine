@@ -89,7 +89,7 @@ TrueHD Atmos and DTS:X can keep their height channels. This is opt-in through `L
 
 - The engine builds a speaker bed from the stream's own lossless 7.1, steered by its objects (TrueHD) or heights (DTS:X).
 - Layouts: TrueHD from 5.1.2 up to 9.1.6; DTS:X 7.1.4 and 9.1.6 (its four heights unfolded from the compatible 7.1).
-- Output: lossless 24-bit PCM delivered as Apple Positional Audio. tvOS sends it to an Atmos receiver as Dolby MAT, iOS plays it as Spatial Audio. Over AirPlay the route plays APAC.
+- Output: the bed as lossless 24-bit linear PCM, which tvOS wraps in Dolby MAT for an Atmos receiver and iOS spatialises on AirPods. Over AirPlay it goes as Apple Positional Audio (APAC, a lossy encode), on the loopback route and the software host alike. Needs OS 26.
 
 Details: [formats.md › TrueHD Atmos with heights](formats.md#truehd-atmos-with-heights) and [formats.md › DTS:X with heights](formats.md#dtsx-with-heights).
 
@@ -164,7 +164,7 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 ## Inputs: custom readers, SMB, certificates
 
 - **Custom input:** play any byte source through the `IOReader` protocol (`load(source:)`). See [guide.md › Custom input](guide.md#custom-input).
-- **SMB:** SMB2/3 shares through the optional `AetherEngineSMB` product (NTLMv2 or guest, read-only). See [guide.md › SMB shares](guide.md#smb-shares).
+- **SMB:** SMB shares (SMB 2.0.2 and 2.1) through the optional `AetherEngineSMB` product (NTLMv2, guest or anonymous, read-only). See [guide.md › SMB shares](guide.md#smb-shares).
 - **Certificate trust:** a media server behind a self-signed or private-CA certificate plays once the host vouches for it.
   - `EngineTLS.serverTrustEvaluator` is asked per challenge, about the origin that challenge came from. A LAN address with a private certificate and a WAN address with a real one are decided separately.
   - It covers every session the engine owns, and the native remote-HLS route too. AVPlayer asks no delegate of its own there, so the engine puts a loopback relay in front of the origin, where the handshake can be checked.
@@ -184,5 +184,5 @@ These are deliberate:
 - **No analytics or session reporting.** A 1 Hz `engine.diagnostics.liveTelemetry` surface exists for host UIs that show runtime stats locally. Nothing leaves the device.
 - **No playlist or queue.** Call `load(url:)` for the next item.
 - **No subtitle overlay.** The engine emits `SubtitleCue` (text or `CGImage`); your UI draws it.
-- **No Metal shaders** for normal playback. Everything renders through Apple's native display stack.
+- **No custom renderer.** The picture goes through Apple's display stack (AVPlayerLayer or AVSampleBufferDisplayLayer). Metal runs only in opt-in stages (upscaling, the FEL composer) and in GPU deinterlacing.
 - **No third-party networking.** `URLSession` moves the bytes, so TLS, HTTP/3, proxies and MDM rules work for free.

@@ -4525,18 +4525,16 @@ public final class AetherEngine: ObservableObject {
     ///
     /// Behavior:
     /// 1. Tears down the previous session.
-    /// 2. Briefly opens the demuxer to detect format + frame rate.
-    /// 3. Programs `AVDisplayCriteria` from the detected metadata
-    ///    (DV → `dvh1`, others → `hvc1`; refresh rate snapped to a
-    ///    standard rate; honors Match Content + Match Frame Rate).
-    /// 4. Waits for the panel mode-switch to settle.
-    /// 5. Spins up `HLSVideoEngine` + `NativeAVPlayerHost`.
+    /// 2. Opens the source to detect format, frame rate and dynamic range.
+    /// 3. Routes it: HEVC, H.264 and hardware-decodable AV1 go to the native route
+    ///    (`HLSVideoEngine` + `NativeAVPlayerHost`); everything else the native route does not
+    ///    carry goes to `SoftwarePlaybackHost`; audio-only sources to an audio host.
+    /// 4. Programs display criteria (unless the host owns them, see `displayCriteriaOwner`) and
+    ///    waits for the panel's mode switch.
     ///
-    /// VP9 / AV1 sources gate on a runtime VideoToolbox capability
-    /// probe; on hardware that can't decode them, the engine throws
-    /// `HLSVideoEngine.HLSVideoEngineError.unsupportedCodec` and the
-    /// host should surface that to the user. Dolby Vision Profile 7
-    /// (dual-layer) and Profile 8.2 (SDR base) similarly throw.
+    /// A codec with no decoder in the linked FFmpeg build fails the load with
+    /// `unsupportedCodec`. Per-format behaviour, Dolby Vision profiles included, is in
+    /// `docs/formats.md`.
     ///
     /// - Parameters:
     ///   - url: Media source (http/https/file).
