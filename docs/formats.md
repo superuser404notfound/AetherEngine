@@ -683,7 +683,7 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 
 ### Audio shaping
 
-`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Four settings, in any combination:
+`LoadOptions.audioShaping` / `setAudioShaping(_:)` (AE#923) shape the decoded PCM before it is re-encoded (loopback) or rendered (software host, FFmpeg audio-only host). Five settings, in any combination:
 
 | Setting | Field | What it does |
 | --- | --- | --- |
@@ -691,8 +691,17 @@ AVPlayer ends a muxed HLS item the moment its audio runs out, however much video
 | Dialogue lift | `dialogueGainDB` | Raises dialogue, up to 12 dB |
 | Night mode | `compressor` | Compresses dynamics |
 | Loudness target | `loudnessTargetLUFS` | Raises a quiet source to a programme loudness (AE#1036) |
+| LFE in the fold | `lfeMixDB` | Keeps the LFE when the cap folds it away (AE#1044) |
 
 **Channel cap (`maxChannels`).** The source is folded to at most that many channels with libswresample's own downmix (centre and surrounds at -3 dB, LFE dropped), the same fold the route would otherwise make. A cap decides the bridge encoder as a source with that many channels would, so a 5.1 source capped to stereo is FLAC, not stereo E-AC-3. A source is never upmixed.
+
+**LFE in the fold (`lfeMixDB`, -20 to +10 dB).** By default a fold that leaves the output without an LFE drops it. With a level set, the LFE is mixed into the fold instead (AE#1044).
+
+- **Who needs it.** A 2.1 system behind a stereo link, for example a TV that sends 2.0 PCM over optical to a stereo streamer with a subwoofer. That subwoofer only hears what is low in left and right, so whatever lives only in the `.1` of a film never reaches it.
+- **What the number means.** It is libswresample's `lfe_mix_level`. On stereo out each side gets the LFE 3 dB below the value, on mono out the one channel gets it at the value. Measured on a 5.1 fixture capped to stereo: at 0 dB the LFE arrives at 0.707 of its level on each side, at -6 dB it is 6.0 dB lower, without a level it is gone.
+- **When it does nothing.** Only a cap that folds the LFE away uses it. A cap that keeps an LFE (7.1 capped to 6 channels is 5.1) leaves it discrete. Without a cap the value is stored but nothing is active, so it does not move a stream-copied track onto the bridge.
+- **Headroom.** The fold stays unnormalized. A loud LFE summed into loud fronts is caught by the limiter below.
+- A second LFE (`LOW_FREQUENCY_2`) is not folded.
 
 **Dialogue lift (`dialogueGainDB`, up to 12 dB).**
 

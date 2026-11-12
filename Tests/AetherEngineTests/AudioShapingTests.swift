@@ -112,6 +112,72 @@ struct AudioShapingTests {
         #expect(abs(m[2] - 2 * M_SQRT1_2) < 1e-9, "FC found at index 2 of the default 5.1 order")
     }
 
+    // MARK: - The LFE in a fold (AE#1044)
+
+    private func fold(_ input: String, _ output: String, dialogueGain: Double = 1, lfeMixDB: Double?) -> [Double]? {
+        let level = AudioShaping(lfeMixDB: lfeMixDB).lfeMixLevel
+        return withLayouts(input, output) {
+            AudioShapingMatrix.coefficients(input: $0, output: $1, dialogueGain: dialogueGain, lfeMixLevel: level)
+        }
+    }
+
+    @Test("5.1 to stereo without a level drops the LFE, as before")
+    func lfeDroppedByDefault() throws {
+        let m = try #require(fold("5.1", "stereo", lfeMixDB: nil))
+        #expect(m[0 * 6 + 3] == 0 && m[1 * 6 + 3] == 0)
+        #expect(AudioShaping().lfeMixLevel == 0)
+    }
+
+    @Test("5.1 to stereo at 0 dB puts the LFE 3 dB down on each side")
+    func lfeAtZeroDB() throws {
+        let m = try #require(fold("5.1", "stereo", lfeMixDB: 0))
+        #expect(abs(m[0 * 6 + 3] - M_SQRT1_2) < 1e-9)
+        #expect(abs(m[1 * 6 + 3] - M_SQRT1_2) < 1e-9)
+        let plain = try #require(fold("5.1", "stereo", lfeMixDB: nil))
+        for o in 0..<2 { for i in 0..<6 where i != 3 { #expect(m[o * 6 + i] == plain[o * 6 + i], "out \(o) in \(i)") } }
+    }
+
+    @Test("5.1 to stereo at -6 dB scales the LFE column")
+    func lfeAtMinusSix() throws {
+        let m = try #require(fold("5.1", "stereo", lfeMixDB: -6))
+        let expected = pow(10, -6.0 / 20) * M_SQRT1_2
+        #expect(abs(m[0 * 6 + 3] - expected) < 1e-9)
+        #expect(abs(m[1 * 6 + 3] - expected) < 1e-9)
+    }
+
+    @Test("5.1 to mono puts the LFE in whole")
+    func lfeIntoMono() throws {
+        let m = try #require(fold("5.1", "mono", lfeMixDB: 0))
+        #expect(abs(m[3] - 1) < 1e-9)
+    }
+
+    @Test("a cap that keeps an LFE leaves it discrete")
+    func lfeKeptDiscrete() throws {
+        let m = try #require(fold("7.1", "5.1", lfeMixDB: 0))
+        let lfeIn = try #require(withLayouts("7.1", "5.1") { i, _ in
+            Int(av_channel_layout_index_from_channel(i, AV_CHAN_LOW_FREQUENCY)) })
+        let lfeOut = try #require(withLayouts("7.1", "5.1") { _, o in
+            Int(av_channel_layout_index_from_channel(o, AV_CHAN_LOW_FREQUENCY)) })
+        for o in 0..<6 { #expect(m[o * 8 + lfeIn] == (o == lfeOut ? 1 : 0), "out \(o)") }
+    }
+
+    @Test("the dialogue lift raises the centre and leaves the LFE column alone")
+    func lfeWithDialogueLift() throws {
+        let m = try #require(fold("5.1", "stereo", dialogueGain: 2, lfeMixDB: 0))
+        #expect(abs(m[0 * 6 + 2] - 2 * M_SQRT1_2) < 1e-9)
+        #expect(abs(m[0 * 6 + 3] - M_SQRT1_2) < 1e-9)
+    }
+
+    @Test("an LFE level alone is not active shaping, is clamped and named")
+    func lfeValue() {
+        #expect(!AudioShaping(lfeMixDB: 0).isActive)
+        #expect(AudioShaping(maxChannels: 2, lfeMixDB: 0).isActive)
+        #expect(AudioShaping(lfeMixDB: 20).clamped.lfeMixDB == AudioShaping.lfeMixRange.upperBound)
+        #expect(AudioShaping(lfeMixDB: -99).clamped.lfeMixDB == AudioShaping.lfeMixRange.lowerBound)
+        #expect(AudioShaping(lfeMixDB: .nan).clamped.lfeMixDB == nil)
+        #expect(AudioShaping(maxChannels: 2, lfeMixDB: -3).summary == "max 2 ch, LFE -3.0 dB")
+    }
+
     // MARK: - The filter graph
 
     @Test("the chain: the limiter always, the compressor and the stereo enhancer only when asked")
@@ -232,8 +298,10 @@ struct AudioShapingTests {
     // MARK: - End to end
 
     /// 16-bit WAV, `channels` wide: a 1 kHz tone on channel 2 (the front centre of a 5.1 default
-    /// order) and a 250 Hz tone on every other channel, each at `amplitude` of full scale.
-    private func makeDialogueWAV(channels: Int, seconds: Double = 0.5, amplitude: Double = 0.25) -> Data {
+    /// order) and a 250 Hz tone on every other channel, each at `amplitude` of full scale. With
+    /// `lfeHz` the LFE (channel 3) carries a tone of its own at that frequency instead (AE#1044).
+    private func makeDialogueWAV(channels: Int, seconds: Double = 0.5, amplitude: Double = 0.25,
+                                 lfeHz: Double? = nil) -> Data {
         let rate = 48_000
         let frames = Int(Double(rate) * seconds)
         var pcm = Data(capacity: frames * channels * 2)
@@ -241,8 +309,9 @@ struct AudioShapingTests {
             let t = Double(n) / Double(rate)
             let dialogue = Int16(amplitude * 32767 * sin(2 * .pi * 1000 * t))
             let score = Int16(amplitude * 32767 * sin(2 * .pi * 250 * t))
+            let lfe = lfeHz.map { Int16(amplitude * 32767 * sin(2 * .pi * $0 * t)) }
             for c in 0..<channels {
-                let v = (channels > 2 && c == 2) ? dialogue : score
+                let v = (channels > 2 && c == 2) ? dialogue : (channels >= 6 && c == 3 ? lfe ?? score : score)
                 withUnsafeBytes(of: v.littleEndian) { pcm.append(contentsOf: $0) }
             }
         }
@@ -395,6 +464,25 @@ struct AudioShapingTests {
                                          amplitude: 0.9)
         let ceiling = Float(pow(10, AudioShapingGraph.ceilingDBFS / 20))
         #expect((out.left.map { abs($0) }.max() ?? 0) <= ceiling + 1e-3)
+    }
+
+    @Test("the LFE reaches the stereo fold at the level asked, and stays out without one (AE#1044)")
+    func bridgedLFEFold() throws {
+        let wav = makeDialogueWAV(channels: 6, lfeHz: 60)
+        func ratioDB(_ shaping: AudioShaping) throws -> Double {
+            let out = try bridgedLeftChannel(sourceChannels: 6, shaping: shaping, wav: wav)
+            #expect(out.channels == 2)
+            let body = Array(out.left.dropFirst(4800).prefix(9600))
+            return 20 * log10(level(body, hz: 60) / level(body, hz: 250))
+        }
+        let dropped = try ratioDB(AudioShaping(maxChannels: 2))
+        let atZero = try ratioDB(AudioShaping(maxChannels: 2, lfeMixDB: 0))
+        let atMinusSix = try ratioDB(AudioShaping(maxChannels: 2, lfeMixDB: -6))
+        // FL out carries 250 Hz from FL and 0.707 SL (FC holds the 1 kHz tone), against 0.707 LFE on 60 Hz.
+        let expected = 20 * log10(M_SQRT1_2 / (1 + M_SQRT1_2))
+        #expect(abs(atZero - expected) < 0.5, "LFE against the fronts at 0 dB: \(atZero) dB, expected \(expected)")
+        #expect(abs((atZero - atMinusSix) - 6) < 0.5, "-6 dB moved the LFE by \(atZero - atMinusSix) dB")
+        #expect(dropped < atZero - 40, "without a level the LFE is gone: \(dropped) dB")
     }
 
     @Test("the software decoder carries the cap and the lift")

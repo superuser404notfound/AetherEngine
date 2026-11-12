@@ -75,7 +75,7 @@ Stream-copied audio is passed on untouched. Bridged audio is decoded and re-enco
 
 - **Surround:** 5.1 and 7.1 with the correct `AudioChannelLayout`.
 - **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery.
-- **Audio shaping (opt-in):** `LoadOptions.audioShaping` / `setAudioShaping(_:)` add a channel cap, a dialogue lift, a night mode (compressor plus limiter) and a loudness target that lifts quiet sources (-36 to -12 LUFS). See [formats.md › Audio shaping](formats.md#audio-shaping).
+- **Audio shaping (opt-in):** `LoadOptions.audioShaping` / `setAudioShaping(_:)` add a channel cap, a dialogue lift, a night mode (compressor plus limiter), a loudness target that lifts quiet sources (-36 to -12 LUFS) and an LFE level for stereo downmixes on 2.1 systems. See [formats.md › Audio shaping](formats.md#audio-shaping).
 - **Audio delay:** `setAudioDelay(_:)` corrects lip sync while playing, up to 2 s either way. See [api.md › Audio delay](api.md#audio-delay).
 - **Audio description:** `TrackInfo.isVisualImpaired` marks audio-description tracks.
 
