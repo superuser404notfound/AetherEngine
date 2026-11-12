@@ -137,7 +137,7 @@ func printUsage() {
                      [--freeze-after N] [--unfreeze-after N] [--rewind-before-freeze N] [--force-recovery-reload-at N] [--live-only] [--no-blocking-reload] [--force-master]
       aetherctl dvr [--path native|sw|both] [--seconds N] [--dvr-window N]
       aetherctl dualsubs <file> --primary <streamIndex> --secondary <streamIndex> [--seek <seconds>]
-      aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N] [--target-duration N] [--window N]
+      aetherctl hlsfixture (<input.ts> | --segments-dir <dir>) [--port N] [--segment-seconds N] [--target-duration N] [--window N]
                            [--master] [--discontinuity-at N] [--slow-refresh]
                            [--drop-segment N] [--encrypted] [--fmp4] [--self-test]
       aetherctl hlslive --segments a.ts,b.ts,c.ts [--seconds N] [--segment-seconds N] [--disc i,j]

@@ -40,6 +40,7 @@ final class PublicAPIDocumentationTests: XCTestCase {
         "NativeVideoFrameTime.swift",
         "SoftwareVideoFrameTime.swift",
         "View/AetherPlayerView.swift",
+        "Decoder/A53SEIParser.swift",   // VideoNALFraming; the parser itself is internal
         "IO/IOReader.swift",
         "IO/HLSIngest/HLSIngestError.swift",
         "Subtitles/ExternalSubtitleTrack.swift",

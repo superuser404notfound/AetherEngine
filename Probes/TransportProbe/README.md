@@ -1,5 +1,15 @@
 # Transport probe (AE#377)
 
+**Outcome.** The answer was yes, and the transport shipped in 6.75.0 as
+`LoadOptions.heldSourceConnection` (`HeldSourceConnection`: the engine's own HTTP/1.1 over a
+`URLSessionStreamTask`). On the reporter's Apple TV 4K (3rd generation, tvOS 26.6), against the
+origin from the issue, arm B held the stream for 600 s with reads stopped and bought nothing while it
+waited ("backpressure held"), and all 1,180 canaries to the origin and to a neutral host were served
+during the hold, so the dormant flow did not starve the process's networking (#310). AE#377 was
+closed on 9 September 2026. How a host uses the option and what it gives up:
+[api.md › heldSourceConnection](../../docs/api.md#heldsourceconnection). The probe stays for the next
+origin that behaves this way.
+
 A measurement, not a test. It answers whether the media read path can move off URLSession data
 tasks onto `URLSessionStreamTask`, and it is meant to be run against the origin that produced the
 failure rather than against a loopback server.

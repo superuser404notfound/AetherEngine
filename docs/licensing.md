@@ -26,7 +26,7 @@ This is what lets any app, closed source included, ship AetherEngine through the
 
 FFmpeg reaches your app through [FFmpegBuild](https://github.com/superuser404notfound/FFmpegBuild) as dynamically linked frameworks under plain LGPL-2.1-or-later, with no GPL components. Dynamic linking keeps the relink requirement satisfiable for closed-source App Store apps.
 
-The components and their licenses: FFmpeg LGPL-2.1+, dav1d BSD-2-Clause, zimg WTFPL, libzvbi LGPL-2.0+. FFmpegBuild's README lists them in detail, with the concrete steps for adopters (embed dynamically, ship the license texts, link the build's source). Its [LICENSES/](https://github.com/superuser404notfound/FFmpegBuild/tree/main/LICENSES) folder is the set to reproduce, one file per component.
+The components and their licenses: FFmpeg LGPL-2.1+ (libavcodec, libavformat, libavutil, libswresample, libswscale, libavfilter), dav1d BSD-2-Clause, zimg WTFPL, libzvbi LGPL-2.0+ (its `ure.c` MIT). FFmpegBuild's README lists them in detail, with the concrete steps for adopters (embed dynamically, ship the license texts, link the build's source). Its [LICENSES/](https://github.com/superuser404notfound/FFmpegBuild/tree/main/LICENSES) folder is the set to reproduce, one file per component.
 
 ## libdovi
 

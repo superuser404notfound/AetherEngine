@@ -4,6 +4,15 @@ A measurement, not a test. It answers whether a television is *using* the Dolby 
 player hands it, as opposed to merely switching into a Dolby Vision mode and showing the base layer.
 The badge cannot tell those apart. A pulse can.
 
+**Verdict so far: the FEL route is real Dolby Vision.** Measured on an Apple TV 4K (2nd generation,
+tvOS 27) into an LG C1, with the arms of the `main` sequence, reported in
+[AE#702](https://github.com/superuser404notfound/AetherEngine/issues/702#issuecomment-6017430221):
+T pulsed like P on every patch (for example -55% against -55% at 10 nit, -45% against -42% at
+10,000 nit), T1 reproduced P1's different L1 shape, and N and S stayed flat. V1 and V2 matched, so the
+display layer does not care where the buffer came from, and S shows the pulse comes from the attached
+RPU alone. Not yet reported: the enhancement-layer arms (TE, NE), the counter arms on the merged
+stack, and any second television.
+
 The clips hold the pixels constant. After a 144 frame pre-roll, only the RPU switches between two
 states A and B every 72 frames (about three seconds, ten cycles, a 66 second clip). If the panel
 applies the metadata, the picture brightens and darkens in step with the switches, and a phone

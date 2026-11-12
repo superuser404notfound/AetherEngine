@@ -19,10 +19,22 @@ Contents:
 
 **Containers (demux side):** MKV, MP4 (and 3GP / 3G2), WebM, MPEG-TS, MPEG-PS (DVD VOB), AVI, ASF / WMV, OGG, FLV, RealMedia (.rm / .rmvb).
 
+The build also carries demuxers for audio files (WAV, MP3, FLAC, AAC in ADTS, LATM, AC-3, E-AC-3, DTS, TrueHD), raw H.264, HEVC, MPEG-2 and MPEG-4 Part 2 elementary streams, and subtitle files (SRT, ASS / SSA, WebVTT, PGS `.sup`, VobSub).
+
 That list is the supported set, not the compiled set. Two demuxers need a note:
 
 - **HLS.** The FFmpeg build carries the HLS demuxer, but it is not a supported source shape. The build ships no network protocols (only `file`, `pipe` and `data`, because bytes come from the engine's own `AVIOReader` over `URLSession`), so libavformat cannot fetch what a manifest points at. Remote HLS is handled one level up instead: by AVPlayer on the bypass, or by the live ingest.
 - **DASH.** The DASH demuxer is not in the build at all (it needs libxml2, which the build does not link). Remote DASH has its own path, described next.
+
+### Remote HLS
+
+A remote HLS playlist plays on AVPlayer straight from the origin by default (the bypass). The engine moves it elsewhere only where AVPlayer cannot show it:
+
+- **Finite playlist of HEVC in MPEG-TS (AE#268).** AVFoundation builds no video track for HEVC in MPEG-TS. When the playlist and the first segment's PMT prove that shape, the load goes through the seekable MPEG-TS ingest, which remuxes to fMP4 for the engine's own loopback. fMP4, live, encrypted, demuxed-audio and H.264 playlists stay on the bypass.
+- **Live master that advertises HEVC, Dolby Vision or AV1 but delivers MPEG-TS (#168).** The session reaches `readyToPlay` with no video track, so a watchdog moves it onto the live ingest. `LoadOptions.nativeRemoteHLSIngestFallback` turns this off.
+- **Finite MPEG-TS playlist in software (AE#990).** With `preferredDecodePath = .software`, any finite MPEG-TS playlist plays on the software host off the same seekable ingest, start position and seeks included. A finite playlist that AVPlayer refuses on its media takes that rebuild too (the AE#561 escalation). Other finite playlists mount AVPlayer once more and surface its failure.
+
+[architecture › Effective video route](architecture.md#effective-video-route-videoroute) lists these transitions as `videoRoute` reports them.
 
 ### MPEG-DASH (on-demand)
 
@@ -53,7 +65,7 @@ The only rewrite happens as the bytes are served: each moof gets the virtual fil
 Native AVPlayer path, VideoToolbox:
 
 - H.264 (progressive), HEVC, HEVC Main10, on hardware whose VideoToolbox has a decoder for the specific profile.
-- AV1 on devices with hardware AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips).
+- AV1 Main profile on devices with hardware AV1 (M3+ Mac, iPhone 15 Pro+, future Apple TV chips). Apple's AV1 hardware decodes Main only (8 or 10 bit, 4:2:0), so High (4:4:4) and Professional (4:2:2, 12 bit) take the software path on these devices too, live included.
 
 ### Software decode
 
@@ -62,6 +74,7 @@ Native AVPlayer path, VideoToolbox:
 | Source | Why it is software | Decoder |
 | --- | --- | --- |
 | AV1 without hardware AV1 | No HW decoder (all current Apple TVs, M1 / M2 Macs, pre-A17-Pro iPhones) | libavcodec / dav1d |
+| AV1 High / Professional | Apple's AV1 hardware decodes Main profile only | libavcodec / dav1d |
 | VP9, VP8 | AVPlayer's HLS pipeline rejects the `vp09` / `vp08` CODECS attributes | VideoToolbox for some VP9, else libavcodec |
 | MPEG-4 Part 2 (XVID / DIVX / SP / ASP), MPEG-2 video, VC-1 | AVPlayer's HLS-fMP4 pipeline accepts none of them | libavcodec |
 | MS-MPEG4 v1 / v2 / v3, WMV1 / WMV2 / WMV3 | Legacy Microsoft tail (FFmpegBuild 2.4.3) | libavcodec |
@@ -73,6 +86,8 @@ Native AVPlayer path, VideoToolbox:
 | H.264 with both MVC stereo views in one track | VideoToolbox renders nothing | libavcodec (base view) |
 
 Any other video codec not on the native allowlist also takes the software path. It plays when the FFmpeg build has a decoder for it and fails the load when it does not (see [Every other video codec](#every-other-video-codec)).
+
+On the software host, VideoToolbox still decodes where it can: VP9 (see below), HEVC (which reaches the software host through, for example, escalation, the dual-layer route, upscaling or `preferredDecodePath = .software`), and AV1 Dolby Vision Profile 10.1 on devices with hardware AV1. Everything else there decodes in libavcodec.
 
 #### AV1
 
@@ -163,12 +178,19 @@ H.264 that carries both stereo views inside one track, which is how a 3D Blu-ray
 - The frame-packed modes (side by side, top / bottom, checkerboard, row or column interleaved, anaglyph) are single self-contained pictures. They keep the native path with hardware decode. Cropping an eye out of one of those is the host's call, not the engine's.
 - MV-HEVC keeps the native path too: it is Apple's own spatial-video format and AVPlayer plays its base layer.
 - Real MVC 3D output is not offered on any path.
+- **Stereo on visionOS.** There, `LoadOptions.stereoPresentation` (default `.automatic`) keeps an MV-HEVC stream's second view and presents an HEVC side-by-side or over-under packing that the container declares (Matroska `StereoMode`) as stereo. A host can also name the packing per title (`.sideBySide`, `.overUnder`). Packing is signalled on HEVC only, so packed H.264 plays 2D, and every other platform plays all of these 2D as described above. See [api › `stereoPresentation`](api.md#stereopresentation).
 
 ### Deinterlacing
 
 Interlaced sources (DVD-rip MPEG-2, SD / HD broadcast H.264) are deinterlaced through a persistent graph. By default it runs on the GPU (`yadif_videotoolbox`, a Metal kernel, at field rate), with CPU bwdif (yadif on older builds) as the fallback. It engages on the first interlaced frame and costs nothing on progressive content.
 
 The dispatch decision lives in `AetherEngine.load` (`VideoRoutingPolicy`). It is gated per source on `VTCapabilityProbe`, the codec id, the declared field order, and on VOD the decode sample that verifies it.
+
+`$sourceVideoScan` tells a host whether the source is progressive or interlaced, from the same evidence (AE#983, [api › Scan type](api.md#scan-type)).
+
+### Upscaling
+
+SDR video below 1080p can be upscaled to the display's pixel size on the software host, opt-in with `LoadOptions.upscalesLowResolutionVideo` (#846). The default scaler is VideoToolbox super resolution plus MetalFX; `upscaleScaler = .lineArt` runs a network made for drawn content (Anime4K mode A, 8 or 10 bit, up to 1080p; AE#1039). HDR, Dolby Vision and AirPlay routes are not upscaled. See [api › `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo).
 
 ### H.264 VOD with changing parameter sets
 
@@ -325,6 +347,16 @@ The fixture generator `Scripts/nal-overrun-fixture.py` forges the shape into any
 - Once per session, and only for a verdict on the MEDIA. A URL-loading failure is a verdict on the SOURCE, which both paths read through the same reader.
 - Whether the software path can serve the source at all is the existing #461 `decodePathRefusal`, so a source it cannot serve costs a refusal and the original failure, not a second dead session.
 
+### 24p film with 2:3 pulldown timestamps
+
+**The problem.** Some encodes of soft-telecined DVDs keep the film's progressive frames but stamp each one with the time its first field would appear on a 59.94 Hz clock. Frames then alternate 50 and 33 ms, averaging 23.976. On a 23.976 Hz panel a 33 ms frame can fall between two refreshes and never be shown, and every start and seek re-rolls whether it does, so a pan stutters on one pass and plays clean on the next (Sodalite#236).
+
+**The repair.** On the native route, `PulldownCadenceRetimer` recognises that cadence over the last 48 frames and puts each frame on its 24p slot, at most about one field from its own time and re-centred after every edit. Other content (true 30p or 60p, constant-rate stretches) is untouched. On the reporting clip, 587 of 606 frame steps came out at exactly 41.7 ms, where every step had been 50 or 33.
+
+**Odd declared frame rates.** mkvmerge writes the first frame's duration as a track's DefaultDuration, so such a file declares 20 fps. A declared rate that is not a standard rate is therefore measured on the head packets the probe already queued, and the load uses the measured rate (23.976 here) for the display switch, the master's `FRAME-RATE` and the frame grid.
+
+The details are in [architecture › 2:3 pulldown timing on 24p film](architecture.md#23-pulldown-timing-on-24p-film).
+
 ## HDR routing
 
 | Source | Wrapper signaling |
@@ -335,9 +367,14 @@ The fixture generator `Scripts/nal-overrun-fixture.py` forges the shape into any
 | HEVC Main10 (DV P5) | `dvh1` track type (DV-only, IPT-PQ base; forced even on SDR panels) |
 | HEVC Main10 (DV P8.1 / P8.4 / P7) | `hvc1` primary + `dvvC` box (P7 converted to 8.1 first), DV engaged via `SUPPLEMENTAL-CODECS` on DV panels, RPU-driven tone map of the HDR10 / HLG base elsewhere |
 | HEVC Main10 (HLG) | BT.2020 / HLG |
+| HEVC / H.264 with a BT.2020 SDR VUI and an alternative-transfer SEI naming HLG | BT.2020 / HLG (AE#839) |
 | AV1 HDR | BT.2020 / PQ |
 
+Broadcast HLG (BBC iPlayer, UK DVB-T2 UHD) keeps a backward-compatible VUI transfer (BT.709, BT.2020 10 or 12 bit, or unspecified) over BT.2020 primaries, so an SDR set still shows a picture, and names HLG only in the `alternative_transfer_characteristics` SEI. The demuxer reads the first video packets for that SEI (at most 8) and, when it names HLG, marks the stream HLG for every later reader: format detection, display criteria, `VIDEO-RANGE`, the muxer's `colr` and `probe(url:)` (AE#839).
+
 AetherEngine does not tone-map on the host. It tells the system "this is BT.2020 PQ" (or DV, or HLG) through the HLS-fMP4 sample description, and AVPlayer and the system compositor map HDR to SDR as the connected display needs. tvOS / iOS pick the right path.
+
+**On the software host** there is no HLS sample description, so the same signal travels on each decoded frame. Both decoders (libavcodec and VideoToolbox) attach the colour primaries, transfer (PQ, HLG) and matrix to every pixel buffer, and HDR10+ metadata goes out per frame as `kCMSampleAttachmentKey_HDR10PlusPerFrameData`. So an AV1 or VP9 HDR10 or HDR10+ source keeps its HDR and its dynamic metadata off the native route too, and `videoFormat` moves to `.hdr10Plus` on the first frame that carries it.
 
 ### When an HDR master is served
 
@@ -420,6 +457,9 @@ For DV streams the demuxer surfaces the source's `AVDOVIDecoderConfigurationReco
 | HEVC 8.2, AV1 10.2 | SDR Rec.709 | Plain base layer, no Dolby Vision |
 | AV1 10.0 | None | `dav1.10.<dvLevel>` |
 | AV1 10.1 / 10.4 | HDR10 / HLG | `av01` + `dav1.10` in `SUPPLEMENTAL-CODECS` |
+| H.264 9 | SDR Rec.709 | Plain `avc1`, the Dolby Vision record stripped (Apple has no H.264 Dolby Vision decoder) |
+
+The AV1 rows apply on a display that takes Dolby Vision; elsewhere AV1 plays as plain `av01` (see [AV1 Dolby Vision](#av1-dolby-vision)). HEVC Profile 8 with a compatibility id other than 1, 2 or 4 (8.6, for example) is served as 8.1, and AV1 Profile 10 with an unknown id as 10.0. Any other profile in an HEVC or AV1 record (not 5, 7 or 8 for HEVC, not 10 for AV1) fails the native load with `HLSVideoEngineError.unsupportedDVProfile`.
 
 #### Profile 5
 
@@ -506,6 +546,8 @@ AV1+DV follows the same split as HEVC:
 
 The cross-compatible profiles are signaled this way on hardware-AV1 hosts. The `dav1` sample entry belongs to the profile without a base layer, the way `dvh1` belongs to Profile 5. A cross-compatible profile carries its base layer's own sample entry, so a client that cannot read Dolby Vision still plays it.
 
+**Only on a Dolby Vision display.** Unlike HEVC Profiles 5 and 8, the AV1 packaging above is used only where the display takes Dolby Vision (the per-mode table, `panelPresentsDolbyVision` on a Mac, or `keepDvh1TagWithoutDV`). Everywhere else the record is dropped and the stream is served as plain `av01` with the range its VUI declares, so a 10.1 or 10.4 plays as its HDR10 or HLG base. A genuine Profile 10.0 declares no VUI range, so on such a display its IPT picture goes out as an SDR `av01` stream. That case has not been measured on a device.
+
 **AV1 Profile 10.1 on the software host** gets its Dolby Vision from the engine rather than from AVFoundation. AVFoundation ignores the RPU an AV1 stream carries in its ITU-T T.35 metadata OBU and shows the HDR10 base layer.
 
 - The RPU of a 10.1 stream is the RPU of an HEVC 8.1 stream in another wrapper. The decoder reads it out of each temporal unit, libdovi rewraps it into the `unspec62` form VideoToolbox attaches to an HEVC 8.1 frame, and the decoded frame carries it under the same two keys, on the buffer and on its IOSurface (`DoviDisplayMetadata`). The system's Dolby Vision display management applies it.
@@ -535,12 +577,16 @@ Profile 7 (dual-layer, the common UHD Blu-ray remux profile) is handled accordin
 - The software host plays an E-AC-3 Atmos track as its channel-bed core (no objects) unless `objectAudioRendering` is set, which keeps the objects (compressed JOC to the renderer, TrueHD Atmos and DTS:X as a rendered bed, PCM or APAC, in a build with the object-audio traits).
 - The stream is classified by `el_type` alone. An RPU that sets `disable_residual_flag` only switches the residual off for that frame and never changes the classification.
 
+**The AVPlayer-output variant.** With `LoadOptions.dualLayerRoute = .avPlayerOutput` (same trait, opt-in), AVPlayer decodes the base layer and plays the audio, and the engine composes onto AVPlayer's own decoded frames instead of running the software host. The item keeps the clock, transport and audio, so the Atmos trade-off above does not apply. A position whose enhancement layer is not at hand shows AVPlayer's base-layer frame. Run on macOS only so far. See [api › `dualLayerRoute`](api.md#duallayerroute) and [Dolby Vision FEL › 5.2.4](dolby-vision-fel.md#524-the-avplayer-output-route).
+
 See [dolby-vision-fel.md](dolby-vision-fel.md) for the design.
 
 **Curve fold.** The single-layer conversion below, with two differences:
 
 - The FEL RPU's mapping is kept (mode 1, then mode 2), so the disc's luma polynomial and MMR chroma reach the platform decoder, which applies them.
 - The enhancement layer's luma residual, measured on the first picture of each scene, is added to every frame's luma polynomial. The engine holds back one GOP to do so and never evaluates the mapping on a pixel.
+- It is on by default wherever the `DolbyVisionFelCurves` trait is built in. `LoadOptions.foldsDolbyVisionFEL = false` turns it off for one load (a title a viewer reports, or an A/B check), and the source then takes the plain conversion.
+- It pauses on its own where the RPU cannot reach the picture (AE#1018): on tvOS, at a display without Dolby Vision whose panel presents HDR, off the `forceDolbyVisionOnNonDVDisplay` route. Measured on an Apple TV 4K, such a panel shows the base layer bit for bit. Packets then pass through with the stream's own mapping and no GOP is held back, logged as `[FelCurves] fold paused`. The fold rejoins at a keyframe. A Mac, a panel in SDR and the Profile 5 route all apply the RPU, so the fold stays on there.
 
 This is the recommended way to bring a FEL source's enhancement layer back in a distributed app. The dual-layer composition above evaluates the MMR prediction and the residual itself. See [Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route).
 
@@ -595,6 +641,13 @@ Stream-copy exceptions:
 - **LATM/LOAS-framed AAC** (DVB broadcast framing) always bridges.
 - **FLAC whose `STREAMINFO` `min_blocksize` is below 192** bridges too (AE#764). CoreMedia drops a track that declares less, and hangs on frames smaller than the field claims, so such a stream cannot be copied (the bridge is bit-perfect for FLAC).
 - **Audio-only FLAC.** The same `min_blocksize` field sends an audio-only FLAC to the FFmpeg host instead of AVPlayer. So does any audio-only FLAC in the raw `flac` container, whose seeks CoreMedia misplaces (AE#946).
+
+**Audio-only files** take one of two hosts. From a URL, AVPlayer plays AAC, MP3, MP2, MPEG-1 Layer I, ALAC, FLAC, AC-3, E-AC-3 and PCM (16-bit little and big endian, 24-bit little and big endian, 32-bit float). Everything else, every custom `IOReader` source and `preferredDecodePath = .software` go to the FFmpeg host. FLAC also leaves AVPlayer for the two cases above and when its frames carry fewer samples than `STREAMINFO`'s `max_blocksize` (AVPlayer mistimes those, AE#946). See [architecture › Audio-only pipeline](architecture.md#audio-only-pipeline-music-podcasts-audiobooks).
+
+**Audio shapes the build cannot decode.** The bridge decodes PCM in these shapes: 16-bit little and big endian, 24-bit little endian, 32-bit float little endian, unsigned 8-bit, G.711 A-law / mu-law, Blu-ray LPCM and DVD LPCM. 24-bit big-endian PCM (QuickTime `in24`), 32-bit integer PCM and MPEG-1 Layer I audio (`mp1`) have no decoder in the FFmpeg build (FFmpegBuild 3.14.0).
+
+- **In a video file** such a track plays silent. The bridge cannot open it, the picture plays on, and `audioDelivery` reads `.droppedNoPipeline`.
+- **As an audio-only file** it fails the load on the FFmpeg host. From a URL, AVPlayer still plays 24-bit big-endian PCM and MPEG-1 Layer I itself; a custom `IOReader` or `preferredDecodePath = .software` sends them to the FFmpeg host.
 
 ### Audio bridge modes
 
@@ -764,6 +817,7 @@ The box then describes a bare 5.1 bed, and an Atmos receiver reports multichanne
 **Why it is opt-in.** It is a trade: the rendered bed, PCM or lossy APAC at several Mbit/s, in place of the lossless 7.1 the channel bridge delivers.
 
 - It applies only to TrueHD that FFmpeg marks as Atmos, at 48 kHz, on OS 26 or later. Anything else, and any failure to start, keeps `audioBridgeMode` with the audio intact.
+- To learn before playback whether a TrueHD track carries Atmos, `probe(url:detecting: .atmos)` reads its major sync and answers in `TrackInfo.trueHDAtmos` (`.atmos`, `.noAtmos` or `.unsettled`; #1035).
 - The decoder and the bed regression are an optional component, compiled only with the `TrueHDObjectAudio` package trait, off by default. Built without it, TrueHD Atmos keeps the channel bridge whatever the option asks, and the session log says so ([Installation › Optional components](installation.md#optional-components)).
 - Silo built the first implementation in its fork, an exact object render that this path replaced.
 
@@ -1677,6 +1731,8 @@ SSAI plays through the direct path instead of bouncing to a server transcode at 
 - Audio is re-anchored to the video timeline at every creative boundary (including amux creatives that mux audio on a separate source clock).
 - With a demuxed audio rendition (Pluto TV: muxed programme segments, video-only ad segments, the sound of both in the rendition) the video PID switch works the same way, and the merge orders the two readers by clock run before timestamp. Both clocks restart at the seam, each reader reaches it on its own schedule, and ordering by timestamp alone handed out the ad before the end of the programme. Inside one run, two clocks more than 60 s apart (FFmpeg lifts the rendition's restart to 2^33 + x while the video stays at x) are compared by their distance from the run's first packets. A restart only one reader ever shows stops holding the other back after 10 s of its media. Every run change logs `merge clock run:`.
 - An `OutputTimestampSanitizer` keeps the stream monotonic across the splice.
+- **Audio on a new PID.** When an ad carries its audio on a PID of its own, the producer follows it only for stream-copied ADTS AAC whose frames match the track's configuration (`audio follows the source to stream N`). A bridged track or another codec logs `not followed`, and those segments are cut without sound.
+- **Software path.** It has no side-audio merge, so ads that carry their sound only in a demuxed rendition (Pluto) play silent there. A live source that depends on a demuxed rendition and has no muxed audio of its own fails fast on the software path (`demuxedAudioLiveUnsupported`, `HLSIngestError.demuxedAudioNotSupported`), so the host can fall back.
 
 **Stall watchdog.** A no-cut stall watchdog sits underneath as a safety net. It tells a genuinely wedged pod (reading at full rate but unable to cut) from a slow source (a trickle) by read rate. A wedge-classified stall whose video PTS is still advancing (a source delivering just below real time, #177) is held with the watchdog re-armed (bounded consecutive holds) instead of retuned. Only a genuine wedge or an exhausted hold budget escalates to a host retune.
 

@@ -22,7 +22,7 @@ What AetherEngine plays and what it does for a host, one section per area. Each 
 | Kind | Supported |
 | --- | --- |
 | Files | MKV, MP4, WebM, MPEG-TS, AVI, ASF / WMV, OGG, FLV, RealMedia (.rm / .rmvb), 3GP / 3G2 |
-| Discs | DVD-Video and Blu-ray ISO (decrypted), with selectable titles and chapters, demuxed through the normal path |
+| Discs | DVD-Video and Blu-ray (decrypted), as an ISO image or as a `BDMV` / `VIDEO_TS` folder (`DiscDirectoryReader`), with selectable titles and chapters, demuxed through the normal path. See [formats.md › Disc](formats.md#disc-dvd--blu-ray-iso) |
 | MPEG-DASH | Remote on-demand manifests: static, one Period, `SegmentBase`, unencrypted |
 | HLS | Remote HLS through AVPlayer, live HLS through the engine's own ingest (see [Live TV and DVR](#live-tv-and-dvr)) |
 
@@ -41,6 +41,8 @@ The engine sends a format to hardware when the platform can decode it, and to it
 - H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext go to software where VideoToolbox has no hardware decoder for them (Intel Macs, older chips).
 - **Interlaced H.264** goes to software, because AVPlayer does not deinterlace. On VOD the engine checks the declared field order against decoded frames, so progressive video in interlaced carriage keeps hardware decode.
 - **Deinterlacing** runs on the GPU (yadif_videotoolbox, Metal, field rate by default), with a CPU bwdif fallback.
+- **Upscaling (opt-in):** `LoadOptions.upscalesLowResolutionVideo` scales SDR video below 1080p up to the display (VideoToolbox super resolution, then MetalFX; OS 26). HDR, Dolby Vision and AirPlay keep their usual route, and the stage never stops playback. For animation, `upscaleScaler = .lineArt` runs a line-art network instead, which also takes 1080p. See [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo).
+- **3D on visionOS:** an MV-HEVC second view and side-by-side or over-under frame packing (HEVC) play in stereo (`LoadOptions.stereoPresentation`). Other platforms play 2D. See [api.md › stereoPresentation](api.md#stereopresentation).
 
 ## HDR and Dolby Vision
 
@@ -70,7 +72,10 @@ On tvOS the engine drives the display switch (Match Content) itself. A host has 
 | Bridged (decoded, then re-encoded to EAC3 5.1 by default, or to lossless FLAC) | TrueHD, MLP, DTS, DTS-HD MA, MP3, MP2, Opus, Vorbis, LPCM (including Blu-ray and G.711), WMA (Standard, Pro, Lossless, Voice), Nellymoser, ADPCM-SWF, Speex, RealAudio (Cook, ATRAC3, Sipro, Lossless, 14.4 / 28.8), AMR-NB, AMR-WB, DVD LPCM |
 
 - **Surround:** 5.1 and 7.1 with the correct `AudioChannelLayout`.
-- **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery, and system Now-Playing on tvOS and iOS.
+- **Audio-only:** `LoadOptions.audioOnly` runs a lean pipeline with no video machinery.
+- **Audio shaping (opt-in):** `LoadOptions.audioShaping` / `setAudioShaping(_:)` add a channel cap, a dialogue lift, a night mode (compressor plus limiter) and a loudness target that lifts quiet sources (-36 to -12 LUFS). See [formats.md › Audio shaping](formats.md#audio-shaping).
+- **Audio delay:** `setAudioDelay(_:)` corrects lip sync while playing, up to 2 s either way. See [api.md › Audio delay](api.md#audio-delay).
+- **Audio description:** `TrackInfo.isVisualImpaired` marks audio-description tracks.
 
 ## Dolby Atmos
 
@@ -109,6 +114,8 @@ More:
 - **Embedded text cues** are harvested from the producer's own read, so enabling a track is instant and costs no extra bandwidth.
 - **Raw ASS** markup and fonts are available opt-in, for hosts that render ASS themselves.
 - **Native WebVTT renditions** (opt-in, `LoadOptions.prepareNativeSubtitles`): one language-tagged rendition per text track, including load-declared external files. Subtitles then survive PiP, AirPlay and an external display.
+- **Two tracks at once:** `selectSecondarySubtitleTrack(index:)` adds an independent second track (embedded or external) for bilingual viewing. Its cues arrive in `secondarySubtitleCues`. See [guide.md › A second subtitle track](guide.md#a-second-subtitle-track-at-the-same-time).
+- **Subtitle offset reach:** `maximumSubtitleDelaySeconds` / `maximumSubtitleAdvanceSeconds` (or `maximumSubtitleOffsetSeconds` for both) keep enough bitmap history and lead for the offset range a host offers.
 - **Bitmap tracks in PiP / AirPlay.** Bitmap tracks (PGS, DVB, DVD, embedded and external .sup) join as OCR-fed renditions. On-device Vision text recognition runs while the track is selected and fills a language-tagged text rendition. This is lossy by design; fullscreen keeps the pixel-accurate overlay.
 
 The host draws the overlay itself. See [formats.md › Subtitles](formats.md#subtitles).
@@ -136,10 +143,11 @@ The host draws the overlay itself. See [formats.md › Subtitles](formats.md#sub
 - A paused session survives quick app switches for a grace window (`backgroundTeardownGraceSeconds`, default 15 s) before the wedge-safe teardown runs.
 - **tvOS:** tears down immediately (wedge-safe), unless a PiP window is active. PiP keeps the pipeline and the loopback server alive, and on the software path it keeps decoding video too, because the window needs frames.
 - Hosts gate corrective actions on the published `isSessionReady`.
+- **Now Playing (opt-in):** the engine can own the system Now Playing card and the remote commands on every platform and route (`ownsAudioNowPlaying`, `ownsVideoNowPlayingSession` with `ownsVideoNowPlayingCommands`, `ownsSoftwareNowPlaying`). `setNowPlayingInfo(_:)` sets the title and artwork, `setNowPlayingTrackCommands(next:previous:)` adds playlist buttons. See [guide.md › Now Playing](guide.md#now-playing).
 
 ## Seeking, streaming and prewarm
 
-**Seeking.** Seeks back into content already watched are restart-free cache hits (byte-budgeted retention, 2 GiB cap). Short forward scrubs ride the cached window. Only a target that was never produced restarts the producer.
+**Seeking.** Seeks back into content already watched are restart-free cache hits (byte-budgeted retention, 2 GiB cap). Short forward scrubs ride the cached window. Only a target that was never produced restarts the producer. `seek(to:exact: true)` lands exactly on its target, for a chapter mark or the end of an intro.
 
 **Streaming.**
 
@@ -173,6 +181,8 @@ How to use all of this: [guide.md › Live TV and DVR](guide.md#live-tv-and-dvr)
 ## Frames, metadata and the audio tap
 
 - **Frames:** the off-playback `FrameExtractor` has `thumbnail` (scrub preview) and `snapshot` (frame-accurate).
+- **Probing without playing:** `AetherEngine.probe(url:)` / `probe(source:)` read tracks, HDR and Dolby Vision format, container and disc titles without starting a session, with optional byte and time limits and cancellation. Opt-in passes settle Atmos, HDR10+ and the Dolby Vision enhancement layer. See [api.md › Probing without playing](api.md#probing-without-playing).
+- **Scan type:** `sourceVideoScan` tells a host 1080i from 1080p. See [api.md › Scan type](api.md#scan-type).
 - **Metadata:** `MediaMetadata` (title, artist, album, cover) is parsed on load. A container's album artist fills `artist` when there is no artist.
 - **Audio tap:** opt-in `installAudioTap()` delivers decoded playback audio as mono Float32 48 kHz PCM with source-PTS timestamps, off the render path. Use it for live transcription or ShazamKit. It works on the loopback, remote-HLS (VOD and live) and software paths. The stream belongs to its session: a session-preserving reload (audio, subtitle or disc-title switch, `reloadAtCurrentPosition`) finishes it, and the host installs it again when the stream ends.
 

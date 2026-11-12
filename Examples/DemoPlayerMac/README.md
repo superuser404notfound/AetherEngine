@@ -28,6 +28,8 @@ Controls:
 
 ## Distribution build
 
+Every published GitHub Release carries a notarized `.dmg` of the demonstrator, built by [`release-dmg.yml`](../../.github/workflows/release-dmg.yml) (setup: [`.github/RELEASE_SETUP.md`](../../.github/RELEASE_SETUP.md)). To try it, download that one. To build one locally:
+
 [`Scripts/build-dmg.sh`](Scripts/build-dmg.sh) produces a notarized universal-binary `.dmg` ready to attach to a GitHub Release as a download. End users get a double-clickable `.app` with Gatekeeper acceptance and no "unidentified developer" warning.
 
 One-time setup on the build machine:

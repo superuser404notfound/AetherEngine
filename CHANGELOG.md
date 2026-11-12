@@ -10,8 +10,22 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **The documentation covers what the engine does today.** The second pass of the docs audit filled about 90
+  gaps: the host guide gains Picture in Picture on both routes, scrub previews, track choice at load, the
+  live replay and resume-clamp contracts, faked-range detection, single-connection providers, log redaction,
+  and the opt-in stages (upscaling, subtitle offset reach, loudness target). `docs/api.md` documents the
+  engine-lifetime subjects, `stop(finalTeardown:)`, reload side effects and the live telemetry fields;
+  `docs/formats.md` adds remote HLS routing, AV1 High / Professional, broadcast HLG, the H.264 Dolby Vision
+  record, 2:3 pulldown and the audio shapes the build cannot decode; `docs/architecture.md` describes the
+  route variants, object audio, Now Playing routes, source connections and shared outputs, and its Source
+  map now names every Swift file. `Scripts/check-source-map.py` (CI) keeps it that way.
+
 ### Fixed
 
+- **`aetherctl play --host-calls subsatload` no longer reports itself as unknown.** It worked but printed
+  `HOSTCALL unknown 'subsatload'`; the unused `ratehold-tail` call is gone.
 - **A correction can no longer flip `sharedOutputRole` on a running session.** The field was on the list of
   options that name a session, but `reloadAtCurrentPosition(applying:)` never compared it, so a changed role was
   applied instead of refused. It is now refused with `loadIdentityNotCorrectable` like the other identity
