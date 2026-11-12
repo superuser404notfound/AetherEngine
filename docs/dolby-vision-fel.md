@@ -19,8 +19,28 @@ This is the design document for playing Dolby Vision Profile 7 dual-layer source
 
 **Which to pick.** For an app that ships to users, build the curve fold. The dual-layer route reconstructs the picture itself: it evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel, and those steps are covered by live Dolby patents (the MMR family runs to 2032). A host without a Dolby Vision licence should build `DolbyVisionFelCurves`, which leaves every evaluation of the stream's mapping to the platform's licensed decoder. On the software host the dual-layer route also gives up Atmos objects by default, AVPlayer PiP, subtitle renditions and AirPlay video (§3.1, §5.2.3).
 
+## Terms
+
+The rest of the document uses these terms without explaining them again.
+
+| Term | Meaning |
+|---|---|
+| BL, EL | Base layer and enhancement layer of a Profile 7 stream. |
+| RPU | Reference processing unit: the per-frame metadata that says how to map the base layer and how to add the enhancement layer. It also carries the display-management metadata. |
+| Display-management metadata (L1, L2, L5, L8, L9, L11) | Per-scene brightness and trim levels a Dolby Vision display uses to fit the picture to its panel. |
+| Reshaping curves (polynomial, MMR) | The RPU's mapping from base-layer code values to the output picture. Luma normally uses polynomial pieces. MMR (multivariate multiple regression) is a polynomial over all three colour components, normally used for chroma. |
+| Residual, NLQ | The FEL's per-pixel correction, and how it is stored (non-linear quantization). Inverse NLQ turns the stored values back into a correction. |
+| Composer, compose | `DoviFelComposer`, the engine's Metal stage that applies the RPU's curves to the base layer and adds the residual. A composed frame went through it. |
+| Bypass | A frame that skips the composer and goes out as its base layer, with an RPU that keeps the source's mapping. |
+| Profile 8.1 | The single-layer Dolby Vision profile Apple decodes: an HDR10 picture plus an RPU. |
+| P010 | The 10-bit 4:2:0 pixel format the composer reads and writes (`kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange`). |
+| PTS, POC, IRAP | Presentation timestamp; picture order count (HEVC's display-order number); an HEVC random-access picture (a keyframe a decoder can start on). |
+| Ticket, epoch | A ticket is the delivery number a base-layer frame takes when it arrives, so frames leave in order. An epoch is a generation number every flush or close moves on, so frames from before it are dropped. |
+| Native route, software host | The native route plays through AVPlayer. The software host (`SoftwarePlaybackHost`) is the engine's own decode-and-render path, with no AVPlayer. |
+
 ## Contents
 
+- [Terms](#terms)
 - [Build, platforms and reference device](#build-platforms-and-reference-device)
 - [1. What is being played](#1-what-is-being-played)
 - [2. Output contract](#2-output-contract)
@@ -130,9 +150,16 @@ What each stage does per frame:
 - **Split.** The RPU is parsed into composer parameters and converted to an 8.1 NAL. EL NAL units are copied into a new `AVPacket`. The BL packet goes to VideoToolbox untouched (it skips the `unspec` NAL units itself).
 - **Align.** Each layer's display slot comes from its POC (`HEVCPictureOrderCount`). The EL packet takes the PTS of the BL picture in the same slot, so pairing by time pairs by picture order when the layers' GOPs differ. A layer whose sequence cannot be trusted keeps its access unit's PTS: the leading pictures of the opener, a picture more than 16 slots off its unit, or a seek before its next IRAP.
 - **Decode.** Asynchronous decode with temporal processing, P010 IOSurface buffers in decode order. Display order is restored by the renderer's 4-frame reorder buffer, as for any VideoToolbox HEVC stream.
-- **Pair.** Match the other layer by 90 kHz canonical PTS within ±300 ticks. A base-layer frame takes its ticket at arrival. It is bypassed under that ticket by its display deadline when the decoder has a render clock (§5.5), or once K = 3 newer base-layer frames have arrived when it has none. Two more bounds: side data in a 32-entry ring, waiting enhancement frames capped at 10. `hdr10Data` and the display-metadata NAL are resolved once here and travel with the ticket.
+- **Pair.** Match the other layer by 90 kHz canonical PTS within ±300 ticks. A base-layer frame takes its ticket at arrival. If its partner does not come, it is bypassed under that ticket:
+  - by its display deadline when the decoder has a render clock (§5.5),
+  - once K = 3 newer base-layer frames have arrived when it has none.
+
+  Two more bounds: side data in a 32-entry ring, waiting enhancement frames capped at 10. `hdr10Data` and the display-metadata NAL are resolved once here and travel with the ticket.
 - **Compose.** In order: wait for one of 2 in-flight slots, rent a P010 buffer (§5.6), copy colour attachments from the base layer, bind 6 texture-cache textures, serialize the parameter block, encode luma and chroma kernels in one concurrent encoder, commit.
-- **Deliver.** On Metal's completion queue, release the GPU slot inline and nothing else. Everything else (error logging, GPU-time accounting, `completion`) first hops off it, immediately, to the composer's own `.userInteractive` queue. That hop is §4.3's firewall, not an ordering mechanism. A bypass comes from the compose queue instead. Either path hands the frame to `OrderedDelivery` (§5.7). Its one serial queue orders composed and bypassed frames alike, whichever queue called `fulfil`, drops anything tagged with an epoch a flush/close has since retired, and calls `onFrame` (renderer enqueue) with no decoder lock held.
+- **Deliver.** On Metal's completion queue, release the GPU slot inline and nothing else.
+  - Everything else (error logging, GPU-time accounting, `completion`) first hops off it, immediately, to the composer's own `.userInteractive` queue. That hop is §4.3's firewall, not an ordering mechanism.
+  - A bypass comes from the compose queue instead.
+  - Either path hands the frame to `OrderedDelivery` (§5.7). Its one serial queue orders composed and bypassed frames alike, whichever queue called `fulfil`. It drops anything tagged with an epoch a flush/close has since retired, and calls `onFrame` (renderer enqueue) with no decoder lock held.
 
 ### When a frame bypasses composition
 
@@ -177,6 +204,8 @@ A host that does not set it and wants E-AC-3 Atmos on a Profile 7 FEL title leav
 
 ### 4.1 tvOS consumes the attachment, in backboardd
 
+tvOS reads the attachment: on every vsync, backboardd (the system process that drives the display) applies Dolby Vision 8.1 policy with the RPU the engine attaches. A crash proved it.
+
 Two device runs were killed with `SIGKILL` about eleven composed frames in. The app log showed only `Connection interrupted` and `invalid destination port` from CoreAnimation, which means the render server died first. The paired Apple TV's crash reports held two `backboardd-*.ips` files timed to the runs and no `JetsamEvent`, which rules out memory pressure. Both had this stack:
 
 ```
@@ -191,16 +220,16 @@ Thread:    com.apple.coreanimation.display.external-0
   CA::WindowServer::IOMFBServer::vsync_callback
 ```
 
-This proves consumption: on the vsync callback, CoreAnimation pulls display management off our IOSurface and applies Dolby Vision 8.1 policy with our RPU.
+This proves consumption: on the vsync callback, CoreAnimation pulls display management off the engine's IOSurface and applies Dolby Vision 8.1 policy with the engine's RPU.
 
-It was also the bug. The policy parses `DolbyCompatibilityID` with `CFStringGetIntValue`, and we had attached a `CFNumber`. Decoding a Profile 8.1 asset through `AVAssetReader` and printing the CF type of VideoToolbox's own attachments confirmed the fix:
+The crash was also the bug. The policy parses `DolbyCompatibilityID` with `CFStringGetIntValue`, and the engine had attached a `CFNumber`. Decoding a Profile 8.1 asset through `AVAssetReader` and printing the CF type of VideoToolbox's own attachments confirmed the fix:
 
 | Attachment | Class | CF type | Value |
 |---|---|---|---|
 | `DolbyCompatibilityID` | `NSTaggedPointerString` | `CFString` | `"1"` |
 | `DolbyVisionRPUData` | `__NSCFData` | `CFData` | 188 / 189 bytes |
 
-The payload form was found the same way. VideoToolbox's `DolbyVisionRPUData` matches the bitstream's `unspec62` NAL byte for byte once the 2-byte header is removed and the emulation-prevention bytes are left in. The EPB-stripped RBSP is 176 bytes and does not match.
+The payload form comes from the same comparison. VideoToolbox's `DolbyVisionRPUData` matches the bitstream's `unspec62` NAL byte for byte once the 2-byte header is removed and the emulation-prevention bytes are left in. The EPB-stripped RBSP is 176 bytes and does not match.
 
 Two lessons:
 
@@ -209,7 +238,7 @@ Two lessons:
 
 ### 4.2 Throughput: the composer must not block decode
 
-Playback first ran with `compose` ending in `waitUntilCompleted()` under the decoder lock. The deficit was steady, not a hitch:
+Composition runs asynchronously, off the decoder lock. A first version, with `compose` ending in `waitUntilCompleted()` under the decoder lock, could not keep real time. The deficit was steady, not a hitch:
 
 | | Blocking compose | `composeAsync` + one encoder |
 |---|---|---|
@@ -218,15 +247,21 @@ Playback first ran with `compose` ending in `waitUntilCompleted()` under the dec
 | Display drops | +3…+7 every second | flat after seek settling |
 | GPU time per frame | 28 ms end to end, serialized | 14.3 → 12.9 ms, off-thread |
 
-Most of the original 28 ms was the wait and the CPU-side setup, not GPU work: the A12 has about 3× headroom against the 41.7 ms budget at 23.976 fps. The two serial compute encoders were merged into one concurrent encoder, because the luma and chroma kernels never read each other's output. The bit-exactness suites passed unchanged, which proves that moved no pixels.
+Most of the original 28 ms was the wait and the CPU-side setup, not GPU work: the A12 has about 3× headroom against the 41.7 ms budget at 23.976 fps.
+
+The luma and chroma kernels also share one concurrent compute encoder instead of two serial ones, because neither reads the other's output. The bit-exactness suites passed unchanged after that merge, which proves it moved no pixels.
 
 ### 4.3 The completion-handler deadlock
 
-Metal runs every `addCompletedHandler` block for a command queue on one serial queue. The first async version delivered from inside that handler, which took the decoder lock. Meanwhile the caller held the same lock, waiting in `inFlight.wait()` for a signal only a later handler could send. Playback stopped after about ten seconds with the session still reporting healthy.
+The rule, for this code and any future change: **release the slot inline in Metal's handler and do nothing there that can block; hop to another queue for everything else.**
 
-The fix, and a rule for any future change: **release the slot inline in Metal's handler and do nothing there that can block; hop to another queue for everything else.** `DoviComposeAsyncTests.doesNotDeadlockAgainstTheCallersLock` reproduces the exact lock shape. Against the old handler it hung past a 300 s timeout.
+Why: Metal runs every `addCompletedHandler` block for a command queue on one serial queue. The first async version delivered from inside that handler, which took the decoder lock. Meanwhile the caller held the same lock, waiting in `inFlight.wait()` for a signal only a later handler could send. Playback stopped after about ten seconds with the session still reporting healthy.
+
+`DoviComposeAsyncTests.doesNotDeadlockAgainstTheCallersLock` reproduces the exact lock shape. Against the old handler it hung past a 300 s timeout.
 
 ### 4.4 Earlier fixes worth remembering
+
+Each row is a symptom seen during development and the rule that prevents it.
 
 | Symptom | Cause | Rule |
 |---|---|---|
@@ -240,7 +275,7 @@ The fix, and a rule for any future change: **release the slot inline in Metal's 
 
 ### 4.5 Consumption test assets
 
-`aetherctl dvsurvey` ranks frames by L1 distance from the title's median, so the pin test can pin a frame whose metadata is a large lie. On the three local test clips:
+The consumption test needs a frame whose metadata differs a lot from the rest of the title. `aetherctl dvsurvey` finds one: it ranks frames by L1 distance from the title's median, so the pin test can pin a frame whose metadata is a large lie. On the three local test clips:
 
 | Clip | Result |
 |---|---|
@@ -248,13 +283,24 @@ The fix, and a rule for any future change: **release the slot inline in Metal's 
 | scene clip | distance 1391, usable |
 | credits clip | static L1 (distance 0), correctly rejected as `WEAK` |
 
-The consumption question is whether the panel uses the RPU the engine attaches, rather than only switching into a Dolby Vision mode. A pulse test answers it, and anyone with an Apple TV, a television and a phone can repeat it: clips whose pixels are constant while only the RPU (or the enhancement-layer residual) switches are played through AVPlayer, VideoToolbox and the FEL route, and filmed. Clip generator, device host, harness scripts and analysis are in [`Probes/DolbyVisionPulse`](../Probes/DolbyVisionPulse/README.md).
+The consumption question is whether the panel uses the RPU the engine attaches, rather than only switching into a Dolby Vision mode. A pulse test answers it, and anyone with an Apple TV, a television and a phone can repeat it:
 
-**Verdict.** The route is real Dolby Vision. On an Apple TV 4K (2nd generation, tvOS 27) into an LG C1, the FEL route's arm pulsed like AVPlayer's on every patch (for example -55% against -55% at 10 nit), its L1 arm reproduced AVPlayer's different L1 shape, and the null arm and the arm with the Dolby attachments removed stayed flat ([AE#702](https://github.com/superuser404notfound/AetherEngine/issues/702#issuecomment-6017430221)). So the panel follows the RPU the engine attaches, not a static HDR10 curve. That run used a zero-residual enhancement layer on purpose. The enhancement-layer arms (whether the composed residual itself reaches the panel), the counter arms on the merged stack, and a second television have not been reported yet.
+- The clips keep their pixels constant while only the RPU (or the enhancement-layer residual) switches.
+- They are played through AVPlayer, VideoToolbox and the FEL route, and the screen is filmed.
+
+Clip generator, device host, harness scripts and analysis are in [`Probes/DolbyVisionPulse`](../Probes/DolbyVisionPulse/README.md).
+
+**Verdict.** The route is real Dolby Vision: the panel follows the RPU the engine attaches, not a static HDR10 curve. Measured on an Apple TV 4K (2nd generation, tvOS 27) into an LG C1 ([AE#702](https://github.com/superuser404notfound/AetherEngine/issues/702#issuecomment-6017430221)):
+
+- the FEL route's arm pulsed like AVPlayer's on every patch (for example -55% against -55% at 10 nit),
+- its L1 arm reproduced AVPlayer's different L1 shape,
+- the null arm and the arm with the Dolby attachments removed stayed flat.
+
+That run used a zero-residual enhancement layer on purpose. Not reported yet: the enhancement-layer arms (whether the composed residual itself reaches the panel), the counter arms on the merged stack, and a second television.
 
 ### 4.6 Caveat on the numbers
 
-Every device figure in sections 4.1 to 4.5 came from DEBUG builds: `-Onone`, with the HDMI probe retrying and the memory watermark sampling on every emitted frame. They show the direction and the GPU cost. CPU and memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
+Every device figure in sections 4.1 to 4.5 came from DEBUG builds: `-Onone`, with the HDMI probe retrying and the memory watermark sampling on every emitted frame. They show the direction and the GPU cost, not the release CPU and memory, which still need a release-build measurement. Footprint went from a flat ~390 MB to a plateau of ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
 
 ### 4.7 4:4:4 chroma compose on the A12
 
@@ -319,7 +365,7 @@ The checks run in this order (the code's order: preference, trait, enhancement l
 9. a base layer of unknown size,
 10. a stream the box could not decode twice in real time.
 
-The `el_type` probe (a packet scan and a seek) runs once nothing up to and including the AirPlay receiver check has ruled the route out. So it also runs for a stream that the geometry or the budget then refuses: the MEL / unknown answer outranks the size reasons in the log line, and that precedence needs the probe's answer.
+The `el_type` probe costs a packet scan and a seek, so it runs only once checks 1 to 7 have passed. It still runs for a stream that the geometry or the budget then refuses. That is on purpose: the log line reports a MEL or unknown answer ahead of the size reasons, and that needs the probe's answer.
 
 **The real-time budget** is a pixel rate, base layer plus enhancement layer, from the stream's width, height and frame rate: `DualLayerRouteDecision.maximumPixelsPerSecond`, 311.04 Mpx/s, which is UHD
 3840x2160 at 30 fps plus a 1920x1080 enhancement layer at 30 fps.
@@ -366,7 +412,7 @@ The route decision does not look at the display. With `preferDualLayerDolbyVisio
 
 The native route, by contrast, strips the Dolby Vision for such a display (`CodecRoutePolicy`) and plays the HDR10 base layer. A host that wants the base layer on a non-Dolby-Vision display leaves the flag off, or sets it from what it knows of the display.
 
-The audio trade-off of §3.1 (an E-AC-3 Atmos track plays as its channel-bed core, without the objects unless `objectAudioRendering` is set) applies on this route whatever the display. This is the current behaviour, documented rather than designed; it is not changed here.
+The audio trade-off of §3.1 (an E-AC-3 Atmos track plays as its channel-bed core, without the objects unless `objectAudioRendering` is set) applies on this route whatever the display. This is current behaviour, documented rather than designed.
 
 ### 5.2.3 What the route gives up against the native route
 
@@ -601,7 +647,7 @@ Order matters, because `HardwareVideoDecoder.flush` waits for frames VideoToolbo
 3. Under the lock, lower `draining` and reset pairing and the side-data ring.
 4. Flush the composer's texture cache.
 
-**Why the epoch is retired before draining.** Retiring it after the drain, with a plain `delivery.reset` once the lock was released, left a gap. A VideoToolbox callback landing between that `unlock()` and the `reset` could take a new-epoch ticket and reach `fulfil` before `reset` had run. The ticket was then dropped as still-old-epoch, and `reset` fast-forwarded past it, stalling every following frame until the stall guard skipped the hole.
+**Why the epoch is retired before draining.** Retiring it after the drain, with a plain `delivery.reset` once the lock is released, leaves a gap. A VideoToolbox callback landing between that `unlock()` and the `reset` can take a new-epoch ticket and reach `fulfil` before `reset` has run. The ticket is then dropped as still-old-epoch, and `reset` fast-forwards past it, stalling every following frame until the stall guard skips the hole.
 
 Splitting the reset into a non-blocking enqueue (`resetAsync`, called while still holding the lock) and a wait (`barrier`, called after releasing it) closes that gap: `draining` cannot go false, so no new ticket can be issued, until `barrier()` has confirmed the new epoch is installed. It also keeps a composition that was already in flight before the flush from reaching `onFrame` while `HardwareVideoDecoder.flush()` is still draining. `OrderedDeliveryTests.newEpochTicketFulfilledBeforeResetIsDeliveredIsNotLost` and `DualLayerVideoDecoderTests.flushDoesNotLosePostFlushTicketInTheUnlockToBarrierGap` drive that window directly.
 

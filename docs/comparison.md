@@ -5,9 +5,14 @@ On Apple platforms the choice is usually between two kinds of player:
 - **AVPlayer:** deep OS integration, but only the formats Apple ships.
 - **A VLC- or mpv-based engine:** plays almost anything, but renders its own frames and bypasses the system's Dolby Vision, Atmos and HDR handling.
 
-AetherEngine aims for both: FFmpeg's format coverage on top of VideoToolbox and AVPlayer, so Dolby Vision, Atmos and Match Content keep working. It plays natively whatever AVPlayer can carry (hardware decode, Dolby Vision display, Atmos passthrough), and everything else on its own software path (dav1d, libavcodec).
+AetherEngine aims for both. It puts FFmpeg's format coverage on top of VideoToolbox and AVPlayer, so Dolby Vision, Atmos and Match Content (the TV's automatic HDR and frame-rate switch) keep working.
 
-**KSPlayer** is the closest alternative. It reaches the same result through the same AVPlayer route, but it ships as a full player with its own UI. Its free build is GPL; a paid LGPL tier unlocks AV1 hardware decoding, the full demuxer and decoder set, and a list of playback features its own feature matrix names. AetherEngine is an engine you embed and drive from your own SwiftUI, with that codec and HDR coverage in the open-source core.
+- Whatever AVPlayer can carry plays natively: hardware decode, Dolby Vision display, Atmos passthrough.
+- Everything else plays on the engine's own software path (dav1d, libavcodec).
+
+**KSPlayer** is the closest alternative. It reaches the same result through the same AVPlayer route, but it ships as a full player with its own UI. Its free build is GPL. A paid LGPL tier unlocks AV1 hardware decoding, the full demuxer and decoder set, and a list of playback features its own feature matrix names.
+
+AetherEngine is an engine you embed and drive from your own SwiftUI, with that codec and HDR coverage in the open-source core.
 
 ## Feature comparison
 
@@ -27,7 +32,7 @@ AetherEngine aims for both: FFmpeg's format coverage on top of VideoToolbox and 
 
 **Short version:** all four engines that open Matroska delivered every frame. AetherEngine and KSPlayer drew about 40 mW of GPU power; VLCKit about 6 times that, libmpv more than 20 times. AVPlayer does not open Matroska.
 
-These numbers are a snapshot taken on 2026-09-24 with AetherEngine 7.15.2; later releases are not re-measured here. They are measured on 4K HDR HEVC in Matroska, the container media servers actually serve, at 38 Mbit/s and at 90 Mbit/s (the rate of a UHD remux).
+These numbers are a snapshot taken on 2026-09-24 with AetherEngine 7.15.2. Later releases are not re-measured here. The test files are 4K HDR HEVC in Matroska, the container media servers actually serve, at 38 Mbit/s and at 90 Mbit/s (the rate of a UHD remux).
 
 How it was measured:
 
@@ -35,7 +40,7 @@ How it was measured:
 - The numbers come from [aetherengine-bench](https://github.com/superuser404notfound/aetherengine-bench). This project's author runs it, so its method, its raw data and the cases where AetherEngine does not win are all in that repository.
 - AVPlayer does not open Matroska at all. On MP4, the one container it plays, it uses less than every engine here; see that repository's README.
 - Machine: Apple M1 (MacBookAir10,1), macOS 27.0. HTTP from a local range origin at 1000 Mbit/s shared, 20 ms latency per request. Windowed, 3840x2160 px rendered, 60 s, median of 2.
-- The MacBook Air is fanless: sustained decode can reach thermal pressure, so the protocol has cooldowns between runs and discards throttled windows.
+- The MacBook Air is fanless, so sustained decode can make it throttle. The protocol has cooldowns between runs and discards throttled windows.
 - Versions: AetherEngine 7.15.2, KSPlayer 2.3.4, AVPlayer macOS 27.0, VLCKit 4.0.0-alpha.21, libmpv mpv v0.41.0.
 
 **hevc-4k-hdr10.mkv (38 Mbit/s)**
@@ -73,13 +78,15 @@ Launch failures (crashes that were retried, not refusals, see the aetherengine-b
 **What the columns mean.**
 
 - Power figures are package power with an idle baseline subtracted, so they are attributable to the run and not to the machine.
-- Peak footprint is the kernel's lifetime maximum of the player process's physical footprint (what the system's memory limit acts on), load phase included. RSS is the mean over the measured window. Decoding that happens in a system service (VideoToolbox) is in neither.
+- Peak footprint is the highest physical footprint the kernel saw for the player process over its lifetime, load phase included. That footprint is what the system's memory limit acts on.
+- RSS (resident memory) is the mean over the measured window.
+- Decoding that happens in a system service (VideoToolbox) is in neither.
 - libmpv is measured with `--hwdec=auto-safe` (hardware decode), not mpv's own software-decode default; see "Fairness decisions" in the aetherengine-bench README.
 
 <details>
 <summary>Frame delivery per run, and measurement notes</summary>
 
-Frame delivery and output (median; resolution, bit depth and HDR transfer are informational per engine only, shown as 'varies across repeats' when they disagree, see the aetherengine-bench README). No engine dropped a frame.
+No engine dropped a frame. The table shows frame delivery and output as medians. Resolution, bit depth and HDR transfer are informational per engine only, and show as 'varies across repeats' when they disagree (see the aetherengine-bench README).
 
 | Fixture | Engine, source | Delivered / expected | Output |
 | --- | --- | --- | --- |
@@ -102,9 +109,13 @@ Frame delivery and output (median; resolution, bit depth and HDR transfer are in
 
 Every run rendered into 3840x2160.
 
-**CPU package power** was measured for every run but is not published above: the idle baseline drifts with load enough that one engine's own repeats can disagree more than the column would be used to show between engines. For example, on hevc-4k-hdr10.mkv KSPlayer measured 76 to 267 mW of CPU package power across its own repeats, a 3.5x range. Recorded for every run in Results/; see "Known gaps" in the aetherengine-bench README for the full reasoning.
+**CPU package power** was measured for every run but is not published above. The idle baseline drifts with load so much that one engine's own repeats can disagree more than the column would show between engines. For example, on hevc-4k-hdr10.mkv KSPlayer measured 76 to 267 mW of CPU package power across its own repeats, a 3.5x range. The values are recorded for every run in Results/; see "Known gaps" in the aetherengine-bench README for the full reasoning.
 
-**The 90 Mbit/s rows** come from a second run of the same protocol, build and origin on the same day and machine. A tvOS Simulator had been left running in the background for the first half of the main run, which raised idle package power to 188 to 214 mW (19 to 26 mW once it was shut down). Both hevc-4k-hdr10-90m.mkv baselines failed validation under it, so that fixture was measured again. The hevc-4k-hdr10.mkv baselines were taken under it too and passed; the GPU idle baseline stayed under 0.05 mW throughout, and CPU load, RSS and footprint are not baseline-subtracted, so none of the published columns moved with it.
+**The 90 Mbit/s rows** come from a second run of the same protocol, build and origin, on the same day and machine.
+
+- During the first half of the main run a tvOS Simulator was running in the background. It raised idle package power to 188 to 214 mW (19 to 26 mW once it was shut down).
+- Both hevc-4k-hdr10-90m.mkv baselines failed validation under it, so that fixture was measured again.
+- The hevc-4k-hdr10.mkv baselines were taken under it too and passed. None of the published columns moved with it: the GPU idle baseline stayed under 0.05 mW throughout, and CPU load, RSS and footprint are not baseline-subtracted.
 
 </details>
 

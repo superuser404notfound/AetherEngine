@@ -4,7 +4,12 @@ Thanks for your interest. AetherEngine is the video playback engine behind [Soda
 
 ## Reporting bugs and requesting capabilities
 
-Open an issue using one of the [templates](.github/ISSUE_TEMPLATE). For playback bugs, the source media details (container, video codec and profile, audio codec, HDR / Dolby Vision profile) and any AVPlayer / CoreMedia / VideoToolbox error codes are the single most useful thing you can provide. `ffprobe` output and a sample file make triage dramatically faster.
+Open an issue using one of the [templates](.github/ISSUE_TEMPLATE). For a playback bug, the most useful things you can provide are:
+
+- the source media details: container, video codec and profile, audio codec, HDR / Dolby Vision profile,
+- any AVPlayer / CoreMedia / VideoToolbox error codes.
+
+`ffprobe` output and a sample file make triage dramatically faster.
 
 If the problem is in a host app's UI rather than the engine, report it on that app's tracker instead (the issue chooser links both).
 
@@ -37,10 +42,10 @@ The suite is large (several thousand tests) and cheap (a few minutes), so any be
 
 Why each one:
 
-1. Files named `Issue<N>…Tests.swift` made the suite grow file by file: nobody could see whether a behaviour was already covered, so seek ended up spread over sixteen files and live over thirty-two. Do not rename old files just for this; put a new test where its topic already lives.
-2. A step the test needs before it can measure anything gets no deadline of its own: any finite bound can be overrun on an oversubscribed machine, and then the bound decides the result. The hang catcher is a `.timeLimit` trait, which reports a hang as a hang, with a name.
-3. A full parallel run blocks every pool worker. Measured with 192 workers blocked, the global queue had not started a block after 35 seconds, while a detached thread ran in 3 milliseconds.
-4. Swift cancellation is cooperative, so a test parked in a blocking syscall never sees the `.timeLimit` trait. The job then dies at its own `timeout-minutes` and the log, test name included, is lost. Measured on this suite: a launch helper parked in `FileHandle.availableData` ran past a one minute limit for more than ten, and the only trace was the subprocess in the runner's orphan-process cleanup. Give the cancellation handler whatever ends the call (close the handle, kill the subprocess). `Support/PythonOrigin.swift` is the worked example.
+1. Files named `Issue<N>…Tests.swift` hide coverage: nobody can see whether a behaviour is already tested. That is how seek ended up spread over sixteen files and live over thirty-two. Do not rename old files just for this; put a new test where its topic already lives.
+2. A step the test needs before it can measure anything gets no deadline of its own. Any finite bound can be overrun on an oversubscribed machine, and then the bound, not the code, decides the result. Hangs are caught by a `.timeLimit` trait instead, which reports a hang as a hang, with a name.
+3. A full parallel run blocks every worker of the global dispatch pool. Measured with 192 workers blocked, the global queue had not started a block after 35 seconds, while a detached thread ran in 3 milliseconds.
+4. Swift cancellation is cooperative (a task stops only where it checks for cancellation), so a test parked in a blocking syscall never sees the `.timeLimit` trait. The job then dies at its own `timeout-minutes` and the log, test name included, is lost. Measured on this suite: a launch helper parked in `FileHandle.availableData` ran past a one minute limit for more than ten, and the only trace was the subprocess in the runner's orphan-process cleanup. Give the cancellation handler whatever ends the call (close the handle, kill the subprocess). `Support/PythonOrigin.swift` is the worked example.
 
 CI enforces the mechanical parts with `Scripts/check-test-hygiene.py`: no `try? await Task.sleep` and no `DispatchQueue.global().async` (or `asyncAfter`) under `Tests/`, and no `.timeLimit` under two minutes (a green run has hundreds of tests above 60 s; use `.minutes(3)`). A line that is a real exception says why, with `// hygiene: allow <reason>` on it.
 
@@ -59,7 +64,14 @@ A bug that reproduces in a host app but traces back to decoding, demuxing, the a
 
 ## Documentation, and the tests that hold it to the code
 
-[docs/api.md](docs/api.md) is the public surface an adopter reads; [docs/formats.md](docs/formats.md) and the architecture pages ([overview](docs/architecture.md), [native path](docs/architecture-native.md), [software path](docs/architecture-software.md)) are the depth behind it. [docs/measurements.md](docs/measurements.md) keeps the dated measurements behind the rules. Investigation notes and regression evidence that are not published on the website live in [docs/notes/](docs/notes/README.md). A contract that needs a host action and has no sentence in the docs gets missed, so update the docs in the same commit as the code. These checks hold you to that:
+Update the docs in the same commit as the code. A contract that needs a host action and has no sentence in the docs gets missed. Where things go:
+
+- [docs/api.md](docs/api.md): the public surface an adopter reads.
+- [docs/formats.md](docs/formats.md) and the architecture pages ([overview](docs/architecture.md), [native path](docs/architecture-native.md), [software path](docs/architecture-software.md)): the depth behind it.
+- [docs/measurements.md](docs/measurements.md): the dated measurements behind the rules.
+- [docs/notes/](docs/notes/README.md): investigation notes and regression evidence that are not published on the website.
+
+These checks hold you to that:
 
 - **`PublicAPIDocumentationTests`.** Every public member of the engine, every host-facing public type and every `LoadOptions` field has to be NAMED somewhere in `README.md` or `docs/`. The test cannot judge a paragraph, only catch a symbol with no prose anywhere. A symbol that is public for the CLI or the test suite rather than for hosts goes in the test's `notHostAPI` list with its reason.
 - **`DocumentedConstantsTests`.** Numbers the documentation quotes ("2 GiB cap", "128 kbps per channel", "the 60 s lead window") are pinned to the constants that own them, and a failure names the sentence to fix. Add a number to the docs, add its pin in the same commit.

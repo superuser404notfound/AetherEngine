@@ -44,11 +44,18 @@ What CI runs:
 
 **Older OS versions.** The 7.x line raised the floor from iOS 16, tvOS 17 and macOS 14. A project that still supports those pins the 6.x line with `.upToNextMajor(from: "6.89.1")`.
 
-**AV1 / VP9 registration on older Xcode.** `VTRegisterSupplementalVideoDecoderIfAvailable` first appears in the mobile SDKs of Xcode 26.2. A narrow compile-time guard uses Swift 6.2.3 as a stand-in for that SDK in stock Xcode bundles. In stock Xcode 26.0 / 26.1 it leaves those calls out and keeps hardware queries and the software fallback. It does not mean the rest of the package builds there, and it does not lower the supported toolchain. A separately installed newer Swift toolchain paired with an older SDK is not covered by this guard. The macOS registration path is unchanged.
+**AV1 / VP9 registration on older Xcode.** `VTRegisterSupplementalVideoDecoderIfAvailable` first appears in the mobile SDKs of Xcode 26.2. A narrow compile-time guard handles older stock Xcode:
+
+- It uses Swift 6.2.3 as a stand-in for that SDK in stock Xcode bundles.
+- In stock Xcode 26.0 / 26.1 it leaves those calls out and keeps hardware queries and the software fallback.
+- It does not mean the rest of the package builds there, and it does not lower the supported toolchain.
+- It does not cover a separately installed newer Swift toolchain paired with an older SDK.
+
+The macOS registration path is unchanged.
 
 ## Optional components
 
-Five components are only compiled when a host asks for them. Each sits behind a package trait that is **off by default**.
+Five components are only compiled when a host asks for them. Each sits behind a package trait (a SwiftPM build switch set on the package dependency) that is **off by default**.
 
 | Trait | Compiles and links | Without it |
 | --- | --- | --- |
@@ -57,6 +64,8 @@ Five components are only compiled when a host asks for them. Each sits behind a 
 | `DualLayerDolbyVision` | the Profile 7 FEL dual-layer composer (`DualLayerVideoDecoder`, its Metal composer and the per-frame display metadata); not recommended for distributed apps, see below | a Profile 7 source keeps the native route whatever `preferDualLayerDolbyVision` asks |
 | `DolbyVisionStillReshaping` | the reshaping that turns a Dolby Vision Profile 5 / AV1 Profile 10.0 frame into a still | such a source has no scrub stills, I-frame stills or held picture (`supportsCacheBackedStills` is false); playback is unaffected |
 | `DolbyVisionFelCurves` | the fold of a Profile 7 FEL enhancement layer into the Profile 8.1 RPU on the native route (the stream's mapping kept, the luma residual added to its luma curve per scene) ([Dolby Vision FEL › Curve fold](dolby-vision-fel.md#7-curve-fold-on-the-native-route)) | the native route's Profile 8.1 conversion drops the enhancement layer |
+
+In the table, the channel bridge is the default audio handling (decode, then re-encode as plain channels without heights). The bed regression builds the height layout from the stream's own lossless 7.1, steered by its objects or heights.
 
 **What "off" means.** Without its trait, a component is not in the binary. Its code is not compiled, and a library behind it is neither linked nor resolved (it disappears from the host's `Package.resolved`). The options that ask for it stay in the API, so a host compiles the same either way. They then do nothing, and the session log says why:
 
@@ -69,7 +78,10 @@ To hide a setting your build cannot honour, ask `AetherEngine.OptionalComponent`
 
 ### Profile 7 FEL: prefer `DolbyVisionFelCurves`
 
-Both `DolbyVisionFelCurves` and `DualLayerDolbyVision` bring back a FEL source's enhancement layer, in different ways. **A host without a Dolby Vision licence should build `DolbyVisionFelCurves`.** The composer evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel, steps covered by live Dolby patents (the MMR family runs to 2032). The curve fold leaves every evaluation of the mapping to the platform's licensed decoder.
+**A host without a Dolby Vision licence should build `DolbyVisionFelCurves`.** Both `DolbyVisionFelCurves` and `DualLayerDolbyVision` bring back a FEL source's enhancement layer, in different ways.
+
+- The composer evaluates the RPU's MMR chroma prediction and the enhancement layer on every pixel. The RPU is the Dolby Vision metadata that rides with each frame. These steps are covered by live Dolby patents (the MMR family runs to 2032).
+- The curve fold leaves every evaluation of the mapping to the platform's licensed decoder.
 
 | | `DolbyVisionFelCurves` (curve fold) | `DualLayerDolbyVision` (composer) |
 | --- | --- | --- |
@@ -98,18 +110,20 @@ List the traits on the package dependency:
 
 ## FFmpeg in the same app
 
-Read this if your app links any other FFmpeg, directly or through another player (libVLC, KSPlayer, mpv, FFmpegKit). The engine has to bind to its own FFmpeg, and the link decides that, not the package graph.
+Read this if your app links any other FFmpeg, directly or through another player (libVLC, KSPlayer, mpv, FFmpegKit). The engine has to bind to its own FFmpeg. The linker decides which FFmpeg it gets, not the package graph.
 
 ### One FFmpeg, and it has to be the engine's
 
 **What the host must do:** make sure no second FFmpeg in the app serves the engine's FFmpeg calls. Check the `[FFmpeg]` line the first `init` logs.
 
-AetherEngine calls `avcodec_*`, `avformat_*`, `avutil_*` and `swr_*` as ordinary external symbols. Which binary serves them is decided by the host executable's link, not by the package graph, so a second FFmpeg anywhere in the app can take the calls. Two shapes do it, and neither announces itself:
+AetherEngine calls `avcodec_*`, `avformat_*`, `avutil_*` and `swr_*` as ordinary external symbols. The host executable's link decides which binary serves them, so a second FFmpeg anywhere in the app can take the calls. Two setups do it, and neither announces itself:
 
 - **A static FFmpeg pulled in with `-force_load`.** Its symbols become ordinary definitions inside the executable, and a definition in a `.o` beats a dylib for every other object in the same link.
-- **A dependency that exports the same symbols.** libVLC is the common one. It is a reasonable thing to have beside AetherEngine, since the fallback ladder the API is built around invites exactly that pairing. CocoaPods sorts a pod ahead of a vendored framework, so libVLC's libavcodec wins by default.
+- **A dependency that exports the same symbols.** libVLC is the common one. Keeping it beside AetherEngine is reasonable: the API is built around a fallback ladder (try one player, fall back to another), which invites exactly that pairing. CocoaPods sorts a pod ahead of a vendored framework, so libVLC's libavcodec wins by default.
 
-The engine then runs against headers it was never compiled against: struct layouts, codec ids and the encoder set are whatever the other build decided. The symptoms do not look like a linking problem. They look like an engine defect, specifically in whatever the other build happens to be missing. For example, AE#396 was reported as an audio-bridge defect on five fixtures and two devices, and was a second FFmpeg one major version behind. The engine's only trace was `flac bridge encoder absent from this FFmpeg build`, a true sentence about a build that was not the engine's. That line now names the libavcodec that answered.
+The engine then runs against headers it was never compiled against: struct layouts, codec ids and the encoder set are whatever the other build decided.
+
+The symptoms do not look like a linking problem. They look like an engine defect, in whatever the other build happens to be missing. Example (AE#396): a report of an audio-bridge defect on five fixtures and two devices was a second FFmpeg one major version behind. The engine's only trace was `flac bridge encoder absent from this FFmpeg build`, true about a build that was not the engine's. That line names the libavcodec that answered.
 
 The first `AetherEngine()` in the process logs which FFmpeg answered, once. Install `EngineLog.handler` before creating the first engine to get the line in your own log:
 
@@ -138,17 +152,17 @@ A ladder that keeps KSPlayer, mpv or MobileVLCKit for the formats it already cov
 - The frameworks ship as `AetherLibavcodec`, `AetherLibavformat`, `AetherLibavutil`, `AetherLibswresample`, `AetherLibswscale`, `AetherLibavfilter`, `AetherLibdav1d`, `AetherLibzimg` and `AetherLibzvbi`.
 - The install names follow (`@rpath/AetherLibavcodec.framework/AetherLibavcodec`).
 
-Before the prefix, a package graph holding both did not resolve: SwiftPM target names are unique across the whole dependency graph, and two framework bundles cannot share one path in `App.app/Frameworks/`.
+The prefix is what lets one package graph hold both. SwiftPM target names are unique across the whole dependency graph, and two framework bundles cannot share one path in `App.app/Frameworks/`.
 
-**If the other FFmpeg is a set of dynamic frameworks**, that is the whole fix. The two-level namespace records per reference which dylib a symbol came from. So the engine reaches its libavcodec and the other player reaches its own, in one process, with no link order to win.
+**If the other FFmpeg is a set of dynamic frameworks**, that is the whole fix. Apple's linker uses a two-level namespace: each symbol reference records which dylib it came from. So the engine reaches its libavcodec and the other player reaches its own, in one process, with no link order to win.
 
-**If the other FFmpeg is static**, the rename is not enough, and no rename could be: `_avcodec_open2` is `_avcodec_open2` in every FFmpeg. Its symbols become definitions inside the executable, and the engine, statically linked beside them, binds to those. The fix is to stop linking the engine into the executable:
+**If the other FFmpeg is static**, no rename helps: `_avcodec_open2` is `_avcodec_open2` in every FFmpeg. Its symbols become definitions inside the executable, and the engine, statically linked beside them, binds to those. The fix is to stop linking the engine into the executable:
 
 1. Add a dynamic framework target to your project, say `PlayerEngineKit`, and link the `AetherEngine` product into that target instead of into the app.
 2. Embed the `AetherLib*` frameworks in the app as usual (Xcode does this for you when the package is linked).
 3. Have the app talk only to `PlayerEngineKit`.
 
-The engine's `_av*` references are then resolved when that framework links, against `AetherLibavcodec.framework`, and recorded as coming from it. Whatever the executable defines for its own player no longer takes part. This is the same construction that lets MobileVLCKit's FFmpeg and FFmpegKit coexist today.
+The engine's `_av*` references are then resolved when that framework links, against `AetherLibavcodec.framework`, and recorded as coming from it. Whatever the executable defines for its own player no longer takes part. The same construction lets MobileVLCKit's FFmpeg and FFmpegKit coexist.
 
 Run these two commands once to confirm it, rather than trusting the arrangement:
 
@@ -164,7 +178,7 @@ The engine also reports it: the `[FFmpeg] libavcodec …` line at `init` shows t
 
 ## Privacy manifest
 
-The engine ships a `PrivacyInfo.xcprivacy` in its resource bundle for the required-reason APIs it calls (#920):
+The engine ships a `PrivacyInfo.xcprivacy` in its resource bundle. It declares the required-reason APIs it calls (APIs Apple makes an app justify):
 
 | API category | Reason | Why |
 | --- | --- | --- |

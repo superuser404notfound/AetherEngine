@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Added
 
+- **The documentation is reorganised so readers find the answer first, and rewritten to be read without
+  background.** `docs/architecture.md` is now a short overview with a component diagram; the depth lives in
+  `docs/architecture-native.md`, `docs/architecture-software.md` and `docs/source-map.md`. `docs/formats.md`
+  opens with an at-a-glance table (does it play, and on which route) and is the one routing reference.
+  `docs/cli.md` opens with a task-to-command table and one table of shared flags, and every command has an
+  exit-code table. Dated measurements and investigation history moved to `docs/measurements.md`, and
+  investigation notes to `docs/notes/`. Every page explains its terms at first use and states the rule before
+  the reason. Old section links keep working through "Moved sections" pointers.
 - **The documentation covers what the engine does today.** The second pass of the docs audit filled about 90
   gaps: the host guide gains Picture in Picture on both routes, scrub previews, track choice at load, the
   live replay and resume-clamp contracts, faked-range detection, single-connection providers, log redaction,

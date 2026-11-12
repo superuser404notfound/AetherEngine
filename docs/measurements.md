@@ -1,6 +1,10 @@
 # Measurements
 
-Dated measurements and investigation history that back the current rules in the other docs. Each rule lives on its own page in the present tense; this page keeps the numbers, engine versions and the rounds that led to it. Read it when you need to know why a rule is what it is, or to repeat a measurement. Nothing here is a contract: a later engine may read differently.
+This page keeps the dated measurements behind the rules in the other docs. Read it to learn why a rule is what it is, or to repeat a measurement.
+
+- Each rule lives on its own page, in the present tense. This page keeps the numbers, the engine versions and the rounds that led to it.
+- Each entry opens with what was measured and what it decided, then links the current rule.
+- Nothing here is a contract: a later engine may read differently.
 
 **Contents**
 
@@ -14,24 +18,34 @@ Measured with [`aetherctl`](cli.md) and its fixtures. Each entry names the comma
 
 ### play: fastZap against an own origin (AE#374)
 
+Measured: behind an origin of its own, a fastZap join serves on the upstream's TARGETDURATION, not on the engine's finer re-cut. Driving that shape is why `play` got the profile switch (`--standard-join`).
+
 Current rule: [cli.md › Live join and cushion](cli.md#live-join-and-cushion).
 
-Why `play` got `--standard-join`: `live` has carried the profile switch for its own raw-TS fixture since AE#195, but that fixture has no upstream playlist. The served `#EXT-X-TARGETDURATION` is floored by the UPSTREAM's observed arrival cadence (`LiveCadencePolicy`), which sizes the holdback the first serve waits for. So fastZap against an origin of one's own, the shape a downstream player actually ships, could not be driven from here at all. Measured on the same 1 s-GOP seed, `--preroll 0 --realtime`:
+`live` has carried the profile switch for its own raw-TS fixture since AE#195, but that fixture has no upstream playlist. The served `#EXT-X-TARGETDURATION` is floored by the UPSTREAM's observed arrival cadence (`LiveCadencePolicy`), and that floor sizes the holdback the first serve waits for. So fastZap against an origin of one's own, the shape a downstream player actually ships, could not be driven from here at all. Measured on the same 1 s-GOP seed, `--preroll 0 --realtime`:
 
 - Raw TS with no playlist serves at 1.325 s on TARGETDURATION 1 (holdback 3 s, full cushion). Since AE#670 the engine's own GOP-bound cut carries 1.5x headroom, so that row now seals at 2.
 - The same content behind an `hlsfixture` origin cutting 2 s segments serves on TARGETDURATION **2** (holdback 6 s), although the engine re-cut it at 1 s.
 
 ### play: the decode-path lever (#461)
 
-Current rule: [cli.md › Software path](cli.md#software-path---sw). Before #461, `play --sw` drove the process-global `setForceSoftwarePathForTesting` hook that `live --sw` and `dvr` still use; it now sets `LoadOptions.preferredDecodePath = .software`, the shipping per-session lever.
+No measurement, a change of lever: `play --sw` now sets `LoadOptions.preferredDecodePath = .software`, the shipping per-session lever.
+
+Current rule: [cli.md › Software path](cli.md#software-path---sw).
+
+Before #461, `play --sw` drove the process-global `setForceSoftwarePathForTesting` hook, which `live --sw` and `dvr` still use.
 
 ### play: the live-start hold (AE#440)
 
+Measured: the live-start hold (a still first picture before playback rolls) does not reproduce on this harness, and that is itself the finding. `--live-start-immediately` therefore only drives the engine end of a device A/B.
+
 Current rule: `--live-start-immediately` in [cli.md › Live loads](cli.md#live-loads).
 
-**The hold it addresses does not reproduce on this harness**, and that is itself the finding. Measured on 6 window geometries against the raw-TS fixture at `--realtime --preroll 0` (a shallow window under the holdback, a window exactly at it, and a deep window from `--preroll 6/12/30`): the gap between `layer.isReadyForDisplay=true` and `timeControlStatus=playing` stayed between 10 and 60 ms every time, against 1.5 to 2.8 s reported on an Apple TV 4K over the same shape. Loopback answers at memory speed, so AVPlayer's buffering-rate evaluation concludes at once. The flag drives the engine end of a device A/B; it proves nothing from a Mac. That A/B has since run (AE#440, on 6.53.0) and is what turned the default on. See the live-join section of `api.md` for its numbers.
+Measured on 6 window geometries against the raw-TS fixture at `--realtime --preroll 0` (a shallow window under the holdback, a window exactly at it, and a deep window from `--preroll 6/12/30`): the gap between `layer.isReadyForDisplay=true` and `timeControlStatus=playing` stayed between 10 and 60 ms every time, against 1.5 to 2.8 s reported on an Apple TV 4K over the same shape. Loopback answers at memory speed, so AVPlayer's buffering-rate evaluation concludes at once. So the flag proves nothing from a Mac. The device A/B has since run (AE#440, on 6.53.0), and it is what turned the default on. See the live-join section of `api.md` for its numbers.
 
 ### play: audio delay rounds (AE#464)
+
+Measured: `play` reproduces the AE#464 audio-delay defects without hardware. Each round below shows the log before and after its fix.
 
 Current rule and the healthy readings: [cli.md › Audio delay](cli.md#audio-delay---audio-delay---switch-audio-delay).
 
@@ -60,9 +74,9 @@ Current rule and the healthy readings: [cli.md › Audio delay](cli.md#audio-del
 
 ### Picture probe and segment placement (AE#418, AE#481)
 
-Current rule: [cli.md › Picture probe](cli.md#picture-probe---picture-probe).
+Measured: AVPlayer places a segment where the playlist puts it, and how far a placement sits below its axis is a distance read in seconds, not a property of the source. This is the history of segment placement on the native path; each round lists what it found and the log lines it added.
 
-This is the measurement history of segment placement on the native path. Each round is listed with what it found and the log lines it added.
+Current rule: [cli.md › Picture probe](cli.md#picture-probe---picture-probe).
 
 **The first finding.** AVPlayer presents a segment at the position the PLAYLIST gives it, not at the tfdt it carries, and then plays continuously from there. So a gate that opened below its boundary shifts the whole run by the re-aim (`axisErr=-13.583` on a 13.583 s re-aim, constant for the run).
 
@@ -113,6 +127,8 @@ A seek landing now reads what its run carries, and says so: `#481 the run holdin
 
 ### hlsfixture: TARGETDURATION and window depth (AE#374, AE#447)
 
+Measured: neither padding the advertised TARGETDURATION nor deepening the upstream window changes a fastZap join. Since 6.56.0 the engine does not read the advertised value at all.
+
 Current rule: [cli.md › TARGETDURATION and window depth](cli.md#targetduration-and-window-depth---target-duration---window).
 
 `--target-duration N` advertises a `#EXT-X-TARGETDURATION` independent of the real cut size. `--window N` sets how many segments the sliding window keeps visible. Packagers commonly pad the target duration (`segment + 1`) to widen a client's patience for an unchanged playlist. A downstream host asked whether that padding was what its live joins were paying for. Neither shape could be expressed here before, so the question could not be answered by measurement.
@@ -130,7 +146,7 @@ Measured against pre-cut GOP-aligned segments, `play --live --fast-zap` entering
 | 1 s | 2 | 7 | 2 | 1.003 / 1.005 / 1.010 s |
 | 0.5 s GOP inside 1 s segments | 2 | 3 | 2 | **0.510 s, three times** |
 
-**At 6.34.1, removing the padding changed nothing.** That finding is what AE#447 later turned out to be. The served TARGETDURATION was `max(advertised, ceil(observed arrival cadence), ceil(max own EXTINF), ceil(1.5 x cut target))`. A strict-realtime origin's real inter-arrival gap is always a hair above the nominal cut, so the `ceil` landed on `cut + 1` whether or not the origin advertised it. "The padding is not what you pay for" was right; "there is nothing to pay" was not. Both terms were wrong for the same reason: an arrival interval is a cadence, and `ceil` treats it as a segment duration.
+**At 6.34.1, removing the padding changed nothing.** That finding is the defect AE#447 later fixed. The served TARGETDURATION was `max(advertised, ceil(observed arrival cadence), ceil(max own EXTINF), ceil(1.5 x cut target))`. A strict-realtime origin's real inter-arrival gap is always a hair above the nominal cut, so the `ceil` landed on `cut + 1` whether or not the origin advertised it. "The padding is not what you pay for" was right; "there is nothing to pay" was not. Both terms were wrong for the same reason: an arrival interval is a cadence, and `ceil` treats it as a segment duration.
 
 **From 6.56.0** the advertised value is not read at all (it is printed in the seal line and nowhere else). A measured cadence enters as the TARGETDURATION its patience actually needs, `ceil(gap / 1.5)`, because `1.5 x TD` is the unchanged-playlist tolerance the floor exists to satisfy. On the same 2 s origin advertising 3, measured on this harness:
 
@@ -153,6 +169,8 @@ Deepening the window changes nothing either. The ingest joins exactly three segm
 
 ### hlsfixture: pricing the bounded start (AE#594)
 
+Measured: flooring fastZap's bounded start at the full holdback costs one more segment minus the grace, which matters only at coarse cadences. The stall risk of the shallower window could not be priced on this harness.
+
 Current rule: `AETHER_BOUNDED_START_FLOOR` in [cli.md › TARGETDURATION and window depth](cli.md#targetduration-and-window-depth---target-duration---window).
 
 `fastZap`'s bounded start serves once two segments exist plus a clamped grace. That window can be shallower than the holdback the same manifest advertises. `AETHER_BOUNDED_START_FLOOR=1` is a measurement arm, not a policy: it skips the bounded branch, so the wait ends at the full cushion or at the 30 s outer deadline.
@@ -173,6 +191,8 @@ Both arms against an `hlsfixture` origin of pre-cut GOP-aligned segments, `play 
 **This harness cannot price the other half.** `-16832` never appeared, in any cadence, in either arm, across thirteen runs. Do not read that as "the shallow window is safe". The session here joins at the HEAD of the served window (`cur` starts at the window's first sample and advances 1x) instead of seeking to edge-minus-holdback, so the state the issue is about is never entered. The per-tick `edge=` and `behind=` cannot check that either: `edge` stays pinned at its first value for the whole run and `behind` is derived from it, with or without `--dvr-window`. The stall half needs a field capture or an origin that reproduces the seek, not this table.
 
 ### hlsfixture: an origin that delivers late (AE#684, AE#686)
+
+Measured against an origin that delivers late: the live seal now asks for the whole upstream segment, a join is equalised over the phases of mixed segment lengths, and the first-serve latch (AE#686) is on by default since 7.28.2. The entry also records what a Mac cannot observe about sound against picture.
 
 Current rule: [cli.md › A late-delivering origin](cli.md#a-late-delivering-origin-scriptshls-burst-originpy).
 
@@ -279,9 +299,11 @@ The PICTURE half is measurable here: the same origin over a 24 fps twin that car
 
 ### play: resume landing (AE#724)
 
+Measured: a resume on a long-GOP source moved the software host's clock back to the keyframe's first audio sample, up to a GOP before the target. The clock now stays on the resume target.
+
 Current rule: [cli.md › Resume landing](cli.md#resume-landing-ae724). Fixture and commands are there (`gop240.mp4`, `play --sw --start-position 17.3`).
 
-That is AE#724. The plain clock-advances check could not see it, because the broken session kept advancing, only from the wrong place. A resume on a long-GOP source repositions to the keyframe before its target, so its first decoded audio sample arrives up to a GOP early, and the software host used to move its clock back onto that sample. Ten-second GOPs reproduce it; two-second ones never do:
+The plain clock-advances check could not see AE#724, because the broken session kept advancing, only from the wrong place. A resume on a long-GOP source repositions to the keyframe before its target, so its first decoded audio sample arrives up to a GOP early, and the software host used to move its clock back onto that sample. Ten-second GOPs reproduce it; two-second ones never do.
 
 Before the fix both read `clock re-anchored to first sample: anchor=9.984s (load anchor 17.300s ...)` and `cur=10.8` at the first tick. After it: `cur=18.2` and no re-anchor.
 
@@ -289,23 +311,27 @@ Before the fix both read `clock re-anchored to first sample: anchor=9.984s (load
 
 ### customio --live spool (AE#445, AE#460, AE#461)
 
+Measured: the custom-source live harness found that host reader callbacks ran on the pump's undrained thread (AE#445), and its reload arms showed two reloads that ignored what they were asked (AE#460, AE#461).
+
 Current rule: [cli.md › The `--live` spool](cli.md#the---live-spool-ae445).
 
 **Why the harness exists (AE#445).** Before AE#445 the custom-source live shape had no harness at all. The defect it found (host reader callbacks ran on the pump's undrained thread) was reachable by every custom reader and visible to none of the engine's own buckets.
 
 **The reader arms.** AE#445 round 1 shipped only the Foundation arm and measured ratio 1.00 before the bridge pool and 0.00 after, which looked like the reporter's defect reproduced and fixed. It was not: his adapter `pread`s and allocates nothing, so the run had reproduced the harness's own retention with his signature. A harness that brings the cause with it matches the shape and answers a different question. Only a second arm that allocates nothing can tell those apart.
 
-**`--reload-at` before the AE#460 follow-up.** Before the AE#460 follow-up the same run reported 15.0 MB (61 s of source) and a playhead of 1.90 s: the reopen rewound the host's spool to its base and re-read the whole delivered window.
+**`--reload-at` before the AE#460 follow-up.** Before that follow-up, the `--reload-at` run reported 15.0 MB (61 s of source) and a playhead of 1.90 s: the reopen rewound the host's spool to its base and re-read the whole delivered window.
 
-**`--reload-decode-path` before the AE#461 follow-up.** Before the follow-up the same run logged `#460: reload applying preferredDecodePath` and then `backend native -> native, decoder=VideoToolbox H264 (HW)`: accepted, named in the log, ignored.
+**`--reload-decode-path` before the AE#461 follow-up.** Before that follow-up, the `--reload-decode-path` run logged `#460: reload applying preferredDecodePath` and then `backend native -> native, decoder=VideoToolbox H264 (HW)`: accepted, named in the log, ignored.
 
 **`--host-carry` (AE#445 round 3).** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged block, growing on an exact x1.25 ladder and holding every byte the session had consumed. That factor is Foundation's: `Data` grows a large buffer by `newLength >> 2`, while `av_fast_realloc` adds a sixteenth and FFmpeg's AVIO dynamic buffer a half. So the block is a Swift `Data`. The one `Data` shape that grows like that while its `count` stays tiny is a parse carry consumed from the front with `removeFirst`. That only advances the slice's lower bound and leaves the backing store holding everything below it.
 
 ### audiotap --software (#400)
 
+`audiotap --software` exists because the software audio path had no harness, and that gap was real: a multichannel trap shipped (#400).
+
 Current rule: [cli.md › audiotap](cli.md#audiotap).
 
-That gap is real: with no harness here, a force unwrap that trapped on the FIRST buffer of any multichannel track shipped in 6.1.3 and survived to main (#400). The silent-downmix defect under it only showed once the trap was gone.
+With no harness here, a force unwrap that trapped on the FIRST buffer of any multichannel track shipped in 6.1.3 and survived to main (#400). The silent-downmix defect under it only showed once the trap was gone.
 
 ## Engine architecture
 
@@ -313,17 +339,21 @@ Measurements behind [architecture.md](architecture.md), [architecture-native.md]
 
 ### Segment cutting by decode time
 
+Observed: comparing a packet's DTS against PTS-valued boundaries split GOPs across segments and showed blocky corruption after a rebuffer. That is why every segment now opens on its own random-access point.
+
 Current rule: [architecture-native.md › Cutting segments at runtime](architecture-native.md#cutting-segments-at-runtime).
 
 The earlier code assigned each packet to a segment by its DTS against PTS-valued boundaries. With B-frame reorder, a keyframe whose DTS trailed its PTS fell into the previous segment, so the next segment started mid-GOP and depended on its predecessor. A fresh decode at that boundary (rebuffer recovery) showed brief blocky corruption (#92).
 
 ### Native scrub picture latency
 
+Measured: on a native AVKit scrub the picture arrives a fetch and a decode after the producer restart drains, 1.4 s on a WAN source in the reporting host's capture. So a scrub's window ends when the picture reaches the restarted region, not when the restart drains.
+
 Current rule: [architecture-native.md › Seek events](architecture-native.md#seek-events).
 
-Native AVKit scrubs end their window when the picture reaches the restarted region, not when the producer restart drains: the picture arrives a fetch and a decode later, 1.4 s on a WAN source in the reporting host's capture.
-
 ### Lost subtitle selection after a background teardown
+
+Observed: a background teardown lost an explicitly picked subtitle track, because the reload took its snapshot after the teardown had wiped the state. The same split broke the native host shell (Sodalite#149). That is why a teardown now hands its state to the reload that follows it.
 
 Current rule: [architecture-native.md › What a teardown hands the reload that follows it](architecture-native.md#what-a-teardown-hands-the-reload-that-follows-it).
 
@@ -335,11 +365,15 @@ The native host shell had the same split (Sodalite#149): checking `playbackBacke
 
 ### Dual-layer in-place output metadata
 
+Measured on the Mac only: writing output metadata in place changes no pixel, so the dual-layer base-layer decoder does it (`allowsInPlaceOutputMetadata`).
+
 Current rule: [architecture-software.md › VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
 
-The dual-layer base-layer decoder writes output metadata in place (`allowsInPlaceOutputMetadata`). It was checked on the Mac only: 240 frames of two real FEL clips were bit-identical with and without the copy. A long-GOP picture comparison on the Apple TV decoder is still open.
+The check: 240 frames of two real FEL clips were bit-identical with and without the copy. A long-GOP picture comparison on the Apple TV decoder is still open.
 
 ### Software channel layout mismatch
+
+Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.
 
 Current rule: [architecture-software.md › Audio channel layout and timestamps](architecture-software.md#audio-channel-layout-and-timestamps).
 
@@ -353,6 +387,8 @@ Only 5.0 and 5.1 lined up, which is why nobody noticed. The two functions now li
 
 ### Parked video read wait
 
+Observed on sources slower than real time (AE#1025): the on-demand loop paused at the wrong times, starved the renderer while it waited, and resumed 2 s late. Three rules came out of it: a pause arm, a 20 ms cap on the parked read wait, and a full layer counting as ready on resume.
+
 Current rule: [architecture-software.md › Rebuffering on the on-demand loop](architecture-software.md#rebuffering-on-the-on-demand-loop).
 
 - The on-demand loop pauses only once its pause arm is open: the source has either built `AudioLookaheadPolicy.rebufferResumeLeadSeconds` of lead once, or let the clock run `starvedLeadSeconds` (one second) past the last audio fed (AE#1025). The first keeps an exactly-realtime origin, whose lead sits at its start offset, from pausing at every start. The second catches a source slower than real time from the first byte, which never builds that lead and used to run the clock on over a starved read-ahead with the phase at `.playing`. A seek closes the arm again.
@@ -361,17 +397,21 @@ Current rule: [architecture-software.md › Rebuffering on the on-demand loop](a
 
 ### Live pause read as playing
 
+Observed: before the current `playbackPhase` rule, a live source that merely paused read as `.playing` over a still picture for the whole reader stall timeout. Only the reader's reconnect promoted it to `.stalled`.
+
 Current rule: [architecture.md › Playback status (`playbackPhase`)](architecture.md#playback-status-playbackphase).
 
-- Before that change, a live source that merely paused read as `.playing` over a still picture for the whole reader stall timeout, until the reader's reconnect promoted it to `.stalled`. A host app watching the clock had already reloaded the session, and the fresh join behind the same frozen burst replayed what it had just shown.
+By then a host app watching the clock had already reloaded the session, and the fresh join behind the same frozen burst replayed what it had just shown.
 
 ### Audio host buffering axis
 
+Observed: up to and including 6.30.1 the audio host fed no buffering axis at all. A dead progressive stream (an internet-radio origin dropping the connection) stayed `.playing` with a frozen clock, and a host had nothing but the clock to watch.
+
 Current rule: [architecture.md › Playback status (`playbackPhase`)](architecture.md#playback-status-playbackphase).
 
-- Up to and including 6.30.1 the audio host fed no buffering axis at all, so a dead progressive stream (an internet-radio origin dropping the connection) stayed `.playing` with a frozen clock, and a host had nothing but the clock to watch.
-
 ### Reader stall hidden behind seeking
+
+Measured on a killed LAN origin: the engine's own recovery seeks hid the outage for 29 s and 41 s. So the reader axis now outranks `isSeeking`.
 
 Current rule: [architecture.md › Playback status (`playbackPhase`)](architecture.md#playback-status-playbackphase).
 
@@ -383,11 +423,15 @@ Current rule: [architecture.md › Playback status (`playbackPhase`)](architectu
 
 ### tvOS packet cache disk appends
 
+Measured on an Apple TV 4K: the disk store's appends took 100 to 600 ms while a download ran. That is why the rule below keeps the tvOS packet cache off disk.
+
 Current rule: [architecture-software.md › Storage](architecture-software.md#storage).
 
-Why: on an Apple TV 4K the disk store's appends took 100 to 600 ms while a download ran. The demux thread stalled behind them, and video it had already parked reached the decoder late. AVPlayer also keeps its progressive-download cache in memory on tvOS.
+The demux thread stalled behind those appends, and video it had already parked reached the decoder late. AVPlayer also keeps its progressive-download cache in memory on tvOS.
 
 ### Packet cache producer QoS
+
+Measured on an idle M1: a producer kept in the efficiency class drains about a third of what a responsive one does. So the producer's priority adapts to its reserve instead of staying demoted.
 
 Current rule: [architecture-software.md › Producer thread priority](architecture-software.md#producer-thread-priority).
 
@@ -397,11 +441,15 @@ Current rule: [architecture-software.md › Producer thread priority](architectu
 
 ### Cooperative pool exhaustion on CI
 
+Observed on CI: blocking work parked every thread of Swift's cooperative pool (the shared thread pool async tasks run on) for half a minute at a time. So the full suite has to pass with the pool narrowed to one thread.
+
 Current rule: [architecture.md › Blocking work and the cooperative pool](architecture.md#blocking-work-and-the-cooperative-pool).
 
-**Background.** CI found it: on a 3-core runner the suite parked all three pool threads for half a minute at a time, until a 120 s time limit fired at 151 s, because its watchdog is a task on the same pool. `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1` narrows the pool to one thread and reproduces this on any Mac. The full suite has to pass under it.
+**Background.** On a 3-core runner the suite parked all three pool threads for half a minute at a time, until a 120 s time limit fired at 151 s: the time limit's watchdog is a task on the same pool. `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1` narrows the pool to one thread and reproduces this on any Mac. The full suite has to pass under it.
 
 ### MP4 without composition offsets
+
+Measured through AVFoundation's own decoder: an MP4 without composition offsets, on a stream that reorders pictures, shows 45 of 66 pictures at another picture's time. That is why the native route repairs these files.
 
 Current rule: [architecture-native.md › MP4 without composition offsets](architecture-native.md#mp4-without-composition-offsets).
 
@@ -411,15 +459,15 @@ Reported by @orut34iop; the HEVC case (#699) by @ijuniorfu.
 
 ### Writers that push timestamps
 
+Measured on three reporting files: writers that push decode-order timestamps to keep them monotonic leave B pictures out of order in every player. These readings set the repair's limits: how late a keyframe may be pushed, how far the cutter reaches back, how many pictures a head is sampled for, and the shift clamp.
+
 Current rule: [architecture-native.md › Writers that push timestamps to keep them monotonic](architecture-native.md#writers-that-push-timestamps-to-keep-them-monotonic).
 
 **The problem.** Some writers go one step further: after dropping `ctts` they force the decode-order presentation times to be monotonic. Each B picture (and on some files each anchor too) decoded after another picture is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before it. There is then no ladder to read a step from. The reporting file (H.264 High, 720p, GOP 90) stepped 3003 on 87% of its samples and 1001, 2252, 9009 or 12012 on the rest. The probe skipped it as non-uniform, and QuickTime, the Files app and both engine routes showed the B pictures out of order.
 
-- The VUI is what tells 24 from 23.976 on a short clip whose pushed tail drags the average. On all three reporting files it named the exact rate (23, 29.97 and 29.0002 fps).
+The VUI (the frame-rate field in the stream's own parameter sets) is what tells 24 from 23.976 on a short clip whose pushed tail drags the average. On all three reporting files it named the exact rate (23, 29.97 and 29.0002 fps).
 
-**Pushed keyframes.** The writer pushes keyframes as well, and only ever later. On both reporting files they sat 0 to 4 pictures after the end of the GOP before them, which left a gap or put the next GOP in front of the last pictures of the previous one. So a later IDR continues the sequence before it, unless:
-
-- it is later than the reorder delay plus two and a half pictures (a real discontinuity; a third reporting file at 29 fps kept its keyframes four pictures late for a hundred seconds), or
+**Pushed keyframes.** The writer pushes keyframes as well, and only ever later. On both reporting files they sat 0 to 4 pictures after the end of the GOP before them, which left a gap or put the next GOP in front of the last pictures of the previous one. So a later IDR continues the sequence before it. The exception is an IDR later than the reorder delay plus two and a half pictures, which is a real discontinuity. A third reporting file at 29 fps kept its keyframes four pictures late for a hundred seconds.
 
 **Clock drift.** Counting alone follows the stated rate, and the writer's clock is not quite that (the third file states 29.0002 fps and writes 29.003). The chain drifted 61 ms behind the writer over 19 minutes and overlapped 3 times where an earlier keyframe pulled it back. A continued sequence therefore also leans toward the earliest origin the pictures before it point to, by at most an eighth of a picture per GOP, which removed both. (The writer only ever pushes a picture later, so the earliest origin is the nearest the truth.) A seek landing holds its first **8 pictures** and takes the earliest origin they point to in the same way.
 
@@ -431,6 +479,8 @@ Current rule: [architecture-native.md › Writers that push timestamps to keep t
 **Shift clamp.** The shift is what puts the first keyframe on the stream's start time. It is clamped to **16 pictures** because this writer left the keyframe four pictures ahead.
 
 ### Clamped timestamp ladders
+
+Measured: the repair for clamped timestamp ladders takes every generated twin from up to 169 backward steps to 0.
 
 Current rule: [architecture-native.md › Writers that push timestamps to keep them monotonic](architecture-native.md#writers-that-push-timestamps-to-keep-them-monotonic).
 
@@ -447,6 +497,8 @@ The repaired fixtures now demux to the healthy twin's timestamps, including the 
 
 ### Matroska slots in coding order
 
+Measured on a generated twin: a Matroska writer that hands out presentation slots in coding order makes 15 of 30 frame times step backwards. The repair moves each slot to the picture displayed there, which takes that to 0.
+
 Current rule: [architecture-native.md › Matroska with presentation slots in coding order](architecture-native.md#matroska-with-presentation-slots-in-coding-order).
 
 **The problem.** Matroska block timestamps are presentation timestamps by specification, and the format has no composition-offset table to lose. A writer that fills them packet by packet while the bitstream reorders pictures has therefore not lost anything: every presentation slot is still in the file. Each one just arrived attached to the picture that was *decoded* at that position rather than the one that is *displayed* there. On the reporting asset the first slots are 0, 40, 73, 107, 140, and the decoder emitted them as 0, 73, 107, 140, 40: one stepped-back presentation clock per mini-GOP for the length of the file. Measured through the engine's own software decoder on a generated twin, 15 of 30 frame times stepped backwards before the repair and 0 after (#511).
@@ -459,31 +511,33 @@ Current rule: [architecture-native.md › Matroska with presentation slots in co
 
 Current rule: [architecture-native.md › Sharing the link with video](architecture-native.md#sharing-the-link-with-video).
 
-Measured on a 1.4x-headroom bench, far-seek landings improved about 45% at the median and the side reader's share of the link halved.
+Measured on a bench with 1.4x link headroom: giving video priority over the subtitle side reader improved far-seek landings about 45% at the median and halved the side reader's share of the link.
 
 ### Subtitle cue pipeline reports
 
+Field reports behind the subtitle cue pipeline: each paragraph below names the rule a report set and what the viewer saw before it (the "report:" figures).
+
 Current rule: [architecture-native.md › Subtitle cue pipeline](architecture-native.md#subtitle-cue-pipeline).
 
-- **Every session reads from 15 s behind its landing (AE#1022)**, in either role. Before, it read from 2 s behind and claimed its coverage only from the landing itself, so a set that began just before a start position or a far seek stayed unproven at any reach.
+**Reading from 15 s behind the landing (AE#1022).** Every session reads from 15 s behind its landing, in either role. Before, it read from 2 s behind and claimed its coverage only from the landing itself, so a set that began just before a start position or a far seek stayed unproven at any reach.
 
-- Without this, the drain window's forward edge decides the end whenever it falls between a set and its clear: the set publishes open, the cursor moves past it, and the next thing to touch it is a composition at the next landing, tens or hundreds of seconds later (report: 3.55 s authored, 76.7 s delivered, and 817 s in the same session).
+**Ending a PGS cue at the next stored packet.** Without that close, the drain window's forward edge decides the end whenever it falls between a set and its clear: the set publishes open, the cursor moves past it, and the next thing to touch it is a composition at the next landing, tens or hundreds of seconds later (report: 3.55 s authored, 76.7 s delivered, and 817 s in the same session).
 
-- Where the store genuinely has nothing after a set (its harvest frontier, a stream cut short), the cue stays open and #357's boundary close still owns it. Inventing an end there is the laundering this replaced.
+Where the store genuinely has nothing after a set (its harvest frontier, a stream cut short), the cue stays open and #357's boundary close still owns it. Inventing an end there is the laundering this replaced.
 
 **The last resort: the seek boundary (#357).** A seek can outrun the successor, and the retention prune cannot help (it filters on `endTime`, which a placeholder end never ages out of). So a jump past an open cue used to leave it in the published window, covering the new playhead until the next composition displaced it. On a seek, the drain now closes every still-open cue that began before its reconstruction window (playhead minus the 15 s backscan) at that window's start: past that line nothing is re-decoded, so nothing there can be confirmed as still open.
 
-**The problem.** After a seek, the pump restarts behind the landing and fills forward, while the store still holds an island the previous run harvested further ahead. The drain window then reads as "packets, hole, packets". Decoding across that hole carries the drain cursor to its far side, and the cursor only moves forward: the hole's packets land a second later and are never read. A stretch of the film then carries no subtitles at all until some later seek resets the window behind it, and the set before the hole is closed at the island rather than at its own clear (report: eleven authored sets delivered as two).
+**Holes in the packet store.** After a seek, the pump restarts behind the landing and fills forward, while the store still holds an island the previous run harvested further ahead. The drain window then reads as "packets, hole, packets". Decoding across that hole carries the drain cursor to its far side, and the cursor only moves forward: the hole's packets land a second later and are never read. A stretch of the film then carries no subtitles at all until some later seek resets the window behind it, and the set before the hole is closed at the island rather than at its own clear (report: eleven authored sets delivered as two).
 
-- There is no other tick budget (#941 round 3). Ticks ran on wall time and expired during seeks and rebuffers while the playhead stood still, which decoded the island over the sets the refill was about to harvest.
+There is no other tick budget (#941 round 3). Ticks once ran on wall time and expired during seeks and rebuffers while the playhead stood still, which decoded the island over the sets the refill was about to harvest.
 
-**Three runs meeting (#941).** Order still sees only half of it. Seek past the producer's front and straight back into the stretch that jump skipped, and three runs meet: the original one up to just past the landing, the forward one's island further on, and the restart behind the landing that has not written anything yet. The island was harvested after the near side, so the sequence ASCENDS across the hole, no pair descends, and the first tick decoded straight across, losing every set the restart then harvested in between (report: seven consecutive sets on a 1x link). A re-harvest of the island does the same to a wait that did fire, because it stamps the island newer than the held position.
+**Three runs meeting (#941).** Harvest order (the drain stops where the store's packet sequence runs backwards, the sign of two runs meeting) still sees only half of it. Seek past the producer's front and straight back into the stretch that jump skipped, and three runs meet: the original one up to just past the landing, the forward one's island further on, and the restart behind the landing that has not written anything yet. The island was harvested after the near side, so the sequence ASCENDS across the hole, no pair descends, and the first tick decoded straight across, losing every set the restart then harvested in between (report: seven consecutive sets on a 1x link). A re-harvest of the island does the same to a wait that did fire, because it stamps the island newer than the held position.
 
 **The ledger decides alone (#1021).** Order also sees holes that are not there. A track selected at load starts the forward prefetch with the session, so the prefetch stores the next 75 s first. The main reader then reads each of those packets again a few seconds ahead of the playhead, and a re-harvest takes the fresh sequence. Every pair at the main reader's front descends, and the drain stopped at each one: it never got more than about 4 s ahead of the playhead, so a host's advance offset showed nothing until the first seek.
 
-- **Release on the far side.** A wait now ends when the playhead closes on the FAR side of the hole (within `subtitleDrainHarvestGapReleaseLeadSeconds`), not on the near one. A refill at about 1x keeps the playhead just behind the filling run, so it passes the last packet before the hole while the hole is still ahead, and releasing there decoded the island over the sets the refill was a second from harvesting.
+**Release on the far side.** A wait now ends when the playhead closes on the FAR side of the hole (within `subtitleDrainHarvestGapReleaseLeadSeconds`), not on the near one. A refill at about 1x keeps the playhead just behind the filling run, so it passes the last packet before the hole while the hole is still ahead, and releasing there decoded the island over the sets the refill was a second from harvesting.
 
-**The problem.** A hole behind the playhead has a third face: the landing itself. The gate that reconstructs the active line at a seek target seeds it from the newest set decoded behind the playhead, and that set is the active line only if nothing on its stream happened in between. The store's silence is read as that proof, and over a stretch nobody read, it proves nothing. A run re-aimed just after it harvested a set leaves that set's own clear on the far side of the skipped ground. The set then decodes at the landing looking unclosed and publishes over the new scene, ending at the next stored packet, which is the far side of the authored silence rather than its own successor (report: a two-second sound-effect caption standing ten seconds over the wrong scene, on both an Apple TV 4K and a Mac).
+**The landing after a seek.** A hole behind the playhead has a third face: the landing itself. The gate that reconstructs the active line at a seek target seeds it from the newest set decoded behind the playhead, and that set is the active line only if nothing on its stream happened in between. The store's silence is read as that proof, and over a stretch nobody read, it proves nothing. A run re-aimed just after it harvested a set leaves that set's own clear on the far side of the skipped ground. The set then decodes at the landing looking unclosed and publishes over the new scene, ending at the next stored packet, which is the far side of the authored silence rather than its own successor (report: a two-second sound-effect caption standing ten seconds over the wrong scene, on both an Apple TV 4K and a Mac).
 
 ## Host API
 
@@ -491,24 +545,28 @@ Measurements and API history behind [api.md](api.md).
 
 ### The clock after `.ended`
 
-Current rule: [api.md › `.ended` is terminal](api.md#ended-is-terminal).
+Measured: two paths kept their clock running past the end of media, so a session left standing after `.ended` published a growing position. Both park now.
 
-History:
+Current rule: [api.md › `.ended` is terminal](api.md#ended-is-terminal).
 
 - Through 6.28.0 the software path's master clock kept its rate past end of media, so a session left standing published a position that grew without bound (20.13 s on a 12.0 s source after 20 s, against 11.97 s from a native session on the same file). A host reading the clock after `.ended` on those builds sees that, not a drifting session (AE#374).
 - The audio-only path (a source without a video track, decoded through FFmpeg) had the same defect through 7.27.0 and parks the same way since (AE#694).
 
 ### Live resume clamp
 
+Measured: a live resume whose position had slid out of the window moved silently. That is why `liveResumeClamped` exists.
+
 Current rule: [api.md › Live: a resume that had to move](api.md#live-a-resume-that-had-to-move).
 
-Measured on the harness with a 30 s window and a 70 s pause: the playhead sat at 93881.2, the window slid to 93890.0...93920.0 underneath it, and the resume landed at 93895.0 without a word. A viewer who paused a match came back to it continuing somewhere else, with nothing on screen to say why. That is why `liveResumeClamped` exists.
+On the harness, with a 30 s window and a 70 s pause, the playhead sat at 93881.2, the window slid to 93890.0...93920.0 underneath it, and the resume landed at 93895.0 without a word. A viewer who paused a match came back to it continuing somewhere else, with nothing on screen to say why.
 
 ### Live join: sealing over the upstream segment
 
+Measured against late-delivering origins: sealing a live join over the whole upstream segment cuts `-12888` errors and stalls, at the cost of a deeper holdback. The seal (the TARGETDURATION the engine serves, which sets the holdback AVPlayer keeps behind the live edge) is bounded by what the join pays for.
+
 Current rule: [api.md › Where a live start's seconds go](api.md#where-a-live-starts-seconds-go).
 
-Why `.fastZap` carries 1.5 x GOP headroom: (A broadcast whose GOPs ran 1.0 to 2.4 s sealed TARGETDURATION 1 on its first three and then broke `EXTINF <= TD` on every longer one, AE#670.)
+`.fastZap` carries 1.5 x GOP headroom because a broadcast whose GOPs ran 1.0 to 2.4 s sealed TARGETDURATION 1 on its first three GOPs and then broke `EXTINF <= TD` on every longer one (AE#670).
 
 #### An ingested HLS upstream: sealing over the whole upstream segment (AE#684)
 
@@ -569,6 +627,8 @@ The seal is bounded three ways:
 
 ### Live join: filling the cushion from the origin's window
 
+Measured: joining deeper into an origin's own window takes the first picture from 2.22 s to 0.20 s on 2 s segments, so the join fills its cushion from that window (6.77.0).
+
 Current rule: [api.md › An HLS source with its own window fills the cushion at the join](api.md#an-hls-source-with-its-own-window-fills-the-cushion-at-the-join).
 
 #### An HLS source with its own window fills the cushion at the join (6.77.0)
@@ -591,6 +651,8 @@ The spread is the second half of the finding: before the change, the number depe
 - It does not touch a source with no playlist at all (raw MPEG-TS over HTTP). There is no window to enter further back into, and the content does not exist yet.
 
 ### Live join: the hold after the first serve
+
+Measured on an Apple TV 4K: after a live serve, AVPlayer can hold the first picture still for 1.5 to 2.8 s. `liveJoinStartsImmediately`, on by default since 6.55.0, cuts that tail short.
 
 Current rule: [api.md › The tail after the first serve, and which signal survives it](api.md#the-tail-after-the-first-serve-and-which-signal-survives-it).
 
@@ -630,14 +692,18 @@ A hold on an item that cannot play yet is now left alone (`leaving the stall-avo
 
 ### `seekableLiveRange` before it asked the cache
 
+Measured on the loopback harness: a `seekableLiveRange` computed by arithmetic alone over-promised the rewind depth. It now asks the cache.
+
 Current rule: [api.md › The rewind depth a live session really has](api.md#the-rewind-depth-a-live-session-really-has).
 
-History: `seekableLiveRange` used to be `max(0, edgeTime - dvrWindowSeconds) ... edgeTime`, pure arithmetic that never asked the cache. Two regimes where that over-promised, both measured on the loopback harness:
+`seekableLiveRange` used to be `max(0, edgeTime - dvrWindowSeconds) ... edgeTime`, pure arithmetic that never asked the cache. It over-promised in two regimes:
 
 - **The session's own start.** A session that joined a source already 181 s into its timeline advertised a floor of 0.00 for its whole run; a seek to 0.20 landed at 181.66, the first position ever written. The over-promise is exactly the join offset, so it is small on a source whose timeline starts with the session and large on one that does not.
 - **Retention shallower than the window.** With `dvrWindowSeconds: 30` on 1 s segments, the cache kept 24 s, and the advertised bound claimed 30.
 
 ### Subtitle offset reach and prefetch cost
+
+Measured with `aetherctl` over HTTP: what a subtitle offset reach and the subtitle prefetch cost in reads from the source.
 
 Current rule: [api.md › Cue retention](api.md#cue-retention).
 
@@ -647,7 +713,7 @@ Current rule: [api.md › Cue retention](api.md#cue-retention).
 
 ### API history notes
 
-Each note starts with the API it belongs to; the current rule is that API's section in [api.md](api.md).
+Short notes on how an API behaved before its current rule. Each note starts with the API it belongs to; the current rule is that API's section in [api.md](api.md).
 
 - **Software-path escalation.** Before 7.9.0 a native item AVPlayer refused on its merits always ended as `.error`; `escalatesToSoftwarePath = false` restores that.
 - **Lapsed credentials.** Before the 401/403 ladder, twelve unproductive reconnects took about 80 s with the same refused header.

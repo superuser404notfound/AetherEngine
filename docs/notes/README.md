@@ -1,6 +1,8 @@
 # Investigation notes
 
-These pages are investigation notes and regression evidence: how a defect was reproduced, the fixtures that pin it, and the numbers that showed the fix. They are kept in the repository for maintainers and reporters, and they are not published on the website. The current behaviour lives in the published docs, which link here where a note backs a rule.
+These pages are investigation notes and regression evidence: how a defect was reproduced, the fixtures (test media files) that pin it, and the numbers that showed the fix.
+
+They are for maintainers and reporters and are not published on the website. The current behaviour lives in the published docs, which link here where a note backs a rule.
 
 | Note | What it covers |
 | --- | --- |

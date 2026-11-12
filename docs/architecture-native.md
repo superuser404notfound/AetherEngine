@@ -1,8 +1,24 @@
 # Architecture: the native route
 
-The native route is the default for video: the engine demuxes the source, remuxes it into HLS with fragmented MP4 segments, serves that from a local HTTP server, and lets `AVPlayer` decode and present it. This page covers that route in depth, plus the parts of a session that sit around it: timestamp repairs for broken files, the route variants (remote HLS, HLS ingest, DASH), trick play, the subtitle cue pipeline, audio routes, backgrounding, Now Playing, source connections, shared outputs and live sources.
+The native route is the default for video. The engine reads the source file, repackages its streams as HLS with fragmented MP4 segments, serves that from a local HTTP server, and lets `AVPlayer` decode and present it. Apple's stack does all the decoding.
 
-Start with the overview in [architecture.md](architecture.md). The software host has its own page, [architecture-software.md](architecture-software.md).
+This page covers that route in depth, plus the parts of a session that sit around it: timestamp repairs for broken files, other ways a source reaches AVPlayer (remote HLS, HLS ingest, DASH), trick play, subtitles, audio routes, backgrounding, Now Playing, source connections, shared outputs and live sources.
+
+Start with the overview in [architecture.md](architecture.md). The other route, the **software host** (the engine decodes with FFmpeg and renders the frames itself), has its own page: [architecture-software.md](architecture-software.md).
+
+**Terms used throughout this page:**
+
+| Term | Meaning |
+| --- | --- |
+| demux / remux | Split a container (MKV, MP4, MPEG-TS) into its compressed audio and video streams / write those streams into another container without re-encoding. |
+| loopback | The engine's local HTTP server on `127.0.0.1`, and the route that plays through it. |
+| producer | `HLSSegmentProducer`, the loop that reads packets from the demuxer and writes HLS segments. |
+| pump | The producer's source-reading loop. It "parks" (pauses reading) once it is far enough ahead of the playhead. |
+| segment plan | The list of segment boundaries the playlist advertises before any segment exists. |
+| PTS / DTS | Presentation and decode timestamp of a compressed picture (what `CMSampleBuffer` calls presentation and decode time). |
+| composition offset | PTS minus DTS. It is non-zero when the encoder reorders pictures (B-frames). |
+| GOP | Group of pictures: a keyframe and the pictures that depend on it. |
+| VOD / live | A finite title with a known duration / a stream that keeps growing. |
 
 Contents:
 
@@ -25,9 +41,9 @@ Contents:
 
 ## Native AVPlayer pipeline (default)
 
-The native path lets Apple's stack do the decoding:
+The native path works in four steps:
 
-1. libavformat demuxes the source.
+1. libavformat (FFmpeg's container library) demuxes the source.
 2. The elementary streams are re-muxed on the fly into HLS-fMP4 (HLS with fragmented MP4 segments).
 3. A local HTTP server on an ephemeral port serves them. The player is handed `127.0.0.1:<port>/<session-token>/...`.
 4. `AVPlayer` plays that playlist. Apple's stack does all decode, all HDR / Dolby Vision signaling over HDMI, and all audio routing.
@@ -38,7 +54,13 @@ The server listens on all interfaces so an AirPlay receiver can reach it over th
 - a cap of 32 connections, 24 of them for non-loopback peers,
 - a 10 s head deadline for unauthenticated connections.
 
-This path handles HEVC, progressive H.264 and, on devices with a hardware AV1 decoder, AV1, which AVPlayer's HLS-fMP4 pipeline reliably accepts. Interlaced H.264 goes to the software path for deinterlacing (#107). Atmos passthrough, the DV HDMI handshake, and HDR10 / HDR10+ system-side tone-mapping all live on this path.
+This path handles the codecs AVPlayer's HLS-fMP4 pipeline reliably accepts:
+
+- HEVC,
+- progressive H.264,
+- AV1, on devices with a hardware AV1 decoder.
+
+Interlaced H.264 goes to the software path, which can deinterlace it (#107). Atmos passthrough, the Dolby Vision (DV) HDMI handshake, and HDR10 / HDR10+ tone-mapping by the system all live on this path.
 
 ```
 Source URL ──► Demuxer ──► [FelCurveLookahead] ──► HLSSegmentProducer ──► SegmentCache
@@ -56,77 +78,104 @@ Source URL ──► Demuxer ──► [FelCurveLookahead] ──► HLSSegmentP
                                                                                  └─► AVR / speakers (Atmos via MAT 2.0)
 ```
 
-`VideoSegmentProvider` answers the server's requests from the cache and restarts the producer when a request falls outside it. The optional [Dolby Vision FEL stages](architecture-software.md#dolby-vision-profile-7-fel) and the [object-audio render](#audio-routes-and-object-audio) plug into this chain; the AVPlayer-output FEL route also taps the producer's reads.
+What the boxes do:
 
-**Why HLS-fMP4 instead of handing `AVPlayer` the source URL.** AVPlayer's progressive-download path does not accept arbitrary MKV containers. Even for MP4 it is brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants. HLS-fMP4 is the most permissive input AVPlayer has. libavformat's `hls` muxer produces bytes identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
+- `HLSSegmentProducer` (the producer) writes the segments into `SegmentCache`. Its `AudioBridge` re-encodes audio AVPlayer cannot take.
+- `VideoSegmentProvider` answers the server's requests from the cache. When a request falls outside the cache, it restarts the producer there.
+- `HLSLocalServer` is the loopback HTTP server.
+
+Two optional stages plug into this chain: the [Dolby Vision FEL stages](architecture-software.md#dolby-vision-profile-7-fel) (FEL is the full enhancement layer of a Dolby Vision profile 7 disc; the "fold" moves its brightness effect into the Dolby Vision metadata so AVPlayer can play the base layer alone) and the [object-audio render](#audio-routes-and-object-audio). The AVPlayer-output FEL route also taps the producer's reads. On the output side, Atmos reaches the receiver wrapped in MAT 2.0 (Dolby's container for sending Atmos over HDMI).
+
+**Why HLS-fMP4 instead of handing `AVPlayer` the source URL.** HLS-fMP4 is the most permissive input AVPlayer has.
+
+- AVPlayer's progressive-download path does not accept arbitrary MKV containers.
+- Even for MP4 it is brittle around Dolby Vision sample-description quirks and EAC3 `dec3` box variants.
+- libavformat's `hls` muxer produces bytes identical to `ffmpeg -f hls -hls_segment_type fmp4`, which is what Apple's HLS spec is defined against.
 
 ### Segment plan
 
-The playlist's segment boundaries come from a keyframe-aligned plan built in `HLSVideoEngine+SegmentPlanning.swift`. It mirrors the `hls` muxer's cut rule: segment N ends at the first IRAP (a random-access keyframe) at or after `(N+1) * targetSegmentDuration`.
+A VOD playlist lists every segment before any of them exists, so the engine must know every boundary up front. These boundaries come from a keyframe-aligned plan built in `HLSVideoEngine+SegmentPlanning.swift`. It mirrors the `hls` muxer's cut rule: segment N ends at the first IRAP (a random-access keyframe) at or after `(N+1) * targetSegmentDuration`.
 
-The plan needs the source's keyframe positions:
+The plan needs the source's keyframe positions, read from the container's keyframe index:
 
-- **MKV / MP4:** from a brief cue prewarm, a bounded seek that loads the Cues / `stss` index.
-- **MPEG-TS / M2TS:** only whatever `avformat_find_stream_info` plus that seek happened to scan.
+- **MKV / MP4:** from a brief cue prewarm, a bounded seek that loads the index (Matroska Cues, or the MP4 `stss` sync-sample table).
+- **MPEG-TS / M2TS:** these have no index, so only whatever `avformat_find_stream_info` plus that seek happened to scan.
 
-`keyframeIndexIsTrustworthy` runs three checks before trusting that index. If one fails, the engine uses a uniform-stride plan instead.
+`keyframeIndexIsTrustworthy` runs three checks before trusting that index. If one fails, the engine uses a uniform-stride plan instead (boundaries at even intervals).
 
 | Check | Rule | What it catches |
 | --- | --- | --- |
 | Gap | The largest gap between consecutive keyframes stays under a cap. | A clustered TS index gaps by thousands of seconds. Trusting it builds a first segment thousands of seconds long, which the `frag_custom` muxer buffers whole in RAM (#64). |
-| Coverage | First to last indexed keyframe spans at least one `targetSegmentDuration`. | A remote MKV whose Cues tail read fails. The prewarm loads nothing, and only the open-time keyframes from the first few seconds survive. Their gaps are tiny, so the gap check passes, but no keyframe reaches the first segment boundary. The plan would collapse into one whole-file segment, from which AVPlayer loads zero tracks (`kFigAssetError_TrackNotFound`, #91). |
-| Tail | The coverage reaches within 60 s of the source duration. | A dense index that stops minutes short is a partial scan (an MKV whose Cues are missing or point past EOF leaves only what the capped prewarm walked). Trusting it cuts a last segment from the final scanned keyframe to the end of the title, which the producer can never finish (PR #703). |
+| Coverage | First to last indexed keyframe spans at least one `targetSegmentDuration`. | A remote MKV whose Cues tail read fails. The prewarm loads nothing; only the keyframes seen at open (the first few seconds) survive. Their gaps are tiny, so the gap check passes, but no keyframe reaches the first segment boundary. The plan would collapse into one whole-file segment, from which AVPlayer loads zero tracks (`kFigAssetError_TrackNotFound`, #91). |
+| Tail | The coverage reaches within 60 s of the source duration. | A dense index that stops minutes short is a partial scan, for example an MKV whose Cues are missing or point past EOF, so only what the capped prewarm walked is known. Trusting it cuts a last segment from the final scanned keyframe to the end of the title, which the producer can never finish (PR #703). |
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
 
 ### Cutting segments at runtime
 
-The producer follows the plan with `VODSegmentCutter`, a keyframe-gated cut in decode order. A segment opens only at the IRAP that reaches the next boundary. That IRAP is the segment's first sample, and its open-GOP leading pictures stay with it. This matches the live path and the `hls` muxer.
+Every segment starts on its own random-access point and never depends on the segment before it. So a fresh decode at a boundary (rebuffer recovery) shows no corruption (#92).
 
-So every segment starts on its own random access point and never depends on its predecessor, and a fresh decode at a boundary (rebuffer recovery) shows no corruption (#92). Background: [measurements.md, Segment cutting by decode time](measurements.md#segment-cutting-by-decode-time).
+The producer follows the plan with `VODSegmentCutter`, a cut in decode order that waits for a keyframe:
 
-**Which timestamp "reaches" a boundary depends on the container.** The plan's boundaries are the container's own index entries, and containers disagree on what an entry means: a mov/mp4 sample table holds decode times, a Matroska Cue holds a presentation time. So the gate compares a packet on the plan's own axis (`PlanBoundaryAxis`, picked from the demuxer's format name). Both mismatches break playback:
+- A segment opens only at the IRAP that reaches the next boundary. That IRAP is the segment's first sample.
+- Its open-GOP leading pictures (pictures after the keyframe in decode order that display before it) stay with it.
+- This matches the live path and the `hls` muxer.
+
+Background: [measurements.md, Segment cutting by decode time](measurements.md#segment-cutting-by-decode-time).
+
+**Which timestamp "reaches" a boundary depends on the container.** The plan's boundaries are the container's own index entries, and containers disagree on what an entry means:
+
+- a mov/mp4 sample table holds decode times,
+- a Matroska Cue holds a presentation time.
+
+So the gate compares a packet on the plan's own axis (`PlanBoundaryAxis`, picked from the demuxer's format name). Each mismatch breaks playback:
 
 - **Presentation packet against decode boundaries.** A keyframe could reach boundaries beyond its own by its composition offset (a couple of frames on an ordinary encode, 3 s on a remux with an edit list). That used up plan indices that never opened a segment while the playlist still offered them (#358).
 - **Decode packet against presentation boundaries.** No keyframe reaches its own boundary on any Matroska file whose video has composition offsets, which is every MKV with B-frames. The gate never opens on the planned IRAP.
 
-  Audio (routed by boundary, not gated) opens each segment instead, so every segment begins mid-GOP, about one IRAP below its own first random-access point. AVPlayer does not notice while it decodes through the boundaries. The first time it has to decode from one, it fails with `CoreMediaErrorDomain -19602`, at a position that depends on the encode rather than on elapsed time (AE#561).
+  Audio is routed by boundary, not gated, so audio opens each segment instead. Every segment then begins mid-GOP, about one IRAP below its own first random-access point. AVPlayer does not notice while it decodes straight through the boundaries. The first time it has to start decoding at one, it fails with `CoreMediaErrorDomain -19602`. Where that happens depends on the encode, not on elapsed time (AE#561).
 
 `PlanBoundaryAxisTests` pins this with one HEVC stream muxed into both containers, where only the timestamps differ.
 
 ### AVC configuration changes
 
-**AVC VOD configuration changes are judged before native muxing.** `H264ConfigurationTracker` catches an H.264 VOD stream whose configuration changes mid-title, before the changed sample reaches the native muxer.
+**AVC VOD configuration changes are judged before native muxing.** Some H.264 (AVC) VOD streams change their decoder configuration mid-title. The engine does not rely on a static VOD playlist refreshing an `EXT-X-MAP` (the init segment that carries the configuration) after AVPlayer has already loaded it. Instead, `H264ConfigurationTracker` catches the change before the changed sample reaches the native muxer, and hands the session to the software path.
 
-- It starts from the producer's effective `avcC`, follows length-prefixed SPS/PPS in NAL order, and checks the SPS referenced by each IDR against that baseline by its decoder signature (profile through cropping). PPS, VUI and level do not count, because the native decoder takes them in band.
-- On a mismatch the pump exits with a typed reason before the changed sample is written. The session keeps the verdict if the pump finishes before its owning load is installed. Producer epoch and load generation checks reject superseded events.
-- Recovery is the existing `SoftwarePathEscalation` takeover, under its normal route and host opt-in constraints. The rebuild starts from the pending user seek or the actual playhead, never from the producer's read-ahead position.
-
-This avoids relying on a static VOD playlist refreshing an `EXT-X-MAP` after it has already been loaded.
+- **Detection.** It starts from the producer's effective `avcC` (the configuration record in the init segment). It follows length-prefixed SPS/PPS (the parameter sets that describe the stream) in NAL order. Each IDR (an H.264 keyframe) names an SPS, and that SPS is checked against the baseline by its decoder signature (profile through cropping). PPS, VUI and level do not count, because the native decoder takes them in band.
+- **Stop.** On a mismatch the pump exits with a typed reason before the changed sample is written. The session keeps the verdict if the pump finishes before its owning load is installed. Producer epoch and load generation checks reject superseded events.
+- **Recovery.** The existing `SoftwarePathEscalation` takeover rebuilds the session on the software path, under its normal route and host opt-in constraints. The rebuild starts from the pending user seek or the actual playhead, never from the producer's read-ahead position.
 
 ### Restarts keep the same timeline
 
-A restarted producer must produce segments on the same media timeline the continuous run gave them. The loopback server's contract with AVPlayer is "static VOD server", and AVPlayer places fMP4 segments by their `tfdt` (the fragment's base decode time).
+A restarted producer must write segments on the same media timeline an uninterrupted run would have given them. The loopback server's contract with AVPlayer is "static VOD server", and AVPlayer places fMP4 segments by their `tfdt` (the fragment's base decode time).
 
-Each restart creates a fresh mp4 muxer, and movenc starts a new instance's timeline at zero by default. Left alone, a restarted segment would carry `tfdt=0` while the playlist places it at its plan offset: a hidden timeline break on every restart. Plain playback hides it, but other consumers break: AVKit's legible renderer detaches mid-PiP (Sodalite#32), and the playhead drifts away from the loaded ranges (#93).
+Each restart creates a fresh mp4 muxer, and movenc (FFmpeg's MP4 muxer) starts each new instance's timeline at zero by default. Left alone, a restarted segment would carry `tfdt=0` while the playlist places it at its plan offset: a hidden timeline break on every restart. Plain playback hides it, but other consumers break:
 
-So:
+- AVKit's legible (subtitle) renderer detaches mid-PiP (Sodalite#32),
+- the playhead drifts away from the loaded ranges (#93).
+
+So the engine keeps absolute timestamps:
 
 - The muxer sets `movflags +frag_discont` with `avoid_negative_ts=disabled`, so `tfdt` carries the producer's absolute output timestamps.
 - The restart audio gate inherits the session shift (the video shift, rescaled) instead of snapping audio onto the video seam.
 - Leading audio at the head of the stream that would map below 0 is dropped, since the muxer no longer absorbs negative timestamps.
 
-A restarted segment is byte-identical to its continuous twin except for the per-muxer `mfhd` sequence number. `RestartTimelineContinuityTests` pins this on a committed A/V fixture. On Matroska sources, per-sample DTS synthesis after a demuxer seek shifts the DTS split and boundary-frame membership by a frame or two, but presentation timestamps and `tfdt` anchoring stay the same across restarts.
+The result: a restarted segment is byte-identical to the same segment from an uninterrupted run, except for the per-muxer `mfhd` sequence number. `RestartTimelineContinuityTests` pins this on a committed A/V fixture.
+
+One exception on Matroska sources: the demuxer synthesizes DTS per sample after a seek, which shifts the DTS split and which segment a boundary frame lands in by a frame or two. Presentation timestamps and `tfdt` anchoring still stay the same across restarts.
 
 **Negative timestamps are clamped.** `tfdt` is an `unsigned int(64)`, so with this setting a negative output axis cannot be represented at all. The published first timestamp is therefore clamped at zero (AE#509).
 
-The case this covers: libavformat serves an MPEG-TS whose first DTS sits within 60 s of the 33-bit PTS wrap with every timestamp `2^33` ticks low (`AV_PTS_WRAP_SUB_OFFSET`). Unclamped, a live join there publishes `baseMediaDecodeTime = 2^64 - |dts|` against a playlist starting at 0, and AVPlayer fetches the whole window and places none of it, with no error and no stall.
+The case this covers: MPEG-TS timestamps are 33-bit and wrap around. When an MPEG-TS's first DTS sits within 60 s of that wrap, libavformat serves every timestamp `2^33` ticks low (`AV_PTS_WRAP_SUB_OFFSET`). Unclamped, a live join there publishes `baseMediaDecodeTime = 2^64 - |dts|` against a playlist starting at 0. AVPlayer then fetches the whole window and places none of it, with no error and no stall.
 
 ### Constant-rate frame grid
 
-The video track's output time base is normally the source's, which movenc scales up to at least 10000 (Matroska's 1/1000 becomes 1/16000). That keeps the container's rounding, which hurts on a constant-rate track: 23.976 fps on 1 ms ticks reaches AVPlayer as 41 and 42 ms steps. At a 59.94 Hz output every second frame sits exactly on a refresh boundary, where half a millisecond of rounding decides which vsync shows it (AE#886).
+**The problem.** The video track's output time base (the tick size of its timestamps) is normally the source's, which movenc scales up to at least 10000 (Matroska's 1/1000 becomes 1/16000). That keeps the container's rounding, which hurts on a constant-rate track:
 
-`CFRFrameGrid` fixes this for a VOD track when both are true:
+- 23.976 fps on 1 ms ticks reaches AVPlayer as 41 and 42 ms steps.
+- At a 59.94 Hz output every second frame sits exactly on a refresh boundary, where half a millisecond of rounding decides which vsync shows it (AE#886).
+
+**The fix.** `CFRFrameGrid` puts the frames on an exact grid (CFR: constant frame rate) for a VOD track when both are true:
 
 - the source tick is 0.1 ms or coarser, and
 - the frame rate probes as exactly a standard rate the tick cannot represent.
@@ -135,13 +184,15 @@ It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks 
 
 The grid is derived once per session, before the first producer runs, from the stream's declared rate. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin.
 
-The one exception to "declared" is a declared rate that is not a standard rate at all. `SourceFrameRateMeasurement` then fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed), and the load uses that instead (Sodalite#236). This matters because mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
+**When the declared rate is not a standard rate.** Then `SourceFrameRateMeasurement` fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed), and the load uses that instead (Sodalite#236). This matters because mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
 
 ### 2:3 pulldown timing on 24p film
 
-Some encodes of soft-telecined DVDs keep the film's progressive frames but stamp each with the time its first field would appear on a 59.94 Hz field clock: frames last three fields, then two (50 ms, 33 ms), averaging 23.976. On a 23.976 Hz panel a 33 ms frame can fall between two refreshes and never be shown, and whether it does depends on the vsync phase, which every start and seek re-rolls. The result is a pan that stutters on one pass and plays clean on the next (Sodalite#236).
+**The problem.** Some encodes of soft-telecined DVDs (film stored at 24 fps with flags that tell a player to show it at 59.94 fields per second) keep the film's progressive frames but stamp each with the time its first field would appear on a 59.94 Hz field clock. Frames then last three fields, then two (50 ms, 33 ms), averaging 23.976.
 
-These frames lie 8 to 17 ms from a grid slot, far past `CFRFrameGrid`'s one-tick tolerance. On a 24p grid, `PulldownCadenceRetimer` owns every video packet instead:
+On a 23.976 Hz panel a 33 ms frame can fall between two refreshes and never be shown. Whether it does depends on the vsync phase, which every start and seek re-rolls. The result is a pan that stutters on one pass and plays clean on the next (Sodalite#236).
+
+**The fix.** These frames lie 8 to 17 ms from a grid slot, far past `CFRFrameGrid`'s one-tick tolerance. So on a 24p grid, `PulldownCadenceRetimer` owns every video packet instead:
 
 - It keeps a window of the last 48 packets (decode order) and calls the stretch film when every spacing among them, in presentation order, is two or three fields and they average two and a half. Anything else (true 30p or 60p video, a constant-rate stretch) goes through `CFRFrameGrid.place` unchanged.
 - In film, each frame goes to its nearest slot on a 24p grid whose origin follows the film. An edit that drops or repeats a field moves the film one field against the grid; the retimer re-centres on the running mean deviation, so no frame moves more than about one field from its source time.
@@ -152,11 +203,16 @@ The producer's finish line counts `pulldownRetimed=` next to `onGrid=` and `offG
 
 ### Seeks and the segment cache
 
-Seeks are demand-driven. `AVPlayer` simply fetches segments at the new position. `VideoSegmentProvider` tears the producer down and re-anchors it at the requested index (`restartHandler`, with bursts coalesced by `RestartCoalescer`) only when `SegmentCache` cannot serve the request. A restart is the expensive path: it re-seeks the demuxer, which is slow on remote sources (#93).
+Seeks are demand-driven: `AVPlayer` simply fetches segments at the new position, and the engine serves them.
+
+- If `SegmentCache` holds the segment, the request is a cache hit.
+- Otherwise `VideoSegmentProvider` tears the producer down and re-anchors it at the requested index (`restartHandler`, with bursts coalesced by `RestartCoalescer`).
+
+A restart is the expensive path: it re-seeks the demuxer, which is slow on remote sources (#93). Most rules below exist to avoid restarts or keep them cheap.
 
 **VOD cache retention.**
 
-- The cache has a hard window, `[target - backwardWindow, target + forwardWindow]`, that is never evicted.
+- The cache has a hard window around the target (the segment being played), `[target - backwardWindow, target + forwardWindow]`, that is never evicted.
 - For VOD it also keeps already-produced segments outside that window, under a byte budget: 2 GiB, clamped to a quarter of the tmp volume's free capacity. Once full, it evicts the segments farthest from the target first.
 - A host can set the byte budget itself with `LoadOptions.sessionCacheByteBudget`. The volume clamp still applies.
 - Concurrent sessions share that clamp: each is sized from the free space minus the other sessions' unwritten claims (`RetentionClaims`, #687).
@@ -166,9 +222,9 @@ Seeks are demand-driven. `AVPlayer` simply fetches segments at the new position.
 
 **Whole-source prefetch (opt-in).** A forward window larger than that is an explicit host opt-in through `LoadOptions.forwardBufferSegments` (up to 2700 segments, ~3 h, #207). It drops the budget's 2 GiB default cap but keeps the quarter-of-free-space clamp.
 
-The producer parks once its race-ahead holds that many bytes ahead of the consumer target, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
+The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
 
-**Where a restart seeks.** A non-disc VOD restart seeks on the video stream's native timestamp axis to the exact IRAP stored in the segment plan, with that timestamp as the lower bound. A global time seek can land a whole GOP earlier on multi-stream MP4 and turn the producer's scan-forward gate into a long remote read (#191). Disc plans use folded multi-clip timestamps and keep the global-time seek.
+**Where a restart seeks.** A non-disc VOD restart seeks to the exact IRAP stored in the segment plan, on the video stream's own timestamp axis, with that timestamp as the lower bound. A seek on the global time axis can land a whole GOP earlier on multi-stream MP4, and the producer then has to read forward to the IRAP, which is a long remote read (#191). Disc plans use folded multi-clip timestamps (one timeline across several clip files) and keep the global-time seek.
 
 **Restarts on a slow link.** These rules keep a slow remote source from turning one restart into many (#93):
 
@@ -177,11 +233,13 @@ The producer parks once its race-ahead holds that many bytes ahead of the consum
 - Lazy native subtitle readers wait while a restart runs.
 - The first producer of a resumed session anchors directly at the resume segment, instead of producing seg0 into an immediate teardown.
 
-**Holes in the cache.** Retained scrub bands leave holes inside the cache's stored min/max index range, so an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).
+**Holes in the cache.** Scrubbing leaves retained bands of segments with gaps between them, inside the cache's stored min/max index range. So an index inside that range is no proof the segment exists. A fetch inside the range waits (2 s) only when the active producer's forward march actually covers the requested index. Otherwise it restarts at once (#129).
 
 ### Seek deadline and recovery
 
-The public `seek(to:)` on the native path waits for AVPlayer's real landing, so `isSeeking` covers it (#37/#38). The wait is capped at 8 s (#65, #129). At the deadline the engine sets the published clock to AVPlayer's rendered frame and returns to the caller, instead of stacking a second unbounded seek (repeated source stalls could chain those past 40 s).
+The public `seek(to:)` on the native path waits for AVPlayer's real landing (the first frame shown at the target), so `isSeeking` covers it (#37/#38). The wait is capped at 8 s (#65, #129).
+
+At the deadline the engine sets the published clock to AVPlayer's rendered frame and returns to the caller. It does not stack a second unbounded seek, because repeated source stalls could chain those past 40 s.
 
 After the deadline:
 
@@ -211,7 +269,11 @@ Three paths feed the stream:
 
 - **Programmatic seeks** report from their finalize step, so the clock is already at the target when the event fires.
 - **Seeks stashed before the session can take them** (#127/#178) hold the level for the whole stash window. The engine publishes their target on `currentTime` optimistically, and a consumer that broadcasts it needs to know nothing has reached it yet.
-- **Native AVKit scrubs** end their window when the picture reaches the restarted region, watched on `$renderedTime` and capped at 8 s. They do not end when the coalesced producer restart drains: draining only means the producer is producing at the new index, and the picture arrives a fetch and a decode later ([measured](measurements.md#native-scrub-picture-latency)). A restart that a programmatic seek itself caused is left to that seek's events, since the restart segment can sit below where the picture ends up.
+- **Native AVKit scrubs** end their window when the picture reaches the restarted region, watched on `$renderedTime` and capped at 8 s.
+
+  They do not end when the coalesced producer restart drains. Draining only means the producer is producing at the new index; the picture arrives a fetch and a decode later ([measured](measurements.md#native-scrub-picture-latency)).
+
+  A restart that a programmatic seek itself caused is left to that seek's events, since the restart segment can sit below where the picture ends up.
 
 ### Restart latency diagnostics
 
@@ -225,24 +287,26 @@ A slow read with all-zero counters means the wait happened before the read loop.
 
 ### Keeping AVPlayer from timing out
 
-A request during a restart must never leave AVPlayer waiting in silence (#93). AVPlayer's media watchdog logs `-12889 "No response for media file"` after ~3.5 s without response headers (holding the connection open does not help), and three strikes fail the item.
+A request during a restart must never leave AVPlayer waiting in silence (#93). AVPlayer's media watchdog logs `-12889 "No response for media file"` after ~3.5 s without response headers. Holding the connection open does not help, and three strikes fail the item.
 
-So a VOD serve still running at 2 s (`SlowServeSignal`, armed by `VideoSegmentProvider.mediaSegment(at:onSlow:)`) sends an early `200` with `Transfer-Encoding: chunked`:
+So a VOD serve still running at 2 s sends the response headers early: a `200` with `Transfer-Encoding: chunked` (`SlowServeSignal`, armed by `VideoSegmentProvider.mediaSegment(at:onSlow:)`).
 
 - The segment follows as a single chunk when it is ready.
 - A serve that finally misses aborts the connection (truncated transfer, AVPlayer retries) instead of sending a cacheable empty 200.
 - Fast serves keep the byte-identical `Content-Length` response.
 
-**If the item dies anyway.** `failedToPlayToEndTime` parks the item at rate 0 / `timeControlStatus == .paused`, with `item.status` often still `readyToPlay`. A pause-guarded recovery layer would read that as user intent and end the session for good. So:
+**If the item dies anyway.** `failedToPlayToEndTime` parks the item at rate 0 / `timeControlStatus == .paused`, with `item.status` often still `readyToPlay`. A recovery layer that respects pauses would read that as the viewer pausing and end the session for good. So:
 
 - The host counts end failures on the loopback path (`endFailureCount`).
-- The engine confirms the death through the same deferred window as the `.failed` KVO, then reloads the item through the stage-2 chain with the pause guard bypassed.
+- The engine confirms the death through the same deferred window as the `.failed` KVO. It then reloads the item through the stage-2 chain (the engine's item-reload recovery) with the pause guard bypassed.
 - `ItemDeathReviveGate` caps this at 3 attempts per dead spot. Playback progress, or a user seek away, restores the budget.
 - The fresh item resumes only if the host's play intent says the viewer was playing. A paused title whose item dies (a tvOS screensaver taking the display is one way) is reloaded and stays paused.
 
 ### End-of-item recovery
 
-Native end-of-item recovery captures the published clock peak and its freshness before it awaits AVFoundation's off-main reading. A slow reading therefore cannot invalidate an end witness and replay an audio tail that already finished. Before applying the result, the host checks both the session generation and the seek generation. If a replacement or seek happened in between, it owns the transport, and the old end notification is suppressed.
+When an item ends, native recovery first records the highest published clock value and how fresh it is, then awaits AVFoundation's off-main reading. A slow reading therefore cannot invalidate that proof of the end and replay an audio tail that already finished.
+
+Before applying the result, the host checks both the session generation and the seek generation. If a replacement or seek happened in between, that one owns the transport, and the old end notification is suppressed.
 
 ### Item diagnostics
 
@@ -258,11 +322,11 @@ How it works:
 - Failure track arrays are also fetched off-main. The SDK's UI-actor-isolated track handles then use async asset-property loaders.
 - A stop or load invalidates publication, including queued callbacks, without waiting for a read.
 - Delivery rechecks ownership after synchronous log handlers and state subscribers, because they can replace the item while its diagnostic batch is being consumed.
-- Merged error batches look at unseen entries, so a fetch error in between cannot hide the startup `-15628` loader-poison signal.
+- Merged error batches look at unseen entries, so a fetch error in between cannot hide the startup `-15628` loader-poison signal (a stall after which AVPlayer fetches no more media).
 - Access-log notification output is capped at five entries per item. A failure still dumps the complete available logs.
 
 **Admission.** Admission is process-wide: at most **two concurrent diagnostic reads**, plus **one pending retirement
-read** kept beyond those lanes.
+read** kept beyond those lanes. A retirement read is the final read of an item that has just been replaced (see item swaps below).
 
 - Current-item and error work goes before optional retirement work.
 - Cancellation never frees a lane that is still inside a native getter.
@@ -284,9 +348,11 @@ The engine repairs these file shapes at the demuxer or the session muxer. The ho
 
 ### MP4 without composition offsets
 
-**The problem.** Some writers emit a sample table with no `ctts` while the H.264 or HEVC bitstream still reorders pictures. Every sample then reports `PTS == DTS`. The native route stream-copies those timestamps into fMP4, so AVPlayer is handed decode order as presentation order: each future reference picture is shown before the B pictures that come before it (#409, [measured](measurements.md#mp4-without-composition-offsets)).
+**The problem.** Some writers emit a sample table with no `ctts` (MP4's composition-offset table) while the H.264 or HEVC bitstream still reorders pictures. Every sample then reports `PTS == DTS`. The native route stream-copies those timestamps into fMP4, so AVPlayer is handed decode order as presentation order. Each future reference picture is then shown before the B pictures that should come before it (#409, [measured](measurements.md#mp4-without-composition-offsets)).
 
-**The repair.** The container lost the information, but the bitstream did not. Every slice header carries a picture order count, which is display order. libavcodec's H.264 and HEVC parsers read it without decoding a pixel, and take MP4's length-prefixed payload directly. `H264CompositionOffsetRepair` samples the head (twelve pictures at most, held rather than re-read, so no rewind and no second fetch) and repairs a confirmed source at the demuxer boundary:
+**The repair.** The container lost the information, but the bitstream did not. Every slice header carries a picture order count (POC), which is display order. libavcodec's H.264 and HEVC parsers read it without decoding a pixel, and take MP4's length-prefixed payload directly.
+
+`H264CompositionOffsetRepair` samples the head of the stream (twelve pictures at most, held rather than re-read, so no rewind and no second fetch). If the source is confirmed broken, it rewrites the timestamps at the demuxer boundary. In the formula, `rank` is a picture's display position within its sequence, `step` is one frame duration, and `reorderDelay` is how many pictures the encoder reorders across:
 
     PTS = (decode time of the picture that opened this coded video sequence) + shift + rank * step
     DTS = DTS + shift - reorderDelay * step
@@ -297,18 +363,18 @@ The engine repairs these file shapes at the demuxer or the session muxer. The ho
 - The source keeps hardware decode: a missing table costs no route change.
 - The container's own index is folded onto the same ladder, because the segment plan is built from index entries and then filled with these packets.
 
-**Detection** is fail-closed and costs a healthy file almost nothing. The first real PTS-DTS offset ends the sample (usually on the first packet, since a reordered file's head sample sits one delay below zero). A source is repaired only when all of these hold:
+**Detection** is fail-closed (when in doubt, the file is left alone) and costs a healthy file almost nothing. The first real PTS-DTS offset ends the sample. That is usually the first packet, since a reordered file's head sample sits one delay below zero. A source is repaired only when all of these hold:
 
 - every sampled pair is equal,
-- the decode ladder is uniform,
+- the decode ladder (the sequence of decode timestamps) is uniform,
 - the picture order regresses,
-- the ranks it produces are distinct and fill the sampled window, or a decode-order prefix of at least nine pictures fills its own range exactly (this covers a hierarchical mini-GOP longer than the reorder delay, #699).
+- the ranks it produces are distinct and fill the sampled window, or a decode-order prefix of at least nine pictures fills its own range exactly (this covers a hierarchical mini-GOP, the run of B pictures between two anchors, that is longer than the reorder delay, #699).
 
 Anything short of that (a picture order that does not advance one rank per picture, a sample that starts nowhere it can be anchored) is delivered exactly as the container wrote it. Reported by @orut34iop; the HEVC case (#699) by @ijuniorfu.
 
 #### H.264 with a changing decode cadence
 
-For H.264 only, a changing decode cadence can instead use the original-slot policy described in [MP4 with composition offsets missing only in later regions](#mp4-with-composition-offsets-missing-only-in-later-regions). This fallback requires:
+For H.264 only, a changing decode cadence can instead use the original-slot policy (keep the timestamps the file already has and hand them out again by display rank) described in [MP4 with composition offsets missing only in later regions](#mp4-with-composition-offsets-missing-only-in-later-regions). This fallback requires:
 
 - a progressive IDR head with equal PTS/DTS,
 - a container start/index lead that exactly matches the observed reorder head,
@@ -318,12 +384,22 @@ It assigns existing slots plus that lead rather than fitting a frame rate. DTS, 
 
 #### Writers that push timestamps to keep them monotonic
 
-**The problem.** Some writers go one step further: after dropping `ctts` they force the decode-order presentation times to be monotonic. Each B picture (and on some files each anchor too) decoded after another picture is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before it. There is then no ladder to read a step from, so the uniform-ladder check above skips such a file as non-uniform ([the reporting files](measurements.md#writers-that-push-timestamps)).
+**The problem.** Some writers go one step further: after dropping `ctts` they force the presentation times, in decode order, to rise monotonically.
 
-**Choosing the step.** When nothing above takes such a head, it is repaired with the step taken from the stream's average frame rate. This requires that the sampled span is the time its pictures take at that rate, within the reorder delay plus two pictures, and that every other check above still passes.
+- Each B picture decoded after another picture is pushed 1001 ticks (at 90 kHz, a third of a 29.97 fps frame) past the picture before it.
+- On some files each anchor (an I or P picture that others reference) is pushed too.
+
+There is then no even ladder to read a step from, so the uniform-ladder check above skips such a file as non-uniform ([the reporting files](measurements.md#writers-that-push-timestamps)).
+
+**Choosing the step.** When nothing above takes such a head, it is repaired with the step taken from the stream's average frame rate. Two conditions apply:
+
+- the sampled span matches the time its pictures take at that rate, within the reorder delay plus two pictures,
+- every other check above still passes.
+
+How the step is refined:
 
 - The step is then remeasured on the anchors when the writer left them on the presentation axis. The average rate is only an estimate: a 60-picture 29.97 fps clip reports 29.80.
-- The reporting file pushed its P pictures as well (each anchor 1001 ticks past the picture before it), so no two anchors agree. The rate is then the one the bitstream's VUI timing states, if that is within 1% of the average rate, snapped to a standard frame rate (any whole rate up to 240, or an NTSC one such as 23.976 or 29.97) within 0.01%.
+- The reporting file pushed its P pictures as well (each anchor 1001 ticks past the picture before it), so no two anchors agree. The rate is then the one the bitstream's VUI timing (frame-rate fields in the SPS) states, if that is within 1% of the average rate, snapped to a standard frame rate (any whole rate up to 240, or an NTSC one such as 23.976 or 29.97) within 0.01%.
 - Without a VUI rate, it is the standard rate nearest the average rate, if that is within 1%.
 - A head with neither is left untouched.
 - The VUI is what tells 24 from 23.976 on a short clip whose pushed tail drags the average.
@@ -337,9 +413,13 @@ It assigns existing slots plus that lead rather than fitting a frame rate. DTS, 
 
 An earlier IDR keeps its own time, which is how a chain started on a pushed keyframe after a seek moves back into place.
 
-**Clock drift.** Counting alone follows the stated rate, and the writer's clock is not quite that, so a counted chain drifts behind the writer and overlaps where an earlier keyframe pulls it back. A continued sequence therefore also leans toward the earliest origin the pictures before it point to, by at most an eighth of a picture per GOP. The writer only ever pushes a picture later, so the earliest origin is the nearest the truth. A seek landing holds its first **8 pictures** and takes the earliest origin they point to in the same way.
+**Clock drift.** Counting frames at the stated rate is not enough, because the writer's clock does not run at exactly that rate. A counted chain drifts behind the writer and then overlaps where an earlier keyframe pulls it back.
 
-**Segment boundaries.** A keyframe placed back like this sits before its index entry, by at most the reorder delay plus two and a half pictures, while the HLS segment plan is built from the index. The VOD cutter and the restart gate therefore reach that far back for the keyframe each boundary names, never as far as the keyframe before it. Without the reach, the keyframe would stay in the previous segment and the next one would open on audio, mid-GOP. With it, every segment is independent, including segments a restart produced (`aetherctl segverify` checks this).
+So a continued sequence also leans toward the earliest origin the pictures before it point to, by at most an eighth of a picture per GOP. The writer only ever pushes a picture later, so the earliest origin is the nearest the truth. A seek landing holds its first **8 pictures** and takes the earliest origin they point to in the same way.
+
+**Segment boundaries.** A keyframe moved back like this sits before its index entry, by at most the reorder delay plus two and a half pictures. The HLS segment plan, though, is built from the index. So the VOD cutter and the restart gate reach that far back for the keyframe each boundary names, never as far as the keyframe before it.
+
+Without the reach, the keyframe would stay in the previous segment and the next one would open on audio, mid-GOP. With it, every segment is independent, including segments a restart produced (`aetherctl segverify` checks this).
 
 **Long P runs.** Some of these files open every GOP on twelve P pictures before the first B. So a head that has not reordered after twelve pictures, with `PTS == DTS` throughout, is sampled on to its first regression plus a mini-GOP, up to
 **48 pictures**. The sampled span is checked against the rounded step with a tick per picture to spare.
@@ -352,9 +432,9 @@ An earlier IDR keeps its own time, which is how a chain started on a pushed keyf
 
 ### Matroska with presentation slots in coding order
 
-**The problem.** Matroska block timestamps are presentation timestamps by specification, and the format has no composition-offset table to lose. A writer that fills them packet by packet while the bitstream reorders pictures has therefore not lost anything: every presentation slot is still in the file. Each one just arrived attached to the picture that was *decoded* at that position rather than the one that is *displayed* there: one stepped-back presentation clock per mini-GOP for the length of the file (#511, [measured](measurements.md#matroska-slots-in-coding-order)).
+**The problem.** Matroska block timestamps are presentation timestamps by specification, and the format has no composition-offset table to lose. Some writers fill them packet by packet while the bitstream reorders pictures. Nothing is lost then: every presentation slot (timestamp value) is still in the file. But each one is attached to the picture *decoded* at that position rather than the one *displayed* there. The presentation clock steps back once per mini-GOP for the length of the file (#511, [measured](measurements.md#matroska-slots-in-coding-order)).
 
-**The repair.** `H264MatroskaSlotPermutation` permutes rather than reconstructs: a picture carries the slot its own display rank owns, and the slot is read from the file instead of being computed.
+**The repair.** `H264MatroskaSlotPermutation` reorders the existing slots rather than computing new ones: a picture gets the slot its own display rank owns, read from the file.
 
 - Nothing fits a cadence. A ladder quantized from a fractional frame rate is reproduced exactly rather than to within a tick, and a slot the writer clamped onto its cluster origin survives as written.
 - Decode timestamps do not move either. libavformat derives them from the rising slot ladder, which is the stream's real decode order, and a picture at most its own reorder delay behind its slot cannot violate `PTS >= DTS`.
@@ -402,7 +482,7 @@ See the [partial-composition regression and reproduction](notes/partial-composit
 
 ### A video sample whose NAL chain overruns it
 
-**The problem.** A sample in an mp4 video track is a run of NAL units, each introduced by a big-endian length of the width the `avcC` / `hvcC` record declares, and a parser walks that run by addition. A damaged source can carry a length that reaches past the end of its own sample. The two consumers answer that differently:
+**The problem.** A sample in an mp4 video track is a run of NAL units (the codec's basic data packets). Each unit starts with a big-endian length, whose width the `avcC` / `hvcC` record declares, and a parser walks the run by adding up those lengths. A damaged source can carry a length that reaches past the end of its own sample. The two consumers answer that differently:
 
 - libavcodec logs `Invalid NAL unit size`, skips the frame and plays on.
 - Apple's fMP4 parser answers the whole SEGMENT with `CoreMediaErrorDomain -19602`, which ends the session and every reload onto that segment.
@@ -417,7 +497,7 @@ So a file like that plays in mpv, plays after an MKVToolNix remux (which drops t
 
 The fixture generator `Scripts/nal-overrun-fixture.py` forges the shape into any length-prefixed source by rewriting four bytes, so the healthy original stands as the control arm (AE#561).
 
-**Last rung: software takeover.** Some cases the cut cannot reach, and every recovery above it answers the same bytes again: the #93 revive reloads the item at the position that died, and the stage-2 chain refills the same segment. Left there, a segment AVPlayer refuses on its merits would end the session, with the replacement item dying milliseconds after the first. So a failure in the CoreMedia domain is offered to `SoftwarePlaybackHost` before it is made terminal:
+**Last rung: software takeover.** Some cases the cut cannot reach. Every native recovery then serves the same bytes again: the #93 revive reloads the item at the position that died, and the stage-2 chain refills the same segment. A segment AVPlayer refuses on its merits would end the session, with each replacement item dying milliseconds after the one before. So a failure in the CoreMedia domain is offered to `SoftwarePlaybackHost` before it is made terminal:
 
 - The session is rebuilt at its playhead with `preferredDecodePath = .software`, which decodes with libavcodec (one skipped frame rather than a dead session) and reads the demuxer directly instead of the loopback HLS.
 - Once per session, and only for a verdict on the MEDIA. A URL-loading failure is a verdict on the SOURCE, which both paths read through the same reader.
@@ -429,16 +509,16 @@ The native pipeline above is the **loopback** route: the engine demuxes, remuxes
 
 ### Remote HLS bypass
 
-**Remote HLS bypass (`.remoteBypass`).** With `LoadOptions.nativeRemoteHLS`, and for a remote HLS VOD URL that reached the loopback path (AE#154), AVPlayer gets the origin's playlist itself. There is no demuxer, no producer and no segment cache.
+**Remote HLS bypass (`.remoteBypass`).** AVPlayer gets the origin's own playlist. There is no demuxer, no producer and no segment cache. This route runs with `LoadOptions.nativeRemoteHLS`, and for a remote HLS VOD URL that reached the loopback path (AE#154).
 
-The `Native/RemoteHLS*` types cover what is left for the engine: media selection (`RemoteHLSMediaSelection`), the readiness deadline, the subtitle cue clock and the carriage watchdog (`RemoteHLSIngestFallback`).
+The `Native/RemoteHLS*` types cover what is left for the engine: media selection (`RemoteHLSMediaSelection`), the readiness deadline, the subtitle cue clock and the carriage watchdog (`RemoteHLSIngestFallback`), which notices when AVPlayer cannot play the stream's carriage and falls back to ingest.
 
-- The engine puts its local server in front of the master for two reasons only (`RemoteHLSSubtitleProxy`): to declare host sidecar subtitles as renditions in a master of its own (#316), and to relay the media through a URLSession the engine owns, so the host's TLS trust answer applies (`HLSOriginRelay`, AE#495). The two compose.
-- The engine sees no media bytes here. Recording and prewarm do not apply, a starved connection reads as `.rebuffering` rather than `.stalled`, and the audio tap fetches its own copy of the segments (`AudioTapHLSReader`).
+- **Local proxy, only when needed.** The engine puts its local server in front of the origin's master playlist for two reasons only (`RemoteHLSSubtitleProxy`). It can declare host sidecar subtitles as renditions in a master of its own (#316). It can relay the media through a URLSession the engine owns, so the host's TLS trust answer applies (`HLSOriginRelay`, AE#495). The two compose.
+- **No media bytes.** The engine sees none here. Recording and prewarm do not apply, a starved connection reads as `.rebuffering` rather than `.stalled`, and the audio tap fetches its own copy of the segments (`AudioTapHLSReader`).
 
 ### HLS ingest into the loopback
 
-Some HLS sources AVPlayer cannot play directly, so the engine reads them itself and feeds the ordinary loopback pipeline. Both readers in `IO/HLSIngest/` are `IOReader`s that expose the playlist's MPEG-TS segments as one byte stream for the demuxer (`formatHint: "mpegts"`).
+Some HLS sources AVPlayer cannot play directly, so the engine reads them itself and feeds the ordinary loopback pipeline. Both readers in `IO/HLSIngest/` are `IOReader`s (the byte-source protocol the demuxer reads from). They expose the playlist's MPEG-TS segments as one byte stream for the demuxer (`formatHint: "mpegts"`).
 
 | Reader | What it does | When the engine routes onto it |
 | --- | --- | --- |
@@ -451,27 +531,29 @@ Some HLS sources AVPlayer cannot play directly, so the engine reads them itself 
 
 ## Trick play and scrub stills
 
-Scrub images come from bytes the session already holds wherever it can, so they cost no second connection. Host API: [api.md, Stills and thumbnails](api.md#stills-and-thumbnails).
+Scrub images (the thumbnails shown while the viewer drags the timeline) come from bytes the session already holds wherever it can, so they cost no second connection. Host API: [api.md, Stills and thumbnails](api.md#stills-and-thumbnails).
 
-- **Cache-backed stills.** `scrubThumbnail` decodes what the session holds: the loopback segment cache on the native route (`AetherEngine+ScrubThumbnail.swift`), and the DVR packet ring or the packet cache on the software host (`SoftwareStillExtractor`). The software extractor drives a real `SoftwareVideoDecoder`, so deinterlacing and pixel aspect match the picture on screen.
-- **Sparse still ladder.** For VOD stretches nothing resident covers, `KeyframeStillLadder` reads one keyframe per rung off the source while the link is idle, on the pump's per-origin request budget (`generatesBackgroundScrubPreviews`). A one-request origin gets no ladder (AE#937).
-- **I-frame rendition.** With `serveIFramePlaylist` (AE#682), the master lists an I-frame playlist, so a stock `AVPlayerViewController` shows scrub thumbnails with no host code. The local server answers `iframe_init.mp4` and `iframe{N}.mp4` through `IFrameRendition`:
+- **Cache-backed stills.** `scrubThumbnail` decodes what the session holds: the loopback segment cache on the native route (`AetherEngine+ScrubThumbnail.swift`), and the DVR packet ring (the buffer of recent live packets) or the packet cache on the software host (`SoftwareStillExtractor`). The software extractor drives a real `SoftwareVideoDecoder`, so deinterlacing and pixel aspect match the picture on screen.
+- **Sparse still ladder.** For VOD stretches nothing resident covers, `KeyframeStillLadder` reads one keyframe per rung (one evenly spaced position) off the source while the link is idle. It uses a slot of the pump's per-origin request budget (`generatesBackgroundScrubPreviews`). A one-request origin gets no ladder (AE#937).
+- **I-frame rendition.** With `serveIFramePlaylist` (AE#682), the master lists an I-frame playlist (a playlist of keyframes only), so a stock `AVPlayerViewController` shows scrub thumbnails with no host code. The local server answers `iframe_init.mp4` and `iframe{N}.mp4` through `IFrameRendition`:
   - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk.
   - `IFrameFragmentBuilder` wraps it in one fMP4 fragment on the main rendition's timeline. Each fragment gets a fresh muxer, because AVKit asks for I-frames in any order.
   - HDR and Dolby Vision sources get one SDR Motion JPEG per keyframe instead (`IFrameJPEGBuilder`), because the tvOS scrubber gives up on PQ I-frames.
   - The rendition is all or nothing (`IFrameRenditionEligibility`). Live sessions, sequential and held origins, serial origins, disc sources and plans whose boundaries are not keyframes list none.
 
-## Subtitle cue pipeline" (route-neutral: it serves the native and the software path alike; put it wherever the shared pipeline lives, but keep the anchor subtitle-cue-pipeline and the H3/H4 headings, formats.md links to them) -->
+<!-- Subtitle cue pipeline (route-neutral: it serves the native and the software path alike; put it wherever the shared pipeline lives, but keep the anchor subtitle-cue-pipeline and the H3/H4 headings, formats.md links to them) -->
 ## Subtitle cue pipeline
 
-The host-facing behaviour is in [formats › Subtitles](formats.md#subtitles). This is how the engine collects embedded cues and keeps the list correct. The field reports behind these rules are in [measurements.md, Subtitle cue pipeline reports](measurements.md#subtitle-cue-pipeline-reports).
+The host-facing behaviour is in [formats › Subtitles](formats.md#subtitles). This is how the engine collects embedded cues and keeps the list correct. It serves the native and the software path alike. The field reports behind these rules are in [measurements.md, Subtitle cue pipeline reports](measurements.md#subtitle-cue-pipeline-reports).
 
 ### Harvest, store and drain
 
-- **Harvest.** EVERY embedded subtitle stream (text and bitmap) stays in the session demuxer's keep-set, and is harvested by a tap on the host's existing source read. Each packet is observed and then dropped, never muxed.
+Subtitles move through three stages: a tap harvests their packets, a store keeps them, and a drainer decodes the ones near the playhead.
+
+- **Harvest.** EVERY embedded subtitle stream (text and bitmap) stays in the session demuxer's keep-set (the streams it does not discard). A tap on the host's existing source read harvests them. Each packet is observed and then dropped, never muxed.
 - **Store.** Harvested packets are kept compressed in a per-session `SubtitlePacketStore` (300 s trailing window, byte-capped per stream).
-- **Drain.** A playhead-paced drainer decodes the selected stream near the playhead into the overlay.
-- **PGS in MPEG-TS (Blu-ray).** A display set arrives split across several PES packets (PCS|WDS|PDS|ODS|END, some without a PTS of their own). The store reassembles those chunks into one self-contained entry at the PCS presentation PTS before keeping it, so the drainer always decodes complete display sets. Matroska already carries one complete set per packet and is stored as-is.
+- **Drain.** A drainer paced by the playhead decodes the selected stream near the playhead into the overlay.
+- **PGS in MPEG-TS (Blu-ray).** PGS is the Blu-ray bitmap subtitle format; one subtitle image is a display set. In MPEG-TS a display set arrives split across several PES packets (PCS|WDS|PDS|ODS|END, some without a PTS of their own). The store reassembles those chunks into one self-contained entry at the PCS presentation PTS before keeping it, so the drainer always decodes complete display sets. Matroska already carries one complete set per packet and is stored as-is.
 - **Instant selection.** Enabling any embedded track is instant: the selection backfills synchronously from the store, with no positioning seek and no recovery machinery, even on remote disc images.
 - **Seeks and restarts.** The tap re-attaches with the producer across seeks and restarts.
 
@@ -479,23 +561,44 @@ The host-facing behaviour is in [formats › Subtitles](formats.md#subtitles). T
 
 ### Forward prefetcher
 
-The tap's forward coverage ends at the producer's read position (its forward park, #102), which on direct play sits only a few seconds past the playhead. On VOD sessions a background subtitle-only side reader, the forward prefetcher (#151), therefore extends the store past the drainer's 60 s lead window, by a 15 s margin so the set at the window's forward edge still has its own successor stored (#362).
+**Why it exists.** The tap only sees what the producer reads, and the producer parks a few seconds past the playhead on direct play (its forward park, #102). So on VOD sessions a background side reader that reads subtitles only, the forward prefetcher (#151), extends the store further ahead.
 
-- While a bitmap track's OCR rendition is armed, the lead is raised to 270 s, which clears the OCR worker's own 240 s window by 30 s, so the store actually holds what the worker is about to read.
-- So `subtitleCues` holds cues ahead of the playhead for a host-applied ADVANCE sync offset, text and bitmap alike.
-- Live sessions skip it: content past the edge does not exist.
-- **Only when something reads ahead (AE#1015).** It runs while the host's advance reach is above 0 (`maximumSubtitleAdvanceSeconds`, default 60, also set by `maximumSubtitleOffsetSeconds`; the later reach `maximumSubtitleDelaySeconds` never starts it, AE#1031), `softwareSubtitleDelaySeconds` is negative, or the OCR worker is armed. On an interleaved container it downloads the video a second time, so with an advance of 0 a text track reads from the tap alone.
-- **The landing role (AE#1022).** With an advance of 0, a bitmap track keeps the reader for its landings only: after each positioning it reads from 15 s before the landing (`subtitleDrainBackscanSeconds`) to 2 s past it and parks there until the next one, instead of following the playhead. The tap cannot serve a landing on its own. It repositions on a video keyframe at or before the target, so a set that began before that keyframe is never read, and one it reads has no read ground behind it, which the #416 check refuses. A software seek sends the reader to the landing as the seek goes out, so the ground is read by the first drain tick after preroll. A landing the check refused anyway is reconstructed once its ground reads (`subtitleLandingAwaitingGround`).
-- **Every session reads from 15 s behind its landing (AE#1022)**, in either role, and claims its coverage from there. A set that began just before a start position or a far seek is therefore proven like any other.
+**How far ahead.**
+
+- It reads past the drainer's 60 s lead window by a 15 s margin, so the set at the window's forward edge still has its own successor stored (#362).
+- While a bitmap track's OCR rendition (bitmap subtitles turned into text) is armed, the lead is raised to 270 s. That clears the OCR worker's own 240 s window by 30 s, so the store actually holds what the worker is about to read.
+- The result: `subtitleCues` holds cues ahead of the playhead for a host-applied ADVANCE sync offset, text and bitmap alike.
+- Live sessions skip it: content past the live edge does not exist.
+
+**Only when something reads ahead (AE#1015).** On an interleaved container the side reader downloads the video a second time, so it runs only when one of these holds:
+
+- the host's advance reach is above 0 (`maximumSubtitleAdvanceSeconds`, default 60, also set by `maximumSubtitleOffsetSeconds`; the later reach `maximumSubtitleDelaySeconds` never starts it, AE#1031),
+- `softwareSubtitleDelaySeconds` is negative,
+- the OCR worker is armed.
+
+With an advance of 0, a text track reads from the tap alone.
+
+**The landing role (AE#1022).** A landing is the position playback arrives at after a start or a seek. With an advance of 0, a bitmap track keeps the reader for its landings only. After each positioning it reads from 15 s before the landing (`subtitleDrainBackscanSeconds`) to 2 s past it, and parks there until the next one instead of following the playhead.
+
+- The tap cannot serve a landing on its own. It repositions on a video keyframe at or before the target, so a set that began before that keyframe is never read. A set it does read has no read ground behind it (no proof of what came before), which the #416 check refuses.
+- A software seek sends the reader to the landing as the seek goes out, so the ground is read by the first drain tick after preroll.
+- A landing the check refused anyway is reconstructed once its ground reads (`subtitleLandingAwaitingGround`).
+
+**Every session reads from 15 s behind its landing (AE#1022)**, in either role, and claims its coverage from there. A set that began just before a start position or a far seek is therefore proven like any other.
+
+**Other rules.**
+
 - It is best-effort. If it cannot open or wedges, the tap-fed behavior above is unchanged.
-- **Positioning (#234).** Its positioning seek is anchored on the subtitle stream's own timestamp axis. Left to libavformat's default reference, the anchor follows whichever stream is not fully discarded. The pacing stream that gives the park its control point (#230) would then move it onto video keyframes, and on Matroska that lands in a later cluster and drops a landing cue that starts further back than the destination.
-- **Re-anchoring.** A playhead jump re-anchors the running session in place rather than rebuilding it, since a rebuild pays an open, the Matroska cue-index prewarm and a positioning seek, each a bounded range the origin delivers in full.
+- **Positioning (#234).** Its positioning seek is anchored on the subtitle stream's own timestamp axis. Left to libavformat's default, the anchor follows whichever stream is not fully discarded. That is the pacing stream that gives the park its control point (#230), so the seek would land on video keyframes. On Matroska that lands in a later cluster and drops a landing cue that starts further back than the destination.
+- **Re-anchoring.** A playhead jump re-anchors the running session in place rather than rebuilding it. A rebuild pays an open, the Matroska cue-index prewarm and a positioning seek, and the origin delivers each of those bounded ranges in full.
 
 <a id="sharing-the-link-with-video-240"></a>
 
 ### Sharing the link with video
 
-The side reader shares the source link with the video pump (#240). On Matroska it is a second full copy of the stream (`matroska_parse_cluster` reads every block off the wire; only `matroska_parse_block` then honours the discard flag), so a subtitled session asks the link for about twice the media rate. Where the link has little headroom the two starve each other, so the video path has priority. A side reader:
+The side reader shares the source link with the video pump, and the video path has priority (#240).
+
+On Matroska the side reader downloads a second full copy of the stream: `matroska_parse_cluster` reads every block off the wire, and only `matroska_parse_block` then honours the discard flag. So a subtitled session asks the link for about twice the media rate. Where the link has little headroom the two would starve each other. A side reader therefore:
 
 - fetches while the pump is parked,
 - yields while the pump is fetching, and yields completely while a seek is in flight,
@@ -506,15 +609,17 @@ Bench result: [measurements.md, Subtitle side reader link sharing](measurements.
 
 ### Ending a PGS cue
 
-A PGS composition carries no end of its own. It is published with FFmpeg's open-ended placeholder end (`end_display_time = UINT32_MAX`) and closed when its successor composition or clear arrives.
+A PGS composition (one subtitle image) carries no end time of its own. The disc ends it with the next composition, or with a clear (an empty composition that removes the image). The engine publishes it with FFmpeg's open-ended placeholder end (`end_display_time = UINT32_MAX`) and closes it when that successor arrives.
 
-**The normal case: the next stored packet (#362).** The end a set is authored with is the PTS of the next packet on its stream, and the packet store holds that packet long before the drain window reaches it. So every tick closes each still-open cue at `SubtitlePacketStore.firstPTS(streamIndex:after:)`.
+**The normal case: the next stored packet (#362).** A set's authored end is the PTS of the next packet on its stream, and the packet store holds that packet long before the drain window reaches it. So every tick (one drain pass) closes each still-open cue at `SubtitlePacketStore.firstPTS(streamIndex:after:)`.
 
-- Without this, the drain window's forward edge decides the end whenever it falls between a set and its clear: the set publishes open, the cursor moves past it, and the next thing to touch it is a composition at the next landing, tens or hundreds of seconds later.
+- Without this, the drain window's forward edge decides the end whenever it falls between a set and its clear. The set publishes open, the cursor moves past it, and the next thing to touch it is a composition at the next landing, tens or hundreds of seconds later.
 - For the store to be able to answer, the harvest has to lead the decode. The forward prefetcher parks a 15 s margin BEYOND the drain window (`subtitleForwardPrefetchLeadMarginSeconds`), because with both lines at 60 s the set at the edge is systematically the one whose clear is stored nowhere.
 - Where the store genuinely has nothing after a set (its harvest frontier, a stream cut short), the cue stays open and #357's boundary close still owns it. The engine never invents an end there.
 
-**The last resort: the seek boundary (#357).** A seek can outrun the successor, and the retention prune cannot help (it filters on `endTime`, which a placeholder end never ages out of). Left alone, a jump past an open cue would leave it in the published window, covering the new playhead until the next composition displaced it. So on a seek, the drain closes every still-open cue that began before its reconstruction window (playhead minus the 15 s backscan) at that window's start: past that line nothing is re-decoded, so nothing there can be confirmed as still open.
+**The last resort: the seek boundary (#357).** A seek can outrun the successor. The retention prune cannot help, because it filters on `endTime`, and a placeholder end never ages out. Left alone, a jump past an open cue would leave it in the published window, covering the new playhead until the next composition displaced it.
+
+So on a seek, the drain closes every still-open cue that began before its reconstruction window (playhead minus the 15 s backscan), at that window's start. Before that line nothing is re-decoded, so nothing there can be confirmed as still open.
 
 - The cue stays in the kept list for a backward seek. Only its unconfirmed end retires.
 - An authored duration is never touched.
@@ -524,50 +629,66 @@ A PGS composition carries no end of its own. It is published with FFmpeg's open-
 
 ### Holes in the packet store
 
-**The problem** (#362, #941, #1021). After a seek, the pump restarts behind the landing and fills forward, while the store still holds an island the previous run harvested further ahead. The drain window then reads as "packets, hole, packets". Decoding across that hole carries the drain cursor to its far side, and the cursor only moves forward: the hole's packets land a second later and are never read. A stretch of the film then carries no subtitles at all until some later seek resets the window behind it, and the set before the hole is closed at the island rather than at its own clear.
+**The problem** (#362, #941, #1021). After a seek, the pump restarts behind the landing and fills forward. The store still holds an island (a stretch of packets) that the previous run harvested further ahead. The drain window then reads as "packets, hole, packets".
 
-**Why not a gap threshold.** The size of the gap cannot tell that apart from a silence the author left, and a threshold on it is actively harmful, since a set is separated from its own clear by its display duration.
+Decoding across that hole carries the drain cursor to its far side, and the cursor only moves forward. The hole's packets land a second later and are never read. A stretch of the film then carries no subtitles at all until some later seek resets the window behind it. The set before the hole is also closed at the island rather than at its own clear.
 
-**Harvest order (#362).** Harvest ORDER can tell. A run reads a stream forwards, so within one run PTS and sequence rise together. A PTS-ascending pair whose sequence DESCENDS is two runs meeting over a span neither of them has read. A tick stops at that boundary and waits (`harvestGapCut`).
+**Why not a gap threshold.** The size of a gap cannot tell a hole from a silence the author left. A threshold on it is actively harmful, since a set is separated from its own clear by its display duration.
+
+**Harvest order (#362).** The order of harvesting can tell. Each harvested packet carries a sequence number. A run (one reader's continuous pass) reads a stream forwards, so within one run PTS and sequence rise together. A pair whose PTS rises while its sequence DESCENDS is two runs meeting over a span neither of them has read. A tick stops at that boundary and waits (`harvestGapCut`).
 
 - This costs nothing visible, because the drain runs its lead ahead of the playhead.
 - The wait ends when the filling run re-harvests across the boundary, or when the playhead comes within two seconds of its far side, so an authored silence never stalls delivery.
 - There is no other tick budget (#941). A wall-time budget would expire during seeks and rebuffers while the playhead stands still, and decode the island over the sets the refill is about to harvest.
 - A tick that waited says so, as `outcome=harvestHole gapAt=`.
 
-**Three runs meeting (#941).** Order still sees only half of it. Seek past the producer's front and straight back into the stretch that jump skipped, and three runs meet: the original one up to just past the landing, the forward one's island further on, and the restart behind the landing that has not written anything yet. The island was harvested after the near side, so the sequence ASCENDS across the hole, no pair descends, and a tick reading order alone would decode straight across, losing every set the restart then harvests in between. A re-harvest of the island does the same to a wait that did fire, because it stamps the island newer than the held position.
+**Three runs meeting (#941).** Order alone misses some holes. Seek past the producer's front and straight back into the stretch that jump skipped, and three runs meet:
+
+- the original run, up to just past the landing,
+- the forward run's island, further on,
+- the restart behind the landing, which has not written anything yet.
+
+The island was harvested after the near side, so the sequence ASCENDS across the hole and no pair descends. A tick reading order alone would decode straight across, losing every set the restart then harvests in between. A re-harvest of the island does the same to a wait that did fire, because it stamps the island newer than the held position.
 
 The coverage ledger ([below](#the-landing-after-a-seek)) knows both cases. `harvestGapCut` also stops at a pair whose span no reader has read.
 
-**The ledger decides alone (#1021).** Order also sees holes that are not there. A track selected at load starts the forward prefetch with the session, so the prefetch stores the next 75 s first. The main reader then reads each of those packets again a few seconds ahead of the playhead, and a re-harvest takes the fresh sequence. Every pair at the main reader's front descends. A drain that stopped at each one would never get more than a few seconds ahead of the playhead, and a host's advance offset would show nothing until the first seek.
+**The ledger decides alone (#1021).** Order also sees holes that are not there:
 
-So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait: a pair whose span some run read is decoded through, and one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
+- A track selected at load starts the forward prefetch with the session, so the prefetch stores the next 75 s first.
+- The main reader then reads each of those packets again a few seconds ahead of the playhead, and a re-harvest takes the fresh sequence.
+- So every pair at the main reader's front descends. A drain that stopped at each one would never get more than a few seconds ahead of the playhead, and a host's advance offset would show nothing until the first seek.
 
-Two more things had to hold for that to work on a link near the media bitrate:
+So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait. A pair whose span some run read is decoded through; one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
 
-- **No reach claim during a seek.** The pump's reach claim ("it rendered the playhead, so it read up to there") is not made while a seek is in flight. `sourceTime` still reports the frame the seek is leaving while the producer is already re-anchored behind it, and the claim stretched the fresh run across exactly the skipped ground.
-- **Release on the far side.** A wait ends when the playhead closes on the FAR side of the hole (within `subtitleDrainHarvestGapReleaseLeadSeconds`), not on the near one. A refill at about 1x keeps the playhead just behind the filling run, so it passes the last packet before the hole while the hole is still ahead, and releasing there would decode the island over the sets the refill is a second from harvesting.
+On a link near the media bitrate, two more rules make this work:
+
+- **No reach claim during a seek.** The pump's reach claim ("it rendered the playhead, so it read up to there") is not made while a seek is in flight. `sourceTime` still reports the frame the seek is leaving while the producer is already re-anchored behind it, so the claim would stretch the fresh run across exactly the skipped ground.
+- **Release on the far side.** A wait ends when the playhead closes on the FAR side of the hole (within `subtitleDrainHarvestGapReleaseLeadSeconds`), not on the near one. A refill at about 1x keeps the playhead just behind the filling run. The playhead passes the last packet before the hole while the hole is still ahead, and releasing there would decode the island over the sets the refill is a second from harvesting.
 
 <a id="the-landing-after-a-seek-416"></a>
 
 ### The landing after a seek
 
-**The problem** (#416). A hole behind the playhead has a third face: the landing itself. The gate that reconstructs the active line at a seek target seeds it from the newest set decoded behind the playhead, and that set is the active line only if nothing on its stream happened in between. The store's silence is read as that proof, and over a stretch nobody read, it proves nothing. A run re-aimed just after it harvested a set leaves that set's own clear on the far side of the skipped ground. The set then decodes at the landing looking unclosed and publishes over the new scene, ending at the next stored packet, which is the far side of the authored silence rather than its own successor.
+**The problem** (#416). A hole behind the playhead also affects the landing itself. At a seek target, a gate reconstructs the subtitle line that should be on screen. It seeds that line from the newest set decoded behind the playhead. That set is the right line only if nothing on its stream happened in between, and the store's silence is read as that proof. Over a stretch nobody read, silence proves nothing.
 
-**Why the packets alone cannot show it.** #362 established this: a reader re-anchored FORWARD hangs its packets in ascending order behind the stretch it skipped, so the pair looks exactly like an authored silence. Only a reader restarted BEHIND leaves the descending sequence `harvestGapCut` reads.
+A run re-aimed just after it harvested a set leaves that set's own clear on the far side of the skipped ground. The set then decodes at the landing looking unclosed and publishes over the new scene. It ends at the next stored packet, which is the far side of the authored silence rather than its own successor.
 
-**The coverage ledger.** So the readers say what they read. `SubtitleHarvestCoverage` in the packet store keeps one span per run, anchored where the reader positioned and extended as it goes:
+**Why the packets alone cannot show it** (#362). A reader re-anchored FORWARD hangs its packets in ascending order behind the stretch it skipped, so the pair looks exactly like an authored silence. Only a reader restarted BEHIND leaves the descending sequence `harvestGapCut` reads.
+
+**The coverage ledger.** So the readers report what they read. `SubtitleHarvestCoverage` in the packet store keeps one span per run, anchored where the reader positioned and extended as it goes:
 
 - The forward prefetcher reports its own read position.
 - The pump's run begins where the producer opens or restarts, and reaches at least the playhead, since playback is rendering there.
 - A set whose ground up to the playhead is not covered cannot claim the landing (`landingWithheld=` on the delivery line), and the pass ends on the next authored set as it would have anyway.
 - A store nobody reports to has no ledger to ask (`harvestReadCheck()` is nil), so a path without coverage notes behaves exactly as it did: the landing is not withheld and holes are read from harvest order.
 
-**Cost.** The landing line is lost in the case where a set really is still up and the proof is missing, which needs an authored dwell long enough to span the whole unread stretch. The alternative was paying that for every normally authored set that ends inside one.
+**Cost.** The landing line is lost when a set really is still up but the proof is missing. That needs a set displayed long enough to span the whole unread stretch. Without the ledger, every normally authored set that ends inside such a stretch would publish over the new scene instead.
 
 ## Audio routes and object audio
 
 How a track's audio leaves the engine depends on its codec and the pipeline. Host-facing detail is in [formats.md, Audio](formats.md#audio); this is where each route sits.
+
+Terms in the table: JOC is the object-audio extension of E-AC-3 (Atmos in streaming); object audio is sound positioned in 3D space rather than tied to a channel; a speaker bed is a fixed set of speaker channels the objects are rendered into; APAC is Apple's spatial audio codec.
 
 | Route | Native (loopback) | Software host |
 | --- | --- | --- |
@@ -580,7 +701,7 @@ How a track's audio leaves the engine depends on its codec and the pipeline. Hos
 **The object render** (`Audio/Spatial/`) is one bridge on both paths:
 
 - **Decode.** `TrueHDObjectAudioDecoder` (over LibTrueHD) or `DTSXObjectAudioDecoder` (over FFmpeg's `dca` with FFmpegBuild's `x_heights` option) delivers the stream's channel presentation plus its objects or heights.
-- **Regression.** `BedRegression` builds every speaker of the `SpatialSpeakerLayout` bed from the channel presentation alone. The objects and heights steer it as statistics and never play themselves.
+- **Regression.** `BedRegression` builds every speaker of the `SpatialSpeakerLayout` bed from the channel presentation alone. The objects and heights only steer that mix as statistics; they are never played themselves.
 - **Output.** `SpatialBedFormat`: 24-bit PCM, or APAC over AirPlay (`APACEncoder`). On tvOS `AtmosOutputActivator` plays a silent E-AC-3 Atmos stream beside it, because some receivers otherwise never switch to Atmos.
 - **Gates.** It needs the `TrueHDObjectAudio` / `DTSXObjectAudio` package traits (off by default), 48 kHz and OS 26 or later. TrueHD must be marked Atmos by FFmpeg, and DTS-HD MA must decode as DTS:X. Anything else, or any failure to start, keeps the bridge (or the PCM decode).
 
@@ -608,13 +729,15 @@ The host contract for all of this is in that api.md section; this page covers th
 - On return to the foreground the flag clears, the video decoder and renderer flush, and video resyncs at the next keyframe while audio continues.
 - A software host that renders no audio of its own never enters this mode (AE#739). The loop would have nothing to pace on and would drop the rest of the file within moments, parking the clock at end of media in the background. Such a session is released like a paused one and reloaded on return.
 
-**VideoToolbox session.** The session is rebuilt on every return to the foreground, because an iOS screen lock invalidates it, and in audio-only mode nothing decodes video to notice. A loss seen while video is wanted (`kVTInvalidSessionErr` from a decode) is reported by `HardwareVideoDecoder.onSessionLost`. The host rebuilds the session and repositions to the playhead, so the picture comes back on the frame the audio is at. If that happens in the background, or VT refuses the rebuild, the recovery is owed to the next foreground return.
+**VideoToolbox session.** The software host's VideoToolbox (VT) decode session is rebuilt on every return to the foreground. An iOS screen lock invalidates it, and in audio-only mode nothing decodes video to notice.
+
+A loss seen while video is wanted (`kVTInvalidSessionErr` from a decode) is reported by `HardwareVideoDecoder.onSessionLost`. The host rebuilds the session and repositions to the playhead, so the picture comes back on the frame the audio is at. If that happens in the background, or VT refuses the rebuild, the recovery waits for the next foreground return.
 
 **Scope.** The combined VOD loop, and live-without-DVR, which shares it. The DVR feeder loop is unchanged. Test it headless with `aetherctl bgaudio` (see [cli.md](cli.md)).
 
 ### Paused-background grace window (iOS)
 
-Without a grace window, a paused session tears down as soon as the app goes to the background, so a 10-30 s app switch pays a full pipeline rebuild (demuxer reopen, segment-plan scan, AVPlayer item reload). The grace window avoids that (#127).
+A paused session waits a short grace window before it tears down in the background (#127). Without it, the teardown would run as soon as the app goes to the background, and a 10-30 s app switch would pay a full pipeline rebuild (demuxer reopen, segment-plan scan, AVPlayer item reload).
 
 **How it works.**
 
@@ -631,18 +754,20 @@ Without a grace window, a paused session tears down as soon as the app goes to t
 
 ### What a teardown hands the reload that follows it
 
-Every reload path snapshots the state it restores (the #170 subtitle carryover, the audio pick, the disc title) right before its own `stopInternal`. That only works while teardown and reload are the same call. The background path splits them: it tears down when the app sleeps and reloads on return, so a snapshot taken by the reload would run long after the state was wiped (#357, symptoms in [measurements.md](measurements.md#lost-subtitle-selection-after-a-background-teardown)).
+The background teardown saves the viewer's track selection for the later reload: it parks a `BackgroundTeardownSelection` before `stopInternal` (the engine's internal teardown), and `reloadAtCurrentPosition` claims it once.
 
-So the teardown parks a `BackgroundTeardownSelection` before `stopInternal`, and `reloadAtCurrentPosition` claims it once.
+The reason: every other reload path snapshots the state it restores (the #170 subtitle carryover, the audio pick, the disc title) right before its own `stopInternal`. That only works while teardown and reload are the same call. The background path splits them. It tears down when the app sleeps and reloads on return, so a snapshot taken by the reload would run long after the state was wiped (#357, symptoms in [measurements.md](measurements.md#lost-subtitle-selection-after-a-background-teardown)).
+
+How the two sources combine:
 
 - The live read stays authoritative for what survives a teardown (the external registry, its ordinal counter, the host's subtitle authority) and for a selection made after it, which is newer intent.
 - The snapshot fills only the fields the teardown wiped.
 
 ### Keeping the native host across a teardown
 
-The background teardown also keeps one object: the `NativeAVPlayerHost` shell (`keepNativeHost`). AVKit registers its MediaRemote Now-Playing client once per `AVPlayer` instance and never registers again against a swapped one (issue #15).
+The background teardown also keeps one object: the `NativeAVPlayerHost` shell (`keepNativeHost`), which owns the `AVPlayer`. AVKit registers its MediaRemote Now-Playing client once per `AVPlayer` instance and never registers again against a swapped one (issue #15). A new `AVPlayer` would leave the system Now-Playing card dead.
 
-On the way back, the reload decides whether to keep it with `shouldPreserveNativeHostAcrossLoad(backend:nativeHostSurvives:)`. That asks whether a host is still there, not which backend is running. The teardown leaves `playbackBackend` at `.none`, so checking the backend alone would throw away exactly the instance the teardown kept, and the system Now-Playing card would be dead after the return (Sodalite#149).
+On the way back, the reload decides whether to keep it with `shouldPreserveNativeHostAcrossLoad(backend:nativeHostSurvives:)`. That asks whether a host is still there, not which backend is running. The teardown leaves `playbackBackend` at `.none`, so checking the backend alone would throw away exactly the instance the teardown kept, and the card would be dead after the return (Sodalite#149).
 
 A load that then routes to software or audio-only releases the kept host in its own dispatch branch.
 
@@ -673,16 +798,18 @@ The engine publishes the system Now-Playing card and answers the remote commands
 
 ## Source connections
 
-`AVIOReader` (`Demuxer/`) reads the engine's HTTP sources. Four mechanisms change how it treats an origin. The host contracts are in api.md.
+`AVIOReader` (`Demuxer/`) reads the engine's HTTP sources. Four mechanisms change how it treats an origin (the server a source comes from). The host contracts are in api.md.
 
-- **One request budget per origin.** `OriginRequestBudget` counts requests, not TCP connections, across every path a reader fetches on: the pump's ranges, detour blocks, size probes and the side readers. A limit comes from the host (`maxConcurrentSourceRequests`) or is learned when the origin answers 429, 503 or 509 (#377). Speculative paths (prewarm, the still ladder) take a slot only when one is free right now.
-- **Held source connection** ([`heldSourceConnection`](api.md#heldsourceconnection), AE#377). The default reader ends its connection at the window's high water and asks again every 8 to 16 MB of drain.
+- **One request budget per origin.** `OriginRequestBudget` counts requests, not TCP connections, across every path a reader fetches on: the pump's ranges, detour blocks (out-of-order reads, for example an index at the end of the file), size probes and the side readers.
 
-  Against an origin that punishes repeated requests, `HeldSourceConnection` asks once and pulls over a `URLSessionStreamTask`, with the engine's own HTTP/1.1 framing. On the HLS VOD ingest the same option uses one persistent HTTP/1.1 connection per origin (see [HLS ingest](#hls-ingest-into-the-loopback)).
+  A limit comes from the host (`maxConcurrentSourceRequests`) or is learned when the origin answers 429, 503 or 509 (#377). Speculative paths (prewarm, the still ladder) take a slot only when one is free right now.
+- **Held source connection** ([`heldSourceConnection`](api.md#heldsourceconnection), AE#377). The default reader ends its connection once its read-ahead window is full, and sends a new request every 8 to 16 MB the player consumes.
+
+  Some origins punish repeated requests. Against those, `HeldSourceConnection` asks once and pulls over a `URLSessionStreamTask`, with the engine's own HTTP/1.1 framing. On the HLS VOD ingest the same option uses one persistent HTTP/1.1 connection per origin (see [HLS ingest](#hls-ingest-into-the-loopback)).
 - **Sequential origins** ([`sequentialOrigin`](api.md#sequentialorigin), AE#693, AE#958). An origin that ignores `Range`, or answers ranges it does not honour, is read as one long unranged GET. The session plays front to back, and seeks land only inside the resident span that reaches the producer's frontier.
 
   An undeclared origin that fabricates ranges is caught at the first ranged reconnect and fails as `.sourceFabricatesRanges`. `$isSequentialOrigin` reports it ([Sequential origins](api.md#sequentialorigin)).
-- **Prewarm** ([Warming a source](api.md#warming-a-source-before-it-is-loaded), #551). `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` is static and needs no engine.
+- **Prewarm** ([Warming a source](api.md#warming-a-source-before-it-is-loaded), #551). Prewarm fetches a source's first bytes before the host loads it, so the start is faster. `AetherEngine.prewarm(url:httpHeaders:byteBudget:)` is static and needs no engine.
 
   `SourcePrewarmFetcher` issues one ranged GET from byte zero, plus a tail request only where `SourcePrewarmPlan` says the open will look there. `SourcePrewarmStore` keeps the bytes in memory, keyed by URL and headers, and the next `load()` of that URL takes them.
 
@@ -690,7 +817,7 @@ These apply to the software host too: it reads through the same `AVIOReader`.
 
 ## Shared outputs and the display switch
 
-**Several engines in one process.** Each `AetherEngine` has its own loopback server, caches and hosts. The audio session, its preferred channel count and the panel's display criteria exist once per process. `SharedOutputCoordinator` keeps the book of which engines still use them: an engine joins when a load starts and leaves on a final teardown.
+**Several engines in one process.** Each `AetherEngine` has its own loopback server, caches and hosts. The audio session, its preferred channel count and the panel's display criteria (the TV's video mode) exist once per process. `SharedOutputCoordinator` keeps track of which engines still use them: an engine joins when a load starts and leaves on a final teardown.
 
 - The audio session is released only by the last engine out.
 - The preferred output channel count is the widest playing source.
@@ -714,11 +841,11 @@ After a reconnect a live source often re-sends media the engine already has. On 
 
 **Proof of replay.**
 
-- A rollback in timestamps alone is never proof. A rollback to a retained packet's DTS/PTS can open a provisional candidate, even if the first payload differs.
+- A rollback in timestamps alone is never proof. A rollback to a retained packet's DTS/PTS can open a provisional candidate (a run of packets suspected to be a replay), even if the first payload differs.
 - Only exact DTS, PTS and compressed-payload SHA-256 matches count as replay evidence.
-- Candidate packets are buffered until both tracks pass their previously admitted frontier. Then the old media is removed, and new media continues on the existing timeline.
+- Candidate packets are buffered until both tracks pass their previously admitted frontier (the newest packet already accepted on that track). Then the old media is removed, and new media continues on the existing timeline.
 
-**Damaged boundaries.** A reconnect can cut a transport/PES packet in half. Forwarding a whole candidate after one mismatch replayed old pictures, and reopening right after that mismatch kept hitting the same damaged boundary. So:
+**Damaged boundaries.** A reconnect can cut a transport/PES packet in half. Two simple answers fail there: forwarding the whole candidate after one mismatch replays old pictures, and reopening right after that mismatch keeps hitting the same damaged boundary. So:
 
 - A short unmatched run that includes the first packet of either track is quarantined, within a bounded source-time interval and a bounded unmatched-packet count per track.
 - Before any exact match on a track, the first unmatched timestamp anchors that bound.
@@ -757,9 +884,9 @@ After a reconnect a live source often re-sends media the engine already has. On 
 
 ### Live replay boundary
 
-Live packet admission also protects the outgoing transport boundary.
+Live packet admission also protects the outgoing transport boundary: the last packets before a reconnect, which the cut may have damaged. The engine holds a damaged picture there until the replayed media proves a clean copy exists.
 
-- A timed, flagged video packet beyond admitted history is held, while earlier intact pictures and audio continue.
+- A timed, flagged (marked corrupt) video packet beyond admitted history is held, while earlier intact pictures and audio continue.
 - Exact replay on the participating tracks can supply the clean returning frame. The flagged packet is discarded only with that evidence.
 - Good pictures that the outgoing parser releases late do not complete a track before its replay is traversed.
 - Verified pending video is ordered by decode timestamp, exact returning copies are removed, and the settling frontier covers every retained good packet.
@@ -788,7 +915,7 @@ Video diagnostics keep source packet cadence separate from native decoded-output
 
 ### Live playlist renewal after a longer GOP
 
-The first live media playlist seals its target duration. If a later finalized segment's serialized `EXTINF`, rounded to an integer, is larger than that value, the provider creates a new `live-N/` playlist namespace with a larger seal.
+A live HLS playlist declares a target duration (the longest segment it will carry), and the first live media playlist seals that value: it never changes for that playlist. A later GOP can be longer than that. If a later finalized segment's serialized `EXTINF`, rounded to an integer, is larger than the sealed value, the provider creates a new `live-N/` playlist namespace with a larger seal.
 
 - The old video and subtitle URLs keep their original target, and keep the end index before the oversized segment, even after that segment leaves the live window.
 - Relative segment, init and subtitle URLs resolve within either namespace to the same retained cache. Source acquisition is not reopened.
@@ -796,7 +923,7 @@ The first live media playlist seals its target duration. If a later finalized se
 The native consumer swaps to the renewed URL using the existing in-place reload and playlist placement code.
 
 - The viewing position and play/pause intent carry across the swap, including a DVR position behind live.
-- A renewal never repeats a startup cushion wait that already finished.
+- A renewal never repeats a startup cushion wait (the buffer the live start waits for) that already finished.
 - It never cuts a GOP at a dependent frame or misstates a segment's duration.
 
 Limits: a consumer item replacement can still cause a short interruption, and this policy cannot rebuild missing source frames.
