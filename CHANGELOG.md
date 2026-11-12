@@ -511,6 +511,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Restore VC-1 references after both nonzero loads and source seeks.** Seekable,
+  non-live software VC-1 uses one bounded reference-preroll path, independent of paused
+  or playing intent. Inconclusive priming falls back to the original target within the
+  remaining seek budget. Retained cache hits keep their existing preroll. Cancelling a
+  transport seek leaves its demuxer reusable; only cancelled whole loads close it.
+  This follows #973; the public real-decoder fixture gate remains open (Draft #979).
+
 - **WMV1/2 software packet caches retain continuous presentation coverage.** Their I/P-only
   streams use the existing successor-PTS model with depth one, avoiding millisecond holes
   from rounded Matroska durations. Disk and memory stores share the qualification; missing/late
