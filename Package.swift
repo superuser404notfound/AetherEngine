@@ -56,7 +56,7 @@ let package = Package(
         .default(enabledTraits: []),
     ],
     dependencies: [
-        // Minimal FFmpeg build (avcodec, avformat, avutil, swresample only).
+        // Trimmed FFmpeg build (avcodec, avformat, avutil, swresample, swscale, avfilter).
         // No network stack, we use custom AVIO + URLSession for HTTP streams.
         // Resolved over Git rather than a local path so consumers (and
         // Xcode Cloud) can build without a sibling FFmpegBuild checkout.

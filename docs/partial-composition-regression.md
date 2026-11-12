@@ -24,7 +24,7 @@
 
 ## Generated regression
 
-Run on an Apple Silicon / Xcode development host, with the FFmpeg CLI available:
+Run on an Apple Silicon / Xcode development host with `ffmpeg` (built with libx264), `ruby` and `python3` on the path:
 
 ```sh
 bash Scripts/test-h264-partial-composition-controls.sh
@@ -32,11 +32,13 @@ bash Scripts/test-h264-partial-composition-controls.sh
 
 **FFmpeg checkout.** The runtime compiler uses the exact `FFmpegBuild` revision in `Package.resolved`. After normal package resolution it defaults to `.build/checkouts/FFmpegBuild`. If needed, set `AETHER_FFMPEG_CHECKOUT` to an existing checkout at that exact revision. The script does not resolve or update dependencies itself.
 
-**Fixtures.** All are generated solid colour plus tone, not an excerpt of any private film. The generator keeps a healthy prefix and clears only later `ctts` offset fields, without changing box lengths, DTS, compressed packets or audio.
+**Fixtures.** All are generated solid colour plus tone, not an excerpt of any private film. The generators clear only `ctts` offset fields, without changing box lengths, DTS, compressed packets or audio.
 
 1. A healthy prefix, with later offsets cleared.
 2. Only the middle cleared, so the broken-to-healthy boundary is also tested.
 3. Scene-cut shaped: a 30-picture zero-offset sequence followed by one of 420.
+4. The whole head without offsets, with a decode cadence change, plus its untouched healthy control (`Scripts/tests/make-missing-head-fixture.py`).
+5. Hierarchical B pictures (forward distance 3, backward depth 2): a damaged tail and a damaged middle, each checked against its healthy twin as an exact PTS oracle (`--partial-hierarchical`, `AETHER_TIMESTAMP_HEALTHY_TWIN`), plus the healthy twin on its own.
 
 **Why the third fixture exists.** A uniform one-second GOP cannot reach the ceiling of a policy that holds a whole sequence, so it also cannot show that ceiling gone. Measured at 30 fps with one stereo AAC track, a sequence-wide hold was ended by its interleaved packet budget at between 390 and 420 pictures, because 420 video packets carry about 656 audio packets with them. Reading the slot instead of holding a plan removes the ceiling rather than raising it: the deepest wait on that fixture is 6 packets, and the whole 1200-picture file comes back identical to its healthy twin.
 

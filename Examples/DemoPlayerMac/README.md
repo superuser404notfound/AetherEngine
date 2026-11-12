@@ -7,7 +7,7 @@ Intended for two audiences:
 - **Beta testers** who want to exercise the engine against their own media without setting up an Xcode project or writing a host app. Useful for repro on bug reports: "does the source play in DemoPlayerMac too?" decouples engine bugs from Sodalite-specific bugs.
 - **Developers** evaluating AetherEngine who want to see playback working before integrating.
 
-## Running it (Phase A: source build)
+## Running it from source
 
 From this directory:
 
@@ -26,7 +26,7 @@ Controls:
 | Escape | Stop and return to the drop zone |
 | Drop a different file | Loads the new file (current one is stopped first by the engine) |
 
-## Distribution build (Phase B)
+## Distribution build
 
 [`Scripts/build-dmg.sh`](Scripts/build-dmg.sh) produces a notarized universal-binary `.dmg` ready to attach to a GitHub Release as a download. End users get a double-clickable `.app` with Gatekeeper acceptance and no "unidentified developer" warning.
 
@@ -59,9 +59,9 @@ NOTARY_PROFILE="NOTARY_PROFILE" \
 ./Scripts/build-dmg.sh
 ```
 
-The output lands in `build/AetherEngine-Demo-<version>.dmg`. Six phases run in sequence: universal release build, `.app` wrap with Info.plist + entitlements, code-sign with Hardened Runtime, notarize + staple the `.app`, package into `.dmg`, sign + notarize the `.dmg`. Takes 1–3 minutes mostly waiting on Apple's notary service.
+The output lands in `build/AetherEngine-Demo-<version>.dmg`. Six phases run in sequence: universal release build, `.app` wrap with Info.plist + entitlements, code-sign with Hardened Runtime, notarize + staple the `.app`, package into `.dmg`, sign + notarize the `.dmg`. Takes 1 to 3 minutes mostly waiting on Apple's notary service.
 
-Optional env overrides: `VERSION` (default `2.0.2`), `APP_NAME`, `BUNDLE_ID`. If `NOTARY_PROFILE` is unset the script still builds + signs but skips notarization, useful for local smoke tests; the output won't pass Gatekeeper on other machines.
+Optional env overrides: `VERSION` (default `2.0.2`; set it to the release tag), `APP_NAME`, `BUNDLE_ID`. If `NOTARY_PROFILE` is unset the script still builds + signs but skips notarization, useful for local smoke tests; the output won't pass Gatekeeper on other machines.
 
 ## Why a separate `Package.swift`
 

@@ -1,6 +1,6 @@
 # Contributing to AetherEngine
 
-Thanks for your interest. AetherEngine is the video playback engine behind [Sodalite](https://github.com/superuser404notfound/Sodalite) (tvOS) and [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer) (macOS). Most of the interesting work here is format- and platform-specific, so a good bug report or a focused PR with a clear test plan is worth a lot.
+Thanks for your interest. AetherEngine is the video playback engine behind [Sodalite](https://github.com/superuser404notfound/Sodalite) (tvOS, iOS), [AetherPlayer](https://github.com/superuser404notfound/AetherPlayer) (macOS) and the apps in the README's [Used by](README.md#used-by) list. Most of the interesting work here is format- and platform-specific, so a good bug report or a focused PR with a clear test plan is worth a lot.
 
 ## Reporting bugs and requesting capabilities
 
@@ -23,7 +23,7 @@ The `aetherctl` command-line target is macOS-only (it uses `Foundation.Process`)
 
 ## Writing tests
 
-The suite is large (3000 tests over 460 files) and cheap (the whole run is about a minute), so the
+The suite is large (several thousand tests) and cheap (the whole run takes a few minutes), so the
 question is never whether a behaviour deserves a test. Two conventions keep it from growing in the
 one direction that costs something, which is width.
 
@@ -86,8 +86,8 @@ New public API therefore belongs in `docs/api.md` in the commit that adds it, an
 
 ## Releases and host pins
 
-Maintainers cut releases as annotated tags plus a GitHub Release with notes. Host apps pin AetherEngine by commit SHA, so after a change merges the host repos bump their pins to the new commit. You do not need to touch the host repos in your PR.
+Maintainers cut releases as tags plus a GitHub Release with notes. Host apps pin a release by its commit SHA and move to a new release after it is published. You do not need to touch the host repos in your PR.
 
 ## License
 
-AetherEngine is [LGPL-3.0 with an Apple Store / DRM exception](LICENSE). By contributing you agree your contributions are licensed under the same terms. Modifications to the engine itself remain under LGPL; the exception clause only covers distribution of unmodified builds through application stores.
+AetherEngine is [LGPL-3.0 with an Apple Store / DRM exception](LICENSE). By contributing you agree your contributions are licensed under the same terms. Modifications to the engine itself remain under LGPL; the exception covers store distribution of the engine and of modified versions.

@@ -16,7 +16,7 @@ public struct ExternalSubtitleTrack: Sendable, Equatable {
     public var isForced: Bool
     public var isHearingImpaired: Bool
     public var isDefault: Bool
-    /// nil forwards `LoadOptions.httpHeaders` (same auth as the media).
+    /// nil inherits `LoadOptions.httpHeaders` only for a same-origin URL, so a third-party host never sees the media's auth.
     public var httpHeaders: [String: String]?
     /// File-extension override ("srt", "ass", "vtt", "ssa") for URLs whose path hides the format.
     public var formatHint: String?

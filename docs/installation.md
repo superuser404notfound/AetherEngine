@@ -37,8 +37,8 @@ What CI runs:
 
 | Job | When | What |
 | --- | --- | --- |
-| `ci.yml` | Every change | Tests on macOS, and builds the test target for the iOS and tvOS Simulator |
-| `ci-extended.yml` | Nightly, and before each release | Release build, visionOS, and the device SDKs with every optional component |
+| `ci.yml` | Every change | Tests on macOS with and without the optional components, builds the test target for the iOS and tvOS Simulator, and checks the doc links |
+| `ci-extended.yml` | Nightly, and before each release | Release build, visionOS, the device SDKs with every optional component, a test pass on a one-thread pool, and the probe harnesses |
 | `xcode26-compat.yml` | Weekly (best effort), and before each release | Builds the package for tvOS and iOS with Xcode 26.3 (Swift 6.2). A break there is known before a release ships, but it does not block one. |
 
 **AV1 / VP9 registration on older Xcode.** `VTRegisterSupplementalVideoDecoderIfAvailable` first appears in the mobile SDKs of Xcode 26.2. A narrow compile-time guard uses Swift 6.2.3 as a stand-in for that SDK in stock Xcode bundles. In stock Xcode 26.0 / 26.1 it leaves those calls out and keeps hardware queries and the software fallback. It does not mean the rest of the package builds there, and it does not lower the supported toolchain. A separately installed newer Swift toolchain paired with an older SDK is not covered by this guard. The macOS registration path is unchanged.
@@ -86,7 +86,7 @@ List the traits on the package dependency:
 
 ```swift
 .package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.64.0",
-         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DualLayerDolbyVision", "DolbyVisionStillReshaping"])
+         traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DolbyVisionFelCurves", "DolbyVisionStillReshaping"])
 ```
 
 **Xcode project.** Set a remote package's traits in the package dependency editor (Project › Package Dependencies). Xcode stores them in the `.pbxproj`.
@@ -96,7 +96,7 @@ List the traits on the package dependency:
 1. Patch the generated `.pbxproj` after each generate: a `traits = ( TrueHDObjectAudio, DTSXObjectAudio, );` list in the package's `XCRemoteSwiftPackageReference`, which Xcode 27 builds with.
 2. Depend on a small local package that depends on AetherEngine with the traits set and re-exports it (`@_exported import AetherEngine`). [Probes/AllTraits](../Probes/AllTraits/Package.swift) is such a package with every trait on, and `Probes/DolbyVisionPulse/Device/PulseEngine` one with `DualLayerDolbyVision` alone.
 
-**Building the engine itself** with traits: `swift build --traits TrueHDObjectAudio,DTSXObjectAudio,DualLayerDolbyVision,DolbyVisionStillReshaping` (or `--enable-all-traits`). CI builds and tests both the default and the all-traits configuration, and builds the all-traits engine for tvOS and iOS through `Probes/AllTraits`.
+**Building the engine itself** with traits: `swift build --traits TrueHDObjectAudio,DTSXObjectAudio,DualLayerDolbyVision,DolbyVisionFelCurves,DolbyVisionStillReshaping` (or `--enable-all-traits`). CI builds and tests both the default and the all-traits configuration on every change, and nightly builds the all-traits engine for tvOS and iOS through `Probes/AllTraits`.
 
 ## Privacy manifest
 

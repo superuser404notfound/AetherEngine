@@ -162,9 +162,14 @@ A known trade-off of the route, documented at the maintainer's request rather th
 - The dual-layer route runs on `SoftwarePlaybackHost`. Its audio is the host's own `AudioDecoder` (FFmpeg decode to PCM, played through the sample-buffer audio renderer), never AVPlayer.
 - On tvOS only AVPlayer emits Dolby Atmos objects, and the platform does not pass a bitstream through.
 - So by default an E-AC-3 (JOC) track plays as its channel-bed core (5.1 or 7.1), without the Atmos objects. On the native route the same track is handed to AVPlayer unchanged.
-- TrueHD behaves as on the native route, which decodes it too and loses the objects either way.
+- With `objectAudioRendering` off, TrueHD loses its objects on both routes.
 
-With `LoadOptions.objectAudioRendering` set, the host keeps the objects. An E-AC-3 JOC track goes to the renderer compressed (after the system's Atmos decoder is registered in the process), and TrueHD Atmos and DTS:X are rendered as APAC. This is verified on macOS only; the tvOS behaviour of both is unmeasured.
+With `LoadOptions.objectAudioRendering` set, the host keeps the objects (`SoftwareAtmosRoute`):
+
+- **E-AC-3 JOC on tvOS** is decoded by the system's own Atmos decoder into the speaker bed and reaches the renderer as PCM. Measured on an Apple TV 4K (tvOS 27) into an AV receiver showing Dolby Atmos, in step with the picture and after seeks, on a Profile 7 FEL film (AE#995). Over AirPlay, and on macOS, the track goes to the renderer compressed instead.
+- **TrueHD Atmos and DTS:X** are rendered into a speaker bed, delivered as PCM on a local route and as APAC over AirPlay.
+
+Live sessions keep the plain PCM decode either way.
 
 A host that does not set it and wants E-AC-3 Atmos on a Profile 7 FEL title leaves `preferDualLayerDolbyVision` off for that title. `DualLayerRouteAudioTests` pins the routing half of this.
 
@@ -299,17 +304,18 @@ The software host instantiates `DualLayerVideoDecoder` only for the first row. A
 
 The route is FEL only and capability gated (`DualLayerRouteDecision`, pure and unit-tested). Everything else keeps the native route, which plays single-layer 8.1 where the display takes Dolby Vision and the HDR10 base layer where it does not.
 
-The checks run in this order (the code's order: preference, trait, handling, live/seekable, hardware, AirPlay video receiver, `el_type`, geometry, budget). The first that fails keeps the native route:
+The checks run in this order (the code's order: preference, trait, enhancement layer in the packets, handling, live/seekable, hardware, AirPlay video receiver, `el_type`, geometry, budget). The first that fails keeps the native route:
 
 1. the preference is off,
 2. the build lacks the `DualLayerDolbyVision` trait,
-3. `dolbyVisionHandling` is not `.automatic`,
-4. a live or non-seekable source,
-5. a box with no hardware HEVC decoder for the stream,
-6. an AirPlay video receiver on the audio route (iOS, as the host reports it),
-7. a MEL source (nothing to compose), or an enhancement layer the probe could not classify,
-8. a base layer of unknown size,
-9. a stream the box could not decode twice in real time.
+3. the enhancement layer is on its own PID or track and could not be joined, so only its RPUs are folded in,
+4. `dolbyVisionHandling` is not `.automatic`,
+5. a live or non-seekable source,
+6. a box with no hardware HEVC decoder for the stream,
+7. an AirPlay video receiver on the audio route (iOS, as the host reports it),
+8. a MEL source (nothing to compose), or an enhancement layer the probe could not classify,
+9. a base layer of unknown size,
+10. a stream the box could not decode twice in real time.
 
 The `el_type` probe (a packet scan and a seek) runs once nothing up to and including the AirPlay receiver check has ruled the route out. So it also runs for a stream that the geometry or the budget then refuses: the MEL / unknown answer outranks the size reasons in the log line, and that precedence needs the probe's answer.
 
@@ -345,8 +351,10 @@ The dual-layer route reads one track, so the demuxer joins the two (`Demuxer.ena
 [AetherEngine] DV P7 dual-layer route: not taken (built without the DualLayerDolbyVision trait), keeps the native route (8.1 where the display takes Dolby Vision)
 [AetherEngine] DV P7 dual-layer route: not taken (over the real-time budget, 3840x2160@60 needs 200% of it), keeps the native route (8.1 where the display takes Dolby Vision)
 [AetherEngine] DV P7 dual-layer route: not taken (base-layer size unknown), keeps the native route (8.1 where the display takes Dolby Vision)
-[AetherEngine] DV P7 dual-layer route: not taken (enhancement layer on its own PID (UHD Blu-ray), only its RPUs are folded in), keeps the native route (8.1 where the display takes Dolby Vision)
+[AetherEngine] DV P7 dual-layer route: not taken (enhancement layer on its own PID or track, only its RPUs are folded in), keeps the native route (8.1 where the display takes Dolby Vision)
 ```
+
+The last line only appears when the demuxer could not join split layers (see above).
 
 **No Metal.** A missing Metal device does not fall back to the native route, because the routing decision has already been made. The software host keeps the base layer alone on a `HardwareVideoDecoder` (HDR10, no composition). The same is true after the fact: if the compute shaders fail to compile, the decoder stays but every frame goes out as its base layer.
 

@@ -42,32 +42,33 @@ ffprobe -v error -show_entries stream=index,codec_type,codec_name /tmp/embedded-
 swift build
 
 # 2. Serve the file with the native subtitle rendition requested (parks; note the printed URL).
-#    --native-subs N requests the native track; the engine now auto-attaches one cue store per
-#    embedded text track inside start(), so the master advertises the SUBTITLES rendition.
+#    --native-subs takes an index for CLI compatibility but ignores it: any value attaches one cue
+#    store per embedded text track, so the master advertises a SUBTITLES rendition for each.
 .build/debug/aetherctl serve --native-subs 0 /tmp/embedded-subs.mkv
-#    -> "=== PLAYBACK URL ===" prints e.g. http://127.0.0.1:58494/media.m3u8
-#       The master is always at the same host:port, path /master.m3u8.
+#    -> "=== PLAYBACK URL ===" prints e.g. http://127.0.0.1:58494/<token>/media.m3u8
+#       <token> is a per-session 32-character hex path segment; a request without it gets a 404.
 
-# 3. In another shell, point the harness at /master.m3u8 (NOT media.m3u8; the rendition lives
-#    only in the master).
-swift Tests/Integration/avplayer-open-check.swift http://127.0.0.1:<port>/master.m3u8 30
+# 3. In another shell, point the harness at the master playlist (NOT media.m3u8; the rendition
+#    lives only in the master): the printed URL with its file name set to master.m3u8, token kept.
+swift Tests/Integration/avplayer-open-check.swift http://127.0.0.1:<port>/<token>/master.m3u8 30
 
 # 4. Ctrl-C the aetherctl process when done.
 ```
 
 ### Expected output (captured 2026-06-29, macOS 26.5, Xcode 26)
 
-Against `/master.m3u8`:
+Against `master.m3u8` (the capture predates the session token, which now sits between the port and
+the file name):
 
 ```
-[harness] opening http://127.0.0.1:58494/master.m3u8  (timeout 30s)
+[harness] opening http://127.0.0.1:58494/<token>/master.m3u8  (timeout 30s)
 [harness] AVPlayerItem.status = .readyToPlay
 [harness] legible media-selection options: 1
 [harness]   [0] displayName="Subtitle 1" lang=nil mediaType=sbtl
 [harness] PASS: readyToPlay + 1 legible option(s) against the loopback master
 ```
 
-Negative control against `/media.m3u8` (no rendition in the media playlist) correctly reports
+Negative control against `media.m3u8` (no rendition in the media playlist) correctly reports
 `legible media-selection options: 0` and exits 1.
 
 Exit codes: `0` = readyToPlay AND >= 1 legible option; `1` = failed / timeout / no option;
