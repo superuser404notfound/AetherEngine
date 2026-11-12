@@ -47,6 +47,9 @@ private final class FakeSurface: RemoteCommandSurface {
     var skipForward: any RemoteCommandHandle { all[3] }
     var skipBackward: any RemoteCommandHandle { all[4] }
     var changePosition: any RemoteCommandHandle { all[5] }
+    let next = FakeCommand(enabled: false), previous = FakeCommand(enabled: false)
+    var nextTrack: any RemoteCommandHandle { next }
+    var previousTrack: any RemoteCommandHandle { previous }
     var interval: Double?
     func setSkipInterval(_ seconds: Double) { interval = seconds }
 }
@@ -58,20 +61,22 @@ private final class FakeInfoCenter: NowPlayingInfoStore {
 
 @MainActor
 private final class RecordingSink: SoftwareNowPlayingSink {
-    var handler: (@MainActor (SoftwareNowPlayingCommand) -> Void)?
+    var handler: (@MainActor (NowPlayingRemoteCommand) -> Void)?
     var seekingEnabled: Bool?
     var published: [(info: [String: Any]?, state: MPNowPlayingPlaybackState)] = []
     var deactivated = false
     var skipInterval: Double?
-    func activate(skipInterval: Double, handler: @escaping @MainActor (SoftwareNowPlayingCommand) -> Void) {
+    func activate(skipInterval: Double, handler: @escaping @MainActor (NowPlayingRemoteCommand) -> Void) {
         self.skipInterval = skipInterval
         self.handler = handler
     }
     func setSeekingEnabled(_ enabled: Bool) { seekingEnabled = enabled }
+    func setTrackCommands(_ tracks: NowPlayingTrackAvailability) {}
     func publish(info: [String: Any]?, playbackState: MPNowPlayingPlaybackState) {
         published.append((info, playbackState))
     }
-    func deactivate() { deactivated = true }
+    func deactivate(clearCard: Bool) { deactivated = true }
+    func clearCard() {}
 }
 
 private func rate(_ info: [String: Any]?) -> Double? { info?[MPNowPlayingInfoPropertyPlaybackRate] as? Double }
@@ -200,6 +205,7 @@ struct SoftwareNowPlayingTests {
         var now: TimeInterval = 1000
         let t = RecordingTransport(), sink = RecordingSink()
         let c = SoftwareNowPlayingController(sink: sink, transport: t, uptime: { now })
+        c.start()
         t.state = .playing; t.currentTime = 10
         c.refresh(requestedRate: 1, isBuffering: false)
         let base = sink.published.count
@@ -218,6 +224,7 @@ struct SoftwareNowPlayingTests {
         var now: TimeInterval = 1000
         let t = RecordingTransport(), sink = RecordingSink()
         let c = SoftwareNowPlayingController(sink: sink, transport: t, uptime: { now })
+        c.start()
         t.state = .playing; t.currentTime = 10
         c.refresh(requestedRate: 1, isBuffering: false)
         now += 0.3
@@ -238,6 +245,7 @@ struct SoftwareNowPlayingTests {
         var now: TimeInterval = 1000
         let t = RecordingTransport(), sink = RecordingSink()
         let c = SoftwareNowPlayingController(sink: sink, transport: t, uptime: { now })
+        c.start()
         t.state = .paused; t.currentTime = 10
         c.refresh(requestedRate: 1, isBuffering: false)
         let base = sink.published.count
@@ -250,6 +258,7 @@ struct SoftwareNowPlayingTests {
     func identityTickets() {
         let t = RecordingTransport(), sink = RecordingSink()
         let c = SoftwareNowPlayingController(sink: sink, transport: t)
+        c.start()
         t.state = .paused
         let first = c.beginIdentityUpdate()
         let second = c.beginIdentityUpdate()
@@ -264,7 +273,7 @@ struct SoftwareNowPlayingTests {
         let engine = try AetherEngine()
         #expect(!engine.ownsSoftwareNowPlaying)
         engine.startSoftwareNowPlaying()
-        #expect(engine.softwareNowPlaying == nil)
+        #expect(engine.nowPlayingController == nil)
         #expect(!engine.softwareNowPlayingActive)
     }
 
@@ -276,7 +285,7 @@ struct SoftwareNowPlayingTests {
         options.sharedOutputRole = .secondary
         engine.setLoadedOptionsForTesting(options)
         engine.startSoftwareNowPlaying()
-        #expect(engine.softwareNowPlaying == nil)
+        #expect(engine.nowPlayingController == nil)
         #expect(!engine.softwareNowPlayingActive)
     }
 
@@ -284,12 +293,13 @@ struct SoftwareNowPlayingTests {
     func enginePrimaryOptIn() throws {
         let engine = try AetherEngine()
         engine.ownsSoftwareNowPlaying = true
-        engine.makeSoftwareNowPlayingSink = { RecordingSink() }
+        engine.nowPlayingArbiter = NowPlayingArbiter()
+        engine.makeNowPlayingSink = { _, _ in RecordingSink() }
         engine.startSoftwareNowPlaying()
-        #expect(engine.softwareNowPlaying != nil)
+        #expect(engine.nowPlayingController != nil)
         #expect(engine.softwareNowPlayingActive)
         engine.stopSoftwareNowPlaying()
-        #expect(engine.softwareNowPlaying == nil)
+        #expect(engine.nowPlayingController == nil)
         #expect(!engine.softwareNowPlayingActive)
     }
 
@@ -298,6 +308,7 @@ struct SoftwareNowPlayingTests {
         var now: TimeInterval = 1000
         let t = RecordingTransport(), sink = RecordingSink()
         let c = SoftwareNowPlayingController(sink: sink, transport: t, uptime: { now })
+        c.start()
         t.state = .playing; t.currentTime = 100
         c.refresh(requestedRate: 1, isBuffering: false)
         now += 0.25
@@ -316,7 +327,7 @@ struct SoftwareNowPlayingTests {
         #expect(surface.interval == 15)
         #expect(surface.all.allSatisfy { $0.isEnabled && $0.targets == 1 })
         sink.setSeekingEnabled(false)
-        sink.deactivate()
+        sink.deactivate(clearCard: true)
         #expect(surface.all.map(\.isEnabled) == [false, true, false, true, false, false])
         #expect(surface.all.allSatisfy { $0.targets == 0 })
     }
@@ -330,7 +341,7 @@ struct SoftwareNowPlayingTests {
             MPMediaItemPropertyTitle: "Mine", MPMediaItemPropertyPlaybackDuration: 60.0,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: 5.0, MPNowPlayingInfoPropertyPlaybackRate: 1.0]
         sink.publish(info: mine, playbackState: .playing)
-        sink.deactivate()
+        sink.deactivate(clearCard: true)
         #expect(center.nowPlayingInfo == nil)
         #expect(center.playbackState == .stopped)
 
@@ -348,7 +359,7 @@ struct SoftwareNowPlayingTests {
             sink.publish(info: mine, playbackState: .playing)
             center.nowPlayingInfo = card
             center.playbackState = .paused
-            sink.deactivate()
+            sink.deactivate(clearCard: true)
             #expect(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double
                     == card[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double)
             #expect(center.nowPlayingInfo?.count == card.count)
@@ -359,7 +370,7 @@ struct SoftwareNowPlayingTests {
         let bare: [String: Any] = [MPMediaItemPropertyTitle: "Live"]
         sink.activate(skipInterval: 10) { _ in }
         sink.publish(info: bare, playbackState: .playing)
-        sink.deactivate()
+        sink.deactivate(clearCard: true)
         #expect(center.nowPlayingInfo != nil)
     }
 
@@ -369,7 +380,7 @@ struct SoftwareNowPlayingTests {
         let sink = SystemNowPlayingSink(infoCenter: center, commands: surface)
         sink.activate(skipInterval: 10) { _ in }
         surface.all[0].isEnabled = false   // play: we wrote true, a foreign owner turned it off
-        sink.deactivate()
+        sink.deactivate(clearCard: true)
         #expect(surface.all[0].isEnabled == false)
         #expect(surface.all[1].isEnabled == true)   // pause: untouched, restored to its prior true
         #expect(surface.all[2].isEnabled == false)  // toggle: prior false restored

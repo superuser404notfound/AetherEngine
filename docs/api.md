@@ -1610,36 +1610,85 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
 
 ## Now Playing and the audio session
 
+The engine can own the system Now-Playing card (lock screen, Control Center, the Apple TV overlay, the Mac's Now Playing widget) and the transport commands behind it, on every host and every platform. Each route is a separate opt-in, because a host that builds its own surface would otherwise get a second one.
+
 | Symbol | Notes |
 | --- | --- |
-| `ownsVideoNowPlayingSession` | Opt in to owning system Now-Playing on the native **video** path. Off by default, and that default matters: an `AVPlayerViewController` host already gets this from AVKit, and opting in costs it AVKit's card, its `externalMetadata` and its transport commands. Read at host creation, so set it before `load()`. |
-| `ownsSoftwareNowPlaying`, `remoteSkipInterval`, `softwareNowPlayingActive` | Now Playing for the software host. See [Now Playing on the software host](#now-playing-on-the-software-host). |
-| `videoNowPlayingSession`, `setVideoNowPlayingInfo(_:)` | The session and its staged identity dictionary. Elapsed / rate / duration are merged from the player; do not stage them. |
-| `audioNowPlayingSession`, `setAudioNowPlayingInfo(_:)` | The same pair for the audio-only path. Pass an empty dictionary to clear. See below. |
-| `setExternalMetadata(_:)` | AVKit's on-screen info pane on the video path. Safe before `load()`; replayed at host creation. |
+| `ownsAudioNowPlaying` | Card and commands for audio-only sessions, on both audio hosts. Off by default. See [Where the engine publishes](#where-the-engine-publishes). |
+| `ownsVideoNowPlayingSession` | Card for the native **video** path. Off by default, and that default matters: an `AVPlayerViewController` host already gets this from AVKit, and opting in costs it AVKit's card, its `externalMetadata` and its transport commands. Read at host creation, so set it before `load()`. |
+| `ownsVideoNowPlayingCommands` | With `ownsVideoNowPlayingSession`, the engine also answers the transport commands for native video. Off by default, so hosts that register their own on `videoNowPlayingSession.remoteCommandCenter` keep working. |
+| `ownsSoftwareNowPlaying`, `softwareNowPlayingActive` | Card and commands for the software host. See [Now Playing on the software host](#now-playing-on-the-software-host). |
+| `remoteSkipInterval` | Skip distance (default 10 s) on every route the engine answers commands for. |
+| `setNowPlayingInfo(_:)` | The item's identity (title, artist, album, artwork) for whichever route `load()` picks, on every platform. Elapsed, rate and duration come from the host; do not stage them. Pass an empty dictionary to clear. |
+| `setVideoNowPlayingInfo(_:)`, `setAudioNowPlayingInfo(_:)` | The same, for the video or the audio routes only. The video identity is cleared by `stop()`, the audio one is not. |
+| `setNowPlayingTrackCommands(next:previous:)` | Next and previous track handlers (a playlist or an album queue). nil for a direction that does not exist right now. While either is set the card shows track buttons instead of the skip pair. |
+| `nowPlayingCommandInterceptor` | Optional. Sees every remote command first (a `NowPlayingRemoteCommand`: play, pause, toggle, skip, change position, next, previous); return true when the host handled it. For commands whose meaning depends on host state, such as play after the end of an item. |
+| `claimNowPlaying()` | Hands the shared surface to this engine when several engines publish there. See [Several engines in one process](#several-engines-in-one-process). |
+| `videoNowPlayingSession`, `audioNowPlayingSession` | The `MPNowPlayingSession` of the native video host and of the AVPlayer audio host (iOS, tvOS, visionOS). nil on macOS, on the software and FFmpeg hosts, and with no host. |
+| `setExternalMetadata(_:)` | AVKit's on-screen info pane on the video path. Also the base identity of a card the engine publishes on the shared center. Safe before `load()`; replayed at host creation. |
 | `deactivatesAudioSessionOnStop` | Off by default. See [The audio session](#the-audio-session). |
 | `rendererAudioSessionActivationEnabled` | Default `true`. See [Host-managed renderer audio activation](#host-managed-renderer-audio-activation). |
 | `logTag` | A short name for this instance (`tile2`), carried by the `[SharedOutput]` lines and a `[AetherEngine:<tag>] state=` line per transition. Set it before `load()` (the tag is captured when the engine joins), on every engine of a host that runs several at once. |
 
+A host that opts into everything needs no MediaPlayer code of its own:
+
+```swift
+engine.ownsAudioNowPlaying = true
+engine.ownsSoftwareNowPlaying = true
+engine.ownsVideoNowPlayingSession = true      // not with AVPlayerViewController
+engine.ownsVideoNowPlayingCommands = true
+engine.setNowPlayingInfo([
+    MPMediaItemPropertyTitle: title,
+    MPMediaItemPropertyArtist: artist,
+    MPMediaItemPropertyArtwork: artwork,      // decoded up front, @Sendable request handler
+])
+engine.setNowPlayingTrackCommands(next: hasNext ? { queue.next() } : nil,
+                                  previous: hasPrevious ? { queue.previous() } : nil)
+try await engine.load(url: url)
+```
+
+### Where the engine publishes
+
+| Host | iOS, tvOS, visionOS | macOS |
+| --- | --- | --- |
+| Native video (`NativeAVPlayerHost`) | The host's `MPNowPlayingSession` publishes the card; with `ownsVideoNowPlayingCommands` the engine binds the commands on the session's center. | No session exists and a bare `AVPlayer` publishes nothing, so the engine writes the shared info center (commands with `ownsVideoNowPlayingCommands`). |
+| AVPlayer audio (`AudioAVPlayerHost`) | The host's session publishes the card; with `ownsAudioNowPlaying` the engine binds the commands on its center. | Shared centers, card and commands. |
+| FFmpeg audio (`AudioPlaybackHost`) | Shared centers, card and commands. | Same. |
+| Software video (`SoftwarePlaybackHost`) | Shared centers, card and commands. | Same. |
+
+On the shared centers the card is republished on state, rate, duration and buffering changes and on a clock jump; the system extrapolates elapsed time in between. A remote play reactivates the audio session first (iOS and tvOS, unless `rendererAudioSessionActivationEnabled` is off), because the system may have deactivated it during the pause and a player resumed on an inactive session stays silent. Every command the engine receives logs a `[NowPlaying] remote command` line.
+
+Between two items (the next track, a reload) the card stays on the shared center until the next item publishes over it, so it does not blink out. `stop()` clears it, and so does a load on a route the engine does not own.
+
 **`audioNowPlayingSession` on the two audio-only hosts.**
 
-- The AVPlayer host (`AudioAVPlayerHost`) owns its session unconditionally (there is no AVKit fork there).
-- The FFmpeg host (`AudioPlaybackHost`) has no session, so the property is nil there and the host drives Now Playing through the shared centers. The FFmpeg host serves: codecs off the AVPlayer whitelist, a custom `IOReader`, a FLAC under CoreMedia's block floor, a FLAC whose frames are smaller than its `STREAMINFO` declares, any raw `.flac` file, and `preferredDecodePath = .software`.
+- The AVPlayer host (`AudioAVPlayerHost`) owns its session unconditionally on iOS, tvOS and visionOS (there is no AVKit fork there).
+- The FFmpeg host (`AudioPlaybackHost`) has no session, so the property is nil there. With `ownsAudioNowPlaying` the engine publishes for it; without, the host drives Now Playing through the shared centers. The FFmpeg host serves: codecs off the AVPlayer whitelist, a custom `IOReader`, a FLAC under CoreMedia's block floor, a FLAC whose frames are smaller than its `STREAMINFO` declares, any raw `.flac` file, and `preferredDecodePath = .software`.
+
+### Several engines in one process
+
+The shared centers exist once per process. Two engines publishing there at once would overwrite each other's card and both answer every command, so a toggle would fire twice and cancel itself. The engine that claimed last holds the surface:
+
+- An engine claims when it starts playing, and when the host calls `claimNowPlaying()` (a player window becoming key, for instance).
+- An engine whose route starts while another holds the surface waits behind it.
+- When the holder stops, the most recent claimant still waiting takes over.
+
+Routes published through an `MPNowPlayingSession` take no part: the system arbitrates between sessions, and each session has its own command center. A secondary `sharedOutputRole` never publishes at all.
 
 ### Now Playing on the software host
 
 `ownsSoftwareNowPlaying` opts the software host (the Dolby Vision FEL route, which has no `AVPlayer`) into publishing its own Now-Playing card on the shared `MPNowPlayingInfoCenter` and serving play, pause, toggle, skip and change-position from `MPRemoteCommandCenter.shared()`.
 
 - Off by default, and independent of `ownsVideoNowPlayingSession`, so the native path is untouched. A secondary role never takes it.
-- Identity comes from `setExternalMetadata`, overlaid by `setVideoNowPlayingInfo`.
-- `remoteSkipInterval` (default 10 s) sets the skip buttons.
-- `softwareNowPlayingActive` is true while the engine is publishing: the cue for a host to register next/previous.
+- Identity comes from `setExternalMetadata`, overlaid by `setNowPlayingInfo` (or `setVideoNowPlayingInfo`).
+- `softwareNowPlayingActive` is true while the engine is publishing for the software host.
 
-The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default()` and registers its own targets on `MPRemoteCommandCenter.shared()`. At stop it:
+The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default()` and registers its own targets on `MPRemoteCommandCenter.shared()`, as it does on every shared route. At stop it:
 
 - removes only those targets
 - restores each command's `isEnabled` to its value before the session; a command another owner changed meanwhile keeps that owner's `isEnabled`
 - clears the info and playback state only while the center still holds what the engine last published (matched on elapsed, rate, title and duration), so a host that took over meanwhile keeps its card
+- touches next and previous only while the host has handed in track handlers, so a host that registers its own keeps them
 
 ### The audio session
 
