@@ -79,11 +79,9 @@ The audio columns describe the native path. The software host decodes every trac
 | AC-3, E-AC-3, E-AC-3 JOC (Atmos) | Yes | Stream copy | JOC reaches HDMI as Dolby MAT 2.0 ([Dolby Atmos](#dolby-atmos)) |
 | FLAC, ALAC | Yes | Stream copy | FLAC with `min_blocksize` below 192 bridges |
 | TrueHD, MLP, DTS, DTS-HD MA | Yes | Bridge | Atmos objects and DTS:X heights only with `objectAudioRendering` and its trait ([TrueHD Atmos](#truehd-atmos-with-heights), [DTS:X](#dtsx-with-heights)) |
-| MP3, MP2, Opus, Vorbis | Yes | Bridge | |
-| PCM: 16-bit LE / BE, 24-bit LE, 32-bit float, unsigned 8-bit, G.711, Blu-ray and DVD LPCM | Yes | Bridge | |
+| MP3, MP2, MPEG-1 Layer I, Opus, Vorbis | Yes | Bridge | |
+| PCM: 16, 24 and 32-bit integer and 32 / 64-bit float (little and big endian), unsigned 8-bit, G.711, Blu-ray and DVD LPCM | Yes | Bridge | |
 | WMA family, Nellymoser, ADPCM-SWF, Speex, RealAudio, AMR-NB / AMR-WB | Yes | Bridge | |
-| 24-bit big-endian PCM, MPEG-1 Layer I | Audio-only from a URL only | AVPlayer | Silent inside a video file: no decoder in the build ([Audio](#audio)) |
-| 32-bit integer PCM | No | | Silent inside a video file, fails as an audio-only file |
 | AC-4, MPEG-H 3D Audio | No | | Track is listed, plays silent ([Audio a build has no decoder for](#audio-a-build-has-no-decoder-for)) |
 
 ### Subtitle formats
@@ -634,10 +632,7 @@ Stream-copy exceptions:
 
 See [architecture › Audio-only pipeline](architecture.md#audio-only-pipeline-music-podcasts-audiobooks).
 
-**Audio shapes the build cannot decode.** The bridge decodes PCM in these shapes only: 16-bit little and big endian, 24-bit little endian, 32-bit float little endian, unsigned 8-bit, G.711 A-law / mu-law, Blu-ray LPCM and DVD LPCM. 24-bit big-endian PCM (QuickTime `in24`), 32-bit integer PCM and MPEG-1 Layer I audio (`mp1`) have no decoder in the FFmpeg build (FFmpegBuild 3.14.0).
-
-- **In a video file** such a track plays silent. The bridge cannot open it, the picture plays on, and `audioDelivery` reads `.droppedNoPipeline`.
-- **As an audio-only file** it fails the load on the FFmpeg host. From a URL, AVPlayer still plays 24-bit big-endian PCM and MPEG-1 Layer I itself; a custom `IOReader` or `preferredDecodePath = .software` sends them to the FFmpeg host.
+**PCM shapes the bridge decodes.** Every integer and float PCM shape the containers carry: 16, 24 and 32-bit integer and 32 / 64-bit float, each little and big endian, plus unsigned 8-bit, G.711 A-law / mu-law, Blu-ray LPCM and DVD LPCM. That covers the 24-bit big-endian PCM camera MOVs record (QuickTime `in24`) and 32-bit WAV. MPEG-1 Layer I (`mp1`) bridges like MP2. All of these need FFmpegBuild 3.15.0; with an older build a track in one of the newer shapes plays silent inside a video file (`audioDelivery` reads `.droppedNoPipeline`).
 
 ### Audio bridge modes
 
