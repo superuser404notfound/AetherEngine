@@ -115,6 +115,14 @@ def anchors_of(markdown: str, drop_first_h1: bool = True) -> set[str]:
         base = slug(heading.group("text"))
         if not base:
             continue
+        # Starlight's smartypants turns "--" in plain heading text (not inside a code span)
+        # into an en-dash, which the slugger then drops; GitHub keeps both hyphens. The same
+        # heading then answers to two different anchors, so a link can only work on one of
+        # the two sites. Such a heading is no valid link target: reword it, or put the flag
+        # in backticks. Found when "### customio --live spool" failed the website build.
+        if re.search(r"--", re.sub(r"`[^`]*`", "", heading.group("text"))):
+            seen[base] = seen.get(base, 0) + 1
+            continue
         count = seen.get(base, 0)
         seen[base] = count + 1
         out.add(base if count == 0 else f"{base}-{count}")

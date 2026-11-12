@@ -309,7 +309,7 @@ Before the fix both read `clock re-anchored to first sample: anchor=9.984s (load
 
 `--paused` alone (no `play`) is not judged, but its ticks are the observable for the second half of the same report. A paused resume read `cur=0.00` until play, because the host published its still unarmed synchronizer over the anchor. It now reads `cur=17.30`.
 
-### customio --live spool (AE#445, AE#460, AE#461)
+### `customio --live` spool (AE#445, AE#460, AE#461)
 
 Measured: the custom-source live harness found that host reader callbacks ran on the pump's undrained thread (AE#445), and its reload arms showed two reloads that ignored what they were asked (AE#460, AE#461).
 
@@ -325,7 +325,7 @@ Current rule: [cli.md › The `--live` spool](cli.md#the---live-spool-ae445).
 
 **`--host-carry` (AE#445 round 3).** Round 3's census on the reporter's device pinned his footprint to ONE `REALLOC`-tagged block, growing on an exact x1.25 ladder and holding every byte the session had consumed. That factor is Foundation's: `Data` grows a large buffer by `newLength >> 2`, while `av_fast_realloc` adds a sixteenth and FFmpeg's AVIO dynamic buffer a half. So the block is a Swift `Data`. The one `Data` shape that grows like that while its `count` stays tiny is a parse carry consumed from the front with `removeFirst`. That only advances the slice's lower bound and leaves the backing store holding everything below it.
 
-### audiotap --software (#400)
+### `audiotap --software` (#400)
 
 `audiotap --software` exists because the software audio path had no harness, and that gap was real: a multichannel trap shipped (#400).
 
