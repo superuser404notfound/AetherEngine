@@ -653,6 +653,9 @@ extension AetherEngine {
                       // signal surface a dead upstream (segment 404 / token expiry) so the host can retune.
                       surfaceEndFailures: true,
                       httpHeaders: options.httpHeaders,
+                      // AE#154 follow-up: only where the engine read the body itself. A host-declared bypass
+                      // keeps AVFoundation's own typing of the URL.
+                      declaresHLSPlaylistMIMEType: options.hlsPlaylistProvenByBody,
                       // #168 follow-up: live-only (VOD remote HLS is the AE#154 reroute target; ingesting
                       // it back would ping-pong), and hosts can opt out via LoadOptions.
                       armIngestFallback: RemoteHLSIngestFallback.shouldArm(

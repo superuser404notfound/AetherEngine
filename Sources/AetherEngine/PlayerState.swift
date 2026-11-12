@@ -1155,6 +1155,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// host's subtitle authority flag carries over. Consumed by the load; never persisted.
     var subtitleSessionCarryover: SubtitleSessionCarryover? = nil
 
+    /// ENGINE-INTERNAL: the engine read this URL's body and found an HLS playlist (the AE#154 / AE#246
+    /// reroute), which is why the session runs on the `nativeRemoteHLS` bypass. Not settable from the
+    /// public initializer. The bypass then declares the HLS MIME type on the asset, because AVFoundation
+    /// types a URL by its path extension and `Content-Type` and never by its body. Rides `loadedOptions`,
+    /// so every rebuild of a rerouted session keeps the declaration.
+    var hlsPlaylistProvenByBody: Bool = false
+
     public init(
         omitCriteriaColorExtensions: Bool = false,
         suppressDisplayCriteria: Bool = false,

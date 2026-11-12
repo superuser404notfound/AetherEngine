@@ -145,6 +145,8 @@ So an origin that turned AVPlayer away with a user-agent filter or a per-token c
 
 **Non-live `m3u8` on the loopback path** (#154). The bundled FFmpeg has no network support, so it can never demux the playlist locally, and remote HLS is AVPlayer's job anyway. On the bypass, the engine lists the stream's external WebVTT renditions (the legible `AVMediaSelectionGroup`) as `subtitleTracks`. `selectSubtitleTrack(index:)` and `clearSubtitle()` drive AVPlayer's media selection, and AVPlayer draws the cues.
 
+**Mis-typed playlists on the reroute** (#154). The reroute is decided by the body (`#EXTM3U`), not by the URL, so the engine tells AVFoundation what it found: the asset declares `application/vnd.apple.mpegurl` (`AVURLAssetOverrideMIMETypeKey`). A playlist behind a URL without `.m3u8` that the origin serves as `video/mp4` or `application/octet-stream` plays instead of failing with AVFoundation -11829 / -11828. A host that sets `nativeRemoteHLS` itself gets no declaration; AVFoundation types that URL as it always has.
+
 [architecture › Effective video route](architecture.md#effective-video-route-videoroute) lists these transitions as `videoRoute` reports them.
 
 ### MPEG-DASH (on-demand)

@@ -37,6 +37,14 @@ the public-API contract.
 
 ### Fixed
 
+- **An HLS VOD playlist behind a URL that does not say so failed on the AE#154 reroute.** The engine reads
+  `#EXTM3U` and moves the load onto the AVPlayer bypass, but AVFoundation types a URL by its path extension and
+  `Content-Type`, never by its body, so a playlist at `/movie.mp4` served as `video/mp4` or
+  `application/octet-stream` (an IPTV panel's VOD link, typically) failed within a third of a second with
+  AVFoundation -11829 / -11828. The rerouted asset now declares `application/vnd.apple.mpegurl`
+  (`AVURLAssetOverrideMIMETypeKey`), and every rebuild of that session keeps it. Only the reroute declares it,
+  because only there has the engine read the body; a host-set `nativeRemoteHLS` load is typed by AVFoundation as
+  before.
 - **`aetherctl play --host-calls subsatload` no longer reports itself as unknown.** It worked but printed
   `HOSTCALL unknown 'subsatload'`; the unused `ratehold-tail` call is gone.
 - **A correction can no longer flip `sharedOutputRole` on a running session.** The field was on the list of
