@@ -495,6 +495,10 @@ So a file like that plays in mpv, plays after an MKVToolNix remux (which drops t
 - A healthy sample is left alone.
 - An Annex B payload is refused rather than walked as lengths.
 - A sample with no complete unit at all is dropped instead of written empty.
+- A length chain can also fit exactly while one unit contains only one byte of HEVC's two-byte NAL header
+  (for example a truncated EOS). In confirmed length-prefixed HEVC samples the muxer removes only those
+  units, retaining valid pictures and any following Dolby Vision RPU. Shared packets are made writable
+  before compaction; a sample with no complete header left is not written (#960).
 
 The fixture generator `Scripts/nal-overrun-fixture.py` forges the shape into any length-prefixed source by rewriting four bytes, so the healthy original stands as the control arm (AE#561).
 

@@ -16,7 +16,7 @@ struct ShortHEVCHeaderTests {
         }
     }
 
-    @Test("A complete length chain can still contain a truncated EOS header")
+    @Test("(#960) A complete length chain can still contain a truncated EOS header")
     func damagedEOSIsRemovedWithoutLosingThePictureOrFollowingRPU() {
         let picture = unit([0x26, 0x01, 0x80])
         let eos = unit([0x48])
@@ -33,12 +33,12 @@ struct ShortHEVCHeaderTests {
         #expect(cleaned == picture + rpu)
     }
 
-    @Test("Valid HEVC delimiters and pictures remain byte-for-byte unchanged")
+    @Test("(#960) Valid HEVC delimiters and pictures remain byte-for-byte unchanged")
     func validUnitsSurvive() {
         #expect(ranges(unit([0x26, 0x01, 0x80]) + unit([0x48, 0x01, 0x80])) == [])
     }
 
-    @Test("Framing and bounds fail closed, and all prefix widths are supported")
+    @Test("(#960) Framing and bounds fail closed, and all prefix widths are supported")
     func framingBoundsAndWidths() {
         #expect(ranges([0, 0, 0, 1, 0x48], confirmed: false) == [])
         #expect(ranges(unit([0x48]) + [0, 0, 2]) == [])
@@ -51,12 +51,12 @@ struct ShortHEVCHeaderTests {
         func get() -> Data { lock.withLock { bytes } }
     }
 
-    @Test("The muxer compacts a shared packet and writes the correct picture/RPU size")
+    @Test("(#960) The muxer compacts a shared packet and writes the correct picture/RPU size")
     func muxerCompactsWithoutChangingTheSharedOriginal() throws {
         try muxerRoundTrip(dropsFirstSample: false)
     }
 
-    @Test("A packet containing only short headers is dropped before the next valid sample")
+    @Test("(#960) A packet containing only short headers is dropped before the next valid sample")
     func muxerDropsAnAllShortSample() throws {
         try muxerRoundTrip(dropsFirstSample: true)
     }

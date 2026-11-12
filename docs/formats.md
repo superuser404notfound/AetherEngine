@@ -324,7 +324,7 @@ Some files carry timestamps or bitstreams that a player would show wrongly. The 
 | Matroska whose presentation slots are in coding order (#511) | Moves each slot to the picture whose display rank owns it (`H264MatroskaSlotPermutation`) | None | [architecture › Matroska with presentation slots in coding order](architecture-native.md#matroska-with-presentation-slots-in-coding-order) |
 | MP4 whose composition offsets are missing only in later regions (judder after a seek) | Streams the same slot repair per sequence | None | [architecture › MP4 with composition offsets missing only in later regions](architecture-native.md#mp4-with-composition-offsets-missing-only-in-later-regions), [regression and reproduction](notes/partial-composition-regression.md) |
 | H.264 VOD whose parameter sets change mid-file (audio, no picture) | Moves the session to the software path | Software decode | [Below](#h264-vod-with-changing-parameter-sets) |
-| A video sample whose NAL length chain overruns the sample (`CoreMediaErrorDomain -19602`, AE#561) | Cuts the sample at its last complete NAL; a CoreMedia refusal that still happens rebuilds the session on the software path, once | None, or software decode | [architecture › A video sample whose NAL chain overruns it](architecture-native.md#a-video-sample-whose-nal-chain-overruns-it) |
+| A video sample whose NAL chain overruns it, or confirmed HEVC with an incomplete two-byte NAL header (AE#561, #960) | Cuts an overlong chain at its last complete NAL; removes incomplete HEVC headers while preserving valid NALs, dropping a sample with no complete header. A CoreMedia refusal that still happens rebuilds the session on the software path, once | None, or software decode | [architecture › A video sample whose NAL chain overruns it](architecture-native.md#a-video-sample-whose-nal-chain-overruns-it) |
 | 24p film stamped with 2:3 pulldown times, 50 and 33 ms per frame (Sodalite#236) | Puts each frame on its 24p slot on the native route (`PulldownCadenceRetimer`) | None | [architecture › 2:3 pulldown timing on 24p film](architecture-native.md#23-pulldown-timing-on-24p-film) |
 | A declared frame rate that is not a standard rate (mkvmerge writes the first frame's duration, so such a file declares 20 fps) | Measures the rate on the head packets the probe already queued and uses that (23.976 here) for the display switch, the master's `FRAME-RATE` and the frame grid | None | |
 
@@ -427,11 +427,6 @@ AVPlayer sees nothing before that. So the routing read happens no earlier than i
 - Shipping the source record verbatim in either case leaves AVPlayer with no usable format description: it buffers the whole forward window and never renders a frame.
 
 H.264 gets the same rebuild (#938). An `avcC` with zero SPS or zero PPS (mkvmerge writes the 7-byte `01 64 00 20 ff e0 00` for such a track) is rebuilt from the first in-band SPS and PPS. movenc does the rebuild, so the High-profile extension comes out right, and the source's NAL length size is kept. Shipped verbatim, it fails differently from HEVC and more quietly: the item reaches `readyToPlay`, the clock runs and audio plays, but no frame is ever ready for display.
-
-A chain can also walk exactly while a unit contains only one byte of HEVC's two-byte header
-(for example a truncated EOS). In confirmed length-prefixed HEVC samples the muxer removes those
-units, retaining valid pictures and any following Dolby Vision RPU. Shared packets are made writable
-before compaction; a sample with no complete header left is not written (#960).
 
 ### Dolby Vision signaling
 
