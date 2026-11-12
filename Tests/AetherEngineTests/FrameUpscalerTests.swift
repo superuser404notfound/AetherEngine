@@ -461,11 +461,11 @@ struct FrameUpscalerTests {
     func budgetFollowsTheDeliveredFrameRate() throws {
         let up = try upscaler(try plan(720, 480, ml: []), frameInterval: 1.0 / 25)
         let input = try TestFrames.nv12(720, 480)
-        #expect(abs(up.frameBudgetMs - 30) < 0.001)
+        #expect(abs(up.frameBudgetMs - 36) < 0.001)
         for i in 0..<8 { _ = up.upscale(input, pts: CMTime(value: Int64(i), timescale: 50)) }
-        #expect(abs(up.frameBudgetMs - 30) < 0.001, "seven deltas still use the configured interval")
+        #expect(abs(up.frameBudgetMs - 36) < 0.001, "seven deltas still use the configured interval")
         _ = up.upscale(input, pts: CMTime(value: 8, timescale: 50))
-        #expect(abs(up.frameBudgetMs - 15) < 0.001)
+        #expect(abs(up.frameBudgetMs - 18) < 0.001)
         #expect(abs(up.mlTimeout - 0.06) < 0.0001)
     }
 
@@ -480,7 +480,7 @@ struct FrameUpscalerTests {
         for v in [0, 0, 1, 1, 0, 2, 3, 4, 5, 6, 7, 8, 9] as [Int64] {
             _ = up.upscale(input, pts: CMTime(value: v, timescale: 50))
         }
-        #expect(abs(up.frameBudgetMs - 15) < 0.001)
+        #expect(abs(up.frameBudgetMs - 18) < 0.001)
     }
     /// A hardware decoder delivers in decode order (I0 P8 B4 B2 B1 B3 B6 B5 B7 ...): the frame period is
     /// still the gap in presentation order, not the gap between two arrivals.
@@ -493,7 +493,7 @@ struct FrameUpscalerTests {
         for base in stride(from: Int64(0), to: 40, by: 8) {
             for offset in gop.dropFirst() { _ = up.upscale(input, pts: CMTime(value: (base + offset) * 1001, timescale: 24000)) }
         }
-        #expect(abs(up.frameBudgetMs - 0.75 * 1001.0 / 24) < 0.01, "budget \(up.frameBudgetMs)")
+        #expect(abs(up.frameBudgetMs - FrameUpscaler.budgetFraction * 1001.0 / 24) < 0.01, "budget \(up.frameBudgetMs)")
     }
 
     @Test
@@ -502,7 +502,7 @@ struct FrameUpscalerTests {
         let up = try upscaler(try plan(720, 480, ml: []), frameInterval: 1.0 / 25)
         let input = try TestFrames.nv12(720, 480)
         for i in 0..<10 { _ = up.upscale(input, pts: CMTime(value: Int64(i) * 5, timescale: 1)) }
-        #expect(abs(up.frameBudgetMs - 30) < 0.001)
+        #expect(abs(up.frameBudgetMs - 36) < 0.001)
         #expect(abs(up.mlTimeout - 0.12) < 0.0001)
     }
 

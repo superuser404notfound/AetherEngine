@@ -59,7 +59,10 @@ final class FrameUpscaler: @unchecked Sendable {
     static let budgetWindow = 48
     /// Timing lines logged per stage, one per budget window.
     static let timingLinesPerStage = 10
-    static let budgetFraction = 0.75
+    /// The GPU lowers its clock until a regular load fills most of the frame interval (measured on an A15:
+    /// work that takes 8.6 ms back to back reads 20.4 ms at 24 fps, 14.3 ms reads 31.7 ms, everything reads
+    /// about 15.6 ms at 60 fps), so a stricter fraction trips on the clock, not on a stage that falls behind.
+    static let budgetFraction = 0.9
     static let maxConsecutiveFailures = 3
     /// PTS deltas the live frame interval is the median of.
     static let intervalWindow = 8
@@ -131,6 +134,11 @@ final class FrameUpscaler: @unchecked Sendable {
     private var scaler: UpscaleScaler
     /// The last frame's sample depth; the automatic route takes 8-bit only.
     private var lastInputEightBit = true
+    /// Whether the line-art stage runs its restore pass: the top rung, dropped first on an overrun.
+    private var lineArtRestores = true
+
+    /// True while a `.lineArt` stage runs its restore pass and highlight clamp.
+    var runsLineArtRestore: Bool { processLock.lock(); defer { processLock.unlock() }; return lineArtRestores }
     /// nil while `buildQueue` builds it.
     private var stage: Stage?
     private var lastPassThroughNote: String?
@@ -171,6 +179,14 @@ final class FrameUpscaler: @unchecked Sendable {
         // Without MetalFX (tvOS before 27.1, or a GPU without it) the ML pass alone is the next best:
         // its output goes out at its own size and the display scales the rest.
         let mlOnly = Self.startsMLOnly(plan, metalFXAvailable: gpu.metalFXAvailable)
+        if plan.scaler == .lineArt,
+           let overrun = LineArtCostMemory.overrun(covering: plan, frameInterval: frameInterval, rung: .restore) {
+            lineArtRestores = false
+            EngineLog.emit(String(format: "[Upscale] line art without restore: it overran on this device earlier "
+                                  + "(%.1f ms at %.1f ms)", overrun.meanMs, overrun.frameInterval * 1000),
+                           category: .swPlayback)
+        }
+        let restores = lineArtRestores
         if mlOnly {
             degraded = true
             _isDegraded = true
@@ -178,14 +194,14 @@ final class FrameUpscaler: @unchecked Sendable {
         }
         guard let buildQueue else {
             do {
-                stage = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly)
+                stage = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly, restores: restores)
             } catch {
                 EngineLog.emit("[Upscale] stage unavailable: \(error)", category: .swPlayback)
                 return nil
             }
             return
         }
-        buildAsync(plan, mlOnly: mlOnly, on: buildQueue, generation: 0)
+        buildAsync(plan, mlOnly: mlOnly, restores: restores, on: buildQueue, generation: 0)
     }
 
     /// An `.automatic` plan that needs MetalFX starts on its ML-only rung when MetalFX is not there.
@@ -196,11 +212,14 @@ final class FrameUpscaler: @unchecked Sendable {
     /// Bumped by every switch of stage, so a build that finishes after a newer one was started is dropped.
     private var buildGeneration = 0
 
-    private func buildAsync(_ plan: UpscalePlan, mlOnly: Bool, on queue: DispatchQueue, generation: Int) {
+    private func buildAsync(_ plan: UpscalePlan, mlOnly: Bool, restores: Bool = true, on queue: DispatchQueue,
+                            generation: Int) {
         let gpuBox = UncheckedSendable(gpu)
         queue.async { [weak self] in
             let start = DispatchTime.now().uptimeNanoseconds
-            let built = Result { UncheckedSendable(try Stage(plan: plan, gpu: gpuBox.value, mlOnly: mlOnly)) }
+            let built = Result {
+                UncheckedSendable(try Stage(plan: plan, gpu: gpuBox.value, mlOnly: mlOnly, restores: restores))
+            }
             self?.install(built, ms: elapsedMs(since: start), generation: generation)
         }
     }
@@ -328,7 +347,7 @@ final class FrameUpscaler: @unchecked Sendable {
         do {
             let mlOnly = (degraded && plan.mlScale != nil)
                 || Self.startsMLOnly(plan, metalFXAvailable: gpu.metalFXAvailable)
-            rebuilt = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly)
+            rebuilt = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly, restores: lineArtRestores)
         } catch {
             disable(reason: "rebuild for \(width)x\(height) failed: \(error)")
             return false
@@ -424,7 +443,9 @@ final class FrameUpscaler: @unchecked Sendable {
         if recentTimes.count == Self.budgetWindow, windowMean.total > budgetMs {
             let over = String(format: "%.2f ms mean over %d frames against %.2f ms",
                               windowMean.total, Self.budgetWindow, budgetMs)
-            if stage.plan.scaler == .lineArt {
+            if stage.plan.scaler == .lineArt, lineArtRestores {
+                dropLineArtRestore(over: over, window: windowMean, plan: stage.plan)
+            } else if stage.plan.scaler == .lineArt {
                 fallBackFromLineArt(over: over, window: windowMean, plan: stage.plan)
             } else if !degraded, stage.plan.mlScale != nil, stage.plan.needsMetalFX {
                 degrade(over: over, window: windowMean, stage: stage)
@@ -434,12 +455,43 @@ final class FrameUpscaler: @unchecked Sendable {
         }
     }
 
+    /// The line-art stage's top rung overran: remember it, rebuild without the restore pass (the kernels are
+    /// compiled already, so this is quick and stays on this thread) and start a fresh budget window.
+    private func dropLineArtRestore(over: String, window: StageTimes, plan: UpscalePlan) {
+        LineArtCostMemory.record(LineArtCostMemory.Overrun(
+            width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total),
+            rung: .restore)
+        let rebuilt: Stage
+        do {
+            rebuilt = try Stage(plan: plan, gpu: gpu, restores: false)
+        } catch {
+            fallBackFromLineArt(over: over, window: window, plan: plan)
+            return
+        }
+        lineArtRestores = false
+        stage?.release()
+        stage = rebuilt
+        EngineLog.emit("[Upscale] degraded: line art over budget (\(over)), dropping the restore pass "
+                       + "(\(window.breakdown))", category: .swPlayback)
+        recentTimes.removeAll()
+        stageFrames = 0
+        timingLines = 0
+        stateLock.lock()
+        _isDegraded = true
+        _deliveredPlan = plan
+        let stats = _stats
+        let handler = _onEvent
+        stateLock.unlock()
+        handler?(.degraded(plan, reason: "line art over budget, " + over, stats: stats))
+    }
+
     /// The line-art rung overran: remember it for the process, then hand a source below 1080p to the
     /// automatic route (VT super resolution, with MetalFX where it is there), built off this thread while
     /// frames pass through. A 1080p source has nothing below line art and switches off.
     private func fallBackFromLineArt(over: String, window: StageTimes, plan: UpscalePlan) {
         LineArtCostMemory.record(LineArtCostMemory.Overrun(
-            width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total))
+            width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total),
+            rung: .upscale)
         // The automatic route takes 8-bit only, and not a plan that already switched itself off here.
         guard lastInputEightBit,
               let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: Self.mlScaleFactors),
@@ -615,9 +667,12 @@ enum MetalFXCostMemory {
 
 // MARK: - Process-wide line-art cost
 
-/// Line-art overruns seen in this process: a later source at least as large, at a frame interval no longer,
-/// would overrun again, so the load decides for the automatic scaler instead (AE#1039).
+/// Line-art overruns seen in this process, per rung: a later source at least as large, at a frame interval
+/// no longer, would overrun again. A restore overrun starts later stages without the restore pass, an
+/// upscale overrun makes the load decide for the automatic scaler instead (AE#1039).
 enum LineArtCostMemory {
+    enum Rung: Sendable { case restore, upscale }
+
     struct Overrun: Equatable, Sendable {
         var width: Int, height: Int
         var frameInterval: Double
@@ -631,22 +686,24 @@ enum LineArtCostMemory {
     }
 
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var overruns: [Overrun] = []
+    nonisolated(unsafe) private static var overruns: [Rung: [Overrun]] = [:]
 
-    static func record(_ overrun: Overrun) {
+    static func record(_ overrun: Overrun, rung: Rung) {
         lock.lock(); defer { lock.unlock() }
-        guard !overruns.contains(where: { $0.pixels <= overrun.pixels && $0.frameInterval >= overrun.frameInterval })
+        var list = overruns[rung] ?? []
+        guard !list.contains(where: { $0.pixels <= overrun.pixels && $0.frameInterval >= overrun.frameInterval })
         else { return }
-        overruns.removeAll { $0.pixels >= overrun.pixels && $0.frameInterval <= overrun.frameInterval }
-        overruns.append(overrun)
+        list.removeAll { $0.pixels >= overrun.pixels && $0.frameInterval <= overrun.frameInterval }
+        list.append(overrun)
+        overruns[rung] = list
     }
 
-    /// The overrun covering a line-art plan for this source at `frameInterval` (unknown counts as covered
-    /// by any rate, like `UpscaleFailureMemory`).
-    static func overrun(covering plan: UpscalePlan, frameInterval: Double?) -> Overrun? {
+    /// The overrun of `rung` covering a line-art plan for this source at `frameInterval` (unknown counts as
+    /// covered by any rate, like `UpscaleFailureMemory`).
+    static func overrun(covering plan: UpscalePlan, frameInterval: Double?, rung: Rung) -> Overrun? {
         lock.lock(); defer { lock.unlock() }
         let pixels = plan.sourceWidth * plan.sourceHeight
-        return overruns.first { o in
+        return (overruns[rung] ?? []).first { o in
             guard let frameInterval else { return pixels >= o.pixels }
             return o.covers(pixels: pixels, frameInterval: frameInterval)
         }
@@ -778,8 +835,9 @@ private final class Stage {
         kCVImageBufferDisplayDimensionsKey as String,
     ]
 
-    /// `mlOnly` builds the degraded rung of `plan`: its ML pass, delivered at the ML output size.
-    init(plan: UpscalePlan, gpu: GPU, mlOnly: Bool = false) throws {
+    /// `mlOnly` builds the degraded rung of `plan`: its ML pass, delivered at the ML output size. `restores`
+    /// picks the line-art stage's top rung (restore pass and highlight clamp) for a `.lineArt` plan.
+    init(plan: UpscalePlan, gpu: GPU, mlOnly: Bool = false, restores: Bool = true) throws {
         self.plan = plan
         self.gpu = gpu
         if plan.scaler == .lineArt {
@@ -787,7 +845,7 @@ private final class Stage {
             chain = try FrameChain(device: gpu.device, queue: gpu.queue,
                                    sourceWidth: plan.sourceWidth, sourceHeight: plan.sourceHeight,
                                    targetWidth: plan.targetWidth, targetHeight: plan.targetHeight,
-                                   stages: [LineArtStage()])
+                                   stages: [LineArtStage(restores: restores)])
             scaler = nil; rgba = nil; scaled = nil
             return
         }
