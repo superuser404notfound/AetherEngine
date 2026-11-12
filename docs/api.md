@@ -180,7 +180,7 @@ History:
 
 ### Live: the retune request
 
-**What the host must do:** subscribe to `liveSourceReset` for every live session. When it fires, back off, then call `retryLiveSourceRecovery()`. If that returns `false`, run a bounded full-load policy. Keep one recovery in flight.
+**What the host must do:** subscribe to `liveSourceReset` once, before the first live load (the subject lives as long as the engine and has no replay). When it fires, back off, then call `retryLiveSourceRecovery()`. If that returns `false`, run a bounded full-load policy. Keep one recovery in flight.
 
 ```swift
 player.liveSourceReset            // PassthroughSubject<Void, Never>; one subscription per engine, no replay

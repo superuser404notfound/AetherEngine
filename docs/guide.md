@@ -195,7 +195,7 @@ Opt in with `LoadOptions.prepareNativeSubtitles`. Details in [formats.md](format
 ### Captions the system turned on
 
 ```swift
-player.systemCaptionRequest   // PassthroughSubject<SystemCaptionRequest, Never>, subscribe per session
+player.systemCaptionRequest   // PassthroughSubject<SystemCaptionRequest, Never>, one subscription per engine
 ```
 
 iOS 26 can turn captions on by itself (Settings > Accessibility > Subtitles & Captioning > Automatic Subtitles: when muted, on skip back, on a language mismatch). Those settings have no read API, so the selection is the only sign of the request. The engine deselects the option, because a rendition drawn in fullscreen puts a caption box over the host's own subtitles, and forwards the request here. A host that wants the behaviour picks its own matching track.
@@ -392,7 +392,7 @@ await player.seekToLiveEdge()
 await player.seek(to: player.liveEdgeTime - 300)   // 5 minutes back
 
 // The retune request: the engine stopped the session and only a fresh URL can revive it
-player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
+player.liveSourceReset            // PassthroughSubject<Void, Never>; one subscription per engine, before the first load
 
 // Ingest a live HLS upstream directly, with no media server in between:
 try await player.load(
@@ -675,7 +675,7 @@ player.maximumSubtitleAdvanceSeconds = 0      // and no EARLIER ones
 
 These tell the engine the largest subtitle offset your overlay applies. The default of 60 s each way costs memory and data: bitmap subtitles (PGS, DVB, DVD) are kept as decoded images, and an earlier offset needs a second reader that downloads a remote source a second time (AE#929, AE#1015, AE#1031).
 
-- **No offset control:** set `maximumSubtitleOffsetSeconds = 0`. On a dense PGS track that drops the image memory from well over 100 MB to the 64 MiB budget, and on a remote MKV it stops the second download.
+- **No offset control:** set `maximumSubtitleOffsetSeconds = 0`. On a dense PGS track that keeps about 15 s of decoded images on each side instead of a protected 120 s plus up to 64 MiB of history, and on a remote MKV it stops the second download.
 - **Later only:** set `maximumSubtitleAdvanceSeconds = 0` and your range in `maximumSubtitleDelaySeconds`. A later offset only needs cues already read, so it costs no second download.
 - Each edge stays at least 15 s, so a short nudge or a seek back still finds its cue.
 

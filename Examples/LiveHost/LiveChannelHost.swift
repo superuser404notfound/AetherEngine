@@ -67,7 +67,7 @@ final class LiveChannelHost {
     init(engine: AetherEngine) {
         self.engine = engine
 
-        // Contract 1. Subscribe per session, and note that this is a subject
+        // Contract 1. Subscribe once per engine, and note that this is a subject
         // rather than a published value: it has no replay, so a subscription
         // made after the fact hears nothing.
         engine.liveSourceReset
