@@ -467,9 +467,25 @@ final class NativeAVPlayerHost {
     /// loopback path's default asset untouched. AVFoundation applies AVURLAssetHTTPHeaderFieldsKey
     /// to playlist and segment requests, which is what header-enforcing remote-HLS origins
     /// (IPTV / Stremio per-stream Referer / User-Agent / Authorization) need (#119).
-    nonisolated static func assetCreationOptions(httpHeaders: [String: String]) -> [String: Any]? {
-        httpHeaders.isEmpty ? nil : ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders]
+    ///
+    /// `declaresHLSPlaylist` adds `AVURLAssetOverrideMIMETypeKey` (AE#154 follow-up). AVFoundation
+    /// decides what a URL is from its path extension and the response's `Content-Type`, never from the
+    /// body. Measured on macOS 27 against a local origin: a playlist whose final URL has no `.m3u8` and
+    /// which is served as `video/mp4` or `application/octet-stream` fails in 0.2 to 0.3 s with -11829 /
+    /// -11828 (OSStatus -12848 / -12847); with the override the same cases play in 0.7 to 0.9 s. A
+    /// valid MP4 opened with the override still plays, so a wrong declaration is not fatal, but it is
+    /// set only where the engine has read the body.
+    nonisolated static func assetCreationOptions(
+        httpHeaders: [String: String], declaresHLSPlaylist: Bool = false
+    ) -> [String: Any]? {
+        var options: [String: Any] = [:]
+        if !httpHeaders.isEmpty { options["AVURLAssetHTTPHeaderFieldsKey"] = httpHeaders }
+        if declaresHLSPlaylist { options[AVURLAssetOverrideMIMETypeKey] = hlsPlaylistMIMEType }
+        return options.isEmpty ? nil : options
     }
+
+    /// RFC 8216's type for an HLS playlist, the one AVFoundation recognizes.
+    nonisolated static let hlsPlaylistMIMEType = "application/vnd.apple.mpegurl"
 
     /// Everything a load establishes about the SESSION rather than about the item it opens (#440 round 5).
     ///
@@ -509,6 +525,10 @@ final class NativeAVPlayerHost {
         /// Sent with every asset and segment request. The bypass path carries the origin's auth here, so
         /// a swap that dropped them would re-open the same URL unauthenticated.
         var httpHeaders: [String: String] = [:]
+        /// The engine read the body behind this URL and it is an HLS playlist (AE#154 reroute): the asset
+        /// declares the HLS MIME type instead of letting the URL's extension and `Content-Type` decide.
+        /// Session-wide for the same reason as the headers: a swap re-opens the same URL.
+        var declaresHLSPlaylistMIMEType: Bool = false
         /// #168 / #293: arm the carriage probe and the ingest reroute for a remote origin.
         var armIngestFallback: Bool = false
         /// #334: the ceiling on silence for a path with no other readiness watchdog.
@@ -571,6 +591,7 @@ final class NativeAVPlayerHost {
         }
         let forwardBufferDuration = contract.forwardBufferDuration
         let httpHeaders = contract.httpHeaders
+        let declaresHLSPlaylist = contract.declaresHLSPlaylistMIMEType
         let armIngestFallback = contract.armIngestFallback
         self.surfaceEndFailures = contract.surfaceEndFailures
         self.ingestFallbackArmed = armIngestFallback
@@ -599,7 +620,7 @@ final class NativeAVPlayerHost {
         let loadStart = DispatchTime.now()
         loadStartTime = loadStart
 
-        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil") headers=\(httpHeaders.isEmpty ? "none" : "\(httpHeaders.count)")", category: .engine)
+        EngineLog.emit("[NativeAVPlayerHost] #\(sid) load url=\(url.absoluteString) startPos=\(startPosition.map { String(format: "%.2fs", $0) } ?? "nil") headers=\(httpHeaders.isEmpty ? "none" : "\(httpHeaders.count)")\(declaresHLSPlaylist ? " mime=hls(body)" : "")", category: .engine)
 
         // First frame on screen, published as `isVideoReadyForDisplay` and stamped for the
         // audio-leads-black-video gap (see `layerReadyObservation`).
@@ -633,7 +654,8 @@ final class NativeAVPlayerHost {
             }
         }
 
-        let asset = AVURLAsset(url: url, options: Self.assetCreationOptions(httpHeaders: httpHeaders))
+        let asset = AVURLAsset(url: url, options: Self.assetCreationOptions(
+            httpHeaders: httpHeaders, declaresHLSPlaylist: declaresHLSPlaylist))
         let item = AVPlayerItem(asset: asset)
         AudioRatePolicy.apply(to: item)
         // 4s default matches loopback HLS segment cadence; raising it for live makes AVPlayer race to the edge and stall at the transcode warm-up gap.
