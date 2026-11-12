@@ -58,6 +58,11 @@ draws them. The engine draws no UI.
 
 - **Playback bugs are fixed in the engine, never by asking hosts to compensate.** A change that adds
   host-side compensation is the wrong direction.
+- **Every change updates the docs in the same commit, and every merge checks it.** Behaviour, API,
+  format, CLI and file changes each go to the page that owns the topic (see the list at the top); a
+  topic nobody describes yet gets a section where a reader would look. The CHANGELOG entry is not the
+  documentation. An external PR's doc text is checked at merge time for the right file (the docs may
+  have been restructured since the branch started) and for the house style below.
 - **Public API needs documentation in the same commit.** `PublicAPIDocumentationTests` fails for any
   public member not named in `README.md` or `docs/`; a symbol public only for the CLI or tests goes
   in its `notHostAPI` list with a reason. Numbers quoted in docs are pinned by

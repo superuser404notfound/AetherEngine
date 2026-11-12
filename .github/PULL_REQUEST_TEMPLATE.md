@@ -26,3 +26,4 @@ Closes #
 - [ ] Commit messages follow Conventional Commits (`feat(...)`, `fix(...)`, `chore(...)`)
 - [ ] The fix lives in the engine, not in a host-side workaround
 - [ ] Public API changes are intentional and documented
+- [ ] Docs updated for every changed behaviour, in the page that owns the topic, in plain short sentences (the CHANGELOG entry does not count)
