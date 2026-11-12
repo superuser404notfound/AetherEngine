@@ -3752,13 +3752,30 @@ private final class DemuxInterrupt: @unchecked Sendable {
             headerWaitBytes = bytes
         }
         let programs = (0..<Int(ctx.pointee.nb_programs)).lazy.compactMap { ctx.pointee.programs[$0] }
-            .map { TransportStreamHeaderWait.Program(pmtVersion: $0.pointee.pmt_version,
-                                                     streamCount: $0.pointee.nb_stream_indexes) }
+            .map { program in
+                TransportStreamHeaderWait.Program(
+                    pmtVersion: program.pointee.pmt_version,
+                    audioVideoStreams: TransportStreamHeaderWait.audioVideoCount(
+                        of: Self.mediaTypes(of: program, in: ctx)))
+            }
         guard TransportStreamHeaderWait.shouldRelease(isMPEGTS: headerWaitIsMPEGTS, noHeader: noHeader,
                                                       elapsedNanoseconds: headerWaitCounted, programs: programs)
         else { return }
         ctx.pointee.ctx_flags &= ~AVFMTCTX_NOHEADER
         headerWaitReleasedAfter = now &- min(now, headerWaitStart)
+    }
+
+    /// The codec types of the streams a program's PMT declared.
+    private static func mediaTypes(of program: UnsafeMutablePointer<AVProgram>,
+                                   in ctx: UnsafeMutablePointer<AVFormatContext>) -> some Sequence<AVMediaType> {
+        let indexes = program.pointee.stream_index
+        let declared = indexes == nil ? 0 : Int(program.pointee.nb_stream_indexes)
+        let streamCount = Int(ctx.pointee.nb_streams)
+        return (0..<declared).lazy.compactMap { k -> AVMediaType? in
+            guard let index = indexes.map({ Int($0[k]) }), index < streamCount,
+                  let codecpar = ctx.pointee.streams[index]?.pointee.codecpar else { return nil }
+            return codecpar.pointee.codec_type
+        }
     }
 
     /// Local (URLContext) inputs only: a provider-backed input never consults this callback per read.
@@ -3801,7 +3818,8 @@ private final class DemuxInterrupt: @unchecked Sendable {
 /// - the input is MPEG-TS and still has `AVFMTCTX_NOHEADER`;
 /// - the pass has received data for `releaseAfterNanoseconds` (`counted`: a stall counts as at most
 ///   one PMT interval, so a source that stops delivering does not run the window down);
-/// - a program has no PMT (`AVProgram.pmt_version == -1`) while another has one with streams.
+/// - a program has no PMT (`AVProgram.pmt_version == -1`) while another has one with an audio or
+///   video stream.
 ///
 /// A TS whose programs all send their PMT, every other format and a TS with no streams at all are
 /// never touched. A PMT that first arrives after the release adds its streams during playback reads,
@@ -3823,8 +3841,19 @@ enum TransportStreamHeaderWait {
     struct Program: Equatable, Sendable {
         /// `AVProgram.pmt_version`: -1 until the program's PMT has been parsed.
         let pmtVersion: Int32
-        /// `AVProgram.nb_stream_indexes`.
-        let streamCount: UInt32
+        /// The audio and video streams among the program's `stream_index` entries.
+        let audioVideoStreams: Int
+    }
+
+    /// Only audio and video make a program ready. A data, SCTE-35 or teletext stream passes FFmpeg's
+    /// `has_codec_parameters` as soon as its PMT is parsed, so a release next to a program that has
+    /// only those would end the pass on the audio and video the TS demuxer guessed from bare packets
+    /// (`auto_guess`, codec probed from the payload), before the TV program's PMT has declared its
+    /// streams, their languages and its subtitle tracks. Measured on a live-paced channel with a
+    /// teletext-only service and a TV PMT 6 s late: released at 2.5 s with guessed tracks, against
+    /// no release and the PMT's tracks once only audio and video count.
+    static func audioVideoCount<Types: Sequence>(of types: Types) -> Int where Types.Element == AVMediaType {
+        types.reduce(0) { $0 + ($1 == AVMEDIA_TYPE_AUDIO || $1 == AVMEDIA_TYPE_VIDEO ? 1 : 0) }
     }
 
     static func shouldRelease<Programs: Sequence>(
@@ -3836,7 +3865,7 @@ enum TransportStreamHeaderWait {
         for program in programs {
             if program.pmtVersion == -1 {
                 missing = true
-            } else if program.streamCount > 0 {
+            } else if program.audioVideoStreams > 0 {
                 ready = true
             }
             if missing && ready { return true }

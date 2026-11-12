@@ -16,9 +16,9 @@ struct MissingPMTReleaseDecisionTests {
     typealias Program = TransportStreamHeaderWait.Program
 
     private static let due = TransportStreamHeaderWait.releaseAfterNanoseconds
-    /// Program 1 with its PMT and two streams, program 2 listed in the PAT and silent.
-    private static let oneMissing = [Program(pmtVersion: 0, streamCount: 2),
-                                     Program(pmtVersion: -1, streamCount: 0)]
+    /// Program 1 with its PMT, video and audio, program 2 listed in the PAT and silent.
+    private static let oneMissing = [Program(pmtVersion: 0, audioVideoStreams: 2),
+                                     Program(pmtVersion: -1, audioVideoStreams: 0)]
 
     @Test("2.5 s: five PMT repetitions at the 0.5 s TR 101 290 expects")
     func window() {
@@ -55,17 +55,31 @@ struct MissingPMTReleaseDecisionTests {
         // No programs at all.
         [],
         // Every program has its PMT; the wait is for something else.
-        [Program(pmtVersion: 0, streamCount: 2), Program(pmtVersion: 3, streamCount: 1)],
+        [Program(pmtVersion: 0, audioVideoStreams: 2), Program(pmtVersion: 3, audioVideoStreams: 1)],
         // Nothing has arrived yet: releasing would start without any stream.
-        [Program(pmtVersion: -1, streamCount: 0), Program(pmtVersion: -1, streamCount: 0)],
+        [Program(pmtVersion: -1, audioVideoStreams: 0), Program(pmtVersion: -1, audioVideoStreams: 0)],
         // The only PMT that arrived declares no streams.
-        [Program(pmtVersion: 0, streamCount: 0), Program(pmtVersion: -1, streamCount: 0)],
+        [Program(pmtVersion: 0, audioVideoStreams: 0), Program(pmtVersion: -1, audioVideoStreams: 0)],
+        // The only PMT that arrived is a data service (SCTE-35, teletext): releasing would end the
+        // pass on streams guessed from bare packets while the TV program's PMT is on its way.
+        [Program(pmtVersion: 0,
+                 audioVideoStreams: Wait.audioVideoCount(of: [AVMEDIA_TYPE_DATA, AVMEDIA_TYPE_SUBTITLE])),
+         Program(pmtVersion: -1, audioVideoStreams: 0)],
         // A single program without its PMT.
-        [Program(pmtVersion: -1, streamCount: 0)],
+        [Program(pmtVersion: -1, audioVideoStreams: 0)],
     ])
     func waits(programs: [Program]) {
         #expect(!Wait.shouldRelease(isMPEGTS: true, noHeader: true, elapsedNanoseconds: Self.due * 4,
                                     programs: programs))
+    }
+
+    @Test("only audio and video make a program ready")
+    func audioVideoOnly() {
+        #expect(Wait.audioVideoCount(of: [AVMEDIA_TYPE_VIDEO, AVMEDIA_TYPE_AUDIO]) == 2)
+        #expect(Wait.audioVideoCount(of: [AVMEDIA_TYPE_DATA, AVMEDIA_TYPE_SUBTITLE, AVMEDIA_TYPE_UNKNOWN,
+                                          AVMEDIA_TYPE_ATTACHMENT]) == 0)
+        #expect(Wait.audioVideoCount(of: [AVMEDIA_TYPE_DATA, AVMEDIA_TYPE_AUDIO, AVMEDIA_TYPE_DATA]) == 1)
+        #expect(Wait.audioVideoCount(of: []) == 0)
     }
 
     @Test("a stall counts as one PMT interval, so the window runs on time in which data arrived")
@@ -80,8 +94,10 @@ struct MissingPMTReleaseDecisionTests {
 
     @Test("several silent programs next to several with streams")
     func manyPrograms() {
-        let programs = [Program(pmtVersion: -1, streamCount: 0), Program(pmtVersion: 1, streamCount: 0),
-                        Program(pmtVersion: -1, streamCount: 0), Program(pmtVersion: 2, streamCount: 3)]
+        let programs = [Program(pmtVersion: -1, audioVideoStreams: 0),
+                        Program(pmtVersion: 1, audioVideoStreams: 0),
+                        Program(pmtVersion: -1, audioVideoStreams: 0),
+                        Program(pmtVersion: 2, audioVideoStreams: 3)]
         #expect(Wait.shouldRelease(isMPEGTS: true, noHeader: true, elapsedNanoseconds: Self.due,
                                    programs: programs))
     }
@@ -186,6 +202,20 @@ struct MissingPMTLiveOpenTests {
         let open = try await PacedOpen.run(ts, label: "j35")
         #expect(open.field("stop") == "resolved")
         #expect((open.releasedAfterMs ?? 0) >= 2_500)
+        #expect(open.tracks == .both)
+    }
+
+    @Test("a data service with its PMT next to a TV program whose PMT is late is not released")
+    func dataServiceNextToLatePMT() async throws {
+        let ts = TransportStreamEdit.listingDataService(
+            in: TransportStreamEdit.delayingPMT(by: 6, in: try LongGOPTransportStreamFixture.data()))
+        let open = try await PacedOpen.run(ts, label: "data")
+        // With every declared stream counted, the teletext service released the wait at 2.5 s and the
+        // pass ended on audio and video guessed from bare packets, with the TV PMT still missing.
+        #expect(open.field("headerWait") == "-")
+        #expect(open.field("stop") == "resolved")
+        #expect(open.field("programs") == "2")
+        #expect(open.field("pmtMissing") == "0")
         #expect(open.tracks == .both)
     }
 
@@ -355,8 +385,12 @@ private final class InstantBox<Value: Sendable>: @unchecked Sendable {
 private enum TransportStreamEdit {
     static let videoPID: UInt16 = 0x0100
     static let audioPID: UInt16 = 0x0101
+    static let pmtPID: UInt16 = 0x1000
     /// A PMT PID nothing in the fixture uses, for the program whose PMT never arrives.
     static let silentPMTPID: UInt16 = 0x1FF0
+    /// The PMT PID of a data-only service, and its one teletext stream.
+    static let dataPMTPID: UInt16 = 0x1FE0
+    static let teletextPID: UInt16 = 0x0200
 
     private static func packets(_ ts: Data) -> [Data] {
         stride(from: 0, to: ts.count - 187, by: 188).map { ts.subdata(in: $0..<($0 + 188)) }
@@ -388,6 +422,34 @@ private enum TransportStreamEdit {
 
     /// Every PAT also lists program 2 on `silentPMTPID`, whose PMT never arrives.
     static func listingSilentProgram(_ ts: Data) -> Data {
+        listing(pmtPID: silentPMTPID, in: ts)
+    }
+
+    /// Every PAT also lists program 2 on `dataPMTPID`, and is followed by that program's PMT: one
+    /// teletext stream (stream type 0x06 with a teletext descriptor), no audio, no video.
+    static func listingDataService(in ts: Data) -> Data {
+        var section: [UInt8] = [0x02, 0xB0, 0x00, 0x00, 0x02, 0xC1, 0x00, 0x00,
+                                0xFF, 0xFF, // no PCR PID
+                                0xF0, 0x00, // no program descriptors
+                                0x06, UInt8(0xE0 | (teletextPID >> 8)), UInt8(teletextPID & 0xFF), 0xF0, 0x07,
+                                0x56, 0x05, 0x65, 0x6E, 0x67, 0x09, 0x00] // teletext, "eng", page 100
+        section[2] = UInt8(section.count - 3 + 4)
+        let crc = mpegCRC32(section)
+        section.append(contentsOf: [24, 16, 8, 0].map { UInt8((crc >> UInt32($0)) & 0xFF) })
+        var counter: UInt8 = 0
+        return Data(packets(listing(pmtPID: dataPMTPID, in: ts)).flatMap { p -> [Data] in
+            guard pid(p) == 0, payloadStart(p) else { return [p] }
+            // Payload unit start, payload only, the continuity counter, a zero pointer field.
+            var pmt: [UInt8] = [0x47, UInt8(0x40 | (dataPMTPID >> 8)), UInt8(dataPMTPID & 0xFF),
+                                0x10 | counter, 0x00]
+            pmt += section
+            pmt += [UInt8](repeating: 0xFF, count: 188 - pmt.count)
+            counter = (counter + 1) & 0x0F
+            return [p, Data(pmt)]
+        }.joined())
+    }
+
+    private static func listing(pmtPID: UInt16, in ts: Data) -> Data {
         Data(packets(ts).map { p -> Data in
             guard pid(p) == 0, payloadStart(p) else { return p }
             var bytes = [UInt8](p)
@@ -395,7 +457,7 @@ private enum TransportStreamEdit {
             let length = Int(bytes[start + 1] & 0x0F) << 8 | Int(bytes[start + 2])
             // The section without its CRC, then the new program entry.
             var section = Array(bytes[start..<(start + 3 + length - 4)])
-            section.append(contentsOf: [0x00, 0x02, UInt8(0xE0 | (silentPMTPID >> 8)), UInt8(silentPMTPID & 0xFF)])
+            section.append(contentsOf: [0x00, 0x02, UInt8(0xE0 | (pmtPID >> 8)), UInt8(pmtPID & 0xFF)])
             let newLength = section.count - 3 + 4
             section[1] = (section[1] & 0xF0) | UInt8(newLength >> 8)
             section[2] = UInt8(newLength & 0xFF)
@@ -416,6 +478,18 @@ private enum TransportStreamEdit {
             guard pid(p) == target else { return true }
             if let start = pts(p) { dropping = start < cutoff }
             return !dropping
+        }.joined())
+    }
+
+    /// Drops the program's PMT until the video reaches `seconds` past its first frame: a program
+    /// whose PMT is late.
+    static func delayingPMT(by seconds: Double, in ts: Data) -> Data {
+        let all = packets(ts)
+        let cutoff = firstVideoPTS(all) + Int64(seconds * 90_000)
+        var videoPTS = Int64.min
+        return Data(all.filter { p in
+            if pid(p) == videoPID, let start = pts(p) { videoPTS = start }
+            return pid(p) != pmtPID || videoPTS >= cutoff
         }.joined())
     }
 
