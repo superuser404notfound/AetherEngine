@@ -298,6 +298,7 @@ So a VOD serve still running at 2 s sends the response headers early: a `200` wi
 **If the item dies anyway.** `failedToPlayToEndTime` parks the item at rate 0 / `timeControlStatus == .paused`, with `item.status` often still `readyToPlay`. A recovery layer that respects pauses would read that as the viewer pausing and end the session for good. So:
 
 - The host counts end failures on the loopback path (`endFailureCount`).
+- A death counts once the item has shown its first frame (a non-zero `presentationSize`), not only after the first `.playing`. The window between the two is real: a host that waits for the display mode switch before calling `play()` can lose the HDMI link there, and before AE#1043 that death belonged to neither the startup watchdogs nor this escalation, so the session sat on a frozen frame forever. A death before the first frame stays with the startup watchdogs.
 - The engine confirms the death through the same deferred window as the `.failed` KVO. It then reloads the item through the stage-2 chain (the engine's item-reload recovery) with the pause guard bypassed.
 - `ItemDeathReviveGate` caps this at 3 attempts per dead spot. Playback progress, or a user seek away, restores the budget.
 - The fresh item resumes only if the host's play intent says the viewer was playing. A paused title whose item dies (a tvOS screensaver taking the display is one way) is reloaded and stays paused.

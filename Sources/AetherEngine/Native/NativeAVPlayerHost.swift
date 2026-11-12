@@ -955,10 +955,15 @@ final class NativeAVPlayerHost {
                     // token expiry, persistent segment 404) surfaces .error so the host can retune / show it.
                     self.handleItemFailed(desc, item: current)
                 } else if Self.shouldCountEndFailureForRevive(
-                    surfaceEndFailures: false, hasEverPlayed: self.hasEverPlayed) {
+                    surfaceEndFailures: false, hasEverPlayed: self.hasEverPlayed,
+                    hasPresentedFrame: current.presentationSize != .zero) {
                     // #93 round 3: loopback path. Count the death for the engine's revive
-                    // escalation; a startup death (never played) stays with the startup watchdogs.
+                    // escalation; a startup death before the first frame stays with the startup watchdogs.
                     self.endFailureCount += 1
+                } else {
+                    EngineLog.emit(
+                        "[NativeAVPlayerHost] #\(sid) failedToPlayToEndTime before the first frame; "
+                        + "left to the startup watchdogs", category: .engine)
                 }
             }
         }
@@ -1153,10 +1158,15 @@ final class NativeAVPlayerHost {
     /// revive escalation? The lean remote-live path (`surfaceEndFailures`) keeps its own
     /// deferred-failure contract; a startup death before the first frame stays with the
     /// startup watchdogs.
+    ///
+    /// AE#1043: "past startup" is the first frame, not the first `.playing`. The startup readiness
+    /// gate declares the item ready on a non-zero presentation size, so a death between that frame
+    /// and the first `.playing` (an HDMI re-handshake while the host waits for the display switch)
+    /// was owned by neither side and parked the session forever.
     nonisolated static func shouldCountEndFailureForRevive(
-        surfaceEndFailures: Bool, hasEverPlayed: Bool
+        surfaceEndFailures: Bool, hasEverPlayed: Bool, hasPresentedFrame: Bool
     ) -> Bool {
-        !surfaceEndFailures && hasEverPlayed
+        !surfaceEndFailures && (hasEverPlayed || hasPresentedFrame)
     }
 
     /// Pure decision for the rate-change mirror: an explicit rate write (`setRateCalled`, e.g. AVKit's

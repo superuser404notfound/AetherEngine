@@ -83,19 +83,27 @@ struct Issue93ItemDeathReviveTests {
     @Test("loopback path counts an end failure after playback was established")
     func countsLoopbackDeath() {
         #expect(NativeAVPlayerHost.shouldCountEndFailureForRevive(
-            surfaceEndFailures: false, hasEverPlayed: true))
+            surfaceEndFailures: false, hasEverPlayed: true, hasPresentedFrame: true))
+    }
+
+    @Test("AE#1043: a death after the first frame but before the first .playing is counted")
+    func countsDeathBetweenFirstFrameAndFirstPlaying() {
+        #expect(NativeAVPlayerHost.shouldCountEndFailureForRevive(
+            surfaceEndFailures: false, hasEverPlayed: false, hasPresentedFrame: true))
     }
 
     @Test("lean remote-live path keeps its own deferred-failure contract")
     func leanLivePathDoesNotDoubleHandle() {
         #expect(!NativeAVPlayerHost.shouldCountEndFailureForRevive(
-            surfaceEndFailures: true, hasEverPlayed: true))
+            surfaceEndFailures: true, hasEverPlayed: true, hasPresentedFrame: true))
+        #expect(!NativeAVPlayerHost.shouldCountEndFailureForRevive(
+            surfaceEndFailures: true, hasEverPlayed: false, hasPresentedFrame: true))
     }
 
     @Test("startup death before the first frame stays with the startup watchdogs")
     func startupDeathNotCounted() {
         #expect(!NativeAVPlayerHost.shouldCountEndFailureForRevive(
-            surfaceEndFailures: false, hasEverPlayed: false))
+            surfaceEndFailures: false, hasEverPlayed: false, hasPresentedFrame: false))
     }
 }
 
