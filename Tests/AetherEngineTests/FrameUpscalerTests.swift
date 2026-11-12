@@ -482,6 +482,20 @@ struct FrameUpscalerTests {
         }
         #expect(abs(up.frameBudgetMs - 15) < 0.001)
     }
+    /// A hardware decoder delivers in decode order (I0 P8 B4 B2 B1 B3 B6 B5 B7 ...): the frame period is
+    /// still the gap in presentation order, not the gap between two arrivals.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func decodeOrderArrivalStillMeasuresTheFramePeriod() throws {
+        let up = try upscaler(try plan(720, 480, ml: []), frameInterval: 1.0 / 25)
+        let input = try TestFrames.nv12(720, 480)
+        let gop: [Int64] = [0, 8, 4, 2, 1, 3, 6, 5, 7]
+        for base in stride(from: Int64(0), to: 40, by: 8) {
+            for offset in gop.dropFirst() { _ = up.upscale(input, pts: CMTime(value: (base + offset) * 1001, timescale: 24000)) }
+        }
+        #expect(abs(up.frameBudgetMs - 0.75 * 1001.0 / 24) < 0.01, "budget \(up.frameBudgetMs)")
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func seekGapsDoNotStretchTheInterval() throws {

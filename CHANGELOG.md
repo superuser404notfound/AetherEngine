@@ -95,6 +95,12 @@ the public-API contract.
 
 ### Fixed
 
+- **The upscale stage measures the frame rate correctly behind a hardware decoder (#846).** VideoToolbox
+  hands frames over in decode order, and the stage took the gap between two arrivals for the frame period:
+  83.5 ms against a real 41.7 ms on 1080p HEVC at 23.976 fps. The overrun budget was therefore twice as
+  generous as intended, so a stage that could not keep up was not switched off. It now sorts the last nine
+  timestamps before measuring the gaps.
+
 - **`LiveTelemetry.objectAudio` is reported on the software host (#1026).** A TrueHD Atmos or DTS:X track
   rendered into a bed there (`objectAudioRendering`, which every Profile 7 FEL session under
   `preferDualLayerDolbyVision` takes) left the field nil, so with `audioDelivery == .bridged` it read like the

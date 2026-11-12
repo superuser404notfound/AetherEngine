@@ -122,8 +122,8 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private let configuredInterval: Double
     private var frameInterval: Double
-    private var ptsDeltas: [Double] = []
-    private var lastPTS: Double?
+    /// The last `intervalWindow + 1` distinct PTS, in arrival order.
+    private var recentPTS: [Double] = []
     private let gpu: GPU
     private let initialPlan: UpscalePlan
     /// nil while `buildQueue` builds it.
@@ -254,12 +254,25 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private func notePTS(_ pts: CMTime) {
         guard pts.isNumeric else { return }
-        let seconds = pts.seconds
-        defer { lastPTS = seconds }
-        guard let last = lastPTS, seconds > last, seconds - last <= Self.maxFrameDelta else { return }
-        ptsDeltas.append(seconds - last)
-        if ptsDeltas.count > Self.intervalWindow { ptsDeltas.removeFirst() }
-        frameInterval = Self.liveInterval(deltas: ptsDeltas, configured: configuredInterval)
+        recentPTS = Self.recentPTS(recentPTS, adding: pts.seconds)
+        frameInterval = Self.liveInterval(deltas: Self.framePeriods(recentPTS), configured: configuredInterval)
+    }
+
+    /// `window` with `seconds` added: a PTS more than `maxFrameDelta` outside the window is a seek and
+    /// starts a new one, a repeat is ignored, and the oldest arrival leaves past `intervalWindow + 1`.
+    static func recentPTS(_ window: [Double], adding seconds: Double) -> [Double] {
+        guard let lo = window.min(), let hi = window.max(),
+              seconds >= lo - maxFrameDelta, seconds <= hi + maxFrameDelta else { return [seconds] }
+        guard !window.contains(seconds) else { return window }
+        return Array((window + [seconds]).suffix(intervalWindow + 1))
+    }
+
+    /// The gaps between neighbouring PTS in presentation order. Sorting first matters: VideoToolbox hands
+    /// frames over in decode order, where the gap between two arrivals is up to a whole mini-GOP (measured
+    /// 83.5 ms against a 41.7 ms period on 1080p HEVC, which doubled the budget).
+    static func framePeriods(_ window: [Double]) -> [Double] {
+        let sorted = window.sorted()
+        return zip(sorted, sorted.dropFirst()).map { $1 - $0 }.filter { $0 > 0 && $0 <= maxFrameDelta }
     }
 
     // MARK: - Rebuild and pass-through
