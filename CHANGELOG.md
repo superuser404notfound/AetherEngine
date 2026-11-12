@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Opt-in whole-session segment disk admission** (#961): `sessionCacheHardLimitBytes` bounds each
+  session's resident/staging bytes; `sessionCacheFreeReserveBytes` independently protects volume
+  headroom for live and VOD. `SessionCacheStatus.diskAdmissionWaiting` distinguishes disk waits from
+  forward-window backpressure. Denied capacity surfaces as `storageExhausted`, cancellation does not.
 
 ## [7.65.0] - 2026-11-12
 
@@ -592,11 +597,6 @@ _Nothing yet._
 ## [7.57.0] - 2026-11-05
 
 ### Added
-
-- **Opt-in whole-session segment disk admission** (#961): `sessionCacheHardLimitBytes` bounds each
-  session's resident/staging bytes; `sessionCacheFreeReserveBytes` independently protects volume
-  headroom for live and VOD. `SessionCacheStatus.diskAdmissionWaiting` distinguishes disk waits from
-  forward-window backpressure. Denied capacity surfaces as `storageExhausted`, cancellation does not.
 
 - **Hosts can observe the selected secondary subtitle identity.**
   `activeSecondarySubtitleTrackIndex` and its publisher report embedded and registered external

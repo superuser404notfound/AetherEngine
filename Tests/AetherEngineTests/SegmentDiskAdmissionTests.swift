@@ -74,6 +74,36 @@ struct SegmentDiskAdmissionTests {
         #expect(status(cache).stagingBytes == 0)
     }
 
+    @Test("(#961) A short backward cache miss evicts the old forward tail")
+    func shortBackwardMissMakesRoom() {
+        let cache = SegmentCache(forwardWindow: 4, backwardWindow: 2, hardDiskLimitBytes: 300)
+        defer { cache.close() }
+
+        // After a short rewind, the consumer needs segment 4 again but the capped cache has only
+        // kept 5...7. One-segment read-ahead can arrive before the refetched target is adopted.
+        for index in 0...2 {
+            cache.declareTarget(index)
+            #expect(cache.store(index: index, data: Data(repeating: UInt8(index), count: 100)))
+        }
+        for index in 5...7 {
+            cache.declareTarget(index)
+            #expect(cache.store(index: index, data: Data(repeating: UInt8(index), count: 100)))
+        }
+        #expect(cache.totalBytes == 300)
+        cache.declareTarget(4)
+        cache.declareTarget(5)
+
+        let staging = cache.sessionDir.appendingPathComponent("short-backward.tmp")
+        #expect(cache.stagingWriteAdmission(path: staging, bytes: 100) == .admitted)
+        #expect(cache.peek(index: 5)?.count == 100)
+        #expect(cache.peek(index: 6)?.count == 100)
+        #expect(cache.peek(index: 7) == nil, "the farthest old forward copy should make room first")
+        #expect(status(cache).currentDiskBytes == 300)
+        #expect(status(cache).stagingBytes == 100)
+        #expect(!status(cache).diskAdmissionWaiting)
+        #expect(!cache.storageExhausted)
+    }
+
     @Test("Close wakes a writer parked while playback is paused")
     func closeCancelsPark() async throws {
         let cache = SegmentCache(hardDiskLimitBytes: 100)

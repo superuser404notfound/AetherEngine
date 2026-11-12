@@ -115,6 +115,9 @@ final class SegmentCache: @unchecked Sendable {
     /// `contiguousForwardFrontier(fromPlayhead:)` rests on.
     private var fetchFloor: Int = -1
     private var fetchFront: Int = -1
+    /// A missing backward target is being re-fetched after a seek. While it is outstanding,
+    /// disk admission may also release old forward copies that AVPlayer already fetched.
+    private var diskAdmissionMissTarget: Int?
 
     let sessionDir: URL
 
@@ -421,6 +424,7 @@ final class SegmentCache: @unchecked Sendable {
         var residentSetChanged = false
         var supersededFile: URL?
         if writeOK {
+            clearDiskAdmissionMissIfReachedLocked(index)
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
@@ -491,6 +495,7 @@ final class SegmentCache: @unchecked Sendable {
         var residentSetChanged = false
         var supersededFile: URL?
         if renameOK {
+            clearDiskAdmissionMissIfReachedLocked(index)
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
@@ -670,15 +675,26 @@ final class SegmentCache: @unchecked Sendable {
     }
 
     /// The last 20 historical segments are a preference under an opted-in total bound.
-    /// A real backward handover's active fetch sequence remains protected in full. Far-future
-    /// tails from an earlier seek must not be pinned forever by highestStoredIndex.
+    /// Only while recovering a missing backward target may admission also evict the farthest
+    /// already-stored forward copy. Normal sequential playback keeps its active fetch band intact.
     private func evictHardDiskHistoryLocked(bytesNeeded: Int) -> [URL] {
         guard bytesNeeded > 0 else { return [] }
         let lower = max(0, min(currentTargetIndex, fetchFront))
         let upper = max(currentTargetIndex, fetchFront) + max(forwardWindow, PrefetchDiskBudget.minAheadSegments)
-        let candidates = entries.keys.filter { $0 < lower || $0 > upper }.sorted {
+        let history = entries.keys.filter { $0 < lower || $0 > upper }.sorted {
             abs($0 - currentTargetIndex) > abs($1 - currentTargetIndex)
         }
+        // A total disk limit can be smaller than the old fetch band plus a staging segment. After
+        // a backward miss, AVPlayer already owns its old forward bytes; keep the nearest cached
+        // successors and release the farthest copies first so the requested segment can land.
+        let forwardTail: [Int]
+        if let missTarget = diskAdmissionMissTarget {
+            forwardTail = entries.keys.filter { $0 > missTarget && $0 >= lower && $0 <= upper }
+                .sorted(by: >)
+        } else {
+            forwardTail = []
+        }
+        let candidates = history + forwardTail
         var removed = 0
         var doomed: [URL] = []
         for index in candidates {
@@ -700,7 +716,22 @@ final class SegmentCache: @unchecked Sendable {
     func declareTarget(_ index: Int) {
         condition.lock()
         var doomed: [URL] = []
-        trackFetchSequenceLocked(index)
+        let backwardDiskCacheMiss = (hardDiskLimitBytes != nil || freeDiskReserveBytes > 0)
+            && currentTargetIndex >= 0 && index < currentTargetIndex && entries[index] == nil
+        if backwardDiskCacheMiss {
+            // A short backward refetch of a resident handover segment remains in the old sequence.
+            // A missing target cannot be a cache hit, so the producer is about to restart there;
+            // stop protecting the previous run's forward band from disk admission.
+            fetchFloor = index
+            fetchFront = index
+            diskAdmissionMissTarget = index
+        } else {
+            if diskAdmissionMissTarget != nil, index > fetchFront + 1 {
+                // A gap starts a new fetch sequence; the earlier backward recovery was abandoned.
+                diskAdmissionMissTarget = nil
+            }
+            trackFetchSequenceLocked(index)
+        }
         if index != currentTargetIndex {
             currentTargetIndex = index
             doomed = pruneOutsideWindow()
@@ -709,6 +740,13 @@ final class SegmentCache: @unchecked Sendable {
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
         if !doomed.isEmpty { onResidentSetChanged?() }
+    }
+
+    /// Must be called with condition held.
+    private func clearDiskAdmissionMissIfReachedLocked(_ index: Int) {
+        if let missTarget = diskAdmissionMissTarget, index >= missTarget {
+            diskAdmissionMissTarget = nil
+        }
     }
 
     /// Must be called with condition held.

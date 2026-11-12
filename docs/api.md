@@ -2263,7 +2263,9 @@ bytes before segment writes, independently of the cap; `0` disables the reserve.
 The reserve can also be used with live sessions, where the hard cap does not apply.
 These are per-session limits, not a process-wide total.
 
-`SessionCacheStatus.currentDiskBytes` includes resident and staging bytes.
+When either disk-admission option is enabled, `SessionCacheStatus.currentDiskBytes`
+includes resident and staging bytes. With both at their defaults, staging writes are
+not reserved by the admission ledger, so this status reports resident bytes only.
 `stagingBytes`, `hardLimitBytes`, `freeDiskReserveBytes`, `rejectedDiskWrites` and
 `diskAdmissionWaiting` expose staging, the configured limits, rejected writes and
 admission waits. `diskAdmissionWaiting` is separate from `producerParked`, which
@@ -2272,7 +2274,10 @@ describes forward-window backpressure.
 A writer blocked by the hard cap waits for consumer advancement and observes
 cancellation and cache closure. Impossible admissions and reserve denials surface
 as `PlaybackErrorKind.storageExhausted`; cancellation does not latch a storage
-failure. Other processes can consume free space after a capacity measurement.
+failure. Other processes can consume free space after a capacity measurement. The
+hard cap may evict backward history that the default retention policy would keep;
+a later seek there can restart the producer. Under pressure it can also evict the
+farthest already-cached forward segment to admit the segment currently requested.
 
 ## Optional components
 
