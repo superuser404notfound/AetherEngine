@@ -170,6 +170,19 @@ struct LineArtUpscalerTests {
         #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001) != nil)
     }
 
+    /// The automatic route takes 8-bit only, so a 10-bit source below 1080p has nothing to fall back to.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func tenBitOverrunBelow1080pSwitchesOff() throws {
+        FrameUpscaler.resetLineArtCostMemoryForTesting()
+        defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
+        let up = try #require(FrameUpscaler(plan: try plan(1280, 720), frameInterval: 0.0001))
+        let input = try ChainFrames.gradient(1280, 720, tenBit: true)
+        for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
+        #expect(up.isDisabled)
+        #expect(up.plan.scaler == .lineArt)
+    }
+
     /// Below 1080p the next best is the automatic route: VT super resolution, MetalFX where it is there.
     @Test(.enabled(if: LineArtGate.mlAvailable))
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)

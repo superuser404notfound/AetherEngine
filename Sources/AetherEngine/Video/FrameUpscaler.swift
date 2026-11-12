@@ -129,6 +129,8 @@ final class FrameUpscaler: @unchecked Sendable {
     private let buildQueue: DispatchQueue?
     /// The scaler the stage runs now: the plan's, until a line-art overrun falls back to `.automatic`.
     private var scaler: UpscaleScaler
+    /// The last frame's sample depth; the automatic route takes 8-bit only.
+    private var lastInputEightBit = true
     /// nil while `buildQueue` builds it.
     private var stage: Stage?
     private var lastPassThroughNote: String?
@@ -245,6 +247,8 @@ final class FrameUpscaler: @unchecked Sendable {
         }
 
         let format = CVPixelBufferGetPixelFormatType(input)
+        lastInputEightBit = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         if built.plan.scaler == .lineArt {
             guard FrameChain.supportedFormats.contains(format) else {
                 notePassThrough("pixel format \(fourCC(format)) is not 8 or 10-bit 4:2:0")
@@ -436,7 +440,10 @@ final class FrameUpscaler: @unchecked Sendable {
     private func fallBackFromLineArt(over: String, window: StageTimes, plan: UpscalePlan) {
         LineArtCostMemory.record(LineArtCostMemory.Overrun(
             width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total))
-        guard let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: Self.mlScaleFactors) else {
+        // The automatic route takes 8-bit only, and not a plan that already switched itself off here.
+        guard lastInputEightBit,
+              let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: Self.mlScaleFactors),
+              !UpscaleFailureMemory.contains(fallback, frameRate: 1 / frameInterval) else {
             disable(reason: "over budget, " + over)
             return
         }
