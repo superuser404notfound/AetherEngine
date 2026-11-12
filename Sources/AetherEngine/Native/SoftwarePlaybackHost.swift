@@ -1560,6 +1560,10 @@ final class SoftwarePlaybackHost {
                 self.audioStreamIndex = -1
             }
         }
+        // AE#1037: `vStream` and `dem` are read again below. Every suspension inside the block above
+        // already turns a stop() into the CancellationError return, but this keeps the guarantee here
+        // instead of in `makeAudioProducer`'s internals.
+        guard !stopRequested else { return }
         // AE#462: after the decoder has had its chance, whichever way the block above left it, so a
         // stream present but unusable (no codecpar) classifies as the drop it is rather than as a
         // source without audio.
