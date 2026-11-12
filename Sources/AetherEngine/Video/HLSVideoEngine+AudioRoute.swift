@@ -48,7 +48,8 @@ extension HLSVideoEngine {
             case AV_CODEC_ID_TRUEHD: return .truehd
             case AV_CODEC_ID_DTS:    return .dts
             case AV_CODEC_ID_VORBIS: return .vorbis
-            case AV_CODEC_ID_MP2:    return .mp2
+            // MP1 is Layer I of the same MPEG audio family and bridges the same way.
+            case AV_CODEC_ID_MP2, AV_CODEC_ID_MP1: return .mp2
             case AV_CODEC_ID_WMAV1,
                  AV_CODEC_ID_WMAV2,
                  AV_CODEC_ID_WMAPRO,
@@ -73,8 +74,14 @@ extension HLSVideoEngine {
                  AV_CODEC_ID_PCM_S24LE,
                  AV_CODEC_ID_PCM_F32LE,
                  AV_CODEC_ID_PCM_S16BE,
+                 AV_CODEC_ID_PCM_S24BE,
                  AV_CODEC_ID_PCM_S32LE,
+                 AV_CODEC_ID_PCM_S32BE,
+                 AV_CODEC_ID_PCM_F32BE,
+                 AV_CODEC_ID_PCM_F64LE,
+                 AV_CODEC_ID_PCM_F64BE,
                  AV_CODEC_ID_PCM_U8,
+                 AV_CODEC_ID_PCM_S8,
                  AV_CODEC_ID_PCM_ALAW,
                  AV_CODEC_ID_PCM_MULAW,
                  AV_CODEC_ID_PCM_DVD:
