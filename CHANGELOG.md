@@ -183,6 +183,14 @@ the public-API contract.
 
 ### Fixed
 
+- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends.**
+  The decoder opened with one thread per core, and under frame threading every thread past the first
+  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
+  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
+  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
+  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
+  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
+
 - **The upscale stage measures the frame rate correctly behind a hardware decoder (#846).** VideoToolbox
   hands frames over in decode order, and the stage took the gap between two arrivals for the frame period:
   83.5 ms against a real 41.7 ms on 1080p HEVC at 23.976 fps. The overrun budget was therefore twice as

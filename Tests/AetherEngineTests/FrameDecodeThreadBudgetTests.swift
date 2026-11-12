@@ -20,4 +20,20 @@ struct FrameDecodeThreadBudgetTests {
         #expect(FrameDecodeContext.stillExtractionThreadCount(activeProcessorCount: 1) >= 1)
         #expect(FrameDecodeContext.stillExtractionThreadCount(activeProcessorCount: 0) >= 1)
     }
+
+    // MARK: - Playback
+
+    /// Every frame thread past the first holds a decoded frame back until more packets arrive.
+    /// Uncapped, an 18-core Mac (Mac17,6) held 17 and delivered 23 of the 40 frames the #220
+    /// fixture (`Issue220SoftwareDecoderDrainTests`) decodes; capped it holds 15 and delivers 25.
+    @Test("playback decodes on one thread per core, at most libavcodec's 16",
+          arguments: [(1, 1), (6, 6), (16, 16), (18, 16), (32, 16)])
+    func playbackThreadCountStopsAt16(cores: Int, threads: Int) {
+        #expect(SoftwareVideoDecoder.playbackThreadCount(activeProcessorCount: cores) == threads)
+    }
+
+    @Test("playback decodes on at least one thread when the core count reads 0")
+    func playbackThreadCountAtLeastOne() {
+        #expect(SoftwareVideoDecoder.playbackThreadCount(activeProcessorCount: 0) == 1)
+    }
 }
