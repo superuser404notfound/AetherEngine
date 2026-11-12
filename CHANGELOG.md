@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.64.0] - 2026-11-12
+
 ### Added
 
 - **The engine can own Now Playing on every host and every platform (#1041, thanks @jihongboo).**
