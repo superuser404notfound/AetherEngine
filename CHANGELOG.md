@@ -15,12 +15,18 @@ the public-API contract.
 - **A line-art scaler for animation (#1039).** `LoadOptions.upscaleScaler = .lineArt` makes the upscale stage
   (`upscalesLowResolutionVideo`) run Anime4K's Upscale CNN x2 (S) as native Metal kernels instead of
   VideoToolbox super resolution and MetalFX. It also takes 1080p and 10-bit SDR, which the automatic route
-  cannot, and keeps 10-bit output 10-bit. On an A15 it costs about 11.6 ms per frame for 1080p to 2160p. It
-  suits drawn content only, so a host sets it per title. `UpscaleStatus.scaler` says which scaler runs, and
+  cannot, and keeps 10-bit output 10-bit. On an A15 it costs about 8.6 ms per frame for 1080p to 2160p with
+  the GPU running flat out. When it overruns, a source below 1080p falls back to the automatic route and a
+  1080p source switches off, and the overrun is remembered for the process. It suits drawn content only, so a
+  host sets it per title. `UpscaleStatus.scaler` says which scaler runs, and
   `aetherctl play --line-art` drives it. It runs as the first stage of a new GPU frame chain (#957), which
   later processing stages can join. Anime4K is MIT; see `docs/licensing.md`.
 
-- **A disc title names its playlist or title set (#1034).** `TitleInfo.playlist` is the `.mpls` file a Blu-ray
+- **Upscaling without MetalFX (#846).** A device or OS without MetalFX spatial scaling (tvOS before 27.1)
+  used to skip the upscale route entirely. Now the stage starts with VideoToolbox super resolution alone and the
+  display scales the rest, published with `UpscaleStatus.degraded`.
+
+- **A disc title names its playlist or title set (#1034). `TitleInfo.playlist` is the `.mpls` file a Blu-ray
   title plays ("00800.mpls"), `TitleInfo.titleSet` the `VTS_NN` a DVD title plays, for images and folders alike.
   `id` is only the title's place in the current scan, so a host that stores a title (a resume point, an "other
   titles" entry) can now check at a later open that it is still the same one, and pass `playlist` back as

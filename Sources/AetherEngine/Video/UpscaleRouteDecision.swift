@@ -73,8 +73,6 @@ enum UpscaleRouteDecision: Equatable {
     ) -> UpscaleRouteDecision {
         guard preference else { return .notTaken(.preferenceOff) }
         guard osSupportsStage else { return .notTaken(.unsupportedOS) }
-        // The line-art stage is plain Metal compute.
-        guard metalFXSupported || scaler == .lineArt else { return .notTaken(.metalFXUnsupported) }
         guard isSDR, !isDolbyVision else { return .notTaken(.hdrOrDolbyVision) }
         switch scaler {
         case .automatic: guard isEightBit420 else { return .notTaken(.notEightBit420) }
@@ -87,12 +85,36 @@ enum UpscaleRouteDecision: Equatable {
         guard let plan = makePlan(source: source, display: display, mlScaleFactors: mlScaleFactors, scaler: scaler),
               plan.targetWidth > source.width || plan.targetHeight > source.height
         else { return .notTaken(.displayNotLarger) }
+        // Without MetalFX an automatic plan needs its ML pass, which then runs alone (the display scales the
+        // rest). The line-art stage is plain Metal compute.
+        if scaler == .automatic, !metalFXSupported, plan.needsMetalFX, plan.mlScale == nil {
+            return .notTaken(.metalFXUnsupported)
+        }
         // Any wireless AirPlay route, not only a receiver that shows video: the stage moves a session the
         // native path would play onto the software path, and there the sound goes to the speakers alone.
         guard !wirelessAirPlayRoute else { return .notTaken(.wirelessAirPlayRoute) }
         guard !demuxedAudioLive else { return .notTaken(.demuxedAudioLive) }
         guard !stageFailedEarlier(plan) else { return .notTaken(.stageFailedEarlier) }
         return .taken(plan)
+    }
+
+    /// What a line-art plan falls back to when it overruns (AE#1039): the automatic plan for the same
+    /// source and display, only below 1080p and only with a VT super-resolution pass (MetalFX alone costs
+    /// about what line art does). The pixel aspect comes from the plan's own target.
+    static func lineArtFallback(for plan: UpscalePlan, mlScaleFactors: (Int, Int) -> [Float]) -> UpscalePlan? {
+        guard plan.scaler == .lineArt,
+              sizeAllowed(width: plan.sourceWidth, height: plan.sourceHeight, scaler: .automatic) else { return nil }
+        var num = plan.targetWidth * plan.sourceHeight, den = plan.targetHeight * plan.sourceWidth
+        guard num > 0, den > 0 else { return nil }
+        var a = num, b = den
+        while b != 0 { (a, b) = (b, a % b) }
+        num /= a; den /= a
+        guard let fallback = makePlan(
+                source: SourceGeometry(width: plan.sourceWidth, height: plan.sourceHeight, sarNum: num, sarDen: den),
+                display: CGSize(width: plan.displayWidth, height: plan.displayHeight),
+                mlScaleFactors: mlScaleFactors, scaler: .automatic),
+              fallback.mlScale != nil else { return nil }
+        return fallback
     }
 
     /// Below 1080p for `.automatic` (1080p scales well enough without it, and VT super resolution does not
