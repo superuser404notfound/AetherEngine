@@ -7,11 +7,12 @@ import AetherLibavcodec
 /// Same rule as the other format chains: a track whose decoder is missing plays SILENT (the bridge has
 /// nothing to open and the session drops to video-only), so every shape a linked demuxer can hand over
 /// is named here, not only the common ones. 24-bit big-endian is what camera MOVs record (`in24`),
-/// 32-bit integer comes in WAV and MOV, big-endian and 64-bit float in MOV.
+/// 32-bit integer comes in WAV and MOV, float in MOV, WAV and Matroska, signed 8-bit in MOV (`twos`).
 @Suite("PCM shapes and MP1")
 struct PCMShapeChainTests {
 
     private static let audio: [(String, AVCodecID, HLSVideoEngine.AudioCodecCompat)] = [
+        ("pcm_s8", AV_CODEC_ID_PCM_S8, .pcm),
         ("pcm_s24be", AV_CODEC_ID_PCM_S24BE, .pcm),
         ("pcm_s32le", AV_CODEC_ID_PCM_S32LE, .pcm),
         ("pcm_s32be", AV_CODEC_ID_PCM_S32BE, .pcm),

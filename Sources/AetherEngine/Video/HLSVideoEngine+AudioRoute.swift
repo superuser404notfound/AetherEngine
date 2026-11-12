@@ -81,6 +81,7 @@ extension HLSVideoEngine {
                  AV_CODEC_ID_PCM_F64LE,
                  AV_CODEC_ID_PCM_F64BE,
                  AV_CODEC_ID_PCM_U8,
+                 AV_CODEC_ID_PCM_S8,
                  AV_CODEC_ID_PCM_ALAW,
                  AV_CODEC_ID_PCM_MULAW,
                  AV_CODEC_ID_PCM_DVD:
