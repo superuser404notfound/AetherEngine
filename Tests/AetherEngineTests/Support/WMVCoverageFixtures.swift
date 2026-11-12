@@ -2,7 +2,7 @@ import Foundation
 import CryptoKit
 import Testing
 
-// Generated testsrc2 pixels only; no third-party media. See docs/wmv-cache-coverage.md.
+// Generated testsrc2 pixels only; no third-party media. See docs/notes/wmv-cache-coverage.md.
 enum WMVCoverageFixtures {
     static func data(_ codec: String) throws -> Data {
         let value = codec == "wmv1" ? wmv1 : wmv2

@@ -394,7 +394,7 @@ final class DocumentedConstantsTests: XCTestCase {
 
     // MARK: - The Atmos rendition's CHANNELS value
 
-    /// docs/formats.md and docs/architecture.md both print the CHANNELS value a stream-copied
+    /// docs/formats.md and docs/source-map.md both print the CHANNELS value a stream-copied
     /// E-AC-3 JOC rendition is advertised with, and the object count in it is the part a reader
     /// checks against Dolby's delivery kit. If the engine ever sources it from the `dec3` box's
     /// `complexity_index_type_a` instead of stating it, both sentences stop being true at once.

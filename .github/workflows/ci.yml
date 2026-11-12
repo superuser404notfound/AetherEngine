@@ -189,7 +189,7 @@ jobs:
       - name: Validate relative links and heading anchors in the published docs
         run: python3 Scripts/check-doc-links.py
 
-      - name: Every Swift source file is named in the architecture Source map
+      - name: Every Swift source file is named in docs/source-map.md
         run: python3 Scripts/check-source-map.py
 
       # The two waiting rules in CONTRIBUTING.md that a grep can check, each written after a red main

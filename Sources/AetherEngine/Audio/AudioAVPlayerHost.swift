@@ -21,7 +21,7 @@ final class AudioAVPlayerHost {
     @Published private(set) var timeControlStatus: AVPlayer.TimeControlStatus = .paused
     /// The item has played and is now starved: AVPlayer is `waitingToPlayAtSpecifiedRate`, or it posted
     /// `AVPlayerItemPlaybackStalled` and has not resumed since. The engine folds this into `isBuffering`,
-    /// so `playbackPhase` reads `.rebuffering` on this path too (architecture.md promised that; the flag
+    /// so `playbackPhase` reads `.rebuffering` on this path too (the architecture docs promised that; the flag
     /// never existed). Startup spin-up before the first `.playing` is not a rebuffer, and a paused player
     /// is never one. See `rebufferingFlag(hasStartedPlaying:status:waitingReason:stalledSinceLastPlaying:)`.
     @Published private(set) var isRebuffering: Bool = false
