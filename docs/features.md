@@ -89,7 +89,7 @@ TrueHD Atmos and DTS:X can keep their height channels. This is opt-in through `L
 
 - The engine builds a speaker bed from the stream's own lossless 7.1, steered by its objects (TrueHD) or heights (DTS:X).
 - Layouts: TrueHD from 5.1.2 up to 9.1.6; DTS:X 7.1.4 and 9.1.6 (its four heights unfolded from the compatible 7.1).
-- Output: the bed as lossless 24-bit linear PCM, which tvOS wraps in Dolby MAT for an Atmos receiver and iOS spatialises on AirPods. Over AirPlay, and on the software host, it goes as Apple Positional Audio (APAC, a lossy encode). Needs OS 26.
+- Output: the bed as lossless 24-bit linear PCM, which tvOS wraps in Dolby MAT for an Atmos receiver and iOS spatialises on AirPods. Over AirPlay it goes as Apple Positional Audio (APAC, a lossy encode), on the loopback route and the software host alike. Needs OS 26.
 
 Details: [formats.md › TrueHD Atmos with heights](formats.md#truehd-atmos-with-heights) and [formats.md › DTS:X with heights](formats.md#dtsx-with-heights).
 
