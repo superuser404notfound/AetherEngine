@@ -87,6 +87,14 @@ the public-API contract.
 
 ### Fixed
 
+- **On a Mac with more than 16 cores the software decoder held more frames back than libavcodec
+  recommends.** The decoder opened with one thread per core, and under frame threading every thread
+  past the first holds a frame until more packets arrive. On an 18-core Mac (Mac17,6) that was 17
+  frames: a 40-packet progressive H.264 delivered 23 frames, and a Live source whose reads stalled
+  kept frames it had already received inside the decoder instead of on screen. Playback now decodes
+  on at most 16 threads, where libavcodec's own automatic choice stops and above which it warns.
+  Apple TV, iPhone and iPad have fewer cores and are unchanged.
+
 - **`LiveTelemetry.objectAudio` is reported on the software host (#1026).** A TrueHD Atmos or DTS:X track
   rendered into a bed there (`objectAudioRendering`, which every Profile 7 FEL session under
   `preferDualLayerDolbyVision` takes) left the field nil, so with `audioDelivery == .bridged` it read like the
