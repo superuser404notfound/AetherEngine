@@ -104,7 +104,7 @@ struct CFRFrameGrid {
         return (outPts, outDts, outDuration)
     }
 
-    private static func roundedQuotient(_ n: Int64, _ d: Int64) -> Int64 {
+    static func roundedQuotient(_ n: Int64, _ d: Int64) -> Int64 {
         let q = n / d
         let r = n % d
         if 2 * abs(r) >= d { return r < 0 ? q - 1 : q + 1 }

@@ -10,7 +10,18 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **24p film with 2:3 pulldown timestamps no longer stutters at random (Sodalite#236, thanks @cstark27).** Some
+  DVD encodes stamp each film frame with its 59.94 Hz field time, so frames alternate 50 and 33 ms. On a 23.976 Hz
+  panel a 33 ms frame could miss its refresh depending on the vsync phase, which every start and seek re-rolled.
+  `PulldownCadenceRetimer` recognises the cadence and puts every frame on its 24p slot (one field of shift at
+  most, re-centred after each edit); other content is untouched. Measured on the reporter's clip: 587 of 606
+  frame steps are exactly 41.7 ms, where every step used to be 50 or 33.
+- **A declared frame rate that is not a standard rate is measured on the packets (Sodalite#236).** mkvmerge
+  writes the first frame's duration as DefaultDuration, so such a track declared 20 fps: the panel switched to
+  24 Hz, the master advertised `FRAME-RATE=20.000`, and no frame grid was built. The load now fits the rate to
+  the head packets already queued by the probe and uses 23.976 there.
 
 ## [7.63.0] - 2026-11-12
 

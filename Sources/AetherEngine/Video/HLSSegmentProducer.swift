@@ -61,6 +61,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         /// AE#886: the exact frame grid of a constant-rate track on a coarse time base. Non-nil gives
         /// the muxer the grid's time base and puts every on-grid frame onto its slot.
         let frameGrid: CFRFrameGrid?
+        /// Sodalite#236: the session's "this is 2:3 film" verdict, shared by every producer so one that
+        /// starts after a seek retimes from its first frame. Only read when `frameGrid` is 24p.
+        let pulldownLatch: PulldownCadenceLatch?
 
         init(
             codecpar: UnsafePointer<AVCodecParameters>,
@@ -74,10 +77,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             convertsAnnexBSamples: Bool = false,
             nalFramingLatch: NALFramingLatch? = nil,
             stereo: StereoVideoSignal? = nil,
-            frameGrid: CFRFrameGrid? = nil
+            frameGrid: CFRFrameGrid? = nil,
+            pulldownLatch: PulldownCadenceLatch? = nil
         ) {
             self.stereo = stereo
             self.frameGrid = frameGrid
+            self.pulldownLatch = pulldownLatch
             self.codecpar = codecpar
             self.timeBase = timeBase
             self.codecTagOverride = codecTagOverride
@@ -192,7 +197,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var startedVideoPacketTap = false
     /// AE#886: `videoConfig.frameGrid` on VOD, nil on live. Pump-thread counters for the finish line.
     private let frameGrid: CFRFrameGrid?
+    /// Sodalite#236: puts 2:3 film onto `frameGrid`; nil unless the grid is 24p. Pump thread only.
+    private let pulldownRetimer: PulldownCadenceRetimer?
     private var griddedVideoPackets = 0
+    private var retimedVideoPackets = 0
     private var offGridVideoPackets = 0
     private let videoConfig: StreamConfig
     private var audioConfig: AudioConfig?
@@ -1689,6 +1697,9 @@ final class HLSSegmentProducer: @unchecked Sendable {
         self.sourceVideoTimeBase = video.timeBase
         self.videoCodecparForTap = video.codecpar
         self.frameGrid = isLive ? nil : video.frameGrid
+        self.pulldownRetimer = (isLive ? nil : video.frameGrid).flatMap {
+            PulldownCadenceRetimer(grid: $0, latch: video.pulldownLatch)
+        }
         self.targetSegmentDurationSeconds = targetSegmentDurationSeconds
         self.segmentBoundaries = segmentBoundaries
         self.planAnchorVideoPts = planAnchorVideoPts
@@ -5189,7 +5200,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
             + "packetsWritten=\(packetsWrittenCount) lastError=\(lastError) "
             + "elapsed=\(String(format: "%.0f", elapsedMs))ms cacheCount=\(cache.count)"
             + (frameGrid.map { " frameGrid=1/\($0.outputTimeBase.den)x\($0.frameTicks) "
-                + "onGrid=\(griddedVideoPackets) offGrid=\(offGridVideoPackets)" } ?? ""),
+                + "onGrid=\(griddedVideoPackets) offGrid=\(offGridVideoPackets)"
+                + (pulldownRetimer == nil ? "" : " pulldownRetimed=\(retimedVideoPackets)") } ?? ""),
             category: .session
         )
 
@@ -5374,16 +5386,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let tapForWrite = convertP7Active ? videoPacketTapProvider?() : nil
 
         // AE#886: decided on the source time base, before the rescale rounds it away.
-        let gridded = muxer.muxerVideoTimeBase.den == frameGrid?.outputTimeBase.den
-            ? frameGrid?.place(pts: packet.pointee.pts, dts: packet.pointee.dts,
-                               duration: packet.pointee.duration, shift: videoShiftPts)
-            : nil
+        // Sodalite#236: the retimer owns every packet of a 24p grid, so its window sees them all.
+        let onGridMuxer = muxer.muxerVideoTimeBase.den == frameGrid?.outputTimeBase.den
+        let gridded: (pts: Int64, dts: Int64, duration: Int64)?
+        if !onGridMuxer {
+            gridded = nil
+        } else if let pulldownRetimer {
+            gridded = pulldownRetimer.place(pts: packet.pointee.pts, dts: packet.pointee.dts,
+                                            duration: packet.pointee.duration, shift: videoShiftPts)
+        } else {
+            gridded = frameGrid?.place(pts: packet.pointee.pts, dts: packet.pointee.dts,
+                                       duration: packet.pointee.duration, shift: videoShiftPts)
+        }
         av_packet_rescale_ts(packet, sourceVideoTimeBase, muxer.muxerVideoTimeBase)
         if let gridded {
             packet.pointee.pts = gridded.pts
             packet.pointee.dts = gridded.dts
             packet.pointee.duration = gridded.duration
-            griddedVideoPackets += 1
+            if onGridMuxer, pulldownRetimer?.lastOutcome == .retimed {
+                retimedVideoPackets += 1
+            } else {
+                griddedVideoPackets += 1
+            }
         } else if frameGrid != nil {
             offGridVideoPackets += 1
         }

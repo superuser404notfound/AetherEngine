@@ -128,7 +128,20 @@ The video track's output time base is normally the source's, which movenc scales
 
 It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks for 23.976, 1/24000 with 1000 ticks for 24), anchored at the stream's start time. `HLSSegmentProducer` moves each packet whose source-axis PTS lies within one source tick of a grid slot onto that slot (the DTS onto its own slot, never past the PTS), and rescales everything else as before.
 
-The grid is derived from stream fields only, never from observed packets. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin.
+The grid is derived once per session, before the first producer runs, from the stream's declared rate. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin. The one exception to "declared" is a declared rate that is not a standard rate at all: `SourceFrameRateMeasurement` then fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed) and the load uses that instead (Sodalite#236). mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
+
+#### 2:3 pulldown timing on 24p film
+
+Some encodes of soft-telecined DVDs keep the film's progressive frames but stamp each with the time its first field would appear on a 59.94 Hz field clock: frames last three fields, then two (50 ms, 33 ms), averaging 23.976. On a 23.976 Hz panel a 33 ms frame can fall between two refreshes and never be shown, and whether it does depends on the vsync phase, which every start and seek re-rolls. The result is a pan that stutters on one pass and plays clean on the next (Sodalite#236).
+
+These frames lie 8 to 17 ms from a grid slot, far past `CFRFrameGrid`'s one-tick tolerance. On a 24p grid, `PulldownCadenceRetimer` owns every video packet instead:
+
+- It keeps a window of the last 48 packets (decode order) and calls the stretch film when every spacing among them, in presentation order, is two or three fields and they average two and a half. Anything else (true 30p or 60p video, a constant-rate stretch) goes through `CFRFrameGrid.place` unchanged.
+- In film, each frame goes to its nearest slot on a 24p grid whose origin follows the film. An edit that drops or repeats a field moves the film one field against the grid; the retimer re-centres on the running mean deviation, so no frame moves more than about one field from its source time.
+- A frame only moves where it stays strictly between its neighbours in presentation order, checked against the whole window. Otherwise the grid re-anchors on that frame, or the frame keeps its own time.
+- `PulldownCadenceLatch` carries the verdict across the session's producers, so a producer started by a seek retimes from its first frame instead of waiting for its window.
+
+The producer's finish line counts `pulldownRetimed=` next to `onGrid=` and `offGrid=`.
 
 #### Seeks and the segment cache
 
@@ -1218,6 +1231,8 @@ Notes:
 | `H264CompositionOffsetRepair.swift` | Rebuilds the presentation axis of an MP4 whose writer dropped `ctts` while the bitstream still reorders pictures (#409, HEVC #699). See note. |
 | `OutputTimestampSanitizer.swift` | Last-stage DTS/PTS monotonicity guard before the fMP4 mux (SSAI splices, program restarts). |
 | `CFRFrameGrid.swift` | Exact frame grid for a constant-rate VOD track on a coarse time base: the muxer's video time base and the slot each on-grid PTS/DTS lands on (AE#886). |
+| `PulldownCadenceRetimer.swift` | Puts 24p film carrying 2:3 pulldown timestamps onto the frame grid, one slot a frame, while the recent cadence is film (Sodalite#236) |
+| `SourceFrameRateMeasurement.swift` | Fits the frame rate to the head packets when the declared one is not a standard rate (Sodalite#236) |
 | `RestartCoalescer.swift` | Merges a burst of producer-restart requests into one in-flight and one settled target (rapid seeking, AetherEngine#35). |
 | `LiveWindow.swift` | Live path: session-relative DVR timeline (seconds since the first frame), shared by the native and software live paths. |
 | `MP4SegmentMuxer.swift` | Native path: session-long fragmented-MP4 muxer (`+empty_moov+default_base_moof+frag_custom+delay_moov`). |
