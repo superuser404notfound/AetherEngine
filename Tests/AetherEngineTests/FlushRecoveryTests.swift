@@ -538,6 +538,10 @@ struct FlushRecoveryHostTests {
                          pts: CMTime(seconds: seconds, preferredTimescale: 90000))
         renderer.drainReorderBuffer()
         try #require(renderer.acceptedFrameCount > 0)
+        // From here the queue's health is the test's to state. The real renderer on a loaded CI runner can
+        // ask for a flush on its own (lost decoder resources), and the recovery that starts then drops or
+        // re-reads packets the test counts, so its wait never ends (CI run 43153322814).
+        renderer.queueNeedsFlushForTesting = { false }
     }
 
     /// A decoder in the host that produces no frames and counts nothing: the demux loop would otherwise read the
@@ -680,7 +684,7 @@ struct FlushRecoveryHostTests {
         host.seekClockForTesting(to: 22)
         let renderer = host.videoRendererForTesting
         renderer.queueNeedsFlushForTesting = { true }
-        defer { renderer.queueNeedsFlushForTesting = nil }
+        defer { renderer.queueNeedsFlushForTesting = { false } }
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .flushVideoOnly)
         #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .ignore)
     }
@@ -983,14 +987,14 @@ struct FlushRecoveryHostTests {
         try await waitFor { host.flushRecoveriesCompleted == 1 }
 
         let renderer = host.videoRendererForTesting
-        defer { renderer.queueNeedsFlushForTesting = nil }
+        defer { renderer.queueNeedsFlushForTesting = { false } }
         for round in 1...2 {
             try await healthyPlaybackAfterRecovery(host, from: 21 + Double(round) * 10)
             // The queue is now flagged, as it is when the system's notification reaches the host.
             renderer.queueNeedsFlushForTesting = { true }
             host.keyframeLedgerForTesting.reset()
             #expect(host.handleFlushTrigger(.videoQueueRequiresFlush) == .reposition)
-            renderer.queueNeedsFlushForTesting = nil
+            renderer.queueNeedsFlushForTesting = { false }
             try await waitFor { host.flushRecoveriesCompleted == round + 1 }
         }
         #expect(host.flushRecoveryLog.map(\.action) == [.reposition, .reposition, .reposition])
@@ -1017,7 +1021,7 @@ struct FlushRecoveryHostTests {
         renderer.queueNeedsFlushForTesting = { true }
         renderer.enqueue(pixelBuffer: try #require(makePixelBuffer()), pts: CMTime(seconds: 23, preferredTimescale: 90000))
         renderer.drainReorderBuffer()
-        renderer.queueNeedsFlushForTesting = nil
+        renderer.queueNeedsFlushForTesting = { false }
         try await waitFor { host.flushRecoveryLog.count == 2 }
         #expect(host.flushRecoveryLog.map(\.action) == [.reposition, .reposition])
         try await waitFor { host.flushRecoveriesCompleted == 2 }
