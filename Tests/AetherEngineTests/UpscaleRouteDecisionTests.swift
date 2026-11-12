@@ -136,10 +136,12 @@ struct UpscaleRouteDecisionTests {
     @Test func withoutMetalFXTheMLPassStillRuns() throws {
         let plan = try #require(decide(metalFX: false).plan)
         #expect(plan.mlScale == 1.5 && plan.needsMetalFX)
+        #if !targetEnvironment(simulator)
         if #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *) {
             #expect(FrameUpscaler.startsMLOnly(plan, metalFXAvailable: false))
             #expect(!FrameUpscaler.startsMLOnly(plan, metalFXAvailable: true))
         }
+        #endif
         #expect(decide(metalFX: false, factors: { _, _ in [] }) == .notTaken(.metalFXUnsupported))
         // ML landing on the target needs no MetalFX at all.
         #expect(decide(metalFX: false, display: CGSize(width: 1920, height: 1080)).plan != nil)

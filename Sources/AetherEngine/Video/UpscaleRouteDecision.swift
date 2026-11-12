@@ -297,3 +297,54 @@ enum UpscaleFailureMemory {
         lock.lock(); failed.removeAll(); lock.unlock()
     }
 }
+
+// MARK: - Process-wide line-art cost
+
+/// Here and not beside `FrameUpscaler` because the load reads it on every platform, the simulator included,
+/// where the stage itself is not built.
+/// Line-art overruns seen in this process, per rung: a later source at least as large, at a frame interval
+/// no longer, would overrun again. A restore overrun starts later stages without the restore pass, an
+/// upscale overrun makes the load decide for the automatic scaler instead (AE#1039).
+enum LineArtCostMemory {
+    enum Rung: Sendable { case restore, upscale }
+
+    struct Overrun: Equatable, Sendable {
+        var width: Int, height: Int
+        var frameInterval: Double
+        var meanMs: Double
+        var pixels: Int { width * height }
+
+        /// 1% slack, so 24 fps counts as at least as fast as 23.976.
+        func covers(pixels other: Int, frameInterval interval: Double) -> Bool {
+            other >= pixels && interval <= frameInterval * 1.01
+        }
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var overruns: [Rung: [Overrun]] = [:]
+
+    static func record(_ overrun: Overrun, rung: Rung) {
+        lock.lock(); defer { lock.unlock() }
+        var list = overruns[rung] ?? []
+        guard !list.contains(where: { $0.pixels <= overrun.pixels && $0.frameInterval >= overrun.frameInterval })
+        else { return }
+        list.removeAll { $0.pixels >= overrun.pixels && $0.frameInterval <= overrun.frameInterval }
+        list.append(overrun)
+        overruns[rung] = list
+    }
+
+    /// The overrun of `rung` covering a line-art plan for this source at `frameInterval` (unknown counts as
+    /// covered by any rate, like `UpscaleFailureMemory`).
+    static func overrun(covering plan: UpscalePlan, frameInterval: Double?, rung: Rung) -> Overrun? {
+        lock.lock(); defer { lock.unlock() }
+        let pixels = plan.sourceWidth * plan.sourceHeight
+        return (overruns[rung] ?? []).first { o in
+            guard let frameInterval else { return pixels >= o.pixels }
+            return o.covers(pixels: pixels, frameInterval: frameInterval)
+        }
+    }
+
+    static func reset() {
+        lock.lock(); overruns.removeAll(); lock.unlock()
+    }
+}
