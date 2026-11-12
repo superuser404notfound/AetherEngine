@@ -437,3 +437,140 @@ Moved to [source-map.md, `Sources/AetherEngineSMB/`](source-map.md#sourcesaether
 
 ### `Sources/aetherctl/`
 Moved to [source-map.md, `Sources/aetherctl/`](source-map.md#sourcesaetherctl).
+
+### Segment plan
+
+Moved to [Segment plan](architecture-native.md#segment-plan).
+
+### Cutting segments at runtime
+
+Moved to [Cutting segments at runtime](architecture-native.md#cutting-segments-at-runtime).
+
+### AVC configuration changes
+
+Moved to [AVC configuration changes](architecture-native.md#avc-configuration-changes).
+
+### Restarts keep the same timeline
+
+Moved to [Restarts keep the same timeline](architecture-native.md#restarts-keep-the-same-timeline).
+
+### Constant-rate frame grid
+
+Moved to [Constant-rate frame grid](architecture-native.md#constant-rate-frame-grid).
+
+### Seeks and the segment cache
+
+Moved to [Seeks and the segment cache](architecture-native.md#seeks-and-the-segment-cache).
+
+### Seek deadline and recovery
+
+Moved to [Seek deadline and recovery](architecture-native.md#seek-deadline-and-recovery).
+
+### Seek events
+
+Moved to [Seek events](architecture-native.md#seek-events).
+
+### Restart latency diagnostics
+
+Moved to [Restart latency diagnostics](architecture-native.md#restart-latency-diagnostics).
+
+### Keeping AVPlayer from timing out (#93 round 3)
+
+Moved to [Keeping AVPlayer from timing out](architecture-native.md#keeping-avplayer-from-timing-out).
+
+### End-of-item recovery
+
+Moved to [End-of-item recovery](architecture-native.md#end-of-item-recovery).
+
+### Item diagnostics
+
+Moved to [Item diagnostics](architecture-native.md#item-diagnostics).
+
+### VP9 hardware decode
+
+Moved to [VP9 hardware decode](architecture-software.md#vp9-hardware-decode).
+
+### VideoToolbox output metadata
+
+Moved to [VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
+
+### Clock and transport
+
+Moved to [Clock and transport](architecture-software.md#clock-and-transport).
+
+### Audio channel layout and timestamps
+
+Moved to [Audio channel layout and timestamps](architecture-software.md#audio-channel-layout-and-timestamps).
+
+### Live audio look-ahead and edge rebuffer
+
+Moved to [Live audio look-ahead and edge rebuffer](architecture-software.md#live-audio-look-ahead-and-edge-rebuffer).
+
+### Software renderer retirement
+
+Moved to [Software renderer retirement](architecture-software.md#software-renderer-retirement).
+
+### Low-resolution upscaling (#846, AE#1039)
+
+Moved to [Low-resolution upscaling](architecture-software.md#low-resolution-upscaling).
+
+### Dolby Vision Profile 7 FEL
+
+Moved to [Dolby Vision Profile 7 FEL](architecture-software.md#dolby-vision-profile-7-fel).
+
+### Background audio (iOS)
+
+Moved to [Background audio (iOS)](architecture-native.md#background-audio-ios).
+
+### Paused-background grace window (iOS, #127)
+
+Moved to [Paused-background grace window (iOS)](architecture-native.md#paused-background-grace-window-ios).
+
+### What a teardown hands the reload that follows it (#357)
+
+Moved to [What a teardown hands the reload that follows it](architecture-native.md#what-a-teardown-hands-the-reload-that-follows-it).
+
+### Keeping the native host across a teardown
+
+Moved to [Keeping the native host across a teardown](architecture-native.md#keeping-the-native-host-across-a-teardown).
+
+### Where the audio comes from
+
+Moved to [Where the audio comes from](architecture-software.md#where-the-audio-comes-from).
+
+### Lifecycle
+
+Moved to [Lifecycle](architecture-software.md#lifecycle).
+
+### Release window and memory
+
+Moved to [Release window and memory](architecture-software.md#release-window-and-memory).
+
+### `Audio/Shaping/`
+
+Moved to [Audio/Shaping/](source-map.md#audioshaping).
+
+### `Audio/Spatial/`
+
+Moved to [Audio/Spatial/](source-map.md#audiospatial).
+
+### `Audio/Tap/`
+
+Moved to [Audio/Tap/](source-map.md#audiotap).
+
+### `IO/DASH/`
+
+Moved to [IO/DASH/](source-map.md#iodash).
+
+### `IO/HLSIngest/`
+
+Moved to [IO/HLSIngest/](source-map.md#iohlsingest).
+
+### `Video/FelCurves/`
+
+Moved to [Video/FelCurves/](source-map.md#videofelcurves).
+
+### `Video/Metal/`
+
+Moved to [Video/Metal/](source-map.md#videometal).
+
