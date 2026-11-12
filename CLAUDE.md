@@ -58,7 +58,8 @@ draws them. The engine draws no UI.
 - **Public API needs documentation in the same commit.** `PublicAPIDocumentationTests` fails for any
   public member not named in `README.md` or `docs/`; a symbol public only for the CLI or tests goes
   in its `notHostAPI` list with a reason. Numbers quoted in docs are pinned by
-  `DocumentedConstantsTests`. Relative links are checked by `Scripts/check-doc-links.py`.
+  `DocumentedConstantsTests`. Relative links are checked by `Scripts/check-doc-links.py`, and
+  `Scripts/check-source-map.py` fails for a source file the architecture Source map does not name.
 - **`CHANGELOG.md` gets an entry under `[Unreleased]`** for every user-visible change, in the style
   of the existing entries (bold one-line summary, then what was broken and what happens now).
 - **Codec routing is "software unless native really carries it".** Two lists that do not cover each

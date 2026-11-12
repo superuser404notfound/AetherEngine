@@ -14,8 +14,13 @@ AetherEngine is a Swift package. It builds for iOS 18+, tvOS 18+, macOS 15+, and
 
 ```bash
 swift build
-swift test
+swift test > /tmp/t.log 2>&1; echo "EXIT=$?"
+swift test --enable-all-traits --scratch-path .build-alltraits
 ```
+
+`swift test` runs two test runners, XCTest and swift-testing. The green swift-testing summary says nothing about the XCTest half, so judge a run by its exit code, never through a pipe (`| tail` returns tail's exit code). The second command builds and tests the five optional components (package traits), as CI does.
+
+To check a playback change against real media, not only unit tests, run `swift run aetherctl` ([docs/cli.md](docs/cli.md)). `Scripts/fetch-fixtures.sh` generates a small set of synthetic test clips for it.
 
 For iterative work, open `Package.swift` in Xcode 27+ and pick the `AetherEngine` scheme. `FFmpegBuild` is a transitive dependency that supplies the bundled FFmpeg / dav1d binaries; you do not build it yourself.
 
@@ -81,6 +86,7 @@ A bug that reproduces in a host app but traces back to decoding, demuxing, the a
 - **`DocumentedConstantsTests`.** Numbers the documentation quotes ("2 GiB cap", "128 kbps per channel", "the 60 s lead window") are pinned to the constants that own them, and a failure names the sentence to fix. Add a number to the docs, add its pin in the same commit. This is what caught a paragraph claiming a 15 s margin over a window the code clears by 30 s.
 - **The `ExampleSources` target.** The samples in `Examples/` are compiled by `swift build`, so one that stops matching the API breaks the build instead of misleading a reader. They are never a product, so nothing reaches a consumer.
 - **`Scripts/check-doc-links.py`**, run by the `docs links` CI job and by hand in a second. Every relative link in the published docs has to point at a file that exists, and every `#anchor` at a heading that produces it. The docs site validates the same anchors, but it builds in another repo after the push, so a bad anchor used to ship first and be found second: `formats.md#dolby-vision` against a heading that slugs to `#dolby-vision-signaling` broke the site build for two releases. Note that the site drops each file's leading H1 (Starlight renders the title from frontmatter), so linking a document's own H1 anchor works on GitHub and 404s on the site; the checker holds you to the stricter of the two.
+- **`Scripts/check-source-map.py`**, run by the same CI job. Every Swift file under `Sources/` has to be named in the Source map of `docs/architecture.md`, so a new file gets its one-line row in the same commit.
 
 New public API therefore belongs in `docs/api.md` in the commit that adds it, and behaviour a host has to answer (a subject to subscribe to, a state that is terminal, a stream that ends with its session) belongs in that file's contracts section rather than only in a doc comment.
 
