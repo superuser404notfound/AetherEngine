@@ -250,6 +250,8 @@ The fix, and a rule for any future change: **release the slot inline in Metal's 
 
 The consumption question is whether the panel uses the RPU the engine attaches, rather than only switching into a Dolby Vision mode. A pulse test answers it, and anyone with an Apple TV, a television and a phone can repeat it: clips whose pixels are constant while only the RPU (or the enhancement-layer residual) switches are played through AVPlayer, VideoToolbox and the FEL route, and filmed. Clip generator, device host, harness scripts and analysis are in [`Probes/DolbyVisionPulse`](../Probes/DolbyVisionPulse/README.md).
 
+**Verdict.** The route is real Dolby Vision. On an Apple TV 4K (2nd generation, tvOS 27) into an LG C1, the FEL route's arm pulsed like AVPlayer's on every patch (for example -55% against -55% at 10 nit), its L1 arm reproduced AVPlayer's different L1 shape, and the null arm and the arm with the Dolby attachments removed stayed flat ([AE#702](https://github.com/superuser404notfound/AetherEngine/issues/702#issuecomment-6017430221)). So the panel follows the RPU the engine attaches, not a static HDR10 curve. That run used a zero-residual enhancement layer on purpose. The enhancement-layer arms (whether the composed residual itself reaches the panel), the counter arms on the merged stack, and a second television have not been reported yet.
+
 ### 4.6 Caveat on the numbers
 
 Every device figure in sections 4.1 to 4.5 came from DEBUG builds: `-Onone`, with the HDMI probe retrying and the memory watermark sampling on every emitted frame. They show the direction and the GPU cost. CPU and memory should be re-measured on a release build. Footprint went from a flat ~390 MB to a plateau of ~705 MB with the async pipeline; §5.10 accounts for the pipeline's own share.
@@ -871,5 +873,7 @@ A display that takes Dolby Vision and a Mac apply it as well. So the fold pauses
 |---|---|
 | this file | design, implementation, evidence, verification |
 | [formats.md](formats.md#dolby-vision-signaling) | Profile 7 behaviour as a host sees it |
-| [api.md](api.md) | `preferDualLayerDolbyVision`, `dolbyVisionHandling`, `foldsDolbyVisionFEL` |
+| [installation.md](installation.md#optional-components) | the `DualLayerDolbyVision` and `DolbyVisionFelCurves` traits, and how to turn them on |
+| [api.md](api.md) | `preferDualLayerDolbyVision`, `dualLayerRoute`, `dolbyVisionHandling`, `foldsDolbyVisionFEL`, `probeDolbyVisionEnhancementLayer(url:options:)`, `prewarmDualLayerDolbyVision()` |
 | [cli.md](cli.md) | `feltest`, `dvsurvey`, `dovitest`, `play --cycle-el`, `felcurves` |
+| [Probes/DolbyVisionPulse](../Probes/DolbyVisionPulse/README.md) | the pulse test behind §4.5: clips, tvOS host, filming harness, analysis |

@@ -339,17 +339,36 @@ swift run aetherctl play --upscale <sd-or-720p-url>           # opt in to upscal
 
 ### Telemetry
 
-Each 1 Hz line shows the transport state: state, phase, currentTime, sourceTime, buffered frontier and duration. It also shows the network half of the same `liveTelemetry` snapshot a host reads:
+Each 1 Hz line shows the transport state, then the network half of the same `liveTelemetry` snapshot a host reads. A software VOD line looks like this:
+
+```
+  t=12 state=playing phase=playing cur=11.84 src=11.84 buf=24.00 dur=600.0 rfd=y net=38.20Mbps rx=41.3MB origin=41.3MB ahead=6.2MB cushion=0.48s drop=3
+```
 
 | Field | Meaning |
 |---|---|
+| `t` | Tick, one per second. |
+| `state`, `phase` | `engine.state` and `engine.playbackPhase`. |
+| `cur` | `currentTime`, the playhead on the item axis. |
+| `src` | `sourceTime`, the playhead on the source's own axis. |
+| `buf` | `bufferedPosition`, the buffered frontier. |
+| `dur` | `duration`. |
+| `rfd` | `hasFirstFrameReadyForDisplay` (`y`/`n`). The black-picture verdict (#938) reads it. |
+| `bmp` | `<count>/<MB>`: decoded bitmap subtitle cues the engine retains (AE#929). Only while there are any. |
+| `pres` | Distinct frames presented this tick. Only with `--present-times`. |
+| `edge`, `behind`, `atEdge`, `range` | `liveEdgeTime`, `behindLiveSeconds`, `isAtLiveEdge` and `seekableLiveRange`. Live sessions only. |
+| `alead`, `abufs` | Decoded-audio lead over the clock and the buffer count. Only with `--audio-stats`. |
+| `inst`, `avg` | Instant and average bitrate of the source, in Mbps. |
 | `net` | Throughput. |
 | `rx` | What the playback consumer pulled over its own link. |
 | `origin` | What the session pulled from the SOURCE. |
 | `ahead` | Fetched but not yet consumed. |
 | `cushion` | Decoded video past the clock (software path). |
 | `fwd` | Native forward buffer (native path). |
+| `obj`, `up`, `bed`, `hch` | Object audio: active/declared objects, how many are overhead, the bed layout, height channels. Only with `--atmos-bed`. |
 | `drop` / `delay` | Dropped and delayed frames. |
+| `pic`, `picItem`, `axisErr`, `capErr`, `capFr` | Picture probe readings. Only with `--picture-probe`, see [Picture probe](#picture-probe---picture-probe). |
+| `ft`, `ftLast`, `ftGen`, `ooo`, `tb`, `disp` | Software frame times, the presentation timebase and the display rectangle. Only with `--frame-times`, see [Frame times](#frame-times---frame-times---present-times). |
 
 Things to know when reading them:
 
@@ -420,8 +439,8 @@ Other lines `play` prints:
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--subs <codec-or-lang>` | Activates the first track whose libavcodec name or language matches, and logs every overlay cue and cue trim. | off |
-| `--sidecar <lang>=<path-or-url>[,...]` | Fills `LoadOptions.externalSubtitles`. | none |
+| `--subs <codec-or-lang-or-id>` | From t=5 (at load with `subsatload`), activates the first track whose libavcodec name or language contains the value (case-insensitive), or the track with that id when the value is a number. Logs every overlay cue and cue trim. | off |
+| `--sidecar [<lang>=]<path-or-url>[,...]` | Fills `LoadOptions.externalSubtitles`. An entry without `<lang>=` is named after its file and has no language. | none |
 | `--teletext-page N` | `LoadOptions.teletextPage`. | none |
 | `--switch-teletext-page <page\|auto>[@ms]` | Changes the teletext page on a playing channel. | +20 s |
 | `--subtitle-offset-reach SECONDS` | Sets `maximumSubtitleOffsetSeconds` before the load (0 to 600). | engine default |
@@ -488,12 +507,14 @@ Other lines `play` prints:
 | `--picture-probe` | Decodes the source time out of the picture itself. | off |
 | `--picture-origin S` | Where the source's timeline starts, for `--picture-probe` (AE#534). | 0 |
 | `--malloc-census` | Large-allocation census for the run. | off |
-| `--census-hz N` | Poll rate of the census jump trigger. Needs `--malloc-census`. | |
-| `--census-threshold-mb N` | Jump size above the running high-water that triggers a zone walk. Needs `--malloc-census`. | |
+| `--census-hz N` | Poll rate of the census jump trigger. Needs `--malloc-census`. | 8 |
+| `--census-threshold-mb N` | Jump size above the running high-water that triggers a zone walk. Needs `--malloc-census`. | 32 |
 
 ### Host calls
 
 `--host-calls <a,b,...>` replays host behavior against the fresh session. Several calls can be combined. Calls that take `@N` fire at tick N. Replaying a host's call sequence this way is how the pre-arming `setRate` wedge was isolated.
+
+A misspelt call is not an error: it prints `HOSTCALL unknown '<call>'` and the run goes on, and can still end `VERDICT: OK`. Check for that line.
 
 | Call | What it does |
 |---|---|
@@ -508,15 +529,15 @@ Other lines `play` prints:
 | `seekfar` / `seekfar@N` | Seeks past the produced window at t=15 (or t=N), so the landing needs a producer restart (#433). |
 | `overlapseek` | Three transport calls inside a seek's reposition window (#292). See [overlapseek](#overlapping-seeks---host-calls-overlapseek). |
 | `pausehold` | Pause at t=10 and hold. See below. |
-| `pauseseek` | Pause at t=12, seek at t=15 while paused, resume at t=20. |
+| `pauseseek` | Pause at t=12, seek at t=15 while paused, resume at t=20. The seek goes to the first `--seek-pattern` value, else 20 s ahead of the playhead (at most 90% of the duration). |
 | `still` | Asks for scrub stills at three aims (#544, AE#605). See below. |
 | `stallclock` | Stops the master clock behind the host's back (AE#549). See below. |
 | `pausereload`, `playreload`, `extplayreload` | Force the stage-2 item reload (#623). See below. |
 | `nativesubs` | Sets `LoadOptions.prepareNativeSubtitles`. |
-| `nativerender@N` | The host call a player makes when the picture leaves its own layer (PiP, AirPlay, a wired display). |
-| `subsoff@N`, `subson@N` | The viewer turning subtitles off and back on while the picture is away. |
+| `nativerender@N` | The host call a player makes when the picture leaves its own layer (PiP, AirPlay, a wired display). Default t=8. |
+| `subsoff@N`, `subson@N` | The viewer turning subtitles off and back on while the picture is away. Defaults t=12 and t=18. `subson` re-picks the `--subs` track; `subson@N:<lang>` picks a different one (the track-switch case). |
 | `subsatload` | Picks the `--subs` track the moment `load` returns, before the first frame, like a host restoring a remembered track. The default pick at t=5 is a mid-session start, which the prefetch and the drain handle differently (#1021). `CUE` lines end in `at=<clock>`, so the lead a cue arrived with is readable. |
-| `lanreload@N` | Fires `reloadAtCurrentPosition()` (AE#955). |
+| `lanreload@N` | Fires `reloadAtCurrentPosition()` (AE#955). Default t=10. |
 
 **`pausestart`.** This is the shape of a host that holds a fresh load paused. A software session used to answer it with eight ticks of `enq=+0 status=unknown r4d=n`: a black picture under a paused clock. Now the `[SWHost] #104` lines show the first frame presented at a stopped clock, and `startup 8/8 presenting` arrives while paused.
 
@@ -1391,6 +1412,13 @@ Runs a live MPEG-TS session against a built-in fixture. The fixture serves an en
 
 When several test flags are given, the first of `--rewind-test`, `--reload-test`, `--rewind-hold`, `--freeze-after` runs and the others are ignored. Without `--serve-only` and the test flags, the run reports whether `isLive` is true, state is `.playing`, and currentTime advanced past ~15 s.
 
+Some flags act in one mode only, and are silently ignored in the others:
+
+| Mode | Flags that only act there |
+|---|---|
+| Plain run (no test flag) | `--start-position`, `--standard-join`, `--live-cushion`, `--measure-rss`, `--report-cache-bytes`, and the monotonic-clock check behind `--discontinuity-at` (the fixture injects the jump in every mode). |
+| Freeze leg (`--freeze-after`) | `--unfreeze-after`, `--rewind-before-freeze`, `--force-recovery-reload-at`, `--no-blocking-reload`, `--live-only`. |
+
 ### Origin pacing
 
 - **`--preroll N`**: `0` models a strict-realtime origin with no backlog.
@@ -1806,6 +1834,8 @@ swift run aetherctl dvsurvey --frames 6000 <p7-source>
 
 Reads `label<TAB>url` lines from stdin and prints, for each source, whether its Dolby Vision Profile 7 enhancement layer is FEL or MEL (`AetherEngine.probeDolbyVisionEnhancementLayer`, no decode). Does not need the `DualLayerDolbyVision` trait.
 
+It prints one `label<TAB>answer` line per source, in input order, once all sources are done. The answer is `FEL`, `MEL`, `none` (not Profile 7, or no RPU within the probe budget) or `error: <reason>`. Input lines without a tab are skipped; a value without `://` is read as a file path.
+
 **Usage:** `aetherctl eltype [--parallel N] < titles.tsv`
 
 | Flag | Meaning | Default |
@@ -1824,7 +1854,19 @@ Reads `label<TAB>url` lines from stdin and measures what each title's enhancemen
 - the share of pixels moved by a 10-bit step or more,
 - the nits change at the average and peak levels.
 
-A TSV row prints as each title finishes. Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so.
+A header prints first, then one TSV row as each title finishes, so rows come in completion order, not input order. A title that fails prints `label<TAB>error: <reason>`. Needs the `DualLayerDolbyVision` trait; without it the subcommand exits 64 and says so.
+
+| Column | Meaning |
+|---|---|
+| `label` | The input label. |
+| `frames`, `off`, `fail` | Keyframes measured, sampled keyframes whose RPU switches the residual off, keyframes that failed. |
+| `mean_abs`, `mean_signed` | Mean absolute and mean signed residual, 12-bit codes. Positive brightens on average. |
+| `p99_med`, `p99_max` | The p99 absolute residual per frame: median and maximum over the frames. |
+| `visible` | Share of pixels moved by at least one 10-bit step (4 codes). |
+| `avg_nits` | Mean residual as a brightness change at the frame's average level (L1 avg), in nits. |
+| `hi_nits_med`, `hi_nits_max` | The p99 residual as a brightness change at the frame's peak (L1 max), in nits: median and maximum. |
+| `peak_s` | Time of the frame with the largest highlight change, in seconds. |
+| `secs` | How long the title took. |
 
 **Usage:** `aetherctl elsurvey [--points N] [--parallel N] < titles.tsv`
 
@@ -1848,7 +1890,7 @@ Composes one Profile 7 FEL keyframe twice on the dual-layer composer, with and w
 | `--at SECONDS` | Picks the keyframe at or before that time. | 0 |
 | `--out DIR` | Destination directory. | required |
 
-When the RPU itself switches the residual off for the frame, it prints a note and sets `residual_disabled_by_rpu` in `frame.json` (FEL and MEL are then identical).
+`frame.json` holds `seconds` (the keyframe actually used), `width`, `height`, `l1_avg_pq` and `l1_max_pq` (the frame's L1 statistics, 12-bit PQ codes) and `residual_disabled_by_rpu`. When the RPU itself switches the residual off for the frame, it prints a note and sets `residual_disabled_by_rpu` (FEL and MEL are then identical).
 
 ```bash
 swift run aetherctl elframe --at 600 --out /tmp/elframe <p7-source>

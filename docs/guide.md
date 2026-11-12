@@ -10,6 +10,8 @@ How to build a player on AetherEngine, from the first frame to live TV. Each sec
 - [Audio and subtitle tracks](#audio-and-subtitle-tracks)
 - [Discs and chapters](#discs-and-chapters)
 - [Now Playing](#now-playing)
+- [Picture in Picture](#picture-in-picture)
+- [Scrub previews](#scrub-previews)
 - [Drawing your own overlay in sync](#drawing-your-own-overlay-in-sync)
 - [Custom input](#custom-input)
 - [SMB shares](#smb-shares)
@@ -17,6 +19,7 @@ How to build a player on AetherEngine, from the first frame to live TV. Each sec
 - [IPTV timeshift and catch-up archives](#iptv-timeshift-and-catch-up-archives)
 - [tvOS host setup](#tvos-host-setup)
 - [Diagnostics](#diagnostics)
+- [Optional features](#optional-features)
 - [Samples](#samples)
 
 ## First player
@@ -84,6 +87,7 @@ All of these are Combine `@Published` properties on the engine.
 | `$audioDelivery` | How the audio reaches the renderer |
 | `$hasFirstFrameReadyForDisplay` | A first picture is ready, the moment to remove a black cover |
 | `$startupProgress` | Progress for a determinate loading bar |
+| `$isAwaitingDisplaySwitch` | The start is held for the TV's mode switch, not for the source |
 | `$currentAVPlayer` | The active AVPlayer, for `MPNowPlayingSession` |
 
 **`state`.** `.idle` means before a load or after `stop()`. `.ended` means the media played to the end (on any backend) and is **terminal**: seeks are rejected and `play()` does not revive it, so a replay is another `load()`. A VOD that is only parked at its final frame is a different case, and `play()` rewinds it.
@@ -106,6 +110,8 @@ All of these are Combine `@Published` properties on the engine.
 - It covers the two stretches a host cannot otherwise see: opening the source (connection, container, stream analysis) and the display-criteria handshake.
 - It is scoped to `.generation`, which counts the startups a user waited through rather than teardowns. An engine-initiated reroute continues the bar instead of resetting it.
 - Monotonic and deduplicated. nil before the first load and after `stop()`. A load that fails never reaches the last checkpoint.
+
+**`isAwaitingDisplaySwitch`** is true while a loaded session holds its start until the TV finishes a mode switch (Match Content, a change of dynamic range). The first frame can already be up and `playbackPhase` reads `.loading` throughout, so this is what tells you the wait is the panel's. A host that keeps its spinner off during a display switch keys on it (AE#1000). It clears when the hold ends and at every `load()` / `stop()`.
 
 **`currentAVPlayer`** is re-emitted on every reload. It is nil on the `.software` route, because that pipeline renders into its own display layer and AVKit must not hold a player nothing feeds. So a host that only hands `currentAVPlayer` to an `AVPlayerViewController` gets audio and AVKit's spinner over an empty picture on that route (#298). Bind a surface for it, and choose the presentation from `$videoRoute`, not from the source codec.
 
@@ -131,6 +137,18 @@ player.clearSubtitle()
 player.$subtitleCues                      // [SubtitleCue]: .text(String), .richText([SubtitleTextRun]) or .image(SubtitleImage)
 ```
 
+### Choosing tracks at load
+
+```swift
+try await player.load(url: videoURL, options: LoadOptions(
+    preferredAudioLanguages: ["de", "en"],     // first match wins, in this order
+    preferredSubtitleLanguages: ["de"]
+))
+try await player.load(url: videoURL, audioSourceStreamIndex: 2)   // an explicit pick wins over the languages
+```
+
+Pick the audio at load rather than right after it. The first frame is muxed with the chosen track, and a later `selectAudioTrack` costs a reload. `initialSubtitleTrackID` selects a subtitle track by id the same way. Full list: [api.md › LoadOptions](api.md#loadoptions).
+
 ### Styled text
 
 ```swift
@@ -144,6 +162,7 @@ Styled text arrives as `.richText` (#233). A run carries colour, bold, italic, u
 - This covers SRT, WebVTT, teletext and ASS alike, because libavcodec turns them all into ASS event lines before the engine sees them.
 - A cue without styling still arrives as `.text`, so code that handles only that case keeps working.
 - Exception: libavcodec does not convert WebVTT cue settings, so VTT positioning does not arrive. Its inline bold, italic and underline do.
+- A host that renders ASS itself (libass) sets `LoadOptions(preserveASSMarkup: true)`. ASS and SSA tracks then arrive as raw event lines, and `TrackInfo.assHeader` carries the script header the styles refer to.
 
 Cues are stamped in raw source PTS. Render the overlay against `player.sourceTime` ([formats.md › Subtitles](formats.md#subtitles)).
 
@@ -196,7 +215,7 @@ For bilingual viewing and language learning.
 ## Discs and chapters
 
 ```swift
-// DVD-Video / Blu-ray ISO (empty for other sources)
+// DVD-Video / Blu-ray ISO, local or remote, or a BDMV / VIDEO_TS folder (empty for other sources)
 player.$discTitles             // [TitleInfo]: id, name, durationSeconds, chapterCount, playlist (Blu-ray .mpls), titleSet (DVD VTS) (longest first, id 0 is the main feature)
 player.$selectedDiscTitle      // TitleInfo?
 player.selectTitle(id: titleID)       // switch title (rebuilds from the new title's start)
@@ -206,6 +225,8 @@ player.selectChapter(id: chapterID)   // seek to a chapter (disc chapters only)
 // Matroska / MP4 chapters (empty for discs, which publish discChapters instead)
 player.$mediaChapters          // [ChapterInfo]; startSeconds are seek(to:) values, 0-based like currentTime
 ```
+
+A ripped disc folder plays through `MediaSource.custom` with a `DiscDirectoryReader`, which lists the folder's files and opens one on request; `HTTPDiscDirectoryReader` is the ready-made one for files on a web server. A remote ISO plays from its URL, on an origin that honours `Range`. To come back to the same title later, store `TitleInfo.playlist` (Blu-ray) or `titleSet` (DVD), not `id`, which is only the title's place in the current scan. Details in [formats.md › Blu-ray folders](formats.md#blu-ray-folders) and [Remote disc images](formats.md#remote-disc-images-ae860).
 
 ## Now Playing
 
@@ -222,6 +243,42 @@ player.setNowPlayingInfo([ /* MPMediaItemProperty... */ ])   // identity for whi
 ```
 
 Every opt-in is off by default. A host using `AVPlayerViewController` already gets Now Playing from AVKit and must **not** set `ownsVideoNowPlayingSession`. A host with its own transport sets the ones it needs before `load()` and stages the item's identity with `setNowPlayingInfo`. Without `ownsVideoNowPlayingCommands`, the host registers the commands itself on `videoNowPlayingSession.remoteCommandCenter`. Playlists, command interception and several engines in one process: [api.md › Now Playing and the audio session](api.md#now-playing-and-the-audio-session).
+
+## Picture in Picture
+
+```swift
+// Native route: build the controller around the engine's own layer
+if let layer = player.nativePlayerLayer {
+    pip = AVPictureInPictureController(playerLayer: layer)
+}
+
+// Software route: the engine builds the controller; rebuild it on every change
+player.$softwarePiPSource
+    .sink { source in pip = source?.makePictureInPictureController() }
+    .store(in: &cancellables)
+
+// Both routes: report the window's state from the controller's delegate
+player.pictureInPictureActive = true    // in willStart; false in didStop
+```
+
+Which one applies depends on `$videoRoute`. `nativePlayerLayer` is nil on the software route, and `softwarePiPSource` is nil everywhere else, so the nil check is also the right test for showing a PiP button. A host on `AVPlayerViewController` gets PiP from AVKit on the native route and needs neither.
+
+- **Set `pictureInPictureActive`.** It keeps the pipeline alive in the background and, on the software route, turns on the frame compositor that draws subtitles into the window.
+- **Rebuild on every change of `softwarePiPSource`.** Each software load builds a new display layer, so any load ends PiP on that route, and the old controller points at nothing. When the source becomes nil the engine stops the controller it made and resets `pictureInPictureActive`.
+- **tvOS:** AVKit accepts the software route's source but does not show sample-buffer content, so software PiP works in practice on iOS and macOS only.
+- **Subtitles in the window** come from native renditions (`prepareNativeSubtitles`) on the native route and from the frame compositor on the software route, never from your overlay.
+
+Full contract, including layer geometry and the macOS window: [api.md › Picture in Picture on the software path](api.md#picture-in-picture-on-the-software-path).
+
+## Scrub previews
+
+```swift
+if player.supportsCacheBackedStills {
+    let image = await player.scrubThumbnail(atSeconds: target)   // CGImage?, nil means "time only"
+}
+```
+
+`scrubThumbnail` decodes bytes the session already holds, so it opens no second connection and works on sources that allow only one. Gate the preview on `supportsCacheBackedStills`, and treat a nil as "no image for this position yet", not as an error. A host on `AVPlayerViewController` sets `LoadOptions(serveIFramePlaylist: true)` instead and gets AVKit's own thumbnails. A host that shows no previews at all sets `generatesBackgroundScrubPreviews: false`, so the engine builds no still ladder in idle time. Details in [api.md › Stills and thumbnails](api.md#stills-and-thumbnails).
 
 ## Drawing your own overlay in sync
 
@@ -261,7 +318,7 @@ Here the engine decodes itself and enqueues the source timestamp unchanged (#311
 ## Custom input
 
 ```swift
-final class MyArchiveReader: IOReader {
+final class MyArchiveReader: IOReader, @unchecked Sendable {   // guard your own state
     func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 { /* ... */ }
     func seek(offset: Int64, whence: Int32) -> Int64 { /* ... */ }  // AVSEEK_SIZE (65536) returns the total size
     func close() { /* ... */ }
@@ -275,10 +332,12 @@ final class MyArchiveReader: IOReader {
     var discImageProbeEnabled: Bool { false }
 }
 
-let probe = try await engine.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
+let probe = try await player.load(source: .custom(MyArchiveReader(), formatHint: "mp4"))
 // load() returns the probe metadata it gathered (discardable).
 // AetherEngine.probe(source:) probes once without starting playback.
 ```
+
+**Threading.** `IOReader` is `Sendable`, and a reader with mutable state is not one the compiler can check, hence `@unchecked Sendable`. `read` and `seek` run on the engine's demux thread, never on main. `cancel()` can arrive from another thread while a `read` blocks, and probes call it too, so guard your state with a lock and make `cancel()` interrupt the blocked read promptly. `close()` is called exactly once.
 
 What a reader unlocks:
 
@@ -299,7 +358,7 @@ let smb = try await SMBConnection.connect(
     server: URL(string: "smb://nas.local")!, share: "media",
     path: "Movies/film.mkv", user: "alice", password: "s3cret"
 )
-try await engine.load(source: .custom(
+try await player.load(source: .custom(
     SMBIOReader(source: smb, discImageProbeEnabled: false),   // an ordinary file, not a disc image
     formatHint: "matroska"
 ))
@@ -375,6 +434,18 @@ How to answer it:
 
 **If you do not subscribe,** a channel can stop while the engine still reports a session. From the outside that looks exactly like a slow channel.
 
+**To retry on your own schedule** without losing the DVR window, set `LoadOptions(hostRetriesExhaustedLiveReplay: true)`. A replay the engine could not recover then publishes `liveSourceReplayExhausted` instead of `liveSourceReset`, and you call `retryLiveSourceRecovery()` under your own backoff. Subscribe to both: the other three causes above still arrive as `liveSourceReset`.
+
+### A resume that moved: `liveResumeClamped`
+
+```swift
+player.liveResumeClamped           // PassthroughSubject<LiveResumeClamp, Never>; no replay, subscribe before load
+    .sink { clamp in showToast("Skipped \(Int(clamp.skippedSeconds)) s") }
+    .store(in: &cancellables)
+```
+
+A viewer who pauses longer than the DVR window has lost the paused position: the window slid past it. The resume then starts at the oldest retained point, or at the live edge without DVR, and this event fires. Without it, the program just continues somewhere else with nothing on screen to say why. `skippedSeconds` is what the viewer missed, `behindLiveSeconds` is where the resume landed. A host that wants to decide itself sets `clampsLiveResumeToWindow: false`. Details in [api.md › Live: a resume that had to move](api.md#live-a-resume-that-had-to-move).
+
 ### Recording a channel
 
 ```swift
@@ -408,6 +479,7 @@ The ingest covers MPEG-TS with demuxed-audio and packed-audio renditions, in-lin
 | A live `nativeRemoteHLS` bypass that the origin refuses (HTTP 401 / 403) | Handed to the live ingest (#363) |
 | A live remote `m3u8` on the default (loopback) path | Rerouted onto the live ingest (#363) |
 | A non-live remote `m3u8` on the default (loopback) path | Rerouted onto the AVPlayer bypass (#154) |
+| A finished MPEG-TS playlist AVPlayer refuses, or one loaded with `preferredDecodePath: .software` | Played on the software host from the seekable TS ingest, seeks included (AE#990) |
 
 **`nativeRemoteHLS`.** Pair it with `isLive: true`. `LoadOptions.httpHeaders` go into the `AVURLAsset` on this path, so origins that require per-stream `Referer`, `User-Agent` or `Authorization` headers (common for IPTV) work too.
 
@@ -440,7 +512,7 @@ try await player.load(url: archiveURL, options: LoadOptions(
 ))
 ```
 
-Timeshift and catch-up archives often fake range answers: `Range: bytes=X-` returns `206` with a body that really starts at a coarse internal chunk boundary. No header reveals this, so the host declares it (#346). The engine then:
+Timeshift and catch-up archives often fake range answers: `Range: bytes=X-` returns `206` with a body that really starts at a coarse internal chunk boundary. No header reveals this up front, so the host declares it when it knows (#346). The engine then:
 
 - runs one long-lived unranged GET, with no ranged probes, no byte-offset reconnects and no tail read;
 - treats the demuxer's pb as non-seekable;
@@ -448,7 +520,18 @@ Timeshift and catch-up archives often fake range answers: `Range: bytes=X-` retu
 - keeps the native path instead of forcing software;
 - serves an append-only `EVENT` playlist with the durations actually muxed, completed with `ENDLIST` at the real end of the source.
 
+**If you did not know in advance,** the engine catches it at the first ranged reconnect into bytes it already holds: it asks 4 KB early and compares them. The session then fails with `errorInfo?.kind == .sourceFabricatesRanges` before any wrong byte plays, at open or mid-session (AE#958). Answer it by loading the source again with `sequentialOrigin: true` and `declaredDurationSeconds`, and remember that for the provider.
+
 Every producer reposition is refused by design. A seek lands only inside what the session already holds (on the native path, the resident span that reaches the producer's frontier). For any other target, and for an audio track switch, request the archive again with a shifted start timestamp and pass `audioSourceStreamIndex` for the chosen track (#958). To reproduce one from macOS: `aetherctl play --sequential-origin --declared-duration`.
+
+### Providers that allow one connection
+
+```swift
+LoadOptions(maxConcurrentSourceRequests: 1)   // the plan allows one request at a time
+LoadOptions(heldSourceConnection: true)       // the origin refuses repeated requests, but serves an open one
+```
+
+Many IPTV and debrid plans cap simultaneous connections. Set `maxConcurrentSourceRequests` to the provider's limit; `1` also turns off the engine's speculative side requests. Some origins instead punish the request cadence: they refuse new requests for minutes while serving one that is already open. `heldSourceConnection` asks once and keeps pulling from that one connection (HTTP/1.1 only, no system proxy). Both are in [api.md › maxConcurrentSourceRequests](api.md#maxconcurrentsourcerequests) and [heldSourceConnection](api.md#heldsourceconnection).
 
 ## tvOS host setup
 
@@ -535,6 +618,15 @@ EngineLog.structuredHandler = { line, category, level in viewer.append(line, fro
 - Per-segment trace lines are logged at `.verbose`. They only reach os_log's debug level, never the handler, so the mirrored stream stays readable.
 - `aetherctl` installs exactly this handler, which is why the CLI prints what the app hides.
 
+**Register secrets the engine cannot recognise.** The engine strips tokens, passwords in named parameters and userinfo, and the Xtream Codes path layout by itself. A password that sits as a bare path segment in a provider URL looks like any other text, so name it:
+
+```swift
+EngineLog.registerSecret(account.password)     // false, and nothing registered, under four bytes
+EngineLog.unregisterSecret(account.password)   // on logout; registrations are counted
+```
+
+Every line reaching os_log or your handler then has that value replaced, raw or percent-encoded. Details in [api.md › Log redaction](api.md#log-redaction).
+
 **Write the log to a file in GUI apps, on every build.** An app launched from Finder or `open` has no stdout you can read, so `print` goes nowhere (this cost a reporter on #493 most of a measurement session). Write each line to a file you can name, flushing per line:
 
 ```swift
@@ -552,6 +644,70 @@ The first line of every session names the FFmpeg in use:
 ```
 
 Which FFmpeg answers is decided by your executable's link, not by the package graph. If a second FFmpeg in the app takes over those symbols, this line becomes an `ERROR:` that names the mismatch and how to find it. Read it once per integration: a wrong FFmpeg produces failures that look like engine bugs (one cost a reporter five fixtures and two devices). Details in [api.md › One FFmpeg](api.md#one-ffmpeg-and-it-has-to-be-the-engines) and [licensing.md › Linking](licensing.md#linking-the-engine-statically).
+
+## Optional features
+
+Everything here is off (or at its old behaviour) until you set it. The ones that change what the viewer sees or hears come first.
+
+### Upscaling low-resolution video
+
+```swift
+LoadOptions(upscalesLowResolutionVideo: true)                        // SDR below 1080p, to the display's size
+LoadOptions(upscalesLowResolutionVideo: true, upscaleScaler: .lineArt) // animation only, also takes 1080p and 10-bit SDR
+player.$activeUpscale   // UpscaleStatus?: what the stage is doing, nil while none runs
+```
+
+SDR video below 1080p is scaled to the display's native size, with VideoToolbox super resolution and MetalFX (#846). `.lineArt` runs a line-art network made for drawn content instead (AE#1039). Set it per title, from the genre or a per-show switch: on live action it looks wrong.
+
+- **It moves the title onto the software path,** so that route's rules apply: PiP through `softwarePiPSource`, no native subtitle renditions.
+- HDR, Dolby Vision, a display no larger than the source and any AirPlay route keep their usual route. The load logs one `[Upscale]` line saying why.
+- It never stops playback. A stage that falls behind degrades, then switches itself off; `$activeUpscale` then carries `degraded` or `disabledReason`.
+
+Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
+
+### Subtitle offset reach
+
+```swift
+player.maximumSubtitleOffsetSeconds = 0       // no subtitle offset control in this app
+player.maximumSubtitleDelaySeconds = 30       // or per direction: LATER offsets up to 30 s
+player.maximumSubtitleAdvanceSeconds = 0      // and no EARLIER ones
+```
+
+These tell the engine the largest subtitle offset your overlay applies. The default of 60 s each way costs memory and data: bitmap subtitles (PGS, DVB, DVD) are kept as decoded images, and an earlier offset needs a second reader that downloads a remote source a second time (AE#929, AE#1015, AE#1031).
+
+- **No offset control:** set `maximumSubtitleOffsetSeconds = 0`. On a dense PGS track that drops the image memory from well over 100 MB to the 64 MiB budget, and on a remote MKV it stops the second download.
+- **Later only:** set `maximumSubtitleAdvanceSeconds = 0` and your range in `maximumSubtitleDelaySeconds`. A later offset only needs cues already read, so it costs no second download.
+- Each edge stays at least 15 s, so a short nudge or a seek back still finds its cue.
+
+Details in [api.md › Cue retention](api.md#cue-retention).
+
+### Loudness target
+
+```swift
+player.setAudioShaping(AudioShaping(loudnessTargetLUFS: -23))   // raise quiet films to -23 LUFS
+```
+
+A quietly mastered film is measured as it plays (BS.1770 / EBU R128) and lifted by the difference, at most 18 dB, never lowered (AE#1036). The target is clamped to -36 to -12 LUFS.
+
+- **Any active shaping needs PCM.** A stream-copied track (Atmos and every lossless bitstream included) is decoded while it is on, so Atmos leaves as a channel bed. Offer it as a choice, not a default, on a receiver setup.
+- Every change is a session-preserving reload. `$audioShapingState` says whether it applies; on `.remoteBypass` it reads `.unavailable`.
+- The same `AudioShaping` carries the channel cap, the dialogue lift and night mode.
+
+Details in [api.md › Audio shaping](api.md#audio-shaping).
+
+### More options
+
+| Option | What it gives you | Default |
+| --- | --- | --- |
+| `skipsContainerAttachments` | Opens a Matroska file without reading its attached fonts, tens of MB on anime releases (AE#956). Leave it off if you render ASS with those fonts | false |
+| `audioBridgeMode` | `.lossless` sends FLAC up to 7.1 for a sink that takes multichannel PCM, instead of E-AC-3 | `.surroundCompat` |
+| `objectAudioRendering` | Keeps the heights of TrueHD Atmos and DTS:X. Needs the package traits ([installation.md](installation.md#optional-components)) | `.off` |
+| `audioDelaySeconds` | Starts the session with a lip-sync offset; `setAudioDelay(_:)` changes it later | 0 |
+| `liveDVRByteBudget` | Lifts the software live DVR ring past 2 GiB, for hours of rewind | nil |
+| `foldsDolbyVisionFEL` | Turns the FEL curve fold off for one load, with the `DolbyVisionFelCurves` trait ([dolby-vision-fel.md](dolby-vision-fel.md#7-curve-fold-on-the-native-route)) | true |
+| `$sourceVideoScan` | Read-only: progressive or interlaced, so a panel can say 1080i instead of guessing 1080p (AE#983) | |
+
+Every option with its contract: [api.md › LoadOptions](api.md#loadoptions).
 
 ## Samples
 
