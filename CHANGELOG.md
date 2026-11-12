@@ -37,6 +37,11 @@ the public-API contract.
 
 ### Fixed
 
+- **An item that dies after its first frame but before it starts playing is revived instead of parking forever (#1043).**
+  When the HDMI link dropped while the host was still waiting for the display mode switch, AVPlayer's
+  `failedToPlayToEndTime` arrived before the first `.playing`. The #93 revive only counted deaths after that
+  first `.playing`, so nothing reloaded the item and no error surfaced. It now counts from the first frame,
+  and the item is reloaded through the stage-2 recovery like any later death.
 - **An HLS VOD playlist behind a URL that does not say so failed on the AE#154 reroute.** The engine reads
   `#EXTM3U` and moves the load onto the AVPlayer bypass, but AVFoundation types a URL by its path extension and
   `Content-Type`, never by its body, so a playlist at `/movie.mp4` served as `video/mp4` or
