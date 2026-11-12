@@ -39,13 +39,25 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     /// scene, and adds no latency. Typical values are -24 (broadcast loudness) and -16 (louder).
     public var loudnessTargetLUFS: Double?
 
+    /// AE#1044: level of the LFE when a fold leaves the output without one, in dB (clamped to
+    /// `lfeMixRange`); nil drops it, as before. It is libswresample's `lfe_mix_level`: a stereo
+    /// output gets the LFE 3 dB below this on each side, a mono output gets it at this level. Only
+    /// a `maxChannels` cap that folds the LFE away makes it do anything, so on its own it does not
+    /// make shaping active and moves no route onto the bridge. Meant for a 2.1 system behind a
+    /// stereo link, whose subwoofer only hears what is low in left and right.
+    public var lfeMixDB: Double?
+
     public init(maxChannels: Int? = nil, dialogueGainDB: Double = 0, compressor: Compressor? = nil,
-                loudnessTargetLUFS: Double? = nil) {
+                loudnessTargetLUFS: Double? = nil, lfeMixDB: Double? = nil) {
         self.maxChannels = maxChannels
         self.dialogueGainDB = dialogueGainDB
         self.compressor = compressor
         self.loudnessTargetLUFS = loudnessTargetLUFS
+        self.lfeMixDB = lfeMixDB
     }
+
+    /// The LFE levels the engine takes. +10 dB is the cinema LFE playback gain, nobody needs more.
+    public static let lfeMixRange: ClosedRange<Double> = -20 ... 10
 
     /// The targets the engine takes. Below it no source is quiet enough to need a lift, above it
     /// the limiter would carry every loud scene.
@@ -116,7 +128,9 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
                      dialogueGainDB: Compressor.clamp(dialogueGainDB, 0, Self.maxDialogueGainDB, fallback: 0),
                      compressor: compressor?.clamped,
                      loudnessTargetLUFS: loudnessTargetLUFS.flatMap { t in
-                         t.isFinite ? min(max(t, Self.loudnessTargetRange.lowerBound), Self.loudnessTargetRange.upperBound) : nil })
+                         t.isFinite ? min(max(t, Self.loudnessTargetRange.lowerBound), Self.loudnessTargetRange.upperBound) : nil },
+                     lfeMixDB: lfeMixDB.flatMap { db in
+                         db.isFinite ? min(max(db, Self.lfeMixRange.lowerBound), Self.lfeMixRange.upperBound) : nil })
     }
 
     /// Whether this value asks for anything at all. An inactive value leaves every route as it was.
@@ -135,6 +149,9 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
     /// Linear gain the dialogue gets.
     var dialogueGain: Double { pow(10, clamped.dialogueGainDB / 20) }
 
+    /// Linear `lfe_mix_level` for the fold; 0 drops the LFE.
+    var lfeMixLevel: Double { clamped.lfeMixDB.map { pow(10, $0 / 20) } ?? 0 }
+
     /// One line naming what is in force ("off", "max 2 ch, dialogue +6.0 dB, ..."), the wording the
     /// engine's own log uses.
     public var summary: String {
@@ -146,6 +163,7 @@ public struct AudioShaping: Sendable, Equatable, Hashable {
             parts.append(String(format: "compressor %.0f dB %.1f:1 makeup %+.1f dB", k.thresholdDB, k.ratio, k.makeupGainDB))
         }
         if let t = c.loudnessTargetLUFS { parts.append(String(format: "loudness %.0f LUFS", t)) }
+        if let l = c.lfeMixDB { parts.append(String(format: "LFE %+.1f dB", l)) }
         return parts.isEmpty ? "off" : parts.joined(separator: ", ")
     }
 }

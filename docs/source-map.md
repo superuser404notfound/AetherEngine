@@ -117,8 +117,8 @@ Notes:
 
 | File | What it does |
 | --- | --- |
-| `AudioShaping.swift` | `AudioShaping` (channel cap, dialogue lift, compressor, loudness target) and `AudioShapingState`: the host's request and the published answer (AE#923). |
-| `AudioShapingMatrix.swift` | The cap and the centre lift as one libswresample remix matrix. |
+| `AudioShaping.swift` | `AudioShaping` (channel cap, dialogue lift, compressor, loudness target, LFE level in the fold) and `AudioShapingState`: the host's request and the published answer (AE#923). |
+| `AudioShapingMatrix.swift` | The cap, the centre lift and the LFE level as one libswresample remix matrix. |
 | `AudioShapingGraph.swift` | The libavfilter graph after the remix: dialoguenhance + pan on stereo, acompressor, alimiter, aformat. Runs on its own sample counter so its latency never reaches the timeline. |
 | `LoudnessNormalizer.swift` | The loudness target (AE#1036): BS.1770 integrated loudness over what has played, and the bounded, latency-free gain toward the target, applied in front of the graph. |
 

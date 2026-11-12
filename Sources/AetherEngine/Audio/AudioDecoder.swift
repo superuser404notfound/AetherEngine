@@ -188,7 +188,7 @@ final class AudioDecoder: @unchecked Sendable {
         guard ret >= 0, let swr = swrContext else { return false }
         if shaping.isActive {
             AudioShapingMatrix.apply(to: swr, input: &inLayout, output: &outLayout,
-                                     dialogueGain: shaping.dialogueGain)
+                                     dialogueGain: shaping.dialogueGain, lfeMixLevel: shaping.lfeMixLevel)
             shapingGraph = AudioShapingGraph(shaping: shaping, sampleRate: sampleRate, layout: &outLayout,
                                              sourceHasCentre: AudioShapingMatrix.hasCentre(&inLayout),
                                              outputFormat: AV_SAMPLE_FMT_FLT)

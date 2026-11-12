@@ -5,7 +5,7 @@ import AetherLibswresample
 /// AE#923: the channel half of audio shaping, as a remix matrix for libswresample.
 ///
 /// The downmix is libswresample's own (`swr_build_matrix2` with its default levels: centre and
-/// surrounds at -3 dB, LFE dropped), so a capped session folds exactly the way an uncapped one
+/// surrounds at -3 dB, LFE dropped unless the host asks for a level, AE#1044), so a capped session folds exactly the way an uncapped one
 /// already did whenever the route forced a fold. The dialogue lift is applied to that matrix rather
 /// than as a separate pass, so it costs nothing per sample: a source with a front centre gets that
 /// input column scaled, wherever the centre lands. A source without a centre is lifted in
@@ -26,7 +26,8 @@ enum AudioShapingMatrix {
     static func coefficients(
         input rawInput: UnsafePointer<AVChannelLayout>,
         output rawOutput: UnsafePointer<AVChannelLayout>,
-        dialogueGain: Double
+        dialogueGain: Double,
+        lfeMixLevel: Double = 0
     ) -> [Double]? {
         let inCount = Int(rawInput.pointee.nb_channels)
         let outCount = Int(rawOutput.pointee.nb_channels)
@@ -38,7 +39,7 @@ enum AudioShapingMatrix {
         return withUnsafePointer(to: &inLayout) { input in
             withUnsafePointer(to: &outLayout) { output in
                 coefficients(resolvedInput: input, output: output, inCount: inCount, outCount: outCount,
-                             dialogueGain: dialogueGain)
+                             dialogueGain: dialogueGain, lfeMixLevel: lfeMixLevel)
             }
         }
     }
@@ -56,9 +57,12 @@ enum AudioShapingMatrix {
         output: UnsafePointer<AVChannelLayout>,
         inCount: Int,
         outCount: Int,
-        dialogueGain: Double
+        dialogueGain: Double,
+        lfeMixLevel: Double
     ) -> [Double]? {
         let lift = dialogueGain.isFinite && dialogueGain > 1 ? dialogueGain : 1
+        // Same layout in and out folds nothing, so the LFE level has nothing to act on there.
+        let lfe = lfeMixLevel.isFinite && lfeMixLevel > 0 ? lfeMixLevel : 0
         if lift == 1, av_channel_layout_compare(input, output) == 0 { return nil }
 
         var matrix = [Double](repeating: 0, count: inCount * outCount)
@@ -68,7 +72,7 @@ enum AudioShapingMatrix {
         // only reads the parameter when it is negative, so the coefficients are the same as with 1.
         let built = matrix.withUnsafeMutableBufferPointer { buf in
             swr_build_matrix2(input, output,
-                              M_SQRT1_2, M_SQRT1_2, 0,
+                              M_SQRT1_2, M_SQRT1_2, lfe,
                               Double(Int32.max), 0,
                               buf.baseAddress, inCount, AV_MATRIX_ENCODING_NONE, nil)
         }
@@ -104,9 +108,11 @@ enum AudioShapingMatrix {
         to swr: OpaquePointer,
         input: UnsafePointer<AVChannelLayout>,
         output: UnsafePointer<AVChannelLayout>,
-        dialogueGain: Double
+        dialogueGain: Double,
+        lfeMixLevel: Double
     ) -> Bool {
-        guard let matrix = coefficients(input: input, output: output, dialogueGain: dialogueGain) else { return true }
+        guard let matrix = coefficients(input: input, output: output, dialogueGain: dialogueGain,
+                                        lfeMixLevel: lfeMixLevel) else { return true }
         let ret = matrix.withUnsafeBufferPointer { buf in
             swr_set_matrix(swr, buf.baseAddress, input.pointee.nb_channels)
         }

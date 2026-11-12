@@ -883,6 +883,19 @@ player.setAudioShaping(AudioShaping(loudnessTargetLUFS: -23))   // raise quiet f
 
 Details in [api.md › Audio shaping](api.md#audio-shaping).
 
+### Stereo downmix for a 2.1 system
+
+```swift
+player.setAudioShaping(AudioShaping(maxChannels: 2, lfeMixDB: 0))   // fold 5.1/7.1 to stereo, keep the LFE
+```
+
+**A stereo downmix drops the LFE by default.** On a 2.1 system behind a stereo link (TV to a stereo streamer or DAC with a subwoofer) that leaves the sub quiet in exactly the scenes a film puts its weight into. `lfeMixDB` mixes the LFE into left and right instead, 3 dB below the value on each side (AE#1044).
+
+- It needs the cap. Without `maxChannels` nothing is folded, and the value alone does not count as active shaping.
+- It costs what any active shaping costs: the track is decoded to PCM, so Atmos leaves as its channel bed. Offer it as an off-by-default switch.
+
+Details in [formats.md › Audio shaping](formats.md#audio-shaping).
+
 ### More options
 
 | Option | What it gives you | Default |
