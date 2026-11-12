@@ -103,7 +103,7 @@ func runHLSFixture(args: [String]) -> Int32 {
 
     guard segmentsDir != nil || (!rest.isEmpty && !rest[0].hasPrefix("-")) else {
         print("ERROR: hlsfixture requires <input.ts> as first argument (or --segments-dir <dir>)")
-        print("Usage: aetherctl hlsfixture <input.ts> [--port N] [--segment-seconds N]")
+        print("Usage: aetherctl hlsfixture (<input.ts> | --segments-dir <dir>) [--port N] [--segment-seconds N]")
         print("       [--target-duration N] [--window N]")
         print("       [--master] [--codecs STR] [--resolution WxH] [--discontinuity-at N] [--slow-refresh]")
         print("       [--drop-segment N] [--encrypted] [--fmp4] [--self-test]")
