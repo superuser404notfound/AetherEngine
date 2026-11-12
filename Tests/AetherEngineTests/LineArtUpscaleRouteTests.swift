@@ -120,12 +120,13 @@ struct LineArtUpscaleRouteTests {
         let hd = try #require(decide(source: geo(1280, 720)).plan)
         let fullHD = try #require(decide().plan)
         let sd = try #require(decide(source: geo(720, 480, 8, 9)).plan)
-        LineArtCostMemory.record(.init(width: 1280, height: 720, frameInterval: 1.0 / 24, meanMs: 40))
-        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1001.0 / 24000) != nil)
-        #expect(LineArtCostMemory.overrun(covering: fullHD, frameInterval: 1.0 / 60) != nil)
-        #expect(LineArtCostMemory.overrun(covering: sd, frameInterval: 1.0 / 24) == nil)
-        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1.0 / 12) == nil)
-        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: nil) != nil)
+        LineArtCostMemory.record(.init(width: 1280, height: 720, frameInterval: 1.0 / 24, meanMs: 40), rung: .upscale)
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1.0 / 24, rung: .restore) == nil, "rungs are separate")
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1001.0 / 24000, rung: .upscale) != nil)
+        #expect(LineArtCostMemory.overrun(covering: fullHD, frameInterval: 1.0 / 60, rung: .upscale) != nil)
+        #expect(LineArtCostMemory.overrun(covering: sd, frameInterval: 1.0 / 24, rung: .upscale) == nil)
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1.0 / 12, rung: .upscale) == nil)
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: nil, rung: .upscale) != nil)
     }
 
     /// A custom source's in-place rebuild keeps its plan, so switching the scaler there needs a fresh load.

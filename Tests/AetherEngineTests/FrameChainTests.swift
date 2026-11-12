@@ -90,15 +90,15 @@ struct FrameChainTests {
 
     /// The last line-art stage at exactly 2x writes the output planes itself; that must match the general
     /// path (the 2x RGB texture, then the chain's conversion) to within rounding.
-    @Test(arguments: [false, true])
+    @Test(arguments: [false, true], [false, true])
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func directLineArtOutputMatchesTheGeneralPath(tenBit: Bool) throws {
+    func directLineArtOutputMatchesTheGeneralPath(tenBit: Bool, restores: Bool) throws {
         let input = try ChainFrames.gradient(480, 270, tenBit: tenBit)
         ChainFrames.paintLuma(input) { x, y in ((x / 7 + y / 5) % 9 == 0) ? 30 : 60 + x / 4 }
-        let direct = LineArtStage()
+        let direct = LineArtStage(restores: restores)
         let (a, _) = try chain(480, 270, target: (960, 540), stages: [direct]).process(input, picture: whole(480, 270))
         #expect(direct.writesOutputDirectly)
-        let general = LineArtStage()
+        let general = LineArtStage(restores: restores)
         let (b, _) = try chain(480, 270, target: (960, 540), stages: [general, PassThroughStage()])
             .process(input, picture: whole(480, 270))
         #expect(!general.writesOutputDirectly)
@@ -153,21 +153,40 @@ struct LineArtUpscalerTests {
         #expect(up.upscale(try ChainFrames.gradient(1280, 720, tenBit: false), pts: .invalid) != nil)
     }
 
-    /// 1080p has nothing below line art: a sustained overrun switches it off directly, and remembers it.
+    /// The ladder at 1080p: an overrun first drops the restore pass, a second one switches the stage off
+    /// (nothing below line art takes 1080p). Both rungs are remembered.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func fullHDOverrunDisablesWithoutADegradedRung() throws {
+    func fullHDOverrunDropsRestoreThenSwitchesOff() throws {
         FrameUpscaler.resetLineArtCostMemoryForTesting()
         defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
         let p = try plan(1920, 1080)
         let up = try #require(FrameUpscaler(plan: p, frameInterval: 0.0001))
-        let degraded = LockedFlag()
-        up.onEvent = { if case .degraded = $0 { degraded.set() } }
+        #expect(up.runsLineArtRestore)
+        let degraded = LockedPlan()
+        up.onEvent = { if case let .degraded(plan, _, _) = $0 { degraded.set(plan) } }
         let input = try ChainFrames.gradient(1920, 1080, tenBit: false)
         for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
+        #expect(!up.isDisabled && !up.runsLineArtRestore && up.isDegraded)
+        #expect(degraded.value?.scaler == .lineArt)
+        #expect(up.upscale(input, pts: .invalid) != nil, "the stage without restore delivers frames")
+        for _ in 0..<47 { _ = up.upscale(input, pts: .invalid) }
         #expect(up.isDisabled)
-        #expect(!degraded.value && !up.isDegraded)
-        #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001) != nil)
+        #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001, rung: .restore) != nil)
+        #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001, rung: .upscale) != nil)
+    }
+
+    /// A restore overrun earlier in the process starts the next stage that it covers without the restore pass.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func aRememberedRestoreOverrunStartsWithoutIt() throws {
+        FrameUpscaler.resetLineArtCostMemoryForTesting()
+        defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
+        LineArtCostMemory.record(.init(width: 1280, height: 720, frameInterval: 1.0 / 24, meanMs: 40), rung: .restore)
+        let covered = try #require(FrameUpscaler(plan: try plan(1920, 1080), frameInterval: 1.0 / 24))
+        #expect(!covered.runsLineArtRestore)
+        let smaller = try #require(FrameUpscaler(plan: try plan(960, 540), frameInterval: 1.0 / 24))
+        #expect(smaller.runsLineArtRestore)
     }
 
     /// The automatic route takes 8-bit only, so a 10-bit source below 1080p has nothing to fall back to.
@@ -178,7 +197,7 @@ struct LineArtUpscalerTests {
         defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
         let up = try #require(FrameUpscaler(plan: try plan(1280, 720), frameInterval: 0.0001))
         let input = try ChainFrames.gradient(1280, 720, tenBit: true)
-        for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
+        for _ in 0..<96 { _ = up.upscale(input, pts: .invalid) }
         #expect(up.isDisabled)
         #expect(up.plan.scaler == .lineArt)
     }
@@ -193,7 +212,7 @@ struct LineArtUpscalerTests {
         let fallback = LockedPlan()
         up.onEvent = { if case let .degraded(plan, _, _) = $0 { fallback.set(plan) } }
         let input = try ChainFrames.gradient(1280, 720, tenBit: false)
-        for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
+        for _ in 0..<96 { _ = up.upscale(input, pts: .invalid) }
         #expect(!up.isDisabled)
         #expect(fallback.value?.scaler == .automatic && fallback.value?.mlScale != nil)
         #expect(up.plan.scaler == .automatic)

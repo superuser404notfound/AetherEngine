@@ -194,52 +194,97 @@ final class PassThroughStage: FrameChainStage {
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
 }
 
-/// Anime4K's Upscale CNN x2 (S) (`LineArtShaderSource`): four 3x3 convolutions at the input size, then a
-/// depth-to-space pass that writes twice the input size and adds the bilinear input. As the last stage of a
-/// chain whose target is exactly twice its input, the depth-to-space step writes the output planes directly
-/// (`frameChainLineArtOutput`): no 2x RGB texture, 36% less GPU time for 1080p to 2160p on an A15
-/// (13.5 to 8.6 ms back to back).
+/// The line-art scaler (`LineArtShaderSource`, Anime4K): with `restores`, its "mode A" in the small size:
+/// Clamp_Highlights statistics of the input, Restore CNN (S) on the input, then Upscale CNN x2 (S) on the
+/// restored picture, whose depth-to-space step adds the bilinear restored picture and is clamped to the
+/// input's local luma maximum. Without `restores`, Upscale CNN x2 (S) alone. As the last stage of a chain whose
+/// target is exactly twice its input, the depth-to-space step writes the output planes directly
+/// (`frameChainLineArtOutput`): no 2x RGB texture. On an A15, 1080p to 2160p back to back: 8.6 ms upscale
+/// alone (13.5 ms through a 2x texture), 15.6 ms with restore and clamp.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class LineArtStage: FrameChainStage {
+    let restores: Bool
     private var convolutions: [MTLComputePipelineState] = []
+    private var restoreConvolutions: [MTLComputePipelineState] = []
     private var depthToSpace: MTLComputePipelineState?
     private var directOutput: MTLComputePipelineState?
+    private var clampStats: (MTLComputePipelineState, MTLComputePipelineState)?
+    private var clampApply: MTLComputePipelineState?
     private var features: [MTLTexture] = []
+    private var restoreFeatures: [MTLTexture] = []
+    private var restored: MTLTexture?
+    private var statsRows: MTLTexture?
+    private var stats: MTLTexture?
     private var output: MTLTexture?
+    private var clamped: MTLTexture?
 
     /// True when the stage writes the chain's output itself.
     private(set) var writesOutputDirectly = false
 
+    init(restores: Bool = true) {
+        self.restores = restores
+    }
+
     func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
         convolutions = kernels.lineArtConvolutions
         depthToSpace = kernels.lineArtDepthToSpace
-        directOutput = kernels.lineArtOutput
+        directOutput = restores ? kernels.lineArtOutputClamped : kernels.lineArtOutput
         features = try convolutions.map { _ in try FrameChain.texture(device, input.0, input.1) }
+        if restores {
+            restoreConvolutions = kernels.restoreConvolutions
+            clampStats = (kernels.clampStatsRows, kernels.clampStatsColumns)
+            clampApply = kernels.clampHighlights
+            restoreFeatures = try (0..<3).map { _ in try FrameChain.texture(device, input.0, input.1) }
+            restored = try FrameChain.texture(device, input.0, input.1)
+            statsRows = try FrameChain.texture(device, input.0, input.1)
+            stats = try FrameChain.texture(device, input.0, input.1)
+        }
         writesOutputDirectly = finalTarget.map { $0 == (input.0 * 2, input.1 * 2) } ?? false
-        output = writesOutputDirectly ? nil : try FrameChain.texture(device, input.0 * 2, input.1 * 2)
+        if !writesOutputDirectly {
+            output = try FrameChain.texture(device, input.0 * 2, input.1 * 2)
+            if restores { clamped = try FrameChain.texture(device, input.0 * 2, input.1 * 2) }
+        }
         return (input.0 * 2, input.1 * 2)
     }
 
-    private func encodeConvolutions(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture {
-        var previous = input
+    /// The statistics and the restore pass when `restores`, then the upscale convolutions; returns the
+    /// picture the depth-to-space step builds on and the last feature texture.
+    private func encodeNetworks(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> (MTLTexture, MTLTexture) {
+        var base = input
+        if restores, let clampStats, let statsRows, let stats, let restored, restoreConvolutions.count == 4 {
+            let grid = (input.width, input.height)
+            FrameChain.dispatch(encoder, clampStats.0, textures: [input, statsRows], grid: grid)
+            FrameChain.dispatch(encoder, clampStats.1, textures: [statsRows, stats], grid: grid)
+            let r = restoreFeatures
+            FrameChain.dispatch(encoder, restoreConvolutions[0], textures: [input, r[0]], grid: grid)
+            FrameChain.dispatch(encoder, restoreConvolutions[1], textures: [r[0], r[1]], grid: grid)
+            FrameChain.dispatch(encoder, restoreConvolutions[2], textures: [r[1], r[2]], grid: grid)
+            FrameChain.dispatch(encoder, restoreConvolutions[3], textures: [input, r[2], restored], grid: grid)
+            base = restored
+        }
+        var previous = base
         for (pipeline, feature) in zip(convolutions, features) {
             FrameChain.dispatch(encoder, pipeline, textures: [previous, feature], grid: (feature.width, feature.height))
             previous = feature
         }
-        return previous
+        return (base, previous)
     }
 
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture {
         guard let depthToSpace, let output else { return input }
-        let last = encodeConvolutions(encoder, input: input)
-        FrameChain.dispatch(encoder, depthToSpace, textures: [input, last, output], grid: (output.width, output.height))
-        return output
+        let (base, last) = encodeNetworks(encoder, input: input)
+        FrameChain.dispatch(encoder, depthToSpace, textures: [base, last, output], grid: (output.width, output.height))
+        guard restores, let clampApply, let stats, let clamped else { return output }
+        FrameChain.dispatch(encoder, clampApply, textures: [output, stats, clamped], grid: (clamped.width, clamped.height))
+        return clamped
     }
 
     func encodeFinal(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, luma: MTLTexture, chroma: MTLTexture) -> Bool {
         guard writesOutputDirectly, let directOutput else { return false }
-        let last = encodeConvolutions(encoder, input: input)
-        FrameChain.dispatch(encoder, directOutput, textures: [input, last, luma, chroma], grid: (input.width, input.height))
+        let (base, last) = encodeNetworks(encoder, input: input)
+        var textures = [base, last, luma, chroma]
+        if restores, let stats { textures.append(stats) }
+        FrameChain.dispatch(encoder, directOutput, textures: textures, grid: (input.width, input.height))
         return true
     }
 }
@@ -282,14 +327,26 @@ final class FrameChainKernels: @unchecked Sendable {
     let lineArtConvolutions: [MTLComputePipelineState]
     let lineArtDepthToSpace: MTLComputePipelineState
     let lineArtOutput: MTLComputePipelineState
+    let lineArtOutputClamped: MTLComputePipelineState
+    let restoreConvolutions: [MTLComputePipelineState]
+    let clampStatsRows: MTLComputePipelineState
+    let clampStatsColumns: MTLComputePipelineState
+    let clampHighlights: MTLComputePipelineState
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var byDevice: [UInt64: FrameChainKernels] = [:]
 
     private init(toRGB: MTLComputePipelineState, toYCbCr: MTLComputePipelineState,
                  lineArtConvolutions: [MTLComputePipelineState], lineArtDepthToSpace: MTLComputePipelineState,
-                 lineArtOutput: MTLComputePipelineState) {
+                 lineArtOutput: MTLComputePipelineState, lineArtOutputClamped: MTLComputePipelineState,
+                 restoreConvolutions: [MTLComputePipelineState], clampStatsRows: MTLComputePipelineState,
+                 clampStatsColumns: MTLComputePipelineState, clampHighlights: MTLComputePipelineState) {
         self.lineArtOutput = lineArtOutput
+        self.lineArtOutputClamped = lineArtOutputClamped
+        self.restoreConvolutions = restoreConvolutions
+        self.clampStatsRows = clampStatsRows
+        self.clampStatsColumns = clampStatsColumns
+        self.clampHighlights = clampHighlights
         self.toRGB = toRGB
         self.toYCbCr = toYCbCr
         self.lineArtConvolutions = lineArtConvolutions
@@ -299,19 +356,36 @@ final class FrameChainKernels: @unchecked Sendable {
     static func shared(for device: MTLDevice) -> FrameChainKernels? {
         lock.lock(); defer { lock.unlock() }
         if let kernels = byDevice[device.registryID] { return kernels }
-        func pipeline(_ library: MTLLibrary, _ name: String) -> MTLComputePipelineState? {
-            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        func pipeline(_ library: MTLLibrary, _ name: String, clamps: Bool? = nil) -> MTLComputePipelineState? {
+            let function: MTLFunction?
+            if let clamps {
+                var value = clamps
+                let constants = MTLFunctionConstantValues()
+                constants.setConstantValue(&value, type: .bool, index: 0)
+                function = try? library.makeFunction(name: name, constantValues: constants)
+            } else {
+                function = library.makeFunction(name: name)
+            }
+            return function.flatMap { try? device.makeComputePipelineState(function: $0) }
         }
         guard let chain = try? device.makeLibrary(source: FrameChainShaderSource.source, options: nil),
               let lineArt = try? device.makeLibrary(source: LineArtShaderSource.source, options: nil),
               let toRGB = pipeline(chain, "frameChainToRGB"), let toYCbCr = pipeline(chain, "frameChainToYCbCr"),
-              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput"),
+              let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", clamps: false),
+              let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", clamps: true),
+              let clampStatsRows = pipeline(chain, "frameChainClampStatsRows"),
+              let clampStatsColumns = pipeline(chain, "frameChainClampStatsColumns"),
+              let clampHighlights = pipeline(chain, "frameChainClampHighlights"),
               let depthToSpace = pipeline(lineArt, LineArtShaderSource.depthToSpaceKernel)
         else { return nil }
         let convolutions = LineArtShaderSource.convolutionKernels.compactMap { pipeline(lineArt, $0) }
-        guard convolutions.count == LineArtShaderSource.convolutionKernels.count else { return nil }
-        let kernels = FrameChainKernels(toRGB: toRGB, toYCbCr: toYCbCr, lineArtConvolutions: convolutions,
-                                        lineArtDepthToSpace: depthToSpace, lineArtOutput: lineArtOutput)
+        let restore = LineArtShaderSource.restoreKernels.compactMap { pipeline(lineArt, $0) }
+        guard convolutions.count == LineArtShaderSource.convolutionKernels.count,
+              restore.count == LineArtShaderSource.restoreKernels.count else { return nil }
+        let kernels = FrameChainKernels(
+            toRGB: toRGB, toYCbCr: toYCbCr, lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
+            lineArtOutput: lineArtOutput, lineArtOutputClamped: lineArtOutputClamped, restoreConvolutions: restore,
+            clampStatsRows: clampStatsRows, clampStatsColumns: clampStatsColumns, clampHighlights: clampHighlights)
         byDevice[device.registryID] = kernels
         return kernels
     }
@@ -380,16 +454,61 @@ enum FrameChainShaderSource {
         cTex.write(float4(quantize(cb, p.cOffset, p.cRange, p), quantize(cr, p.cOffset, p.cRange, p), 0.0, 1.0), gid);
     }
 
+    // Anime4K's Clamp_Highlights: the luma maximum over 5 samples, along rows then columns, at the source
+    // size. The picture after the networks is clamped to it, which stops their overshoot at bright edges.
+    constant float3 clampLumaWeights = float3(0.299, 0.587, 0.114);
+    kernel void frameChainClampStatsRows(texture2d<half, access::read> src [[texture(0)]],
+                                         texture2d<half, access::write> out [[texture(1)]],
+                                         uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) { return; }
+        float m = 0.0;
+        int w = int(src.get_width()) - 1;
+        for (int i = -2; i <= 2; i++) {
+            m = max(m, dot(float3(src.read(uint2(clamp(int(gid.x) + i, 0, w), gid.y)).rgb), clampLumaWeights));
+        }
+        out.write(half4(m), gid);
+    }
+    kernel void frameChainClampStatsColumns(texture2d<half, access::read> src [[texture(0)]],
+                                            texture2d<half, access::write> out [[texture(1)]],
+                                            uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) { return; }
+        float m = 0.0;
+        int h = int(src.get_height()) - 1;
+        for (int i = -2; i <= 2; i++) {
+            m = max(m, float(src.read(uint2(gid.x, clamp(int(gid.y) + i, 0, h))).r));
+        }
+        out.write(half4(m), gid);
+    }
+    inline float3 clampHighlight(float3 rgb, float maximum) {
+        float l = dot(rgb, clampLumaWeights);
+        return rgb - (l - min(l, maximum));
+    }
+    // The clamp for a 2x picture the chain resamples afterwards.
+    kernel void frameChainClampHighlights(texture2d<half, access::read> src [[texture(0)]],
+                                          texture2d<half, access::sample> stats [[texture(1)]],
+                                          texture2d<half, access::write> out [[texture(2)]],
+                                          uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= out.get_width() || gid.y >= out.get_height()) { return; }
+        constexpr sampler bilinear(coord::normalized, address::clamp_to_edge, filter::linear);
+        float m = float(stats.sample(bilinear, (float2(gid) + 0.5) / float2(out.get_width(), out.get_height())).r);
+        out.write(half4(half3(clampHighlight(float3(src.read(gid).rgb), m)), 1.0h), gid);
+    }
+
+    constant bool clampsHighlights [[function_constant(0)]];
+
     // The line-art stage's depth-to-space step written straight to the output planes, for a target exactly
     // twice the source: one thread per source sample X writes its 2x2 output block. Each output sample is
     // the bilinear source at its centre (a quarter sample from X) plus its residual channel, as
-    // lineArtDepthToSpace computes it.
+    // lineArtDepthToSpace computes it, clamped to the highlight statistics when that variant is built.
     kernel void frameChainLineArtOutput(constant FrameChainColorParams &p [[buffer(0)]],
                                         texture2d<half, access::read> rgbTex [[texture(0)]],
                                         texture2d<half, access::read> residual [[texture(1)]],
                                         texture2d<float, access::write> yTex [[texture(2)]],
                                         texture2d<float, access::write> cTex [[texture(3)]],
+                                        texture2d<half, access::sample> stats [[texture(4), function_constant(clampsHighlights)]],
                                         uint2 gid [[thread_position_in_grid]]) {
+        constexpr sampler bilinear(coord::normalized, address::clamp_to_edge, filter::linear);
+        float2 outSize = float2(rgbTex.get_width() * 2, rgbTex.get_height() * 2);
         if (gid.x >= rgbTex.get_width() || gid.y >= rgbTex.get_height()) { return; }
         int2 lim = int2(rgbTex.get_width() - 1, rgbTex.get_height() - 1);
         float3 n[9];
@@ -406,7 +525,12 @@ enum FrameChainShaderSource {
             uint sx = i == 0 ? 0 : 2, sy = j == 0 ? 0 : 2;
             float3 a = n[4] * 0.75 + n[3 + sx] * 0.25;
             float3 b = n[sy * 3 + 1] * 0.75 + n[sy * 3 + sx] * 0.25;
-            float3 rgb = saturate(a * 0.75 + b * 0.25 + float(r[k]));
+            float3 rgb = a * 0.75 + b * 0.25 + float(r[k]);
+            if (clampsHighlights) {
+                float2 uv = (float2(gid * 2 + uint2(i, j)) + 0.5) / outSize;
+                rgb = clampHighlight(rgb, float(stats.sample(bilinear, uv).r));
+            }
+            rgb = saturate(rgb);
             sum += rgb;
             yTex.write(float4(quantize(dot(rgb, w), p.yOffset, p.yRange, p), 0.0, 0.0, 1.0), gid * 2 + uint2(i, j));
         }

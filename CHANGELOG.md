@@ -17,14 +17,20 @@ _Nothing yet._
 ### Added
 
 - **A line-art scaler for animation (#1039).** `LoadOptions.upscaleScaler = .lineArt` makes the upscale stage
-  (`upscalesLowResolutionVideo`) run Anime4K's Upscale CNN x2 (S) as native Metal kernels instead of
-  VideoToolbox super resolution and MetalFX. It also takes 1080p and 10-bit SDR, which the automatic route
-  cannot, and keeps 10-bit output 10-bit. On an A15 it costs about 8.6 ms per frame for 1080p to 2160p with
-  the GPU running flat out. When it overruns, a source below 1080p falls back to the automatic route and a
-  1080p source switches off, and the overrun is remembered for the process. It suits drawn content only, so a
+  (`upscalesLowResolutionVideo`) run Anime4K's mode A in the small size (Clamp_Highlights, Restore CNN S,
+  Upscale CNN x2 S) as native Metal kernels instead of VideoToolbox super resolution and MetalFX. It also takes
+  1080p and 10-bit SDR, which the automatic route cannot, and keeps 10-bit output 10-bit. On an A15 it costs
+  about 15.6 ms per frame for 1080p to 2160p with the GPU running flat out. When it overruns it first drops the
+  restore pass (8.6 ms), then a source below 1080p falls back to the automatic route and a 1080p source switches
+  off; each step is remembered for the process. It suits drawn content only, so a
   host sets it per title. `UpscaleStatus.scaler` says which scaler runs, and
   `aetherctl play --line-art` drives it. It runs as the first stage of a new GPU frame chain (#957), which
   later processing stages can join. Anime4K is MIT; see `docs/licensing.md`.
+
+- **The upscale stage's frame budget is 90% of the frame interval, up from 75% (#846, #1039).** The GPU lowers
+  its clock until a regular load fills most of the interval: on an A15 work that takes 14 ms back to back
+  reads 32 ms at 24 fps. The 75% budget therefore tripped on the clock, not on a stage that fell behind, and
+  degraded or switched off stages that had room to spare.
 
 - **Upscaling without MetalFX (#846).** A device or OS without MetalFX spatial scaling (tvOS before 27.1)
   used to skip the upscale route entirely. Now the stage starts with VideoToolbox super resolution alone and the

@@ -65,7 +65,7 @@ extension AetherEngine {
         let decision = decide(options.upscaleScaler)
         // AE#1039: line art that overran here before starts on the rung it fell back to.
         if let plan = decision.plan, plan.scaler == .lineArt,
-           let overrun = LineArtCostMemory.overrun(covering: plan, frameInterval: frameRate.map { 1 / $0 }) {
+           let overrun = LineArtCostMemory.overrun(covering: plan, frameInterval: frameRate.map { 1 / $0 }, rung: .upscale) {
             let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: mlScaleFactors) != nil
                 ? decide(.automatic) : .notTaken(.stageFailedEarlier)
             EngineLog.emit(String(format: "[Upscale] line art overran on this device earlier (%.1f ms at %.1f ms), %@",
