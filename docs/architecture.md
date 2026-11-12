@@ -459,12 +459,14 @@ audioOnly == true
    └─ otherwise ──► Demuxer ──► AudioDecoder ──► AVSampleBufferAudioRenderer ──► AVR / speakers
 ```
 
-**Now Playing on the audio host.** On tvOS and iOS the AVPlayer audio host owns a persistent per-player `MPNowPlayingSession` (exposed as `audioNowPlayingSession`). It keeps the system Now-Playing overlay bound to the app across a background pause, publishes now-playing info from the player automatically, and carries `externalMetadata`. The host survives across tracks and does not pause when the app goes to the background. All of this is gated `#if os(tvOS) || os(iOS)`. On macOS the path builds and plays without the system session; a macOS host drives Now-Playing through the shared centers itself.
+**Now Playing on the audio host.** On tvOS, iOS and visionOS the AVPlayer audio host owns a persistent per-player `MPNowPlayingSession` (exposed as `audioNowPlayingSession`). It keeps the system Now-Playing overlay bound to the app across a background pause, publishes now-playing info from the player automatically, and carries `externalMetadata`. The host survives across tracks and does not pause when the app goes to the background. macOS has no such session; there, and on the FFmpeg audio host everywhere, the engine publishes through the shared centers when the app set `ownsAudioNowPlaying` (see `AetherEngine+NowPlaying.swift`).
 
 **Now Playing on the video host.** The native video host can own the same kind of session, but only on request (`ownsVideoNowPlayingSession`, default off, read when a host is created). The difference is deliberate. The audio path is always a bare AVPlayer, but the video player is used both by custom-transport hosts and by `AVPlayerViewController` hosts, and AVKit owns Now-Playing there through its own private registration. A session claimed underneath AVKit costs that host its identity card and its working transport commands, so it is the host's call. When taken:
 
 - The session lives on `NativeAVPlayerHost`, so it survives native-to-native reloads with it (issue #15).
-- `setVideoNowPlayingInfo(_:)` stages the identity dictionary that is replayed onto every fresh `AVPlayerItem` (readiness-gate master reloads, media fallback, in-place PiP swaps).
+- `setNowPlayingInfo(_:)` (or `setVideoNowPlayingInfo(_:)`) stages the identity dictionary that is replayed onto every fresh `AVPlayerItem` (readiness-gate master reloads, media fallback, in-place PiP swaps).
+- `ownsVideoNowPlayingCommands` lets the engine bind the transport commands on the session's center; without it the host does.
+- On macOS no session exists, so the engine publishes the card on the shared centers instead.
 
 ### Audio tap (#95)
 
@@ -899,7 +901,7 @@ Which file owns what. Paths are relative to `Sources/AetherEngine/` unless noted
 | `AetherEngine+AudioShaping.swift` | `setAudioShaping(_:)`: audio shaping as a live setting. Each change is a session-preserving rebuild, with presses folded into the one in flight (AE#923). |
 | `AetherEngine+TeletextPage.swift` | `setTeletextPage(_:)`: the teletext caption page as a live setting. Rebuilds the drain decoder of each channel showing a teletext track and leaves others alone, so a page libzvbi does not flag as a subtitle page can be fixed without leaving the channel (#364). |
 | `AetherEngine+ScrubThumbnail.swift` | Scrub still for the active native session, decoded from bytes already in `SegmentCache`. Single-connection sources (debrid / torrent links) that refuse the `FrameExtractor`'s second demuxer still get previews (#106). |
-| `AetherEngine+SoftwareNowPlaying.swift` | Builds the software host's Now-Playing publisher when the app set `ownsSoftwareNowPlaying` (primary role only), and publishes `softwareNowPlayingActive`. |
+| `AetherEngine+NowPlaying.swift` | Builds the Now-Playing publisher of the route that loaded, from the app's opt-ins (`ownsSoftwareNowPlaying`, `ownsAudioNowPlaying`, `ownsVideoNowPlayingSession` + `ownsVideoNowPlayingCommands`; primary role only): commands on the route's `MPNowPlayingSession`, or card and commands on the shared centers where none exists. Keeps the card through a load seam, and takes part in `NowPlayingArbiter` on the shared centers. |
 | `SeekEvent.swift` | One statement about a seek's lifecycle (outcome plus its target). `isSeeking` / `seekTarget` are a level, and a level cannot say why it fell (#38 follow-up). |
 | `StartupProgress.swift` | The nine-checkpoint startup ladder behind `$startupProgress` (#361). See note. |
 | `SubtitleSessionCarryover.swift` | Subtitle state carried across an engine-initiated `reloadAtCurrentPosition` (AirPlay LAN swap, background-return reopen), which otherwise rebuilds the session from `LoadOptions` alone (#170). |
@@ -1148,7 +1150,8 @@ Notes:
 | `SeekResumeIntent.swift` | Whether a seek on a demuxer-driven host re-arms the clock at `lastRate` or parks it at 0, for the second seek issued inside the window its predecessor cleared (#292). |
 | `SoftwareBufferFrontier.swift` | How far ahead of the clock the software path really holds decoded video, and how that folds into the `bufferedPosition` a host reads (#303). |
 | `SoftwarePiPSource.swift` | Everything a host needs to build an `AVPictureInPictureController` content source around the software path without AVKit entering the engine: the layer plus the four transport answers behind the sample-buffer delegate. |
-| `SoftwareNowPlaying.swift` | Software-host Now-Playing: state-to-card mapping, remote-command routing and the publisher, behind small protocols for the two process-wide centers so tests run on fakes. Undoes only its own changes at stop. |
+| `SoftwareNowPlaying.swift` | The Now-Playing publisher every engine-owned route uses: state-to-card mapping, remote-command routing (track commands included) and the sink, behind small protocols for the info and command centers so tests run on fakes. Undoes only its own changes at stop. |
+| `NowPlayingArbiter.swift` | Which engine in the process holds the shared Now-Playing centers: the last one to claim (start playing, or `claimNowPlaying()`); waiting engines take over in claim order. |
 | `StartupReadinessGate.swift` | Outcome of one startup-readiness attempt: the reloaded item became playable, died, or ran out the settle window without doing either. |
 
 ### `Network/`

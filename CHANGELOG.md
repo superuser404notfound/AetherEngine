@@ -10,6 +10,20 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **The engine can own Now Playing on every host and every platform (#1041, thanks @jihongboo).**
+  `ownsAudioNowPlaying` publishes the card and answers the transport commands for audio-only sessions on both
+  audio hosts, `ownsVideoNowPlayingCommands` adds the commands to the native video session, and on macOS (no
+  `MPNowPlayingSession`) the native and audio routes now publish through the shared centers. One
+  `setNowPlayingInfo(_:)` stages the identity for whichever host `load()` picks, on every platform, and
+  `setNowPlayingTrackCommands(next:previous:)` adds a playlist's next and previous. Several engines in one
+  process hand the shared surface to the one that played or was claimed last (`claimNowPlaying()`), and
+  `nowPlayingCommandInterceptor` lets a host answer a single command itself (play after the end). A remote
+  play reactivates the audio session first, and the card stays up between two items instead of blinking out.
+  All opt-in; nothing changes for a host that sets none of it. visionOS gets the `MPNowPlayingSession` paths
+  iOS has. See `docs/api.md`, "Now Playing and the audio session".
+
 ### Fixed
 
 - **24p film with 2:3 pulldown timestamps no longer stutters at random (Sodalite#236, thanks @cstark27).** Some

@@ -2388,9 +2388,26 @@ public final class AetherEngine: ObservableObject {
     /// Combine subscriptions mirroring softwareHost's @Published. Cancelled in stopInternal.
     var softwareCancellables: Set<AnyCancellable> = []
     /// Now-Playing card and remote commands for the software host, which has no AVPlayer to supply them.
-    var softwareNowPlaying: SoftwareNowPlayingController?
-    /// Where the software host's Now-Playing goes; replaced by tests so they never touch the shared centers.
-    var makeSoftwareNowPlayingSink: @MainActor () -> SoftwareNowPlayingSink = { SystemNowPlayingSink() }
+    /// The publisher of the route that is playing, for every route the engine owns Now-Playing on.
+    var nowPlayingController: SoftwareNowPlayingController?
+    var nowPlayingRoute: (kind: NowPlayingRouteKind, plan: NowPlayingPublisherPlan)?
+    var nowPlayingCancellables = Set<AnyCancellable>()
+    /// The previous item's card, left on the shared center through a load seam (see `stopNowPlayingPublisher`).
+    var retainedNowPlayingSink: SoftwareNowPlayingSink?
+    var nowPlayingArbiter: NowPlayingArbiter = .shared
+    var nowPlayingNextTrackHandler: (@MainActor () -> Void)?
+    var nowPlayingPreviousTrackHandler: (@MainActor () -> Void)?
+    /// Where Now-Playing goes; replaced by tests so they never touch the real centers.
+    var makeNowPlayingSink: @MainActor (NowPlayingPublisherPlan, MPRemoteCommandCenter?) -> SoftwareNowPlayingSink = { plan, sessionCenter in
+        switch plan {
+        case .sessionCommands:
+            return SystemNowPlayingSink(infoCenter: nil, commands: SharedRemoteCommandSurface(center: sessionCenter))
+        case .sharedCenter(let commands):
+            return SystemNowPlayingSink(commands: commands ? SharedRemoteCommandSurface() : nil)
+        case .none:
+            return SystemNowPlayingSink(infoCenter: nil, commands: nil)
+        }
+    }
 
     /// FFmpeg audio-only host (music). Mutually exclusive with nativeHost/softwareHost; stopInternal tears all down.
     var audioHost: AudioPlaybackHost?
@@ -7652,12 +7669,11 @@ public final class AetherEngine: ObservableObject {
         sourceVideoHeight = 0
         sourceVideoPixelAspectRatio = 1
         pendingExternalMetadata = []
-        #if os(tvOS) || os(iOS)
         // Same lifetime as pendingExternalMetadata: session identity the host staged, cleared when the
         // host leaves playback so the next session cannot inherit the previous title's system card.
         // Surviving stopInternal is deliberate (a reload keeps the card through the seam).
         pendingVideoNowPlayingInfo = [:]
-        #endif
+        finishNowPlaying()
         // #436: the speed belongs to the item, so it leaves with it. Same lifetime as the staged
         // Now-Playing card above, and for the same reason: a reload keeps it through the seam.
         desiredRate = nil
@@ -8193,11 +8209,12 @@ public final class AetherEngine: ObservableObject {
         return AirPlayPlaylistDecision.receiverURL(base: base, lanIP: lanIP, playlist: playlist)
     }
 
-    #if os(tvOS) || os(iOS)
-    /// MPNowPlayingSession for the active AVPlayer audio path, or nil. The host registers transport commands
-    /// and writes metadata here to stay the active Now-Playing app across a background pause (tvOS drops a
-    /// paused bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost. Nil on
-    /// the FFmpeg audio host (`audioOnlyUsesAVPlayer` false), which has no session of its own.
+    #if os(iOS) || os(tvOS) || os(visionOS)
+    /// MPNowPlayingSession for the active AVPlayer audio path, or nil. It publishes the card from the
+    /// player and keeps the app the active Now-Playing app across a background pause (tvOS drops a paused
+    /// bare AVPlayer, killing the Home badge and remote play route). See AudioAVPlayerHost. Nil on the
+    /// FFmpeg audio host (`audioOnlyUsesAVPlayer` false), which has no session of its own. With
+    /// `ownsAudioNowPlaying` the engine binds the transport commands here itself; without it the host does.
     public var audioNowPlayingSession: MPNowPlayingSession? {
         audioAVPlayerActive ? audioAVPlayerHost?.nowPlayingSession : nil
     }
@@ -8213,37 +8230,63 @@ public final class AetherEngine: ObservableObject {
     /// items are replayed at host creation.
     public func setExternalMetadata(_ items: [AVMetadataItem]) {
         pendingExternalMetadata = items
-        refreshSoftwareNowPlayingIdentity()
+        refreshNowPlayingIdentity()
         nativeHost?.setExternalMetadata(items)
         audioAVPlayerHost?.setExternalMetadata(items)
     }
 
-    #if os(tvOS) || os(iOS)
-    /// Opt in to owning the system Now-Playing session on the native VIDEO path.
+    // MARK: - Now Playing
+
+    /// Opt in to the engine owning system Now-Playing for audio-only sessions, on every audio host and
+    /// every platform: the card (title, artwork, elapsed, rate, duration) and the transport commands
+    /// (play, pause, toggle, skip by `remoteSkipInterval`, change position, plus next and previous once
+    /// the host hands in handlers through `setNowPlayingTrackCommands`).
+    ///
+    /// Where it publishes depends on the host the source lands on, and the app does not need to know which:
+    /// the AVPlayer audio host's `MPNowPlayingSession` on iOS, tvOS and visionOS (the session publishes the
+    /// card, the engine binds the commands on its center), the shared info and command centers for the
+    /// FFmpeg audio host and for every audio session on macOS. Identity comes from `setNowPlayingInfo`.
+    ///
+    /// Off by default, because a host that registers its own commands on `audioNowPlayingSession` or the
+    /// shared center would otherwise answer every command twice (a toggle that cancels itself). Read when
+    /// an audio host loads, so set it before `load()`. A secondary `sharedOutputRole` never takes it.
+    public var ownsAudioNowPlaying: Bool = false
+
+    /// Opt in to owning system Now-Playing on the native VIDEO path.
     ///
     /// Off by default, and that default is load-bearing. The native path is consumed both by hosts
     /// that build their own transport around a bare `AVPlayer` and by `AVPlayerViewController` hosts,
     /// and AVKit owns Now-Playing itself there through private MediaRemote: WWDC22's guidance is not
     /// to bring an `MPNowPlayingSession` when using AVKit, and doing so costs the host AVKit's card,
     /// its `externalMetadata`, and its working transport commands. Only a host with custom UI should
-    /// set this. The audio path's AVPlayer host has no such fork (always a bare AVPlayer) and owns its
-    /// session unconditionally.
+    /// set this.
+    ///
+    /// On iOS, tvOS and visionOS the native host then owns an `MPNowPlayingSession`
+    /// (`videoNowPlayingSession`) that publishes the card from the player. macOS has no such session and
+    /// a bare AVPlayer publishes nothing there, so the engine writes the shared info center instead. The
+    /// transport commands are a separate opt-in, `ownsVideoNowPlayingCommands`.
     ///
     /// Read when a native host is created, so set it before `load()`. A host preserved across a
     /// native->native reload (issue #15) keeps whatever it was created with; the change takes effect
     /// on the next fresh host.
     public var ownsVideoNowPlayingSession: Bool = false
 
+    /// With `ownsVideoNowPlayingSession`, also let the engine answer the transport commands for the
+    /// native video path: on the session's own command center on iOS, tvOS and visionOS, on the shared
+    /// one on macOS. Off by default because hosts written before it register their own commands on
+    /// `videoNowPlayingSession.remoteCommandCenter`, and both would answer. Read at load.
+    public var ownsVideoNowPlayingCommands: Bool = false
+
+    #if os(iOS) || os(tvOS) || os(visionOS)
     /// MPNowPlayingSession for the native VIDEO path; nil unless `ownsVideoNowPlayingSession` was set
-    /// before the session loaded (also nil on the software path and with no host). Same contract as
-    /// `audioNowPlayingSession`: the host app registers transport commands on `remoteCommandCenter`
-    /// and stages identity metadata via `setVideoNowPlayingInfo`; the session auto-publishes
-    /// elapsed/rate/duration from the AVPlayer and survives native->native reloads with the host
-    /// (issue #15), so system Now-Playing ownership holds across a background pause.
+    /// before the session loaded (also nil on the software path and with no host). It auto-publishes
+    /// elapsed/rate/duration from the AVPlayer merged with the identity from `setNowPlayingInfo`, and
+    /// survives native->native reloads with the host (issue #15), so system Now-Playing ownership holds
+    /// across a background pause. Without `ownsVideoNowPlayingCommands` the host registers the transport
+    /// commands on its `remoteCommandCenter`.
     public var videoNowPlayingSession: MPNowPlayingSession? {
         nativeHost?.nowPlayingSession
     }
-
     #endif
 
     /// Opt in to the software host (the Dolby Vision FEL route) publishing its own Now-Playing card and
@@ -8251,52 +8294,88 @@ public final class AetherEngine: ObservableObject {
     /// auto-publishing session exists for it; with this set the engine writes the shared Now-Playing
     /// info and serves play, pause, toggle, skip and change-position, republishing on seek, pause, speed
     /// change, stall and end. Identity comes from `setExternalMetadata`, overlaid by
-    /// `setVideoNowPlayingInfo` on iOS and tvOS. Off by default; independent of
-    /// `ownsVideoNowPlayingSession`, so the native path is unaffected. Read when the software host is
-    /// built, so set it before `load()`. A secondary `sharedOutputRole` never takes it.
+    /// `setNowPlayingInfo`. Off by default; independent of `ownsVideoNowPlayingSession`, so the native
+    /// path is unaffected. Read when the software host is built, so set it before `load()`. A secondary
+    /// `sharedOutputRole` never takes it.
     public var ownsSoftwareNowPlaying: Bool = false
 
-    /// Skip distance advertised to, and used for, the software host's remote skip buttons. Read when the
-    /// software host is built.
+    /// Skip distance advertised to, and used for, the remote skip buttons on every route the engine
+    /// answers commands for. Read when a route starts.
     public var remoteSkipInterval: Double = 10
 
-    /// True while the engine is publishing Now-Playing for a software-host session. A host that wants
-    /// next/previous registers them on `MPRemoteCommandCenter.shared()` only while this is true.
+    /// True while the engine is publishing Now-Playing for a software-host session.
     @Published public internal(set) var softwareNowPlayingActive: Bool = false
 
-    #if os(tvOS) || os(iOS)
-    /// Staged per-item Now-Playing dictionary for the native video path. Replayed at host creation
-    /// and onto every fresh AVPlayerItem (gate reloads, media fallback, in-place swaps). Caller-managed
-    /// like the audio variant: pass an empty dict to clear.
+    /// Staged per-item Now-Playing identity for the video routes. Replayed at host creation and onto
+    /// every fresh AVPlayerItem (gate reloads, media fallback, in-place swaps); cleared by `stop()`.
     var pendingVideoNowPlayingInfo: [String: Any] = [:]
 
-    /// Stage the system Now-Playing identity dictionary for the native video path (MPMediaItemProperty
-    /// keys + a force-decoded, @Sendable-wrapped MPMediaItemArtwork). Elapsed/rate/duration keys are
-    /// unnecessary, the session merges the player truth. Safe before `load()`; replayed at host
-    /// creation. Ignored by a host that does not own the session (`ownsVideoNowPlayingSession`), but
-    /// still staged, so a host that opts in on a later load keeps what it set.
-    public func setVideoNowPlayingInfo(_ info: [String: Any]) {
-        pendingVideoNowPlayingInfo = info
-        refreshSoftwareNowPlayingIdentity()
-        nativeHost?.setNowPlayingInfo(info)
-    }
-    #endif
-
-    #if os(iOS) || os(tvOS)
-    /// Staged per-item Now-Playing dictionary for the audio AVPlayer path. Replayed at host creation.
+    /// Staged per-item Now-Playing identity for the audio routes. Replayed at host creation; survives
+    /// `stop()`, the host clears it with an empty dictionary.
     var pendingAudioNowPlayingInfo: [String: Any] = [:]
 
-    /// Stage the system Now-Playing dictionary for the audio AVPlayer path (MPMediaItemProperty /
-    /// MPNowPlayingInfoProperty keys, including the host's already-force-decoded, @Sendable-wrapped MPMediaItemArtwork).
-    /// The host owns the AVPlayer session with auto-publish ON; this is written to the per-item
-    /// AVPlayerItem.nowPlayingInfo (the documented, queue-safe channel) and the session merges in the player-derived
-    /// elapsed/rate/duration. Supplying a valid artwork keeps the system from falling back to the asset's embedded
-    /// cover. Pass an empty dict to clear. Safe before load(); replayed at host creation.
+    /// Stage the Now-Playing identity of the item being played, for whichever route `load()` picks:
+    /// MPMediaItemProperty / MPNowPlayingInfoProperty keys and an artwork. Elapsed, rate and duration are
+    /// unnecessary, the engine fills them from the playing host. Safe before `load()`, replayed onto every
+    /// host, and effective on every platform. Staged even for a route the engine does not own, so a host
+    /// that opts in later keeps it. Pass an empty dictionary to clear.
+    ///
+    /// The artwork must be decoded up front and its request handler `@Sendable`: MediaPlayer calls it off
+    /// the main thread, and a lazy decode of a corrupt embedded cover crashes it there.
+    public func setNowPlayingInfo(_ info: [String: Any]) {
+        pendingVideoNowPlayingInfo = info
+        pendingAudioNowPlayingInfo = info
+        nativeHost?.setNowPlayingInfo(info)
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        audioAVPlayerHost?.setNowPlayingInfo(info)
+        #endif
+        refreshNowPlayingIdentity()
+    }
+
+    /// `setNowPlayingInfo` for the video routes only.
+    public func setVideoNowPlayingInfo(_ info: [String: Any]) {
+        pendingVideoNowPlayingInfo = info
+        refreshNowPlayingIdentity()
+        nativeHost?.setNowPlayingInfo(info)
+    }
+
+    /// `setNowPlayingInfo` for the audio routes only. On the AVPlayer audio host it is written to the
+    /// item's `AVPlayerItem.nowPlayingInfo` (the documented, queue-safe channel) and the session merges in
+    /// the player-derived elapsed/rate/duration. Supplying a valid artwork keeps the system from falling
+    /// back to the asset's embedded cover.
     public func setAudioNowPlayingInfo(_ info: [String: Any]) {
         pendingAudioNowPlayingInfo = info
+        #if os(iOS) || os(tvOS) || os(visionOS)
         audioAVPlayerHost?.setNowPlayingInfo(info)
+        #endif
+        refreshNowPlayingIdentity()
     }
-    #endif
+
+    /// Next and previous track for the routes the engine answers commands on, typically a playlist or an
+    /// album queue the engine does not know about. Pass nil for a direction that does not exist right now
+    /// (first or last item), and nil for both when the queue ends. While either is set, the card offers
+    /// track buttons instead of the skip-interval pair, since the system shows only one of the two.
+    /// Handlers run on the main actor. Takes effect immediately, also mid-item.
+    public func setNowPlayingTrackCommands(next: (@MainActor () -> Void)?, previous: (@MainActor () -> Void)?) {
+        nowPlayingNextTrackHandler = next
+        nowPlayingPreviousTrackHandler = previous
+        nowPlayingController?.setTracks(nowPlayingTrackAvailability)
+    }
+
+    /// Lets the host answer a remote command itself on the routes the engine answers commands for.
+    /// Return true when the host handled it, false to let the engine perform it. For the few commands
+    /// whose meaning depends on the host's state, such as a play after the end of an item that the host
+    /// answers by starting the item over. Runs on the main actor.
+    public var nowPlayingCommandInterceptor: (@MainActor (NowPlayingRemoteCommand) -> Bool)?
+
+    /// Takes the shared Now-Playing surface for this engine when several engines in the process publish
+    /// there (one per player window on macOS). An engine claims it on its own when it starts playing; call
+    /// this when the user brings its player to the front. No effect on a route published through an
+    /// `MPNowPlayingSession`, where the system arbitrates.
+    public func claimNowPlaying() {
+        guard nowPlayingRoute?.plan.usesSharedSurface == true else { return }
+        nowPlayingArbiter.claim(self)
+    }
 
     /// Playback volume (0.0-1.0). Routes to the active host only; writing all hosts changed subsequent music
     /// sessions. Remembered by `desiredVolume` so a pre-session write (e.g. app-init restore) isn't a no-op.
@@ -8849,7 +8928,7 @@ public final class AetherEngine: ObservableObject {
         }
 
         softwareCancellables.removeAll()
-        stopSoftwareNowPlaying()
+        stopNowPlayingPublisher(clearCard: false)
         softwareClockSessionZero = nil
         endClockHold()
         // #353: the picture belongs to the session. Left standing, the next source would be laid out

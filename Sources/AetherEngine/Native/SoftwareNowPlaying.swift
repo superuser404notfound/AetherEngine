@@ -9,13 +9,24 @@ import AppKit
 #endif
 
 /// A remote command the system forwards to the engine, already decoded off the MediaPlayer event types.
-enum SoftwareNowPlayingCommand: Equatable {
+/// Public so a host can see it in `AetherEngine.nowPlayingCommandInterceptor`.
+public enum NowPlayingRemoteCommand: Equatable, Sendable {
     case play
     case pause
     case togglePlayPause
     /// Signed: negative skips back.
     case skip(seconds: Double)
     case changePosition(to: Double)
+    case nextTrack
+    case previousTrack
+}
+
+/// Which of the host's track commands exist right now. Either one switches the card from skip-interval
+/// buttons to track buttons, since the system shows only one of the two pairs.
+struct NowPlayingTrackAvailability: Equatable {
+    var next = false
+    var previous = false
+    var any: Bool { next || previous }
 }
 
 /// What the Now-Playing publisher drives and reads. The engine conforms; tests use a recording stand-in.
@@ -29,6 +40,22 @@ protocol SoftwareNowPlayingTransport: AnyObject {
     func pause()
     func togglePlayPause()
     func seek(to seconds: Double) async
+    /// A play that arrives from the lock screen, Control Center or a remote. The engine reactivates its
+    /// audio session first: the system may have deactivated it during the pause, and a player resumed on
+    /// an inactive session stays silent.
+    func playFromRemote()
+    func togglePlayPauseFromRemote()
+    /// Next or previous track, answered by the host's handler.
+    func performTrackCommand(next: Bool)
+    /// The host's chance to answer a command itself. True: handled, the engine does nothing more.
+    func interceptRemoteCommand(_ command: NowPlayingRemoteCommand) -> Bool
+}
+
+extension SoftwareNowPlayingTransport {
+    func interceptRemoteCommand(_ command: NowPlayingRemoteCommand) -> Bool { false }
+    func playFromRemote() { play() }
+    func togglePlayPauseFromRemote() { togglePlayPause() }
+    func performTrackCommand(next: Bool) {}
 }
 
 extension AetherEngine: SoftwareNowPlayingTransport {}
@@ -37,10 +64,15 @@ extension AetherEngine: SoftwareNowPlayingTransport {}
 /// `SystemNowPlayingSink`; the controller only sees this, so the state mapping needs no MediaPlayer.
 @MainActor
 protocol SoftwareNowPlayingSink: AnyObject {
-    func activate(skipInterval: Double, handler: @escaping @MainActor (SoftwareNowPlayingCommand) -> Void)
+    func activate(skipInterval: Double, handler: @escaping @MainActor (NowPlayingRemoteCommand) -> Void)
     func setSeekingEnabled(_ enabled: Bool)
+    func setTrackCommands(_ tracks: NowPlayingTrackAvailability)
     func publish(info: [String: Any]?, playbackState: MPNowPlayingPlaybackState)
-    func deactivate()
+    /// `clearCard` false keeps the published card on the center: a load that follows publishes over
+    /// it, so the card does not blink out between two items.
+    func deactivate(clearCard: Bool)
+    /// Clears a card `deactivate(clearCard: false)` left behind, if the center still holds it.
+    func clearCard()
 }
 
 /// Pure mapping from engine state to what the system card shows, and from commands to engine actions.
@@ -109,11 +141,14 @@ enum SoftwareNowPlayingPolicy {
     static func seekingEnabled(isLive: Bool) -> Bool { !isLive }
 
     @MainActor
-    static func perform(_ command: SoftwareNowPlayingCommand, on transport: any SoftwareNowPlayingTransport) {
+    static func perform(_ command: NowPlayingRemoteCommand, on transport: any SoftwareNowPlayingTransport) {
+        if transport.interceptRemoteCommand(command) { return }
         switch command {
-        case .play: transport.play()
+        case .play: transport.playFromRemote()
         case .pause: transport.pause()
-        case .togglePlayPause: transport.togglePlayPause()
+        case .togglePlayPause: transport.togglePlayPauseFromRemote()
+        case .nextTrack: transport.performTrackCommand(next: true)
+        case .previousTrack: transport.performTrackCommand(next: false)
         case .skip(let seconds):
             let target = skipTarget(current: transport.currentTime, delta: seconds, duration: transport.duration)
             Task { @MainActor in await transport.seek(to: target) }
@@ -130,13 +165,16 @@ enum SoftwareNowPlayingPolicy {
     }
 }
 
-/// Publishes the software host's Now-Playing card and routes the system's remote commands to the engine.
-/// The AVPlayer paths get both from their player; the software host has none, so this fills the same
-/// role by hand. Elapsed time is only published on discontinuities (state, rate, duration, a clock jump):
-/// the system extrapolates between them from the published rate.
+/// Publishes a Now-Playing card and routes the system's remote commands to the engine. Built for the
+/// software host, which has no `AVPlayer` to publish for it, and reused for every route the engine owns:
+/// with a sink that writes the shared info center (software video, the FFmpeg audio host, and the AVPlayer
+/// hosts on macOS, where no `MPNowPlayingSession` exists), or with one that only binds commands on a
+/// session's own center (the session publishes the card itself). Elapsed time is only published on
+/// discontinuities (state, rate, duration, a clock jump): the system extrapolates between them from the
+/// published rate.
 @MainActor
 final class SoftwareNowPlayingController {
-    private let sink: SoftwareNowPlayingSink
+    let sink: SoftwareNowPlayingSink
     private weak var transport: (any SoftwareNowPlayingTransport)?
     private var identity: [String: Any] = [:]
     private var intendedPlaying = false
@@ -150,16 +188,31 @@ final class SoftwareNowPlayingController {
         self.uptime = uptime
     }
 
+    /// False until `start` and after `stop`: an engine that does not hold the shared surface keeps its
+    /// controller built but silent, so a refresh or a clock tick publishes nothing.
+    private(set) var isActive = false
+    private var tracks = NowPlayingTrackAvailability()
+
     func start(skipInterval: Double = 10) {
         sink.activate(skipInterval: skipInterval) { [weak self] command in
             guard let transport = self?.transport else { return }
+            EngineLog.emit("[NowPlaying] remote command \(command)", category: .engine)
             SoftwareNowPlayingPolicy.perform(command, on: transport)
         }
+        isActive = true
+        sink.setTrackCommands(tracks)
     }
 
-    func stop() {
-        sink.deactivate()
+    func stop(clearCard: Bool = true) {
+        guard isActive else { return }
+        isActive = false
+        sink.deactivate(clearCard: clearCard)
         published = nil
+    }
+
+    func setTracks(_ tracks: NowPlayingTrackAvailability) {
+        self.tracks = tracks
+        if isActive { sink.setTrackCommands(tracks) }
     }
 
     /// Per-item identity (title, artwork, ...). Empty clears it.
@@ -181,7 +234,7 @@ final class SoftwareNowPlayingController {
     /// `elapsed` lets the clock sink pass the value it was handed, since the transport's own
     /// `currentTime` still holds the previous one while a @Published change is being delivered.
     func refresh(requestedRate: Float?, isBuffering: Bool, elapsed: Double? = nil) {
-        guard let transport else { return }
+        guard isActive, let transport else { return }
         let state = transport.state
         if state == .playing { intendedPlaying = true } else if state == .paused { intendedPlaying = false }
         if state != .playing { stalled = false }
@@ -211,7 +264,7 @@ final class SoftwareNowPlayingController {
     /// playing is the stall signal: rate goes to 0 until it advances again. Otherwise republish only
     /// when the position left the extrapolation the system holds (a seek while paused, a reposition).
     func clockTick(_ elapsed: Double) {
-        guard let published, let transport else { return }
+        guard isActive, let published, let transport else { return }
         let now = uptime()
         if transport.state == .playing {
             // Either direction is the clock moving; a backward reposition is not a stall.
@@ -321,11 +374,20 @@ protocol RemoteCommandSurface: AnyObject {
     var skipForward: any RemoteCommandHandle { get }
     var skipBackward: any RemoteCommandHandle { get }
     var changePosition: any RemoteCommandHandle { get }
+    var nextTrack: any RemoteCommandHandle { get }
+    var previousTrack: any RemoteCommandHandle { get }
     func setSkipInterval(_ seconds: Double)
 }
 
+/// A real command center: the shared one, or the per-player one of an `MPNowPlayingSession`.
 final class SharedRemoteCommandSurface: RemoteCommandSurface {
-    private var center: MPRemoteCommandCenter { .shared() }
+    private let resolve: () -> MPRemoteCommandCenter
+    init(center: MPRemoteCommandCenter? = nil) {
+        if let center { resolve = { center } } else { resolve = { .shared() } }
+    }
+    private var center: MPRemoteCommandCenter { resolve() }
+    var nextTrack: any RemoteCommandHandle { center.nextTrackCommand }
+    var previousTrack: any RemoteCommandHandle { center.previousTrackCommand }
     var play: any RemoteCommandHandle { center.playCommand }
     var pause: any RemoteCommandHandle { center.pauseCommand }
     var togglePlayPause: any RemoteCommandHandle { center.togglePlayPauseCommand }
@@ -338,49 +400,39 @@ final class SharedRemoteCommandSurface: RemoteCommandSurface {
     }
 }
 
-/// MediaPlayer-backed sink on the shared info and command centers. `MPNowPlayingSession` is not used:
-/// it asserts on an empty player list, and this host has no `AVPlayer` to give it.
+/// MediaPlayer-backed sink. On the shared route it writes the shared info center and binds the shared
+/// command center; on a session route `infoCenter` is nil (the session publishes the card from its player)
+/// and `commands` is that session's own center. `commands` nil publishes a card without answering any
+/// command, for a host that binds its own.
 ///
-/// The centers are process-wide, so the sink is a polite tenant: `deactivate` removes only its own
-/// targets, restores each command's `isEnabled` to what it was at `activate`, and clears the info and
-/// playback state only while the center still holds what this sink last published (another owner that
-/// took over in the meantime keeps its card).
+/// The shared centers are process-wide, so the sink is a polite tenant: `deactivate` removes only its own
+/// targets, restores each command's `isEnabled` to what it was before the sink first touched it, and clears
+/// the info and playback state only while the center still holds what this sink last published (another
+/// owner that took over in the meantime keeps its card). The track commands are only touched while the
+/// host has track handlers, so a host that registers its own next/previous keeps them.
 @MainActor
 final class SystemNowPlayingSink: SoftwareNowPlayingSink {
-    private let infoCenter: any NowPlayingInfoStore
-    private let commands: any RemoteCommandSurface
+    private let infoCenter: (any NowPlayingInfoStore)?
+    private let commands: (any RemoteCommandSurface)?
     private var tokens: [(any RemoteCommandHandle, Any)] = []
-    private var priorEnabled: [(any RemoteCommandHandle, Bool)] = []
+    private var trackTokens: [(any RemoteCommandHandle, Any)] = []
+    private var priorEnabled: [ObjectIdentifier: (command: any RemoteCommandHandle, enabled: Bool)] = [:]
     /// Our last `isEnabled` write per command; restored only while the command still holds it.
     private var written: [ObjectIdentifier: Bool] = [:]
     private var lastPublished: [String: Any]?
+    private var handler: (@MainActor (NowPlayingRemoteCommand) -> Void)?
+    private var seekingEnabled = true
+    private var tracks = NowPlayingTrackAvailability()
 
-    init(infoCenter: any NowPlayingInfoStore = MPNowPlayingInfoCenter.default(),
-         commands: any RemoteCommandSurface = SharedRemoteCommandSurface()) {
+    init(infoCenter: (any NowPlayingInfoStore)? = MPNowPlayingInfoCenter.default(),
+         commands: (any RemoteCommandSurface)? = SharedRemoteCommandSurface()) {
         self.infoCenter = infoCenter
         self.commands = commands
     }
 
-    private var allCommands: [any RemoteCommandHandle] {
-        [commands.play, commands.pause, commands.togglePlayPause,
-         commands.skipForward, commands.skipBackward, commands.changePosition]
-    }
-
-    func activate(skipInterval: Double, handler: @escaping @MainActor (SoftwareNowPlayingCommand) -> Void) {
-        priorEnabled = allCommands.map { ($0, $0.isEnabled) }
-        written.removeAll()
-        // MediaPlayer delivers commands on a queue of its own (not the main actor), so the target is
-        // explicitly @Sendable and hops to the main actor itself instead of inheriting this isolation.
-        func add(_ command: any RemoteCommandHandle,
-                 _ make: @escaping @Sendable (MPRemoteCommandEvent) -> SoftwareNowPlayingCommand?) {
-            setEnabled(command, true)
-            let token = command.addTarget { @Sendable event in
-                guard let decoded = make(event) else { return .commandFailed }
-                Task { @MainActor in handler(decoded) }
-                return .success
-            }
-            tokens.append((command, token))
-        }
+    func activate(skipInterval: Double, handler: @escaping @MainActor (NowPlayingRemoteCommand) -> Void) {
+        self.handler = handler
+        guard let commands else { return }
         add(commands.play) { _ in .play }
         add(commands.pause) { _ in .pause }
         add(commands.togglePlayPause) { _ in .togglePlayPause }
@@ -390,12 +442,62 @@ final class SystemNowPlayingSink: SoftwareNowPlayingSink {
         add(commands.changePosition) {
             ($0 as? MPChangePlaybackPositionCommandEvent).map { .changePosition(to: $0.positionTime) }
         }
+        applySeekingAndTracks()
+    }
+
+    /// MediaPlayer delivers commands on a queue of its own (not the main actor), so the target is
+    /// explicitly @Sendable and hops to the main actor itself instead of inheriting this isolation.
+    private func add(_ command: any RemoteCommandHandle, toTracks: Bool = false,
+                     _ make: @escaping @Sendable (MPRemoteCommandEvent) -> NowPlayingRemoteCommand?) {
+        rememberPrior(command)
+        setEnabled(command, true)
+        let box = HandlerBox(sink: self)
+        let token = command.addTarget { @Sendable event in
+            guard let decoded = make(event) else { return .commandFailed }
+            Task { @MainActor in box.sink?.handler?(decoded) }
+            return .success
+        }
+        if toTracks { trackTokens.append((command, token)) } else { tokens.append((command, token)) }
+    }
+
+    private final class HandlerBox: @unchecked Sendable {
+        weak var sink: SystemNowPlayingSink?
+        init(sink: SystemNowPlayingSink) { self.sink = sink }
     }
 
     func setSeekingEnabled(_ enabled: Bool) {
-        setEnabled(commands.skipForward, enabled)
-        setEnabled(commands.skipBackward, enabled)
-        setEnabled(commands.changePosition, enabled)
+        seekingEnabled = enabled
+        applySeekingAndTracks()
+    }
+
+    func setTrackCommands(_ tracks: NowPlayingTrackAvailability) {
+        self.tracks = tracks
+        guard let commands, handler != nil else { return }
+        if tracks.any, trackTokens.isEmpty {
+            add(commands.nextTrack, toTracks: true) { _ in .nextTrack }
+            add(commands.previousTrack, toTracks: true) { _ in .previousTrack }
+        } else if !tracks.any, !trackTokens.isEmpty {
+            release(&trackTokens)
+        }
+        applySeekingAndTracks()
+    }
+
+    /// The system shows either skip-interval or track buttons, so track handlers turn the skip pair off.
+    private func applySeekingAndTracks() {
+        guard let commands, handler != nil else { return }
+        let skip = seekingEnabled && !tracks.any
+        setEnabled(commands.skipForward, skip)
+        setEnabled(commands.skipBackward, skip)
+        setEnabled(commands.changePosition, seekingEnabled)
+        if !trackTokens.isEmpty {
+            setEnabled(commands.nextTrack, tracks.next)
+            setEnabled(commands.previousTrack, tracks.previous)
+        }
+    }
+
+    private func rememberPrior(_ command: any RemoteCommandHandle) {
+        let id = ObjectIdentifier(command)
+        if priorEnabled[id] == nil { priorEnabled[id] = (command, command.isEnabled) }
     }
 
     private func setEnabled(_ command: any RemoteCommandHandle, _ enabled: Bool) {
@@ -403,21 +505,37 @@ final class SystemNowPlayingSink: SoftwareNowPlayingSink {
         written[ObjectIdentifier(command)] = enabled
     }
 
+    /// Removes the targets and restores the enablement of exactly these commands.
+    private func release(_ list: inout [(any RemoteCommandHandle, Any)]) {
+        for (command, token) in list {
+            command.removeTarget(token)
+            let id = ObjectIdentifier(command)
+            if let prior = priorEnabled.removeValue(forKey: id), written[id] == command.isEnabled {
+                command.isEnabled = prior.enabled
+            }
+            written.removeValue(forKey: id)
+        }
+        list.removeAll()
+    }
+
     func publish(info: [String: Any]?, playbackState: MPNowPlayingPlaybackState) {
+        guard let infoCenter else { return }
         lastPublished = info
         infoCenter.nowPlayingInfo = info
         infoCenter.playbackState = playbackState
     }
 
-    func deactivate() {
-        for (command, token) in tokens { command.removeTarget(token) }
-        tokens.removeAll()
-        for (command, enabled) in priorEnabled where written[ObjectIdentifier(command)] == command.isEnabled {
-            command.isEnabled = enabled
-        }
-        priorEnabled.removeAll()
-        written.removeAll()
-        if let last = lastPublished, Self.sameCard(infoCenter.nowPlayingInfo, last) {
+    func deactivate(clearCard: Bool) {
+        release(&tokens)
+        release(&trackTokens)
+        handler = nil
+        if clearCard { self.clearCard() }
+    }
+
+    /// Clears the card this sink last published, if the center still holds it. Also what a card kept by
+    /// `deactivate(clearCard: false)` is cleared with once no later load replaced it.
+    func clearCard() {
+        if let infoCenter, let last = lastPublished, Self.sameCard(infoCenter.nowPlayingInfo, last) {
             infoCenter.nowPlayingInfo = nil
             infoCenter.playbackState = .stopped
         }

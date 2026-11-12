@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 import AVKit
 import Combine
-#if os(tvOS) || os(iOS)
+#if os(iOS) || os(tvOS) || os(visionOS)
 import MediaPlayer
 #endif
 #if os(iOS) || os(tvOS) || os(visionOS)
@@ -378,7 +378,7 @@ final class NativeAVPlayerHost {
 
     // MARK: - Init
 
-    #if os(tvOS) || os(iOS)
+    #if os(iOS) || os(tvOS) || os(visionOS)
     /// Now-Playing session bound to THIS player (same rationale as
     /// AudioAVPlayerHost): the shared MPRemoteCommandCenter /
     /// MPNowPlayingInfoCenter aren't reliably bound to a bare AVPlayer, a
@@ -422,7 +422,7 @@ final class NativeAVPlayerHost {
         self.playerLayer = AVPlayerLayer(player: player)
         self.playerLayer.videoGravity = .resizeAspect
         self.ownsNowPlayingSession = ownsNowPlayingSession
-        #if os(tvOS) || os(iOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         if ownsNowPlayingSession {
             let session = MPNowPlayingSession(players: [player])
             session.automaticallyPublishesNowPlayingInfo = true
@@ -437,7 +437,7 @@ final class NativeAVPlayerHost {
     /// another engine path) took over in the meantime is never claimed back. No-op when no session
     /// is owned.
     func becomeActiveNowPlaying() {
-        #if os(tvOS) || os(iOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         nowPlayingSession?.becomeActiveIfPossible(completion: { _ in })
         #endif
     }
@@ -447,7 +447,7 @@ final class NativeAVPlayerHost {
     /// elapsed/rate/duration. Empty clears.
     func setNowPlayingInfo(_ info: [String: Any]) {
         pendingNowPlayingInfo = info
-        #if os(tvOS) || os(iOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         // Only when this host owns the session. Writing item.nowPlayingInfo under an AVKit host
         // would feed AVKit's own Now-Playing publication a second, host-authored identity.
         guard ownsNowPlayingSession else { return }
@@ -665,7 +665,7 @@ final class NativeAVPlayerHost {
             item.externalMetadata = pendingExternalMetadata
         }
         #endif
-        #if os(tvOS) || os(iOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         // Replay staged Now-Playing identity onto the fresh item (gate
         // reloads / media fallback / in-place swaps keep the system card).
         // Owned sessions only: see setNowPlayingInfo.
