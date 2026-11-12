@@ -447,6 +447,7 @@ Other lines `play` prints:
 | `--cycle-el <seconds>` | Flips the FEL residual off and on every period (at least 0.1). | off |
 | `--dv-pin <spec>` | DEBUG: pulses a pinned frame's DV metadata. | off |
 | `--upscale` | `LoadOptions.upscalesLowResolutionVideo` (#846). | off |
+| `--line-art` | `LoadOptions.upscaleScaler = .lineArt` (AE#1039); implies `--upscale`. | off |
 | `--deinterlace-field-rate field\|frame` | `LoadOptions.deinterlaceFieldRate` (AE#492). | `field` |
 | `--native-video-frame-diagnostics` | `LoadOptions.nativeVideoFrameDiagnostics`. | off |
 | `--native-video-frame-recovery` | Bounded SDR native decoded-output repair. | off |
@@ -772,6 +773,8 @@ The refusal half needs a native mount that fails on its media, and macOS AVPlaye
 ### Upscaling (`--upscale`)
 
 `--upscale` opts in to upscaling sub-1080p SDR video to the display (`LoadOptions.upscalesLowResolutionVideo`, #846). It logs one `[Upscale]` line, and an `UPSCALE` line once the first frame is upscaled.
+
+`--line-art` runs the line-art scaler instead (`LoadOptions.upscaleScaler = .lineArt`, AE#1039) and implies `--upscale`. It also takes 1080p and 10-bit SDR. The `UPSCALE` line then ends in `scaler=lineArt`, and the `[Upscale] timing` lines show the chain's GPU time under `metal`.
 
 ### Dropped audio (`--drop-audio`)
 

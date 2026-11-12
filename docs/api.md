@@ -2069,6 +2069,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `preferredDecodePath` | `.automatic` | A `DecodePath`. `.software` serves this source through `SoftwarePlaybackHost` whatever the routing concluded, scoped to this session and costing the source nothing (seeks, the audio switch and the title switch all keep working). The escape for the formats `VTCapabilityProbe` deliberately cannot classify, and for live H.264 / HEVC, which never reaches that gate at all. One-way: there is no `.native`. On an `audioOnly` session it sends the audio to the FFmpeg host instead of AVPlayer. See [Overriding the decode path](#overriding-the-decode-path). |
 | `escalatesToSoftwarePath` | `true` | Whether a native session AVPlayer refuses on its merits (`CoreMediaErrorDomain`), or a live join without an entry point the native route can open (`AetherEngine.LiveJoin`, AE#627), may be rebuilt once on the software path (AE#561). `false` surfaces the failure as `.error` instead, for a host with its own fallback ladder (AE#629). Correctable. |
 | `upscalesLowResolutionVideo` | false | Opt in to upscaling SDR video below 1080p to the display's native pixel size (#846). See [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo). |
+| `upscaleScaler` | `.automatic` | The scaler that upscale stage runs. `.lineArt` is a 2x line-art network for animation that also takes 1080p and 10-bit SDR (AE#1039). See [`upscaleScaler`](#upscalescaler). |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |
 | `deinterlaceFieldRate` | `.field` | A `DeinterlaceFieldRate`: the hardware deinterlacer emits one frame per field (25i to 50p) or per frame. The software fallback is always frame rate, because doubling a CPU bwdif is the wrong trade and a fallback should not change cost class. |
 | `nativeVideoFrameDiagnostics` | false | Decoded-frame observation on SDR native loopback playback. See [Native video frame diagnostics and recovery](#native-video-frame-diagnostics-and-recovery). |
@@ -2378,6 +2379,29 @@ Opt in to upscaling SDR video below 1080p (coded width under 1920 and height und
 
 **Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source (which re-runs `load()` and re-decides the route). On a custom `IOReader` source, turning it off is honoured in place (the session stays on the software path and delivers frames as decoded), and turning it on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`.
 
+#### `upscaleScaler`
+
+Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE#1039). Ignored while that option is off.
+
+| Value | What it does | Takes |
+| --- | --- | --- |
+| `.automatic` (default) | VideoToolbox super resolution, then MetalFX, as described above | SDR, 8-bit 4:2:0, below 1080p |
+| `.lineArt` | A 2x line-art network, then a bilinear resample to the display box where 2x does not land on it | SDR, 8 or 10-bit 4:2:0, up to 1920x1080 |
+
+**What `.lineArt` is.** [Anime4K](https://github.com/bloc97/Anime4K)'s Upscale CNN x2 (S), MIT, as native Metal compute kernels in half precision (`LineArtShaderSource`, generated from the original GLSL by `Scripts/generate-line-art-shader.py`, weights unchanged). It upscales without restoring: no denoising and no line darkening, so grain and painted textures stay as they are. It is made for drawn content and suits nothing else, so a host sets it per title (from the genre, or a per-show switch).
+
+**What it costs.** About 11.6 ms of GPU time per frame for 1080p to 2160p on an A15 (Apple TV 4K, 3rd generation), and about 8 ms for 720p to 1440p. That fits 24 fps animation with room to spare. It needs no MetalFX and no Neural Engine, so the stage builds in well under a second. Like `.automatic`, it moves the title onto the software path, with the costs that path has.
+
+**How it behaves.** The same as the automatic stage, except:
+
+- The load logs `[Upscale] taken: <source> -> <target> (line art 2x to <size>)`, with `, then bilinear` when 2x does not land on the target.
+- It is not taken for a source that is neither 8 nor 10-bit 4:2:0 (`[Upscale] not taken (source is not 8 or 10-bit 4:2:0)`) or larger than 1920x1080 (`source is larger than 1920x1080`).
+- Output frames keep the decoder's pixel format: 10-bit stays 10-bit.
+- There is no degraded rung. A sustained overrun of the frame budget switches it off directly.
+- `UpscaleStatus.scaler` is `.lineArt`, and `mlScale` is nil.
+
+**Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source. On a custom `IOReader` source, switching it while `upscalesLowResolutionVideo` stays on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`, because the in-place rebuild keeps the session's plan.
+
 #### `autoplay`
 
 `autoplay` describes THIS MOUNT and nothing after it. The rebuilds a session makes on its own (`reloadAtCurrentPosition`, an option correction, the AirPlay LAN swap, an audio-delay nudge) come back in the transport state the session is in, not in this one.
@@ -2407,7 +2431,8 @@ Correcting it through `reloadAtCurrentPosition(applying:)` therefore does nothin
 | `AudioShaping` | `maxChannels` (nil or 1...8, never upmixes), `dialogueGainDB` (0...`maxDialogueGainDB`, 12), `compressor`, `clamped`, `isActive`, `summary` (the wording the engine's log uses). |
 | `AudioShaping.Compressor` | `thresholdDB`, `ratio`, `makeupGainDB`, `attackMilliseconds`, `releaseMilliseconds`, `kneeDB`, `clamped`, and the `night` preset (-30 dB, 4:1, +10 dB makeup, 5 ms attack, 250 ms release, 6 dB knee). |
 | `AudioShapingState` | `.off`, `.applied`, `.unavailable`; see `$audioShapingState`. |
-| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (true once a sustained overrun made the stage drop MetalFX and deliver the VideoToolbox output at its own size, which `targetSize` then is, with the source's pixel aspect ratio; kept when the stage later switches itself off). See `$activeUpscale`. |
+| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (true once a sustained overrun made the stage drop MetalFX and deliver the VideoToolbox output at its own size, which `targetSize` then is, with the source's pixel aspect ratio; kept when the stage later switches itself off), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
+| `UpscaleScaler` | `.automatic` or `.lineArt`, the scaler `LoadOptions.upscaleScaler` selects. See [`upscaleScaler`](#upscalescaler). |
 | `AudioTapChannels` | `.downmix` (every channel summed) or `.dialogue` (the front-centre channel, falling back to the downmix on a source without one). |
 | `AudioTapBuffer` | `buffer` (`AVAudioPCMBuffer`), `sourceTime`, `discontinuity`, `channels` (what this buffer actually carries). Non-discontinuity buffers are strictly increasing and non-overlapping, which is what SpeechAnalyzer's input timeline requires. |
 | `LiveTelemetry` | The 1 Hz snapshot: bitrates, observed fps, dropped frames, cache and network bytes, A/V gap, RSS. |
