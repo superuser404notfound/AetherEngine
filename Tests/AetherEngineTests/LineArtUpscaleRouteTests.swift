@@ -65,7 +65,7 @@ struct LineArtUpscaleRouteTests {
 
     @Test func lineArtNeedsNoMetalFX() {
         #expect(decide(metalFX: false).plan != nil)
-        #expect(decide(scaler: .automatic, metalFX: false, source: geo(1280, 720)) == .notTaken(.metalFXUnsupported))
+        #expect(decide(scaler: .automatic, metalFX: false, source: geo(1280, 720)).plan?.mlScale != nil)
     }
 
     @Test func hdrAndDolbyVisionKeepTheirRoute() {
@@ -96,6 +96,36 @@ struct LineArtUpscaleRouteTests {
     @Test func unknownFormatFallsBackToTheRawDepth() {
         #expect(UpscaleRouteDecision.isTenBit420(pixelFormat: AV_PIX_FMT_NONE.rawValue, bitsPerRawSample: 10))
         #expect(!UpscaleRouteDecision.isTenBit420(pixelFormat: AV_PIX_FMT_NONE.rawValue, bitsPerRawSample: 8))
+    }
+
+    /// What line art falls back to: the automatic plan below 1080p when it has an ML pass, else nothing.
+    @Test func lineArtFallsBackToTheAutomaticPlanBelow1080p() throws {
+        let hd = try #require(decide(source: geo(1280, 720)).plan)
+        let fallback = try #require(UpscaleRouteDecision.lineArtFallback(for: hd, mlScaleFactors: { _, _ in [1.5] }))
+        #expect(fallback.scaler == .automatic && fallback.mlScale == 1.5)
+        #expect(fallback.targetWidth == hd.targetWidth && fallback.targetHeight == hd.targetHeight)
+        #expect(UpscaleRouteDecision.lineArtFallback(for: hd, mlScaleFactors: { _, _ in [] }) == nil)
+
+        let fullHD = try #require(decide().plan)
+        #expect(UpscaleRouteDecision.lineArtFallback(for: fullHD, mlScaleFactors: { _, _ in [2] }) == nil)
+
+        let dvd = try #require(decide(source: geo(720, 480, 8, 9)).plan)
+        let dvdFallback = try #require(UpscaleRouteDecision.lineArtFallback(for: dvd, mlScaleFactors: { _, _ in [2] }))
+        #expect(dvdFallback.targetWidth == dvd.targetWidth && dvdFallback.targetHeight == dvd.targetHeight)
+    }
+
+    @Test func lineArtOverrunIsRememberedForLargerAndFasterSources() throws {
+        LineArtCostMemory.reset()
+        defer { LineArtCostMemory.reset() }
+        let hd = try #require(decide(source: geo(1280, 720)).plan)
+        let fullHD = try #require(decide().plan)
+        let sd = try #require(decide(source: geo(720, 480, 8, 9)).plan)
+        LineArtCostMemory.record(.init(width: 1280, height: 720, frameInterval: 1.0 / 24, meanMs: 40))
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1001.0 / 24000) != nil)
+        #expect(LineArtCostMemory.overrun(covering: fullHD, frameInterval: 1.0 / 60) != nil)
+        #expect(LineArtCostMemory.overrun(covering: sd, frameInterval: 1.0 / 24) == nil)
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: 1.0 / 12) == nil)
+        #expect(LineArtCostMemory.overrun(covering: hd, frameInterval: nil) != nil)
     }
 
     /// A custom source's in-place rebuild keeps its plan, so switching the scaler there needs a fresh load.

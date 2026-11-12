@@ -88,6 +88,24 @@ struct FrameChainTests {
         #expect(transition(row) <= transition(soft), "transition width \(transition(row)) vs bilinear \(transition(soft))")
     }
 
+    /// The last line-art stage at exactly 2x writes the output planes itself; that must match the general
+    /// path (the 2x RGB texture, then the chain's conversion) to within rounding.
+    @Test(arguments: [false, true])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func directLineArtOutputMatchesTheGeneralPath(tenBit: Bool) throws {
+        let input = try ChainFrames.gradient(480, 270, tenBit: tenBit)
+        ChainFrames.paintLuma(input) { x, y in ((x / 7 + y / 5) % 9 == 0) ? 30 : 60 + x / 4 }
+        let direct = LineArtStage()
+        let (a, _) = try chain(480, 270, target: (960, 540), stages: [direct]).process(input, picture: whole(480, 270))
+        #expect(direct.writesOutputDirectly)
+        let general = LineArtStage()
+        let (b, _) = try chain(480, 270, target: (960, 540), stages: [general, PassThroughStage()])
+            .process(input, picture: whole(480, 270))
+        #expect(!general.writesOutputDirectly)
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c)")
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func unsupportedFormatIsRefused() throws {
@@ -135,17 +153,38 @@ struct LineArtUpscalerTests {
         #expect(up.upscale(try ChainFrames.gradient(1280, 720, tenBit: false), pts: .invalid) != nil)
     }
 
-    /// The line-art stage has no lighter rung: a sustained overrun switches it off directly.
+    /// 1080p has nothing below line art: a sustained overrun switches it off directly, and remembers it.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func overrunDisablesWithoutADegradedRung() throws {
-        let up = try #require(FrameUpscaler(plan: try plan(640, 360), frameInterval: 0.0001))
+    func fullHDOverrunDisablesWithoutADegradedRung() throws {
+        FrameUpscaler.resetLineArtCostMemoryForTesting()
+        defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
+        let p = try plan(1920, 1080)
+        let up = try #require(FrameUpscaler(plan: p, frameInterval: 0.0001))
         let degraded = LockedFlag()
         up.onEvent = { if case .degraded = $0 { degraded.set() } }
-        let input = try ChainFrames.gradient(640, 360, tenBit: false)
+        let input = try ChainFrames.gradient(1920, 1080, tenBit: false)
         for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
         #expect(up.isDisabled)
         #expect(!degraded.value && !up.isDegraded)
+        #expect(LineArtCostMemory.overrun(covering: p, frameInterval: 0.0001) != nil)
+    }
+
+    /// Below 1080p the next best is the automatic route: VT super resolution, MetalFX where it is there.
+    @Test(.enabled(if: LineArtGate.mlAvailable))
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func overrunBelow1080pFallsBackToTheAutomaticScaler() throws {
+        FrameUpscaler.resetLineArtCostMemoryForTesting()
+        defer { FrameUpscaler.resetLineArtCostMemoryForTesting() }
+        let up = try #require(FrameUpscaler(plan: try plan(1280, 720), frameInterval: 0.0001))
+        let fallback = LockedPlan()
+        up.onEvent = { if case let .degraded(plan, _, _) = $0 { fallback.set(plan) } }
+        let input = try ChainFrames.gradient(1280, 720, tenBit: false)
+        for _ in 0..<48 { _ = up.upscale(input, pts: .invalid) }
+        #expect(!up.isDisabled)
+        #expect(fallback.value?.scaler == .automatic && fallback.value?.mlScale != nil)
+        #expect(up.plan.scaler == .automatic)
+        #expect(up.upscale(input, pts: .invalid) != nil, "the fallback stage delivers frames")
     }
 
     @Test
@@ -157,6 +196,28 @@ struct LineArtUpscalerTests {
         #expect(up.upscale(try ChainFrames.gradient(2560, 1440, tenBit: false), pts: .invalid) == nil)
         #expect(!up.isDisabled)
     }
+}
+
+private enum LineArtGate {
+    /// VT super resolution reports support on GitHub's macOS VMs yet fails every pass, so one real pass decides.
+    static let mlAvailable: Bool = {
+        guard #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *), ChainGate.gpuAvailable,
+              let plan = UpscaleRouteDecision.makePlan(
+                  source: SourceGeometry(width: 1280, height: 720, sarNum: 1, sarDen: 1),
+                  display: CGSize(width: 1920, height: 1080), mlScaleFactors: FrameUpscaler.mlScaleFactors),
+              plan.mlScale != nil,
+              let up = FrameUpscaler(plan: plan, frameInterval: 1.0 / 24),
+              let frame = try? ChainFrames.gradient(1280, 720, tenBit: false)
+        else { return false }
+        return up.upscale(frame, pts: .invalid) != nil
+    }()
+}
+
+private final class LockedPlan: @unchecked Sendable {
+    private let lock = NSLock()
+    private var plan: UpscalePlan?
+    func set(_ p: UpscalePlan) { lock.lock(); plan = p; lock.unlock() }
+    var value: UpscalePlan? { lock.lock(); defer { lock.unlock() }; return plan }
 }
 
 private final class LockedFlag: @unchecked Sendable {

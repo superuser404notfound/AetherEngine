@@ -126,6 +126,9 @@ final class FrameUpscaler: @unchecked Sendable {
     private var recentPTS: [Double] = []
     private let gpu: GPU
     private let initialPlan: UpscalePlan
+    private let buildQueue: DispatchQueue?
+    /// The scaler the stage runs now: the plan's, until a line-art overrun falls back to `.automatic`.
+    private var scaler: UpscaleScaler
     /// nil while `buildQueue` builds it.
     private var stage: Stage?
     private var lastPassThroughNote: String?
@@ -159,28 +162,54 @@ final class FrameUpscaler: @unchecked Sendable {
         }
         self.gpu = gpu
         self.initialPlan = plan
+        self.buildQueue = buildQueue
+        self.scaler = plan.scaler
         self.configuredInterval = frameInterval
         self.frameInterval = frameInterval
+        // Without MetalFX (tvOS before 27.1, or a GPU without it) the ML pass alone is the next best:
+        // its output goes out at its own size and the display scales the rest.
+        let mlOnly = Self.startsMLOnly(plan, metalFXAvailable: gpu.metalFXAvailable)
+        if mlOnly {
+            degraded = true
+            _isDegraded = true
+            EngineLog.emit("[Upscale] MetalFX unavailable on this device, starting ML only", category: .swPlayback)
+        }
         guard let buildQueue else {
             do {
-                stage = try Stage(plan: plan, gpu: gpu)
+                stage = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly)
             } catch {
                 EngineLog.emit("[Upscale] stage unavailable: \(error)", category: .swPlayback)
                 return nil
             }
             return
         }
+        buildAsync(plan, mlOnly: mlOnly, on: buildQueue, generation: 0)
+    }
+
+    /// An `.automatic` plan that needs MetalFX starts on its ML-only rung when MetalFX is not there.
+    static func startsMLOnly(_ plan: UpscalePlan, metalFXAvailable: Bool) -> Bool {
+        plan.scaler == .automatic && plan.needsMetalFX && plan.mlScale != nil && !metalFXAvailable
+    }
+
+    /// Bumped by every switch of stage, so a build that finishes after a newer one was started is dropped.
+    private var buildGeneration = 0
+
+    private func buildAsync(_ plan: UpscalePlan, mlOnly: Bool, on queue: DispatchQueue, generation: Int) {
         let gpuBox = UncheckedSendable(gpu)
-        buildQueue.async { [weak self] in
+        queue.async { [weak self] in
             let start = DispatchTime.now().uptimeNanoseconds
-            let built = Result { UncheckedSendable(try Stage(plan: plan, gpu: gpuBox.value)) }
-            self?.install(built, ms: elapsedMs(since: start))
+            let built = Result { UncheckedSendable(try Stage(plan: plan, gpu: gpuBox.value, mlOnly: mlOnly)) }
+            self?.install(built, ms: elapsedMs(since: start), generation: generation)
         }
     }
 
-    private func install(_ built: Result<UncheckedSendable<Stage>, Error>, ms: Double) {
+    private func install(_ built: Result<UncheckedSendable<Stage>, Error>, ms: Double, generation: Int) {
         processLock.lock()
         defer { processLock.unlock() }
+        guard generation == buildGeneration else {
+            if case let .success(box) = built { box.value.release() }
+            return
+        }
         switch built {
         case let .success(box):
             guard !isDisabled else { box.value.release(); return }
@@ -278,7 +307,6 @@ final class FrameUpscaler: @unchecked Sendable {
     // MARK: - Rebuild and pass-through
 
     private func rebuild(for input: CVPixelBuffer, width: Int, height: Int) -> Bool {
-        let scaler = initialPlan.scaler
         guard UpscaleRouteDecision.sizeAllowed(width: width, height: height, scaler: scaler) else {
             notePassThrough("\(width)x\(height) is " + (scaler == .lineArt ? "larger than 1920x1080" : "not below 1080p"))
             return false
@@ -294,7 +322,9 @@ final class FrameUpscaler: @unchecked Sendable {
         }
         let rebuilt: Stage
         do {
-            rebuilt = try Stage(plan: plan, gpu: gpu, mlOnly: degraded && plan.mlScale != nil)
+            let mlOnly = (degraded && plan.mlScale != nil)
+                || Self.startsMLOnly(plan, metalFXAvailable: gpu.metalFXAvailable)
+            rebuilt = try Stage(plan: plan, gpu: gpu, mlOnly: mlOnly)
         } catch {
             disable(reason: "rebuild for \(width)x\(height) failed: \(error)")
             return false
@@ -390,12 +420,65 @@ final class FrameUpscaler: @unchecked Sendable {
         if recentTimes.count == Self.budgetWindow, windowMean.total > budgetMs {
             let over = String(format: "%.2f ms mean over %d frames against %.2f ms",
                               windowMean.total, Self.budgetWindow, budgetMs)
-            if !degraded, stage.plan.mlScale != nil, stage.plan.needsMetalFX {
+            if stage.plan.scaler == .lineArt {
+                fallBackFromLineArt(over: over, window: windowMean, plan: stage.plan)
+            } else if !degraded, stage.plan.mlScale != nil, stage.plan.needsMetalFX {
                 degrade(over: over, window: windowMean, stage: stage)
             } else {
                 disable(reason: "over budget, " + over)
             }
         }
+    }
+
+    /// The line-art rung overran: remember it for the process, then hand a source below 1080p to the
+    /// automatic route (VT super resolution, with MetalFX where it is there), built off this thread while
+    /// frames pass through. A 1080p source has nothing below line art and switches off.
+    private func fallBackFromLineArt(over: String, window: StageTimes, plan: UpscalePlan) {
+        LineArtCostMemory.record(LineArtCostMemory.Overrun(
+            width: plan.sourceWidth, height: plan.sourceHeight, frameInterval: frameInterval, meanMs: window.total))
+        guard let fallback = UpscaleRouteDecision.lineArtFallback(for: plan, mlScaleFactors: Self.mlScaleFactors) else {
+            disable(reason: "over budget, " + over)
+            return
+        }
+        let mlOnly = Self.startsMLOnly(fallback, metalFXAvailable: gpu.metalFXAvailable)
+            || MetalFXCostMemory.overrun(covering: fallback, frameInterval: frameInterval) != nil
+        EngineLog.emit("[Upscale] degraded: line art over budget (\(over)), falling back to the automatic scaler"
+                       + (fallback.mlScale.map { ", ML \(String(format: "%g", $0))x" } ?? "")
+                       + (mlOnly ? " only" : " + MetalFX"), category: .swPlayback)
+        scaler = .automatic
+        stage?.release()
+        stage = nil
+        buildGeneration += 1
+        var published = fallback
+        if let buildQueue {
+            buildAsync(fallback, mlOnly: mlOnly, on: buildQueue, generation: buildGeneration)
+            if mlOnly {
+                published.targetWidth = fallback.mlOutputWidth
+                published.targetHeight = fallback.mlOutputHeight
+            }
+        } else {
+            do {
+                let built = try Stage(plan: fallback, gpu: gpu, mlOnly: mlOnly)
+                stage = built
+                published = built.plan
+            } catch {
+                disable(reason: "over budget, " + over + "; fallback not built: \(error)")
+                return
+            }
+        }
+        // MetalFX can still be dropped from the fallback later, so it is degraded only without it.
+        degraded = mlOnly
+        firstFrameSent = true
+        recentTimes.removeAll()
+        stageFrames = 0
+        timingLines = 0
+        stateLock.lock()
+        _isDegraded = true
+        _deliveredPlan = published
+        let stats = _stats
+        let handler = _onEvent
+        stateLock.unlock()
+        handler?(.degraded(published, reason: "line art over budget, " + over, stats: stats))
     }
 
     /// The first rung of the overrun ladder: keep ML, drop MetalFX, start a fresh budget window.
@@ -523,9 +606,54 @@ enum MetalFXCostMemory {
     }
 }
 
+// MARK: - Process-wide line-art cost
+
+/// Line-art overruns seen in this process: a later source at least as large, at a frame interval no longer,
+/// would overrun again, so the load decides for the automatic scaler instead (AE#1039).
+enum LineArtCostMemory {
+    struct Overrun: Equatable, Sendable {
+        var width: Int, height: Int
+        var frameInterval: Double
+        var meanMs: Double
+        var pixels: Int { width * height }
+
+        /// 1% slack, so 24 fps counts as at least as fast as 23.976.
+        func covers(pixels other: Int, frameInterval interval: Double) -> Bool {
+            other >= pixels && interval <= frameInterval * 1.01
+        }
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var overruns: [Overrun] = []
+
+    static func record(_ overrun: Overrun) {
+        lock.lock(); defer { lock.unlock() }
+        guard !overruns.contains(where: { $0.pixels <= overrun.pixels && $0.frameInterval >= overrun.frameInterval })
+        else { return }
+        overruns.removeAll { $0.pixels >= overrun.pixels && $0.frameInterval <= overrun.frameInterval }
+        overruns.append(overrun)
+    }
+
+    /// The overrun covering a line-art plan for this source at `frameInterval` (unknown counts as covered
+    /// by any rate, like `UpscaleFailureMemory`).
+    static func overrun(covering plan: UpscalePlan, frameInterval: Double?) -> Overrun? {
+        lock.lock(); defer { lock.unlock() }
+        let pixels = plan.sourceWidth * plan.sourceHeight
+        return overruns.first { o in
+            guard let frameInterval else { return pixels >= o.pixels }
+            return o.covers(pixels: pixels, frameInterval: frameInterval)
+        }
+    }
+
+    static func reset() {
+        lock.lock(); overruns.removeAll(); lock.unlock()
+    }
+}
+
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 extension FrameUpscaler {
     static func resetMetalFXCostMemoryForTesting() { MetalFXCostMemory.reset() }
+    static func resetLineArtCostMemoryForTesting() { LineArtCostMemory.reset() }
 }
 
 // MARK: - GPU state shared across rebuilds
@@ -575,6 +703,7 @@ private final class GPU {
     let toRGBA: MTLComputePipelineState
     let toNV12: MTLComputePipelineState
     let textureCache: CVMetalTextureCache
+    let metalFXAvailable: Bool
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
@@ -588,6 +717,11 @@ private final class GPU {
         self.toRGBA = kernels.toRGBA
         self.toNV12 = kernels.toNV12
         self.textureCache = cache
+        if #available(tvOS 27.1, *) {
+            metalFXAvailable = MTLFXSpatialScalerDescriptor.supportsDevice(device)
+        } else {
+            metalFXAvailable = false
+        }
     }
 
     func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) throws -> (MTLTexture, CVMetalTexture) {

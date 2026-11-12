@@ -124,10 +124,25 @@ struct UpscaleRouteDecisionTests {
 
     @Test func exitsInOrder() {
         #expect(decide(os: false, sdr: false) == .notTaken(.unsupportedOS))
-        #expect(decide(metalFX: false, sdr: false) == .notTaken(.metalFXUnsupported))
+        #expect(decide(metalFX: false, sdr: false) == .notTaken(.hdrOrDolbyVision))
+        #expect(decide(metalFX: false, airPlay: true, factors: { _, _ in [] }) == .notTaken(.metalFXUnsupported))
         #expect(decide(source: geo(0, 0), sdr: false) == .notTaken(.hdrOrDolbyVision))
         #expect(decide(source: geo(0, 0), airPlay: true) == .notTaken(.geometryUnknown))
         #expect(decide(source: geo(1920, 1080), display: CGSize(width: 100, height: 100)) == .notTaken(.notBelow1080p))
+    }
+
+    /// Without MetalFX the ML pass is the next best: the route is taken and the stage starts ML only.
+    /// Only a plan that would need MetalFX and has no ML pass is refused.
+    @Test func withoutMetalFXTheMLPassStillRuns() throws {
+        let plan = try #require(decide(metalFX: false).plan)
+        #expect(plan.mlScale == 1.5 && plan.needsMetalFX)
+        if #available(macOS 26, iOS 26, tvOS 26, visionOS 26, *) {
+            #expect(FrameUpscaler.startsMLOnly(plan, metalFXAvailable: false))
+            #expect(!FrameUpscaler.startsMLOnly(plan, metalFXAvailable: true))
+        }
+        #expect(decide(metalFX: false, factors: { _, _ in [] }) == .notTaken(.metalFXUnsupported))
+        // ML landing on the target needs no MetalFX at all.
+        #expect(decide(metalFX: false, display: CGSize(width: 1920, height: 1080)).plan != nil)
     }
 
     @Test func zeroGeometryIsUnknown() {
