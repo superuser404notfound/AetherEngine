@@ -675,6 +675,9 @@ public final class AetherEngine: ObservableObject {
     /// RPU could not be read. Held for the same reason as `sourceDVBLCompatID`: a reload has to judge the
     /// source after the probe that measured it is gone.
     var sourceDolbyVisionRPUProfile: Int? = nil
+    /// Sodalite#236: the frame rate the load measured on packets in place of an odd declared one, held
+    /// so a reload builds the same frame grid without the probe that measured it.
+    var sourceMeasuredFrameRate: AVRational? = nil
 
     /// AE#541: the two load-time terms of the HDR route that a reload cannot take again. The criteria
     /// readout is only an answer around the handshake, and an in-place rebuild runs none, so an audio
@@ -4977,6 +4980,7 @@ public final class AetherEngine: ObservableObject {
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
         sourceDolbyVisionRPUProfile = nil
+        sourceMeasuredFrameRate = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil
@@ -5059,6 +5063,7 @@ public final class AetherEngine: ObservableObject {
         var detectedDVProfileNum: Int? = nil
         var detectedDVBLCompatIDNum: Int? = nil
         var detectedRate: Double? = nil
+        var measuredFrameRate: AVRational? = nil
         var detectedVideoBitrate: Int64 = 0
         var detectedVideoStreamFormat: VideoStreamFormat? = nil
         var detectedDVProfile: Bool = false
@@ -5224,6 +5229,28 @@ public final class AetherEngine: ObservableObject {
                     capabilities: presentsDolbyVisionBaseLayer
                         ? sessionDisplayCaps.withoutDolbyVision() : sessionDisplayCaps)
                 detectedRate = Self.detectFrameRate(stream: stream)
+                // Sodalite#236: an odd declared rate (a Matroska DefaultDuration of 50 ms on 2:3 film
+                // reads as 20 fps) is checked against the packets find_stream_info already queued.
+                let declaredRate = stream.pointee.avg_frame_rate.num > 0
+                    ? stream.pointee.avg_frame_rate : stream.pointee.r_frame_rate
+                if !options.isLive, declaredRate.num > 0, declaredRate.den > 0,
+                   !SourceFrameRateMeasurement.isStandard(declaredRate) {
+                    let videoIndex = stream.pointee.index
+                    let timeBase = stream.pointee.time_base
+                    measuredFrameRate = await BlockingWork.detached(priority: .userInitiated) { [probe] in
+                        SourceFrameRateMeasurement.measure(
+                            demuxer: probe, videoStreamIndex: videoIndex, declared: declaredRate, timeBase: timeBase)
+                    }.value
+                    EngineLog.emit(
+                        "[AetherEngine] Sodalite#236 declared frame rate \(declaredRate.num)/\(declaredRate.den) is "
+                        + "not a standard rate; "
+                        + (measuredFrameRate.map { "the packets run at \($0.num)/\($0.den), which this session uses" }
+                           ?? "the packets did not settle on a standard rate, so it stands"),
+                        category: .engine)
+                    if let measuredFrameRate {
+                        detectedRate = Double(measuredFrameRate.num) / Double(measuredFrameRate.den)
+                    }
+                }
                 // DrHurt #4 (2026-05-26): use source-detected DV, not effective-format, so codecTag=dvh1
                 // asks AVDisplayManager for DV mode on every DV source. AVPlayer's HLS tone-mapper downgrades
                 // DV->HDR10 when the panel can't host it; we don't pre-strip engine-side. Pairs with
@@ -5401,6 +5428,7 @@ public final class AetherEngine: ObservableObject {
         sourceVideoFormat = detectedFormat
         sourceDVProfile = detectedDVProfileNum
         sourceDolbyVisionRPUProfile = detectedDVRPUProfile
+        sourceMeasuredFrameRate = measuredFrameRate
         sourceVideoFrameRate = detectedRate
         sourceVideoBitrate = detectedVideoBitrate
         sourceVideoStreamFormat = detectedVideoStreamFormat
@@ -6339,6 +6367,7 @@ public final class AetherEngine: ObservableObject {
                     forceDolbyVisionOnNonDVDisplay: options.forceDolbyVisionOnNonDVDisplay,
                     dolbyVisionHandling: options.dolbyVisionHandling,
                     dolbyVisionRPUProfile: detectedDVRPUProfile,
+                    measuredFrameRate: measuredFrameRate,
                     matchContentEnabled: options.matchContentEnabled,
                     panelIsInHDRMode: routingPanelHDR,
                     // AE#535: the table composed at the top of this load, not a second read of it.
@@ -7609,6 +7638,7 @@ public final class AetherEngine: ObservableObject {
         sourceSoftwareOnlyForUpscale = false
         sourceUpscaleFrameRate = nil
         sourceDolbyVisionRPUProfile = nil
+        sourceMeasuredFrameRate = nil
         sessionPanelHDRReadout = nil
         sessionObservedDisplayCaps = nil
         sourceVideoFrameRate = nil

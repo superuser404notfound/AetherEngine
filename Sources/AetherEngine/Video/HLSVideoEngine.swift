@@ -75,6 +75,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// (`DolbyVisionRecordAudit`). nil when nothing was read, which is every source but a Profile 5
     /// record over a BT.2020 YCbCr HDR VUI. The route believes it over the record.
     let dolbyVisionRPUProfile: Int?
+    /// Sodalite#236: the rate the load measured on packets because the declared one was not a
+    /// standard rate (`SourceFrameRateMeasurement`); nil keeps the stream's declared rate.
+    let measuredFrameRate: AVRational?
+    /// Sodalite#236: one 2:3 film verdict for every producer of the session.
+    let pulldownLatch = PulldownCadenceLatch()
 
     /// Match Content master toggle at load time; one input to the master-vs-media-playlist routing decision.
     private let matchContentEnabled: Bool
@@ -1153,6 +1158,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         dolbyVisionRPUProfile: Int? = nil,
+        measuredFrameRate: AVRational? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         audioSourceStreamIndexOverride: Int32? = nil,
@@ -1215,6 +1221,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.forceDolbyVisionOnNonDVDisplay = forceDolbyVisionOnNonDVDisplay
         self.dolbyVisionHandling = dolbyVisionHandling
         self.dolbyVisionRPUProfile = dolbyVisionRPUProfile
+        self.measuredFrameRate = measuredFrameRate
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.audioSourceStreamIndexOverride = audioSourceStreamIndexOverride
@@ -1810,7 +1817,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // leaves avg_frame_rate unset while the parser still fills r_frame_rate; the master's
         // FRAME-RATE attribute is load-bearing for PQ/HLG variants (AVPlayer filters a
         // VIDEO-RANGE=PQ/HLG EXT-X-STREAM-INF without FRAME-RATE and fails -1002).
-        let frameRate: Double? = AetherEngine.detectFrameRate(stream: videoStream)
+        let frameRate: Double? = measuredFrameRate.map { Double($0.num) / Double($0.den) }
+            ?? AetherEngine.detectFrameRate(stream: videoStream)
         // HDCP-LEVEL omitted: local loopback has no DRM scope, and emitting TYPE-1 caused
         // AVFoundationErrorDomain -11868 / tracks count=0 when the HDMI link's HDCP 2.2
         // negotiation state didn't match (Vincent test 2026-05-26, HDR10 panel).
@@ -2031,8 +2039,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // writes) agrees on the time base. A Matroska track with DefaultDuration probes its rate exactly.
         let frameGrid: CFRFrameGrid? = isLiveSession ? nil : CFRFrameGrid.make(
             sourceTimeBase: videoTimeBase,
-            frameRate: videoStream.pointee.avg_frame_rate.num > 0
-                ? videoStream.pointee.avg_frame_rate : videoStream.pointee.r_frame_rate,
+            frameRate: measuredFrameRate ?? (videoStream.pointee.avg_frame_rate.num > 0
+                ? videoStream.pointee.avg_frame_rate : videoStream.pointee.r_frame_rate),
             startPts: videoStream.pointee.start_time
         )
         if let frameGrid {
@@ -2055,7 +2063,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
             convertsAnnexBSamples: framingNormalization.convertsAnnexBSamples,
             nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed),
             stereo: stereo.signal,
-            frameGrid: frameGrid
+            frameGrid: frameGrid,
+            pulldownLatch: pulldownLatch
         )
         self.videoStreamIndex = videoIndex
         self.savedVideoConfig = videoConfig
