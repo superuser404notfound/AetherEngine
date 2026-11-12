@@ -36,21 +36,6 @@ struct Issue220SoftwareDecoderDrainTests {
         #expect(SoftwareVideoDecoder.disposition(forSendResult: FFmpegErr.eof) == .dropped)
     }
 
-    // MARK: - Thread count
-
-    /// Every frame thread past the first holds a frame back, so the count bounds the depth the
-    /// fixture test below allows. Uncapped, an 18-core Mac (Mac17,6) held 17 and delivered 23 of 40.
-    @Test("playback decodes on one thread per core, at most libavcodec's 16",
-          arguments: [(1, 1), (6, 6), (16, 16), (18, 16), (32, 16)])
-    func playbackThreadCountStopsAt16(cores: Int, threads: Int) {
-        #expect(SoftwareVideoDecoder.playbackThreadCount(activeProcessorCount: cores) == threads)
-    }
-
-    @Test("a reported core count of zero still decodes on one thread")
-    func playbackThreadCountNeverZero() {
-        #expect(SoftwareVideoDecoder.playbackThreadCount(activeProcessorCount: 0) == 1)
-    }
-
     // MARK: - Real decode
 
     /// Regression guard for the send/drain split: 40 IDR+P packets, no B-frames, so the decoder

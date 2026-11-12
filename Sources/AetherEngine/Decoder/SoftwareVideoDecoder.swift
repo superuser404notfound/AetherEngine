@@ -130,8 +130,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// arrive, so the count is also output delay, and libavcodec warns above 16 ("Using a thread
     /// count greater than 16 is not recommended"), where its own automatic choice stops. Uncapped on
     /// an 18-core Mac (Mac17,6) the decoder held 17 frames: a 40-packet progressive H.264 delivered
-    /// 23 frames, and a Live source whose reads stalled kept the frames it had already received
-    /// inside the decoder instead of on screen. Apple TV, iPhone and iPad have far fewer cores.
+    /// 23, and a Live source whose reads stalled kept 17 frames it had already received off the
+    /// screen. Capped it holds at most 15, as a 16-core Mac already did; that remaining delay is
+    /// frame threading's own. Apple TV, iPhone and iPad have far fewer cores.
     nonisolated static func playbackThreadCount(activeProcessorCount: Int) -> Int {
         max(1, min(16, activeProcessorCount))
     }
