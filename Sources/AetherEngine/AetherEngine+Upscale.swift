@@ -21,6 +21,7 @@ extension AetherEngine {
         var frameRate: Double?
         var isSDR = true
         var isEightBit420 = true
+        var isTenBit420 = false
         if let stream = videoStream, let cp = stream.pointee.codecpar {
             let sar = PixelAspectPolicy.declaredPixelAspect(
                 bitstream: cp.pointee.sample_aspect_ratio, container: stream.pointee.sample_aspect_ratio,
@@ -30,6 +31,8 @@ extension AetherEngine {
             frameRate = Self.detectFrameRate(stream: stream)
             isSDR = UpscaleRouteDecision.isSDR(colorTransfer: cp.pointee.color_trc)
             isEightBit420 = UpscaleRouteDecision.isEightBit420(
+                pixelFormat: cp.pointee.format, bitsPerRawSample: cp.pointee.bits_per_raw_sample)
+            isTenBit420 = UpscaleRouteDecision.isTenBit420(
                 pixelFormat: cp.pointee.format, bitsPerRawSample: cp.pointee.bits_per_raw_sample)
         }
 
@@ -54,7 +57,7 @@ extension AetherEngine {
             source: source, isSDR: isSDR, isDolbyVision: dvProfile != nil, isEightBit420: isEightBit420,
             display: DisplayPixelSize.current() ?? .zero,
             wirelessAirPlayRoute: wirelessAirPlayRoute, demuxedAudioLive: demuxedAudioLive,
-            mlScaleFactors: mlScaleFactors,
+            mlScaleFactors: mlScaleFactors, scaler: options.upscaleScaler, isTenBit420: isTenBit420,
             stageFailedEarlier: { UpscaleFailureMemory.contains($0, frameRate: frameRate) })
     }
 

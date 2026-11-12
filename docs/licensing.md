@@ -12,6 +12,7 @@ What you have to do to ship AetherEngine and its dependencies in an app, App Sto
 | LibTrueHD | MIT, plus Apache-2.0 parts | Static library, only with the `TrueHDObjectAudio` trait | Ship the Apache-2.0 text and LibTrueHD's `NOTICE` |
 | DTS:X decoding | Part of FFmpeg | Nothing extra | Nothing beyond FFmpeg |
 | SMBClient | MIT | Only if you link `AetherEngineSMB` | Show its notice |
+| Anime4K | MIT | Compiled in (the line-art scaler's kernels) | Show bloc97's notice |
 
 ## AetherEngine
 
@@ -50,6 +51,10 @@ History: earlier releases linked LibDTSX instead. Its `dca` crate is a port of F
 ## SMBClient
 
 [SMBClient](https://github.com/kishikawakatsumi/SMBClient) (MIT) reaches your app only if you link the `AetherEngineSMB` product. Linking `AetherEngine` alone pulls in none of its symbols, even though SwiftPM still lists the package in `Package.resolved` (that file describes the resolved graph, not what the linker kept).
+
+## Anime4K
+
+The line-art scaler (`LoadOptions.upscaleScaler = .lineArt`) runs [Anime4K](https://github.com/bloc97/Anime4K)'s Upscale CNN x2 (S), Copyright (c) 2019-2021 bloc97, MIT. Its weights are compiled into the engine as Metal source (`Sources/AetherEngine/Video/Metal/LineArtShaderSource.swift`, which carries the full notice), whether or not a host uses the option. MIT requires the copyright notice to travel with the binary, so **bloc97's notice** belongs on your acknowledgements screen.
 
 ## Linking the engine statically
 

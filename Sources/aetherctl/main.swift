@@ -70,7 +70,7 @@ func printUsage() {
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
-      aetherctl play [--fel [--fel-output]] [--upscale] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -85,7 +85,9 @@ func printUsage() {
                      (full load+play session smoke test; --fel opts into the Profile 7
                       FEL dual-layer route (off by default, as in the engine, and only in
                       a build with the DualLayerDolbyVision trait); --upscale opts into
-                      upscaling sub-1080p SDR video to the display (#846);
+                      upscaling sub-1080p SDR video to the display (#846),
+                      --line-art with the line-art scaler for animation, which
+                      also takes 1080p and 10-bit SDR (AE#1039);
                       --surface (or --window) presents
                       into a window; --cycle-el S flips the FEL residual every S
                       seconds, which needs --fel and a surface; --subs activates the first
@@ -856,7 +858,9 @@ if first == "play" {
     // software host's (needs --fel).
     let playFelOutput = takeFlag("--fel-output", from: &rest)
     // #846: `LoadOptions.upscalesLowResolutionVideo`, off by default as in the engine.
-    let playUpscale = takeFlag("--upscale", from: &rest)
+    // AE#1039: `LoadOptions.upscaleScaler = .lineArt`; implies --upscale.
+    let playLineArt = takeFlag("--line-art", from: &rest)
+    let playUpscale = takeFlag("--upscale", from: &rest) || playLineArt
     let playSurfaceFlag = takeFlag("--surface", from: &rest)
     let playWindowFlag = takeFlag("--window", from: &rest)
     let playAttachSurface = playSurfaceFlag || playWindowFlag
@@ -1204,6 +1208,7 @@ if first == "play" {
                  preferDualLayerDolbyVision: playPreferDualLayerDV,
                  dualLayerRoute: playFelOutput ? .avPlayerOutput : .softwareHost,
                  upscalesLowResolutionVideo: playUpscale,
+                 upscaleScaler: playLineArt ? .lineArt : .automatic,
                  attachSurface: playAttachSurface,
                  record: playRecord))
 }

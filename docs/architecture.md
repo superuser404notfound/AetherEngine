@@ -1232,10 +1232,15 @@ Notes:
 | `PrefetchDiskBudget.swift` | Disk bound for an opt-in whole-source prefetch. The hard window is never evicted, so the budget only bounds what lives outside it (#207). |
 | `RetentionClaims.swift` | Process-wide ledger of the running sessions' disk allowances. A new session is sized from the free space minus what the others may still write, so concurrent engines cannot each claim a quarter of the same space (#687). |
 
-#### `Video/Metal/` (`DualLayerDolbyVision` trait only)
+#### `Video/Metal/`
+
+The `Dovi*` files build only with the `DualLayerDolbyVision` trait.
 
 | File | What it does |
 | --- | --- |
+| `FrameChain.swift` | The GPU frame chain (AE#957, AE#1039): a decoded 8 or 10-bit 4:2:0 frame to half-float RGB, through a list of `FrameChainStage`s, and back to the input's format at the target size, in one command buffer. `PassThroughStage` and `LineArtStage` are its stages; `FrameUpscaler` runs it for the `.lineArt` plan. |
+| `LineArtShaderSource.swift` | Generated (`Scripts/generate-line-art-shader.py`) from Anime4K's Upscale CNN x2 (S), MIT: four half-precision convolution kernels and the depth-to-space kernel, compiled at runtime. |
+| `UpscaleShaderSource.swift` | NV12 / RGBA kernels around MetalFX for the automatic upscale stage, and the Y'CbCr matrix from a buffer's tag. |
 | `DoviFelChromaFormat.swift` | Chroma sampling of the composed frame: 4:2:0 (the composition), 4:2:2 and 4:4:4 (experimental, `AETHER_FEL_CHROMA`), and each format's CoreVideo layout. |
 | `DoviFelComposer.swift` | BL + EL + RPU composition: pipelines compiled at runtime, pooled P010 output, `composeAsync` bounded at `maxFramesInFlight` with completions on its own serial queue; RPU → `DoviMetalParams` parsing. |
 | `DoviShaderSource.swift` | Luma / chroma compose kernels (reshaping, inverse NLQ, bilinear EL upsampling, ordered dither) and the ABI layout probe, compiled at runtime. |

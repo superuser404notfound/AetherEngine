@@ -122,8 +122,8 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private let configuredInterval: Double
     private var frameInterval: Double
-    private var ptsDeltas: [Double] = []
-    private var lastPTS: Double?
+    /// The last `intervalWindow + 1` distinct PTS, in arrival order.
+    private var recentPTS: [Double] = []
     private let gpu: GPU
     private let initialPlan: UpscalePlan
     /// nil while `buildQueue` builds it.
@@ -216,10 +216,17 @@ final class FrameUpscaler: @unchecked Sendable {
         }
 
         let format = CVPixelBufferGetPixelFormatType(input)
-        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-                || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else {
-            notePassThrough("pixel format \(fourCC(format)) is not 8-bit 4:2:0")
-            return nil
+        if built.plan.scaler == .lineArt {
+            guard FrameChain.supportedFormats.contains(format) else {
+                notePassThrough("pixel format \(fourCC(format)) is not 8 or 10-bit 4:2:0")
+                return nil
+            }
+        } else {
+            guard format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange else {
+                notePassThrough("pixel format \(fourCC(format)) is not 8-bit 4:2:0")
+                return nil
+            }
         }
         let picture = Self.pictureRegion(of: input)
         if picture.width != built.plan.sourceWidth || picture.height != built.plan.sourceHeight {
@@ -247,26 +254,40 @@ final class FrameUpscaler: @unchecked Sendable {
 
     private func notePTS(_ pts: CMTime) {
         guard pts.isNumeric else { return }
-        let seconds = pts.seconds
-        defer { lastPTS = seconds }
-        guard let last = lastPTS, seconds > last, seconds - last <= Self.maxFrameDelta else { return }
-        ptsDeltas.append(seconds - last)
-        if ptsDeltas.count > Self.intervalWindow { ptsDeltas.removeFirst() }
-        frameInterval = Self.liveInterval(deltas: ptsDeltas, configured: configuredInterval)
+        recentPTS = Self.recentPTS(recentPTS, adding: pts.seconds)
+        frameInterval = Self.liveInterval(deltas: Self.framePeriods(recentPTS), configured: configuredInterval)
+    }
+
+    /// `window` with `seconds` added: a PTS more than `maxFrameDelta` outside the window is a seek and
+    /// starts a new one, a repeat is ignored, and the oldest arrival leaves past `intervalWindow + 1`.
+    static func recentPTS(_ window: [Double], adding seconds: Double) -> [Double] {
+        guard let lo = window.min(), let hi = window.max(),
+              seconds >= lo - maxFrameDelta, seconds <= hi + maxFrameDelta else { return [seconds] }
+        guard !window.contains(seconds) else { return window }
+        return Array((window + [seconds]).suffix(intervalWindow + 1))
+    }
+
+    /// The gaps between neighbouring PTS in presentation order. Sorting first matters: VideoToolbox hands
+    /// frames over in decode order, where the gap between two arrivals is up to a whole mini-GOP (measured
+    /// 83.5 ms against a 41.7 ms period on 1080p HEVC, which doubled the budget).
+    static func framePeriods(_ window: [Double]) -> [Double] {
+        let sorted = window.sorted()
+        return zip(sorted, sorted.dropFirst()).map { $1 - $0 }.filter { $0 > 0 && $0 <= maxFrameDelta }
     }
 
     // MARK: - Rebuild and pass-through
 
     private func rebuild(for input: CVPixelBuffer, width: Int, height: Int) -> Bool {
-        guard width < 1920, height < 1080 else {
-            notePassThrough("\(width)x\(height) is not below 1080p")
+        let scaler = initialPlan.scaler
+        guard UpscaleRouteDecision.sizeAllowed(width: width, height: height, scaler: scaler) else {
+            notePassThrough("\(width)x\(height) is " + (scaler == .lineArt ? "larger than 1920x1080" : "not below 1080p"))
             return false
         }
         let sar = Self.pixelAspectRatio(of: input)
         let display = CGSize(width: initialPlan.displayWidth, height: initialPlan.displayHeight)
         guard let plan = UpscaleRouteDecision.makePlan(
                 source: SourceGeometry(width: width, height: height, sarNum: sar.0, sarDen: sar.1),
-                display: display, mlScaleFactors: Self.mlScaleFactors),
+                display: display, mlScaleFactors: Self.mlScaleFactors, scaler: scaler),
               plan.targetWidth > width || plan.targetHeight > height else {
             notePassThrough("\(width)x\(height) is not smaller than the display")
             return false
@@ -599,6 +620,8 @@ private final class Stage {
     private(set) var plan: UpscalePlan
     private let gpu: GPU
     private let ml: MLScaler?
+    /// The `.lineArt` plan's whole processing; nil for `.automatic`.
+    private let chain: FrameChain?
     /// The MetalFX spatial scaler, held untyped because the tvOS SDK has it only from 27.1.
     private var scaler: AnyObject?
     private var rgba: MTLTexture?
@@ -618,6 +641,16 @@ private final class Stage {
     init(plan: UpscalePlan, gpu: GPU, mlOnly: Bool = false) throws {
         self.plan = plan
         self.gpu = gpu
+        if plan.scaler == .lineArt {
+            ml = nil
+            chain = try FrameChain(device: gpu.device, queue: gpu.queue,
+                                   sourceWidth: plan.sourceWidth, sourceHeight: plan.sourceHeight,
+                                   targetWidth: plan.targetWidth, targetHeight: plan.targetHeight,
+                                   stages: [LineArtStage()])
+            scaler = nil; rgba = nil; scaled = nil
+            return
+        }
+        chain = nil
         ml = try plan.mlScale.map { try MLScaler(width: plan.sourceWidth, height: plan.sourceHeight, scale: $0) }
         if mlOnly, let ml {
             self.plan = Self.mlOnlyPlan(plan, ml: ml)
@@ -703,6 +736,13 @@ private final class Stage {
     func process(_ original: CVPixelBuffer, picture: FrameUpscaler.PictureRegion, frameIndex: Int64,
                  mlTimeout: Double, submit: FrameUpscaler.MLSubmit?,
                  times: inout FrameUpscaler.StageTimes) throws -> CVPixelBuffer {
+        if let chain {
+            let t0 = DispatchTime.now().uptimeNanoseconds
+            let (output, gpuMs) = try chain.process(original, picture: picture)
+            times.metal = elapsedMs(since: t0)
+            times.metalGPU = gpuMs
+            return attach(to: output, from: original, times: &times)
+        }
         let format = CVPixelBufferGetPixelFormatType(original)
         let color = UpscaleColorParams(videoRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                                        matrix: UpscaleMatrix.of(original))
@@ -762,7 +802,11 @@ private final class Stage {
         } else {
             throw UpscaleError("plan has no stage")
         }
+        return attach(to: output, from: original, times: &times)
+    }
 
+    private func attach(to output: CVPixelBuffer, from original: CVPixelBuffer,
+                        times: inout FrameUpscaler.StageTimes) -> CVPixelBuffer {
         let t0 = DispatchTime.now().uptimeNanoseconds
         CVBufferRemoveAllAttachments(output)
         if let attachments = CVBufferCopyAttachments(original, .shouldPropagate) as? [String: Any] {

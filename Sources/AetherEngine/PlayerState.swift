@@ -577,6 +577,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// in place, and turning it on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`.
     public var upscalesLowResolutionVideo: Bool = false
 
+    /// Which scaler the upscale stage runs when `upscalesLowResolutionVideo` is on (AE#1039). `.automatic`
+    /// (the default) is the route described there. `.lineArt` replaces it with a 2x line-art network
+    /// (Anime4K Upscale CNN S) made for animation, and widens the route to 1080p sources and 10-bit SDR.
+    /// It suits drawn content only, so a host sets it per title (from the genre, or a per-show switch).
+    /// Ignored while `upscalesLowResolutionVideo` is off. A tuning field like it.
+    public var upscaleScaler: UpscaleScaler = .automatic
+
     /// Mirror of `AVDisplayManager.isDisplayCriteriaMatchingEnabled`. Default `true`. When `false`, engine routes HDR sources through the media playlist (auto-tonemap path) because AVKit cannot switch the panel.
     public var matchContentEnabled: Bool
 
@@ -1157,6 +1164,7 @@ public struct LoadOptions: Sendable, Equatable {
         dualLayerRoute: DualLayerRoute = .softwareHost,
         foldsDolbyVisionFEL: Bool = true,
         upscalesLowResolutionVideo: Bool = false,
+        upscaleScaler: UpscaleScaler = .automatic,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         attemptsHDRMasterOnUnprovenPanel: Bool = true,
@@ -1223,6 +1231,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.dualLayerRoute = dualLayerRoute
         self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo
+        self.upscaleScaler = upscaleScaler
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
         self.attemptsHDRMasterOnUnprovenPanel = attemptsHDRMasterOnUnprovenPanel
@@ -1888,6 +1897,16 @@ func makeResamplerOutputLayout(_ channels: Int32, into layout: inout AVChannelLa
     av_channel_layout_default(&layout, channels)
 }
 
+/// The scaler the upscale stage runs (`LoadOptions.upscaleScaler`, AE#1039).
+public enum UpscaleScaler: Sendable, Hashable {
+    /// VideoToolbox low-latency super resolution where the device and frame size allow it, then MetalFX
+    /// spatial scaling to the target. SDR 8-bit below 1080p.
+    case automatic
+    /// A 2x line-art network for animation (Anime4K Upscale CNN S, half precision), then a bilinear
+    /// resample to the target where 2x does not land on it. SDR 8 or 10-bit 4:2:0 up to 1920x1080.
+    case lineArt
+}
+
 /// What the low-resolution upscale stage is doing for the current session (#846), published as
 /// `AetherEngine.activeUpscale` once the first upscaled frame is delivered, nil otherwise.
 public struct UpscaleStatus: Sendable, Equatable {
@@ -1903,9 +1922,12 @@ public struct UpscaleStatus: Sendable, Equatable {
     /// True once a sustained overrun made the stage drop MetalFX and deliver the VideoToolbox output at
     /// its own size (`targetSize`, carrying the source's pixel aspect). Kept when it later disables.
     public let degraded: Bool
+    /// The scaler the stage runs (`LoadOptions.upscaleScaler`).
+    public let scaler: UpscaleScaler
 
     init(plan: UpscalePlan, degraded: Bool = false, disabledReason: String? = nil) {
         sourceSize = CGSize(width: plan.sourceWidth, height: plan.sourceHeight)
+        scaler = plan.scaler
         mlScale = plan.mlScale
         targetSize = CGSize(width: plan.targetWidth, height: plan.targetHeight)
         self.degraded = degraded
@@ -1925,11 +1947,14 @@ public struct UpscaleStatus: Sendable, Equatable {
                       mlScale: current.map(\.mlScale) ?? plan.mlScale,
                       targetSize: current?.targetSize ?? CGSize(width: plan.targetWidth, height: plan.targetHeight),
                       degraded: current?.degraded ?? false,
+                      scaler: current?.scaler ?? plan.scaler,
                       disabledReason: reason)
     }
 
-    private init(sourceSize: CGSize, mlScale: Float?, targetSize: CGSize, degraded: Bool, disabledReason: String?) {
+    private init(sourceSize: CGSize, mlScale: Float?, targetSize: CGSize, degraded: Bool, scaler: UpscaleScaler,
+                 disabledReason: String?) {
         self.sourceSize = sourceSize
+        self.scaler = scaler
         self.mlScale = mlScale
         self.targetSize = targetSize
         self.degraded = degraded

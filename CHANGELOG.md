@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Added
 
+- **A line-art scaler for animation (#1039).** `LoadOptions.upscaleScaler = .lineArt` makes the upscale stage
+  (`upscalesLowResolutionVideo`) run Anime4K's Upscale CNN x2 (S) as native Metal kernels instead of
+  VideoToolbox super resolution and MetalFX. It also takes 1080p and 10-bit SDR, which the automatic route
+  cannot, and keeps 10-bit output 10-bit. On an A15 it costs about 11.6 ms per frame for 1080p to 2160p. It
+  suits drawn content only, so a host sets it per title. `UpscaleStatus.scaler` says which scaler runs, and
+  `aetherctl play --line-art` drives it. It runs as the first stage of a new GPU frame chain (#957), which
+  later processing stages can join. Anime4K is MIT; see `docs/licensing.md`.
+
 - **A disc title names its playlist or title set (#1034).** `TitleInfo.playlist` is the `.mpls` file a Blu-ray
   title plays ("00800.mpls"), `TitleInfo.titleSet` the `VTS_NN` a DVD title plays, for images and folders alike.
   `id` is only the title's place in the current scan, so a host that stores a title (a resume point, an "other
@@ -86,6 +94,12 @@ the public-API contract.
   Logged as `[FelCurves] fold paused`.
 
 ### Fixed
+
+- **The upscale stage measures the frame rate correctly behind a hardware decoder (#846).** VideoToolbox
+  hands frames over in decode order, and the stage took the gap between two arrivals for the frame period:
+  83.5 ms against a real 41.7 ms on 1080p HEVC at 23.976 fps. The overrun budget was therefore twice as
+  generous as intended, so a stage that could not keep up was not switched off. It now sorts the last nine
+  timestamps before measuring the gaps.
 
 - **`LiveTelemetry.objectAudio` is reported on the software host (#1026).** A TrueHD Atmos or DTS:X track
   rendered into a bed there (`objectAudioRendering`, which every Profile 7 FEL session under
