@@ -12,10 +12,11 @@ the public-API contract.
 
 ### Added
 
-- **Opt-in whole-session segment disk admission** (#961): `sessionCacheHardLimitBytes` bounds each
-  session's resident/staging bytes; `sessionCacheFreeReserveBytes` independently protects volume
-  headroom for live and VOD. `SessionCacheStatus.diskAdmissionWaiting` distinguishes disk waits from
-  forward-window backpressure. Denied capacity surfaces as `storageExhausted`, cancellation does not.
+- **A session can cap its segment disk use and keep free volume headroom (#961).**
+  `sessionCacheHardLimitBytes` bounds each session's resident and staging bytes;
+  `sessionCacheFreeReserveBytes` independently protects volume headroom for live and VOD.
+  `SessionCacheStatus.diskAdmissionWaiting` distinguishes disk waits from forward-window
+  backpressure. Capacity denial surfaces as `storageExhausted`; cancellation does not.
 
 ## [7.65.0] - 2026-11-12
 
