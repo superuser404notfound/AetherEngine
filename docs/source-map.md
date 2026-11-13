@@ -530,7 +530,7 @@ Notes:
 | `RestartCoalescer.swift` | Merges a burst of producer-restart requests into one in-flight and one settled target (rapid seeking, AetherEngine#35). |
 | `LiveWindow.swift` | Live path: session-relative DVR timeline (seconds since the first frame), shared by the native and software live paths. |
 | `MP4SegmentMuxer.swift` | Native path: session-long fragmented-MP4 muxer (`+empty_moov+default_base_moof+frag_custom+delay_moov`). |
-| `NALUnitChain.swift` | Last-stage payload guard before the fMP4 mux: a video sample whose length-prefixed NAL chain overruns it is cut at its last complete unit, because Apple's parser answers one such sample with -19602 for the whole segment (AE#561). |
+| `NALUnitChain.swift` | Last-stage payload guard before the fMP4 mux: cuts a length-prefixed NAL chain at its last complete unit when it overruns a sample (AE#561), and removes incomplete one-byte HEVC headers while preserving valid payloads (#960). |
 | `AudioLanguageMap.swift` | Native path: the ISO 639-2/T code an audio track is declared with in the master's `EXT-X-MEDIA:TYPE=AUDIO` rendition and written into its `mdhd` (AE#458). See note. |
 | `FragmentSplitter.swift` | Native path: splits the mp4 muxer's avio output into `init.mp4` (ftyp+moov) and per-segment moof+mdat files. |
 | `PacketRingBuffer.swift` | Live path: keyframe-indexed, disk-spooled packet ring behind the software DVR rewind. Append-only chunk files, a 24-byte index record per packet, eviction by time and by the session retention budget, evict-and-retry when the volume or quota is full. |

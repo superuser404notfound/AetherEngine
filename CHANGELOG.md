@@ -21,6 +21,13 @@ the public-API contract.
   shift the field. Thanks to ysuleman for the report, the measurements and the patch. Covered by
   `Issue1047AACProgramConfigTests`.
 
+- **An HEVC sample with a cut-off NAL header no longer breaks its segment (#960).** A NAL unit
+  shorter than the two-byte header (for example a one-byte EOS at the end of an M2TS) could make
+  AVPlayer reject the whole fMP4 segment. The length chain itself was intact, so the #561 sanitizer
+  did not see it. The muxer now removes just those short units and keeps the picture, any Dolby
+  Vision RPU and the timestamps. A sample made only of short units is dropped. Thanks to Nebr88 for
+  the fix and the Apple TV run. Covered by `ShortHEVCHeaderTests`.
+
 ## [7.65.0] - 2026-11-12
 
 ### Added
