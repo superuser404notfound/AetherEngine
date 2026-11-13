@@ -120,6 +120,7 @@ These cases take the libavcodec route even when the codec is on the whitelist:
 | --- | --- |
 | A custom `IOReader` | AVPlayer needs a URL. |
 | A FLAC whose blocks are under CoreMedia's floor | AE#764. |
+| An AAC whose layout sits in a PCE (`channelConfiguration` 0) | AVPlayer opens it and ends at 0 s with no duration (AE#1047). |
 | A FLAC whose first frame is smaller than its `STREAMINFO` `max_blocksize` | AVPlayer times each frame by the declared size and runs its clock past the end. Read from a peeked first packet (AE#946). |
 | Any FLAC in the raw `flac` container | CoreMedia ignores the `SEEKTABLE`, places a seek by an estimated byte rate, and stamps the requested time on the frame it reached, seconds early on real music (AE#946). FLAC in MP4 seeks exactly. |
 | `LoadOptions.preferredDecodePath = .software` | The host app asked for it. |

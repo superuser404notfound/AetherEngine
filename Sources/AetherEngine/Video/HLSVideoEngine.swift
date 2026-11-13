@@ -2250,6 +2250,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     + "\(FLACStreamInfo.coreMediaMinimumBlockSize), bridging instead of stream-copy",
                     category: .session
                 )
+            } else if AACAudioSpecificConfig.coreMediaRejects(UnsafePointer(audioStream.pointee.codecpar)) {
+                // AE#1047: CoreMedia refuses an esds whose layout lives in a PCE.
+                bridgePreferred = true
+                EngineLog.emit(
+                    "[HLSVideoEngine] audio: AAC config declares channelConfiguration=0 (layout in a PCE), "
+                    + "which CoreMedia refuses; bridging \(acpForHE.ch_layout.nb_channels) ch instead of stream-copy",
+                    category: .session
+                )
             } else if compat.requiresBridge || isHEAAC {
                 bridgePreferred = true
                 EngineLog.emit(
