@@ -142,8 +142,6 @@ struct SegmentDiskAdmissionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
 
         let capacityURL = directory
-        let before = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
-        let fileURL = directory.appendingPathComponent("capacity-probe.bin")
 
         // Deterministic, incompressible data ensures APFS cannot satisfy this with a sparse or
         // compressed allocation. Keep the write modest while making the capacity change clear.
@@ -156,15 +154,24 @@ struct SegmentDiskAdmissionTests {
             state ^= state << 17
             return UInt8(truncatingIfNeeded: state)
         })
-        #expect(FileManager.default.createFile(atPath: fileURL.path, contents: nil))
-        let output = try FileHandle(forWritingTo: fileURL)
-        defer { try? output.close() }
-        for _ in 0..<chunkCount { try output.write(contentsOf: data) }
-        try output.synchronize()
-
-        let after = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
-        #expect(before - after >= Int64(chunkSize * chunkCount / 2),
-                "capacity should reflect the file written between queries")
+        // The capacity is volume-wide, and in the full parallel suite other tests free space between
+        // the two reads, which can swallow 32 MiB. A stale cache shows a delta of exactly 0 on every
+        // attempt, so one attempt that sees the drop is enough.
+        var drops: [Int64] = []
+        for attempt in 0..<3 {
+            let before = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
+            let fileURL = directory.appendingPathComponent("capacity-probe-\(attempt).bin")
+            #expect(FileManager.default.createFile(atPath: fileURL.path, contents: nil))
+            let output = try FileHandle(forWritingTo: fileURL)
+            for _ in 0..<chunkCount { try output.write(contentsOf: data) }
+            try output.synchronize()
+            try output.close()
+            let after = try #require(SegmentCache.availableVolumeBytes(at: capacityURL))
+            drops.append(before - after)
+            if before - after >= Int64(chunkSize * chunkCount / 2) { break }
+        }
+        #expect(drops.contains { $0 >= Int64(chunkSize * chunkCount / 2) },
+                "capacity should reflect the file written between queries, drops \(drops)")
     }
 
     private final class StopFlag: @unchecked Sendable {
