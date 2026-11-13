@@ -122,6 +122,19 @@ screen, note the peak, MaxCLL and MaxFALL it shows).
 
 CM is the arm step 3 depends on: a buffer the engine rendered itself, with metadata the engine chose.
 
+`SEQ=pulse` needs no camera, about 2 minutes:
+
+| arm | mode | what plays | HDR10 metadata the engine sends |
+|---|---|---|---|
+| S | `software` | 15 s, VideoToolbox's buffer as decoded | none: the steady control |
+| SP | `pulse` | 30 s, the probe's values on VideoToolbox's buffer | 777 nit / MaxCLL 345, then 4000 / 4000, switching every 3 s |
+| CP | `chainpulse` | 30 s, our own buffer from the chain | the same switching |
+
+The picture never changes, only the metadata. Watch the patches from 1000 to 10000 nit and the two
+squares. If the television reads the metadata, it tone-maps them brighter and dimmer every 3 s (the 345
+nit set compresses them less than the 4000 nit one). If they hold still, it did not take the change: it
+may ignore metadata that changes mid-stream, so a steady picture is "not shown", not "not delivered".
+
 `SEQ=pace` checks frame pacing with the chain in the loop: S and C on both clips, 25 s each.
 Film the moving bar and the frame counter; a stall or a jump is a dropped or repeated frame. Each arm's
 summary line reports `droppedFrames`.
@@ -151,5 +164,7 @@ line of S shows `mdcv=- cll=-`). That is a gap of its own, whatever this check f
   ahead, and the software path can send the stream's metadata the same way.
 - **CM looks like C, but M differs from S**: the layer forwards metadata only on the decoder's buffers.
   Compare the `[HDR10Probe] first frame` lines of M and CM.
+- **SP and CP both pulse**: the television reads per-buffer metadata on both kinds of buffer, the same
+  answer as "CM differs from C". **Only SP pulses**: as "CM looks like C, but M differs from S".
 - **Both alike**: the layer forwards nothing per buffer. Tone mapping must then target a fixed, assumed
   panel, or stay off on tvOS.

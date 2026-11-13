@@ -5,6 +5,8 @@
 #   DEVICE="Apple TV" ./run_tv.sh               build + install, then SEQ=main (a 1 min setup arm and six
 #                                               arms, about 4 min; SETUP=0 skips the setup arm)
 #   DEVICE=... ./run_tv.sh --no-build           play only (app already installed)
+#   DEVICE=... SEQ=pulse ./run_tv.sh            no camera: a steady arm, then the metadata switching every
+#                                               3 s with and without the chain (about 2 min, watch by eye)
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
 #
 # Required: DEVICE, the Apple TV's name or identifier as `xcrun devicectl list devices` shows it. Use
@@ -45,9 +47,12 @@ case "$SEQ" in
     SETUP_ARM=""
     [[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=60,"
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|$S,N|native|$B/pattern_24.mp4|$S,S|software|$B/pattern_24.mp4|$S,M|meta|$B/pattern_24.mp4|$S,C|chain|$B/pattern_24.mp4|$S,CM|chainmeta|$B/pattern_24.mp4|$S" ;;
+  pulse)
+    # S first, so the steady look is fresh when the pulse arms start. 30 s is ten switches.
+    ARMS="S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
-  *) echo "unknown SEQ=$SEQ (main|pace)"; exit 1 ;;
+  *) echo "unknown SEQ=$SEQ (main|pulse|pace)"; exit 1 ;;
 esac
 # Only the clips this sequence plays have to exist.
 for clip in $(print -r -- "$ARMS" | grep -o "pattern_[0-9]*\.mp4" | sort -u); do

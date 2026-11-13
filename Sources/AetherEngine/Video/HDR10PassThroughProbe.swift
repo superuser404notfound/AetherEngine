@@ -17,6 +17,8 @@ import Metal
 /// | `meta` | the decoder's buffer gets the probe's mastering display and content light level values |
 /// | `chain` | the frame goes through `FrameChain` (`PassThroughStage`) into a buffer of our own, attachments copied |
 /// | `chain+meta` | both: our own buffer, carrying the probe's values |
+/// | `pulse` | as `meta`, but every 72 frames (3 s at 24p) the values switch to a 4000 nit set and back |
+/// | `chain+pulse` | as `chain+meta`, with the same switching |
 ///
 /// `AETHER_HDR10_PROBE_META` sets the values (`maxcll=345,maxfall=123,peak=777,min=0.005`, the default).
 /// They are chosen to be unlike any real master, so a television's HDR info screen tells at a glance whose
@@ -30,9 +32,14 @@ struct HDR10ProbeSettings: Equatable, Sendable {
         case meta
         case chain
         case chainMeta = "chain+meta"
+        case pulse
+        case chainPulse = "chain+pulse"
 
-        var runsChain: Bool { self == .chain || self == .chainMeta }
-        var setsMetadata: Bool { self == .meta || self == .chainMeta }
+        var runsChain: Bool { self == .chain || self == .chainMeta || self == .chainPulse }
+        var setsMetadata: Bool { self != .log && self != .chain }
+        /// The pixels stay as they are and only the metadata switches, so a television that uses it
+        /// brightens and dims the highlights in step: visible by eye, no camera needed.
+        var pulses: Bool { self == .pulse || self == .chainPulse }
     }
 
     var mode: Mode
@@ -83,6 +90,11 @@ struct HDR10StaticMetadata: Equatable, Sendable {
     /// Unlike any real master (those say 1000 or 4000 nit), so a television's info screen shows whose it is.
     static let probeDefault = HDR10StaticMetadata(maxCLL: 345, maxFALL: 123, masteringPeakNits: 777,
                                                   masteringMinNits: 0.005)
+
+    /// The other half of the pulse: a common real master (4000 nit), far from the probe's 345 / 777, so
+    /// a television that tone-maps by it maps the highlights very differently.
+    static let pulseAlternate = HDR10StaticMetadata(maxCLL: 4000, maxFALL: 1000, masteringPeakNits: 4000,
+                                                    masteringMinNits: 0.005)
 
     /// BT.2020 primaries in the SEI's order (green, blue, red), then the D65 white point, in 0.00002 units.
     static let bt2020Chromaticities: [UInt16] = [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450]
@@ -158,6 +170,9 @@ final class HDR10ProbeStage: @unchecked Sendable {
     static let timingWindow = 48
     static let timingLines = 10
     static let maxConsecutiveFailures = 3
+    /// Frames per pulse phase: 3 s at 23.976, 1.2 s at 59.94.
+    static let pulseFrames = 72
+    static let pulseSwitchLines = 4
 
     private let lock = NSLock()
     private var frames = 0
@@ -167,6 +182,7 @@ final class HDR10ProbeStage: @unchecked Sendable {
     private var consecutiveFailures = 0
     private var disabled = false
     private var lastNote: String?
+    private var pulseSwitchesLogged = 0
     #if !targetEnvironment(simulator)
     /// A `FrameChain`, typed loosely because the class needs OS 26.
     private var chain: AnyObject?
@@ -178,7 +194,9 @@ final class HDR10ProbeStage: @unchecked Sendable {
     init(settings: HDR10ProbeSettings) {
         self.settings = settings
         EngineLog.emit("[HDR10Probe] on: mode=\(settings.mode.rawValue)"
-                       + (settings.mode.setsMetadata ? " " + Self.describe(settings.metadata) : ""),
+                       + (settings.mode.setsMetadata ? " " + Self.describe(settings.metadata) : "")
+                       + (settings.mode.pulses ? " alternating every \(Self.pulseFrames) frames with "
+                          + Self.describe(.pulseAlternate) : ""),
                        category: .swPlayback)
     }
 
@@ -213,10 +231,11 @@ final class HDR10ProbeStage: @unchecked Sendable {
             }
         }
         if settings.mode.setsMetadata {
+            let metadata = metadata(forFrame: frames, pts: pts)
             CVBufferSetAttachment(output, kCVImageBufferMasteringDisplayColorVolumeKey,
-                                  settings.metadata.masteringDisplayColorVolume as CFData, .shouldPropagate)
+                                  metadata.masteringDisplayColorVolume as CFData, .shouldPropagate)
             CVBufferSetAttachment(output, kCVImageBufferContentLightLevelInfoKey,
-                                  settings.metadata.contentLightLevel as CFData, .shouldPropagate)
+                                  metadata.contentLightLevel as CFData, .shouldPropagate)
         }
         frames += 1
         if !firstFrameLogged {
@@ -229,6 +248,20 @@ final class HDR10ProbeStage: @unchecked Sendable {
         if let gpuMs { noteTiming(gpuMs, pts: pts) }
         // `meta` alone changed the input's own attachments, so delivering the input is right there too.
         return output === input ? nil : output
+    }
+
+    /// The values for frame `index` (counted from 0): the settings' own, or in a pulse mode the
+    /// alternate set in every other phase of `pulseFrames`. Logs the first few switches.
+    func metadata(forFrame index: Int, pts: CMTime) -> HDR10StaticMetadata {
+        guard settings.mode.pulses else { return settings.metadata }
+        let phase = index / Self.pulseFrames
+        if index > 0, index % Self.pulseFrames == 0, pulseSwitchesLogged < Self.pulseSwitchLines {
+            pulseSwitchesLogged += 1
+            EngineLog.emit(String(format: "[HDR10Probe] pulse: frame %d, pts %.2f s, now %@", index,
+                                  CMTimeGetSeconds(pts), phase % 2 == 1 ? "the 4000 nit set" : "the probe's set"),
+                           category: .swPlayback)
+        }
+        return phase % 2 == 1 ? .pulseAlternate : settings.metadata
     }
 
     private struct Note: Error {

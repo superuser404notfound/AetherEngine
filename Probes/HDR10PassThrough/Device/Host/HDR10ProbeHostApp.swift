@@ -18,9 +18,13 @@ import UIKit
 //   settings (dynamic tone mapping) are set. Nothing is measured.
 // - `avplayer`: plain AVPlayer + AVPlayerLayer, Apple's own path (the reference).
 // - `native`: AetherEngine as a host uses it, default routing (the native AVPlayer route for this clip).
-// - `software`, `meta`, `chain`, `chainmeta`: AetherEngine on the software path
-//   (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain` and
-//   `chain+meta`. The engine reads the variable at each load, so the harness sets it before each arm.
+// - `software`, `meta`, `chain`, `chainmeta`, `pulse`, `chainpulse`: AetherEngine on the software path
+//   (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain`,
+//   `chain+meta`, `pulse` and `chain+pulse`. The engine reads the variable at each load, so the harness
+//   sets it before each arm.
+//
+// The pulse arms need no camera: the picture stays the same and only the metadata switches every 3 s,
+// so a television that reads it tone-maps the bright patches brighter and dimmer every 3 s.
 
 @main
 struct HDR10ProbeHostApp: App {
@@ -62,6 +66,8 @@ struct ProbeArm {
         case "meta": "meta"
         case "chain": "chain"
         case "chainmeta": "chain+meta"
+        case "pulse": "pulse"
+        case "chainpulse": "chain+pulse"
         default: nil
         }
     }
@@ -73,8 +79,20 @@ struct ProbeArm {
         case "setup": "HDR10 is on: set the TV's Dynamic Tone Mapping to Off now"
         case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
         case "software", "chain": "decoder's frames carry no HDR10 metadata: the TV's 'none' case"
+        case "pulse", "chainpulse": "metadata switches every 3 s: do the bright patches pulse?"
         default: "clip's metadata (1000 nit, MaxCLL 1000)"
         }
+    }
+
+    var pulses: Bool { mode == "pulse" || mode == "chainpulse" }
+
+    /// What the person in front of the television does during the arm. In a sequence with pulse arms
+    /// the others are steady controls, watched by eye like the rest.
+    func instruction(inPulseSequence: Bool) -> String {
+        if mode == "setup" { return "" }
+        if pulses { return "watch the patches from 1000 to 10000 nit and the two squares" }
+        return inPulseSequence ? "steady control: nothing changes here, remember how it looks"
+                               : "photo from the same spot, exposure locked"
     }
 
     static func fromEnvironment() -> [ProbeArm]? {
@@ -138,7 +156,7 @@ struct ProbeHarnessView: View {
         say("sequence: " + arms.map { "\($0.label)(\($0.mode))" }.joined(separator: " "))
         for (n, arm) in arms.enumerated() {
             slate = ["\(n + 1)/\(arms.count)  \(arm.label)", arm.mode, arm.expectation,
-                     "photo from the same spot, exposure locked"]
+                     arm.instruction(inPulseSequence: arms.contains(where: \.pulses))]
             host.window?.avDisplayManager.preferredDisplayCriteria = nil
             say("slate \(arm.label)")
             try? await Task.sleep(nanoseconds: 6_000_000_000)
@@ -150,7 +168,7 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, loops: true, log: say)
             case "avplayer":
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
-            case "native", "software", "meta", "chain", "chainmeta":
+            case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse":
                 await playEngine(arm, log: say)
             default:
                 say("unknown mode \(arm.mode), skipped")

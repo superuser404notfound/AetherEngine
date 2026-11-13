@@ -16,8 +16,17 @@ the public-API contract.
   attaches to a frame it rendered itself reaches the television on tvOS, and tone mapping depends on it.
   `AETHER_HDR10_PROBE` (`log`, `meta`, `chain`, `chain+meta`) now logs, replaces or carries that metadata
   through the frame chain, with values unlike the stream's, so an analyser or the television's tone mapping shows which arrived.
+  `pulse` and `chain+pulse` switch the values every 3 s on an unchanged picture, so the answer can be read by eye.
   `Probes/HDR10PassThrough` plays every mode on an Apple TV. Off by default; no public API. Covered by
   `HDR10PassThroughProbeTests`.
+
+### Fixed
+
+- **The software path's format description follows a change of HDR10 metadata.** The renderer reused
+  its format description while size, pixel format and colour tags stayed the same, so mastering display
+  and content light level values that changed mid-stream never reached the display layer: it kept the
+  first frame's. The values are now part of the cache key. Covered by
+  `FormatDescriptionFollowsHDR10MetadataTests`.
 
 ## [7.66.1] - 2026-11-13
 

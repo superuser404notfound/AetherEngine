@@ -45,6 +45,10 @@ struct HDR10PassThroughProbeTests {
         #expect(!HDR10ProbeSettings.Mode.meta.runsChain && HDR10ProbeSettings.Mode.meta.setsMetadata)
         #expect(HDR10ProbeSettings.Mode.chain.runsChain && !HDR10ProbeSettings.Mode.chain.setsMetadata)
         #expect(HDR10ProbeSettings.Mode.chainMeta.runsChain && HDR10ProbeSettings.Mode.chainMeta.setsMetadata)
+        #expect(!HDR10ProbeSettings.Mode.pulse.runsChain && HDR10ProbeSettings.Mode.pulse.pulses)
+        #expect(HDR10ProbeSettings.Mode.chainPulse.runsChain && HDR10ProbeSettings.Mode.chainPulse.pulses)
+        #expect(HDR10ProbeSettings.Mode.allCases.filter(\.pulses).allSatisfy(\.setsMetadata))
+        #expect(!HDR10ProbeSettings.Mode.meta.pulses && !HDR10ProbeSettings.Mode.chainMeta.pulses)
     }
 
     @Test
@@ -118,6 +122,39 @@ struct HDR10PassThroughProbeTests {
         #expect(HDR10StaticMetadata.describe(contentLightLevel: cll) == "345/123")
         let pq = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String
         #expect(HDR10ProbeStage.describe(buffer).contains("tf=\(pq)"))
+    }
+
+    @Test
+    func issue957PulseSwitchesTheMetadataEveryPhaseAndBack() {
+        let stage = HDR10ProbeStage(settings: HDR10ProbeSettings(mode: .pulse, metadata: .probeDefault))
+        let n = HDR10ProbeStage.pulseFrames
+        let seen = [0, n - 1, n, 2 * n - 1, 2 * n, 3 * n].map { stage.metadata(forFrame: $0, pts: .zero) }
+        #expect(seen == [.probeDefault, .probeDefault, .pulseAlternate, .pulseAlternate, .probeDefault,
+                         .pulseAlternate])
+        #expect(HDR10StaticMetadata.pulseAlternate.maxCLL != HDR10StaticMetadata.probeDefault.maxCLL)
+        // docs/architecture-software.md and the harness slates say 72 frames, 3 s at 23.976.
+        #expect(n == 72)
+    }
+
+    @Test
+    func issue957PulseFramesCarryTheAlternateSetInTheSecondPhase() throws {
+        let stage = HDR10ProbeStage(settings: HDR10ProbeSettings(mode: .pulse, metadata: .probeDefault))
+        var last: CVPixelBuffer?
+        for _ in 0...HDR10ProbeStage.pulseFrames {
+            let buffer = try ProbeFrames.pq(16, 16)
+            #expect(stage.process(buffer, pts: .zero) == nil)
+            last = buffer
+        }
+        let cll = CVBufferCopyAttachment(try #require(last), kCVImageBufferContentLightLevelInfoKey, nil) as? Data
+        #expect(HDR10StaticMetadata.describe(contentLightLevel: cll) == "4000/1000")
+    }
+
+    @Test
+    func issue957MetaModeNeverPulses() {
+        let stage = HDR10ProbeStage(settings: HDR10ProbeSettings(mode: .meta, metadata: .probeDefault))
+        let n = HDR10ProbeStage.pulseFrames
+        #expect([0, n, 3 * n].map { stage.metadata(forFrame: $0, pts: .zero) }
+                == Array(repeating: .probeDefault, count: 3))
     }
 
     @Test

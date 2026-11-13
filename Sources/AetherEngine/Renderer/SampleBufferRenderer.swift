@@ -311,7 +311,7 @@ final class SampleBufferRenderer: @unchecked Sendable {
         return _flushGeneration
     }
 
-    /// Cached CMVideoFormatDescription keyed by dimensions + pixel format + colorimetry + pixel aspect ratio. CMVideoFormatDescriptionCreateForImageBuffer snapshots color AND aspect attachments at creation, so a mid-stream change at same dimensions must invalidate the cache; a PAR-less first frame froze a PAR-less description for the whole stream and collapsed anamorphic content to coded dimensions (#177). Guarded by reorderLock; nil'd by flush().
+    /// Cached CMVideoFormatDescription keyed by dimensions + pixel format + colorimetry + pixel aspect ratio + HDR10 static metadata. CMVideoFormatDescriptionCreateForImageBuffer snapshots color AND aspect attachments at creation, so a mid-stream change at same dimensions must invalidate the cache; a PAR-less first frame froze a PAR-less description for the whole stream and collapsed anamorphic content to coded dimensions (#177). Guarded by reorderLock; nil'd by flush().
     private var cachedFormatDesc: CMVideoFormatDescription?
     private var cachedFormatKey: FormatDescriptionKey?
 
@@ -325,6 +325,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
         var matrix: String?
         var parH: Int?
         var parV: Int?
+        /// HDR10 static metadata (AE#957): the description snapshots it too, so a change mid-stream
+        /// (the probe's pulse, or a stream whose first frames carry none) must make a new one.
+        var masteringDisplay: Data?
+        var contentLightLevel: Data?
     }
 
     private var loggedLayerFailed = false
@@ -1141,7 +1145,9 @@ final class SampleBufferRenderer: @unchecked Sendable {
             transfer: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferTransferFunctionKey, nil) as? String,
             matrix: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil) as? String,
             parH: (par?[kCVImageBufferPixelAspectRatioHorizontalSpacingKey] as? NSNumber)?.intValue,
-            parV: (par?[kCVImageBufferPixelAspectRatioVerticalSpacingKey] as? NSNumber)?.intValue
+            parV: (par?[kCVImageBufferPixelAspectRatioVerticalSpacingKey] as? NSNumber)?.intValue,
+            masteringDisplay: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data,
+            contentLightLevel: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferContentLightLevelInfoKey, nil) as? Data
         )
 
         // Guarded by reorderLock: flush() nils the cache from other threads.

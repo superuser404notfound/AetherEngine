@@ -279,10 +279,14 @@ It is off unless `AETHER_HDR10_PROBE` is set (`HDR10PassThroughProbe.swift`). Th
 | `meta` | the decoder's buffer gets the probe's mastering display and content light level values |
 | `chain` | goes through the frame chain (`PassThroughStage`) into a buffer of the engine's own, attachments copied |
 | `chain+meta` | both: the engine's own buffer, with the probe's values |
+| `pulse` | as `meta`, but every 72 frames the values switch to a 4000 nit set (MaxCLL 4000, MaxFALL 1000) and back |
+| `chain+pulse` | as `chain+meta`, switching the same way |
 
 - `AETHER_HDR10_PROBE_META` sets the values, as `maxcll=345,maxfall=123,peak=777,min=0.005` (the default). They share no number with a real master, so an analyser shows whose metadata a television got, and a MaxCLL of 345 changes the television's tone mapping visibly (`Probes/HDR10PassThrough`). A value out of range turns the probe off with one `[HDR10Probe] ignored:` line.
 - `meta` changes the attachments of VideoToolbox's buffer in place. Attachments are not pixels, so reference frames decode the same, but it is a probe, not the output-metadata policy above.
 - The chain runs on OS 26 and later on a device. Elsewhere, and on a frame the chain cannot take, both chain modes deliver the frame unchanged, without the probe's values.
+- The pulse modes need no instrument. The pixels stay the same and only the metadata changes, so a television that reads it tone-maps the bright parts brighter and dimmer every 3 s at 23.976 fps. The first four switches are logged.
+- The renderer keeps one format description while the frames look the same. Its cache key includes the frame's mastering display and content light level bytes, so a metadata change at the same size and colour gets a new description (`FormatDescriptionFollowsHDR10MetadataTests`).
 - The log lines start with `[HDR10Probe]`: the first frame before and after, the format description built from the output, and the GPU time over each 48-frame window (the first ten). Three chain failures in a row turn the probe off for the session.
 
 The device harness that plays every mode on an Apple TV is [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md).
