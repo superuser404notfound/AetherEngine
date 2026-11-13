@@ -2281,7 +2281,7 @@ public final class Demuxer: @unchecked Sendable {
                 .replacingOccurrences(of: "\0", with: "")
         }
 
-        return TrackInfo(
+        var info = TrackInfo(
             id: index,
             name: name,
             codec: codecName,
@@ -2301,6 +2301,8 @@ public final class Demuxer: @unchecked Sendable {
             channelLayout: isAudio ? Self.channelLayoutDescription(&codecpar.pointee.ch_layout) : nil,
             profile: VideoStreamFormat.profileName(codecID: codecID, profile: codecpar.pointee.profile)
         )
+        if let title, !title.isEmpty { info.sourceTitle = title }
+        return info
     }
 
     static func sampleFormatName(_ raw: Int32) -> String? {

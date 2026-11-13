@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **Native subtitle renditions are named after the track's title (AE#1050).** Two English tracks titled
+  SDH and CC showed up in AVKit's menu as "English" and "English 2". They now read "English (SDH)" and
+  "English (CC)". The title is the container's `title` tag or `ExternalSubtitleTrack.name`; without one the
+  name stays the language. Hearing-impaired tracks also declare `CHARACTERISTICS` on the loopback master,
+  as the remote HLS rewrite already did. See [Formats › Rendition names and SDH](docs/formats.md#rendition-names-and-sdh).
 
 ## [7.65.0] - 2026-11-12
 

@@ -188,8 +188,7 @@ enum RemoteHLSMasterRewrite {
                     attrs.append("LANGUAGE=\"\(escaped(language))\"")
                 }
                 if rendition.isSDH {
-                    attrs.append("CHARACTERISTICS=\"public.accessibility.transcribes-spoken-dialog,"
-                                 + "public.accessibility.describes-music-and-sound\"")
+                    attrs.append("CHARACTERISTICS=\"\(HLSLocalServer.sdhCharacteristics)\"")
                 }
                 attrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO"])
                 attrs.append("URI=\"subs_\(rendition.ordinal).m3u8\"")

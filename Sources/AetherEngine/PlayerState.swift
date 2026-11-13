@@ -1569,6 +1569,10 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// track list). `.atmos` also sets `profile` to "Dolby TrueHD + Dolby Atmos".
     public internal(set) var trueHDAtmos: TrueHDAtmosVerdict?
 
+    /// AE#1050: the title the container or the host gave the track, nil when `name` is the engine's own
+    /// fallback ("ENG (subrip)", "Track 3 (subrip)"). Native subtitle renditions name themselves from it.
+    var sourceTitle: String? = nil
+
     public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isVisualImpaired: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate
         self.bitsPerSample = bitsPerSample

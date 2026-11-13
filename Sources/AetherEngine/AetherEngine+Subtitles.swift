@@ -2737,7 +2737,9 @@ extension AetherEngine {
                                      externalID: track.isExternal ? track.id : nil,
                                      language: track.language,
                                      isForced: track.isForced,
-                                     needsOCR: true)
+                                     needsOCR: true,
+                                     title: track.sourceTitle,
+                                     isHearingImpaired: track.isHearingImpaired)
         }
     }
 
@@ -2746,20 +2748,42 @@ extension AetherEngine {
     /// legible option (device: three declared, groupOpts=2, and the second German track ended up
     /// selecting the English option through the old positional fallback). Same-language duplicates
     /// get a numbered suffix; the forced disposition is carried for FORCED=YES.
+    /// AE#1050: a track with its own title is named after it, so an SDH and a CC track in one
+    /// language read "English (SDH)" and "English (CC)" instead of "English" and "English 2".
     nonisolated static func nativeSubtitleRenditionInfos(
         for entries: [NativeSubtitleTrackEntry]
     ) -> [NativeSubtitleRenditionInfo] {
         var counts: [String: Int] = [:]
         return entries.enumerated().map { i, entry in
-            let base = entry.language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
+            let base = nativeSubtitleRenditionBaseName(language: entry.language, title: entry.title)
                 ?? "Subtitle \(i + 1)"
             let n = (counts[base] ?? 0) + 1
             counts[base] = n
             return NativeSubtitleRenditionInfo(
                 language: entry.language,
                 name: n == 1 ? base : "\(base) \(n)",
-                isForced: entry.isForced
+                isForced: entry.isForced,
+                isHearingImpaired: entry.isHearingImpaired
             )
+        }
+    }
+
+    /// The language name, the track title, or both. A title that already names the language
+    /// ("English SDH") stands alone; one that does not ("SDH") goes in brackets after it. A title
+    /// that is only the language code ("eng") adds nothing and is dropped.
+    nonisolated static func nativeSubtitleRenditionBaseName(language: String?, title: String?) -> String? {
+        let languageName = language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
+        var cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            // NAME is a quoted-string in the master; a quote or a line break would end the tag.
+            .replacingOccurrences(of: "\"", with: "'")
+            .components(separatedBy: .newlines).joined(separator: " ")
+        if let t = cleanTitle, t.isEmpty || (language.map { languageMatches(t, $0) } ?? false) { cleanTitle = nil }
+        switch (languageName, cleanTitle) {
+        case let (name?, title?):
+            return title.localizedCaseInsensitiveContains(name) ? title : "\(name) (\(title))"
+        case let (name?, nil): return name
+        case let (nil, title?): return title
+        case (nil, nil): return nil
         }
     }
 

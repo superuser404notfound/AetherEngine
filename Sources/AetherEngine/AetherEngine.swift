@@ -2865,6 +2865,10 @@ public final class AetherEngine: ObservableObject {
         /// Phase D: bitmap (PGS/DVB/DVD) entry whose store is filled by the OCR worker /
         /// sidecar OCR fill, not by the pump tap or the side readers.
         var needsOCR: Bool = false
+        /// AE#1050: the track's own title, which names the rendition when there is one.
+        var title: String? = nil
+        /// AE#1050: declared as CHARACTERISTICS so AVKit can mark the option as SDH itself.
+        var isHearingImpaired: Bool = false
     }
     var nativeSubtitleTrackTable: [NativeSubtitleTrackEntry] = []
 

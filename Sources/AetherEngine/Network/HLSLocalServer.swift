@@ -108,6 +108,8 @@ protocol HLSSegmentProvider: AnyObject {
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
     /// NAMEs must be unique within the group (duplicates collapse AVFoundation's legible options).
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { get }
+    /// AE#1050: ordinals whose rendition is SDH, declared with CHARACTERISTICS in the master.
+    var nativeSubtitleHearingImpairedOrdinals: Set<Int> { get }
     /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
     var nativeSubtitleDefaultOrdinal: Int { get }
     /// Serve the SUBTITLES rendition as one whole-program .vtt (single VOD segment) instead of per-video-segment (Sodalite#32).
@@ -203,6 +205,7 @@ extension HLSSegmentProvider {
     var masterAudioRendition: (language: String?, name: String)? { nil }
     var masterAudioChannels: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
+    var nativeSubtitleHearingImpairedOrdinals: Set<Int> { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
@@ -1782,6 +1785,10 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     /// Pure playlist builders callable without a live server instance. subResourceBaseURL emits absolute URIs for AVAssetResourceLoader; nil emits relative URIs for the HTTP workflow.
+    /// CHARACTERISTICS of an SDH subtitle rendition, as Apple's HLS authoring spec spells it.
+    static let sdhCharacteristics = "public.accessibility.transcribes-spoken-dialog,"
+        + "public.accessibility.describes-music-and-sound"
+
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
                                          subResourceBaseURL: URL? = nil,
                                          variant: MasterPlaylistVariant = .primary) -> String {
@@ -1856,9 +1863,14 @@ final class HLSLocalServer: @unchecked Sendable {
         // (the on-frame overlay owns fullscreen subtitles). The host explicitly selects the matching rendition
         // only on PiP entry and deselects it on PiP exit, so the two never double up.
         let subRenditions = provider.nativeSubtitleRenditions
+        let hearingImpaired = provider.nativeSubtitleHearingImpairedOrdinals
         for r in subRenditions {
             var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
             if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
+            // AE#1050: same value the remote master rewrite writes, so AVKit can label the option SDH.
+            if hearingImpaired.contains(r.ordinal) {
+                mediaAttrs.append("CHARACTERISTICS=\"\(Self.sdhCharacteristics)\"")
+            }
             mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO"])
             // Deliberately NO FORCED=YES, even for a source-forced track: AVKit force-displays a FORCED
             // rendition whose language matches the selected audio regardless of DEFAULT/AUTOSELECT and the

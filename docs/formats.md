@@ -1354,6 +1354,14 @@ engine.setNativeSubtitleRendering(_ active: Bool)
 
 `NativeSubtitleTrack` carries `.ordinal` (position in the rendition declaration), `.language` (ISO 639-2 tag), and `.displayName` (localized name suitable for a picker label).
 
+#### Rendition names and SDH
+
+The rendition's `NAME`, which AVKit shows in its subtitle menu and which `.displayName` repeats, comes from the track's own title when it has one (AE#1050). That is the container's `title` tag, or `ExternalSubtitleTrack.name` for a host-declared track. Two English tracks titled "SDH" and "CC" read "English (SDH)" and "English (CC)". A title that already names the language ("English SDH") is used as it is, and a title that is only the language code ("eng") is ignored. Without a title the name is the language, as before.
+
+Names stay unique within the group, because AVFoundation folds renditions with the same `NAME` into one option. Two tracks that end up with the same name get a number on the second ("English 2").
+
+A track whose container marks it hearing impaired gets `CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"`, the value Apple's HLS authoring spec uses for SDH. AVKit can label and rank the option from it. The remote HLS master rewrite writes the same value.
+
 The recommended host pattern for PiP / AirPlay:
 
 1. Observe `$nativeSubtitleRenditionAvailable` (wait for the first cues to be ready before activating).

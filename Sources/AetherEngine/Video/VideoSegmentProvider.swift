@@ -10,6 +10,7 @@ struct NativeSubtitleRenditionInfo: Sendable, Equatable {
     let language: String?
     let name: String
     let isForced: Bool
+    var isHearingImpaired: Bool = false
 }
 
 // MARK: - Live window sizing
@@ -3490,6 +3491,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             let name = lang.flatMap { Locale.current.localizedString(forIdentifier: $0) } ?? "Subtitle \(i + 1)"
             return (ordinal: i, language: lang, name: name, isForced: false)
         }
+    }
+
+    var nativeSubtitleHearingImpairedOrdinals: Set<Int> {
+        Set(nativeSubRenditionInfos.indices.filter { nativeSubRenditionInfos[$0].isHearingImpaired })
     }
 
     /// WebVTT for one subtitle segment: the cues overlapping video segment `segmentIndex`'s [start, end) on

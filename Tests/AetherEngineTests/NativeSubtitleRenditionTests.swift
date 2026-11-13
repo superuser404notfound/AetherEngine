@@ -58,6 +58,50 @@ struct NativeSubtitleRenditionTests {
         #expect(AetherEngine.nativeOptionIndex(forLanguage: nil, rank: 0, optionLanguageTags: tags) == nil)
     }
 
+    // MARK: - AE#1050: names from the track title
+
+    private func titled(_ lang: String?, _ title: String?, sdh: Bool = false) -> AetherEngine.NativeSubtitleTrackEntry {
+        AetherEngine.NativeSubtitleTrackEntry(sourceStreamIndex: 0, language: lang, title: title, isHearingImpaired: sdh)
+    }
+
+    private func languageName(_ code: String) -> String {
+        Locale.current.localizedString(forIdentifier: code) ?? code
+    }
+
+    @Test("AE#1050: two same-language tracks are told apart by their titles")
+    func titlesSeparateSameLanguage() {
+        let infos = AetherEngine.nativeSubtitleRenditionInfos(
+            for: [titled("eng", "SDH", sdh: true), titled("eng", "CC")])
+        let en = languageName("eng")
+        #expect(infos[0].name == "\(en) (SDH)")
+        #expect(infos[1].name == "\(en) (CC)")
+        #expect(infos[0].isHearingImpaired)
+        #expect(!infos[1].isHearingImpaired)
+    }
+
+    @Test("AE#1050: a title that names the language stands alone, one that is the code is dropped")
+    func titleNamingTheLanguage() {
+        let en = languageName("eng")
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "\(en) SDH") == "\(en) SDH")
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "eng") == en)
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "  ") == en)
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: nil, title: "Signs") == "Signs")
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: nil, title: nil) == nil)
+    }
+
+    @Test("AE#1050: a quote or line break in a title cannot break the master tag")
+    func titleIsSanitized() {
+        let name = AetherEngine.nativeSubtitleRenditionBaseName(language: nil, title: "Say \"hi\"\nnow") ?? ""
+        #expect(!name.contains("\""))
+        #expect(!name.contains("\n"))
+    }
+
+    @Test("AE#1050: identical titles still get the numbered suffix")
+    func identicalTitlesStayUnique() {
+        let infos = AetherEngine.nativeSubtitleRenditionInfos(for: [titled("eng", "Full"), titled("eng", "Full")])
+        #expect(infos[1].name == "\(infos[0].name) 2")
+    }
+
     // MARK: - Phase D: bitmap OCR renditions
 
     @Test("bitmap tracks become needsOCR entries; text tracks and live sessions are excluded")
