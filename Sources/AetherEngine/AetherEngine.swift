@@ -7092,7 +7092,7 @@ public final class AetherEngine: ObservableObject {
             // AE#1022: the landing read goes out with the seek, not with the first drain tick after
             // it, which comes only once the landed frame has prerolled (measured 0.67 s). The ground
             // behind the landing is then read by the time that tick asks about it.
-            closeOpenEndedSubtitleCues(atSeekLanding: landingSource)
+            closeOpenEndedSubtitleCues(atSeekFrom: clock.sourceTime, to: landingSource)
             requestSubtitlePrefetchLanding(at: landingSource)
             hostReposition = await host.seek(to: clockTarget)
         } else {

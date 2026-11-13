@@ -121,16 +121,55 @@ struct Issue1022LandingWindowTests {
 
     // MARK: - Seek
 
-    @Test("a set left open before a seek is closed at the landing, not drawn over it")
-    func openSetClosedAtSeekLanding() throws {
+    @Test("a set left open before a seek is closed at the departure, not drawn over the landing")
+    func openSetClosedAtSeekDeparture() throws {
         let engine = try AetherEngine()
         let open = SubtitleCue(id: 1, startTime: 72, endTime: 72 + 4_294_967, body: .text("old"))
         let ahead = SubtitleCue(id: 2, startTime: 82, endTime: 82 + 4_294_967, body: .text("next"))
         engine.subtitleCues = [open, ahead]
-        engine.closeOpenEndedSubtitleCues(atSeekLanding: 79.4)
-        #expect(engine.subtitleCues.first { $0.id == 1 }?.endTime == 79.4)
+        engine.closeOpenEndedSubtitleCues(atSeekFrom: 73.1, to: 79.4)
+        #expect(engine.subtitleCues.first { $0.id == 1 }?.endTime == 73.1)
         #expect(engine.subtitleCues.first { $0.id == 2 }?.endTime == ahead.endTime,
                 "a set after the landing is the reconstruction's to decide")
+    }
+
+    // Round 2 (retest on 7.63.0): closing at the landing claimed the whole jumped-over stretch.
+
+    @Test("a set closed by a forward seek is not drawn when a later seek lands back inside the jump")
+    func forwardSeekDoesNotClaimTheJumpedStretch() {
+        var cues = [SubtitleCue(id: 1, startTime: 0, endTime: 4_294_967, body: .text("only set"))]
+        #expect(AetherEngine.closeOpenEndedCues(&cues, seekFrom: 1.2, to: 58))
+        #expect(cues[0].endTime == 1.2)
+        #expect(!cues.contains { $0.startTime <= 54 && $0.endTime > 54 },
+                "nothing covers the later landing at 54 s")
+        #expect(!AetherEngine.closeOpenEndedCues(&cues, seekFrom: 58, to: 54),
+                "once closed it is no longer open, and a later seek leaves it alone")
+    }
+
+    @Test("an open set the playhead never reached is closed at its own start on a forward seek")
+    func unseenSetBeforeForwardLandingClosedAtItsStart() {
+        var cues = [SubtitleCue(id: 1, startTime: 5, endTime: 5 + 4_294_967, body: .text("read ahead"))]
+        #expect(AetherEngine.closeOpenEndedCues(&cues, seekFrom: 3, to: 50))
+        #expect(cues[0].endTime == 5)
+        #expect(!cues.contains { $0.startTime <= 35 && $0.endTime > 35 })
+    }
+
+    @Test("a backward seek keeps a set that was on screen at the departure over its own stretch")
+    func backwardSeekKeepsTheSeenStretch() {
+        var cues = [SubtitleCue(id: 1, startTime: 10, endTime: 10 + 4_294_967, body: .text("on screen")),
+                    SubtitleCue(id: 2, startTime: 30, endTime: 30 + 4_294_967, body: .text("ahead"))]
+        #expect(AetherEngine.closeOpenEndedCues(&cues, seekFrom: 20, to: 15))
+        #expect(cues[0].endTime == 20, "its clear was still unread, so it lasted at least to 20 s")
+        #expect(cues[1].endTime == 30 + 4_294_967, "a set ahead of a backward landing stays open")
+    }
+
+    @Test("an authored end and a departure without a frame are handled")
+    func authoredEndAndNoDeparture() {
+        var authored = [SubtitleCue(id: 1, startTime: 10, endTime: 14, body: .text("authored"))]
+        #expect(!AetherEngine.closeOpenEndedCues(&authored, seekFrom: 12, to: 60))
+        var cues = [SubtitleCue(id: 1, startTime: 72, endTime: 72 + 4_294_967, body: .text("old"))]
+        #expect(AetherEngine.closeOpenEndedCues(&cues, seekFrom: .nan, to: 79.4))
+        #expect(cues[0].endTime == 79.4, "no departure falls back to the landing")
     }
 
     @Test("the drain's jump after a seek does not resend the reader, a later seek's jump does")

@@ -591,6 +591,8 @@ With an advance of 0, a text track reads from the tap alone.
 
 **Every session reads from 15 s behind its landing (AE#1022)**, in either role, and claims its coverage from there. A set that began just before a start position or a far seek is therefore proven like any other.
 
+**An open set is closed where playback left (AE#1022 round 2).** A bitmap set whose clear was not read yet still has its open placeholder end, so it would be drawn over the landing of a seek. When a software seek goes out, such a set is closed at the departure, the position playback left from. Its clear was still unread there and the harvest runs ahead of the playhead, so the set really lasted that long, and nothing past it is known. A set that starts after the departure was never on screen. If it starts before the landing of a forward seek, it is closed at its own start, and a re-decode replaces it (`insertCueSorted`). Closing at the landing instead, as round 1 did, claimed the whole stretch the seek jumped over, and a later seek back into it drew the set again.
+
 **Other rules.**
 
 - It is best-effort. If it cannot open or wedges, the tap-fed behavior above is unchanged.

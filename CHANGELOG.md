@@ -35,6 +35,15 @@ the public-API contract.
 
 ### Fixed
 
+- **A PGS set is no longer drawn again after a seek back into a stretch a seek jumped over (AE#1022,
+  round 2).** A set still open when a seek went out was closed at the landing, so it claimed everything
+  between its start and the landing. A later seek back into that stretch drew it again, until the
+  playhead passed the first landing (retest: a set from 0 s on screen from 54 s to 58 s). The end is now
+  the position playback left from, and a set the playhead never reached is closed at its own start. On a
+  60 s MKV with one set and no readable clear, seeking from 10.7 s to 50 s and back to 46 s drew the set
+  at 46 s before the fix and not after, two runs each. Thanks to Desima-AP for the retest. Covered by
+  `Issue1022LandingWindowTests`.
+
 - **AAC with its channel layout in a PCE plays instead of failing to open (AE#1047).** FFmpeg's AAC
   encoder writes `channelConfiguration` 0 plus a Program Config Element for any layout without a
   standard number (a 6.0 track, or a Plex transcode laid out CPE, SCE, SCE, CPE). CoreMedia refuses
