@@ -14,6 +14,8 @@ import UIKit
 //   HDR10_ARMS="label|mode|url[|secs=25],label|mode|url,..."
 //
 // Modes:
+// - `setup`: the clip on loop through AVPlayer, so the television is in HDR10 while its HDR picture
+//   settings (dynamic tone mapping) are set. Nothing is measured.
 // - `avplayer`: plain AVPlayer + AVPlayerLayer, Apple's own path (the reference).
 // - `native`: AetherEngine as a host uses it, default routing (the native AVPlayer route for this clip).
 // - `software`, `meta`, `chain`, `chainmeta`: AetherEngine on the software path
@@ -68,6 +70,7 @@ struct ProbeArm {
     /// mapping off), with the values an analyser would read.
     var expectation: String {
         switch mode {
+        case "setup": "HDR10 is on: set the TV's Dynamic Tone Mapping to Off now"
         case "meta", "chainmeta": "probe's metadata: 777 and 1000 markers look the SAME (MaxCLL 345)"
         default: "clip's metadata: 777 and 1000 markers look DIFFERENT (MaxCLL 1000)"
         }
@@ -141,6 +144,8 @@ struct ProbeHarnessView: View {
             corner = "\(arm.label) \(arm.mode)"
             say("arm \(arm.label) start mode=\(arm.mode) url=\(arm.url.lastPathComponent) secs=\(Int(arm.seconds))")
             switch arm.mode {
+            case "setup":
+                await host.playAVPlayer(arm.url, seconds: arm.seconds, loops: true, log: say)
             case "avplayer":
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
             case "native", "software", "meta", "chain", "chainmeta":
@@ -201,9 +206,13 @@ final class ProbeHostView: UIView {
     }
 
     @MainActor
-    func playAVPlayer(_ url: URL, seconds: Double, log: @escaping @Sendable (String) -> Void) async {
+    func playAVPlayer(_ url: URL, seconds: Double, loops: Bool = false,
+                      log: @escaping @Sendable (String) -> Void) async {
         let item = AVPlayerItem(url: url)
-        let player = AVPlayer(playerItem: item)
+        let player = AVQueuePlayer()
+        // Looping plays copies of the item; `looper` must live until the arm ends.
+        let looper = loops ? AVPlayerLooper(player: player, templateItem: item) : nil
+        if looper == nil { player.insert(item, after: nil) }
         window?.avDisplayManager.preferredDisplayCriteria = try? await item.asset.load(.preferredDisplayCriteria)
         let pl = AVPlayerLayer(player: player)
         pl.frame = bounds
@@ -211,11 +220,14 @@ final class ProbeHostView: UIView {
         layer.addSublayer(pl)
         player.play()
         let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, item.status != .failed {
+        while Date() < deadline, (player.currentItem ?? item).status != .failed {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
-        log(String(format: "summary avplayer: status=%d error=%@ played=%.1fs", item.status.rawValue,
-                   String(describing: item.error), player.currentTime().seconds))
+        let playing = player.currentItem ?? item
+        log(String(format: "summary %@: status=%d error=%@ played=%.1fs loops=%d", loops ? "setup" : "avplayer",
+                   playing.status.rawValue, String(describing: playing.error), player.currentTime().seconds,
+                   looper?.loopCount ?? 0))
+        looper?.disableLooping()
         player.pause()
         pl.removeFromSuperlayer()
     }

@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds the HDR10 pass-through clips into $HDR10_OUT (default ../out, gitignored). Needs ffmpeg with
-# libx265 and python3 + numpy. Each 4K encode takes a few minutes; a clip that exists is kept.
+# libx265 and python3 + numpy. Each 4K encode takes a few minutes (the pattern is flat, so x265's
+# veryfast preset loses nothing); a clip that exists is kept.
 #
 #   pattern_24.mp4   3840x2160 at 23.976, 40 s
 #   pattern_60.mp4   3840x2160 at 59.94, 30 s
@@ -30,19 +31,26 @@ build() {
     -f rawvideo -pix_fmt yuv420p10le -s 3840x2160 -framerate $num/$den -i - \
     -f lavfi -i anullsrc=r=48000:cl=stereo \
     -map 0:v -map 1:a -shortest \
-    -c:v libx265 -preset fast -crf 16 -pix_fmt yuv420p10le \
+    -c:v libx265 -preset veryfast -crf 16 -pix_fmt yuv420p10le \
     -color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv \
     -x265-params "hdr10=1:hdr10-opt=1:repeat-headers=1:aud=1:keyint=$gop:min-keyint=$gop:no-scenecut=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:master-display=$MASTER:max-cll=1000,400" \
     -tag:v hvc1 -c:a aac -b:a 64k -movflags +faststart "$OUT/$name.mp4.tmp.mp4"
   mv "$OUT/$name.mp4.tmp.mp4" "$OUT/$name.mp4"
 }
 
-build pattern_24 24000 1001 40 48
-build pattern_60 60000 1001 30 120
+# Arguments pick clips (`build.sh pattern_24`); none builds both.
+for clip in ${@:-pattern_24 pattern_60}; do
+  case $clip in
+    pattern_24) build pattern_24 24000 1001 40 48 ;;
+    pattern_60) build pattern_60 60000 1001 30 120 ;;
+    *) echo "unknown clip $clip (pattern_24, pattern_60)"; exit 1 ;;
+  esac
+done
 
 # What the files declare, for the run log.
 if command -v ffprobe >/dev/null; then
   for f in pattern_24 pattern_60; do
+    [[ -s "$OUT/$f.mp4" ]] || continue
     echo "$f: $(ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,color_transfer,color_primaries -of csv=p=0 "$OUT/$f.mp4")"
   done
 fi

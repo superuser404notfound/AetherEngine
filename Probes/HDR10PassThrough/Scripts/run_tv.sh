@@ -2,7 +2,8 @@
 # Builds the HDR10 host, installs it on an Apple TV, serves the clips from this Mac and plays an arm
 # sequence with the console attached. Watch the 777 and 1000 nit markers during each arm (README).
 #
-#   DEVICE="Apple TV" ./run_tv.sh               build + install, then SEQ=main (six arms, about 3 min)
+#   DEVICE="Apple TV" ./run_tv.sh               build + install, then SEQ=main (a 1 min setup arm and six
+#                                               arms, about 4 min; SETUP=0 skips the setup arm)
 #   DEVICE=... ./run_tv.sh --no-build           play only (app already installed)
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
 #
@@ -29,9 +30,6 @@ SEQ=${SEQ:-main}
 SECS=${SECS:-25}
 SERVE=$ROOT/../DolbyVisionPulse/Scripts/serve.py
 
-for clip in pattern_24 pattern_60; do
-  [[ -s "$OUT/$clip.mp4" ]] || { echo "no $OUT/$clip.mp4: run Scripts/build.sh first"; exit 1; }
-done
 if [[ -n "${IFACE:-}" ]]; then
   IP=$(ipconfig getifaddr "$IFACE" 2>/dev/null || true)
   [[ -n "$IP" ]] || { echo "no IP address on IFACE=$IFACE"; exit 1; }
@@ -43,11 +41,18 @@ B="http://$IP:$PORT"
 S="secs=$SECS"
 case "$SEQ" in
   main)
-    ARMS="P|avplayer|$B/pattern_24.mp4|$S,N|native|$B/pattern_24.mp4|$S,S|software|$B/pattern_24.mp4|$S,M|meta|$B/pattern_24.mp4|$S,C|chain|$B/pattern_24.mp4|$S,CM|chainmeta|$B/pattern_24.mp4|$S" ;;
+    # SETUP (60 s, SETUP=0 to skip) puts the television in HDR10 so its HDR picture settings can be set.
+    SETUP_ARM=""
+    [[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=60,"
+    ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|$S,N|native|$B/pattern_24.mp4|$S,S|software|$B/pattern_24.mp4|$S,M|meta|$B/pattern_24.mp4|$S,C|chain|$B/pattern_24.mp4|$S,CM|chainmeta|$B/pattern_24.mp4|$S" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
   *) echo "unknown SEQ=$SEQ (main|pace)"; exit 1 ;;
 esac
+# Only the clips this sequence plays have to exist.
+for clip in $(print -r -- "$ARMS" | grep -o "pattern_[0-9]*\.mp4" | sort -u); do
+  [[ -s "$OUT/$clip" ]] || { echo "no $OUT/$clip: run Scripts/build.sh first"; exit 1; }
+done
 
 if [[ "${1:-}" != "--no-build" ]]; then
   SIGN=()

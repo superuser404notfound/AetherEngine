@@ -83,11 +83,11 @@ Each encode takes a few minutes; an existing clip is kept.
 Nothing here can harm a television. HDR10 metadata only describes the content; the television's own
 firmware decides how bright the panel goes and never exceeds its limits, whatever a patch or MaxCLL says.
 
-The one thing to mind is an OLED panel and a static picture. The pattern does not move except for the
-bar and the counter, so arms are short (25 s, `SECS` to change), the run ends on the home screen, and a
-full `main` sequence shows the pattern for about 2.5 minutes. That is far below what leaves lasting
-retention. A faint afterimage right after a run fades within minutes, or with the panel's own
-refresh. Do not pause on the pattern or leave the app running unattended.
+The one thing to mind is an OLED panel and a still picture. So the patches drift on a small circle (8
+pixels, one turn every 20 s), arms are short (25 s, `SECS` to change), and the run ends on the home
+screen. A full `main` sequence shows the pattern for about 3.5 minutes, the setup arm included, far
+below what leaves lasting retention. A faint afterimage right after a run fades within minutes, or
+with the panel's own refresh. Do not pause on the pattern or leave the app running unattended.
 
 ## Run
 
@@ -103,6 +103,7 @@ analyser or info screen, the peak, MaxCLL and MaxFALL it shows).
 
 | arm | mode | what plays | metadata that should arrive if it works |
 |---|---|---|---|
+| SETUP | `setup` | the clip on loop, 60 s, nothing measured | the TV is in HDR10: set Dynamic Tone Mapping to Off now (`SETUP=0` skips it) |
 | P | `avplayer` | plain AVPlayer, Apple's own path | the clip's (the reference) |
 | N | `native` | the engine, native route | the clip's |
 | S | `software` | software path, probe `log`: VideoToolbox's buffer as decoded | the clip's, if VideoToolbox attaches it |
