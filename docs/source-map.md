@@ -199,7 +199,7 @@ Notes:
 | `AlternativeTransferSEI.swift` | AE#839: reads the `alternative_transfer_characteristics` SEI that names HLG behind a backward-compatible VUI. |
 | `AV1DolbyVisionRPU.swift` | The Dolby Vision RPU from an AV1 T.35 metadata OBU (Profile 10), attached to decoded frames for the system's DV display management. |
 | `DualLayerRouteDecision.swift` | Whether a Profile 7 load takes the dual-layer route or stays native, and why. Pure, logged once per source. |
-| `UpscalingFrameHandler.swift` | Runs the upscale stage (#846) on every decoded frame; a nil from the stage delivers the original. |
+| `UpscalingFrameHandler.swift` | Runs the upscale stage (#846), or the HDR10 pass-through probe (AE#957), on every decoded frame; a nil from the stage delivers the original. |
 
 Notes:
 
@@ -560,6 +560,7 @@ Notes:
 | `StereoVideoSignal.swift` | `StereoPresentation` (`LoadOptions.stereoPresentation`) and how the native path signals frame-packed 3D in the served HLS. |
 | `HDR10PlusDetectionProbe.swift` | `probe(url:detecting:)`: the opt-in HDR10+ / HDR Vivid pre-playback scan, its bounds and `ProbeDetail`. |
 | `HDR10PlusMetadataScan.swift` | Decoder-free HDR10+ confirmation from T.35 SEI / OBU or Matroska side data, for playback and the probe. |
+| `HDR10PassThroughProbe.swift` | AE#957: with `AETHER_HDR10_PROBE`, runs software-path frames through the frame chain and/or sets HDR10 metadata of its own, to check on a television whether that metadata arrives (`Probes/HDR10PassThrough`). |
 | `HDRVividMetadataScan.swift` | Decoder-free HDR Vivid (CUVA) confirmation for the detail probe (#699). |
 | `DolbyVisionRecordAudit.swift` | AE#532: what a DV source's own RPU says about the profile its container record claims. |
 | `DoviRpuGuard.swift` | CRC-checks every RPU before libdovi (built panic=abort) parses it. |
