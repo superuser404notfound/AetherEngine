@@ -85,7 +85,6 @@ extension AetherEngine: SharedNowPlayingClient {
         nowPlayingController = controller
         nowPlayingRoute = (kind, plan)
         controller.setTracks(nowPlayingTrackAvailability)
-        if kind == .softwareVideo { softwareNowPlayingActive = true }
 
         // @Published emits before the stored value changes, so a synchronous read in the sink would see the
         // previous state; the hop lets the controller read the settled values.
@@ -126,6 +125,9 @@ extension AetherEngine: SharedNowPlayingClient {
     private func activateNowPlayingController() {
         guard let controller = nowPlayingController, !controller.isActive else { return }
         controller.start(skipInterval: remoteSkipInterval)
+        // Only now are the engine's command targets registered. A host that replaces some of them
+        // when the flag turns true must find them there (#1051).
+        if nowPlayingRoute?.kind == .softwareVideo { softwareNowPlayingActive = true }
         refreshSoftwareNowPlaying()
         // The fresh card is on the center now, over whatever the previous item left there.
         dropRetainedNowPlayingCard(clear: false)
@@ -177,6 +179,7 @@ extension AetherEngine: SharedNowPlayingClient {
             activateNowPlayingController()
         } else {
             controller.stop(clearCard: true)
+            if softwareNowPlayingActive { softwareNowPlayingActive = false }
         }
     }
 

@@ -10,7 +10,14 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **`softwareNowPlayingActive` turns true only once the engine's command targets are registered (#1051).**
+  Since 7.64.0 the flag went true before the targets existed, so a host that swaps play, pause and toggle
+  for its own the moment the flag turns true removed nothing, and both answered every press (a toggle
+  cancelled itself). It also stayed true while the engine waited behind another one for the shared
+  surface. It now goes true after registration and false when another engine takes the surface. Thanks
+  to Desima-AP for the report and the measurement. Covered by `NowPlayingRoutingTests`.
 
 ## [7.66.0] - 2026-11-13
 

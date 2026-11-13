@@ -1,5 +1,6 @@
 import Testing
 import MediaPlayer
+import Combine
 @testable import AetherEngine
 
 /// #1041: one Now-Playing contract across the four hosts and the four platforms. Covers where each
@@ -239,6 +240,43 @@ struct NowPlayingRoutingTests {
         #expect(sinks.count == 1 && sinks[0].deactivated)
     }
 
+    @Test("#1051: the software flag turns true only once the engine's targets are registered")
+    func softwareFlagFollowsRegisteredTargets() throws {
+        let arbiter = NowPlayingArbiter()
+        let holder = try AetherEngine(), waiter = try AetherEngine()
+        var sinks: [ObjectIdentifier: Sink] = [:]
+        for engine in [holder, waiter] {
+            engine.nowPlayingArbiter = arbiter
+            engine.ownsSoftwareNowPlaying = true
+            let sink = Sink()
+            sinks[ObjectIdentifier(engine)] = sink
+            engine.makeNowPlayingSink = { _, _ in sink }
+        }
+        // What the reporter's host does: the moment the flag turns true it replaces the engine's
+        // play/pause/toggle, so the engine's targets must already be on the center by then.
+        var activatedWhenSeen: [Bool] = []
+        let watch = waiter.$softwareNowPlayingActive.dropFirst().sink { active in
+            if active { activatedWhenSeen.append(sinks[ObjectIdentifier(waiter)]!.activations > 0) }
+        }
+        defer { watch.cancel() }
+
+        holder.startSoftwareNowPlaying()
+        #expect(holder.softwareNowPlayingActive)
+
+        waiter.startSoftwareNowPlaying()
+        #expect(!waiter.softwareNowPlayingActive, "waiting behind another engine publishes nothing")
+
+        arbiter.claim(waiter)
+        #expect(waiter.softwareNowPlayingActive)
+        #expect(!holder.softwareNowPlayingActive, "losing the surface removes the targets")
+        #expect(activatedWhenSeen == [true])
+
+        waiter.stop()
+        #expect(holder.softwareNowPlayingActive, "the holder takes the surface back")
+        holder.stop()
+        #expect(!holder.softwareNowPlayingActive)
+    }
+
     @Test("track handlers reach the engine's controller and the host's closures")
     func engineTrackHandlers() throws {
         let engine = try AetherEngine()
@@ -355,7 +393,10 @@ private final class Sink: SoftwareNowPlayingSink {
     var deactivated = false
     var clearedOnDeactivate: Bool?
     var cardCleared = 0
-    func activate(skipInterval: Double, handler: @escaping @MainActor (NowPlayingRemoteCommand) -> Void) {}
+    var activations = 0
+    func activate(skipInterval: Double, handler: @escaping @MainActor (NowPlayingRemoteCommand) -> Void) {
+        activations += 1
+    }
     func setSeekingEnabled(_ enabled: Bool) {}
     func setTrackCommands(_ tracks: NowPlayingTrackAvailability) { self.tracks = tracks }
     func publish(info: [String: Any]?, playbackState: MPNowPlayingPlaybackState) { published.append(info) }

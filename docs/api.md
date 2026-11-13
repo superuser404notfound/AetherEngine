@@ -1866,7 +1866,8 @@ Routes published through an `MPNowPlayingSession` take no part: the system arbit
 
 - Off by default, and independent of `ownsVideoNowPlayingSession`, so the native path is untouched. A secondary role never takes it.
 - Identity comes from `setExternalMetadata`, overlaid by `setNowPlayingInfo` (or `setVideoNowPlayingInfo`).
-- `softwareNowPlayingActive` is true while the engine is publishing for the software host.
+- `softwareNowPlayingActive` is true while the engine is publishing for the software host. It turns true once the engine's command targets are on `MPRemoteCommandCenter.shared()`, so a host may replace some of them from its observer. It is false while the engine waits behind another one for the shared surface, and turns false again when it loses the surface or stops.
+- To answer a command yourself, `nowPlayingCommandInterceptor` is the simpler route: it sees each command before the engine and never fights over targets.
 
 The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default()` and registers its own targets on `MPRemoteCommandCenter.shared()`, as it does on every shared route. At stop it:
 
