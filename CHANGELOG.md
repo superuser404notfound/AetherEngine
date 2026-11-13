@@ -10,10 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Every audio track in AVKit's audio menu (AE#1049).** With `LoadOptions.nativeAudioTrackMenu` on, a stock
+  `AVPlayerViewController` lists all audio tracks of the source, not just the one playing, and a pick there
+  switches through `selectAudioTrack(index:)`. Off by default. See
+  [Formats › Every audio track in AVKit's audio menu](docs/formats.md#every-audio-track-in-avkits-audio-menu).
+
 ### Changed
 
 - **Native subtitle renditions are named after the track's title (AE#1050).** Two English tracks titled
-  SDH and CC showed up in AVKit's menu as "English" and "English 2". They now read "English (SDH)" and
+  SDH and CC showed up in AVKit's menu as "English" and "English 2". They now read "English SDH" and
   "English (CC)". The title is the container's `title` tag or `ExternalSubtitleTrack.name`; without one the
   name stays the language. Hearing-impaired tracks also declare `CHARACTERISTICS` on the loopback master,
   as the remote HLS rewrite already did. See [Formats › Rendition names and SDH](docs/formats.md#rendition-names-and-sdh).

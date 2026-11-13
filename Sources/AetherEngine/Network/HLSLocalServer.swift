@@ -103,6 +103,9 @@ protocol HLSSegmentProvider: AnyObject {
     /// AVFoundation has nothing above the segment layer that says "object audio" and settles on the
     /// bed, which is how an Atmos stream-copy reached an Atmos-capable receiver as 5.1 PCM.
     var masterAudioChannels: String? { get }
+    /// AE#1049: the source's other audio tracks, URI-less entries in the same group as
+    /// `masterAudioRendition`. Empty unless the host opted in.
+    var masterAudioAlternates: [AudioRenditionChoice] { get }
 
     /// Native subtitle renditions (#15): one per text track, for the master EXT-X-MEDIA:TYPE=SUBTITLES tags
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
@@ -204,6 +207,7 @@ extension HLSSegmentProvider {
     var masterClosedCaptions: String? { nil }
     var masterAudioRendition: (language: String?, name: String)? { nil }
     var masterAudioChannels: String? { nil }
+    var masterAudioAlternates: [AudioRenditionChoice] { [] }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
     var nativeSubtitleHearingImpairedOrdinals: Set<Int> { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
@@ -1855,6 +1859,18 @@ final class HLSLocalServer: @unchecked Sendable {
                 audioAttrs.append("CHANNELS=\"\(channels)\"")
             }
             lines.append("#EXT-X-MEDIA:\(audioAttrs.joined(separator: ","))")
+            // AE#1049: the other tracks ride the same group without a URI. RFC 8216 reads that as
+            // "carried in the variant", which only the served track is; AVFoundation lists them
+            // anyway, and a pick is answered by a reload onto that track. AUTOSELECT=NO, or
+            // AVFoundation passes over DEFAULT=YES for the entry in the system language (measured
+            // on macOS 27).
+            for alt in provider.masterAudioAlternates {
+                var altAttrs = ["TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(alt.name)\""]
+                if let language = alt.language { altAttrs.append("LANGUAGE=\"\(language)\"") }
+                altAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO"])
+                if alt.channels > 0 { altAttrs.append("CHANNELS=\"\(alt.channels)\"") }
+                lines.append("#EXT-X-MEDIA:\(altAttrs.joined(separator: ","))")
+            }
         }
 
         // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is

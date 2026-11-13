@@ -2755,7 +2755,8 @@ extension AetherEngine {
     ) -> [NativeSubtitleRenditionInfo] {
         var counts: [String: Int] = [:]
         return entries.enumerated().map { i, entry in
-            let base = nativeSubtitleRenditionBaseName(language: entry.language, title: entry.title)
+            let base = nativeSubtitleRenditionBaseName(language: entry.language, title: entry.title,
+                                                       isHearingImpaired: entry.isHearingImpaired)
                 ?? "Subtitle \(i + 1)"
             let n = (counts[base] ?? 0) + 1
             counts[base] = n
@@ -2771,12 +2772,23 @@ extension AetherEngine {
     /// The language name, the track title, or both. A title that already names the language
     /// ("English SDH") stands alone; one that does not ("SDH") goes in brackets after it. A title
     /// that is only the language code ("eng") adds nothing and is dropped.
-    nonisolated static func nativeSubtitleRenditionBaseName(language: String?, title: String?) -> String? {
+    ///
+    /// An SDH track drops "SDH" from its title: it carries CHARACTERISTICS, and AVFoundation then
+    /// appends "SDH" to the name by itself. Measured on tvOS 26: NAME="English (SDH)" read
+    /// "English (SDH) SDH" in AVKit's menu.
+    nonisolated static func nativeSubtitleRenditionBaseName(language: String?, title: String?,
+                                                            isHearingImpaired: Bool = false) -> String? {
         let languageName = language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
-        var cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleanTitle = title?
             // NAME is a quoted-string in the master; a quote or a line break would end the tag.
             .replacingOccurrences(of: "\"", with: "'")
             .components(separatedBy: .newlines).joined(separator: " ")
+        if isHearingImpaired, let t = cleanTitle {
+            cleanTitle = t.replacingOccurrences(of: #"\bSDH\b"#, with: "", options: [.regularExpression, .caseInsensitive])
+                .replacingOccurrences(of: #"\(\s*\)|\[\s*\]"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
+        }
+        cleanTitle = cleanTitle?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.init(charactersIn: "-,/|")))
         if let t = cleanTitle, t.isEmpty || (language.map { languageMatches(t, $0) } ?? false) { cleanTitle = nil }
         switch (languageName, cleanTitle) {
         case let (name?, title?):

@@ -73,7 +73,8 @@ struct NativeSubtitleRenditionTests {
         let infos = AetherEngine.nativeSubtitleRenditionInfos(
             for: [titled("eng", "SDH", sdh: true), titled("eng", "CC")])
         let en = languageName("eng")
-        #expect(infos[0].name == "\(en) (SDH)")
+        // AVFoundation appends "SDH" itself to an option with the SDH characteristic.
+        #expect(infos[0].name == en)
         #expect(infos[1].name == "\(en) (CC)")
         #expect(infos[0].isHearingImpaired)
         #expect(!infos[1].isHearingImpaired)
@@ -87,6 +88,17 @@ struct NativeSubtitleRenditionTests {
         #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "  ") == en)
         #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: nil, title: "Signs") == "Signs")
         #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: nil, title: nil) == nil)
+    }
+
+    @Test("AE#1050: an SDH track drops SDH from its title, AVFoundation adds it back")
+    func sdhTitleStripped() {
+        let en = languageName("eng")
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "SDH", isHearingImpaired: true) == en)
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "\(en) [SDH]", isHearingImpaired: true) == en)
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "Forced SDH", isHearingImpaired: true)
+                == "\(en) (Forced)")
+        // Without the disposition there is no characteristic, so the title keeps its SDH.
+        #expect(AetherEngine.nativeSubtitleRenditionBaseName(language: "eng", title: "SDH") == "\(en) (SDH)")
     }
 
     @Test("AE#1050: a quote or line break in a title cannot break the master tag")
