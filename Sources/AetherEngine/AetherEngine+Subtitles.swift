@@ -994,17 +994,50 @@ extension AetherEngine {
 
     /// AE#1022: a bitmap set still carrying its open placeholder end covers every position after
     /// it, so from the moment the clock jumps it is drawn over the landing until the first reset
-    /// tick closes it (#357), and that tick comes only after the landed frame prerolled. Closed at
-    /// the landing here instead, which is less than the tick does (it closes at the start of its
-    /// backscan): a set that really is the landing line comes back through the reconstruction.
-    func closeOpenEndedSubtitleCues(atSeekLanding landing: Double) {
+    /// tick closes it (#357), and that tick comes only after the landed frame prerolled.
+    ///
+    /// Round 2: the end is set from the DEPARTURE, not the landing. A set open at the departure
+    /// has its clear still unread, and the harvest runs ahead of the playhead, so the set really
+    /// lasted at least to the departure and nothing beyond it is known. Closed at the landing
+    /// instead, it claimed the whole jumped-over stretch, and a later seek back into that stretch
+    /// drew it (retest: a set from 0 s drawn from 54 s to 58 s after a seek to 58 s and back).
+    /// A set that starts after the departure was never seen; if it starts before a forward landing
+    /// it is closed at its own start. That does not lose it: a re-decode of the same set replaces
+    /// it (`insertCueSorted`), and one that really is the landing line comes back through the
+    /// reconstruction. An open set after the landing is left alone, as is one ahead of a backward
+    /// landing, which is an ordinary not-yet-closed set.
+    func closeOpenEndedSubtitleCues(atSeekFrom departure: Double, to landing: Double) {
         guard landing.isFinite else { return }
         for channel in [SubtitleChannel.primary, .secondary] {
             var cues = retainedSubtitleCues(for: channel)
-            if Self.closeOpenEndedCues(&cues, startingBefore: landing) {
+            if Self.closeOpenEndedCues(&cues, seekFrom: departure, to: landing) {
                 publishRetainedSubtitleCues(cues, for: channel)
             }
         }
+    }
+
+    /// AE#1022 round 2: the per-cue rule of `closeOpenEndedSubtitleCues(atSeekFrom:to:)`. A
+    /// departure that is not finite (no frame yet) falls back to the landing, the round 1 rule.
+    nonisolated static func closeOpenEndedCues(_ cues: inout [SubtitleCue],
+                                               seekFrom departure: Double, to landing: Double) -> Bool {
+        let from = departure.isFinite ? departure : landing
+        var changed = false
+        for i in 0..<cues.count {
+            let cue = cues[i]
+            guard cue.endTime - cue.startTime > subtitleOpenEndedWindowSeconds else { continue }
+            let end: Double
+            if cue.startTime < from {
+                end = from
+            } else if cue.startTime < landing {
+                end = cue.startTime
+            } else {
+                continue
+            }
+            guard end < cue.endTime else { continue }
+            cues[i] = cue.with(endTime: end)
+            changed = true
+        }
+        return changed
     }
 
     /// AE#1022: send a running prefetch session to a seek's landing, on the source axis, as the
