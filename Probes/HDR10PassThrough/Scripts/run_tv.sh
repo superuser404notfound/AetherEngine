@@ -43,19 +43,20 @@ else
 fi
 B="http://$IP:$PORT"
 S="secs=$SECS"
+# SETUP (60 s, SETUP=0 to skip; main, pulse and control) plays the pattern on loop, so the television's HDR
+# picture settings, or a camera's exposure, can be set on it before anything is measured.
+SETUP_ARM=""
+[[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=60,"
 case "$SEQ" in
   main)
-    # SETUP (60 s, SETUP=0 to skip) puts the television in HDR10 so its HDR picture settings can be set.
-    SETUP_ARM=""
-    [[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=60,"
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|$S,N|native|$B/pattern_24.mp4|$S,S|software|$B/pattern_24.mp4|$S,M|meta|$B/pattern_24.mp4|$S,C|chain|$B/pattern_24.mp4|$S,CM|chainmeta|$B/pattern_24.mp4|$S" ;;
   pulse)
     # S first, so the steady look is fresh when the pulse arms start. 30 s is ten switches.
-    ARMS="S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
+    ARMS="${SETUP_ARM}S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
   control)
     # Does the television visibly follow HDR10 metadata at all? P and P4 differ only in metadata, AP
     # alternates them every 6 s through AVPlayer, SP is the engine's pulse for comparison.
-    ARMS="P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
+    ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
   *) echo "unknown SEQ=$SEQ (main|pulse|control|pace)"; exit 1 ;;

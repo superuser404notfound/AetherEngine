@@ -163,6 +163,23 @@ frame carried before and after, what the format description built from it carrie
 | date | Apple TV | tvOS | television | engine side | M vs S | CM vs C | pacing 24 / 60 |
 |---|---|---|---|---|---|---|---|
 | 2026-11-13 | 4K (2nd gen), A12 | 27.2 | LG OLED77G4 | M and CM carry 777 / 345 / 123 to the display layer; S and C none | not read (pattern too bright, photos auto-exposed) | not read | chain 10.5 ms mean, 13.9 ms max per 4K frame; 0 and 1 dropped frames in 25 s at 23.976 |
+| 2026-11-13 | same | 27.2 | same | `SEQ=control`, filmed (below) | SP pulses: the TV follows metadata on VideoToolbox's buffers | CP not run yet | SP 0 dropped frames in 30 s |
+
+**Read from a video, 2026-11-13.** The pulse is invisible by eye but measurable on film. An iPhone filmed
+`SEQ=control` with exposure locked low (AE/AF lock, then exposure down until the top patches are grey).
+The raw 10-bit HLG luma of each patch was read per frame, and the ratio of the 4000 nit patch to the
+1500 nit patch tracks the TV's tone curve while staying independent of the camera's exposure:
+
+| part | metadata | 4000 / 1500 ratio |
+|---|---|---|
+| P | clip, 1000 nit | 0.987 (flat top: the TV clips above about 1500) |
+| P4 | clip, 4000 nit | 1.061 (a roll-off up to 4000) |
+| AP | AVPlayer, 1000 / 4000 every 6 s | follows the switches, +0.054, about 2 s behind them |
+| SP | engine `pulse`, 345 / 4000 every 3 s | follows the switches, +0.026, 1.75 s behind them; the same fit at other periods gives at most 0.009 |
+
+So a metadata change the engine makes mid-stream on VideoToolbox's buffers reaches the LG G4, which
+takes about 2 s to settle into a new curve. Smaller than AP, because 3 s phases leave it little time to
+settle.
 
 Write the M and CM cells as `differ` or `alike` against S and C, from the photos, or as what an analyser
 showed (`777/345/123`, `none` for HDR10 with no static metadata). `SDR` if the television left HDR.
