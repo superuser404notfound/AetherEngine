@@ -10,7 +10,16 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **AAC with its channel layout in a PCE plays instead of failing to open (AE#1047).** FFmpeg's AAC
+  encoder writes `channelConfiguration` 0 plus a Program Config Element for any layout without a
+  standard number (a 6.0 track, or a Plex transcode laid out CPE, SCE, SCE, CPE). CoreMedia refuses
+  that record: the loopback item failed with `-11829` / `-12848`, and an audio-only `.m4a` on AVPlayer
+  ended at 0 s. Such a track now bridges on the native path and takes the FFmpeg host when audio-only.
+  The record is parsed bit by bit, so an escaped object type or an explicit sampling rate does not
+  shift the field. Thanks to ysuleman for the report, the measurements and the patch. Covered by
+  `Issue1047AACProgramConfigTests`.
 
 ## [7.65.0] - 2026-11-12
 

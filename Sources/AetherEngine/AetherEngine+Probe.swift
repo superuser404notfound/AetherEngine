@@ -705,17 +705,19 @@ extension AetherEngine {
     /// (`AudioPlaybackHost`). AVPlayer needs a URL it can read and a codec on the whitelist, and
     /// takes neither a FLAC whose blocks are under CoreMedia's floor (AE#764), nor a FLAC whose frames
     /// are smaller than `STREAMINFO`'s `max_blocksize` (AE#946, AVPlayer mistimes it), nor a raw FLAC
-    /// file (AE#946, AVPlayer seeks it to the wrong place), nor a session the host asked onto `.software`.
+    /// file (AE#946, AVPlayer seeks it to the wrong place), nor an AAC whose layout lives in a PCE
+    /// (AE#1047, the item ends at 0 s), nor a session the host asked onto `.software`.
     nonisolated static func audioOnlyUsesAVPlayer(
         codecID: AVCodecID,
         isCustomSource: Bool,
         flacBlocksTooSmall: Bool,
         flacFramesMistimed: Bool,
         flacSeeksMisplaced: Bool,
+        aacLayoutInPCE: Bool = false,
         preferred: DecodePath
     ) -> Bool {
         !isCustomSource && avPlayerCanDecodeAudio(codecID) && !flacBlocksTooSmall && !flacFramesMistimed
-            && !flacSeeksMisplaced && preferred != .software
+            && !flacSeeksMisplaced && !aacLayoutInPCE && preferred != .software
     }
 
     /// AE#946: CoreMedia's parser for the raw FLAC container ignores `SEEKTABLE` and places a seek by

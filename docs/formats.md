@@ -75,7 +75,7 @@ The audio columns describe the native path. The software host decodes every trac
 
 | Codec | Plays? | Route (native path) | Notes |
 | --- | --- | --- | --- |
-| AAC-LC, HE-AAC / HE-AACv2 | Yes | Stream copy | LATM / LOAS, and HE-AAC without an AudioSpecificConfig (live ADTS), bridge |
+| AAC-LC, HE-AAC / HE-AACv2 | Yes | Stream copy | LATM / LOAS, HE-AAC without an AudioSpecificConfig (live ADTS), and a layout in a PCE bridge |
 | AC-3, E-AC-3, E-AC-3 JOC (Atmos) | Yes | Stream copy | JOC reaches HDMI as Dolby MAT 2.0 ([Dolby Atmos](#dolby-atmos)) |
 | FLAC, ALAC | Yes | Stream copy | FLAC with `min_blocksize` below 192 bridges |
 | TrueHD, MLP, DTS, DTS-HD MA | Yes | Bridge | Atmos objects and DTS:X heights only with `objectAudioRendering` and its trait ([TrueHD Atmos](#truehd-atmos-with-heights), [DTS:X](#dtsx-with-heights)) |
@@ -623,8 +623,10 @@ Stream-copy exceptions:
 
 - **HE-AAC / HE-AACv2** stream-copy when the source carries an AudioSpecificConfig (any movie container), and bridge only without one (live ADTS / MPEG-TS, where a synthesized ASC would mis-signal SBR).
 - **LATM/LOAS-framed AAC** (DVB broadcast framing) always bridges.
+- **AAC whose AudioSpecificConfig says `channelConfiguration` 0** bridges (AE#1047). That value means the channel layout sits in a Program Config Element (PCE), which FFmpeg's AAC encoder writes for any layout without a standard number, such as 6.0. CoreMedia refuses the record and the item fails with `-11829` / `-12848`. Relabelling it with a standard number opens the item but plays silence, because the PCE's element order no longer matches. libavcodec reads the PCE, so the bridge plays it.
 - **FLAC whose `STREAMINFO` `min_blocksize` is below 192** bridges too (AE#764). CoreMedia drops a track that declares less, and hangs on frames smaller than the field claims, so such a stream cannot be copied. The bridge is bit-perfect for FLAC.
 - **Audio-only FLAC.** The same `min_blocksize` field sends an audio-only FLAC to the FFmpeg host instead of AVPlayer. So does any audio-only FLAC in the raw `flac` container, whose seeks CoreMedia misplaces (AE#946).
+- **Audio-only AAC with a PCE.** The same `channelConfiguration` 0 sends an audio-only AAC to the FFmpeg host. On AVPlayer it opens and ends at 0 s (AE#1047).
 
 **Audio-only files** take one of two hosts:
 

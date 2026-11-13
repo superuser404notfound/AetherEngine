@@ -101,6 +101,7 @@ Notes:
 | `SoftwareAtmosRoute.swift` | Software path: the pure choice of how a track's audio reaches the renderer (PCM decode, compressed E-AC-3 JOC, or TrueHD Atmos / DTS:X rendered into a bed as APAC or PCM), from codec, stream shape, live and `objectAudioRendering`. |
 | `SoftwareAudioProducing.swift` | Software path: what the host asks of whatever turns an audio packet into renderer input. Implemented by `AudioDecoder`, `SoftwareEAC3Passthrough` and `SoftwareAPACProducer`. |
 | `SoftwareEAC3Passthrough.swift` | Software path: E-AC-3 JOC packets sent compressed to the audio renderer, with the `dec3` format description built from the stream, so the system's Atmos decoder gets the objects. |
+| `AACAudioSpecificConfig.swift` | Reads the `channelConfiguration` of an AAC AudioSpecificConfig and decides when CoreMedia refuses the record because its layout sits in a PCE (AE#1047). |
 | `AtmosDecoderPrimer.swift` | Registers the system's Atmos decoders in the process once (by creating an AVPlayer). The renderer needs this before it decodes compressed E-AC-3 as Atmos. |
 | `AudioDelayPolicy.swift` | AE#464: where a host's audio-delay nudge lands on each video route. |
 | `AudioRatePolicy.swift` | Pitch handling for host-driven rate changes on both transport surfaces (#434). |
