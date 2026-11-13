@@ -17,6 +17,9 @@ import UIKit
 // - `setup`: the clip on loop through AVPlayer, so the television is in HDR10 while its HDR picture
 //   settings (dynamic tone mapping) are set. Nothing is measured.
 // - `avplayer`: plain AVPlayer + AVPlayerLayer, Apple's own path (the reference).
+// - `avpulse`: the control for the pulse arms. AVPlayer alternates the arm's clip and its `_m4000` twin
+//   (the same pixels, 4000 nit metadata) every 6 s, so it shows whether the television visibly follows a
+//   metadata change that Apple's own player makes.
 // - `native`: AetherEngine as a host uses it, default routing (the native AVPlayer route for this clip).
 // - `software`, `meta`, `chain`, `chainmeta`, `pulse`, `chainpulse`: AetherEngine on the software path
 //   (`preferredDecodePath: .software`) with `AETHER_HDR10_PROBE` set to `log`, `meta`, `chain`,
@@ -80,11 +83,13 @@ struct ProbeArm {
         case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
         case "software", "chain": "decoder's frames carry no HDR10 metadata: the TV's 'none' case"
         case "pulse", "chainpulse": "metadata switches every 3 s: do the bright patches pulse?"
+        case "avpulse": "Apple's player switches 1000 / 4000 nit metadata every 6 s: does it change?"
+        case "avplayer" where url.lastPathComponent.contains("m4000"): "clip's metadata (4000 nit, MaxCLL 4000)"
         default: "clip's metadata (1000 nit, MaxCLL 1000)"
         }
     }
 
-    var pulses: Bool { mode == "pulse" || mode == "chainpulse" }
+    var pulses: Bool { mode == "pulse" || mode == "chainpulse" || mode == "avpulse" }
 
     /// What the person in front of the television does during the arm. In a sequence with pulse arms
     /// the others are steady controls, watched by eye like the rest.
@@ -168,6 +173,8 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, loops: true, log: say)
             case "avplayer":
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
+            case "avpulse":
+                await host.playAVPulse(arm.url, seconds: arm.seconds, log: say)
             case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse":
                 await playEngine(arm, log: say)
             default:
@@ -249,6 +256,47 @@ final class ProbeHostView: UIView {
                    looper?.loopCount ?? 0))
         looper?.disableLooping()
         player.pause()
+        pl.removeFromSuperlayer()
+    }
+
+    /// Seconds each clip plays in `avpulse`.
+    static let avPulseSeconds = 6.0
+
+    /// The clip and its `_m4000` twin, alternating every `avPulseSeconds` in one AVQueuePlayer.
+    @MainActor
+    func playAVPulse(_ url: URL, seconds: Double, log: @escaping @Sendable (String) -> Void) async {
+        let twin = url.deletingLastPathComponent()
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_m4000.mp4")
+        let phase = CMTime(seconds: Self.avPulseSeconds, preferredTimescale: 600)
+        let count = Int((seconds / Self.avPulseSeconds).rounded(.up))
+        let player = AVQueuePlayer()
+        for i in 0..<count {
+            let item = AVPlayerItem(url: i % 2 == 0 ? url : twin)
+            item.forwardPlaybackEndTime = phase
+            player.insert(item, after: nil)
+        }
+        let first = player.items().first
+        window?.avDisplayManager.preferredDisplayCriteria = try? await first?.asset.load(.preferredDisplayCriteria)
+        let pl = AVPlayerLayer(player: player)
+        pl.frame = bounds
+        pl.videoGravity = .resizeAspect
+        layer.addSublayer(pl)
+        var current: AVPlayerItem?
+        var switches = 0
+        player.play()
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline, let item = player.currentItem, item.status != .failed {
+            if item !== current {
+                current = item
+                log("avpulse: now \((item.asset as? AVURLAsset)?.url.lastPathComponent ?? "?")")
+                switches += 1
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        log(String(format: "summary avpulse: clips=%d error=%@", switches,
+                   String(describing: player.currentItem?.error)))
+        player.pause()
+        player.removeAllItems()
         pl.removeFromSuperlayer()
     }
 }

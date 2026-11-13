@@ -7,6 +7,8 @@
 #   DEVICE=... ./run_tv.sh --no-build           play only (app already installed)
 #   DEVICE=... SEQ=pulse ./run_tv.sh            no camera: a steady arm, then the metadata switching every
 #                                               3 s with and without the chain (about 2 min, watch by eye)
+#   DEVICE=... SEQ=control ./run_tv.sh          the pulse's control: AVPlayer with the 1000 and the 4000
+#                                               nit clip, steady and alternating, then the engine's pulse
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
 #
 # Required: DEVICE, the Apple TV's name or identifier as `xcrun devicectl list devices` shows it. Use
@@ -50,12 +52,18 @@ case "$SEQ" in
   pulse)
     # S first, so the steady look is fresh when the pulse arms start. 30 s is ten switches.
     ARMS="S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
+  control)
+    # Does the television visibly follow HDR10 metadata at all? P and P4 differ only in metadata, AP
+    # alternates them every 6 s through AVPlayer, SP is the engine's pulse for comparison.
+    ARMS="P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
-  *) echo "unknown SEQ=$SEQ (main|pulse|pace)"; exit 1 ;;
+  *) echo "unknown SEQ=$SEQ (main|pulse|control|pace)"; exit 1 ;;
 esac
 # Only the clips this sequence plays have to exist.
-for clip in $(print -r -- "$ARMS" | grep -o "pattern_[0-9]*\.mp4" | sort -u); do
+# avpulse also plays the clip's _m4000 twin.
+for clip in $(print -r -- "$ARMS" | grep -o "pattern_[0-9a-z_]*\.mp4" | sort -u) \
+            $(print -r -- "$ARMS" | grep -o "avpulse|[^|]*/pattern_[0-9]*\.mp4" | grep -o "pattern_[0-9]*" | sed 's/$/_m4000.mp4/'); do
   [[ -s "$OUT/$clip" ]] || { echo "no $OUT/$clip: run Scripts/build.sh first"; exit 1; }
 done
 

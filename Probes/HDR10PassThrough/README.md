@@ -135,6 +135,21 @@ squares. If the television reads the metadata, it tone-maps them brighter and di
 nit set compresses them less than the 4000 nit one). If they hold still, it did not take the change: it
 may ignore metadata that changes mid-stream, so a steady picture is "not shown", not "not delivered".
 
+`SEQ=control` checks the instrument: does this television visibly follow HDR10 metadata at all? It
+needs `pattern_24_m4000.mp4` (`Scripts/build.sh pattern_24_m4000`), the same pixels with 4000 nit
+metadata.
+
+| arm | mode | what plays |
+|---|---|---|
+| P | `avplayer` | 15 s, the 1000 nit clip through AVPlayer |
+| P4 | `avplayer` | 15 s, the 4000 nit clip through AVPlayer |
+| AP | `avpulse` | 48 s, AVPlayer alternating the two every 6 s |
+| SP | `pulse` | 30 s, the engine's pulse, for comparison |
+
+If P and P4 or AP differ and SP does not, the television can show the difference and the engine's
+metadata does not get through. If none of them differ, this television cannot answer the question by
+eye, and only an HDMI analyser can.
+
 `SEQ=pace` checks frame pacing with the chain in the loop: S and C on both clips, 25 s each.
 Film the moving bar and the frame counter; a stall or a jump is a dropped or repeated frame. Each arm's
 summary line reports `droppedFrames`.
