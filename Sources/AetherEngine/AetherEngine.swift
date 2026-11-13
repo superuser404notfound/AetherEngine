@@ -8320,7 +8320,9 @@ public final class AetherEngine: ObservableObject {
     /// answers commands for. Read when a route starts.
     public var remoteSkipInterval: Double = 10
 
-    /// True while the engine is publishing Now-Playing for a software-host session.
+    /// True while the engine is publishing Now-Playing for a software-host session: it turns true once the
+    /// engine's command targets are registered, and false when they are removed (stop, or another engine
+    /// taking the shared surface).
     @Published public internal(set) var softwareNowPlayingActive: Bool = false
 
     /// Staged per-item Now-Playing identity for the video routes. Replayed at host creation and onto
