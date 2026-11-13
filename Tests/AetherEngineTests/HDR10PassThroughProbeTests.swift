@@ -47,7 +47,9 @@ struct HDR10PassThroughProbeTests {
         #expect(HDR10ProbeSettings.Mode.chainMeta.runsChain && HDR10ProbeSettings.Mode.chainMeta.setsMetadata)
         #expect(!HDR10ProbeSettings.Mode.pulse.runsChain && HDR10ProbeSettings.Mode.pulse.pulses)
         #expect(HDR10ProbeSettings.Mode.chainPulse.runsChain && HDR10ProbeSettings.Mode.chainPulse.pulses)
-        #expect(HDR10ProbeSettings.Mode.allCases.filter(\.pulses).allSatisfy(\.setsMetadata))
+        let pulsingModes = HDR10ProbeSettings.Mode.allCases.filter { $0.pulses }
+        #expect(pulsingModes == [.pulse, .chainPulse])
+        #expect(pulsingModes.allSatisfy { $0.setsMetadata })
         #expect(!HDR10ProbeSettings.Mode.meta.pulses && !HDR10ProbeSettings.Mode.chainMeta.pulses)
     }
 
