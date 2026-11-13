@@ -15,7 +15,7 @@ the public-API contract.
 - **HDR10 pass-through probe on the software path (#957).** Nobody knew whether HDR10 metadata the engine
   attaches to a frame it rendered itself reaches the television on tvOS, and tone mapping depends on it.
   `AETHER_HDR10_PROBE` (`log`, `meta`, `chain`, `chain+meta`) now logs, replaces or carries that metadata
-  through the frame chain, with values a television's info screen tells apart from the stream's.
+  through the frame chain, with values unlike the stream's, so an analyser or the television's tone mapping shows which arrived.
   `Probes/HDR10PassThrough` plays every mode on an Apple TV. Off by default; no public API. Covered by
   `HDR10PassThroughProbeTests`.
 

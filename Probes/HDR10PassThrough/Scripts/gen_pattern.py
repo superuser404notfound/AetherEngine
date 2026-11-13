@@ -12,8 +12,12 @@ What is on screen:
 - a bar that steps one position per frame across the bottom, and the frame number in digits: a skipped
   or repeated frame shows as a jump or a stall of the bar when the screen is filmed.
 
+The patches and markers drift on a small circle (radius 8 pixels, one turn every 20 seconds), so an OLED
+panel never holds one still picture for long. Every patch keeps a black border wider than the radius.
+
 Needs numpy.
 """
+import math
 import sys
 
 import numpy as np
@@ -64,6 +68,7 @@ PATCHES = [0.1, 1, 5, 10, 50, 100, 200, 300, 400, 500, 600, 700, 800, 1000, 1500
 BLACK = pq_code(0)
 LABEL = pq_code(100)
 BAR_TOP, BAR_HEIGHT, BAR_WIDTH = 1880, 160, 48
+DRIFT_RADIUS, DRIFT_SECONDS = 8, 20
 
 
 def static_planes():
@@ -90,8 +95,12 @@ def main():
     # Two seconds per sweep across the width.
     step = max(1, int((W - BAR_WIDTH) / (2 * fps)))
     out = sys.stdout.buffer
-    y = base_y.copy()
     for n in range(frames):
+        # The static part drifts; np.roll wraps only black, since no patch comes within 8 px of an edge.
+        angle = 2 * math.pi * n / (DRIFT_SECONDS * fps)
+        dx = int(round(DRIFT_RADIUS * math.cos(angle)))
+        dy = int(round(DRIFT_RADIUS * math.sin(angle)))
+        y = np.roll(base_y, (dy, dx), axis=(0, 1))
         y[BAR_TOP:H, :] = BLACK
         x = (n * step) % (W - BAR_WIDTH)
         y[BAR_TOP:BAR_TOP + BAR_HEIGHT, x:x + BAR_WIDTH] = LABEL

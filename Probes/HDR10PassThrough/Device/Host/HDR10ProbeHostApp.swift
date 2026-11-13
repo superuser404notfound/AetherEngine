@@ -5,13 +5,13 @@ import SwiftUI
 import UIKit
 
 // Device harness for the HDR10 pass-through check (see ../../README.md). It plays the pattern clip arm by
-// arm, so the television's HDR info screen can be read for each one: whose metadata arrived, the clip's
+// arm, so the television's tone mapping (or an analyser) shows for each one whose metadata arrived, the clip's
 // own (1000 nit, MaxCLL 1000 / MaxFALL 400) or the engine probe's (777 nit, 345 / 123).
 //
 // Arms come from the environment variable `HDR10_ARMS`, which `devicectl device process launch
 // --environment-variables` delivers to an app process:
 //
-//   HDR10_ARMS="label|mode|url[|secs=45],label|mode|url,..."
+//   HDR10_ARMS="label|mode|url[|secs=25],label|mode|url,..."
 //
 // Modes:
 // - `avplayer`: plain AVPlayer + AVPlayerLayer, Apple's own path (the reference).
@@ -64,11 +64,12 @@ struct ProbeArm {
         }
     }
 
-    /// What the television's HDR info screen should show if the metadata on this arm reaches it.
+    /// What the picture should show if the metadata on this arm reaches the television (dynamic tone
+    /// mapping off), with the values an analyser would read.
     var expectation: String {
         switch mode {
-        case "meta", "chainmeta": "expect 777 nit, MaxCLL 345, MaxFALL 123 (the probe's)"
-        default: "expect 1000 nit, MaxCLL 1000, MaxFALL 400 (the clip's)"
+        case "meta", "chainmeta": "probe's metadata: 777 and 1000 markers look the SAME (MaxCLL 345)"
+        default: "clip's metadata: 777 and 1000 markers look DIFFERENT (MaxCLL 1000)"
         }
     }
 
@@ -77,7 +78,7 @@ struct ProbeArm {
         let arms = raw.split(separator: ",").compactMap { item -> ProbeArm? in
             let parts = item.split(separator: "|", maxSplits: 3).map(String.init)
             guard parts.count >= 3, let url = URL(string: parts[2]) else { return nil }
-            var seconds = 45.0
+            var seconds = 25.0
             if parts.count == 4, parts[3].hasPrefix("secs="), let s = Double(parts[3].dropFirst(5)) { seconds = s }
             return ProbeArm(label: parts[0], mode: parts[1], url: url, seconds: seconds)
         }
@@ -203,7 +204,7 @@ final class ProbeHostView: UIView {
     func playAVPlayer(_ url: URL, seconds: Double, log: @escaping @Sendable (String) -> Void) async {
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
-        window?.avDisplayManager.preferredDisplayCriteria = item.asset.preferredDisplayCriteria
+        window?.avDisplayManager.preferredDisplayCriteria = try? await item.asset.load(.preferredDisplayCriteria)
         let pl = AVPlayerLayer(player: player)
         pl.frame = bounds
         pl.videoGravity = .resizeAspect
