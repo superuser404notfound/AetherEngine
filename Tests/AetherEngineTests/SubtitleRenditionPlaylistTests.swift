@@ -4,7 +4,13 @@ import Foundation
 
 private final class MasterMockProvider: HLSSegmentProvider, @unchecked Sendable {
     let renditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)]
-    init(renditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)]) { self.renditions = renditions }
+    let hearingImpaired: Set<Int>
+    init(renditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)],
+         hearingImpaired: Set<Int> = []) {
+        self.renditions = renditions
+        self.hearingImpaired = hearingImpaired
+    }
+    var nativeSubtitleHearingImpairedOrdinals: Set<Int> { hearingImpaired }
     func initSegment() -> Data? { Data([0x00]) }
     func mediaSegment(at index: Int) -> Data? { Data([0x00]) }
     var segmentCount: Int { 1 }
@@ -43,6 +49,20 @@ private final class WindowedSubsProvider: HLSSegmentProvider, @unchecked Sendabl
 }
 
 struct SubtitleRenditionPlaylistTests {
+    @Test("AE#1050: an SDH rendition carries CHARACTERISTICS, the others do not")
+    func sdhCharacteristics() {
+        let provider = MasterMockProvider(renditions: [(0, "eng", "English (SDH)", false),
+                                                       (1, "eng", "English (CC)", false)],
+                                          hearingImpaired: [0])
+        let lines = HLSLocalServer.buildMasterPlaylistText(provider: provider)
+            .split(separator: "\n").filter { $0.hasPrefix("#EXT-X-MEDIA:TYPE=SUBTITLES") }
+        #expect(lines.count == 2)
+        #expect(lines[0].contains("NAME=\"English (SDH)\""))
+        #expect(lines[0].contains("CHARACTERISTICS=\"public.accessibility.transcribes-spoken-dialog,"
+                                  + "public.accessibility.describes-music-and-sound\""))
+        #expect(!lines[1].contains("CHARACTERISTICS"))
+    }
+
     @Test("VOD subtitle playlist mirrors the video segment count with per-segment .vtt URIs")
     func vodWindowedPlaylist() {
         let p = WindowedSubsProvider(segCount: 3)

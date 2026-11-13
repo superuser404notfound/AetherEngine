@@ -777,6 +777,22 @@ The rendition is advertised only when the audio actually reached the variant, so
 
 A label that resolves to nothing writes nothing, so an untagged source's master stays as it is. The one exception is a stream-copied E-AC-3 JOC track (AE#726, next section), which gets a rendition without `LANGUAGE` because its `CHANNELS` has nowhere else to go.
 
+### Every audio track in AVKit's audio menu
+
+With `LoadOptions.nativeAudioTrackMenu` on, a stock `AVPlayerViewController` lists every audio track of the source in its audio menu, and a pick there switches the track (AE#1049). It is off by default. A host with its own track picker gains nothing from it.
+
+**How it works.** The variant still carries one muxed audio track. The master lists the others in the same `aud` group as entries without a URI, with `DEFAULT=NO,AUTOSELECT=NO`. When the viewer picks one, the engine sees the item's audible selection change and calls `selectAudioTrack(index:)`. That is the usual audio switch, a reload that holds the last frame for about 120 to 140 ms on an Apple TV.
+
+**Names in the menu.** Each entry is named like a subtitle rendition: the track's title if it has one, otherwise the language. AVFoundation labels the entry that is playing by its language only and ignores its `NAME` (measured on tvOS 26 and macOS 27), while the other entries show their `NAME`. So when a language appears more than once, a track that would be named by the bare language becomes "English (Track 2)", and the playing track cannot be confused with it. Names are fixed for the session and do not change when the track does.
+
+**Why the extra entries need `AUTOSELECT=NO`.** With `AUTOSELECT=YES` on every entry, AVFoundation passed over `DEFAULT=YES` and picked the entry in the system language (macOS 27).
+
+**What a pick does before the reload.** Picking an entry that is not in the variant keeps the muxed track playing on tvOS 26. On macOS 27 the clock stops with `rate` 1.0 and no error. The reload replaces the item either way.
+
+**After the reload.** AVKit carries the viewer's pick over to the new item as a language preference. With two tracks in one language it can land on the wrong one, so the engine selects the served entry on the new item before it watches for picks again.
+
+**Where it does not apply.** Only the loopback route, and only where `selectAudioTrack` can switch: not on a forward-only custom source, not on a sequential origin, not for companion-demuxed live audio. The served track also needs a master audio rendition, which means a language (or untagged E-AC-3 JOC, see above).
+
 ### Dolby Atmos
 
 EAC3+JOC packets are stream-copied through the muxer untouched, on every output route.
@@ -1355,6 +1371,16 @@ engine.setNativeSubtitleRendering(_ active: Bool)
 ```
 
 `NativeSubtitleTrack` carries `.ordinal` (position in the rendition declaration), `.language` (ISO 639-2 tag), and `.displayName` (localized name suitable for a picker label).
+
+#### Rendition names and SDH
+
+The rendition's `NAME`, which AVKit shows in its subtitle menu and which `.displayName` repeats, comes from the track's own title when it has one (AE#1050). That is the container's `title` tag, or `ExternalSubtitleTrack.name` for a host-declared track. A track titled "CC" reads "English (CC)". A title that already names the language ("English Signs") is used as it is, and a title that is only the language code ("eng") is ignored. Without a title the name is the language, as before.
+
+An SDH track drops "SDH" from its title, because AVFoundation appends "SDH" to an option with the SDH characteristic by itself. Measured on tvOS 26, `NAME="English (SDH)"` read "English (SDH) SDH" in AVKit's menu. So an English track titled "SDH" with the hearing-impaired disposition is named "English", and AVKit shows "English SDH".
+
+Names stay unique within the group, because AVFoundation folds renditions with the same `NAME` into one option. Two tracks that end up with the same name get a number on the second ("English 2").
+
+A track whose container marks it hearing impaired gets `CHARACTERISTICS="public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"`, the value Apple's HLS authoring spec uses for SDH. AVKit can label and rank the option from it. The remote HLS master rewrite writes the same value.
 
 The recommended host pattern for PiP / AirPlay:
 

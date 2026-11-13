@@ -45,6 +45,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+RequestHeaders.swift` | `updateRequestHeaders(_:)` (AE#792): swaps a live session's request headers (a rotated bearer token) without a rebuild. |
 | `AetherEngine+SoftwarePathEscalation.swift` | AE#561: the rung under every native recovery. Moves a session AVPlayer refuses on its merits onto the software host. |
 | `AetherEngine+AudioDelay.swift` | `setAudioDelay(_:)` / `audioDelaySeconds` (AE#464): the viewer's lip-sync nudge as a live setting, placed per route by `AudioDelayPolicy`. |
+| `AetherEngine+AudioMenu.swift` | AE#1049: names every audio track for the master's audio group and answers a pick in AVKit's audio menu with `selectAudioTrack`. |
 | `AetherEngine+AudibleReadback.swift` | Logs once per load what AVFoundation resolved from the audio the engine served (AE#458). Read-only: it never selects an option. |
 | `AetherEngine+ChannelCountChange.swift` | F4: follows a mid-play change of the route's output channel count and rewrites the renderer paths' channel preference. |
 | `AetherEngine+RouteRemoval.swift` | F3: pauses a renderer path when its audio route goes away (headphones unplugged), as AVPlayer does on its own. |

@@ -6,10 +6,20 @@ import Foundation
 /// (HLS requirement; duplicates make AVFoundation collapse same-language renditions into one
 /// legible option), FORCED carries the container disposition into EXT-X-MEDIA. Built once at load
 /// by `AetherEngine.nativeSubtitleRenditionInfos(for:)`.
+/// AE#1049: one source audio track as the master's audio group lists it. Only the served track is
+/// in the variant; the rest are URI-less entries a viewer can pick from AVKit's audio menu.
+struct AudioRenditionChoice: Sendable, Equatable {
+    let trackID: Int
+    let language: String?
+    let name: String
+    let channels: Int
+}
+
 struct NativeSubtitleRenditionInfo: Sendable, Equatable {
     let language: String?
     let name: String
     let isForced: Bool
+    var isHearingImpaired: Bool = false
 }
 
 // MARK: - Live window sizing
@@ -831,6 +841,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#458: ISO 639-2/T of the ONE audio track muxed into the variant, for the master's
     /// EXT-X-MEDIA:TYPE=AUDIO tag. Nil for a source whose audio carries no resolvable language.
     private let audioLanguage: String?
+    /// AE#1049: every source audio track, uniquely named once for the whole session, and the one
+    /// served in the variant. Empty unless the host opted in with `LoadOptions.nativeAudioTrackMenu`.
+    private let audioMenuChoices: [AudioRenditionChoice]
+    private let servedAudioTrackID: Int
     /// Channel count of the audio track as it is SERVED (the muxer's codecpar, so a bridged track
     /// reports the encoder's layout, not the source's). Drives CHANNELS on the audio rendition.
     private let audioChannelCount: Int?
@@ -1115,6 +1129,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         audioLanguage: String? = nil,
         audioChannelCount: Int? = nil,
         audioIsAtmosStreamCopy: Bool = false,
+        audioMenuChoices: [AudioRenditionChoice] = [],
+        servedAudioTrackID: Int = -1,
         videoLayout: String? = nil,
         isLive: Bool = false,
         servesSegmentsProgressively: Bool = false,
@@ -1181,6 +1197,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.sourcePeakBitrate = sourcePeakBitrate
         self.bridgedAudioPeakBitrate = bridgedAudioPeakBitrate
         self.audioLanguage = audioLanguage
+        self.audioMenuChoices = audioMenuChoices
+        self.servedAudioTrackID = servedAudioTrackID
         self.audioChannelCount = audioChannelCount
         self.audioIsAtmosStreamCopy = audioIsAtmosStreamCopy
         self.videoLayout = videoLayout
@@ -3444,6 +3462,17 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#726: an untagged track gets no rendition, except a stream-copied E-AC-3 JOC one. Its CHANNELS is
     /// the only place the master can say "object audio", and without the tag AVFoundation renders the bed.
     var masterAudioRendition: (language: String?, name: String)? {
+        // AE#1049: with the menu on, the served track keeps the name it had as an alternate, so
+        // a switch does not rename the entries under the viewer (measured: "English" read
+        // "English 2" after a switch onto the other English track).
+        if let rendition = languageOrAtmosRendition,
+           let served = audioMenuChoices.first(where: { $0.trackID == servedAudioTrackID }) {
+            return (language: rendition.language, name: served.name)
+        }
+        return languageOrAtmosRendition
+    }
+
+    private var languageOrAtmosRendition: (language: String?, name: String)? {
         if let audioLanguage {
             let name = Locale.current.localizedString(forIdentifier: audioLanguage) ?? audioLanguage
             return (language: audioLanguage, name: name)
@@ -3452,6 +3481,28 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
 
     static let untaggedAtmosRenditionName = "Dolby Atmos"
+
+    /// AE#1049: the other audio tracks, named uniquely against the served rendition and each other.
+    /// Nothing without a served rendition: the alternates join its group and cannot form one alone.
+    var masterAudioAlternates: [AudioRenditionChoice] {
+        guard masterAudioRendition != nil,
+              audioMenuChoices.contains(where: { $0.trackID == servedAudioTrackID }) else { return [] }
+        return audioMenuChoices.filter { $0.trackID != servedAudioTrackID }
+    }
+
+    /// HLS requires NAME to be unique in a group, and AVFoundation folds equal names into one option.
+    /// Applied to the whole track list once, so every track keeps its name whichever one is served.
+    static func uniquelyNamed(_ choices: [AudioRenditionChoice]) -> [AudioRenditionChoice] {
+        var taken: Set<String> = []
+        return choices.map { choice in
+            var name = choice.name
+            var n = 2
+            while taken.contains(name) { name = "\(choice.name) \(n)"; n += 1 }
+            taken.insert(name)
+            return AudioRenditionChoice(trackID: choice.trackID, language: choice.language,
+                                        name: name, channels: choice.channels)
+        }
+    }
 
     /// Apple HLS Authoring Spec 2.13 ("CHANNELS ... MUST be present") plus Dolby's DD+ Online
     /// Delivery Kit: the value is the count of decodable objects, a slash, then `JOC`. 16 is the
@@ -3490,6 +3541,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             let name = lang.flatMap { Locale.current.localizedString(forIdentifier: $0) } ?? "Subtitle \(i + 1)"
             return (ordinal: i, language: lang, name: name, isForced: false)
         }
+    }
+
+    var nativeSubtitleHearingImpairedOrdinals: Set<Int> {
+        Set(nativeSubRenditionInfos.indices.filter { nativeSubRenditionInfos[$0].isHearingImpaired })
     }
 
     /// WebVTT for one subtitle segment: the cues overlapping video segment `segmentIndex`'s [start, end) on

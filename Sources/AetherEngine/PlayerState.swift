@@ -857,6 +857,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// Start the native WebVTT subtitle readers eagerly at load (instead of lazily on `setNativeSubtitleSelected`), so the `/subs_N_M.vtt` segments are already populated when AVKit fetches them under a host-independent selection (e.g. an `EXT-X-MEDIA ... DEFAULT=YES` rendition that AVKit auto-selects). Equivalent to a fully-populated static VOD subtitle file. Only meaningful with `prepareNativeSubtitles`. Default `false` (Sodalite#32 probe).
     public var eagerNativeSubtitleReaders: Bool = false
 
+    /// List every audio track of the source in the master's audio group, so a stock `AVPlayerViewController` offers all of them in its audio menu (AE#1049). Only the active track is muxed into the variant; the others are entries without a URI. When the viewer picks one, the engine switches to it through `selectAudioTrack(index:)`, which is a reload with a brief hold on the last frame. Off by default because a host with its own track picker gains nothing and the master changes shape. Applies to the loopback route only, and only where `selectAudioTrack` can switch (not live forward-only sources or a sequential origin). A tuning field: correctable through `reloadAtCurrentPosition(applying:)`.
+    public var nativeAudioTrackMenu: Bool = false
+
     /// Serve an I-frame rendition (`EXT-X-I-FRAME-STREAM-INF`) next to the master, so a stock `AVPlayerViewController` shows its own scrub thumbnails and can scan on I-frames, with no host code (AE#682). One still per served segment: the source's own keyframe at full resolution for SDR, and for HDR10, HLG and Dolby Vision a tone-mapped SDR Motion JPEG 640 pixels wide, since AVKit shows no scrub thumbnail from a PQ or Dolby Vision keyframe. Costs a second reader on the source for the whole session, opened shortly after load because AVKit asks for the first keyframe before anyone scrubs. Silently absent, with one log line naming the reason, when the session cannot answer every listed keyframe: live, a source without a trustworthy keyframe index (MPEG-TS), `sequentialOrigin`, `heldSourceConnection`, an origin limited to one request, a disc source, a custom reader that cannot clone, or media-playlist routing. A host with its own transport bar wants `scrubThumbnail` instead. A tuning field: correctable through `reloadAtCurrentPosition(applying:)`. Default `false`.
     public var serveIFramePlaylist: Bool = false
 
@@ -1198,6 +1201,7 @@ public struct LoadOptions: Sendable, Equatable {
         preserveASSMarkup: Bool = false,
         prepareNativeSubtitles: Bool = false,
         eagerNativeSubtitleReaders: Bool = false,
+        nativeAudioTrackMenu: Bool = false,
         serveIFramePlaylist: Bool = false,
         generatesBackgroundScrubPreviews: Bool = true,
         confirmAtmos: Bool = false,
@@ -1265,6 +1269,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preserveASSMarkup = preserveASSMarkup
         self.prepareNativeSubtitles = prepareNativeSubtitles
         self.eagerNativeSubtitleReaders = eagerNativeSubtitleReaders
+        self.nativeAudioTrackMenu = nativeAudioTrackMenu
         self.serveIFramePlaylist = serveIFramePlaylist
         self.generatesBackgroundScrubPreviews = generatesBackgroundScrubPreviews
         self.confirmAtmos = confirmAtmos
@@ -1568,6 +1573,10 @@ public struct TrackInfo: Identifiable, Sendable, Equatable {
     /// that pass did not run for this track (not requested, not the targeted track, not TrueHD, or a session's
     /// track list). `.atmos` also sets `profile` to "Dolby TrueHD + Dolby Atmos".
     public internal(set) var trueHDAtmos: TrueHDAtmosVerdict?
+
+    /// AE#1050: the title the container or the host gave the track, nil when `name` is the engine's own
+    /// fallback ("ENG (subrip)", "Track 3 (subrip)"). Native subtitle renditions name themselves from it.
+    var sourceTitle: String? = nil
 
     public init(id: Int, name: String, codec: String, language: String?, channels: Int = 0, bitrate: Int64 = 0, isDefault: Bool, isForced: Bool = false, isHearingImpaired: Bool = false, isCommentary: Bool = false, isVisualImpaired: Bool = false, isAtmos: Bool = false, assHeader: String? = nil, isExternal: Bool = false, isNativelyRenderedSubtitle: Bool = false, sampleRate: Int = 0, bitsPerSample: Int = 0, sampleFormat: String? = nil, channelLayout: String? = nil, profile: String? = nil, isDTSX: Bool = false) {
         self.sampleRate = sampleRate

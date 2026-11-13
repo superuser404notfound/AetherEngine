@@ -78,10 +78,12 @@ public struct ExternalSubtitleTrack: Sendable, Equatable {
         } else {
             resolvedName = "External \(fallbackNumber)"
         }
-        return TrackInfo(id: id, name: resolvedName,
-                         codec: Self.codecName(url: url, formatHint: formatHint),
-                         language: language, channels: 0, isDefault: isDefault,
-                         isForced: isForced, isHearingImpaired: isHearingImpaired,
-                         isExternal: true)
+        var info = TrackInfo(id: id, name: resolvedName,
+                             codec: Self.codecName(url: url, formatHint: formatHint),
+                             language: language, channels: 0, isDefault: isDefault,
+                             isForced: isForced, isHearingImpaired: isHearingImpaired,
+                             isExternal: true)
+        if let name, !name.isEmpty { info.sourceTitle = name }
+        return info
     }
 }

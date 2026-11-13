@@ -78,6 +78,7 @@ Stream-copied audio is passed on untouched. Bridged audio is decoded and re-enco
 - **Audio shaping (opt-in):** `LoadOptions.audioShaping` / `setAudioShaping(_:)` add a channel cap, a dialogue lift, a night mode (compressor plus limiter), a loudness target that lifts quiet sources (-36 to -12 LUFS) and an LFE level for stereo downmixes on 2.1 systems. See [formats.md › Audio shaping](formats.md#audio-shaping).
 - **Audio delay:** `setAudioDelay(_:)` corrects lip sync while playing, up to 2 s either way. See [api.md › Audio delay](api.md#audio-delay).
 - **Audio description:** `TrackInfo.isVisualImpaired` marks audio-description tracks.
+- **AVKit's audio menu (opt-in):** `LoadOptions.nativeAudioTrackMenu` lists every audio track there, and a pick switches the track. See [formats.md › Every audio track in AVKit's audio menu](formats.md#every-audio-track-in-avkits-audio-menu).
 
 ## Dolby Atmos
 
