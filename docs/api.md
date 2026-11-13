@@ -124,7 +124,7 @@ Kinds that need their own handling:
 - **`.sourceRefused`**: the origin answered an HTTP status other than a rate limit instead of media; `underlyingCode` is the status. See [Origin refusals](#origin-refusals-sourcerefused-and-sourceratelimited).
 - **`.sourceCertificateRejected`**: the transport was refused over certificate trust; `underlyingCode` is the `NSURLErrorDomain` code. See [Certificate refusals](#certificate-refusals-sourcecertificaterejected).
 - **`.audioBridgeProducedNoOutput`** means demote to another player, not stop. The source's audio had to be transcoded into fMP4 (MP3, MP2, DTS, TrueHD, Vorbis, PCM) and produced no encoded audio at all. The mp4 muxer derives its sample entry from a written packet, so it could not build one (AE#396). The source is neither gone nor unreadable: a second player that decodes the track itself plays the file. See also [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered).
-- **`.storageExhausted`** is neither a source nor an audio failure. The volume holding the loopback segment cache (the temporary directory) filled up, so no segment could be written (`underlyingCode` is `-28`, `AVERROR(ENOSPC)`). The source, its audio and every other player are fine. The same load succeeds once space is freed.
+- **`.storageExhausted`** is neither a source nor an audio failure. The volume holding the loopback segment cache (the temporary directory) filled up, so no segment could be written (`underlyingCode` is `-28`, `AVERROR(ENOSPC)`). The source, its audio and every other player are fine. The same load succeeds once space is freed. It also fires when a write would break `sessionCacheHardLimitBytes` or `sessionCacheFreeReserveBytes` ([Whole-session segment storage admission](#whole-session-segment-storage-admission)), with the same `-28`, even though the volume itself may still have room.
 - **`.sourceFabricatesRanges`** asks for a different load, not a retry. Load the source again with `sequentialOrigin` and `declaredDurationSeconds` (see [`sequentialOrigin`](#sequentialorigin)). The origin answered a byte range with other bytes (AE#958): a `206` named the requested offset, but the body did not hold the bytes the reader already had there. An IPTV timeshift archive answering on its own chunk boundary does this. Nothing past byte 0 can be placed.
 - **`.liveSourceUnavailable`**, **`.hlsFormatUnsupported`**, **`.hlsIngestFailed`**, **`.customSourceProbeFailed`**: see the sections below.
 
@@ -2256,28 +2256,18 @@ What the values mean:
 
 ### Whole-session segment storage admission
 
-`LoadOptions.sessionCacheHardLimitBytes` opts a VOD loopback session into a hard,
-per-session disk cap covering resident and staging bytes; `nil` keeps the previous
-behavior. `LoadOptions.sessionCacheFreeReserveBytes` reserves that many free volume
-bytes before segment writes, independently of the cap; `0` disables the reserve.
-The reserve can also be used with live sessions, where the hard cap does not apply.
-These are per-session limits, not a process-wide total.
+Two opt-in options bound how much disk one session's segment cache may use. Both are off by default, and then nothing changes.
 
-When either disk-admission option is enabled, `SessionCacheStatus.currentDiskBytes`
-includes resident and staging bytes. With both at their defaults, staging writes are
-not reserved by the admission ledger, so this status reports resident bytes only.
-`stagingBytes`, `hardLimitBytes`, `freeDiskReserveBytes`, `rejectedDiskWrites` and
-`diskAdmissionWaiting` expose staging, the configured limits, rejected writes and
-admission waits. `diskAdmissionWaiting` is separate from `producerParked`, which
-describes forward-window backpressure.
+- **`LoadOptions.sessionCacheHardLimitBytes`** caps one VOD loopback session at that many bytes, resident segments plus the ones still being written ("staging"). `nil` keeps the old behaviour. Live sessions ignore it.
+- **`LoadOptions.sessionCacheFreeReserveBytes`** keeps that many bytes of the volume free. The engine checks it before every segment write, with or without the cap, on VOD and on live. `0` turns it off.
 
-A writer blocked by the hard cap waits for consumer advancement and observes
-cancellation and cache closure. Impossible admissions and reserve denials surface
-as `PlaybackErrorKind.storageExhausted`; cancellation does not latch a storage
-failure. Other processes can consume free space after a capacity measurement. The
-hard cap may evict backward history that the default retention policy would keep;
-a later seek there can restart the producer. Under pressure it can also evict the
-farthest already-cached forward segment to admit the segment currently requested.
+Both are per session, not a process-wide total. Two players with a 256 MiB cap can use 512 MiB together.
+
+**What the cap gives up.** To make room, the cap evicts backward history that the normal retention would keep, so a seek back there can restart the producer. After a seek back to a segment that is no longer cached, it may also evict the farthest forward segments AVPlayer already fetched, so the requested one can land.
+
+**When a write does not fit.** A writer blocked by the cap waits for playback to move on. It stops waiting when the session is cancelled or closed. A segment larger than the cap, or a write the reserve refuses, ends playback with `PlaybackErrorKind.storageExhausted`. Cancelling does not. Another process can still fill the volume between the measurement and the write.
+
+**Status fields.** `SessionCacheStatus` reports `hardLimitBytes`, `freeDiskReserveBytes`, `stagingBytes` and `rejectedDiskWrites`. `currentDiskBytes` is resident plus staging bytes, but staging is only counted while one of the two options is set, so with both off it equals the resident bytes. `diskAdmissionWaiting` is true while a writer waits for disk room. That is different from `producerParked`, which means the producer is waiting on the forward window.
 
 ## Optional components
 
