@@ -1,0 +1,552 @@
+[HDR10Host] t=0.0 sequence: P(avplayer) N(native) S(software) M(meta) C(chain) CM(chainmeta)
+[HDR10Host] t=0.0 slate P
+[HDR10Host] t=6.0 arm P start mode=avplayer url=pattern_24.mp4 secs=25
+[HDR10Host] t=31.2 summary avplayer: status=1 error=nil played=24.7s loops=0
+[HDR10Host] t=31.2 arm P end
+[HDR10Host] t=31.2 slate N
+[HDR10Host] t=37.2 arm N start mode=native url=pattern_24.mp4 secs=25
+[FFmpeg] libavcodec 62.28.103, libavformat 62.12.103, libavutil 60.26.103, libswresample 6.3.103
+[AetherEngine] #361 startup 0/8 dispatched (gen 1)
+[AetherEngine] AVAudioSession: category set off-main, not activated (AVKit drives activation) category=AVAudioSessionCategoryPlayback mode=AVAudioSessionModeMoviePlayback policy=1 maxChannels=6 output=2
+[DisplayCapabilities] observed: hdr=true hdr10=true hlg=true dv=true
+[AetherEngine] audioRoute changed reason=8 output=2 preferred=0 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms
+[AVIOReader] pump tail prefetch issued bytes=-65536
+[AVIOReader] pump conn start gen=1 offset=0 len=32MB reader=31E71454 slot_ms=0
+[AVIOReader] File size: 1291845 bytes (data connection)
+[AVIOReader] pump gen=1 first data after 89ms
+[SourceOpen] reader=31E71454 phase=first-data gen=1 result=data elapsed_ms=88 budget=15.0s status=206 size=1291845
+[AetherEngine] #361 startup 1/8 sourceOpened (gen 1)
+[AVIOReader] pump tail prefetch installed 65536B at 1226309 after 102ms
+[AetherEngine] #361 startup 2/8 containerOpened (gen 1)
+[AVIOReader] origin transport: http/1.1 at http://192.168.68.87:8766 (one request per connection, so a per-session connection cap bounds requests)
+[Demuxer] Opened: 2 streams, duration=39998292 us
+[Demuxer]   stream[0] type=video codec=hevc 3840x2160
+[Demuxer]   stream[1] type=audio codec=aac 0x0
+[AetherEngine] #361 startup 3/8 streamsProbed (gen 1)
+[Demuxer] open timings (pump): connect 102ms, open_input 19ms, find_stream_info 13ms, total 134ms; 2 stream(s), probesize 50 MiB, analyzeduration 60 s; probe stop=resolved, unresolved=0, programs=0, pmtMissing=0, headerWait=-, probeBytes=0, closeToReturn=-
+[SourceOpen] phase=capability seekability=seekable
+[AetherEngine] load url=http://192.168.68.87:8766/pattern_24.mp4 source-format=hdr10 effective-format=hdr10 rate=23.976
+[DisplayCriteria] panel readout before apply: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=no
+[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) -> first apply this controller instance (a RESET or a fresh controller cleared it)
+[DisplayCriteria] SET: format=hdr10 codec=hvc1 rate=23.976 extensions=HDR before write: panel 59.940Hz, neither the requested rate nor a multiple of it
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[AetherEngine] dispatch: codec=173 → native
+[AetherEngine] #361 startup 5/8 routed (gen 1)
+[AetherEngine] native subtitles: prepare=false eager=false textTracks=0 bitmapOCR=0 enable=false
+[AetherEngine] A53 SEI caption tap armed (synthetic id 99608)
+[HLSVideoEngine] video codecpar: codec=173 3840x2160 profile=2 level=150 fieldOrder=1 extradata=2564B head=0102200000009000
+[DemuxReposition] flags=0
+[HLSVideoEngine] cue prewarm: seek to 20.0s took 0.1ms
+[HLSVideoEngine] segment plan: keyframe-aligned, 20 IRAPs → 10 segments [firstKeyframePts=-2002 (-0.083s) videoStream.start_time=0 format.start_time=0us plan[0].startSeconds=0.000]
+[HLSVideoEngine] canonicalized hvcC (stripped non-parameter-set NAL arrays): 2564 B → 113 B (AE#187)
+[HLSVideoEngine] segment retention budget: requested=automatic effective=603 MiB (volumeAvailable=2414 MiB, forwardWindow=10 seg)
+[HLSVideoEngine] peak segment bitrate: 258439 bps (source average 258380 bps)
+[HLSVideoEngine] audio: codec=aac → stream-copy as `mp4a.40.2` (fallback duration=1024 in audioTb 1/48000)
+[HLSSegmentProducer] init OK (baseIndex=0, segments=9, targetDur=0.500s, srcVideoTb=1/24000) audio=stream-copy inTb=1/48000
+[HLSVideoEngine] prepared: codec=hvc1.2.4.L150.90,mp4a.40.2 resolution=3840x2160 fps=23.976 range=PQ DV=none segments=9 duration=40.0s
+[HLSLocalServer] Listening on port 53554
+[HLSSegmentProducer] pump thread qos=userInitiated
+[HLSSegmentProducer] video gate open: actual=-2002 anchorPts=0 target=-9223372036854775808 desired=0 shift=-2002 presentedShift=0 lead=2002 videoPID=0 reconstructed=false
+[HLSSegmentProducer] first video pkt: dts=0 pts=2002 duration=1001 size=20261 (fallback=1001 in srcVideoTb)
+[HLSSegmentProducer] #65 ledger seg-0 base=0 itemAxis=0.000s sourceStart=-0.083s planSource=-0.083s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] audio gate open: actual=-1024 target=-4004 desired=0 shift=-4004 gapMs=0.0
+[HLSSegmentProducer] init.mp4 captured (1358 B)
+[HLSSegmentProducer] #65 ledger seg-1 base=0 itemAxis=5.923s sourceStart=5.839s planSource=5.839s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-2 base=0 itemAxis=9.927s sourceStart=9.843s planSource=9.843s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-3 base=0 itemAxis=13.931s sourceStart=13.847s planSource=13.847s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-4 base=0 itemAxis=17.935s sourceStart=17.851s planSource=17.851s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-5 base=0 itemAxis=21.939s sourceStart=21.855s planSource=21.855s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-6 base=0 itemAxis=25.943s sourceStart=25.859s planSource=25.859s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-7 base=0 itemAxis=29.947s sourceStart=29.863s planSource=29.863s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] #65 ledger seg-8 base=0 itemAxis=33.951s sourceStart=33.867s planSource=33.867s drift=0.000s shift=-0.083s
+[HLSSegmentProducer] pump finished: reason=eof packetsRead=2834 packetsWritten=959 lastError=0 elapsed=42ms cacheCount=9
+[DisplayCriteria] proceed after cap (start in-gate after 11ms, total 2023ms; engine HDR criteria, switch started and not yet ended, panel still mid-switch; EDR headroom 1.00)
+[DisplayCriteria] unproven HDR master waits for the running switch to end before it is served (#667)
+[DisplayCriteria] switch settled via modeSwitchEnd (start pre-gate (start notification, before gate entry) 2026ms before gate entry, total 965ms, switch 2951ms end to end, panel 23.981Hz, the requested rate)
+[DisplayCriteria] panel unproven but HDR-eligible: serving the master and letting AVPlayer answer (refusal costs one in-place media fallback)
+[HLSVideoEngine] serving on http://127.0.0.1:53554/<redacted>/master.m3u8 (dvModeAvailable=true effectiveDvMode=true panelIsHDR=true displaySupportsHDR=true matchContent=true sourceIsHDR=true useMaster=true videoRange=pq dvVariant=none audioLang=none)
+[AetherEngine] #361 startup 6/8 sessionConstructed (gen 1)
+[NativeAVPlayerHost] #1 load url=http://127.0.0.1:53554/<redacted>/master.m3u8 startPos=nil headers=none
+[NativeAVPlayerHost] #1 layer.isReadyForDisplay=false t+0.00s (carried in from the previous item when true)
+[NativeAVPlayerHost] #1 timeControlStatus=paused reason=- t+0.01s
+[NativeAVPlayerHost] #1 mount seek: item axis 0.00s (startPosition=nil, live=false)
+[AetherEngine] #321: effective video route = loopback
+[AetherEngine] AE#462: audio delivery = streamCopy
+[DisplayCriteria] switch settled before the gate opened (start pre-gate (start notification, before gate entry) 3036ms before gate entry, total 0ms, switch 2951ms end to end); nothing left to wait for
+[NativeAVPlayerHost] #1 rate=1.0
+[NativeAVPlayerHost] #1 timeControlStatus=waitingToPlay reason=AVPlayerWaitingWhileEvaluatingBufferingRateReason t+0.01s
+[NativeAVPlayerHost] #1 rate change reason=AVPlayerRateDidChangeReasonSetRateCalled rate=1.0 ready=false play intent true -> true
+[HLSLocalServer] GET /master.m3u8 HTTP/1.1 fd=8
+[HLSLocalServer] #227 client 127.0.0.1 first request: GET /master.m3u8 HTTP/1.1
+[HLSLocalServer] first request headers fd=8: Host: 127.0.0.1:53554 | X-Playback-Session-Id: 273F869A-3926-4348-9F99-835BD6CCCBC9 | Accept: */* | User-Agent: AppleCoreMedia/1.0.0.24K122 (Apple TV; U; CPU OS 27_2 like Mac OS X; en_us) | Accept-Language | Accept-Encoding | Connection
+[HLSLocalServer] master.m3u8 body:
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-INDEPENDENT-SEGMENTS
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,AVERAGE-BANDWIDTH=258380,CODECS="hvc1.2.4.L150.90,mp4a.40.2",RESOLUTION=3840x2160,FRAME-RATE=23.976,VIDEO-RANGE=PQ,CLOSED-CAPTIONS=NONE
+media.m3u8
+
+[NativeAVPlayerHost] #1 asset.load(isPlayable) ok url=http://127.0.0.1:53554/<redacted>/master.m3u8 value=true
+[NativeAVPlayerHost] #1 asset.load(tracks) ok url=http://127.0.0.1:53554/<redacted>/master.m3u8 count=0
+[HLSLocalServer] GET /media.m3u8 HTTP/1.1 fd=8
+[NativeAVPlayerHost] #1 asset.load(duration) ok url=http://127.0.0.1:53554/<redacted>/master.m3u8 seconds=39.998
+[NativeAVPlayerHost] #1 timeControlStatus=waitingToPlay reason=AVPlayerWaitingWithNoItemToPlayReason t+0.05s
+[NativeAVPlayerHost] #1 timeControlStatus=waitingToPlay reason=AVPlayerWaitingToMinimizeStallsReason t+0.05s
+[HLSLocalServer] GET /init.mp4 HTTP/1.1 fd=8
+[HLSLocalServer] GET /seg0.mp4 HTTP/1.1 fd=9
+[HLSVideoEngine] #418 seg0 placed (advertised 0.000s, worth 0.000s, sitting 0.000s below its axis): axis shift 0.000s -> 0.000s from item 0.000s
+[AetherEngine] VOD shift published: 0.000s (prev 0.000s, delta 0.000s, changed=no) seamAt=0.000s seams=1 foldShift=0.000s presentationOrigin=0.000s rawClock=0.00s avBufAhead=0.00s
+[NativeAVPlayerHost] #1 accessLog uri=http://127.0.0.1:53554/<redacted>/media.m3u8 server=127.0.0.1 bytes=132430 reqs=0
+[NativeAVPlayerHost] #1 layer.isReadyForDisplay=true t+0.10s
+[AetherEngine] #361 startup 8/8 presenting (gen 1)
+[HLSLocalServer] GET /seg1.mp4 HTTP/1.1 fd=8
+[NativeAVPlayerHost] #1 rate=1.0
+[NativeAVPlayerHost] #1 timeControlStatus=waitingToPlay reason=AVPlayerWaitingToMinimizeStallsReason t+0.21s
+[NativeAVPlayerHost] #1 rate change reason=AVPlayerRateDidChangeReasonSetRateCalled rate=1.0 ready=false play intent true -> true
+[HLSVideoEngine] #418 seg0 placement confirmed: AVPlayer holds it from item 0.000s, base 0.000s as published; taught the standing distance 0.000s again
+[NativeAVPlayerHost] #1 item.status=readyToPlay
+[NativeAVPlayerHost] #1 timeControlStatus=playing reason=- t+0.53s
+[AetherEngine] AE#458 audible readback: served=none, master, no audible group, as declared
+[NativeAVPlayerHost] #1 item videoFormat=hdr10 subType='hvc1' transfer=SMPTE_ST_2084_PQ rate=0.000
+[NativeAVPlayerHost] #1 item.videoTrack codec='hvc1' enabled=true dim=3840x2160 primaries=ITU_R_2020 transfer=SMPTE_ST_2084_PQ matrix=ITU_R_2020 fullRange=false (readyToPlay)
+[NativeAVPlayerHost] #1 item.audioTrack codec='aac ' enabled=true sr=48000 ch=2 bits=0 fmt=aac  layoutTag=<missing> (readyToPlay)
+[NativeAVPlayerHost] #1 audioRoute output=2 preferred=0 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (readyToPlay, route may still be negotiating)
+[DisplayCriteria] panel proven to engage HDR (AVFoundation accepted the HDR master); later sessions trust an accepted HDR write even without a headroom reading
+[AetherEngine] republishing videoFormat sdr -> hdr10: AVFoundation accepted the HDR master, which a display presenting SDR refuses with -11868/-11848 (#459)
+[NativeAVPlayerHost] #1 audioRoute output=2 preferred=0 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (settled)
+[DisplayCriteria] mode check (native): content=23.976 requested=23.976 panel=23.976Hz (nominal 23.976) player=24.501fps
+[HLSLocalServer] GET /seg2.mp4 HTTP/1.1 fd=8
+[HLSLocalServer] GET /seg3.mp4 HTTP/1.1 fd=8
+[HLSLocalServer] GET /seg4.mp4 HTTP/1.1 fd=8
+[HLSLocalServer] GET /seg5.mp4 HTTP/1.1 fd=8
+[HLSLocalServer] GET /seg6.mp4 HTTP/1.1 fd=8
+[HDR10Host] t=66.0 summary N: route=loopback state=playing played=24.9s droppedFrames=0
+[SharedOutput] engine-7957 left last, release=false
+[HLSLocalServer] stop: port 53554 released, 2 connection(s) shut down
+[DisplayCriteria] panel readout before reset: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] RESET
+[HDR10Host] t=66.0 arm N end
+[HDR10Host] t=66.0 slate S
+[HDR10Host] t=72.2 arm S start mode=software url=pattern_24.mp4 secs=25
+[AetherEngine] #361 startup 0/8 dispatched (gen 1)
+[DisplayCapabilities] observed: hdr=true hdr10=true hlg=true dv=true
+[AVIOReader] pump tail prefetch issued bytes=-65536
+[AVIOReader] pump conn start gen=1 offset=0 len=32MB reader=6393C315 slot_ms=0
+[AVIOReader] File size: 1291845 bytes (data connection)
+[AVIOReader] pump gen=1 first data after 60ms
+[SourceOpen] reader=6393C315 phase=first-data gen=1 result=data elapsed_ms=58 budget=15.0s status=206 size=1291845
+[AetherEngine] #361 startup 1/8 sourceOpened (gen 1)
+[AVIOReader] pump tail prefetch installed 65536B at 1226309 after 69ms
+[AetherEngine] #361 startup 2/8 containerOpened (gen 1)
+[Demuxer] Opened: 2 streams, duration=39998292 us
+[Demuxer]   stream[0] type=video codec=hevc 3840x2160
+[Demuxer]   stream[1] type=audio codec=aac 0x0
+[AetherEngine] #361 startup 3/8 streamsProbed (gen 1)
+[Demuxer] open timings (pump): connect 64ms, open_input 24ms, find_stream_info 5ms, total 94ms; 2 stream(s), probesize 50 MiB, analyzeduration 60 s; probe stop=resolved, unresolved=0, programs=0, pmtMissing=0, headerWait=-, probeBytes=0, closeToReturn=-
+[SourceOpen] phase=capability seekability=seekable
+[AetherEngine] load url=http://192.168.68.87:8766/pattern_24.mp4 source-format=hdr10 effective-format=hdr10 rate=23.976
+[DisplayCriteria] panel readout before apply: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) -> first apply this controller instance (a RESET or a fresh controller cleared it)
+[DisplayCriteria] SET: format=hdr10 codec=hvc1 rate=23.976 extensions=HDR before write: panel 59.940Hz, neither the requested rate nor a multiple of it
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[AetherEngine] #461: host asked for the software path, overriding the native route
+[AetherEngine] dispatch: codec=173 → software
+[AetherEngine] #361 startup 5/8 routed (gen 1)
+[DisplayCriteria] proceed after cap (start in-gate after 11ms, total 2036ms; engine HDR criteria, switch started and not yet ended, panel still mid-switch; EDR headroom 1.00)
+[AetherEngine] renderer audio session active: sourceCh=2 maxChannels=6 preferred=2 output=2
+[AetherEngine] #361 startup 6/8 sessionConstructed (gen 1)
+[SWHost] session start: videoCodecID=173 audioCodecID=86018 duration=40.0s
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[SWHost] selected HardwareVideoDecoder (VT) for codec_id=173
+[SWHost] HDR mode ON on display layer (transfer=16)
+[HDR10Probe] on: mode=log
+[HardwareVideoDecoder] opened HEVC 3840x2160 10-bit transfer=16
+[AudioDecoder] Opened: 48000Hz, 2ch, codec=aac
+[SoftwarePlaybackHost] audioRoute output=2 preferred=2 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (session start, live=false)
+[SWHost] packet cache in memory: forward 96 MB, history 128 MB
+[AetherEngine] #361 startup 7/8 ready (gen 1)
+[AetherEngine] #321: effective video route = software
+[AetherEngine] AE#462: audio delivery = decoded
+[SWReadAhead] producer qos -> utility (now=utility reservoir=20.0s relax=20.0s boost=10.0s waiting=0)
+[SWCacheCoverage] flags=64
+[DisplayCriteria] switch settled via modeSwitchEnd (start pre-gate (start notification, before gate entry) 2119ms before gate entry, total 851ms, switch 2960ms end to end, panel 23.975Hz, the requested rate)
+[AudioDecoder] Resampler ready: 48000Hz, 2ch, inFmt=8
+[AudioOutput] first enqueue: 48000.0Hz 2ch, 1024 samples, renderer.error=nil
+[AudioOutput] seekClock to=0.000 rate=1.0
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; format description mdcv=- cll=-
+[SWHost] first video frame enqueued: pixfmt=0x78343230 size=3840x2160 pts=0.000s
+[SWHost] picture settles at 3840x2160 after 4 frames
+[Renderer] enqueue #1: status=rendering ready=true error=nil
+[SWHost] layer.isReadyForDisplay=true after 4 frames
+[AetherEngine] #361 startup 8/8 presenting (gen 1)
+[SWDiag] clk=0.00 dclk=- rate=0.00 aLead=0.28 aRend=rendering/n/- vLead=0.21 parkedPkts=0 rebuf=n enq=+6 disp=+2 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[AudioOutput] preroll ready after 118 ms; starting at t=0.000 rate=1.0
+[Renderer] isReadyForMoreMediaData=false at enqueue #7 status=rendering
+[SWDiag] clk=0.72 dclk=0.72 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.42 parkedPkts=85 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #30: status=rendering ready=false error=nil
+[SWDiag] clk=1.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.49 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=2.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.45 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[DisplayCriteria] mode check (software): content=23.976 requested=23.976 panel=23.976Hz (nominal 23.976) player=n/afps
+[SWDiag] clk=3.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.49 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #100: status=rendering ready=false error=nil
+[SWDiag] clk=4.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.45 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=5.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.50 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=6.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.45 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=7.72 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.50 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=8.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=9.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.50 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=10.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=11.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.50 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=12.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.46 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=13.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.50 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=14.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.46 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=15.72 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.51 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=16.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=17.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=18.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.47 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=19.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=20.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.47 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=21.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=22.72 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.47 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=23.72 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=24.72 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.47 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Host] t=100.8 summary S: route=software state=playing played=25.0s droppedFrames=0
+[SharedOutput] engine-7957 left last, release=false
+[DisplayCriteria] panel readout before reset: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] RESET
+[HDR10Host] t=100.9 arm S end
+[HDR10Host] t=100.9 slate M
+[HDR10Host] t=106.9 arm M start mode=meta url=pattern_24.mp4 secs=25
+[AetherEngine] #361 startup 0/8 dispatched (gen 1)
+[DisplayCapabilities] observed: hdr=true hdr10=true hlg=true dv=true
+[AVIOReader] pump tail prefetch issued bytes=-65536
+[AVIOReader] pump conn start gen=1 offset=0 len=32MB reader=293D2B95 slot_ms=0
+[AVIOReader] File size: 1291845 bytes (data connection)
+[AVIOReader] pump gen=1 first data after 46ms
+[SourceOpen] reader=293D2B95 phase=first-data gen=1 result=data elapsed_ms=45 budget=15.0s status=206 size=1291845
+[AetherEngine] #361 startup 1/8 sourceOpened (gen 1)
+[AVIOReader] pump tail prefetch installed 65536B at 1226309 after 53ms
+[AetherEngine] #361 startup 2/8 containerOpened (gen 1)
+[Demuxer] Opened: 2 streams, duration=39998292 us
+[Demuxer]   stream[0] type=video codec=hevc 3840x2160
+[Demuxer]   stream[1] type=audio codec=aac 0x0
+[AetherEngine] #361 startup 3/8 streamsProbed (gen 1)
+[Demuxer] open timings (pump): connect 50ms, open_input 14ms, find_stream_info 4ms, total 70ms; 2 stream(s), probesize 50 MiB, analyzeduration 60 s; probe stop=resolved, unresolved=0, programs=0, pmtMissing=0, headerWait=-, probeBytes=0, closeToReturn=-
+[SourceOpen] phase=capability seekability=seekable
+[AetherEngine] load url=http://192.168.68.87:8766/pattern_24.mp4 source-format=hdr10 effective-format=hdr10 rate=23.976
+[DisplayCriteria] panel readout before apply: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) -> first apply this controller instance (a RESET or a fresh controller cleared it)
+[DisplayCriteria] SET: format=hdr10 codec=hvc1 rate=23.976 extensions=HDR before write: panel 59.939Hz, neither the requested rate nor a multiple of it
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[AetherEngine] #461: host asked for the software path, overriding the native route
+[AetherEngine] dispatch: codec=173 → software
+[AetherEngine] #361 startup 5/8 routed (gen 1)
+[DisplayCriteria] proceed after cap (start in-gate after 10ms, total 2024ms; engine HDR criteria, switch started and not yet ended, panel still mid-switch; EDR headroom 1.00)
+[AetherEngine] renderer audio session active: sourceCh=2 maxChannels=6 preferred=2 output=2
+[AetherEngine] #361 startup 6/8 sessionConstructed (gen 1)
+[SWHost] session start: videoCodecID=173 audioCodecID=86018 duration=40.0s
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[SWHost] selected HardwareVideoDecoder (VT) for codec_id=173
+[SWHost] HDR mode ON on display layer (transfer=16)
+[HDR10Probe] on: mode=meta maxCLL=345 maxFALL=123 mastering=777/0.0050 nit
+[HardwareVideoDecoder] opened HEVC 3840x2160 10-bit transfer=16
+[AudioDecoder] Opened: 48000Hz, 2ch, codec=aac
+[SoftwarePlaybackHost] audioRoute output=2 preferred=2 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (session start, live=false)
+[SWHost] packet cache in memory: forward 96 MB, history 128 MB
+[AetherEngine] #361 startup 7/8 ready (gen 1)
+[AetherEngine] #321: effective video route = software
+[AetherEngine] AE#462: audio delivery = decoded
+[SWReadAhead] producer qos -> utility (now=utility reservoir=20.0s relax=20.0s boost=10.0s waiting=0)
+[SWCacheCoverage] flags=64
+[DisplayCriteria] switch settled via modeSwitchEnd (start pre-gate (start notification, before gate entry) 2086ms before gate entry, total 905ms, switch 2950ms end to end, panel 23.984Hz, the requested rate)
+[AudioDecoder] Resampler ready: 48000Hz, 2ch, inFmt=8
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=peak 777 min 0.0050 cll=345/123; format description mdcv=peak 777 min 0.0050 cll=345/123
+[SWHost] first video frame enqueued: pixfmt=0x78343230 size=3840x2160 pts=0.000s
+[AudioOutput] first enqueue: 48000.0Hz 2ch, 1024 samples, renderer.error=nil
+[AudioOutput] seekClock to=0.000 rate=1.0
+[SWHost] picture settles at 3840x2160 after 4 frames
+[Renderer] enqueue #1: status=rendering ready=true error=nil
+[SWHost] layer.isReadyForDisplay=true after 5 frames
+[AetherEngine] #361 startup 8/8 presenting (gen 1)
+[SWDiag] clk=0.00 dclk=- rate=0.00 aLead=0.28 aRend=rendering/n/- vLead=0.42 parkedPkts=0 rebuf=n enq=+6 disp=+2 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[AudioOutput] preroll ready after 61 ms; starting at t=0.000 rate=1.0
+[Renderer] isReadyForMoreMediaData=false at enqueue #7 status=rendering
+[SWDiag] clk=0.73 dclk=0.73 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.42 parkedPkts=85 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #30: status=rendering ready=false error=nil
+[SWDiag] clk=1.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.48 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=2.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[DisplayCriteria] mode check (software): content=23.976 requested=23.976 panel=23.976Hz (nominal 23.976) player=n/afps
+[SWDiag] clk=3.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #100: status=rendering ready=false error=nil
+[SWDiag] clk=4.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=5.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=6.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=7.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=8.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=9.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=10.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=11.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.49 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=12.73 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=13.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.49 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=14.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=15.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.54 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=16.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.54 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=17.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.49 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=18.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.54 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=19.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.50 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=20.73 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.54 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=21.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.50 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=22.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=23.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.50 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=24.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Host] t=135.4 summary M: route=software state=playing played=25.0s droppedFrames=0
+[SharedOutput] engine-7957 left last, release=false
+[DisplayCriteria] panel readout before reset: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] RESET
+[HDR10Host] t=135.5 arm M end
+[HDR10Host] t=135.5 slate C
+[HDR10Host] t=141.6 arm C start mode=chain url=pattern_24.mp4 secs=25
+[AetherEngine] #361 startup 0/8 dispatched (gen 1)
+[DisplayCapabilities] observed: hdr=true hdr10=true hlg=true dv=true
+[AVIOReader] pump tail prefetch issued bytes=-65536
+[AVIOReader] pump conn start gen=1 offset=0 len=32MB reader=A6B65F16 slot_ms=0
+[AVIOReader] File size: 1291845 bytes (data connection)
+[AVIOReader] pump gen=1 first data after 226ms
+[SourceOpen] reader=A6B65F16 phase=first-data gen=1 result=data elapsed_ms=225 budget=15.0s status=206 size=1291845
+[AetherEngine] #361 startup 1/8 sourceOpened (gen 1)
+[AVIOReader] pump tail prefetch installed 65536B at 1226309 after 232ms
+[AetherEngine] #361 startup 2/8 containerOpened (gen 1)
+[Demuxer] Opened: 2 streams, duration=39998292 us
+[Demuxer]   stream[0] type=video codec=hevc 3840x2160
+[Demuxer]   stream[1] type=audio codec=aac 0x0
+[AetherEngine] #361 startup 3/8 streamsProbed (gen 1)
+[Demuxer] open timings (pump): connect 230ms, open_input 21ms, find_stream_info 4ms, total 256ms; 2 stream(s), probesize 50 MiB, analyzeduration 60 s; probe stop=resolved, unresolved=0, programs=0, pmtMissing=0, headerWait=-, probeBytes=0, closeToReturn=-
+[SourceOpen] phase=capability seekability=seekable
+[AetherEngine] load url=http://192.168.68.87:8766/pattern_24.mp4 source-format=hdr10 effective-format=hdr10 rate=23.976
+[DisplayCriteria] panel readout before apply: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) -> first apply this controller instance (a RESET or a fresh controller cleared it)
+[DisplayCriteria] SET: format=hdr10 codec=hvc1 rate=23.976 extensions=HDR before write: panel 59.940Hz, neither the requested rate nor a multiple of it
+[AVIOReader] origin connections: 0 of 4 reader connections reused at http://192.168.68.87:8766, every one paid a fresh handshake
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[AetherEngine] #461: host asked for the software path, overriding the native route
+[AetherEngine] dispatch: codec=173 → software
+[AetherEngine] #361 startup 5/8 routed (gen 1)
+[DisplayCriteria] proceed after cap (start in-gate after 11ms, total 2033ms; engine HDR criteria, switch started and not yet ended, panel still mid-switch; EDR headroom 1.00)
+[AetherEngine] renderer audio session active: sourceCh=2 maxChannels=6 preferred=2 output=2
+[AetherEngine] #361 startup 6/8 sessionConstructed (gen 1)
+[SWHost] session start: videoCodecID=173 audioCodecID=86018 duration=40.0s
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[SWHost] selected HardwareVideoDecoder (VT) for codec_id=173
+[SWHost] HDR mode ON on display layer (transfer=16)
+[HDR10Probe] on: mode=chain
+[HardwareVideoDecoder] opened HEVC 3840x2160 10-bit transfer=16
+[AudioDecoder] Opened: 48000Hz, 2ch, codec=aac
+[SoftwarePlaybackHost] audioRoute output=2 preferred=2 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (session start, live=false)
+[SWHost] packet cache in memory: forward 96 MB, history 128 MB
+[AetherEngine] #361 startup 7/8 ready (gen 1)
+[AetherEngine] #321: effective video route = software
+[AetherEngine] AE#462: audio delivery = decoded
+[SWReadAhead] producer qos -> utility (now=utility reservoir=20.0s relax=20.0s boost=10.0s waiting=0)
+[SWCacheCoverage] flags=64
+[DisplayCriteria] switch settled via modeSwitchEnd (start pre-gate (start notification, before gate entry) 2095ms before gate entry, total 911ms, switch 2960ms end to end, panel 23.972Hz, the requested rate)
+[AudioDecoder] Resampler ready: 48000Hz, 2ch, inFmt=8
+[AudioOutput] first enqueue: 48000.0Hz 2ch, 1024 samples, renderer.error=nil
+[AudioOutput] seekClock to=0.000 rate=1.0
+[SWDiag] clk=0.00 dclk=- rate=0.00 aLead=0.02 aRend=rendering/n/- vLead=- parkedPkts=0 rebuf=n enq=+0 disp=+0 lost=0(+0) skip=0 dpts=- layerDrop=-1(+0) delay=-(+0.00) corrupt=-1 status=unknown surf=1920x1080 r4d=n
+[SWDiag] clk=0.00 dclk=0.00 rate=0.00 aLead=0.02 aRend=rendering/n/- vLead=- parkedPkts=0 rebuf=n enq=+0 disp=+0 lost=0(+0) skip=0 dpts=- layerDrop=-1(+0) delay=-(+0.00) corrupt=-1 status=unknown surf=1920x1080 r4d=n
+[HDR10Probe] chain built for 3840x2160
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; out x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; format description mdcv=- cll=-
+[SWHost] first video frame enqueued: pixfmt=0x78343230 size=3840x2160 pts=0.000s
+[SWHost] picture settles at 3840x2160 after 4 frames
+[Renderer] enqueue #1: status=rendering ready=true error=nil
+[SWHost] layer.isReadyForDisplay=true after 5 frames
+[AetherEngine] #361 startup 8/8 presenting (gen 1)
+[SWDiag] clk=0.00 dclk=0.00 rate=0.00 aLead=0.32 aRend=rendering/n/- vLead=0.42 parkedPkts=0 rebuf=n enq=+7 disp=+3 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[AudioOutput] preroll ready after 2051 ms; starting at t=0.000 rate=1.0
+[Renderer] isReadyForMoreMediaData=false at enqueue #7 status=rendering
+[SWDiag] clk=0.73 dclk=0.73 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+1) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #30: status=rendering ready=false error=nil
+[HDR10Probe] chain gpu 10.67 ms mean, 13.25 ms max over 48 frames (frame 48, pts 1.96 s)
+[DisplayCriteria] mode check (software): content=23.976 requested=23.976 panel=23.976Hz (nominal 23.976) player=n/afps
+[SWDiag] clk=1.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=2.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=83 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.43 ms mean, 12.68 ms max over 48 frames (frame 96, pts 3.96 s)
+[SWDiag] clk=3.73 dclk=1.00 rate=1.00 aLead=3.97 aRend=rendering/y/- vLead=0.44 parkedPkts=86 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #100: status=rendering ready=false error=nil
+[SWDiag] clk=4.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=84 rebuf=n enq=+26 disp=+26 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.42 ms mean, 12.61 ms max over 48 frames (frame 144, pts 5.96 s)
+[SWDiag] clk=5.73 dclk=1.00 rate=1.00 aLead=4.02 aRend=rendering/y/- vLead=0.48 parkedPkts=84 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=6.73 dclk=1.00 rate=1.00 aLead=3.98 aRend=rendering/y/- vLead=0.52 parkedPkts=87 rebuf=n enq=+22 disp=+22 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.63 ms mean, 13.88 ms max over 48 frames (frame 192, pts 7.97 s)
+[SWDiag] clk=7.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.40 parkedPkts=86 rebuf=n enq=+26 disp=+26 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=8.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.44 parkedPkts=84 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.46 ms mean, 12.63 ms max over 48 frames (frame 240, pts 9.97 s)
+[SWDiag] clk=9.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.48 parkedPkts=86 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=10.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.40 parkedPkts=83 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.57 ms mean, 12.63 ms max over 48 frames (frame 288, pts 11.97 s)
+[SWDiag] clk=11.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.49 parkedPkts=83 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=12.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.53 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.50 ms mean, 12.57 ms max over 48 frames (frame 336, pts 13.97 s)
+[SWDiag] clk=13.73 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.45 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=14.73 dclk=1.00 rate=1.00 aLead=3.98 aRend=rendering/y/- vLead=0.45 parkedPkts=83 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.52 ms mean, 12.65 ms max over 48 frames (frame 384, pts 15.97 s)
+[SWDiag] clk=15.73 dclk=1.00 rate=1.00 aLead=3.98 aRend=rendering/y/- vLead=0.49 parkedPkts=86 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=16.73 dclk=1.00 rate=1.00 aLead=3.98 aRend=rendering/y/- vLead=0.53 parkedPkts=84 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.56 ms mean, 12.60 ms max over 48 frames (frame 432, pts 17.98 s)
+[SWDiag] clk=17.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.45 parkedPkts=85 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=18.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.54 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.45 ms mean, 12.61 ms max over 48 frames (frame 480, pts 19.98 s)
+[SWDiag] clk=19.73 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.45 parkedPkts=86 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=20.73 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.45 parkedPkts=84 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=21.73 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.50 parkedPkts=87 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=22.73 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.46 parkedPkts=83 rebuf=n enq=+26 disp=+26 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=1(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Host] t=170.3 summary C: route=software state=playing played=23.0s droppedFrames=1
+[SharedOutput] engine-7957 left last, release=false
+[DisplayCriteria] panel readout before reset: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] RESET
+[HDR10Host] t=170.5 arm C end
+[HDR10Host] t=170.5 slate CM
+[HDR10Host] t=176.6 arm CM start mode=chainmeta url=pattern_24.mp4 secs=25
+[AetherEngine] #361 startup 0/8 dispatched (gen 1)
+[DisplayCapabilities] observed: hdr=true hdr10=true hlg=true dv=true
+[AVIOReader] pump tail prefetch issued bytes=-65536
+[AVIOReader] pump conn start gen=1 offset=0 len=32MB reader=534DA069 slot_ms=0
+[AVIOReader] File size: 1291845 bytes (data connection)
+[AVIOReader] pump gen=1 first data after 19ms
+[SourceOpen] reader=534DA069 phase=first-data gen=1 result=data elapsed_ms=18 budget=15.0s status=206 size=1291845
+[AetherEngine] #361 startup 1/8 sourceOpened (gen 1)
+[AVIOReader] pump tail prefetch installed 65536B at 1226309 after 23ms
+[AetherEngine] #361 startup 2/8 containerOpened (gen 1)
+[Demuxer] Opened: 2 streams, duration=39998292 us
+[Demuxer]   stream[0] type=video codec=hevc 3840x2160
+[Demuxer]   stream[1] type=audio codec=aac 0x0
+[AetherEngine] #361 startup 3/8 streamsProbed (gen 1)
+[Demuxer] open timings (pump): connect 22ms, open_input 12ms, find_stream_info 3ms, total 39ms; 2 stream(s), probesize 50 MiB, analyzeduration 60 s; probe stop=resolved, unresolved=0, programs=0, pmtMissing=0, headerWait=-, probeBytes=0, closeToReturn=-
+[SourceOpen] phase=capability seekability=seekable
+[AetherEngine] load url=http://192.168.68.87:8766/pattern_24.mp4 source-format=hdr10 effective-format=hdr10 rate=23.976
+[DisplayCriteria] panel readout before apply: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] diag no-skip: no baseline (didApply=false, lastApplied=nil) -> first apply this controller instance (a RESET or a fresh controller cleared it)
+[DisplayCriteria] SET: format=hdr10 codec=hvc1 rate=23.976 extensions=HDR before write: panel 59.940Hz, neither the requested rate nor a multiple of it
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[AetherEngine] #461: host asked for the software path, overriding the native route
+[AetherEngine] dispatch: codec=173 → software
+[AetherEngine] #361 startup 5/8 routed (gen 1)
+[DisplayCriteria] proceed after cap (start in-gate after 11ms, total 2030ms; engine HDR criteria, switch started and not yet ended, panel still mid-switch; EDR headroom 1.00)
+[AetherEngine] renderer audio session active: sourceCh=2 maxChannels=6 preferred=2 output=2
+[AetherEngine] #361 startup 6/8 sessionConstructed (gen 1)
+[SWHost] session start: videoCodecID=173 audioCodecID=86018 duration=40.0s
+[VTProbe] canHardwareDecode codec=173 3840x2160 -> true (status=0)
+[SWHost] selected HardwareVideoDecoder (VT) for codec_id=173
+[SWHost] HDR mode ON on display layer (transfer=16)
+[HDR10Probe] on: mode=chain+meta maxCLL=345 maxFALL=123 mastering=777/0.0050 nit
+[HardwareVideoDecoder] opened HEVC 3840x2160 10-bit transfer=16
+[AudioDecoder] Opened: 48000Hz, 2ch, codec=aac
+[SoftwarePlaybackHost] audioRoute output=2 preferred=2 max=6 rendering=notApplicable multichannelContent=true ports=[HDMIOutput[ch=2, labels=?x2, heights=0]] latency=80ms io=21.3ms (session start, live=false)
+[SWHost] packet cache in memory: forward 96 MB, history 128 MB
+[AetherEngine] #361 startup 7/8 ready (gen 1)
+[AetherEngine] #321: effective video route = software
+[AetherEngine] AE#462: audio delivery = decoded
+[SWReadAhead] producer qos -> utility (now=utility reservoir=20.0s relax=20.0s boost=10.0s waiting=0)
+[SWCacheCoverage] flags=64
+[DisplayCriteria] switch settled via modeSwitchEnd (start pre-gate (start notification, before gate entry) 2092ms before gate entry, total 900ms, switch 2958ms end to end, panel 23.976Hz, the requested rate)
+[AudioDecoder] Resampler ready: 48000Hz, 2ch, inFmt=8
+[HDR10Probe] chain built for 3840x2160
+[AudioOutput] first enqueue: 48000.0Hz 2ch, 1024 samples, renderer.error=nil
+[AudioOutput] seekClock to=0.000 rate=1.0
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; out x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=peak 777 min 0.0050 cll=345/123; format description mdcv=peak 777 min 0.0050 cll=345/123
+[SWHost] first video frame enqueued: pixfmt=0x78343230 size=3840x2160 pts=0.000s
+[SWDiag] clk=0.00 dclk=- rate=0.00 aLead=0.11 aRend=rendering/n/- vLead=0.21 parkedPkts=0 rebuf=n enq=+2 disp=+0 lost=0(+0) skip=0 dpts=- layerDrop=-1(+0) delay=-(+0.00) corrupt=-1 status=unknown surf=1920x1080 r4d=n
+[SWHost] picture settles at 3840x2160 after 4 frames
+[Renderer] enqueue #1: status=rendering ready=true error=nil
+[SWHost] layer.isReadyForDisplay=true after 5 frames
+[AetherEngine] #361 startup 8/8 presenting (gen 1)
+[AudioOutput] preroll ready after 172 ms; starting at t=0.000 rate=1.0
+[Renderer] isReadyForMoreMediaData=false at enqueue #7 status=rendering
+[SWDiag] clk=0.62 dclk=0.62 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.46 parkedPkts=84 rebuf=n enq=+25 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #30: status=rendering ready=false error=nil
+[HDR10Probe] chain gpu 10.48 ms mean, 12.66 ms max over 48 frames (frame 48, pts 1.96 s)
+[SWDiag] clk=1.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.50 parkedPkts=85 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=2.62 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.46 parkedPkts=83 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[DisplayCriteria] mode check (software): content=23.976 requested=23.976 panel=23.976Hz (nominal 23.976) player=n/afps
+[HDR10Probe] chain gpu 10.42 ms mean, 12.57 ms max over 48 frames (frame 96, pts 3.96 s)
+[SWDiag] clk=3.62 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.38 parkedPkts=87 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[Renderer] enqueue #100: status=rendering ready=false error=nil
+[SWDiag] clk=4.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.47 parkedPkts=86 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.46 ms mean, 12.74 ms max over 48 frames (frame 144, pts 5.96 s)
+[SWDiag] clk=5.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=6.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.43 parkedPkts=87 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.48 ms mean, 12.63 ms max over 48 frames (frame 192, pts 7.97 s)
+[SWDiag] clk=7.62 dclk=1.00 rate=1.00 aLead=3.98 aRend=rendering/y/- vLead=0.51 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=8.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.47 parkedPkts=86 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.68 ms mean, 13.13 ms max over 48 frames (frame 240, pts 9.97 s)
+[SWDiag] clk=9.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.51 parkedPkts=86 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=10.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.47 parkedPkts=86 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.49 ms mean, 12.64 ms max over 48 frames (frame 288, pts 11.97 s)
+[SWDiag] clk=11.62 dclk=1.00 rate=1.00 aLead=3.97 aRend=rendering/y/- vLead=0.39 parkedPkts=86 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=12.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.43 parkedPkts=87 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.28 ms mean, 12.58 ms max over 48 frames (frame 336, pts 13.97 s)
+[SWDiag] clk=13.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=84 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=14.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.48 parkedPkts=84 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.59 ms mean, 12.64 ms max over 48 frames (frame 384, pts 15.97 s)
+[SWDiag] clk=15.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=86 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=16.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.44 parkedPkts=84 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.51 ms mean, 12.56 ms max over 48 frames (frame 432, pts 17.98 s)
+[SWDiag] clk=17.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=87 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=18.62 dclk=1.00 rate=1.00 aLead=3.99 aRend=rendering/y/- vLead=0.44 parkedPkts=87 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Probe] chain gpu 10.55 ms mean, 12.64 ms max over 48 frames (frame 480, pts 19.98 s)
+[SWDiag] clk=19.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.52 parkedPkts=84 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=20.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.44 parkedPkts=85 rebuf=n enq=+23 disp=+23 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=21.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.52 parkedPkts=87 rebuf=n enq=+24 disp=+24 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=22.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.48 parkedPkts=84 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=23.62 dclk=1.00 rate=1.00 aLead=4.00 aRend=rendering/y/- vLead=0.40 parkedPkts=85 rebuf=n enq=+22 disp=+22 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[SWDiag] clk=24.62 dclk=1.00 rate=1.00 aLead=4.01 aRend=rendering/y/- vLead=0.44 parkedPkts=85 rebuf=n enq=+25 disp=+25 lost=0(+0) skip=0 dpts=41.7/41.7 layerDrop=0(+0) delay=0.00(+0.00) corrupt=0 status=rendering surf=1920x1080 r4d=y
+[HDR10Host] t=205.1 summary CM: route=software state=playing played=24.9s droppedFrames=0
+[SharedOutput] engine-7957 left last, release=false
+[DisplayCriteria] panel readout before reset: currentEDR=1.00 potentialEDR=1.00 headroomLimit=unspecified switching=no matching=on hdrEligible=yes provenHDR=yes
+[DisplayCriteria] RESET
+[HDR10Host] t=205.2 arm CM end
+[HDR10Host] t=208.2 sequence done
+14:24:28  Acquired tunnel connection to device.
+14:24:28  Enabling developer disk image services.
+14:24:28  Acquired usage assertion.
+Launched application with io.github.bdavid21wnec.hdr10passthrough.host bundle identifier.
+Waiting for the application to terminate...
+The app terminated with the exit code 0.
+log: tv_main_20261113_142426.log (+ tv_main_20261113_142426.app.log)
+--- what the engine attached and timed, and each arm's summary:
+[HDR10Host] t=31.2 summary avplayer: status=1 error=nil played=24.7s loops=0
+[HDR10Host] t=66.0 summary N: route=loopback state=playing played=24.9s droppedFrames=0
+[HDR10Probe] on: mode=log
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; format description mdcv=- cll=-
+[HDR10Host] t=100.8 summary S: route=software state=playing played=25.0s droppedFrames=0
+[HDR10Probe] on: mode=meta maxCLL=345 maxFALL=123 mastering=777/0.0050 nit
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=peak 777 min 0.0050 cll=345/123; format description mdcv=peak 777 min 0.0050 cll=345/123
+[HDR10Host] t=135.4 summary M: route=software state=playing played=25.0s droppedFrames=0
+[HDR10Probe] on: mode=chain
+[HDR10Probe] chain built for 3840x2160
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; out x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; format description mdcv=- cll=-
+[HDR10Probe] chain gpu 10.67 ms mean, 13.25 ms max over 48 frames (frame 48, pts 1.96 s)
+[HDR10Probe] chain gpu 10.43 ms mean, 12.68 ms max over 48 frames (frame 96, pts 3.96 s)
+[HDR10Probe] chain gpu 10.42 ms mean, 12.61 ms max over 48 frames (frame 144, pts 5.96 s)
+[HDR10Probe] chain gpu 10.63 ms mean, 13.88 ms max over 48 frames (frame 192, pts 7.97 s)
+[HDR10Probe] chain gpu 10.46 ms mean, 12.63 ms max over 48 frames (frame 240, pts 9.97 s)
+[HDR10Probe] chain gpu 10.57 ms mean, 12.63 ms max over 48 frames (frame 288, pts 11.97 s)
+[HDR10Probe] chain gpu 10.50 ms mean, 12.57 ms max over 48 frames (frame 336, pts 13.97 s)
+[HDR10Probe] chain gpu 10.52 ms mean, 12.65 ms max over 48 frames (frame 384, pts 15.97 s)
+[HDR10Probe] chain gpu 10.56 ms mean, 12.60 ms max over 48 frames (frame 432, pts 17.98 s)
+[HDR10Probe] chain gpu 10.45 ms mean, 12.61 ms max over 48 frames (frame 480, pts 19.98 s)
+[HDR10Host] t=170.3 summary C: route=software state=playing played=23.0s droppedFrames=1
+[HDR10Probe] on: mode=chain+meta maxCLL=345 maxFALL=123 mastering=777/0.0050 nit
+[HDR10Probe] chain built for 3840x2160
+[HDR10Probe] first frame: in x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=- cll=-; out x420 3840x2160 tf=SMPTE_ST_2084_PQ prim=ITU_R_2020 mtx=ITU_R_2020 mdcv=peak 777 min 0.0050 cll=345/123; format description mdcv=peak 777 min 0.0050 cll=345/123
+[HDR10Probe] chain gpu 10.48 ms mean, 12.66 ms max over 48 frames (frame 48, pts 1.96 s)
+[HDR10Probe] chain gpu 10.42 ms mean, 12.57 ms max over 48 frames (frame 96, pts 3.96 s)
+[HDR10Probe] chain gpu 10.46 ms mean, 12.74 ms max over 48 frames (frame 144, pts 5.96 s)
+[HDR10Probe] chain gpu 10.48 ms mean, 12.63 ms max over 48 frames (frame 192, pts 7.97 s)
+[HDR10Probe] chain gpu 10.68 ms mean, 13.13 ms max over 48 frames (frame 240, pts 9.97 s)
+[HDR10Probe] chain gpu 10.49 ms mean, 12.64 ms max over 48 frames (frame 288, pts 11.97 s)
+[HDR10Probe] chain gpu 10.28 ms mean, 12.58 ms max over 48 frames (frame 336, pts 13.97 s)
+[HDR10Probe] chain gpu 10.59 ms mean, 12.64 ms max over 48 frames (frame 384, pts 15.97 s)
+[HDR10Probe] chain gpu 10.51 ms mean, 12.56 ms max over 48 frames (frame 432, pts 17.98 s)
+[HDR10Probe] chain gpu 10.55 ms mean, 12.64 ms max over 48 frames (frame 480, pts 19.98 s)
+[HDR10Host] t=205.1 summary CM: route=software state=playing played=24.9s droppedFrames=0

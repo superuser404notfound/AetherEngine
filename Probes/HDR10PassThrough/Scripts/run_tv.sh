@@ -71,10 +71,16 @@ if [[ "${1:-}" != "--no-build" ]]; then
   xcrun devicectl device install app --device "$DEVICE" "$DD/Build/Products/Debug-appletvos/HDR10PassThroughHost.app"
 fi
 
-python3 "$SERVE" $PORT "$IP" "$OUT" >/dev/null 2>&1 &
+# Apple's signed python3: with the macOS firewall on, an unsigned one (Homebrew's) accepts the Apple TV's
+# connection and loses it at once, and every arm fails with "network connection was lost".
+SERVER_PY=python3
+[[ -x /usr/bin/python3 ]] && /usr/bin/python3 -c 'import http.server' 2>/dev/null && SERVER_PY=/usr/bin/python3
+"$SERVER_PY" "$SERVE" $PORT "$IP" "$OUT" >/dev/null 2>&1 &
 SERVER=$!
 trap 'kill $SERVER 2>/dev/null' EXIT
-sleep 1
+# Wait until the server answers on the address the Apple TV uses (Xcode's python starts slowly).
+for _ in {1..20}; do curl -s -m 2 -o /dev/null -r 0-0 "$B/pattern_24.mp4" && break; sleep 0.5; done
+curl -s -m 2 -o /dev/null -r 0-0 "$B/pattern_24.mp4" || { echo "the clip server does not answer on $B (firewall?)"; exit 1; }
 
 LOG=tv_${SEQ}_$(date +%Y%m%d_%H%M%S).log
 # `process launch` hands --environment-variables to the app process.

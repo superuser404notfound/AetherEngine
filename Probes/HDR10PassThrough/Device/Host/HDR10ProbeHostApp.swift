@@ -66,13 +66,14 @@ struct ProbeArm {
         }
     }
 
-    /// What the picture should show if the metadata on this arm reaches the television (dynamic tone
-    /// mapping off), with the values an analyser would read.
+    /// Whose HDR10 metadata this arm sends, as far as the engine controls it. The answer is read by
+    /// comparing arms (M against S, CM against C) on photos taken with the exposure locked.
     var expectation: String {
         switch mode {
         case "setup": "HDR10 is on: set the TV's Dynamic Tone Mapping to Off now"
-        case "meta", "chainmeta": "probe's metadata: 777 and 1000 markers look the SAME (MaxCLL 345)"
-        default: "clip's metadata: 777 and 1000 markers look DIFFERENT (MaxCLL 1000)"
+        case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
+        case "software", "chain": "decoder's frames carry no HDR10 metadata: the TV's 'none' case"
+        default: "clip's metadata (1000 nit, MaxCLL 1000)"
         }
     }
 
@@ -136,7 +137,8 @@ struct ProbeHarnessView: View {
         }
         say("sequence: " + arms.map { "\($0.label)(\($0.mode))" }.joined(separator: " "))
         for (n, arm) in arms.enumerated() {
-            slate = ["\(n + 1)/\(arms.count)  \(arm.label)", arm.mode, arm.expectation]
+            slate = ["\(n + 1)/\(arms.count)  \(arm.label)", arm.mode, arm.expectation,
+                     "photo from the same spot, exposure locked"]
             host.window?.avDisplayManager.preferredDisplayCriteria = nil
             say("slate \(arm.label)")
             try? await Task.sleep(nanoseconds: 6_000_000_000)

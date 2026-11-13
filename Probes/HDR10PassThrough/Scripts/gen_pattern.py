@@ -4,13 +4,18 @@
     gen_pattern.py FRAMES FPS_NUM FPS_DEN | ffmpeg -f rawvideo -pix_fmt yuv420p10le -s 3840x2160 ...
 
 What is on screen:
-- a row of grey patches at known brightness (0.1 to 10000 nit), each labelled with its value. A television
-  that tone-maps by the metadata it received clips or rolls off the row at a different patch for a master
-  of 1000 nit (the clip's own) than for one of 777 nit (the probe's), so the row is a second witness next
-  to the info screen;
-- a 777 and a 1000 nit marker patch, side by side, for the same comparison by eye;
+- a row of small grey patches at known brightness (0.1 to 10000 nit), each labelled with its value;
+- a 777 and a 1000 nit marker, side by side;
 - a bar that steps one position per frame across the bottom, and the frame number in digits: a skipped
   or repeated frame shows as a jump or a stall of the bar when the screen is filmed.
+
+Everything bright is small: about 4% of the screen is above 100 nit. An OLED lowers its peak when a
+large part of the screen is bright, and a first version of this pattern (about 30% bright) brought a
+77 inch LG G4 below 777 nit, so every patch above that looked the same whatever metadata arrived.
+
+How the television tone-maps the upper patches depends on the metadata it received, so the row reads
+differently with the clip's own metadata, with the probe's, and with none. Compare arms against each
+other (photos from one spot, exposure locked), not against an expectation of one television's curve.
 
 The patches and markers drift on a small circle (radius 8 pixels, one turn every 20 seconds), so an OLED
 panel never holds one still picture for long. Every patch keeps a black border wider than the radius.
@@ -71,18 +76,25 @@ BAR_TOP, BAR_HEIGHT, BAR_WIDTH = 1880, 160, 48
 DRIFT_RADIUS, DRIFT_SECONDS = 8, 20
 
 
+# Patch row: small patches centred in 18 equal cells. Markers: two small squares. About 4% of the
+# screen is above 100 nit.
+PATCH_TOP, PATCH_HEIGHT, PATCH_WIDTH = 300, 160, 120
+MARKER_TOP, MARKER_HEIGHT, MARKER_WIDTH = 1100, 200, 240
+
+
 def static_planes():
     y = np.full((H, W), BLACK, dtype=np.uint16)
     pw = W // len(PATCHES)
     for i, nits in enumerate(PATCHES):
-        y[240:840, i * pw + 8:(i + 1) * pw - 8] = pq_code(nits)
+        x = i * pw + (pw - PATCH_WIDTH) // 2
+        y[PATCH_TOP:PATCH_TOP + PATCH_HEIGHT, x:x + PATCH_WIDTH] = pq_code(nits)
         text = f"{nits:g}"
-        draw_text(y, text, i * pw + (pw - len(text) * 6 * 5) // 2, 880, 5, LABEL)
-    # The two markers the probe's metadata and the clip's own sit on.
-    y[1100:1700, 1080:1800] = pq_code(777)
-    y[1100:1700, 2040:2760] = pq_code(1000)
-    draw_text(y, "777", 1260, 1730, 10, LABEL)
-    draw_text(y, "1000", 2220, 1730, 10, LABEL)
+        draw_text(y, text, i * pw + (pw - len(text) * 6 * 5) // 2, PATCH_TOP + PATCH_HEIGHT + 30, 5, LABEL)
+    for nits, centre in ((777, 1680), (1000, 2160)):
+        x = centre - MARKER_WIDTH // 2
+        y[MARKER_TOP:MARKER_TOP + MARKER_HEIGHT, x:x + MARKER_WIDTH] = pq_code(nits)
+        text = f"{nits}"
+        draw_text(y, text, centre - len(text) * 6 * 8 // 2, MARKER_TOP + MARKER_HEIGHT + 30, 8, LABEL)
     u = np.full((H // 2, W // 2), 512, dtype=np.uint16)
     return y, u
 

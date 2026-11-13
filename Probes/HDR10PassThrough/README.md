@@ -8,7 +8,7 @@ Tone mapping to a panel's real peak only pays off if it does. tvOS has no `CAEDR
 `wantsExtendedDynamicRangeContent`, so the only lever is the attachments on the pixel buffer handed to
 `AVSampleBufferDisplayLayer`. Nobody has measured whether that layer forwards them to HDMI.
 
-**Verdict so far: not measured.** Fill in the results table below.
+**Verdict so far: engine side yes, television side not read yet.** See the results table below.
 
 ## How it tells whose metadata arrived
 
@@ -27,15 +27,24 @@ Two ways to tell which set arrived:
   static metadata. Many do not. LG's hidden "HDMI Signal Override" menu *sets* the metadata instead of
   showing it: do not use it for this, and do not change anything in it.
 - **The picture**, with the television's dynamic tone mapping off (LG: Picture, Advanced Settings,
-  Brightness, Dynamic Tone Mapping: Off; note the old value and put it back afterwards). The television
-  then tone-maps by the metadata: below its peak it uses MaxCLL as the brightest value in the content.
-  - The clip's metadata (MaxCLL 1000): the **777 and 1000 nit markers look different**, and the row
-    of patches keeps getting brighter up to the 1000 patch.
-  - The probe's metadata (MaxCLL 345): both markers are above 345, so they **look the same**, and the
-    row stops getting brighter at about the 300 to 400 patch.
+  Brightness, Dynamic Tone Mapping: Off; it shows only while HDR plays, which is what the setup arm is
+  for). The television then tone-maps by the metadata it received, so the upper patches of the row look
+  different with different metadata. How exactly depends on the television, so **compare arms against
+  each other**, not against an expected curve:
+  - **M against S**: the same decoded frames, with the probe's metadata and with none.
+  - **CM against C**: the same through the frame chain.
+  - P and N show the television's picture with the clip's own metadata.
 
-Compare each arm with P, Apple's own player on the same clip. A phone photo of each arm, with the
-camera's exposure locked, makes the comparison easy.
+  If M looks like S, and CM like C, the metadata did not change what the television does. If they
+  differ, it arrived.
+
+Take the photos with a phone from one spot (leaning on something), with the exposure locked low enough
+that the 10000 patch is grey, not white (iPhone: press and hold until "AE/AF LOCK", then drag the sun
+down). The eye adapts and an automatic exposure brightens each photo, so neither compares across arms.
+
+Keep the bright part of the picture small. An OLED lowers its peak when much of the screen is bright:
+a first version of this pattern, about 30% bright, held a 77 inch LG G4 below 777 nit, so every patch
+above that looked the same in every arm. The pattern now has about 4% of the screen above 100 nit.
 
 ## What is in here
 
@@ -96,19 +105,19 @@ DEVICE="Living Room" Scripts/run_tv.sh
 ```
 
 Each arm shows a 6 s slate with its label and what to expect, then plays 25 s with the label in a
-corner. For each arm, note whether the 777 and 1000 markers look the same or different (and, with an
-analyser or info screen, the peak, MaxCLL and MaxFALL it shows).
+corner. Take one photo per arm from the same spot with the exposure locked (and, with an analyser or info
+screen, note the peak, MaxCLL and MaxFALL it shows).
 
 `SEQ=main` (the default):
 
-| arm | mode | what plays | metadata that should arrive if it works |
+| arm | mode | what plays | HDR10 metadata the engine sends |
 |---|---|---|---|
 | SETUP | `setup` | the clip on loop, 60 s, nothing measured | the TV is in HDR10: set Dynamic Tone Mapping to Off now (`SETUP=0` skips it) |
 | P | `avplayer` | plain AVPlayer, Apple's own path | the clip's (the reference) |
 | N | `native` | the engine, native route | the clip's |
-| S | `software` | software path, probe `log`: VideoToolbox's buffer as decoded | the clip's, if VideoToolbox attaches it |
+| S | `software` | software path, probe `log`: VideoToolbox's buffer as decoded | none (VideoToolbox attaches none, see below) |
 | M | `meta` | software path, the probe's values on VideoToolbox's buffer | the probe's |
-| C | `chain` | software path, `FrameChain` into a buffer of our own, attachments copied | the clip's |
+| C | `chain` | software path, `FrameChain` into a buffer of our own, attachments copied | none, as S |
 | CM | `chainmeta` | both: our own buffer, the probe's values | the probe's |
 
 CM is the arm step 3 depends on: a buffer the engine rendered itself, with metadata the engine chose.
@@ -123,22 +132,24 @@ frame carried before and after, what the format description built from it carrie
 
 ## Results
 
-| date | Apple TV | tvOS | television | P | N | S | M | C | CM | pacing 24 / 60 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | |
+| date | Apple TV | tvOS | television | engine side | M vs S | CM vs C | pacing 24 / 60 |
+|---|---|---|---|---|---|---|---|
+| 2026-11-13 | 4K (2nd gen), A12 | 27.2 | LG OLED77G4 | M and CM carry 777 / 345 / 123 to the display layer; S and C none | not read (pattern too bright, photos auto-exposed) | not read | chain 10.5 ms mean, 13.9 ms max per 4K frame; 0 and 1 dropped frames in 25 s at 23.976 |
 
-Write each cell as `differ` or `same` for the two markers, or as what an analyser showed
-(`1000/1000/400`, `777/345/123`, `none` for HDR10 with no static metadata). `SDR` if the television left
-HDR.
+Write the M and CM cells as `differ` or `alike` against S and C, from the photos, or as what an analyser
+showed (`777/345/123`, `none` for HDR10 with no static metadata). `SDR` if the television left HDR.
+
+**Found on the way:** on tvOS 27.2 (A12) VideoToolbox attaches no mastering display or content light
+level to the frames it decodes from this clip, though the stream carries both in SEI messages and in the
+`hvcC`. So the software path today sends HDR10 with no static metadata (the `[HDR10Probe] first frame`
+line of S shows `mdcv=- cll=-`). That is a gap of its own, whatever this check finds.
 
 ## Reading it
 
-- **CM shows the probe's values** (markers the same, or 777/345/123): the display layer forwards per-buffer metadata. Step 3 (tone mapping
-  with metadata of our own) can go ahead.
-- **CM shows the clip's values** (markers differ, or 1000/1000/400): the layer forwards something, but from the stream, not from our buffer.
-  Look at the `[HDR10Probe] first frame` line: if the format description built from our buffer carries
-  the probe's values, the layer reads them from somewhere else.
-- **CM shows none or SDR** (with no metadata an LG assumes a 4000 nit master, so the markers differ less than on P): the layer forwards nothing from our buffer. Tone mapping must then target a
-  fixed, assumed panel, or stay off on tvOS.
-- **S differs from P**: VideoToolbox's buffer already lacks the metadata. That is a separate finding,
-  and the `[HDR10Probe] first frame` line says which key is missing.
+- **CM differs from C** (or an analyser shows 777/345/123 on CM): the display layer forwards the metadata
+  on the engine's own buffer to the television. Step 3 (tone mapping with metadata of our own) can go
+  ahead, and the software path can send the stream's metadata the same way.
+- **CM looks like C, but M differs from S**: the layer forwards metadata only on the decoder's buffers.
+  Compare the `[HDR10Probe] first frame` lines of M and CM.
+- **Both alike**: the layer forwards nothing per buffer. Tone mapping must then target a fixed, assumed
+  panel, or stay off on tvOS.
