@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.66.1] - 2026-11-13
+
 ### Fixed
 
 - **DTS:X keeps its heights when a smaller bed is asked for.** With `objectAudioRendering` set to 5.1.2,
