@@ -1,6 +1,14 @@
 import Darwin
 import Foundation
 
+/// A cancelled producer must not be reported as a full volume.
+enum SegmentWriteAdmission: Sendable, Equatable {
+    case admitted
+    case cancelled
+    case storageExhausted
+    case invalidRequest
+}
+
 /// Sliding-window disk-backed cache for HLS-fMP4 segments. Bytes go to
 /// <NSTemporaryDirectory>/aether-segments/<uuid>/seg-N-G.m4s; only URLs stay in RAM.
 /// Reads use .alwaysMapped (kernel pages in/out under memory pressure). Window:
@@ -38,6 +46,7 @@ final class SegmentCache: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
+    private let availableVolumeBytes: @Sendable (URL) -> Int64?
     private let onResidentSetChanged: (@Sendable () -> Void)?
 
     private let forwardWindow: Int
@@ -51,6 +60,11 @@ final class SegmentCache: @unchecked Sendable {
     /// and detaches AVKit's PiP legible renderer (Sodalite#32). 0 = window-only legacy pruning
     /// (live sessions, where the sliding playlist already dropped everything behind the window).
     private let retentionBudgetBytes: Int
+    let hardDiskLimitBytes: Int?
+    let freeDiskReserveBytes: Int
+    private var stagingReservations: [URL: Int] = [:]
+    private var hardDiskWaiters = 0
+    private var hardDiskRejectedWrites = 0
     private let nativeLiveDVRPolicy: LiveDVRRetentionPolicy?
     private var nativeLiveRetentionFloor = 0
     private lazy var nativeLiveExpiryQueue = DispatchQueue(label: "com.aetherengine.live-expiry", qos: .utility)
@@ -101,6 +115,9 @@ final class SegmentCache: @unchecked Sendable {
     /// `contiguousForwardFrontier(fromPlayhead:)` rests on.
     private var fetchFloor: Int = -1
     private var fetchFront: Int = -1
+    /// A missing backward target is being re-fetched after a seek. While it is outstanding,
+    /// disk admission may also release old forward copies that AVPlayer already fetched.
+    private var diskAdmissionMissTarget: Int?
 
     let sessionDir: URL
 
@@ -176,6 +193,9 @@ final class SegmentCache: @unchecked Sendable {
         forwardWindow: Int = 10,
         backwardWindow: Int = SegmentCache.defaultBackwardWindow,
         retentionBudgetBytes: Int = 0,
+        hardDiskLimitBytes: Int? = nil,
+        freeDiskReserveBytes: Int = 0,
+        availableVolumeBytes: @escaping @Sendable (URL) -> Int64? = SegmentCache.availableVolumeBytes,
         baseDirectory: URL? = nil,
         sessionID: String = UUID().uuidString,
         now: Date = Date(),
@@ -185,6 +205,9 @@ final class SegmentCache: @unchecked Sendable {
         self.forwardWindow = forwardWindow
         self.backwardWindow = backwardWindow
         self.retentionBudgetBytes = retentionBudgetBytes
+        self.hardDiskLimitBytes = hardDiskLimitBytes.map { max(1, $0) }
+        self.freeDiskReserveBytes = max(0, freeDiskReserveBytes)
+        self.availableVolumeBytes = availableVolumeBytes
         self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.onResidentSetChanged = onResidentSetChanged
 
@@ -359,6 +382,7 @@ final class SegmentCache: @unchecked Sendable {
     @discardableResult
     func store(index: Int, data: Data) -> Bool {
         let fileURL = nextSegmentFileURL(index: index)
+        guard admitStagingWrite(path: fileURL, bytes: data.count) else { return false }
         var writeOK: Bool
         do {
             try data.write(to: fileURL, options: [.atomic])
@@ -388,6 +412,7 @@ final class SegmentCache: @unchecked Sendable {
             }
         }
         condition.lock()
+        stagingReservations.removeValue(forKey: fileURL)
         // store racing close() must not resurrect bookkeeping; entry would point into deleted sessionDir.
         guard !closed else {
             condition.unlock()
@@ -399,6 +424,7 @@ final class SegmentCache: @unchecked Sendable {
         var residentSetChanged = false
         var supersededFile: URL?
         if writeOK {
+            clearDiskAdmissionMissIfReachedLocked(index)
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
@@ -450,6 +476,7 @@ final class SegmentCache: @unchecked Sendable {
         }
         condition.lock()
         // Sealed or not, this staging file is no longer being written.
+        if renameOK { stagingReservations.removeValue(forKey: stagingPath) }
         if inProgress[index] == stagingPath { inProgress.removeValue(forKey: index) }
         if renameOK {
             if sealedFromStaging.updateValue(byteCount, forKey: stagingPath) == nil {
@@ -468,6 +495,7 @@ final class SegmentCache: @unchecked Sendable {
         var residentSetChanged = false
         var supersededFile: URL?
         if renameOK {
+            clearDiskAdmissionMissIfReachedLocked(index)
             if let oldBytes = entryBytes[index] {
                 _totalBytes -= oldBytes
             }
@@ -518,6 +546,7 @@ final class SegmentCache: @unchecked Sendable {
         initSegment = nil
         initVersions.removeAll(keepingCapacity: false)
         inProgress.removeAll(keepingCapacity: false)
+        stagingReservations.removeAll(keepingCapacity: false)
         sealedFromStaging.removeAll(keepingCapacity: false)
         sealedStagingOrder.removeAll(keepingCapacity: false)
         _totalBytes = 0
@@ -547,12 +576,162 @@ final class SegmentCache: @unchecked Sendable {
         return result
     }
 
+    /// Reserve bytes BEFORE the muxer touches the file. A completed segment's adoption
+    /// transfers the same reservation to entries, so no double-accounting or uncounted staging.
+    /// History and old seek tails are expendable; the active fetch sequence is not.
+    func admitStagingWrite(path: URL, bytes: Int, waitForConsumer: Bool = false,
+                           shouldStop: () -> Bool = { false }) -> Bool {
+        let result = stagingWriteAdmission(path: path, bytes: bytes,
+                                          waitForConsumer: waitForConsumer, shouldStop: shouldStop)
+        if result == .storageExhausted { noteStorageExhausted() }
+        return result == .admitted
+    }
+
+    /// Uses the same volume capacity as the native and software playback paths.
+    static func availableVolumeBytes(at url: URL) -> Int64? {
+        // URL resource values can be cached on the URL instance. Admission may evict a file and
+        // query again immediately on the producer thread, so use a fresh instance to observe it.
+        let refreshedURL = URL(fileURLWithPath: url.path, isDirectory: url.hasDirectoryPath)
+        return (try? refreshedURL.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
+            .volumeAvailableCapacity.map(Int64.init)
+    }
+
+    func stagingWriteAdmission(path: URL, bytes: Int, waitForConsumer: Bool = false,
+                               shouldStop: () -> Bool = { false }) -> SegmentWriteAdmission {
+        guard !shouldStop() else { return .cancelled }
+        guard hardDiskLimitBytes != nil || freeDiskReserveBytes > 0 else { return .admitted }
+        guard bytes >= 0, path.deletingLastPathComponent().standardizedFileURL == sessionDir.standardizedFileURL
+        else { return .invalidRequest }
+        let limit = hardDiskLimitBytes ?? Int.max
+        while !shouldStop() {
+            condition.lock()
+            guard !closed else { condition.unlock(); return .cancelled }
+            let staged = stagingReservations.values.reduce(0, +)
+            let own = stagingReservations[path] ?? 0
+            guard bytes <= limit, own <= limit - bytes else {
+                hardDiskRejectedWrites += 1
+                condition.unlock()
+                return .storageExhausted // A segment larger than the cap can never make progress.
+            }
+            let need = max(0, _totalBytes + staged - (limit - bytes))
+            let doomed = evictHardDiskHistoryLocked(bytesNeeded: need)
+            let hasRoom = _totalBytes + staged <= limit - bytes
+            condition.unlock()
+            for url in doomed { try? FileManager.default.removeItem(at: url) }
+            if !doomed.isEmpty { onResidentSetChanged?() }
+            if hasRoom {
+                if freeDiskReserveBytes > 0 {
+                    // An unknown capacity does not silently disable an explicitly requested reserve.
+                    guard let free = availableVolumeBytes(sessionDir), free >= 0 else {
+                        return rejectedForStorage(shouldStop: shouldStop)
+                    }
+                    let (required, overflow) = Int64(freeDiskReserveBytes).addingReportingOverflow(Int64(bytes))
+                    guard !overflow else { return rejectedForStorage(shouldStop: shouldStop) }
+                    if free < required {
+                        condition.lock()
+                        let more = evictHardDiskHistoryLocked(bytesNeeded: Int(required - free))
+                        condition.unlock()
+                        for url in more { try? FileManager.default.removeItem(at: url) }
+                        if more.isEmpty { return rejectedForStorage(shouldStop: shouldStop) }
+                        onResidentSetChanged?()
+                        continue // An open reader may still own an unlinked file: measure again.
+                    }
+                }
+                condition.lock()
+                let stillFits = !closed && _totalBytes + stagingReservations.values.reduce(0, +) <= limit - bytes
+                if stillFits {
+                    stagingReservations[path, default: 0] += bytes
+                    condition.unlock()
+                    return .admitted
+                }
+                condition.unlock()
+            }
+            guard waitForConsumer else { return rejectedForStorage(shouldStop: shouldStop) }
+            condition.lock()
+            guard !closed else { condition.unlock(); return .cancelled }
+            hardDiskWaiters += 1
+            _parkedSinceStore = true
+            _ = condition.wait(until: Date().addingTimeInterval(0.1))
+            hardDiskWaiters -= 1
+            condition.unlock()
+        }
+        return .cancelled
+    }
+
+    private func rejectedForStorage(shouldStop: () -> Bool) -> SegmentWriteAdmission {
+        guard !shouldStop() else { return .cancelled }
+        condition.lock()
+        guard !closed else { condition.unlock(); return .cancelled }
+        hardDiskRejectedWrites += 1
+        condition.unlock()
+        return .storageExhausted
+    }
+
+    func discardStagingReservation(path: URL) {
+        condition.lock()
+        stagingReservations.removeValue(forKey: path)
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    /// The last 20 historical segments are a preference under an opted-in total bound.
+    /// Only while recovering a missing backward target may admission also evict the farthest
+    /// already-stored forward copy. Normal sequential playback keeps its active fetch band intact.
+    private func evictHardDiskHistoryLocked(bytesNeeded: Int) -> [URL] {
+        guard bytesNeeded > 0 else { return [] }
+        let lower = max(0, min(currentTargetIndex, fetchFront))
+        let upper = max(currentTargetIndex, fetchFront) + max(forwardWindow, PrefetchDiskBudget.minAheadSegments)
+        let history = entries.keys.filter { $0 < lower || $0 > upper }.sorted {
+            abs($0 - currentTargetIndex) > abs($1 - currentTargetIndex)
+        }
+        // A total disk limit can be smaller than the old fetch band plus a staging segment. After
+        // a backward miss, AVPlayer already owns its old forward bytes; keep the nearest cached
+        // successors and release the farthest copies first so the requested segment can land.
+        let forwardTail: [Int]
+        if let missTarget = diskAdmissionMissTarget {
+            forwardTail = entries.keys.filter { $0 > missTarget && $0 >= lower && $0 <= upper }
+                .sorted(by: >)
+        } else {
+            forwardTail = []
+        }
+        let candidates = history + forwardTail
+        var removed = 0
+        var doomed: [URL] = []
+        for index in candidates {
+            guard removed < bytesNeeded else { break }
+            if let url = entries.removeValue(forKey: index) {
+                let bytes = entryBytes.removeValue(forKey: index) ?? 0
+                removed += bytes
+                _totalBytes -= bytes
+                videoReaches.removeValue(forKey: index)
+                doomed.append(url)
+            }
+        }
+        _evictionCount += doomed.count
+        return doomed
+    }
+
     // MARK: - Reader side
 
     func declareTarget(_ index: Int) {
         condition.lock()
         var doomed: [URL] = []
-        trackFetchSequenceLocked(index)
+        let backwardDiskCacheMiss = (hardDiskLimitBytes != nil || freeDiskReserveBytes > 0)
+            && currentTargetIndex >= 0 && index < currentTargetIndex && entries[index] == nil
+        if backwardDiskCacheMiss {
+            // A short backward refetch of a resident handover segment remains in the old sequence.
+            // A missing target cannot be a cache hit, so the producer is about to restart there;
+            // stop protecting the previous run's forward band from disk admission.
+            fetchFloor = index
+            fetchFront = index
+            diskAdmissionMissTarget = index
+        } else {
+            if diskAdmissionMissTarget != nil, index > fetchFront + 1 {
+                // A gap starts a new fetch sequence; the earlier backward recovery was abandoned.
+                diskAdmissionMissTarget = nil
+            }
+            trackFetchSequenceLocked(index)
+        }
         if index != currentTargetIndex {
             currentTargetIndex = index
             doomed = pruneOutsideWindow()
@@ -561,6 +740,13 @@ final class SegmentCache: @unchecked Sendable {
         condition.unlock()
         for url in doomed { try? FileManager.default.removeItem(at: url) }
         if !doomed.isEmpty { onResidentSetChanged?() }
+    }
+
+    /// Must be called with condition held.
+    private func clearDiskAdmissionMissIfReachedLocked(_ index: Int) {
+        if let missTarget = diskAdmissionMissTarget, index >= missTarget {
+            diskAdmissionMissTarget = nil
+        }
     }
 
     /// Must be called with condition held.
@@ -853,7 +1039,12 @@ final class SegmentCache: @unchecked Sendable {
             hardWindowFloorExceeded: hardFloor > baseEffectiveBudgetBytes,
             cleanupReason: _lastCleanupReason,
             cleanupResult: _lastCleanupResult,
-            lastFailure: _lastFailure
+            lastFailure: _lastFailure,
+            hardLimitBytes: hardDiskLimitBytes,
+            stagingBytes: stagingReservations.values.reduce(0, +),
+            freeDiskReserveBytes: freeDiskReserveBytes,
+            rejectedDiskWrites: hardDiskRejectedWrites,
+            diskAdmissionWaiting: hardDiskWaiters > 0
         )
     }
 

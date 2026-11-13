@@ -17,6 +17,14 @@ the public-API contract.
   switches through `selectAudioTrack(index:)`. Off by default. See
   [Formats › Every audio track in AVKit's audio menu](docs/formats.md#every-audio-track-in-avkits-audio-menu).
 
+- **A session can cap its segment disk use and keep free space on the volume (#961).** Two opt-in
+  `LoadOptions`. `sessionCacheHardLimitBytes` caps one VOD session's resident plus staging bytes.
+  `sessionCacheFreeReserveBytes` keeps that much of the volume free before each segment write, with or
+  without the cap and on live too. A write that cannot fit surfaces as `storageExhausted`, and
+  `SessionCacheStatus.diskAdmissionWaiting` tells a disk wait apart from forward-window backpressure.
+  Defaults are unchanged. Thanks to Nebr88 for the patch and the Apple TV runs. Covered by
+  `SegmentDiskAdmissionTests`. See [API › Whole-session segment storage admission](docs/api.md#whole-session-segment-storage-admission).
+
 ### Changed
 
 - **Native subtitle renditions are named after the track's title (AE#1050).** Two English tracks titled

@@ -2254,6 +2254,31 @@ What the values mean:
 
 **Cost and cleanup.** The engine reads its in-memory byte count off the main thread at the existing telemetry rate, without listing files on the UI thread. A successful cleanup removes the whole session UUID directory. A bounded sweep at startup removes abandoned sibling directories that qualify. It never takes over their bytes, and it is no offline or cross-launch cache.
 
+### Whole-session segment storage admission
+
+`LoadOptions.sessionCacheHardLimitBytes` opts a VOD loopback session into a hard,
+per-session disk cap covering resident and staging bytes; `nil` keeps the previous
+behavior. `LoadOptions.sessionCacheFreeReserveBytes` reserves that many free volume
+bytes before segment writes, independently of the cap; `0` disables the reserve.
+The reserve can also be used with live sessions, where the hard cap does not apply.
+These are per-session limits, not a process-wide total.
+
+When either disk-admission option is enabled, `SessionCacheStatus.currentDiskBytes`
+includes resident and staging bytes. With both at their defaults, staging writes are
+not reserved by the admission ledger, so this status reports resident bytes only.
+`stagingBytes`, `hardLimitBytes`, `freeDiskReserveBytes`, `rejectedDiskWrites` and
+`diskAdmissionWaiting` expose staging, the configured limits, rejected writes and
+admission waits. `diskAdmissionWaiting` is separate from `producerParked`, which
+describes forward-window backpressure.
+
+A writer blocked by the hard cap waits for consumer advancement and observes
+cancellation and cache closure. Impossible admissions and reserve denials surface
+as `PlaybackErrorKind.storageExhausted`; cancellation does not latch a storage
+failure. Other processes can consume free space after a capacity measurement. The
+hard cap may evict backward history that the default retention policy would keep;
+a later seek there can restart the producer. Under pressure it can also evict the
+farthest already-cached forward segment to admit the segment currently requested.
+
 ## Optional components
 
 Five parts of the engine are compiled only with their package trait, all off by default ([Installation › Optional components](installation.md#optional-components)). The options that ask for them stay in the API and do nothing without the trait. So a host compiles the same either way, and asks at run time whether a setting would do anything:
@@ -2309,6 +2334,8 @@ A "tuning field" is one that `reloadAtCurrentPosition(applying:)` can correct on
 | --- | --- | --- |
 | `forwardBufferSegments` | nil (10, about 40 s) | How far the producer may run ahead, and how much the cache keeps resident. Clamped to 4...2700. Ignored on `nativeRemoteHLS`. See note 1. |
 | `sessionCacheByteBudget` | nil | Optional byte request for the temporary VOD cache. See [Session cache budget and status](#session-cache-budget-and-status). |
+| `sessionCacheHardLimitBytes` | nil | Opt-in per-session disk cap for resident plus staging bytes on VOD loopback. See [Whole-session segment storage admission](#whole-session-segment-storage-admission). |
+| `sessionCacheFreeReserveBytes` | 0 | Opt-in free-volume reserve checked before segment writes; independent of the hard cap and also available to live sessions. See [Whole-session segment storage admission](#whole-session-segment-storage-admission). |
 | `progressiveSegmentDelivery` | false | Serve each VOD loopback segment while it is being written. VOD only; ignored on live, `nativeRemoteHLS` and the software path. See note 2. |
 | `softwarePacketCacheStorage` | `.automatic` | `SoftwarePacketCacheStorage` picks where seekable software VOD stores compressed packets. The choice survives session reloads. See note 3. |
 | `generatesBackgroundScrubPreviews` | true | Build the sparse scrub-still ladder while the source is idle. Correctable through `reloadAtCurrentPosition(applying:)`. See note 4. |

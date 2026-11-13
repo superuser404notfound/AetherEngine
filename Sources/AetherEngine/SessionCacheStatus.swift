@@ -52,11 +52,19 @@ public struct SessionCacheStatus: Sendable, Equatable {
     public let baseEffectiveBudgetBytes: Int
     public let playbackSafeFloorBytes: Int
     public let effectiveBudgetBytes: Int
+    public let hardLimitBytes: Int?
+    public let stagingBytes: Int
+    public let freeDiskReserveBytes: Int
+    public let rejectedDiskWrites: Int
+    public var currentDiskBytes: Int { currentResidentBytes + stagingBytes }
     public let currentResidentBytes: Int
     public let currentForwardBytes: Int
     public let forwardWindowSegments: Int
     public let backwardWindowSegments: Int
+    /// The producer is waiting for the forward fetch window (not for disk admission).
     public let producerParked: Bool
+    /// A staging writer is waiting for consumer advancement to make disk space admissible.
+    public let diskAdmissionWaiting: Bool
     public let evictionCount: Int
     public let hardWindowFloorExceeded: Bool
     public let cleanupReason: SessionCacheCleanupReason?
@@ -80,8 +88,17 @@ public struct SessionCacheStatus: Sendable, Equatable {
         hardWindowFloorExceeded: Bool,
         cleanupReason: SessionCacheCleanupReason?,
         cleanupResult: SessionCacheCleanupResult,
-        lastFailure: SessionCacheFailureReason?
+        lastFailure: SessionCacheFailureReason?,
+        hardLimitBytes: Int? = nil,
+        stagingBytes: Int = 0,
+        freeDiskReserveBytes: Int = 0,
+        rejectedDiskWrites: Int = 0,
+        diskAdmissionWaiting: Bool = false
     ) {
+        self.hardLimitBytes = hardLimitBytes
+        self.stagingBytes = stagingBytes
+        self.freeDiskReserveBytes = freeDiskReserveBytes
+        self.rejectedDiskWrites = rejectedDiskWrites
         self.route = route
         self.capability = capability
         self.requestedBudgetBytes = requestedBudgetBytes
@@ -94,6 +111,7 @@ public struct SessionCacheStatus: Sendable, Equatable {
         self.forwardWindowSegments = forwardWindowSegments
         self.backwardWindowSegments = backwardWindowSegments
         self.producerParked = producerParked
+        self.diskAdmissionWaiting = diskAdmissionWaiting
         self.evictionCount = evictionCount
         self.hardWindowFloorExceeded = hardWindowFloorExceeded
         self.cleanupReason = cleanupReason

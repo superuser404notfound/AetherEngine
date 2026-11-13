@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import AetherLibavcodec
+import AetherLibavutil
 @testable import AetherEngine
 
 /// A full segment volume used to reach the host as `vodSourceFailed` ("Source audio cannot be
@@ -85,4 +87,37 @@ struct SegmentStorageExhaustionTests {
         #expect(surfaced.snapshot?.kind == .vodSourceFailed)
         #expect(surfaced.snapshot?.reason == "Source audio cannot be muxed")
     }
+    @Test("Muxer admission denial reaches the host as storageExhausted, cancellation does not", arguments: [false, true])
+    func muxerAdmissionPreservesTheFailureKind(cancelled: Bool) throws {
+        let cache = SegmentCache(freeDiskReserveBytes: 1, availableVolumeBytes: { _ in 0 })
+        defer { cache.close() }
+        let source = try #require(Data(base64Encoded: AtmosDetectionProbeIntegrationTests.videoOnlyBase64,
+                                      options: .ignoreUnknownCharacters))
+        let demuxer = Demuxer()
+        defer { demuxer.close() }
+        try demuxer.open(reader: DataIOReader(data: source), formatHint: "mp4")
+        let stream = try #require(demuxer.stream(at: demuxer.videoStreamIndex))
+        let muxer = try MP4SegmentMuxer(initialSegmentIndex: 0, sessionDir: cache.sessionDir,
+            video: .init(codecpar: UnsafePointer(stream.pointee.codecpar), timeBase: stream.pointee.time_base,
+                         codecTagOverride: nil), audio: nil,
+            onStorageExhausted: { cache.noteStorageExhausted() },
+            admitStagingBytes: { path, count in
+                cache.stagingWriteAdmission(path: path, bytes: count, shouldStop: { cancelled })
+            }, onInitCaptured: { _ in })
+        var packet: UnsafeMutablePointer<AVPacket>? = try #require(try demuxer.readPacket())
+        defer { trackedPacketFree(&packet) }
+        packet!.pointee.stream_index = muxer.videoOutputStreamIndex
+        #expect(muxer.writePacket(packet!).rc >= 0)
+        #expect(muxer.cutFragmentForNextSegment(1) == .failed)
+        #expect(cache.storageExhausted == !cancelled)
+        let engine = makeEngine()
+        engine.cache = cache
+        engine.muxerFailureReviveGate = MuxerFailureReviveGate(maxAttempts: 0)
+        let surfaced = SurfacedFailure()
+        engine.onVODSourceFailed = { surfaced.set($0, $1, $2) }
+        engine.handleVODMuxerFailure()
+        #expect(surfaced.snapshot?.kind == (cancelled ? .vodSourceFailed : .storageExhausted))
+        if !cancelled { #expect(surfaced.snapshot?.code == FFmpegErr.enospc) }
+    }
+
 }
