@@ -66,7 +66,7 @@ struct ServedFromMemoryProgressTests {
     /// charge standing. Before this held, the return to the head reset the streak on every read,
     /// and both the bounded give-up and #380's re-resolve rung stayed out of reach.
     @Test("a retained-span serve is not progress against a metered origin",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func retainedSpanServeDoesNotClearTheLadder() async throws {
 
         // The first range ends here and every refill at the frontier is refused: the shape of an

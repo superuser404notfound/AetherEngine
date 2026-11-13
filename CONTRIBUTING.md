@@ -47,7 +47,7 @@ Why each one:
 3. A full parallel run blocks every worker of the global dispatch pool. Measured with 192 workers blocked, the global queue had not started a block after 35 seconds, while a detached thread ran in 3 milliseconds.
 4. Swift cancellation is cooperative (a task stops only where it checks for cancellation), so a test parked in a blocking syscall never sees the `.timeLimit` trait. The job then dies at its own `timeout-minutes` and the log, test name included, is lost. Measured on this suite: a launch helper parked in `FileHandle.availableData` ran past a one minute limit for more than ten, and the only trace was the subprocess in the runner's orphan-process cleanup. Give the cancellation handler whatever ends the call (close the handle, kill the subprocess). `Support/PythonOrigin.swift` is the worked example.
 
-CI enforces the mechanical parts with `Scripts/check-test-hygiene.py`: no `try? await Task.sleep` and no `DispatchQueue.global().async` (or `asyncAfter`) under `Tests/`, and no `.timeLimit` under two minutes (a green run has hundreds of tests above 60 s; use `.minutes(3)`). A line that is a real exception says why, with `// hygiene: allow <reason>` on it.
+CI enforces the mechanical parts with `Scripts/check-test-hygiene.py`: no `try? await Task.sleep` and no `DispatchQueue.global().async` (or `asyncAfter`) under `Tests/`, and no `.timeLimit` under three minutes (a green run has hundreds of tests above 60 s and trivial ones near 100 s; use `.minutes(3)`). A line that is a real exception says why, with `// hygiene: allow <reason>` on it.
 
 ## Where playback bugs get fixed
 

@@ -5,7 +5,7 @@ import Foundation
 /// EXT-X-BYTERANGE (RFC 8216 4.3.2.2): a packager that writes one file per stream lists every segment
 /// as a sub-range of that file. The ingest fetched each URI whole, so every segment delivered the
 /// entire file and a live channel never advanced past its first seconds.
-@Suite("HLS byte-range segments are read as their sub-range", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("HLS byte-range segments are read as their sub-range", .offCooperativePool, .timeLimit(.minutes(3)))
 struct HLSByteRangeSegmentTests {
 
     private func mediaPlaylist(_ lines: [String]) throws -> HLSMediaPlaylist {

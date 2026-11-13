@@ -11,7 +11,7 @@ extension PrewarmStoreSuites {
     ///
     /// The origin counts sockets that are still open, which is the one place the leak shows.
     /// `.serialized`: the warm case goes through the process-wide prewarm store.
-    @Suite("Remote disc image sessions are released (audit NET-110)", .serialized, .timeLimit(.minutes(2)))
+    @Suite("Remote disc image sessions are released (audit NET-110)", .serialized, .timeLimit(.minutes(3)))
     struct RemoteDiscSessionReleaseTests {
 
         /// 0.5 s of 64x64 MPEG-2 video in an MPEG-PS pack stream (ffmpeg `-f vob`), 4096 bytes: the

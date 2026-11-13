@@ -10,7 +10,7 @@ import Foundation
 /// that never saturates the socket the transport keeps delivering and the window grows without
 /// bound. Asking for a fixed amount at a time makes the overshoot impossible rather than caught:
 /// the origin cannot send more than was requested.
-@Suite("Bounded persistent ranges (#220)", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("Bounded persistent ranges (#220)", .offCooperativePool, .timeLimit(.minutes(3)))
 struct Issue220BoundedRangeTests {
 
     private func makeReader(_ server: ThrottledOriginServer) -> AVIOReader {

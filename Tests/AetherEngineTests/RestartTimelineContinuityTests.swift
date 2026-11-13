@@ -193,7 +193,7 @@ struct RestartTimelineContinuityTests {
     @Test("Leading head-of-stream audio never produces a negative/wrapped tfdt",
           .enabled(if: fixtureExists("restart-witness-leadaudio.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func leadingAudioIsGuardedAtHeadOfStream() throws {
         let engine = HLSVideoEngine(url: fixtureURL("restart-witness-leadaudio.mp4"), dvModeAvailable: false)
         _ = try engine.start()

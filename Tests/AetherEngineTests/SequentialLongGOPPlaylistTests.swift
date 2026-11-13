@@ -63,7 +63,7 @@ struct SequentialLongGOPPlaylistTests {
     @Test("the finished playlist lists every video frame and the whole duration",
           .enabled(if: fixtureExists("long-first-gop-aac.mkv") && fixtureExists("long-first-gop-pcm.mkv"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clips"),
-          .timeLimit(.minutes(2)),
+          .timeLimit(.minutes(3)),
           arguments: ["aac", "pcm"])
     func longFirstGOPLosesNothing(audio: String) async throws {
         // Served the way the reporting origin served it: `Range` ignored, no length, one plain 200.

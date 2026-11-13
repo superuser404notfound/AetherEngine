@@ -497,7 +497,7 @@ private func syntheticVideoFixture(keyFlags: [Bool], withAudio: Bool = false) th
     return Data(bytes: try #require(bytes), count: Int(count))
 }
 
-@Suite("Flush recovery host", .serialized, .timeLimit(.minutes(2)))
+@Suite("Flush recovery host", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct FlushRecoveryHostTests {
 

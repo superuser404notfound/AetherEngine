@@ -61,7 +61,7 @@ struct Issue232InterlaceProbeTests {
         #expect(InterlaceProbe.refutesDeclaredInterlace(verdict))
     }
 
-    @Test("software loads and reloads carry the interlace decision and stop clears it", .timeLimit(.minutes(2)),
+    @Test("software loads and reloads carry the interlace decision and stop clears it", .timeLimit(.minutes(3)),
           arguments: [false, true])
     @MainActor
     func loadCarriesWarmupDecision(interlaced: Bool) async throws {
@@ -85,7 +85,7 @@ struct Issue232InterlaceProbeTests {
     }
 
     @Test("custom-source reload preserves a same-title progressive verdict and rechecks a different title",
-          .timeLimit(.minutes(2)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     @MainActor
     func customReloadUsesTitleIdentity(changesTitle: Bool) async throws {
         let bytes = try #require(Data(base64Encoded: Self.declaredTTProgressiveBase64,
@@ -116,7 +116,7 @@ struct Issue232InterlaceProbeTests {
     }
 
     @Test("custom-source background reload retains interlace evidence through repeated teardown",
-          .timeLimit(.minutes(2)), arguments: [false, true], [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true], [false, true])
     @MainActor
     func customBackgroundReloadRetainsWarmupDecision(interlaced: Bool, hasDiscTitle: Bool) async throws {
         let fixture = interlaced ? Self.interlacedBase64 : Self.declaredTTProgressiveBase64
@@ -143,7 +143,7 @@ struct Issue232InterlaceProbeTests {
     }
 
     @Test("a fresh custom load discards the parked source's warm-up decision",
-          .timeLimit(.minutes(2)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     @MainActor
     func freshCustomLoadDiscardsParkedWarmupDecision(initiallyInterlaced: Bool) async throws {
         let engine = try AetherEngine()

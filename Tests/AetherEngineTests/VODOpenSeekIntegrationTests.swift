@@ -6,7 +6,7 @@ import Testing
 
 /// Real AVPlayer witness with a synthetic H.264/AAC MKV, served only over loopback.
 /// Scripts/test-vod-open-seek.sh supplies the fixture; no provider credentials are needed.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct VODOpenSeekIntegrationTests {
     private func fixture() throws -> Data {

@@ -12,7 +12,7 @@ import Foundation
 /// being served concurrently. Serial fetch never exceeds 1; the pipeline must overlap
 /// (>= 2) while staying inside its window (<= 4). Byte order in the FIFO stays playlist
 /// order even when a slow segment completes after its successors.
-@Suite("HLS live ingest bounded prefetch (#177)", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("HLS live ingest bounded prefetch (#177)", .offCooperativePool, .timeLimit(.minutes(3)))
 struct Issue177IngestPrefetchTests {
 
     // MARK: - Loopback HLS origin

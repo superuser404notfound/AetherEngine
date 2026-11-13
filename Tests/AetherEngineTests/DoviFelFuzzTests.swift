@@ -160,7 +160,7 @@ extension HeavyDualLayerSuites {
         }
 
         @Test("a mutated synthetic RPU never crashes libdovi or the parameter parser; the result is nil or self-consistent",
-              .timeLimit(.minutes(2)), arguments: DoviCrcValidFuzzTests.syntheticSeeds.indices)
+              .timeLimit(.minutes(3)), arguments: DoviCrcValidFuzzTests.syntheticSeeds.indices)
         func mutatedSyntheticRpuParsing(index: Int) throws {
             let seed = DoviCrcValidFuzzTests.syntheticSeeds[index]
             try Self.checkMutatedRpuParsing(seedRPU: seed.nal, label: seed.name, rngState: 0xFE1 + UInt64(index), iterations: 4000)
@@ -168,7 +168,7 @@ extension HeavyDualLayerSuites {
 
         @Test("a mutated RPU from a real clip never crashes libdovi or the parameter parser; the result is nil or self-consistent",
               .enabled(if: DoviFelRealFileTests.available(DoviFelRealFileTests.fixtures[2]), DoviFelRealFileTests.needsClips),
-              .timeLimit(.minutes(2)))
+              .timeLimit(.minutes(3)))
         func mutatedRpuParsing() throws {
             let seed = try #require(try Self.seed())
             try Self.checkMutatedRpuParsing(seedRPU: seed.rpu, label: "clip", rngState: 0xFE1, iterations: 4000)

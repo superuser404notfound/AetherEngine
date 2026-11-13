@@ -262,7 +262,7 @@ struct DetourCacheWorkingSetReaderTests {
     private static let chunk = 256 * 1024
     private static let block: Int64 = 4 * 1024 * 1024
 
-    @Test("a third pass over twelve regions behind the window fetches nothing", .timeLimit(.minutes(2)))
+    @Test("a third pass over twelve regions behind the window fetches nothing", .timeLimit(.minutes(3)))
     func repeatedPassesStopFetching() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 128 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }

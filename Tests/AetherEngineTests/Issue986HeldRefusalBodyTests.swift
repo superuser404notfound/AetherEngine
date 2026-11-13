@@ -36,7 +36,7 @@ struct Issue986HeldRefusalBodyTests {
     }
 
     @Test("a refusal with a held short body fails the open with its status in seconds",
-          .timeLimit(.minutes(2)),
+          .timeLimit(.minutes(3)),
           arguments: [("text/plain", 500), (nil, 500), ("text/plain", 403)] as [(String?, Int)])
     func heldRefusalFailsFast(contentType: String?, status: Int) throws {
         let originMaybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024, respond: { _, _, _ in

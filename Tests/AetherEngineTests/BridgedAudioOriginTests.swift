@@ -77,7 +77,7 @@ struct BridgedAudioOriginTests {
     @Test("No published timestamp is a wrapped negative",
           .enabled(if: fixtureExists("bridge-eac3-51.mkv"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func bridgedAudioOriginIsRepresentable() throws {
         let engine = HLSVideoEngine(url: fixtureURL("bridge-eac3-51.mkv"), dvModeAvailable: false)
         let playbackURL = try engine.start()

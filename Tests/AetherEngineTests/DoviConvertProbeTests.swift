@@ -33,7 +33,7 @@ struct DoviConvertProbeTests {
 
     @Test("A raw Annex-B stream probes to the same NALs as the hvcC file it was written from",
           .enabled(if: fixtureExists("hdr10-hevc.mp4"), "needs Fixtures/hdr10-hevc.mp4 (Scripts/fetch-fixtures.sh)"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func annexBSourceKeepsItsNALs() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("dovi-probe-\(UUID().uuidString)", isDirectory: true)

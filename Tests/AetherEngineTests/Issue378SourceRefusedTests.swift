@@ -69,7 +69,7 @@ struct Issue378SourceRefusedTests {
                 "expected exactly one suffix tail prefetch: \(requests)")
     }
 
-    @Test("a refusal does not latch the suffix-range denial for the origin", .timeLimit(.minutes(2)))
+    @Test("a refusal does not latch the suffix-range denial for the origin", .timeLimit(.minutes(3)))
     func refusalDoesNotLatchSuffixRanges() async throws {
         let server = try Self.refusingOrigin()
         defer { server.stop() }

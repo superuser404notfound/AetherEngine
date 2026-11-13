@@ -4,7 +4,7 @@ import Testing
 @testable import AetherEngine
 
 @MainActor
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct DolbyVisionSourceCapabilityLifecycleTests {
     private func seedPriorDV(_ engine: AetherEngine) {
         engine.sourceDVBLCompatID = 1

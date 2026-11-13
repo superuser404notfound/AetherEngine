@@ -53,7 +53,7 @@ struct SubtitleHeaderOriginTests {
 
 #if os(macOS)
 @MainActor
-@Suite("Sidecar requests observed at their origin", .timeLimit(.minutes(2)))
+@Suite("Sidecar requests observed at their origin", .timeLimit(.minutes(3)))
 struct SubtitleHeaderOriginRequestTests {
     private let script = #"""
 import http.server

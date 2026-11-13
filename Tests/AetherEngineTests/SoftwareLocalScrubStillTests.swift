@@ -7,7 +7,7 @@ import Foundation
 /// it used to report no cache-backed stills and answer every scrub request with nil. It now decodes
 /// them from the file, through the same `scrubThumbnail` / `scrubPreviewFrame` calls the native
 /// session answers.
-@Suite("Scrub stills on a software session playing a local file", .serialized, .timeLimit(.minutes(2)))
+@Suite("Scrub stills on a software session playing a local file", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct SoftwareLocalScrubStillTests {
 

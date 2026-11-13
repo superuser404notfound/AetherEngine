@@ -14,7 +14,7 @@ struct StreamingBufferTrimTests {
         AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/archive.ts")!, sequentialOnly: true)
     }
 
-    @Test("unaligned reads return exactly the bytes the origin sent", .timeLimit(.minutes(2)))
+    @Test("unaligned reads return exactly the bytes the origin sent", .timeLimit(.minutes(3)))
     func byteExactAcrossUnalignedReads() async throws {
         let maybe = ThrottledOriginServer(totalSize: Int64(total), throttleUs: 0, patternedBody: true)
         let server = try #require(maybe)
@@ -47,7 +47,7 @@ struct StreamingBufferTrimTests {
     }
 
     #if DEBUG
-    @Test("a trim releases what it passed and moves nothing it keeps", .timeLimit(.minutes(2)))
+    @Test("a trim releases what it passed and moves nothing it keeps", .timeLimit(.minutes(3)))
     func trimMovesNothing() async throws {
         let maybe = ThrottledOriginServer(totalSize: Int64(total), throttleUs: 0)
         let server = try #require(maybe)

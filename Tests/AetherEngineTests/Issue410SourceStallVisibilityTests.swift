@@ -38,7 +38,7 @@ struct Issue410SourceStallVisibilityTests {
     /// `.reconnecting`, nothing it does is a delivery, so the axis must not read `.flowing` again, and the
     /// give-up must say `.exhausted` rather than claim the source came back.
     @Test("a refusing origin stays visible across the runway and the give-up",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func refusedRefillHoldsTheStallThroughGiveUp() async throws {
 
         // 8 MB of runway so the low-water refill is refused while the window still has plenty to serve:
@@ -79,7 +79,7 @@ struct Issue410SourceStallVisibilityTests {
     /// The counterpart, so the rule cannot be satisfied by never reporting recovery: an origin that refuses
     /// once and then delivers must clear the axis off its own delivery.
     @Test("a transient refusal clears once the origin delivers again",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func transientRefusalClearsOnDelivery() async throws {
 
         let firstRange: Int64 = 1024 * 1024
@@ -123,7 +123,7 @@ struct Issue410SourceStallVisibilityTests {
     /// reads is erased by read-ahead paid for before the origin died, and the `.exhausted` the give-up just
     /// published does not survive the next read.
     @Test("bytes handed back out of memory do not clear the stall",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func memoryServeDoesNotClearTheStall() async throws {
 
         let runway: Int64 = 8 * 1024 * 1024

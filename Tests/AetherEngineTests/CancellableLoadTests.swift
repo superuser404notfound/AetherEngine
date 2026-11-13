@@ -6,7 +6,7 @@ import Testing
 /// Sodalite#173: a host that cancels the Task awaiting `load()` (a zap past an unreachable channel)
 /// waited out the whole connect budget, 19 s on the reporter's box, and every zap queued behind it.
 /// Cancelling that Task now ends the load at once, the way a `stop()` would have.
-@Suite("Cancelling the task that awaits load() ends the load", .serialized, .timeLimit(.minutes(2)))
+@Suite("Cancelling the task that awaits load() ends the load", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct CancellableLoadTests {
 

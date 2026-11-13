@@ -214,7 +214,7 @@ struct Issue388RedirectChainBudgetTests {
     /// is about), so a peak of one at the server is not something the reader can promise. Not
     /// opening a second request on purpose while the pump streams is, and the budget's own
     /// `peakInflight` is where the reader's side of that is readable.
-    @Test("a declared ceiling of one issues no detour block behind the 302", .timeLimit(.minutes(2)))
+    @Test("a declared ceiling of one issues no detour block behind the 302", .timeLimit(.minutes(3)))
     func declaredCeilingIssuesNoSecondRequestOnTheWire() async throws {
         let total: Int64 = 64 * 1024 * 1024
         let mediaMaybe = ThrottledOriginServer(totalSize: total, throttleUs: 1000)

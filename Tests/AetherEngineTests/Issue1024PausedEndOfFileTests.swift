@@ -9,7 +9,7 @@ import AetherLibavcodec
 /// the end of the file before that frame is in (a paused rebuild in the last half second, whose decoder
 /// still holds the frames at the playhead). That end belongs to a running clock, so it waits for
 /// `play()` instead of finishing the session.
-@Suite("AE#1024 end of file under a pause waits for play", .serialized, .timeLimit(.minutes(2)))
+@Suite("AE#1024 end of file under a pause waits for play", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct Issue1024PausedEndOfFileTests {
 

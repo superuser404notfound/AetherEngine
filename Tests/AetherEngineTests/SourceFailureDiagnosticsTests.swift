@@ -504,7 +504,7 @@ struct SourceFailureDiagnosticsTests {
 
     @MainActor
     @Test("Live initial connection failure keeps liveSourceUnavailable and the original URL error",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func liveConnectionFailure() async throws {
         let server = try #require(ScriptedOriginServer { _ in .init(status: 200, declaredLength: 0) })
         let url = URL(string: "http://127.0.0.1:\(server.port)/live/test.ts")!

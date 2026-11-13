@@ -8,7 +8,7 @@ import Foundation
 @Suite("Detour block idle release")
 struct DetourBlockIdleReleaseTests {
 
-    @Test("a detour block nothing reads any more is released by the read path", .timeLimit(.minutes(2)))
+    @Test("a detour block nothing reads any more is released by the read path", .timeLimit(.minutes(3)))
     func idleBlockIsReleased() async throws {
         let maybe = ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000)
         let server = try #require(maybe)

@@ -10,7 +10,7 @@ import AVFoundation
 /// have, so bitrate, throughput and transferred bytes were a hard zero for the whole session rather
 /// than the real numbers. And the read-ahead the path does hold was computed for the memprobe only,
 /// so nothing on the public surface answered "is the network keeping up" where it matters most.
-@Suite(.timeLimit(.minutes(2)))
+@Suite(.timeLimit(.minutes(3)))
 @MainActor
 struct Issue306SoftwareTelemetryTests {
 

@@ -55,7 +55,7 @@ struct StartAfterCuePrewarmTests {
     }
 
     @Test("after the reposition note, the first miss past the head opens the connection there",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func firstMissAnchors() throws {
         // The head holds whatever the open-phase connection delivered, up to its cap: 2.5 MiB on a
         // loaded CI runner. So the miss is somewhere inside that cap, and the read runs past it.
@@ -71,7 +71,7 @@ struct StartAfterCuePrewarmTests {
     }
 
     @Test("without the note the same start detours, which is the 4 s the field trace paid",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func withoutNoteDetours() throws {
         let (server, reader, ok) = try startSequence(notePlayback: false)
         defer { reader.markClosed(); reader.close(); server.stop() }

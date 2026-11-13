@@ -11,7 +11,7 @@ import AetherLibavutil
 /// VUI) is a second network read `stopInternal` cannot abort, so a load superseded inside it came
 /// back after its successor's prologue and wrote its own width, height and codec over the reset.
 /// A successor that never probes (the remote-HLS bypass) then kept them for the session.
-@Suite("A superseded probe leaves its successor's geometry alone", .timeLimit(.minutes(2)))
+@Suite("A superseded probe leaves its successor's geometry alone", .timeLimit(.minutes(3)))
 @MainActor
 struct SupersededProbeGeometryTests {
 

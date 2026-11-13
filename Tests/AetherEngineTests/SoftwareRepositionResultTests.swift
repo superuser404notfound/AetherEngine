@@ -3,7 +3,7 @@ import Combine
 import Testing
 @testable import AetherEngine
 
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct SoftwareRepositionResultTests {
     actor Gate {

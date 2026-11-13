@@ -79,7 +79,7 @@ struct ResolvedURLInvalidationTests {
     }
 
     @Test("a hard 500 from the pinned URL falls back to the source URL for a fresh redirect",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func hard500FallsBackToSourceURL() async throws {
         let firstRange: Int64 = 256 * 1024
         let attempts = AttemptCounter()
@@ -136,7 +136,7 @@ struct ResolvedURLInvalidationTests {
     /// against the origin that is already refusing them, and on a connection-capped panel
     /// (#307) that is the request there is no room for.
     @Test("a rate-limited refill keeps the pin instead of re-resolving through the source",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func rateLimitedRefillKeepsThePin() async throws {
 
         let firstRange: Int64 = 256 * 1024
@@ -186,7 +186,7 @@ struct ResolvedURLInvalidationTests {
     /// in seconds and the pinned target is fine; dropping the pin sent every retry back
     /// through the portal — latency plus the one request there is no room for.
     @Test("a 509 refill keeps the pin instead of re-resolving through the source",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func connectionCappedRefillKeepsThePin() async throws {
 
         let firstRange: Int64 = 256 * 1024
@@ -239,7 +239,7 @@ struct ResolvedURLInvalidationTests {
     /// source, not one per attempt — and gives up on the ladder when the fresh target
     /// refuses identically.
     @Test("a permanent 509 pays the rate-limit ladder and gives up cleanly",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func permanent509TakesTheRateLimitLadder() async throws {
 
         let firstRange: Int64 = 256 * 1024
@@ -297,7 +297,7 @@ struct ResolvedURLInvalidationTests {
     /// delivered first data in 452 ms). Past `rateLimitRepinStreak` attempts the pin must
     /// be dropped for exactly ONE re-resolve, and the fresh target's 206 re-pins.
     @Test("a 509 outliving the keep-pin grace re-resolves once through the source",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func stalePinned509HealsThroughTheSource() async throws {
 
         let firstRange: Int64 = 256 * 1024
@@ -358,7 +358,7 @@ struct ResolvedURLInvalidationTests {
     /// 16 of 32 MB, three 509s against the pin across 9 s, then the source-resolved target answered
     /// 206 on its first try, a 12 s visible stall). The first refusal must spend the re-resolve.
     @Test("a pin refused right after the edge cut its connection re-resolves on the first refusal",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func cutConnectionDropsThePinOnTheFirstRefusal() async throws {
 
         let totalSize: Int64 = 64 * 1024 * 1024
@@ -416,7 +416,7 @@ struct ResolvedURLInvalidationTests {
     /// held, a paced consumer reset the streak on every read and a refused origin was
     /// retried at streak=1 for as long as the runway lasted (the post-pause field trace:
     /// 20 generations across ~85 s, none of them counted).
-    @Test("a draining window does not reset the rate-limit ladder", .timeLimit(.minutes(2)))
+    @Test("a draining window does not reset the rate-limit ladder", .timeLimit(.minutes(3)))
     func drainingWindowKeepsTheLadderCharged() async throws {
 
         let firstRange: Int64 = 2 * 1024 * 1024
@@ -478,7 +478,7 @@ struct ResolvedURLInvalidationTests {
     /// The pause is modelled by not READING. The reader is pull-driven, so a consumer that stops is
     /// the only thing that stops the network, which is exactly what a paused player is from here.
     @Test("an idle pin is dropped by its FIRST refusal instead of riding out the grace",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func idlePinDropsOnTheFirstRefusal() async throws {
 
         let leases = LeaseLatch()

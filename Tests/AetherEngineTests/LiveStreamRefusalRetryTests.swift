@@ -14,7 +14,7 @@ import Foundation
 /// Scale and budget go to each reader at init: process-wide hooks raced between these tests, which
 /// run in parallel, and handed one test's one-second budget to its neighbour.
 /// The wait itself is a pure rule, tested as one.
-@Suite("Live stream reader rides out refusals", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("Live stream reader rides out refusals", .offCooperativePool, .timeLimit(.minutes(3)))
 struct LiveStreamRefusalRetryTests {
 
     // MARK: - Loopback origin

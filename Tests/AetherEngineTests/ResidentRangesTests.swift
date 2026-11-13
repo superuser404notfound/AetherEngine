@@ -89,7 +89,7 @@ struct ResidentRangesTests {
     }
 
     @MainActor
-    @Test("a store and eviction publish their two resident shapes", .timeLimit(.minutes(2)))
+    @Test("a store and eviction publish their two resident shapes", .timeLimit(.minutes(3)))
     func publisherStoreThenEvict() async throws {
         let session = HLSVideoEngine(url: URL(string: "https://example.com/video.mkv")!)
         let cache = SegmentCache(
