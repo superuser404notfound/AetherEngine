@@ -847,6 +847,8 @@ Warms run one at a time across the process. A second `prewarm` while one is in f
 
 `MediaSource.custom(reader, formatHint:)` hands the engine a host-owned byte source: a memory buffer, an encrypted container, a tuner spool, anything that is not a plain URL. It plays through the same decode paths as a URL.
 
+`formatHint` names the libavformat demuxer to open with (`"mp4"`, `"matroska"`, `"mpegts"`). It is not weighed against the bytes. A known name skips content probing, so a Matroska hint on MP4 bytes fails the open instead of falling back. Pass `nil` when you only have a filename and are not sure of the content; the engine then probes the bytes, and `SourceProbe.containerFormat` tells you what it found. A name libavformat does not know behaves like `nil`.
+
 **What the host must do:**
 
 - implement `read`, `seek` and `close`

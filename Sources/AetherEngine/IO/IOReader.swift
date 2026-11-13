@@ -69,6 +69,8 @@ public extension IOReader {
 /// The source AetherEngine loads media from.
 public enum MediaSource: Sendable {
     case url(URL)
-    /// `formatHint`: optional container short name ("mp4", "matroska", "mpegts") to disambiguate probing when no filename is present; nil probes from content.
+    /// `formatHint`: optional libavformat demuxer name ("mp4", "matroska", "mpegts"). A known name
+    /// skips content probing and opens with exactly that demuxer, so a wrong one fails the open
+    /// instead of falling back. nil, or a name libavformat does not know, probes from content.
     case custom(IOReader, formatHint: String? = nil)
 }
