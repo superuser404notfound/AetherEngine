@@ -263,6 +263,10 @@ the public-API contract.
   channel bridge that drops the objects. It now carries the layout and the object counts, as on the loopback
   route.
 
+- **A DTS:X track rendered on the software host is labelled DTS:X (#1027).** The demuxer names DTS `dca`,
+  and the decoder label only tested for `DTS`, so a real DTS:X bed read "DCA Atmos → PCM 7.1.4". It now reads
+  "DTS:X → PCM 7.1.4" (or "→ APAC 7.1.4"), as `isRenderableDTSX` and `profileNamesDTSX` already did.
+
 - **A controlled probe counts a disc folder's playlist scan (#1033).** With `limits` or `cancellation` set, the
   `.mpls`, IFO and `.clpi` files that folder recognition opens were read outside the probe's accounting, so a
   BDMV folder with hundreds of playlists could read far past `maxInputBytes`, and a cancellation only landed once
