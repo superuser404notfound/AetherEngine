@@ -146,7 +146,9 @@ private enum ProbeChainGate {
 
 /// The chain modes on a 10-bit PQ frame: the pixels come back as they were (the pass-through stage does
 /// no transfer handling, so PQ codes survive as codes) in a buffer of our own, with the decoder's tags.
-@Suite("HDR10 pass-through probe, chain", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(3)),
+/// Five minutes like "Frame chain": on a CI runner both suites compile their kernels on one shared GPU, and
+/// the first case of each took about 5 minutes there with every trait on.
+@Suite("HDR10 pass-through probe, chain", .serialized, .offCooperativePoolOneLane, .timeLimit(.minutes(5)),
        .enabled(if: ProbeChainGate.gpuAvailable))
 struct HDR10PassThroughProbeChainTests {
 
@@ -168,7 +170,7 @@ struct HDR10PassThroughProbeChainTests {
 }
 #endif
 
-/// 10-bit (x420) BT.2020 PQ video-range frames with a luma ramp from black to about 1000 nit.
+/// 10-bit (x420) BT.2020 PQ video-range frames with a luma ramp from about 0.15 to 1600 nit.
 private enum ProbeFrames {
     struct Failure: Error {}
 
@@ -195,8 +197,9 @@ private enum ProbeFrames {
                 let line = base.advanced(by: row * stride).assumingMemoryBound(to: UInt16.self)
                 for x in 0..<pw {
                     if plane == 0 {
-                        // 10-bit video range 64...768 is black up to about 1000 nit in PQ.
-                        line[x] = UInt16(64 + x * 704 / max(w - 1, 1)) << 6
+                        // 128...768 is about 0.15 to 1600 nit in PQ. It starts above black because the chain
+                        // clamps RGB to 0...1, and the chroma below on black luma would be a negative green.
+                        line[x] = UInt16(128 + x * 640 / max(w - 1, 1)) << 6
                     } else {
                         line[2 * x] = UInt16(500 + row * 24 / max(ph - 1, 1)) << 6
                         line[2 * x + 1] = UInt16(524 - x * 24 / max(pw - 1, 1)) << 6
