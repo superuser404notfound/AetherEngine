@@ -267,6 +267,26 @@ See [dolby-vision-fel.md, section 7](dolby-vision-fel.md#7-curve-fold-on-the-nat
 
 See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.4 The AVPlayer-output route](dolby-vision-fel.md#524-the-avplayer-output-route).
 
+### HDR10 pass-through probe
+
+A measurement switch for AE#957, not a feature. It checks whether HDR10 metadata the engine attaches to a frame of its own reaches the television. tvOS has no `CAEDRMetadata`, so the attachments on the buffer given to `AVSampleBufferDisplayLayer` are the only lever. Tone mapping to a panel's peak depends on the answer.
+
+It is off unless `AETHER_HDR10_PROBE` is set (`HDR10PassThroughProbe.swift`). The variable is read at every software-path load, so a test host can switch it between loads. It never runs with an upscale plan or on the dual-layer decoder.
+
+| `AETHER_HDR10_PROBE` | each decoded frame |
+|---|---|
+| `log` | unchanged; the first frame's colour tags and HDR10 metadata are logged |
+| `meta` | the decoder's buffer gets the probe's mastering display and content light level values |
+| `chain` | goes through the frame chain (`PassThroughStage`) into a buffer of the engine's own, attachments copied |
+| `chain+meta` | both: the engine's own buffer, with the probe's values |
+
+- `AETHER_HDR10_PROBE_META` sets the values, as `maxcll=345,maxfall=123,peak=777,min=0.005` (the default). They share no number with a real master, so a television's info screen shows whose metadata it got. A value out of range turns the probe off with one `[HDR10Probe] ignored:` line.
+- `meta` changes the attachments of VideoToolbox's buffer in place. Attachments are not pixels, so reference frames decode the same, but it is a probe, not the output-metadata policy above.
+- The chain runs on OS 26 and later on a device. Elsewhere, and on a frame the chain cannot take, both chain modes deliver the frame unchanged, without the probe's values.
+- The log lines start with `[HDR10Probe]`: the first frame before and after, the format description built from the output, and the GPU time over each 48-frame window (the first ten). Three chain failures in a row turn the probe off for the session.
+
+The device harness that plays every mode on an Apple TV is [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md).
+
 The 2:3 pulldown retimer is not an optional stage. It is part of the native route's frame grid, see [2:3 pulldown timing on 24p film](architecture-native.md#23-pulldown-timing-on-24p-film).
 
 ## Audio on the software host

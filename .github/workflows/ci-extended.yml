@@ -88,6 +88,13 @@ jobs:
           zsh -n Probes/DolbyVisionPulse/Scripts/run_tv.sh
           swiftc -typecheck Probes/DolbyVisionPulse/Scripts/dump_attachments.swift
 
+      # Same for the HDR10 pass-through check (AE#957): its scripts run only next to a television.
+      - name: Compile the HDR10 pass-through scripts
+        run: |
+          python3 -m py_compile Probes/HDR10PassThrough/Scripts/*.py
+          zsh -n Probes/HDR10PassThrough/Scripts/build.sh
+          zsh -n Probes/HDR10PassThrough/Scripts/run_tv.sh
+
   devices-tvos:
     name: xcodebuild (tvOS devices, visionOS, harnesses)
     runs-on: xcode-27
@@ -127,6 +134,18 @@ jobs:
             -scheme DolbyVisionPulse \
             -destination 'generic/platform=tvOS Simulator' \
             -derivedDataPath .build/xcode-pulse \
+            EXCLUDED_ARCHS=x86_64 \
+            CODE_SIGNING_ALLOWED=NO
+
+      # The HDR10 pass-through host (AE#957) links the engine with its default traits and sets the
+      # software path's probe variable per arm, so it breaks when LoadOptions or the surface moves.
+      - name: Build the HDR10 pass-through host (Probes/HDR10PassThrough)
+        run: |
+          xcodebuild build \
+            -project Probes/HDR10PassThrough/Device/HDR10PassThrough.xcodeproj \
+            -scheme HDR10PassThrough \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath .build/xcode-hdr10 \
             EXCLUDED_ARCHS=x86_64 \
             CODE_SIGNING_ALLOWED=NO
 

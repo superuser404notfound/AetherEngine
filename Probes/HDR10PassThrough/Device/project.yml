@@ -1,0 +1,58 @@
+# Device harness for the HDR10 pass-through check (Probes/HDR10PassThrough/README.md): a tvOS app that
+# plays the pattern clips from Scripts/build.sh arm by arm, so the television's HDR info screen can be
+# read for each. It depends on the engine as a local Swift package (the repository root, three levels
+# up), with the default traits: the probe needs none.
+#
+# Regenerate with `xcodegen generate --spec project.yml` from this directory. The generated project
+# is committed so that running the probe needs Xcode and nothing else.
+name: HDR10PassThrough
+options:
+  bundleIdPrefix: de.superuser404.hdr10passthrough
+  createIntermediateGroups: true
+  deploymentTarget:
+    tvOS: "18.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    TARGETED_DEVICE_FAMILY: "3"
+    CODE_SIGN_STYLE: Automatic
+    # If a team cannot register this id, override it on the command line
+    # (HDR10_BUNDLE_PREFIX=com.example.hdr10); the app's id is $(HDR10_BUNDLE_PREFIX).host.
+    HDR10_BUNDLE_PREFIX: de.superuser404.hdr10passthrough
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+
+packages:
+  AetherEngine:
+    path: ../../..
+
+targets:
+  HDR10PassThroughHost:
+    type: application
+    platform: tvOS
+    sources:
+      - path: Host
+        excludes:
+          - Info.plist
+    dependencies:
+      - package: AetherEngine
+        product: AetherEngine
+    info:
+      path: Host/Info.plist
+      properties:
+        CFBundleDisplayName: HDR10 pass-through
+        # The clips are served over plain http by the pulse probe's serve.py on the Mac next door.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HDR10_BUNDLE_PREFIX).host
+        GENERATE_INFOPLIST_FILE: NO
+
+schemes:
+  HDR10PassThrough:
+    build:
+      targets:
+        HDR10PassThroughHost: all
+    run:
+      config: Debug
