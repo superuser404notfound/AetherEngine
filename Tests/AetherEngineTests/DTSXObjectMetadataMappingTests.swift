@@ -59,6 +59,15 @@ struct DTSXObjectMetadataMappingTests {
         }
     }
 
+    @Test("a layout that does not carry the standard channels one to one renders DTS:X as 7.1.4")
+    func bedFallback() {
+        #expect(SpatialSpeakerLayout.l512.dtsxBed == .l714)
+        #expect(SpatialSpeakerLayout.l514.dtsxBed == .l714)
+        #expect(SpatialSpeakerLayout.l712.dtsxBed == .l714)
+        #expect(SpatialSpeakerLayout.l714.dtsxBed == .l714)
+        #expect(SpatialSpeakerLayout.l916.dtsxBed == .l916)
+    }
+
     @Test("a channel plays at unity on its speaker")
     func channelState() {
         let state = DTSXObjectAudioDecoder.state(for: .bed(.topFrontLeft))

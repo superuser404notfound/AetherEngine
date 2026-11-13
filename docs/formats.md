@@ -988,7 +988,9 @@ DTS:X's standard presentation is a 7.1 bed and four fixed heights (the top front
 
 **Latency.** The regression's 2048 frames, kept off the timeline.
 
-**Layouts.** Each of the twelve channels has its own speaker, so DTS:X is rendered into the two layouts that carry all twelve one to one, 7.1.4 and 9.1.6. Any other layout keeps the channel bridge.
+**Layouts.** Each of the twelve channels has its own speaker, so DTS:X is rendered into the two layouts that carry all twelve one to one, 7.1.4 and 9.1.6.
+
+A smaller layout (5.1.2, 5.1.4, 7.1.2) renders DTS:X as 7.1.4 instead. The host can set the layout to match the room, and the receiver maps the 7.1.4 bed onto its own speakers, the same as it does with tvOS's own Atmos. Nothing is panned, and a chain that cannot take twelve channels gets the 7.1 it would have had from the channel bridge, since tvOS folds the bed itself.
 
 #### The alternate presentations
 
@@ -1043,7 +1045,7 @@ Those runs predate the decoder in FFmpeg. The activator still runs for a rendere
   - `DTS:X in an alternate presentation without heights, which plays as its 7.1 bed` (a stream FFmpeg labels IMAX whose frames carry none)
   - `DTS:X in alternate presentation 0xd4, whose height fold is not known, which plays as its 7.1 bed`
 - A frame whose height channel set does not decode keeps the 7.1.4 layout with silent heights and the bed as coded, and libavcodec logs `DTS:X height channels not decoded, output silent heights`.
-- A layout other than 7.1.4 or 9.1.6 logs `DTS:X is rendered into 7.1.4 or 9.1.6 only`.
+- A layout other than 7.1.4 or 9.1.6 logs `DTS:X is rendered into 7.1.4 instead of 5.1.2, the smallest bed that carries its channels one to one`.
 - The `object configuration` and `bed levels` lines are the same as for TrueHD Atmos. So is the 1200-packet silence report: at 512 samples a DTS frame, that is 12.8 s of DTS, against a second of TrueHD.
 
 ## Subtitles
