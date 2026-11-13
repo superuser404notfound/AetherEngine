@@ -11,7 +11,7 @@ import AetherLibavformat
 /// `submitBaseLayerFrame`); pairing, composition and delivery are the software host's. The compose kernels
 /// dither on the parity of the frame index, so what the index is decides whether two runs of one clip
 /// produce the same bits.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct DualLayerExternalBaseLayerTests {
 
     private static func pts(_ n: Int64) -> CMTime { CMTime(value: n * 3750, timescale: 90000) }

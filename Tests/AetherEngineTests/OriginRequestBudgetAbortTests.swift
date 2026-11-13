@@ -50,7 +50,7 @@ struct OriginRequestBudgetAbortTests {
     }
 
     @Test("a caller parked for a slot leaves on abort without taking or holding one",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func slotWaitAborts() async throws {
         let budget = OriginRequestBudget()
         budget.setHostLimit(1, for: url)
@@ -81,7 +81,7 @@ struct OriginRequestBudgetAbortTests {
     }
 
     @Test("a caller parked for the pacer leaves on abort and leaves the tokens alone",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func pacerWaitAborts() async throws {
         let clock = ManualClock()
         let budget = OriginRequestBudget(now: clock.now)

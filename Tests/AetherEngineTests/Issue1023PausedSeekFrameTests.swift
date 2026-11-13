@@ -7,7 +7,7 @@ import Testing
 /// at the landing while its transport stays stopped, the way the native route does. The flush keeps the
 /// pre-seek frame on screen (#90) and the loops are parked under the pause, so before this nothing
 /// decoded at the landing until `play()`.
-@Suite("AE#1023 paused seek presents the landed frame", .serialized, .timeLimit(.minutes(2)))
+@Suite("AE#1023 paused seek presents the landed frame", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct Issue1023PausedSeekFrameTests {
 

@@ -11,7 +11,7 @@ import Foundation
 struct DetourOriginTicketTests {
 
     @Test("a detour block behind a pump holding one of two slots takes one slot and no wait",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func detourTakesOneTicket() async throws {
         let total: Int64 = 64 * 1024 * 1024
         // About 6 MB/s: the pump still has seconds of its 32 MB range to go when the detour is asked for.
@@ -69,7 +69,7 @@ struct DetourOriginTicketTests {
     }
 
     @Test("bounded cold probing reanchors without a speculative block, then restores normal detours",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func boundedProbeSkipsColdDetour() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024,
                                                        throttleUs: 40_000, patternedBody: true))

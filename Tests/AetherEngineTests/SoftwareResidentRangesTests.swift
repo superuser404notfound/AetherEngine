@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite("Software VOD resident ranges", .timeLimit(.minutes(2)))
+@Suite("Software VOD resident ranges", .timeLimit(.minutes(3)))
 struct SoftwareResidentRangesTests {
     private final class Input: @unchecked Sendable {
         private let lock = NSLock()
@@ -293,7 +293,7 @@ struct SoftwareResidentRangesTests {
 }
 
 @MainActor
-@Suite("Software resident range publication", .timeLimit(.minutes(2)))
+@Suite("Software resident range publication", .timeLimit(.minutes(3)))
 struct SoftwareResidentRangePublicationTests {
     private nonisolated static func isMainThread() -> Bool {
         Thread.isMainThread

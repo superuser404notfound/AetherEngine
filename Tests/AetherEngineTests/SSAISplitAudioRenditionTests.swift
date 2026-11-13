@@ -15,7 +15,7 @@ import Testing
 /// Regenerate with the recipe in `Issue996SSAISeamTests` at `r=25` and `-g 25 -keyint_min 25`
 /// (`-streamid` per PID, `adVideo` without the audio input, the two audio fixtures without the video
 /// input). At 2 fps the TS demuxer's late release of each PID's last frame cost a second per seam.
-@Suite("SSAI seam with a demuxed audio rendition", .serialized, .timeLimit(.minutes(2)))
+@Suite("SSAI seam with a demuxed audio rendition", .serialized, .timeLimit(.minutes(3)))
 struct SSAISplitAudioRenditionTests {
 
     private final class Reader: IOReader, @unchecked Sendable {

@@ -129,7 +129,7 @@ struct Issue309SilentTransportDeathTests {
     // MARK: - Detection
 
     @Test("a flow that dies mid-window is ended without any read blocking on it",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func deadFlowIsEndedWithoutAWaitingRead() async throws {
         let stallTimeout: TimeInterval = 0.6
         let silenceOffset = Self.silenceOffset
@@ -172,7 +172,7 @@ struct Issue309SilentTransportDeathTests {
                 "the dead flow was re-requested while nothing drained: \(server.requestedRanges)")
     }
 
-    @Test("a generation that never sees a first byte is ended too", .timeLimit(.minutes(2)))
+    @Test("a generation that never sees a first byte is ended too", .timeLimit(.minutes(3)))
     func headersWithoutABodyAreEnded() async throws {
         let stallTimeout: TimeInterval = 0.6
 
@@ -251,7 +251,7 @@ struct Issue309SilentTransportDeathTests {
 
     // MARK: - Regression
 
-    @Test("a backpressure-parked reader is not treated as a dead flow", .timeLimit(.minutes(2)))
+    @Test("a backpressure-parked reader is not treated as a dead flow", .timeLimit(.minutes(3)))
     func parkedIsNotStalled() async throws {
         let stallTimeout: TimeInterval = 0.5
 

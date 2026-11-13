@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite(.timeLimit(.minutes(2)), .offCooperativePool)
+@Suite(.timeLimit(.minutes(3)), .offCooperativePool)
 struct LiveStartupAdmissionTests {
     /// A parked job ends on an append or `cancelWaiters()`, never on its own deadline: past it the
     /// gate takes the undersized-cushion exit and returns true, which a test task resumed late

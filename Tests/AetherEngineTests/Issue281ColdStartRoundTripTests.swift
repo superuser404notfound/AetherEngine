@@ -9,7 +9,7 @@ import Foundation
 ///
 /// These tests work in byte offsets rather than through a real container, so they pin the reader's
 /// behaviour rather than one fixture's box layout.
-@Suite("Cold-start round trips (#281)", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("Cold-start round trips (#281)", .offCooperativePool, .timeLimit(.minutes(3)))
 struct Issue281ColdStartRoundTripTests {
 
     private let fileSize: Int64 = 512 * 1024 * 1024

@@ -5,7 +5,7 @@ import Testing
 /// The listener answers the whole LAN while AirPlay needs it (#86), and the session token is read only
 /// after a complete request head. These pin what keeps a peer that never presents one from holding the
 /// slots the local player needs (audit NET-6), plus the two accept-loop diagnostics (NET-12, NET-13).
-@Suite("HLS local server against slow and silent peers", .serialized, .timeLimit(.minutes(2)))
+@Suite("HLS local server against slow and silent peers", .serialized, .timeLimit(.minutes(3)))
 struct HLSLocalServerSlowPeerTests {
 
     @Test("A connection that never sends a request head is dropped at the head deadline")

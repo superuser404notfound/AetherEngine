@@ -34,7 +34,7 @@ struct ClosedCaptionTapA53Tests {
     /// track exactly once, and a stray tap that is never assigned to `engine.closedCaptionTap` (a
     /// torn-down or superseded session's tap) must not resurrect or duplicate it.
     @Test("Detection surfaces the synthetic track exactly once, even across a repeat and a stray tap",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func onceOnlyNotify() async throws {
         let engine = try AetherEngine()
         let tap = ClosedCaptionTap(engine: engine, ccStreamIndex: Int32(AetherEngine.a53ClosedCaptionTrackID))

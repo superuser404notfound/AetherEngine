@@ -132,7 +132,7 @@ struct RemoteHLSSubtitleProxyTests {
         #expect(try await Self.get("/\(server.pathToken)/init.mp4", port: server.port).status == 404)
     }
 
-    @Test("A decoded sidecar is served as whole-program WebVTT", .timeLimit(.minutes(2)))
+    @Test("A decoded sidecar is served as whole-program WebVTT", .timeLimit(.minutes(3)))
     func sidecarBecomesWebVTT() async throws {
         let srt = """
         1

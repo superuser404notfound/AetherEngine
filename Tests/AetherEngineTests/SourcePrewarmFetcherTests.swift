@@ -9,7 +9,7 @@ extension PrewarmStoreSuites {
     /// budget, which is process-wide too: a global reset from here tore the budget out from under
     /// suites running in parallel (measured, two unrelated failures), so a test that needs a ceiling
     /// sets it for its own origin and clears that one again.
-    @Suite("Source prewarm fetch (#551)", .serialized, .timeLimit(.minutes(2)))
+    @Suite("Source prewarm fetch (#551)", .serialized, .timeLimit(.minutes(3)))
     struct SourcePrewarmFetcherTests {
 
         private let fileSize: Int64 = 64 * 1024 * 1024

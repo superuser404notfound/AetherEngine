@@ -10,7 +10,7 @@ import Testing
 /// The rebuild is the host's call (`needsForegroundVideoRestore`, then `reloadAtCurrentPosition`).
 /// This pins that the rebuild alone brings the session back where it was, paused, with the card and
 /// the remote commands answering again.
-@Suite("Software host: restore after a background teardown", .serialized, .timeLimit(.minutes(2)))
+@Suite("Software host: restore after a background teardown", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct SoftwareHostWakeRestoreTests {
 

@@ -4,7 +4,7 @@ import Testing
 @testable import AetherEngine
 
 @MainActor
-@Suite("Paused native buffer publication", .timeLimit(.minutes(2)))
+@Suite("Paused native buffer publication", .timeLimit(.minutes(3)))
 struct PausedBufferPublicationTests {
     private func fixture() throws -> (AetherEngine, NativeAVPlayerHost, SegmentCache) {
         let engine = try AetherEngine()

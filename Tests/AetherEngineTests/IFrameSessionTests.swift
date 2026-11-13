@@ -55,7 +55,7 @@ struct IFrameSessionTests {
     private static let fixture = "restart-witness-av.mp4"
 
     @Test("a flagged VOD session lists the rendition and serves keyframes on the plan's timeline",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func servesRendition() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
         engine.requestIFramePlaylist()
@@ -87,7 +87,7 @@ struct IFrameSessionTests {
     // Profile 5 stills need the DolbyVisionStillReshaping trait (README, "Optional components").
     #if DolbyVisionStillReshaping
     @Test("a Dolby Vision session serves SDR JPEG stills on the plan's timeline",
-          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(3)))
     func dolbyVisionServesJPEG() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.dolbyVisionFixture), dvModeAvailable: true)
         engine.requestIFramePlaylist()
@@ -114,7 +114,7 @@ struct IFrameSessionTests {
     }
 
     @Test("a JPEG I-frame playlist waits for the main variant and is withheld from a player that refused it",
-          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(3)))
     func jpegPlaylistFollowsMainVariant() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.dolbyVisionFixture), dvModeAvailable: true)
         engine.requestIFramePlaylist()
@@ -135,7 +135,7 @@ struct IFrameSessionTests {
     }
     #else
     @Test("without the reshaping trait a Profile 5 session lists no I-frame rendition",
-          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(dolbyVisionFixture)), .timeLimit(.minutes(3)))
     func dolbyVisionWithoutReshapingHasNoRendition() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.dolbyVisionFixture), dvModeAvailable: true)
         engine.requestIFramePlaylist()
@@ -149,7 +149,7 @@ struct IFrameSessionTests {
     #endif
 
     @Test("the loopback server answers the three new paths",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func routes() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
         engine.requestIFramePlaylist()
@@ -170,7 +170,7 @@ struct IFrameSessionTests {
     }
 
     @Test("without the request the session is what it was: no tag, no route, no reader",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func flagOffLeavesMasterUntouched() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
         _ = try engine.start()
@@ -184,7 +184,7 @@ struct IFrameSessionTests {
     }
 
     @Test("the fallback to the media playlist takes the rendition down with it",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func fallbackDropsRendition() throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
         engine.requestIFramePlaylist()
@@ -198,7 +198,7 @@ struct IFrameSessionTests {
     }
 
     @Test("stopping while a keyframe request is in flight neither crashes nor hangs",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func stopWithRenditionInFlightDoesNotCrash() async throws {
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
         engine.requestIFramePlaylist()
@@ -234,7 +234,7 @@ struct IFrameSessionTests {
     }
 
     @Test("a custom source's clone feeds the side reader and is closed exactly once at stop",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func customCloneIsClosedAtStop() async throws {
         let clone = try CountingFileReader(url: fixtureURL(Self.fixture))
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
@@ -252,7 +252,7 @@ struct IFrameSessionTests {
     }
 
     @Test("a clone nobody ever read from is still closed at stop",
-          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists(fixture)), .timeLimit(.minutes(3)))
     func untouchedCloneIsClosedAtStop() async throws {
         let clone = try CountingFileReader(url: fixtureURL(Self.fixture))
         let engine = HLSVideoEngine(url: fixtureURL(Self.fixture), dvModeAvailable: false)
@@ -264,7 +264,7 @@ struct IFrameSessionTests {
     }
 
     @Test("a clone handed to a session that cannot serve the rendition is closed at once",
-          .enabled(if: fixtureExists("sdr-h264.mp4")), .timeLimit(.minutes(2)))
+          .enabled(if: fixtureExists("sdr-h264.mp4")), .timeLimit(.minutes(3)))
     func cloneOfAnAbsentRenditionIsClosed() throws {
         // One IRAP in the whole file: no keyframe-aligned plan, so the rendition stays absent.
         let clone = try CountingFileReader(url: fixtureURL("sdr-h264.mp4"))

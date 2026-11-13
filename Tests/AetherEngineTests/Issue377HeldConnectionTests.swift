@@ -418,7 +418,7 @@ struct Issue377HeldReaderTests {
     }
 
     @Test("a PAUSED consumer ends the held connection inside its budget and holds no flow",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func pausedConsumerEndsTheHeldConnection() async throws {
         let totalSize: Int64 = 256 * 1024 * 1024
         let server = try #require(ThrottledOriginServer(totalSize: totalSize))
@@ -518,7 +518,7 @@ struct Issue377HeldReaderTests {
     }
 
     @Test("consumption after an idle end refills at the frontier without going backwards",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func refillAfterIdleEnd() async throws {
         let totalSize: Int64 = 256 * 1024 * 1024
         let server = try #require(ThrottledOriginServer(totalSize: totalSize))

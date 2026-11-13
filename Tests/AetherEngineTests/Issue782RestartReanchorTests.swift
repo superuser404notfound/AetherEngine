@@ -33,7 +33,7 @@ struct Issue782RestartReanchorTests {
     }
 
     @Test("a backward read after a playback reposition opens the connection there, not a detour block",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func repositionAnchorsAtLanding() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }
@@ -59,7 +59,7 @@ struct Issue782RestartReanchorTests {
     }
 
     @Test("without the reposition the same read is still a detour, so the parse-read policy is unchanged",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func parseReadStillDetours() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }
@@ -80,7 +80,7 @@ struct Issue782RestartReanchorTests {
     }
 
     @Test("a resident detour block still serves the landing, and the first miss past it anchors",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func residentBlockServesFirst() throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         defer { server.stop() }

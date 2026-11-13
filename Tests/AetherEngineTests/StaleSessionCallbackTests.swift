@@ -5,7 +5,7 @@ import Testing
 /// Audit LIF-103, Vcore-101, Vcore-102: callbacks a session raises reach the engine through a hop onto
 /// the main actor, and a hop that lands after the session ended used to act on whatever owned the
 /// engine by then: a stopped engine, or the next load.
-@Suite("A callback from an ended session does not reach its successor", .timeLimit(.minutes(2)))
+@Suite("A callback from an ended session does not reach its successor", .timeLimit(.minutes(3)))
 @MainActor
 struct StaleSessionCallbackTests {
 

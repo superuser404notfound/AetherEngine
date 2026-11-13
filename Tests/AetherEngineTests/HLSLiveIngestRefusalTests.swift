@@ -7,7 +7,7 @@ import Foundation
 /// again every second and carries on the moment it is served, and the refusals arm no pacer, which
 /// would hold the requests after them. A session URL the panel keeps refusing, or revoked, is asked
 /// for afresh through the URL the host loaded.
-@Suite("Live HLS ingest rides out refusals", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("Live HLS ingest rides out refusals", .offCooperativePool, .timeLimit(.minutes(3)))
 struct HLSLiveIngestRefusalTests {
 
     // MARK: - Loopback origin

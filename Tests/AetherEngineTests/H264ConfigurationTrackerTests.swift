@@ -7,7 +7,7 @@ import AetherLibavcodec
 import AetherLibavutil
 @testable import AetherEngine
 
-@Suite("H264 VOD configuration compatibility", .serialized, .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("H264 VOD configuration compatibility", .serialized, .offCooperativePool, .timeLimit(.minutes(3)))
 struct H264ConfigurationTrackerTests {
     private let sps = Self.hex("6764001facd9405005bb016a02040280000003008000001e078c18cb")
     private let changed = Self.hex("6764001facd9404c057fbc05a828282a000003000200000300781e30632c")

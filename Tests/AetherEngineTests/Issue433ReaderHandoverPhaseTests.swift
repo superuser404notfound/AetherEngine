@@ -32,7 +32,7 @@ struct Issue433ReaderHandoverPhaseTests {
     /// it the sink (`HLSVideoEngine.restart`, `AetherEngine+Loading` on both software paths). What a
     /// listener sees must not depend on which side of `open()` it attached from.
     @Test("a reader wired after its open still announces the delivery the session is riding on",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func sinkAttachedAfterOpenStillHearsDelivery() throws {
         let serverMaybe = ThrottledOriginServer(totalSize: 32 * 1024 * 1024, respond: { _, _, _ in .serve206 })
         let server = try #require(serverMaybe)

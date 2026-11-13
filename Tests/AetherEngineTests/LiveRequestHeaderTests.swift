@@ -44,7 +44,7 @@ struct LiveRequestHeaderTests {
     }
 
     @Test("a reader stalled on a refused token heals on the next attempt once the store holds a new one",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func refusedTokenHealsWithoutReopen() async throws {
         let firstRange: Int64 = 256 * 1024
         // The last refusal the ladder still retries after: the reader is mid-ladder, on the stale

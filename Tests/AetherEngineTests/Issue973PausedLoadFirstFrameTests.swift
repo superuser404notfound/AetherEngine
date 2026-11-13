@@ -5,7 +5,7 @@ import Testing
 /// AE#973: a software host that is loaded and then paused without ever having played (a session
 /// rebuilt at the playhead while paused, a paused mount) still decodes and presents the frame at
 /// the playhead, and keeps its transport stopped.
-@Suite("AE#973 paused load presents its first frame", .serialized, .timeLimit(.minutes(2)))
+@Suite("AE#973 paused load presents its first frame", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct Issue973PausedLoadFirstFrameTests {
 

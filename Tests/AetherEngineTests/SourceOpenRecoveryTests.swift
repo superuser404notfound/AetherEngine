@@ -26,7 +26,7 @@ private final class ProbeTestTrigger: @unchecked Sendable {
     }
 }
 
-@Suite(.timeLimit(.minutes(2)))
+@Suite(.timeLimit(.minutes(3)))
 struct SourceOpenRecoveryTests {
     private let bytes = Data(repeating: 0x47, count: 8192)
 

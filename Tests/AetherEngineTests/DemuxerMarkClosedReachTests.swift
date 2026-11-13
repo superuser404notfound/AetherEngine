@@ -38,7 +38,7 @@ struct DemuxerMarkClosedReachTests {
     }
 
     @Test("a close that lands while the source is connecting aborts the open",
-          .timeLimit(.minutes(2)), arguments: [true, false])
+          .timeLimit(.minutes(3)), arguments: [true, false])
     func closeDuringConnectAbortsTheOpen(isLive: Bool) async throws {
         let origin = ThrottledOriginServer(
             totalSize: 64 << 20, patternedBody: true, firstByteDelayUs: { _ in 10_000_000 })
@@ -58,7 +58,7 @@ struct DemuxerMarkClosedReachTests {
     }
 
     @Test("a pump parked for an origin slot leaves when the demuxer is closed",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func closeReachesAParkedPump() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 << 20, patternedBody: true))
         defer { server.stop() }

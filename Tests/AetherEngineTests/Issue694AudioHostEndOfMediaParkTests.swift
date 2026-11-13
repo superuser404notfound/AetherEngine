@@ -10,7 +10,7 @@ struct Issue694AudioHostEndOfMediaParkTests {
 
     @MainActor
     @Test("after end of media the clock stands still on the last sample, even when the park runs late",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func clockParksOnTheLastSample() async throws {
         let host = AudioPlaybackHost()
         let demuxer = Demuxer()

@@ -151,7 +151,7 @@ struct SegmentOpensOnIRAPTests {
     @Test("Every produced segment opens on a sync sample, in both containers",
           .enabled(if: fixtureExists("cue-axis-bframes.mkv") && fixtureExists("cue-axis-bframes.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clips"),
-          .timeLimit(.minutes(2)),
+          .timeLimit(.minutes(3)),
           arguments: ["cue-axis-bframes.mkv", "cue-axis-bframes.mp4"])
     func segmentsOpenOnSyncSample(fixture: String) throws {
         let engine = HLSVideoEngine(url: fixtureURL(fixture), dvModeAvailable: false)

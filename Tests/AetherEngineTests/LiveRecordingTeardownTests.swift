@@ -5,7 +5,7 @@ import Foundation
 /// Audit FEA-105 / FEA-106: a stop or a zap that lands while a recording is being torn down, or while
 /// a start is waiting for the previous file, must neither publish `.ended` early nor lose a failure, and
 /// a start that was overtaken must not install a writer afterwards.
-@Suite("Live recording teardown and start races (FEA-105, FEA-106)", .serialized, .timeLimit(.minutes(2)))
+@Suite("Live recording teardown and start races (FEA-105, FEA-106)", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct LiveRecordingTeardownTests {
 

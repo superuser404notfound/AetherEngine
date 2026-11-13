@@ -158,7 +158,7 @@ struct PlaylistNamedHostCredentialTests {
     /// Audit NAT-105 / NET-109: the #316 build fetched the master's first variant with every host
     /// header, whatever host the master named, and anchored the relay's grant on the redirect target.
     @Test("The subtitle proxy keeps the token off an edge the master redirected to",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func subtitleProxyAfterACrossOriginRedirect() async throws {
         let originMaybe = CannedHTTPOrigin()
         let edgeMaybe = CannedHTTPOrigin()

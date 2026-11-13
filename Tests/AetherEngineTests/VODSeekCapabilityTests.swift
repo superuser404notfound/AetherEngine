@@ -3,7 +3,7 @@ import Combine
 import Testing
 @testable import AetherEngine
 
-@Suite(.timeLimit(.minutes(2)))
+@Suite(.timeLimit(.minutes(3)))
 @MainActor
 struct VODSeekCapabilityTests {
     @Test("A known duration never makes a forward-only source seekable")

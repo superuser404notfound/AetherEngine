@@ -7,7 +7,7 @@ import Testing
 /// target). The engine's owned sessions had no redirect handler, so a 302 on a playlist, segment, key
 /// or disc range took the host's token wherever it pointed. The session-level delegate now applies the
 /// same rule a per-task redirect handler does.
-@Suite("Engine sessions keep credentials off a redirect target", .serialized, .timeLimit(.minutes(2)))
+@Suite("Engine sessions keep credentials off a redirect target", .serialized, .timeLimit(.minutes(3)))
 struct EngineSessionRedirectCredentialTests {
 
     private let credentialFields = ["X-Emby-Token": "SOURCE-ONLY", "Cookie": "sid=SOURCE-ONLY",

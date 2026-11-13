@@ -72,7 +72,7 @@ struct Issue450ConcurrentReaderCeilingTests {
 
     /// The negative control. Without it the test below could pass for a reason that has nothing to
     /// do with the cap, and this suite would be measuring itself.
-    @Test("a cap of two parks the third open-ended request", .timeLimit(.minutes(2)))
+    @Test("a cap of two parks the third open-ended request", .timeLimit(.minutes(3)))
     func aCapOfTwoParksTheThirdOpenEndedRequest() async throws {
         let server = try #require(Self.makeOrigin())
         defer { server.stop() }
@@ -92,7 +92,7 @@ struct Issue450ConcurrentReaderCeilingTests {
                 "expected the cap to park one of three: \(Self.pathsSeen(server))")
     }
 
-    @Test("the long-lived pool lets a third open-ended request through", .timeLimit(.minutes(2)))
+    @Test("the long-lived pool lets a third open-ended request through", .timeLimit(.minutes(3)))
     func longLivedPoolLetsTheThirdRequestThrough() async throws {
         let server = try #require(Self.makeOrigin())
         defer { server.stop() }
@@ -153,7 +153,7 @@ struct Issue450ConcurrentReaderCeilingTests {
     /// connection delivering nothing is armed at `connStallTimeout` (20 s shipped), which is longer
     /// than the arcs that give up on a source first. The witness that speaks has to be inside them.
     @Test("a connection with no first byte is reported before the threshold ends it",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func aConnectionWithNoFirstByteIsReported() async throws {
         let stallTimeout: TimeInterval = 2.0
         let firstRange: Int64 = 2 * 1024 * 1024

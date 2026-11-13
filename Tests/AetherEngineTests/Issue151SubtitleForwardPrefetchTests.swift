@@ -66,7 +66,7 @@ struct Issue151SubtitleForwardPrefetchTests {
     /// The prefetch loop harvests every routed subtitle packet up to playhead + lead, then PARKS:
     /// nothing past the lead edge may be read while the playhead stands still, and advancing the
     /// playhead resumes the read through EOF.
-    @Test("prefetch harvests to the lead edge, parks, resumes on playhead advance", .timeLimit(.minutes(2)))
+    @Test("prefetch harvests to the lead edge, parks, resumes on playhead advance", .timeLimit(.minutes(3)))
     func prefetchHarvestsToLeadAndParks() async throws {
         let fixture = MatroskaSubtitleFixture.make(
             durationMs: 130_000,

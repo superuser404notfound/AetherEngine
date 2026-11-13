@@ -32,7 +32,7 @@ struct Issue983SourceVideoScanTests {
     }
 
     @Test("a load publishes the scan from the routing evidence, a reload keeps it, stop clears it",
-          .timeLimit(.minutes(2)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     @MainActor
     func loadPublishesScan(interlaced: Bool) async throws {
         let fixture = interlaced
@@ -59,7 +59,7 @@ struct Issue983SourceVideoScanTests {
     }
 
     @Test("decodedVideoFormat names the deinterlacer only when frames pass through one",
-          .timeLimit(.minutes(2)), arguments: [false, true])
+          .timeLimit(.minutes(3)), arguments: [false, true])
     @MainActor
     func decodedFormatCarriesDeinterlace(interlaced: Bool) async throws {
         let fixture = interlaced

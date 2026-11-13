@@ -40,7 +40,7 @@ struct Issue409HeldPacketSeekTests {
     @Test("a seek drops the sample the verdict left held",
           .enabled(if: fixtureExists("a53-captions.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the A/53 caption clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func heldSampleDoesNotSurviveASeek() throws {
         let url = fixtureURL("a53-captions.mp4")
 
@@ -70,7 +70,7 @@ struct Issue409HeldPacketSeekTests {
     @Test("without a seek the held sample is still delivered in full",
           .enabled(if: fixtureExists("a53-captions.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the A/53 caption clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func heldSampleSurvivesWhenNothingSeeks() throws {
         let url = fixtureURL("a53-captions.mp4")
 

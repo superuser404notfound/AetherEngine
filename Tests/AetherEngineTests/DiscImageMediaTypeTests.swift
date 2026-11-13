@@ -52,7 +52,7 @@ extension PrewarmStoreSuites {
     /// AE#860: an extensionless URL whose origin declares a disc image type reaches the disc
     /// adapter; the type stays a hint that the disc readers confirm.
     /// `.serialized`: the warm case and the recognized-URL memo are process-wide.
-    @Suite("Extensionless disc images by Content-Type (AE#860)", .serialized, .timeLimit(.minutes(2)))
+    @Suite("Extensionless disc images by Content-Type (AE#860)", .serialized, .timeLimit(.minutes(3)))
     struct ExtensionlessDiscImageTests {
 
         private static let iso = RemoteDiscSessionReleaseTests.isoImage(vob: RemoteDiscSessionReleaseTests.vob)

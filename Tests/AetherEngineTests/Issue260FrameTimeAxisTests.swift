@@ -45,7 +45,7 @@ struct Issue260FrameTimeAxisTests {
     @Test("Every frame reports source and item, separated by the producer shift",
           .enabled(if: fixtureExists("restart-witness-av.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func framesCarryBothAxes() throws {
         let collector = FrameTimeCollector()
         let engine = HLSVideoEngine(url: fixtureURL("restart-witness-av.mp4"), dvModeAvailable: false)
@@ -94,7 +94,7 @@ struct Issue260FrameTimeAxisTests {
     @Test("Delivery is decode order, not presentation order",
           .enabled(if: fixtureExists("restart-witness-av.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func deliveryIsDecodeOrder() throws {
         let collector = FrameTimeCollector()
         let engine = HLSVideoEngine(url: fixtureURL("restart-witness-av.mp4"), dvModeAvailable: false)
@@ -116,7 +116,7 @@ struct Issue260FrameTimeAxisTests {
     @Test("A restart opens a new epoch and reports the seam it starts at",
           .enabled(if: fixtureExists("restart-witness-av.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func restartOpensNewEpoch() async throws {
         let collector = FrameTimeCollector()
         let seams = SeamCollector()

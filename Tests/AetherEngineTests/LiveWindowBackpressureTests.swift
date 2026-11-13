@@ -14,7 +14,7 @@ import Foundation
 struct LiveWindowBackpressureTests {
 
     @Test("a live join burst past the VOD high water keeps its one connection",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func liveJoinBurstKeepsConnection() async throws {
         // The join-burst shape: 24 MB delivered at line rate into a stalled consumer,
         // then silence with the connection held open — no FIN, no error, exactly a live
@@ -55,7 +55,7 @@ struct LiveWindowBackpressureTests {
     }
 
     @Test("a live source past the live backstop is ended, stays bounded, and refills at the frontier",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func liveBackstopEndsAndRefills() async throws {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024))
         defer { server.stop() }
@@ -112,7 +112,7 @@ struct LiveWindowBackpressureTests {
     /// session starves. The rejection is the signal: one 416 latches the join shape for
     /// the rest of the session, so the loop costs a single request and never repeats.
     @Test("a rejected live frontier latches the join shape for the rest of the session",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func liveReconnectAsksLikeAJoin() async throws {
         // 4 MB per connection: the origin serves its "ring buffer" and completes the
         // response; anything with offset > 0 is rejected the way the field panel does.

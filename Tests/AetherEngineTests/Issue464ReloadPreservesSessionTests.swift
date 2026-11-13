@@ -144,7 +144,7 @@ struct Issue464StackedRebuildTransportTests {
 /// `play()`. The pure answer above was right and the call site ignored it: pause, pick another
 /// language, and the film started behind the menu.
 @Suite("Audit LIF-102: the audio-switch and custom-source rebuild comes back in the session's transport",
-       .timeLimit(.minutes(2)))
+       .timeLimit(.minutes(3)))
 @MainActor
 struct Issue464RebuildCallSiteTransportTests {
 

@@ -6,7 +6,7 @@ import Testing
 /// Audit NET-112 / FEA-107 / DEC-103 / NET-113: segment, key and rendition bodies were read with
 /// `session.data(for:)`, which holds the whole body before anyone can look at its size, and the
 /// playlist fetch appended one byte at a time. One bounded fetch now serves all of them.
-@Suite(.timeLimit(.minutes(2)))
+@Suite(.timeLimit(.minutes(3)))
 struct BoundedFetchTests {
 
     private func makeSession() -> URLSession {

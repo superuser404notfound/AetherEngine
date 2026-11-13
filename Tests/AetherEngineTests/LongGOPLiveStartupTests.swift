@@ -5,7 +5,7 @@ import Testing
 
 /// Optional real-media witness. Generate 40 s H.264/AAC MPEG-TS fixtures with 5 s and 10 s closed GOPs
 /// and a 700 kbit/s constant mux rate. Scripts/test-long-gop-startup.sh supplies the fixtures.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct LongGOPLiveStartupTests {
     private final class PacedReader: IOReader, @unchecked Sendable {

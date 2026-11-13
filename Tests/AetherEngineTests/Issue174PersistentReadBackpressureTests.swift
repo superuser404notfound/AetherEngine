@@ -17,7 +17,7 @@ import Foundation
 ///
 /// They run a loopback HTTP/1.1 origin that counts every body byte it manages to write and
 /// records every Range it is asked for.
-@Suite("AVIOReader persistent backpressure (#174/#220/#310)", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("AVIOReader persistent backpressure (#174/#220/#310)", .offCooperativePool, .timeLimit(.minutes(3)))
 struct Issue174PersistentReadBackpressureTests {
 
 

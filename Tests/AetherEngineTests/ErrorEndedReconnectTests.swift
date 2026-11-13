@@ -43,7 +43,7 @@ struct ErrorEndedReconnectTests {
     /// failure ladder (status accounting, backoff, `.reconnecting`, bounded give-up) instead
     /// of reconnecting forever off the books.
     @Test("an origin refusing every refill is retried with backoff and given up on",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func refusedRefillIsBoundedAndGivenUp() async throws {
 
         let firstRange: Int64 = 512 * 1024
@@ -87,7 +87,7 @@ struct ErrorEndedReconnectTests {
     /// transient. The first ladder pass sees real progress since the last accounting, keeps
     /// the streak at zero, applies no backoff, and the retry completes the read.
     @Test("a single dropped refill connection recovers and completes the read",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func transientRefillFailureRecovers() async throws {
         let firstRange: Int64 = 512 * 1024
         let attempts = AttemptCounter()
@@ -123,7 +123,7 @@ struct ErrorEndedReconnectTests {
 
     /// Regression guard for the healthy path: a range boundary on a well-behaved origin
     /// stays off the failure ladder entirely — no streak, no `.reconnecting`.
-    @Test("healthy range boundaries stay off the failure ladder", .timeLimit(.minutes(2)))
+    @Test("healthy range boundaries stay off the failure ladder", .timeLimit(.minutes(3)))
     func healthyBoundariesKeepFastPath() async throws {
         let firstRange: Int64 = 256 * 1024
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024))

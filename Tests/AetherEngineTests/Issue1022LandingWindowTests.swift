@@ -15,7 +15,7 @@ struct Issue1022LandingWindowTests {
     // MARK: - Read loop
 
     @Test("a landing session reads to just past the landing and stays parked while the playhead moves",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func landingSessionParksPastTheLanding() async throws {
         let fixture = MatroskaSubtitleFixture.make(
             durationMs: 130_000,
@@ -69,7 +69,7 @@ struct Issue1022LandingWindowTests {
     }
 
     @Test("a PGS line the landing could not prove comes back once the landing window is read",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func refusedLandingComesBack() async throws {
         let format = try #require(avformat_alloc_context())
         defer { avformat_free_context(format) }

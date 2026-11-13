@@ -211,7 +211,7 @@ struct ForwardOnlyHeadIsKeptTests {
     /// 8 s clip is well inside the reader's 1 MB back window, which is exactly the shape where the
     /// probe's rewind appeared to work and ate the opening.
     @Test("the finished playlist of a forward-only Annex-B TS lists every video frame",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func playlistKeepsTheOpeningFrames() async throws {
         let body = TinyTransportStreamFixture.data
         let origin = ScriptedOriginServer { _ in

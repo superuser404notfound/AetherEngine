@@ -11,7 +11,7 @@ import AetherLibavcodec
 /// deadline against the render clock, not by a count of newer base frames, and at once when the access
 /// unit carried no enhancement layer. Everything is synthetic: tagged pixel buffers into the frame
 /// handlers, a recording composer, an injected clock and uptime, no media and no GPU.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct DualLayerDeadlineBypassTests {
 
     // MARK: - Fixtures

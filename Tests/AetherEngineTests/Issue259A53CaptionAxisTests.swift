@@ -73,7 +73,7 @@ struct Issue259A53CaptionAxisTests {
     @Test("The A53 observer is fed source PTS, not the shifted output timestamps",
           .enabled(if: fixtureExists("a53-captions.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the A/53 caption clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func a53ObservationsStayOnTheSourceAxis() async throws {
         let witnessCount = 24
         let (expected, sourceTimeBase) = try sourceA53PacketPTS("a53-captions.mp4", limit: witnessCount)

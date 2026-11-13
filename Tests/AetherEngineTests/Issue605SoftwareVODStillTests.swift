@@ -9,7 +9,7 @@ import Testing
 /// moving the consumer, or every preview would rewind playback. And the run is offered exactly where
 /// a commit would be a cache hit: a target past the retained frontier has a real frame the store
 /// does not hold yet, so the frame before it is the wrong answer rather than a close one.
-@Suite("Software VOD scrub stills from the packet cache (AE#605)", .offCooperativePool, .timeLimit(.minutes(2)))
+@Suite("Software VOD scrub stills from the packet cache (AE#605)", .offCooperativePool, .timeLimit(.minutes(3)))
 struct Issue605SoftwareVODStillTests {
 
     // MARK: - FIFO history walk

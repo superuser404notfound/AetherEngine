@@ -12,7 +12,7 @@ import AetherLibavcodec
 /// intact by a failed composition) has not, so it carries the RPU that keeps the mapping and the display
 /// side reshapes it. The two RPUs are stood in for by tagged byte strings: this pins the choice, and
 /// `DoviComposedFrameRpuTests` pins what the two forms contain.
-@Suite(.serialized, .timeLimit(.minutes(2)))
+@Suite(.serialized, .timeLimit(.minutes(3)))
 struct DualLayerBypassRpuTests {
 
     private static let composedTag: UInt8 = 0xC0

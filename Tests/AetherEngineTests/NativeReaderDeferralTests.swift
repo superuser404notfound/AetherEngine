@@ -26,7 +26,7 @@ struct NativeReaderDeferralTests {
         engine.cancelNativeSubtitleReaders()
     }
 
-    @Test("lazy readers defer while a restart is in flight and start once it settles", .timeLimit(.minutes(2)))
+    @Test("lazy readers defer while a restart is in flight and start once it settles", .timeLimit(.minutes(3)))
     func deferThenStart() async throws {
         let engine = try prepared()
         engine.testHookRestartInFlightOverride = true

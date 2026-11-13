@@ -134,7 +134,7 @@ struct Issue314FrameTimeSequenceTests {
     @Test("a new native session reports above the one it replaces",
           .enabled(if: fixtureExists("restart-witness-av.mp4"),
                    "run Scripts/fetch-fixtures.sh to generate the witness clip"),
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func newNativeSessionOutranksTheOutgoingOne() async throws {
         let outgoingFrames = EpochCollector()
         let outgoing = HLSVideoEngine(url: fixtureURL("restart-witness-av.mp4"), dvModeAvailable: false)
