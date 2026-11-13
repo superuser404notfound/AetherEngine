@@ -47,6 +47,14 @@ public enum SpatialSpeakerLayout: String, Sendable, CaseIterable, Codable {
         return standard.allSatisfy(speakers.contains)
     }
 
+    /// The bed DTS:X is rendered into when the host asks for this layout: the layout itself when it
+    /// carries the standard channels one to one, otherwise 7.1.4, the smallest bed that does. The
+    /// receiver maps 7.1.4 onto its own speakers, so a 5.1.2 room still gets the heights instead of
+    /// the 7.1 channel bridge, and no DTS:X channel is ever panned.
+    var dtsxBed: SpatialSpeakerLayout {
+        carriesDTSXOneToOne ? self : .l714
+    }
+
     /// CoreAudio's tag for this bed. The comments in CoreAudioBaseTypes.h spell the order
     /// `speakers` mirrors.
     public var channelLayoutTag: AudioChannelLayoutTag {

@@ -118,13 +118,15 @@ struct SoftwareAtmosRouteTests {
         #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, apacOS: false) == .pcm)
     }
 
-    @Test("DTS:X renders only into a bed that carries its channels one to one, and TrueHD Atmos into any")
-    func dtsxNeedsAOneToOneBed() {
-        // DTS:X's 7.1 bed and four heights map onto 7.1.4 and 9.1.6 only (`carriesDTSXOneToOne`);
-        // a smaller bed keeps the PCM decode, where TrueHD Atmos is rendered into whatever bed is asked.
-        for layout in SpatialSpeakerLayout.allCases where !layout.carriesDTSXOneToOne {
+    @Test("DTS:X falls back to 7.1.4 when the bed asked for does not carry its channels one to one")
+    func dtsxFallsBackToSevenOneFour() {
+        // DTS:X's 7.1 bed and four heights map onto 7.1.4 and 9.1.6 only (`carriesDTSXOneToOne`), so a
+        // smaller bed is rendered as 7.1.4 instead, where TrueHD Atmos is rendered into whatever bed is asked.
+        let builtIn = AetherEngine.OptionalComponent.dtsxObjectAudio.isBuiltIn
+        for layout in SpatialSpeakerLayout.allCases {
+            let dtsx: SoftwareAtmosRoute = builtIn ? .apac(layout.carriesDTSXOneToOne ? layout : .l714) : .pcm
             #expect(route(codec: AV_CODEC_ID_DTS, profile: AV_PROFILE_DTS_HD_MA, channels: 8, frame: 0,
-                          rendering: .apac(layout)) == .pcm, "\(layout.rawValue)")
+                          rendering: .apac(layout)) == dtsx, "\(layout.rawValue)")
             let trueHD: SoftwareAtmosRoute = AetherEngine.OptionalComponent.trueHDObjectAudio.isBuiltIn ? .apac(layout) : .pcm
             #expect(route(codec: AV_CODEC_ID_TRUEHD, profile: AV_PROFILE_TRUEHD_ATMOS, channels: 8, frame: 0,
                           rendering: .apac(layout)) == trueHD, "\(layout.rawValue)")

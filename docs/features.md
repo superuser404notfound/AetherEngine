@@ -98,7 +98,7 @@ Setting `LoadOptions.objectAudioRendering` keeps the objects on that route: comp
 TrueHD Atmos and DTS:X can keep their height channels. This is opt-in through `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` or `DTSXObjectAudio` trait ([Optional components](installation.md#optional-components)).
 
 - The engine builds a speaker bed (a fixed set of speaker channels, heights included) from the stream's own lossless 7.1, steered by its objects (TrueHD) or heights (DTS:X).
-- Layouts: TrueHD from 5.1.2 up to 9.1.6; DTS:X 7.1.4 and 9.1.6 (its four heights unfolded from the compatible 7.1).
+- Layouts: TrueHD from 5.1.2 up to 9.1.6; DTS:X 7.1.4 and 9.1.6 (its four heights unfolded from the compatible 7.1); a smaller layout renders DTS:X as 7.1.4.
 - Output: the bed as lossless 24-bit linear PCM. tvOS wraps it in Dolby MAT for an Atmos receiver, and iOS spatialises it on AirPods.
 - Over AirPlay it goes as Apple Positional Audio (APAC, a lossy encode). That holds on the loopback route (the engine's local server feeding AVPlayer) and on the software host alike. Needs OS 26.
 

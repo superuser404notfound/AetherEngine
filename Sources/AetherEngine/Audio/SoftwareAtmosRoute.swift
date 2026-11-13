@@ -58,10 +58,10 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
             return .compressedEAC3JOC
         }
         guard osSupportsAPAC,
-              HLSVideoEngine.spatialRenderingLayout(
-                rendering: .apac(layout), codecID: codecID, profile: profile, sampleRate: sampleRate) != nil
+              let bed = HLSVideoEngine.spatialRenderingLayout(
+                rendering: .apac(layout), codecID: codecID, profile: profile, sampleRate: sampleRate)
         else { return .pcm }
-        return rendering.bedFormat(routeFormat: routeFormat()) == .lpcm ? .pcmBed(layout) : .apac(layout)
+        return rendering.bedFormat(routeFormat: routeFormat()) == .lpcm ? .pcmBed(bed) : .apac(bed)
     }
 
     /// Why `route` kept a TrueHD or DTS track on the PCM decode although object rendering was asked
@@ -74,7 +74,7 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         rendering: ObjectAudioRendering,
         osSupportsAPAC: Bool = ObjectAudioRendering.isAvailable
     ) -> String? {
-        guard let layout = rendering.layout, codecID == AV_CODEC_ID_TRUEHD || codecID == AV_CODEC_ID_DTS else {
+        guard rendering.layout != nil, codecID == AV_CODEC_ID_TRUEHD || codecID == AV_CODEC_ID_DTS else {
             return nil
         }
         guard let source = HLSVideoEngine.objectAudioSource(codecID: codecID, profile: profile) else {
@@ -86,9 +86,6 @@ enum SoftwareAtmosRoute: Equatable, Sendable {
         if !osSupportsAPAC { return "no APAC encoder on this OS" }
         if sampleRate != 0, sampleRate != Int32(ObjectAudioRendering.sampleRate) {
             return "\(source.name) at \(sampleRate) Hz, rendered at 48 kHz only"
-        }
-        if source == .dtsHDMasterAudio, !layout.carriesDTSXOneToOne {
-            return "DTS:X is rendered into 7.1.4 or 9.1.6 only, not \(layout.rawValue)"
         }
         return nil
     }

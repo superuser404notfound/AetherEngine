@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **DTS:X keeps its heights when a smaller bed is asked for.** With `objectAudioRendering` set to 5.1.2,
+  5.1.4 or 7.1.2, DTS:X fell back to the 7.1 channel bridge, so a host that sets the layout to match the
+  room lost DTS:X's heights and the receiver never switched to Atmos. It is now rendered as 7.1.4, the
+  smallest bed that carries its channels one to one, and the receiver maps that onto its speakers.
+  TrueHD Atmos still renders into the layout asked for. Thanks to vZone71 for the report. Covered by
+  `SoftwareAtmosRouteTests` and `DTSXObjectMetadataMappingTests`.
+
 - **`softwareNowPlayingActive` turns true only once the engine's command targets are registered (#1051).**
   Since 7.64.0 the flag went true before the targets existed, so a host that swaps play, pause and toggle
   for its own the moment the flag turns true removed nothing, and both answered every press (a toggle
