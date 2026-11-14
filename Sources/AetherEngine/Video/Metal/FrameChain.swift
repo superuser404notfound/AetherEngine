@@ -11,6 +11,9 @@ import Metal
 /// When no stage needs the RGB picture (`FrameChainStage.isIdentity`) and the size stays, one kernel does
 /// the whole round trip with the same arithmetic and no RGB texture between the passes. At 4K that texture
 /// is 66 MB written and read back per frame, which kept an A12 Apple TV's GPU busy about 10 ms per frame.
+/// Where the width and the picture's x origin are multiples of 4 (`roundTripIsWide`), that kernel moves
+/// four luma samples per access and folds the colour arithmetic: 2.6 ms instead of 4.0 on the A12, where
+/// the arithmetic, not the memory or the sampler, set the time.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChain {
 
@@ -99,10 +102,13 @@ final class FrameChain {
         let output = try makeOutput(format: format)
         let lumaFormat: MTLPixelFormat = tenBit ? .r16Unorm : .r8Unorm
         let chromaFormat: MTLPixelFormat = tenBit ? .rg16Unorm : .rg8Unorm
-        let iy = try planeTexture(input, plane: 0, format: lumaFormat)
+        // The wide round trip sees luma and the output chroma as 4-sample texels (2 CbCr pairs for chroma).
+        let wide = rgb == nil && Self.roundTripIsWide(targetWidth: targetWidth, pictureX: picture.x)
+        let wideFormat: MTLPixelFormat = tenBit ? .rgba16Unorm : .rgba8Unorm
+        let iy = try planeTexture(input, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1)
         let ic = try planeTexture(input, plane: 1, format: chromaFormat)
-        let oy = try planeTexture(output, plane: 0, format: lumaFormat)
-        let oc = try planeTexture(output, plane: 1, format: chromaFormat)
+        let oy = try planeTexture(output, plane: 0, format: wide ? wideFormat : lumaFormat, widthDivisor: wide ? 4 : 1)
+        let oc = try planeTexture(output, plane: 1, format: wide ? wideFormat : chromaFormat, widthDivisor: wide ? 2 : 1)
 
         guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else {
             throw Failure("no command buffer")
@@ -124,6 +130,9 @@ final class FrameChain {
                 Self.dispatch(enc, kernels.toYCbCr, textures: [current, oy.0, oc.0],
                               grid: (targetWidth / 2, targetHeight / 2))
             }
+        } else if wide {
+            Self.dispatch(enc, kernels.roundTripWide, textures: [iy.0, ic.0, oy.0, oc.0],
+                          grid: (targetWidth / 4, targetHeight / 2))
         } else {
             Self.dispatch(enc, kernels.roundTrip, textures: [iy.0, ic.0, oy.0, oc.0],
                           grid: (targetWidth / 2, targetHeight / 2))
@@ -140,6 +149,12 @@ final class FrameChain {
         return (output, max(0, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
     }
 
+    /// The wide round trip reads luma four samples at a time, so the width and the picture's x origin
+    /// must land on those texels.
+    static func roundTripIsWide(targetWidth: Int, pictureX: Int) -> Bool {
+        targetWidth % 4 == 0 && pictureX % 4 == 0
+    }
+
     static func dispatch(_ encoder: MTLComputeCommandEncoder, _ pipeline: MTLComputePipelineState,
                          textures: [MTLTexture], grid: (Int, Int)) {
         encoder.setComputePipelineState(pipeline)
@@ -150,9 +165,10 @@ final class FrameChain {
                                 threadsPerThreadgroup: MTLSize(width: w, height: h, depth: 1))
     }
 
-    private func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat) throws -> (MTLTexture, CVMetalTexture) {
+    private func planeTexture(_ buffer: CVPixelBuffer, plane: Int, format: MTLPixelFormat,
+                              widthDivisor: Int = 1) throws -> (MTLTexture, CVMetalTexture) {
         var ref: CVMetalTexture?
-        let w = CVPixelBufferGetWidthOfPlane(buffer, plane), h = CVPixelBufferGetHeightOfPlane(buffer, plane)
+        let w = CVPixelBufferGetWidthOfPlane(buffer, plane) / widthDivisor, h = CVPixelBufferGetHeightOfPlane(buffer, plane)
         guard CVMetalTextureCacheCreateTextureFromImage(
                 kCFAllocatorDefault, textureCache, buffer, nil, format, w, h, plane, &ref) == kCVReturnSuccess,
               let ref, let texture = CVMetalTextureGetTexture(ref)
@@ -345,6 +361,7 @@ final class FrameChainKernels: @unchecked Sendable {
     let toRGB: MTLComputePipelineState
     let toYCbCr: MTLComputePipelineState
     let roundTrip: MTLComputePipelineState
+    let roundTripWide: MTLComputePipelineState
     let lineArtConvolutions: [MTLComputePipelineState]
     let lineArtDepthToSpace: MTLComputePipelineState
     let lineArtOutput: MTLComputePipelineState
@@ -358,6 +375,7 @@ final class FrameChainKernels: @unchecked Sendable {
     nonisolated(unsafe) private static var byDevice: [UInt64: FrameChainKernels] = [:]
 
     private init(toRGB: MTLComputePipelineState, toYCbCr: MTLComputePipelineState, roundTrip: MTLComputePipelineState,
+                 roundTripWide: MTLComputePipelineState,
                  lineArtConvolutions: [MTLComputePipelineState], lineArtDepthToSpace: MTLComputePipelineState,
                  lineArtOutput: MTLComputePipelineState, lineArtOutputClamped: MTLComputePipelineState,
                  restoreConvolutions: [MTLComputePipelineState], clampStatsRows: MTLComputePipelineState,
@@ -371,6 +389,7 @@ final class FrameChainKernels: @unchecked Sendable {
         self.toRGB = toRGB
         self.toYCbCr = toYCbCr
         self.roundTrip = roundTrip
+        self.roundTripWide = roundTripWide
         self.lineArtConvolutions = lineArtConvolutions
         self.lineArtDepthToSpace = lineArtDepthToSpace
     }
@@ -394,6 +413,7 @@ final class FrameChainKernels: @unchecked Sendable {
               let lineArt = try? device.makeLibrary(source: LineArtShaderSource.source, options: nil),
               let toRGB = pipeline(chain, "frameChainToRGB"), let toYCbCr = pipeline(chain, "frameChainToYCbCr"),
               let roundTrip = pipeline(chain, "frameChainRoundTrip"),
+              let roundTripWide = pipeline(chain, "frameChainRoundTripWide"),
               let lineArtOutput = pipeline(chain, "frameChainLineArtOutput", clamps: false),
               let lineArtOutputClamped = pipeline(chain, "frameChainLineArtOutput", clamps: true),
               let clampStatsRows = pipeline(chain, "frameChainClampStatsRows"),
@@ -406,7 +426,7 @@ final class FrameChainKernels: @unchecked Sendable {
         guard convolutions.count == LineArtShaderSource.convolutionKernels.count,
               restore.count == LineArtShaderSource.restoreKernels.count else { return nil }
         let kernels = FrameChainKernels(
-            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
+            toRGB: toRGB, toYCbCr: toYCbCr, roundTrip: roundTrip, roundTripWide: roundTripWide, lineArtConvolutions: convolutions, lineArtDepthToSpace: depthToSpace,
             lineArtOutput: lineArtOutput, lineArtOutputClamped: lineArtOutputClamped, restoreConvolutions: restore,
             clampStatsRows: clampStatsRows, clampStatsColumns: clampStatsColumns, clampHighlights: clampHighlights)
         byDevice[device.registryID] = kernels
@@ -505,6 +525,69 @@ enum FrameChainShaderSource {
             rgb[k] = saturate(inTex.sample(bilinear, (float2(pos) + 0.5) / size).rgb);
         }
         frameChainWriteBlock(p, rgb, gid, yTex, cTex);
+    }
+
+    // frameChainRoundTrip for a 4x2 luma block, with luma and the output chroma as 4-sample texels and the
+    // colour arithmetic folded into per-thread coefficients; RGB still rounded to half, as the stages see it.
+    // On an A12 the arithmetic set this kernel's time, not the memory or the sampler.
+    struct FrameChainFolded {
+        float ys, yo, cs, co, rCr, gCb, gCr, bCb, cbScale, crScale, rcpCode;
+        float3 w;
+    };
+    inline FrameChainFolded frameChainFold(constant FrameChainColorParams &p) {
+        FrameChainFolded k;
+        k.ys = p.codeScale / p.yRange; k.yo = p.yOffset / p.yRange;
+        k.cs = p.codeScale / p.cRange; k.co = p.cOffset / p.cRange;
+        float kg = 1.0 - p.kr - p.kb;
+        k.rCr = 2.0 * (1.0 - p.kr); k.bCb = 2.0 * (1.0 - p.kb);
+        k.gCb = p.kb * k.bCb / kg; k.gCr = p.kr * k.rCr / kg;
+        k.cbScale = 1.0 / k.bCb; k.crScale = 1.0 / k.rCr;
+        k.rcpCode = 1.0 / p.codeScale;
+        k.w = float3(p.kr, kg, p.kb);
+        return k;
+    }
+    inline float3 frameChainFoldedRGB(thread const FrameChainFolded &k, float yRaw, float2 cRaw) {
+        float y = yRaw * k.ys - k.yo;
+        float2 c = cRaw * k.cs - k.co;
+        return float3(half3(saturate(float3(y + k.rCr * c.y, y - k.gCb * c.x - k.gCr * c.y, y + k.bCb * c.x))));
+    }
+    inline float frameChainFoldedQuantize(thread const FrameChainFolded &k, constant FrameChainColorParams &p,
+                                          float v, float range, float offset) {
+        return clamp(rint(v * range + offset), 0.0, p.maxCode) * k.rcpCode;
+    }
+    kernel void frameChainRoundTripWide(constant FrameChainColorParams &p [[buffer(0)]],
+                                        texture2d<float, access::read> yIn4 [[texture(0)]],
+                                        texture2d<float, access::sample> cIn [[texture(1)]],
+                                        texture2d<float, access::write> yOut4 [[texture(2)]],
+                                        texture2d<float, access::write> cOut2 [[texture(3)]],
+                                        uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= yOut4.get_width() || gid.y * 2 >= yOut4.get_height()) { return; }
+        constexpr sampler bilinear(coord::pixel, address::clamp_to_edge, filter::linear);
+        FrameChainFolded k = frameChainFold(p);
+        uint2 inBase = uint2(gid.x + p.originX / 4, gid.y * 2 + p.originY);
+        float4 row0 = yIn4.read(inBase), row1 = yIn4.read(inBase + uint2(0, 1));
+        // Chroma at each luma sample's centre, in input coordinates.
+        float2 c0 = (float2(gid.x * 4 + p.originX, gid.y * 2 + p.originY) + 0.5) * 0.5;
+        float3 s[8];
+        for (uint i = 0; i < 4; i++) {
+            s[i] = frameChainFoldedRGB(k, row0[i], cIn.sample(bilinear, c0 + float2(i, 0) * 0.5).rg);
+            s[i + 4] = frameChainFoldedRGB(k, row1[i], cIn.sample(bilinear, c0 + float2(i, 1) * 0.5).rg);
+        }
+        float4 out0, out1;
+        for (uint i = 0; i < 4; i++) {
+            out0[i] = frameChainFoldedQuantize(k, p, dot(s[i], k.w), p.yRange, p.yOffset);
+            out1[i] = frameChainFoldedQuantize(k, p, dot(s[i + 4], k.w), p.yRange, p.yOffset);
+        }
+        yOut4.write(out0, uint2(gid.x, gid.y * 2));
+        yOut4.write(out1, uint2(gid.x, gid.y * 2 + 1));
+        float4 chroma;
+        for (uint b = 0; b < 2; b++) {
+            float3 mean = (s[b * 2] + s[b * 2 + 1] + s[b * 2 + 4] + s[b * 2 + 5]) * 0.25;
+            float y = dot(mean, k.w);
+            chroma[b * 2] = frameChainFoldedQuantize(k, p, (mean.b - y) * k.cbScale, p.cRange, p.cOffset);
+            chroma[b * 2 + 1] = frameChainFoldedQuantize(k, p, (mean.r - y) * k.crScale, p.cRange, p.cOffset);
+        }
+        cOut2.write(chroma, gid);
     }
 
     // Anime4K's Clamp_Highlights: the luma maximum over 5 samples, along rows then columns, at the source

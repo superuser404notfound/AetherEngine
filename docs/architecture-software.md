@@ -255,7 +255,8 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 **The frame chain** (`FrameChain`, AE#957) is what the line-art scaler and the HDR10 probe run on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
 
-- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel, `frameChainRoundTrip`, with no RGB texture. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame.
+- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame.
+- That kernel is `frameChainRoundTripWide` when the width and the picture's x origin are multiples of 4: it reads and writes four luma samples per texel and folds the colour arithmetic, 2.7 ms per 4K frame on the A12. Otherwise `frameChainRoundTrip`, one sample per access, 4.0 ms.
 - Every other chain keeps the two passes: a stage reads its neighbours from that texture.
 - Both paths give the same picture: luma unchanged, chroma within one code value.
 

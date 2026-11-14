@@ -406,8 +406,24 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 |---|---|---|
 | Two passes through RGB | 11426 | 9871 |
 | One kernel | 5341 | 3987 |
+| One kernel, wide texels, folded arithmetic | 3973 | 2675 |
 
-On a Radeon Pro 455 (Mac) the GPU time went from 3.36 to 0.87 ms. Luma is identical between the two, and chroma is within one code value.
+Luma is identical between all three, and chroma is within one code value.
+
+**What set the one kernel's time on the A12.** Variants of it, same frame and day (GPU median, us):
+
+| Variant | GPU |
+|---|---|
+| Copy only, one sample per access | 3456 |
+| Copy only, four luma samples per access | 1936 |
+| Four per access, chroma sampler but no arithmetic | 1956 |
+| Four per access, full arithmetic | 3970 |
+| The same, coefficients folded per thread | 2583 |
+| The same, chroma read by hand (9 texels) instead of sampled | 4587 |
+
+So the sampler is free, wide accesses halve the memory cost, and the arithmetic set the rest. Half precision arithmetic took 2606 but moved luma by up to 2 codes, so it is not used.
+
+**The time outside the GPU** (about 1.3 ms) is mostly the CPU slowing down while it waits for the command buffer. Spinning on the status instead of `waitUntilCompleted` cut the wall time by 0.8 ms, but holds a core busy for the whole GPU time, so the chain still waits.
 
 ### Software channel layout mismatch
 

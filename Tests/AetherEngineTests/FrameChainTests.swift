@@ -108,22 +108,37 @@ struct FrameChainTests {
     }
 
     /// AE#957: a chain whose stages leave the picture alone, at its own size, runs as one kernel with no
-    /// RGB texture. It must give what the two passes give, to within rounding.
-    @Test(arguments: [false, true])
+    /// RGB texture. It must give what the two passes give, to within rounding: 320 wide takes the wide
+    /// kernel (four luma samples per texel), 322 the narrow one.
+    @Test(arguments: [false, true], [320, 322])
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    func issue957OneKernelRoundTripMatchesTheTwoPasses(tenBit: Bool) throws {
-        let input = try ChainFrames.gradient(320, 180, tenBit: tenBit)
+    func issue957OneKernelRoundTripMatchesTheTwoPasses(tenBit: Bool, width: Int) throws {
+        let input = try ChainFrames.gradient(width, 180, tenBit: tenBit)
         ChainFrames.paintLuma(input) { x, y in ((x / 7 + y / 5) % 9 == 0) ? 30 : 60 + x / 2 }
-        let fused = try chain(320, 180, stages: [PassThroughStage(), PassThroughStage()])
-        let twoPass = try chain(320, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
-        let scaled = try chain(320, 180, target: (640, 360), stages: [PassThroughStage()])
+        let fused = try chain(width, 180, stages: [PassThroughStage(), PassThroughStage()])
+        let twoPass = try chain(width, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
+        let scaled = try chain(width, 180, target: (width * 2, 360), stages: [PassThroughStage()])
         #expect(fused.isRoundTripOnly)
         #expect(!twoPass.isRoundTripOnly)
         #expect(!scaled.isRoundTripOnly)
-        let (a, _) = try fused.process(input, picture: whole(320, 180))
-        let (b, _) = try twoPass.process(input, picture: whole(320, 180))
+        let wide = FrameChain.roundTripIsWide(targetWidth: width, pictureX: 0)
+        #expect(wide == (width == 320))
+        let (a, _) = try fused.process(input, picture: whole(width, 180))
+        let (b, _) = try twoPass.process(input, picture: whole(width, 180))
         let diff = ChainFrames.maxDifference(a, b)
-        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit))")
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit), width \(width))")
+    }
+
+    /// The wide kernel reads luma four samples at a time: a picture origin off those texels takes the narrow one.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957TheWideRoundTripNeedsFourSampleAlignment() {
+        let aligned = FrameChain.roundTripIsWide(targetWidth: 3840, pictureX: 0)
+        let offset = FrameChain.roundTripIsWide(targetWidth: 1920, pictureX: 2)
+        let narrow = FrameChain.roundTripIsWide(targetWidth: 1918, pictureX: 0)
+        #expect(aligned)
+        #expect(!offset)
+        #expect(!narrow)
     }
 
     @Test
