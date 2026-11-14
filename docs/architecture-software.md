@@ -287,7 +287,7 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 | `.hdr10(values)` | those values in both keys, over the source's |
 
 - The last stage that declares a volume sets the chain's. A dither or LUT stage after a tone mapper declares nothing and keeps the tone mapper's volume.
-- `FrameChain.attach(from:to:)` gives every output buffer its attachments: the source's, minus the geometry keys (the output is the picture region alone, so a clean aperture would crop it again), then the declared HDR10 metadata. `FrameUpscaler` and the HDR10 probe both use it.
+- `FrameChain.attach(from:to:)` gives every output buffer its attachments: the source's, minus the geometry keys (the output is the picture region alone, so a clean aperture would crop it again), then the declared HDR10 metadata. The HDR10 probe calls it. `FrameUpscaler` runs the same step on every rung, with `.unchanged` when it built no chain.
 - Only `PassThroughStage` and `LineArtStage` exist today, and both declare nothing, so no frame changes yet.
 
 ### Dolby Vision Profile 7 FEL

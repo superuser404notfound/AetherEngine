@@ -334,7 +334,6 @@ private final class LockedFlag: @unchecked Sendable {
     var value: Bool { lock.lock(); defer { lock.unlock() }; return flag }
 }
 
-/// 8-bit (420v) and 10-bit (x420) BT.709 video-range test frames. 10-bit samples sit in the high bits of 16.
 /// Hands its input on unchanged but declares a colour volume, as a tone mapper would.
 @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
 private final class DeclaringStage: FrameChainStage {
@@ -346,6 +345,7 @@ private final class DeclaringStage: FrameChainStage {
     func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
 }
 
+/// 8-bit (420v) and 10-bit (x420) BT.709 video-range test frames. 10-bit samples sit in the high bits of 16.
 private enum ChainFrames {
     struct Failure: Error {}
 
