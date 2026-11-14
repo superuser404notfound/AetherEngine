@@ -73,7 +73,13 @@ extension AetherEngine {
             // and with two tracks in one language that lands on the wrong one. Measured on tvOS 26:
             // a pick of "English (Commentary)" reloaded onto it, the new item came up on "English",
             // and the engine followed 56 ms later. The served track is the truth, so select it first.
-            if let served = group.options.first(where: { Self.renditionName(of: $0) == primary.name }),
+            var servedOption: AVMediaSelectionOption?
+            for option in group.options where await Self.renditionName(of: option) == primary.name {
+                servedOption = option
+                break
+            }
+            guard !Task.isCancelled, self.currentAVPlayer?.currentItem === item else { return }
+            if let served = servedOption,
                item.currentMediaSelection.selectedMediaOption(in: group) != served {
                 EngineLog.emit("[AetherEngine] AE#1049 audio menu: item came up on "
                                + "\"\(item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil")\", "
@@ -97,10 +103,14 @@ extension AetherEngine {
               let group = try? await item.asset.loadMediaSelectionGroup(for: .audible),
               !Task.isCancelled, currentAVPlayer?.currentItem === item,
               let selected = item.currentMediaSelection.selectedMediaOption(in: group) else { return }
+        let selectedName = await Self.renditionName(of: selected)
+        // The load suspends: a newer pick or item may have landed meanwhile, and its own task answers it.
+        guard !Task.isCancelled, currentAVPlayer?.currentItem === item,
+              item.currentMediaSelection.selectedMediaOption(in: group) == selected else { return }
         let language = selected.extendedLanguageTag
         let rank = group.options.prefix { $0 != selected }
             .filter { Self.languageMatches($0.extendedLanguageTag, language ?? "") }.count
-        guard let trackID = Self.audioMenuTrackID(selectedName: Self.renditionName(of: selected), selectedLanguage: language,
+        guard let trackID = Self.audioMenuTrackID(selectedName: selectedName, selectedLanguage: language,
                                                   rankInLanguage: rank, declared: declared) else {
             EngineLog.emit("[AetherEngine] AE#1049 audio menu: pick \"\(selected.displayName)\" lang=\(language ?? "nil") "
                            + "matches no declared track, ignored", category: .session)
@@ -113,8 +123,9 @@ extension AetherEngine {
     }
 
     /// The master's NAME for an option. `displayName` is not it for the playing entry.
-    nonisolated static func renditionName(of option: AVMediaSelectionOption) -> String? {
-        option.commonMetadata.first { $0.commonKey == .commonKeyTitle }?.stringValue
+    nonisolated static func renditionName(of option: AVMediaSelectionOption) async -> String? {
+        guard let title = option.commonMetadata.first(where: { $0.commonKey == .commonKeyTitle }) else { return nil }
+        return try? await title.load(.stringValue)
     }
 
     func cancelAudioMenuPicks() {

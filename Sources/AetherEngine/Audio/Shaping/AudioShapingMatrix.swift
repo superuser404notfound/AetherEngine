@@ -72,7 +72,7 @@ enum AudioShapingMatrix {
         // only reads the parameter when it is negative, so the coefficients are the same as with 1.
         let built = matrix.withUnsafeMutableBufferPointer { buf in
             swr_build_matrix2(input, output,
-                              M_SQRT1_2, M_SQRT1_2, lfe,
+                              0.5.squareRoot(), 0.5.squareRoot(), lfe,
                               Double(Int32.max), 0,
                               buf.baseAddress, inCount, AV_MATRIX_ENCODING_NONE, nil)
         }
