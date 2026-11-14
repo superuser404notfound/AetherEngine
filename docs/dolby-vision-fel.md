@@ -269,6 +269,7 @@ Each row is a symptom seen during development and the rule that prevents it.
 | Black picture with `COMPOSE SUCCESS` on every frame | 10-bit prediction treated as 12-bit | keep the whole reconstruction in one declared precision |
 | Green / purple picture | chroma curves with fewer than 2 pivots returned 0 | an absent curve is identity, not zero |
 | GPU reading freed memory | `CVMetalTexture` wrappers released before completion | keep textures *and* their source buffers alive until the command buffer retires (`ComposedFrame`) |
+| Picture stops a few seconds in on an Apple TV 4K (A12), sound goes on; GPU restart reports with a BIF0 page fault at `&poly_cb.num_pivots + 4 GiB` | a chroma curve the parser rejects becomes identity (`num_pivots` 0); the MMR evaluation of the other chroma component reads its range with an unclamped last-pivot index (index `0xFFFFFFFF`), and the A12 executes that guarded load anyway. Shader validation on a Mac does not see it, and the M4 reads 0 there without an error | every pivot index the kernels form from `num_pivots` goes through a bound (`dovi_last_pivot`, the capped piece count in `dovi_select_piece`); `DoviCurveIndexBoundsTests` |
 | Layers never pairing | container vs decoder timestamp scales | canonicalize to 90 kHz and match within ±300 ticks |
 | EL decoder never opening | EL VPS / SPS / PPS split across packets | accumulate parameter sets across packets |
 | Profile 7 plays as plain HDR10 | the container carries no `dvcC` record, so the load never sees a Profile 7 (routing and the `el_type` probe both start from the record) | none: the file plays as its HEVC base layer, the `unspec62` / `unspec63` NAL units ignored. `DolbyVisionRecordAudit.addRecordIfProfile5` repairs a recordless Profile 5 only; for Profile 7 the fix is a remux that writes the record |
@@ -866,6 +867,7 @@ This is a list of known paths, not a proof. Tests:
 - `CustomBlockSource` addresses the packet payload, not `buf->data` (Matroska packets sit 4 bytes in).
 - Pairing is key-based: `settledBlKeys` (ring of 64) decides whether an enhancement frame's base layer has already gone out.
 - `DoviFelComposer`'s completion handler keeps the in-flight semaphore alive past the composer.
+- Every pivot index a kernel forms from `num_pivots` stays inside the parameter block for any value, the identity fail-safe's 0 included (`dovi_last_pivot`). A guard in front of a load is not enough: a GPU compiler may execute the load anyway (§4.4).
 
 ## 7. Curve fold on the native route
 

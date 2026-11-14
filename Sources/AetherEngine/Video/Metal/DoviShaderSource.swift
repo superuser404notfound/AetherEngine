@@ -205,11 +205,22 @@ static inline float dovi_dither(uint2 gid, uint frame_index, uint2 phase) {
    Reshaping curve evaluation
    ========================================================================= */
 
+// Index of a curve's last pivot, inside `pivots` for every num_pivots, 0 and anything above 9 included.
+// Callers read it only behind a `num_pivots < 2` check, but a GPU compiler may execute a guarded load anyway.
+// The A12 (Apple TV 4K, 2nd generation) does: with the identity fail-safe's num_pivots 0, an unclamped last
+// index (num_pivots minus one) is 0xFFFFFFFF, which the A12 turns into a read 4 GiB past `num_pivots` and a
+// GPU page fault. Measured: Apple TV GPU restart reports at exactly `&poly_cb.num_pivots + 2^32` in either
+// in-flight parameter buffer, on the frames where a rejected Cb curve meets an MMR Cr curve. The M4 forms the
+// same address in 64 bits (16 GiB past) and reads 0 without an error, so a Mac never shows it.
+static inline uint dovi_last_pivot(constant struct DoviPolynomialParams &curve) {
+    return clamp(curve.num_pivots, 1u, 9u) - 1u;
+}
+
 // Index of the piece owning bl_val: the last pivot that bl_val reaches.
 // Deliberately last-match-wins rather than first, because adjacent pivots can
 // repeat (a zero-width piece) and the spec assigns the sample to the later one.
 static inline int dovi_select_piece(constant struct DoviPolynomialParams &curve, int bl_val) {
-    int last_piece = int(curve.num_pivots) - 2;
+    int last_piece = int(min(curve.num_pivots, 9u)) - 2;
     int piece = 0;
     for (int i = 0; i <= last_piece; ++i) {
         if (bl_val >= int(curve.pivots[i])) {
@@ -230,7 +241,7 @@ static inline float dovi_eval_poly(
     uint bl_max)
 {
     int lo = int(curve.pivots[0]);
-    int hi = int(curve.pivots[curve.num_pivots - 1]);
+    int hi = int(curve.pivots[dovi_last_pivot(curve)]);
     float x = float(clamp(bl_val, lo, hi)) / float(bl_max);
 
     float inv = ldexp(1.0f, -int(curve.coef_shift[piece]));
@@ -253,7 +264,7 @@ static inline float dovi_clamp_mmr_input(constant struct DoviPolynomialParams &c
         return norm;
     }
     float lo = float(curve.pivots[0]) / scale;
-    float hi = float(curve.pivots[curve.num_pivots - 1u]) / scale;
+    float hi = float(curve.pivots[dovi_last_pivot(curve)]) / scale;
     return clamp(norm, lo, hi);
 }
 
