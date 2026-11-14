@@ -25,6 +25,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Scrubbing a 4K title no longer holds up to six still decoders open (#1059).** Each one costs 100 to 160 MB
+  on an Apple TV 4K, and a held fast-forward took the app from 180 MB to about 1.1 GB. The open decoders now
+  share a budget of six 1080p pictures, so a 4K title keeps one and the others close down to their cached
+  still. Resident decoders close after 3 s idle instead of 10 s, and the new `releaseScrubPreviewDecoders()`
+  closes them when the host's scrub ends. Covered by `Issue1059ScrubDecoderBudgetTests`. Thanks to samimt55
+  for the measurements.
 - **Profile 7 FEL no longer freezes the picture on an Apple TV 4K (A12) when a chroma curve is rejected (#1055).**
   When the parser rejected one chroma curve (for example an MMR coefficient too large for the fixed-point
   form) and the other chroma curve was MMR, the chroma kernel read the rejected curve's range with an
