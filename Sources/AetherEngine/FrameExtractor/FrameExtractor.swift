@@ -54,6 +54,19 @@ public actor FrameExtractor {
     /// The area the source decoded at the last time it was open, kept across a close so the budget
     /// can count a decoder before it reopens.
     private(set) var knownDecoderPixelArea = 0
+    /// Queue jobs submitted but not yet reported back. While one runs the decoder may be opening,
+    /// and `openDecoderPixelArea` cannot say so yet.
+    private(set) var queueJobsInFlight = 0
+    /// Stamped on the queue, so a report that reenters the actor late never overwrites a newer one.
+    private final class QueueStamp: @unchecked Sendable { var value = 0 }
+    private let queueStamp = QueueStamp()
+    private var lastReportedStamp = 0
+    /// What the scrub decoder budget counts for this extractor: the open area, or the last known
+    /// one while a queue job may be opening the decoder. 0 when nothing is or may be open.
+    var budgetedDecoderPixelArea: Int {
+        queueJobsInFlight > 0 ? max(openDecoderPixelArea, knownDecoderPixelArea) : openDecoderPixelArea
+    }
+    var decoderMayBeOpen: Bool { openDecoderPixelArea > 0 || queueJobsInFlight > 0 }
     private var idleTask: Task<Void, Never>?
     private var residentApproximation: (width: Int, frame: ScrubFrame)?
     nonisolated let residentIdentity: String?
@@ -66,7 +79,7 @@ public actor FrameExtractor {
     /// segment still answers without a decode. The next decode reopens lazily. Queued behind any
     /// decode in flight, which therefore finishes first.
     func releaseDecoder() async {
-        guard !isShutDown, openDecoderPixelArea > 0 else { return }
+        guard !isShutDown, decoderMayBeOpen else { return }
         idleTask?.cancel()
         idleTask = nil
         let context = self.context
@@ -384,20 +397,26 @@ public actor FrameExtractor {
     /// Run blocking work on the serial queue, awaiting the result without blocking the actor's executor.
     private func runOnQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
         let context = self.context
-        let (result, area) = await withCheckedContinuation {
-            (continuation: CheckedContinuation<(T, Int), Never>) in
+        let stamp = queueStamp
+        queueJobsInFlight += 1
+        let (result, area, order) = await withCheckedContinuation {
+            (continuation: CheckedContinuation<(T, Int, Int), Never>) in
             decodeQueue.async {
                 let result = work()
-                continuation.resume(returning: (result, context.openDecoderPixelArea))
+                stamp.value += 1
+                continuation.resume(returning: (result, context.openDecoderPixelArea, stamp.value))
             }
         }
-        noteDecoderArea(area)
+        queueJobsInFlight -= 1
+        noteDecoderArea(area, order: order)
         return result
     }
 
-    private func noteDecoderArea(_ area: Int) {
-        openDecoderPixelArea = area
+    private func noteDecoderArea(_ area: Int, order: Int) {
         if area > 0 { knownDecoderPixelArea = area }
+        guard order > lastReportedStamp else { return }
+        lastReportedStamp = order
+        openDecoderPixelArea = area
     }
 
     /// Tests that wait for the idle close shorten it, so a starved runner does not spend the
@@ -427,8 +446,10 @@ public actor FrameExtractor {
         residentApproximation = nil
         openDecoderPixelArea = 0
         let context = self.context
+        let stamp = queueStamp
         // Fire-and-forget: best-effort, no caller awaits it; runOnQueue would block the actor for nothing.
-        decodeQueue.async { context.close() }
+        // The stamp moves so an earlier job's late report cannot mark the closed decoder open again.
+        decodeQueue.async { context.close(); stamp.value += 1 }
     }
 }
 

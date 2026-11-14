@@ -58,6 +58,41 @@ struct Issue1059ScrubDecoderBudgetTests {
         await extractor.shutdown()
     }
 
+    @Test("A decoder still opening is released once its decode finishes")
+    func releaseCoversAFirstOpenInFlight() async throws {
+        let reader = StillGateReader(data: try LongGOPTransportStreamFixture.data())
+        let extractor = FrameExtractor(residentReader: reader, formatHint: "mpegts",
+                                       identity: "release-in-flight", residentBudget: .seconds(60))
+        await extractor.setIdleIntervalForTesting(.seconds(600))
+        reader.arm()
+        let pending = Task {
+            await extractor.residentPreview(rawTarget: 2, refined: false, maxWidth: 16, isCancelled: { false })
+        }
+        defer { reader.release(); pending.cancel() }
+        try await waitFor { reader.isBlocked }
+        #expect(await extractor.openDecoderPixelArea == 0)
+        #expect(await extractor.decoderMayBeOpen)
+
+        let release = Task { await extractor.releaseDecoder() }
+        reader.release()
+        _ = await pending.value
+        await release.value
+        #expect(await extractor.openDecoderPixelArea == 0)
+        #expect(await !extractor.decoderMayBeOpen)
+        await extractor.shutdown()
+    }
+
+    private func waitFor(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(20)
+        while !condition() {
+            guard Date() < deadline else {
+                Issue.record("condition not met within 20 s")
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     @Test("releaseScrubPreviewDecoders closes every decoder and keeps the extractors")
     @MainActor
     func engineReleasesEveryDecoder() async throws {

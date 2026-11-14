@@ -43,11 +43,15 @@ extension AetherEngine {
         var states: [(extractor: FrameExtractor, open: Int)] = []
         for extractor in entries {
             largest = max(largest, await extractor.knownDecoderPixelArea)
-            states.append((extractor, await extractor.openDecoderPixelArea))
+            // A first open still in flight knows no area yet; count it at the largest one known.
+            let budgeted = await extractor.budgetedDecoderPixelArea
+            let mayBeOpen = await extractor.decoderMayBeOpen
+            let open = budgeted == 0 && mayBeOpen ? -1 : budgeted
+            states.append((extractor, open))
         }
         let incomingKnown = await incoming.knownDecoderPixelArea
         let released = Self.scrubDecodersToRelease(
-            newestLast: states.map { $0.extractor === incoming ? 0 : $0.open },
+            newestLast: states.map { $0.extractor === incoming ? 0 : ($0.open < 0 ? max(largest, 1) : $0.open) },
             incomingArea: incomingKnown > 0 ? incomingKnown : largest)
         guard !released.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in

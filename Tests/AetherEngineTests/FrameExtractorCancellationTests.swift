@@ -200,7 +200,7 @@ struct FrameExtractorCancellationTests {
 
 /// The production decode queue blocks at a real source operation, while the extractor actor can
 /// accept a newer request. The condition protects only this one-shot gate; DataIOReader owns its cursor.
-private final class StillGateReader: IOReader, @unchecked Sendable {
+final class StillGateReader: IOReader, @unchecked Sendable {
     private let reader: DataIOReader
     // Short reads let a resident refinement cross the AVIO buffer and reach the real I/O gate.
     private let maxReadSize: Int32
