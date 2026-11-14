@@ -10,6 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.67.1] - 2026-11-14
+
+### Changed
+
+- **A frame chain stage can declare the colour volume of its output (#957, #1065).** Internal groundwork for a
+  later tone map stage. The chain writes the frames' HDR10 metadata from the last stage that declares one, so
+  the display is told what it gets and does not tone map a second time. The two existing stages declare
+  nothing, so no frame changes today. Thanks to bdavid21wnec for the change.
+
 ### Fixed
 
 - **The FEL curve fold no longer crashes on a GOP with undated packets (#1064).** With `DolbyVisionFelCurves`
