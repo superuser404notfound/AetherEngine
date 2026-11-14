@@ -520,6 +520,13 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// Frames dropped because an in-place composition failed after the GPU had started writing into the
     /// base-layer buffer. Guarded by `composeResultLock`.
     private var summaryInPlaceDropped: Int = 0
+    /// Set by the first in-place composition that failed after the GPU started writing. From then on
+    /// every frame takes the pool path, whose failure leaves the base layer intact and shows it. Without
+    /// this one GPU fault cost every later frame: tvOS stops running a process's GPU work after a couple
+    /// of faults, each later in-place command buffer failed too, and each frame was dropped while the
+    /// sound played on (AE#1055, an Apple TV 4K 2nd generation). Kept for the decoder's life, `flush()`
+    /// included: the GPU that faulted is the same one after a seek. Guarded by `composeResultLock`.
+    private var inPlaceOffAfterFault = false
     /// Frames sent out as the base layer, with its mapping-preserving RPU, because the compose queue was
     /// in stall mode (`acquireSlotOrStall`). Guarded by `composeResultLock`; reset by the 1 Hz summary.
     private var summaryBypassComposeStalled: Int = 0
@@ -1527,7 +1534,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         }
         // A measurement run (`AETHER_FEL_MEASURE`) composes the base layer a second and third time from
         // another queue, so the base buffer has to stay intact: those runs use the output pool.
-        let inPlace = FelResidualMeasure.stride == 0 && req.composesIntoBase
+        let inPlace = FelResidualMeasure.stride == 0 && req.composesIntoBase && !isInPlaceOffAfterFault()
             && composer.canComposeInPlace(baseBuffer: req.base, params: req.params)
         if !inPlace, !isInStallMode(), let concrete = composer as? DoviFelComposer {
             FelResidualMeasure.sampleIfDue(composer: concrete, base: req.base, enhancement: req.enhancement,
@@ -1596,6 +1603,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 case .baseCorrupted:
                     EngineLog.emit("[DualLayerVideoDecoder] compose failed after writing began (\(arrived)): pts=\(String(format: "%.3f", pts.seconds)); frame dropped", category: .swPlayback)
                     self?.recordInPlaceDrop()
+                    self?.turnInPlaceOffAfterFault()
                     delivery.skip(ticket: ticket, epoch: epoch)
                 }
                 self?.composeResultLock.lock(); self?.composeRequestsHandedOff += 1; self?.composeResultLock.unlock()
@@ -1622,6 +1630,21 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     private func recordInPlaceDrop() {
         composeResultLock.lock(); summaryInPlaceDropped += 1; composeResultLock.unlock()
+    }
+
+    private func isInPlaceOffAfterFault() -> Bool {
+        composeResultLock.lock(); defer { composeResultLock.unlock() }
+        return inPlaceOffAfterFault
+    }
+
+    private func turnInPlaceOffAfterFault() {
+        composeResultLock.lock()
+        let first = !inPlaceOffAfterFault
+        inPlaceOffAfterFault = true
+        composeResultLock.unlock()
+        if first {
+            EngineLog.emit("[DualLayerVideoDecoder] in-place compose failed on the GPU; composing into the output pool from here on, so a failed frame shows its base layer instead of being dropped", category: .swPlayback)
+        }
     }
 
     private func recordComposeResult(success: Bool) {
@@ -2598,6 +2621,7 @@ final class DualLayerVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     }
 
     var isComposeStalledForTesting: Bool { isInStallMode() }
+    var isInPlaceOffAfterFaultForTesting: Bool { isInPlaceOffAfterFault() }
 
     /// Compositions and bypasses handed to the compose queue and not yet handed to `orderedDelivery` (or
     /// dropped as retired): started minus handed off.

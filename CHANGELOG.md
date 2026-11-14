@@ -29,6 +29,10 @@ the public-API contract.
   Mac never showed it. Covered by `DoviCurveIndexBoundsTests`, see
   [Dolby Vision FEL › Earlier fixes worth remembering](docs/dolby-vision-fel.md#44-earlier-fixes-worth-remembering).
   Thanks to Desima-AP for the GPU restart reports, the address arithmetic and the patch.
+- **A GPU fault during FEL composition no longer costs every later frame (#1055 follow-up).** After the first
+  in-place frame that fails on the GPU, the dual-layer decoder composes into the output pool for the rest of
+  the session. A frame that fails there still shows its base layer. Before, tvOS refusing the process's GPU work
+  after a fault meant every frame was dropped while the sound played on. Suggested by Desima-AP.
 - **A short timestamp spike on a live software session no longer mutes the sound for good (#1053).** A Jellyfin
   OTA channel (MPEG-2 + AC-3) sent a run of packets stamped 347 s ahead, then returned. The fold that hides
   such jumps looked at video only and moved audio by read order, and the two streams cross a TS splice at
