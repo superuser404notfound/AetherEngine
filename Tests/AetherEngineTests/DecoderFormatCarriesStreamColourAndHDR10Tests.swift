@@ -69,4 +69,27 @@ struct DecoderFormatCarriesStreamColourAndHDR10Tests {
         let unchanged = HardwareVideoDecoder.extensions(base, carrying: .none)
         #expect(unchanged === base)
     }
+
+    /// Values only a key frame carries also go into the description (a new one, before that key frame
+    /// decodes), or every frame after it would be copied. Many AV1 HDR10 encodes carry them in-band only.
+    @Test func issue957ValuesFoundInAKeyFrameMakeANewDescription() {
+        let full = HDR10StaticMetadataSEI.Values(
+            masteringDisplay: Self.clip.masteringDisplayColorVolume, contentLightLevel: Self.clip.contentLightLevel)
+        let containerCLLOnly = HDR10StaticMetadataSEI.Values(contentLightLevel: Self.clip.contentLightLevel)
+        #expect(HardwareVideoDecoder.needsNewDescription(found: full, described: .none))
+        #expect(HardwareVideoDecoder.needsNewDescription(found: full, described: containerCLLOnly))
+        #expect(!HardwareVideoDecoder.needsNewDescription(found: full, described: full))
+        #expect(!HardwareVideoDecoder.needsNewDescription(found: .none, described: .none))
+
+        // The new description keeps what the old one had and adds what the key frame brought.
+        let opened = HardwareVideoDecoder.extensions(
+            [kCMFormatDescriptionExtension_TransferFunction: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ],
+            carrying: containerCLLOnly)
+        let rebuilt = HardwareVideoDecoder.extensions(opened, carrying: full)
+        #expect(rebuilt?[kCMFormatDescriptionExtension_MasteringDisplayColorVolume] as? Data
+                == Self.clip.masteringDisplayColorVolume)
+        #expect(rebuilt?[kCMFormatDescriptionExtension_ContentLightLevelInfo] as? Data == Self.clip.contentLightLevel)
+        #expect(rebuilt?[kCMFormatDescriptionExtension_TransferFunction] as? String
+                == kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String)
+    }
 }

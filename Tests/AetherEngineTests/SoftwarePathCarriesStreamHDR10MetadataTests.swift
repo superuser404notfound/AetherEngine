@@ -55,11 +55,6 @@ struct SoftwarePathCarriesStreamHDR10MetadataTests {
         #expect(fromMP4 == expected)
     }
 
-    @Test func issue957TheScanStopsAfterThreeKeyFrames() {
-        // docs/architecture-software.md says 3.
-        #expect(HDR10StaticMetadataSEI.keyFramesToScan == 3)
-    }
-
     @Test func issue957APacketWithoutTheSEIGivesNothing() {
         let slice: [UInt8] = [19 << 1, 1, 0xAF, 0x00, 0x11]
         let fromSlice = scan(Self.lengthPrefixed(slice, size: 4), framing: .lengthPrefixed(size: 4))

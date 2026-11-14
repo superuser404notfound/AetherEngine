@@ -1659,6 +1659,11 @@ public final class AetherEngine: ObservableObject {
     /// Scoped to the generation: a request from an earlier seek or the session start says nothing
     /// about where the reader is now.
     var subtitlePrefetchLandingRequestedAt: (seconds: Double, seekGeneration: UInt64)?
+    /// AE#1022 round 3: the seek generation whose software seek closed the open sets at its
+    /// departure. Until that seek lands, a drain tick would plan at the departure again (the clock
+    /// still reports the frame being left) and publish sets whose clear nobody read, open, after
+    /// the closing ran, and the clock then draws them at the landing.
+    var subtitleDepartureClosedSeekGeneration: UInt64?
     /// #496: why the last live prefetch session was cancelled. Set only when a task was actually
     /// running, so it names a real teardown rather than the many no-op cancels on the way through
     /// a selection. Mirrors the log line; kept as state so a test can assert the routing.
