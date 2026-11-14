@@ -238,7 +238,7 @@ try await player.load(url: videoURL, options: LoadOptions(
 try await player.load(url: videoURL, audioSourceStreamIndex: 2)   // an explicit pick wins over the languages
 ```
 
-**Pick the audio track at load, not right after it.** The first frame is packaged together with the chosen track, so a later `selectAudioTrack` costs a reload.
+**Pick the audio track at load, not right after it.** The first frame is packaged together with the chosen track, so a later `selectAudioTrack` costs a reload. A pick made while the load is still running waits for it to finish and then reloads, so it costs the whole load plus the reload.
 
 `initialSubtitleTrackID` selects a subtitle track by id the same way. Full list: [api.md › LoadOptions](api.md#loadoptions).
 

@@ -2850,6 +2850,14 @@ extension AetherEngine {
                     attemptWhenUnproven: loadedOptions.attemptsHDRMasterOnUnprovenPanel,
                     displayEligibleForHDR: sessionDisplayEligibleForHDR,
                     panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
+                // AE#1061: a rebuild that superseded its load before the handshake settled has no load-time
+                // answer, and without this line the media route it then takes reads like any other.
+                if sessionObservedDisplayCaps == nil, sourceVideoFormat != .sdr {
+                    EngineLog.emit(
+                        "[DisplayCriteria] reload found no load-time panel answer (the load it replaced never "
+                        + "settled its route): an HDR source routes as on an SDR panel (#1061)",
+                        category: .session)
+                }
                 if reloadRoutingPanelHDR != loadedOptions.panelIsInHDRMode {
                     EngineLog.emit(
                         "[DisplayCriteria] AE#541 reload routes on the load's panel answer: panelIsHDR="
