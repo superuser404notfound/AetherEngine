@@ -3244,11 +3244,8 @@ final class SoftwarePlaybackHost {
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
         playedMedia: PlayedMediaLedger? = nil
     ) {
-        let discontinuityThresholdSeconds = 10.0
-        var prevRawVideoPtsSec = Double.nan
-        var frameIntervalSec = 0.0
-        var discontinuityOffsetSec = 0.0
-        var loggedSWDiscontinuity = false
+        var timelineFold = LiveTimelineFold()
+        var loggedSeamCount = 0
         var lastSeenExtradata: Data? = nil
         let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
             videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
@@ -3333,34 +3330,19 @@ final class SoftwarePlaybackHost {
                 packet.pointee.pts = packet.pointee.dts
             }
 
-            // Live PTS-discontinuity: same accrual as combined loop.
-            if streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Live PTS-discontinuity, per stream (AE#1053): same fold as the combined loop.
+            let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
+            if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                packet.pointee.pts != Int64.min {
-                let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
-                if !prevRawVideoPtsSec.isNaN {
-                    let deltaSec = rawPtsSec - prevRawVideoPtsSec
-                    if abs(deltaSec) >= discontinuityThresholdSeconds {
-                        let expectedContinuation = prevRawVideoPtsSec
-                            + (frameIntervalSec > 0 ? frameIntervalSec : 0)
-                        discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
-                        if !loggedSWDiscontinuity {
-                            loggedSWDiscontinuity = true
-                            EngineLog.emit(
-                                "[SWHost] live PTS discontinuity (reader): prevPts="
-                                + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
-                                + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
-                                + "delta=\(String(format: "%.2f", deltaSec))s -> "
-                                + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)",
-                                category: .swPlayback
-                            )
-                        }
-                    } else if deltaSec > 0 {
-                        frameIntervalSec = deltaSec
-                    }
+                let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                if tbSec > 0, let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * tbSec),
+                   loggedSeamCount < LiveTimelineFold.loggedSeamCap {
+                    loggedSeamCount += 1
+                    EngineLog.emit(LiveTimelineFold.logLine(seam, number: loggedSeamCount, route: "reader"),
+                                   category: .swPlayback)
                 }
-                prevRawVideoPtsSec = rawPtsSec
             }
+            let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
             if discontinuityOffsetSec != 0 {
                 let tbSec = (streamIdx == videoStreamIndex)
                     ? videoTimeBaseSeconds : audioTimeBaseSeconds
@@ -3967,10 +3949,7 @@ final class SoftwarePlaybackHost {
         // into +92726 s, the renderer then waited 25 h for the frame's display time and died with
         // -12080). Seekable VOD keeps the fold off: its timeline is trusted, and a threshold-sized
         // jump there is a container seek artifact the native path also leaves alone.
-        let discontinuityThresholdSeconds = 10.0
-        var prevRawVideoPtsSec = Double.nan
-        var frameIntervalSec = 0.0
-        var discontinuityOffsetSec = 0.0
+        var timelineFold = LiveTimelineFold()
         var loggedSeamCount = 0
         let replayReader = isLive && directLiveSource == nil ? LiveReplayPacketReader(videoIndex: videoStreamIndex,
             audioIndex: audioStreamIndex, videoTimeBase: videoTimeBaseSeconds,
@@ -4025,6 +4004,18 @@ final class SoftwarePlaybackHost {
         var diagAudioPtsSec = Double.nan
         var diagAudioPtsGeneration = parkedSeekGeneration
 
+        // AE#1053 follow-up: a video timestamp seam has been read, and the decoder still has to be
+        // drained and flushed before the next video packet goes in. On the parked route the mark moves
+        // onto that packet (`seamParkedPackets`), so everything parked ahead of it decodes first while
+        // this thread keeps reading audio.
+        var videoSeamPending = false
+        var seamParkedPackets = Set<UnsafeMutablePointer<AVPacket>>()
+        func applyVideoSeam() {
+            videoDecoder.drainForEndOfStream()
+            videoDecoder.flush()
+            renderer.drainReorderBuffer()
+        }
+
         func freeParkedVideo() {
             for p in parkedVideo {
                 av_packet_unref(p)
@@ -4032,6 +4023,11 @@ final class SoftwarePlaybackHost {
             }
             parkedVideo.removeAll()
             parkedVideoBytes = 0
+            // Freed pointers can come back from the allocator; a stale mark would flush on a stranger.
+            // Every caller (seek, background, recovery) flushes the decoder itself, so a pending seam
+            // goes with the packets.
+            seamParkedPackets.removeAll()
+            videoSeamPending = false
             keyframeLedger?.discardPending()
         }
 
@@ -4063,6 +4059,8 @@ final class SoftwarePlaybackHost {
             if seekGeneration() != parkedSeekGeneration { return }
             while let head = parkedVideo.first, mayDecodeVideoPacket(head),
                   !stopRequested(), !backgroundAudioOnly() {
+                // Before the epoch read: the seam's flush moves it, and this packet belongs after it.
+                if seamParkedPackets.remove(head) != nil { applyVideoSeam() }
                 // The epoch is read per packet, before the generation check below. A seek bumps the
                 // generation before it flushes the decoder, so an epoch read ahead of its flush is refused
                 // by the decoder and one read after it is behind a generation check that fails: either
@@ -4414,52 +4412,28 @@ final class SoftwarePlaybackHost {
 
             let streamIdx = packet.pointee.stream_index
 
-            // Discontinuity runs before any timestamp read; offset applied to both streams.
-            if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Discontinuity runs before any timestamp read. Each stream folds its own seams (AE#1053).
+            let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
+            if foldTimeline, streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                packet.pointee.pts != Int64.min {
-                let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
-                if !prevRawVideoPtsSec.isNaN {
-                    let deltaSec = rawPtsSec - prevRawVideoPtsSec
-                    if abs(deltaSec) >= discontinuityThresholdSeconds {
-                        // Accrue (jumpedPts - expectedContinuation) into offset; flush decoders at the seam.
-                        let expectedContinuation = prevRawVideoPtsSec
-                            + (frameIntervalSec > 0 ? frameIntervalSec : 0)
-                        discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
-                        // Feed the parked pre-seam tail to the decoder before the flush drops
-                        // its reference chain; the seam packet itself parks after this block.
-                        waitForRenderer(.drainAll)
-                        freeParkedVideo()
-                        videoDecoder.drainForEndOfStream()
-                        videoDecoder.flush()
-                        // AE#492: this flush is THIS thread's, made after the read and on behalf of
-                        // the packet in hand. Retiring that packet along with the seam it opens
-                        // would drop the first picture of every new segment, so the epoch moves with
-                        // it. A seek's flush comes from the other thread and is not re-read here.
-                        epochBeforeRead = videoDecoder.feedEpoch
+                let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                if tbSec > 0, let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * tbSec) {
+                    if seam.stream == .video {
+                        // The video decoder is flushed where the first post-seam packet reaches it, not
+                        // here: the parked pre-seam tail has to be decoded first, and waiting for it on
+                        // this thread read no audio for as long as the FIFO held (~3.5 s on a 4 s lead,
+                        // measured down to 0.33 s of audio lead at every seam). See `videoSeamPending`.
+                        videoSeamPending = true
                         audioDecoder?.flush()
-                        renderer.drainReorderBuffer()
-                        // Chunked archives seam every minute or two; log each seam (bounded by the
-                        // 10 s threshold to at most one line per 10 s of content) with a soft cap
-                        // so a pathological source cannot flood the log.
-                        if loggedSeamCount < 20 {
-                            loggedSeamCount += 1
-                            EngineLog.emit(
-                                "[SWHost] PTS discontinuity #\(loggedSeamCount): prevPts="
-                                + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
-                                + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
-                                + "delta=\(String(format: "%.2f", deltaSec))s -> "
-                                + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)"
-                                + (loggedSeamCount == 20 ? " [further seams unlogged]" : ""),
-                                category: .swPlayback
-                            )
-                        }
-                    } else if deltaSec > 0 {
-                        frameIntervalSec = deltaSec
+                    }
+                    if loggedSeamCount < LiveTimelineFold.loggedSeamCap {
+                        loggedSeamCount += 1
+                        EngineLog.emit(LiveTimelineFold.logLine(seam, number: loggedSeamCount, route: "demux"),
+                                       category: .swPlayback)
                     }
                 }
-                prevRawVideoPtsSec = rawPtsSec
             }
+            let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
 
             // Apply discontinuity offset to timestamps in-place; converts seconds to stream TB ticks.
             if foldTimeline, discontinuityOffsetSec != 0 {
@@ -4576,6 +4550,10 @@ final class SoftwarePlaybackHost {
                         parkedVideoBytes += bytes
                     }
                     noteVideoPacketParked(packet)
+                    if videoSeamPending {
+                        videoSeamPending = false
+                        seamParkedPackets.insert(packet)
+                    }
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
@@ -4638,6 +4616,11 @@ final class SoftwarePlaybackHost {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
                     return false
+                }
+                // Lockstep route: nothing is parked, so the seam is applied right before its packet.
+                if videoSeamPending {
+                    videoSeamPending = false
+                    applyVideoSeam()
                 }
                 // A recovery flush can land during the wait. The packet in hand is still current, and the
                 // epoch read before the read would make the decoder refuse it; if it is the keyframe the

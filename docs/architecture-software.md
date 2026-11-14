@@ -347,6 +347,18 @@ Each path's tap reader belongs to that path (native, remote HLS, software). The 
 
 The native stream-copy path's live recovery (reconnect overlap, the replay boundary, playlist renewal) is in [architecture-native.md, Live sources](architecture-native.md#live-sources). The software host reuses the same replay guard and adds the rules below.
 
+### Timestamp jumps (the discontinuity fold)
+
+Live sources, and VOD sources that cannot seek, jump their timestamps at programme boundaries, ad breaks and recording chunks. The software host folds each jump away, so decoders, renderers, the DVR ring and the live edge all see one continuous timeline. Both the DVR reader and the combined demux loop do this through `LiveTimelineFold`.
+
+- A jump is a step of 10 s or more between two packets of the same stream. The stream's offset moves by the jump, minus one packet's spacing.
+- **Video and audio each find their own jumps** (AE#1053). An MPEG-TS splice does not move both streams at the same byte, so a fold keyed on video alone put the audio packets read between the two seams a whole jump off the clock. On a +347 s spike that left AC-3 queued 347 s ahead of the clock and the session silent until a retune.
+- When the second stream reaches a jump the first one already crossed, it takes over that stream's offset exactly, so a splice keeps the two in sync to the tick. The test is closeness: its own estimate within 1 s of the other stream's offset.
+- Each jump logs one `[SWHost] PTS discontinuity #n (reader|demux, video|audio)` line, capped at 40 per session. `(adopted from the other stream)` marks the second stream of a splice.
+- The live read-ahead measures its reservoir on raw timestamps, upstream of the fold. A distance past any fill it could have built (forward window + 10 s) counts as a jump, not as a full reservoir, so a spike no longer parks the producer. The VOD cache keeps the old reading, because a cached seek back legitimately leaves more stored than the window.
+
+**Where the video decoder is flushed.** A video jump needs the decoder drained and flushed, after the pre-jump packets and before the first post-jump one. On the combined loop's parked route that first packet carries a mark, and the flush runs when it reaches the head of the parked queue. The loop keeps reading audio meanwhile. It used to wait on the spot for the whole parked queue (~3.5 s of video), read no audio, and lose most of a 4 s audio lead at every jump (down to 0.33 s, measured). With the mark, a spike and a +5000 s splice both keep the lead at its no-jump level (3.30 s and 3.09 s minimum against 3.37 s). The audio decoder is still flushed when the video jump is read.
+
 ### Software live replay admission and recovery
 
 After a reconnect, a live source can send packets again that the engine already has (a replay). The replay guard catches them. `LiveReplayPacketReader` runs the same `LivePacketReplayGuard` before recording, clock-discontinuity folding and the ring append. Both the DVR reader and the live combined loop use it.

@@ -551,6 +551,7 @@ Notes:
 | `VideoConfigRecord+InBand.swift` | Rebuilds an `hvcC` with empty arrays from in-band parameter sets for consumers that need them in the record. |
 | `LivePacketReplayGuard.swift` | Removes packets a live origin resends after a reconnect, matched on timestamps and payload. |
 | `LiveReplayPacketReader.swift` | Demux-thread admission through that guard, before clock folding, recording and DVR storage. |
+| `LiveTimelineFold.swift` | AE#1053: the software path's timestamp-jump fold, per stream, with the second stream of a splice adopting the first one's offset. |
 | `LiveReadHead.swift` | AE#936: how far and how fast the cutter reads into the open live segment, for the fastZap grace. |
 | `LiveDVRLimits.swift` | `LiveDVRLimits`: caller-selected DVR retention (window, bytes, free-space floor), and its policy. |
 | `SoftwareDVRRetentionOptions.swift` | `SoftwareDVRRetentionOptions`: opt-in storage bounds for a software live spool. |
