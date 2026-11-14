@@ -130,13 +130,15 @@ extension AetherEngine {
     /// first recognition is real (Vision took over 60 s for one 4K composition in 2 of 7 Mac runs).
     /// Returns the reason, for the pre-fill line.
     func awaitSubtitleOCRCoverage(ordinal: Int, store: NativeSubtitleCueStore,
-                                  item: AVPlayerItem) async -> String {
+                                  item: AVPlayerItem, generation: UInt64) async -> String {
         let reportAt = Date().addingTimeInterval(Self.subtitleOCRPrefillReportSeconds)
         var reported = false
         while true {
             if store.isFinished { return "finished" }
             if subtitleOCRCoversNativeWindow(ordinal: ordinal) { return "covered" }
-            guard nativeSubtitleReapplyOrdinal == ordinal, currentAVPlayer?.currentItem === item
+            // AE#1052: the generation, not the ordinal. A marker of the same track disarms the worker,
+            // and an ordinal check would wait on it forever.
+            guard nativeSubtitleSelectGeneration == generation, currentAVPlayer?.currentItem === item
             else { return "superseded" }
             if !reported, Date() >= reportAt {
                 reported = true

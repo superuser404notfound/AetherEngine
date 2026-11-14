@@ -2904,6 +2904,13 @@ public final class AetherEngine: ObservableObject {
     /// the track table on load/stop so a new session never inherits a stale selection.
     var nativeSubtitleReapplyOrdinal: Int?
 
+    /// AE#1052: the host's menu marker (`setNativeSubtitleSelected(track:markerOnly: true)`), the
+    /// selection that stands while the picture is in the app. Replaced by the host's next call.
+    var nativeSubtitleMarkerOrdinal: Int?
+
+    /// AE#1052: bumped by every native selection, so a pre-fill that outlived its request stops.
+    var nativeSubtitleSelectGeneration: UInt64 = 0
+
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
     var externalNativeStoreFillTask: Task<Void, Never>? = nil
 
@@ -3818,7 +3825,7 @@ public final class AetherEngine: ObservableObject {
             )
             // The select path's own stall-recovery retries (#32) cover the fresh item's
             // not-ready window; the stores are already filled, so the pre-fill returns fast.
-            setNativeSubtitleSelected(track: ordinal)
+            applyNativeSubtitleSelection(track: ordinal)
         }
     }
 
@@ -4976,6 +4983,7 @@ public final class AetherEngine: ObservableObject {
         setPendingRecoverySeekTarget(nil)
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
+        nativeSubtitleMarkerOrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         metadata = nil
@@ -9083,6 +9091,7 @@ public final class AetherEngine: ObservableObject {
         isLoadingSubtitles = false
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
+        nativeSubtitleMarkerOrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         cancelNativeSubtitleReaders()

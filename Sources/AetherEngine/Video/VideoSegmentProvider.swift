@@ -3551,9 +3551,16 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// the AVPlayer timeline. `segments[i].startSeconds` is the absolute output-axis start (correct for both
     /// VOD and the live sliding window, where a cumulative EXTINF sum from firstVisible would not be), so the
     /// window is read straight off the segment plan rather than recomputed.
+    func nativeSubtitleServesSilently(ordinal: Int) -> Bool {
+        ordinal >= 0 && ordinal < nativeSubStores.count && nativeSubStores[ordinal].servesSilently
+    }
+
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
         guard ordinal >= 0, ordinal < nativeSubStores.count else { return nil }
         let store = nativeSubStores[ordinal]
+        if store.servesSilently, nativeSubtitleWholeProgram {
+            return WebVTTBuilder.body(cues: [])   // AE#1052: a menu marker, nothing to draw
+        }
         if nativeSubtitleWholeProgram {
             // Sodalite#32: serve the ENTIRE program's cues as one .vtt (the only AVPlayer-reliable sideload
             // shape). AVKit fetches this VOD single-segment file ONCE and never re-fetches it, so it MUST be
@@ -3596,6 +3603,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         let start = segments[segmentIndex].startSeconds
         let end = start + segments[segmentIndex].durationSeconds
         stateLock.unlock()
+        // AE#1052: a menu marker. No wait, no cues; AVKit fetches again when the marker becomes the display.
+        if store.servesSilently { return WebVTTBuilder.segment(cues: [], segmentStart: start) }
         // Sodalite#32: bounded, distance-aware readiness wait replacing the 25 s wait-for-isFinished. AVKit
         // caches an empty-served window forever, so waiting is worth it; but blocking every fetch on a store
         // that never finishes serialized the loopback connection AVPlayer also uses for video (device:

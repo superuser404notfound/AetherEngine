@@ -2559,6 +2559,7 @@ extension AetherEngine {
         let activeTrackToResume = activeSubtitleTrackIndex
         let reapplyOrdinalToRestore = nativeSubtitleReapplyOrdinal
         let reapplyMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
+        let markerOrdinalToRestore = nativeSubtitleMarkerOrdinal
         // #112 full umbau: an audio-track switch does not move the playhead, so the PGS line already on screen is
         // still valid. Snapshot the visible bitmap cues before stopInternal wipes them; they are restored after the
         // subtitle re-arm so the line stays up while the re-armed reader re-primes forward (old path reconstructed
@@ -3013,6 +3014,7 @@ extension AetherEngine {
         restoreSecondarySubtitleAfterRebuild(
             externalID: secondaryToResume.externalID, sidecarURL: secondaryToResume.sidecarURL,
             embeddedIndex: secondaryToResume.embeddedIndex, startAt: preSwitchSourceTime)
+        nativeSubtitleMarkerOrdinal = markerOrdinalToRestore   // AE#1052: before the replay reads it
         // #170: replay the native-rendition pick onto the rebuilt item, the way the #65 recovery
         // does; the table was rebuilt from the preserved track list, so a rendering-derived
         // ordinal recomputes to the same rendition and a host-positional one replays as-is.
@@ -3027,7 +3029,7 @@ extension AetherEngine {
                 "[AetherEngine] #170 re-applying native subtitle ordinal=\(ordinal) after audio-switch reload",
                 category: .engine
             )
-            setNativeSubtitleSelected(track: ordinal)
+            applyNativeSubtitleSelection(track: ordinal)
         }
         return nil
     }

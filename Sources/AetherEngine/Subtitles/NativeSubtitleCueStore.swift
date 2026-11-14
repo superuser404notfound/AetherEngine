@@ -40,6 +40,14 @@ final class NativeSubtitleCueStore: @unchecked Sendable {
     func markFinished() { lock.lock(); finished = true; externalFill = .none; lock.unlock() }
     var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
 
+    /// AE#1052: the rendition is a menu marker, so the server answers with no cues while the store
+    /// keeps filling (or keeps what an earlier PiP fill left) for the next time it is the display.
+    var servesSilently: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return silent }
+        set { lock.lock(); silent = newValue; lock.unlock() }
+    }
+    private var silent = false
+
     /// AE#984: where a load-declared sidecar's whole-file fill stands. Only that fill sets it; a store
     /// fed by the pump tap or a side reader stays `.none` and keeps its own readiness rules.
     enum ExternalFill: Equatable, Sendable {

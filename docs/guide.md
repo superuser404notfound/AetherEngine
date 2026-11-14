@@ -281,9 +281,12 @@ External files behave like any other track. They appear in `subtitleTracks` with
 ```swift
 player.$nativeSubtitleTracks               // [NativeSubtitleTrack]: ordinal, language, displayName
 player.setNativeSubtitleSelected(track: 2) // engage a rendition (for example on PiP entry); nil deselects
+player.setNativeSubtitleSelected(track: 2, markerOnly: true) // tick it in AVKit's menu, draw nothing
 ```
 
-Your own overlay cannot reach a Picture in Picture window, an AirPlay receiver or an external display. For those, the engine can hand AVPlayer the subtitles as WebVTT renditions that AVPlayer draws itself. Opt in with `LoadOptions.prepareNativeSubtitles`. Details in [formats.md](formats.md#native-subtitle-renditions-webvtt-for-pip-airplay-and-external-display).
+Your own overlay cannot reach a Picture in Picture window, an AirPlay receiver or an external display. For those, the engine can hand AVPlayer the subtitles as WebVTT renditions that AVPlayer draws itself. Opt in with `LoadOptions.prepareNativeSubtitles`.
+
+If you draw a bitmap track yourself inside `AVPlayerViewController`, `markerOnly: true` makes AVKit's subtitle menu show that track as selected without drawing it or running OCR. PiP and AirPlay still get the OCR text once you call `setNativeSubtitleRendering(true)`. Details in [formats.md](formats.md#native-subtitle-renditions-webvtt-for-pip-airplay-and-external-display).
 
 ### Captions the system turned on
 

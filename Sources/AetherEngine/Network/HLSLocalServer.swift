@@ -122,6 +122,8 @@ protocol HLSSegmentProvider: AnyObject {
     /// playlist one segment per video segment, so the embedded reader (parked ~90s ahead of the playhead)
     /// has the cues for a segment in the store by the time AVPlayer fetches it.
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String?
+    /// AE#1052: true while `ordinal` is a menu marker, served empty on purpose.
+    func nativeSubtitleServesSilently(ordinal: Int) -> Bool
 
     /// AE#682: true when this session lists an I-frame rendition in its master. The two calls below
     /// answer `iframe_init.mp4` and `iframe{N}.mp4`; both may block on a source read.
@@ -213,6 +215,7 @@ extension HLSSegmentProvider {
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
+    func nativeSubtitleServesSilently(ordinal: Int) -> Bool { false }
     var iFrameRenditionServed: Bool { false }
     var iFrameRenditionFormat: IFrameRenditionFormat? { nil }
     func iFrameInitSegment() -> Data? { nil }
@@ -1231,7 +1234,8 @@ final class HLSLocalServer: @unchecked Sendable {
         case let p where p.hasPrefix("/subs_") && p.hasSuffix(".vtt"):
             // #15: one WebVTT segment built on demand from the cue store's window for this video segment.
             guard let parsed = Self.parseSubsPath(p), let seg = parsed.segment,
-                  let vtt = provider?.nativeSubtitleVTT(ordinal: parsed.ordinal, segmentIndex: seg) else {
+                  let prov = provider,
+                  let vtt = prov.nativeSubtitleVTT(ordinal: parsed.ordinal, segmentIndex: seg) else {
                 return send404(fd: fd, path: normalizedPath, reason: "no subtitle segment for \(normalizedPath)")
             }
             // Sodalite#156: an EMPTY segment is the reported defect and a populated one is routine, so
@@ -1240,11 +1244,12 @@ final class HLSLocalServer: @unchecked Sendable {
             // a visible level would push the surrounding evidence out of the 300-line ring, and it is
             // exactly the surrounding evidence that says WHY a segment came out empty.
             let cues = vtt.components(separatedBy: "-->").count - 1
-            if cues == 0 {
+            // An AE#1052 marker is empty on purpose and gets refetched on the next select.
+            if cues == 0, prov.nativeSubtitleServesSilently(ordinal: parsed.ordinal) == false {
                 EngineLog.emit("[HLSLocalServer] served an EMPTY subtitle .vtt ord=\(parsed.ordinal) "
                                + "seg=\(seg) bytes=\(vtt.utf8.count); the receiver caches this segment "
                                + "as it is and never asks again", category: .hlsServer)
-            } else {
+            } else if cues > 0 {
                 EngineLog.emit("[HLSLocalServer] served subtitle .vtt ord=\(parsed.ordinal) seg=\(seg) "
                                + "bytes=\(vtt.utf8.count) cues=\(cues)", category: .hlsServer, level: .verbose)
             }

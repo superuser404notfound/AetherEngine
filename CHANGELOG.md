@@ -10,7 +10,13 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **AVKit's subtitle menu can show a track the host draws itself (#1052).** `setNativeSubtitleSelected(track:markerOnly:)`
+  with `markerOnly: true` ticks the track in the menu and offers Off, but serves it as empty segments and runs no
+  OCR, so nothing is drawn over the host's own bitmap overlay. `setNativeSubtitleRendering(true)` turns it into a
+  full rendition for PiP, AirPlay and external displays, and `false` goes back to the marker. Thanks to Anquietas
+  for the request.
 
 ## [7.66.1] - 2026-11-13
 

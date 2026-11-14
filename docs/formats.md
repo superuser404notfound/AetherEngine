@@ -1365,7 +1365,7 @@ engine.$nativeSubtitleTracks               // @Published var [NativeSubtitleTrac
 
 // select a rendition by ordinal (nil deselects); language-tag match, positional fallback.
 // Re-asserts automatically if AVFoundation drops the selection during a stall recovery.
-engine.setNativeSubtitleSelected(track ordinal: Int?)
+engine.setNativeSubtitleSelected(track ordinal: Int?, markerOnly: Bool = false)
 
 // convenience for the enter/leave pattern below: true resolves the rendition matching the
 // currently-active overlay track and selects it, false deselects
@@ -1391,6 +1391,17 @@ The recommended host pattern for PiP / AirPlay:
 3. On leaving: call `setNativeSubtitleRendering(false)` and re-enable the host overlay.
 
 This avoids double subtitles during inline playback (where the host overlay is already painting them), and makes sure the user sees subtitles the moment the stream is mirrored or sent to PiP.
+
+#### Showing the host's pick in AVKit's menu (`markerOnly`)
+
+A host that draws a bitmap track itself inside a stock `AVPlayerViewController` would normally see AVKit's subtitle menu say "Off", because the engine keeps the legible group deselected while the overlay paints. `setNativeSubtitleSelected(track: n, markerOnly: true)` selects rendition `n` in that menu without drawing anything (AE#1052). The user sees their track ticked and can pick Off or another track from the menu.
+
+- The marker rendition is served as empty WebVTT segments, so AVKit shows no text and no caption box over the host's overlay. The host's text style rules are left alone.
+- No OCR runs for a marker. Bitmap recognition starts only when the rendition has to carry text.
+- `setNativeSubtitleRendering(true)` (PiP, AirPlay, external display) turns the marker into a full rendition: OCR arms, and the engine deselects and reselects so AVKit refetches the segments under the playhead with text. Measured on an iPhone with iOS 27, the first OCR cue showed up right after the reselect.
+- `setNativeSubtitleRendering(false)` goes back to the marker instead of deselecting.
+- Any plain `setNativeSubtitleSelected(track:)` call, nil included, replaces the marker. The marker survives the engine's own reloads (audio switch, recovery, AirPlay).
+- Scope is the VOD loopback, the same as bitmap renditions in general.
 
 ### Live HLS subtitle renditions (host overlay)
 

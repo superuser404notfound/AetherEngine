@@ -1370,7 +1370,7 @@ What each setting reads over HTTP, measured: [measurements.md › Subtitle offse
 
 | Symbol | Notes |
 | --- | --- |
-| `$nativeSubtitleTracks`, `setNativeSubtitleSelected(track:)` | The WebVTT renditions declared by `prepareNativeSubtitles`, for PiP / AirPlay / external display. nil deselects. |
+| `$nativeSubtitleTracks`, `setNativeSubtitleSelected(track:markerOnly:)` | The WebVTT renditions declared by `prepareNativeSubtitles`, for PiP / AirPlay / external display. nil deselects. `markerOnly: true` ticks the track in AVKit's menu but serves it empty, for a host that draws the track itself ([formats](formats.md#showing-the-hosts-pick-in-avkits-menu-markeronly)). |
 | `$nativeSubtitleDefaultOrdinal` | The rendition marked `DEFAULT=YES`, resolved from `nativeSubtitlePreferredLanguages`. A programmatic legible selection only renders if it is the default, so select **this** ordinal. |
 | `$nativeSubtitleRenditionAvailable` | At least one cue exists for the native track. Gate the AVMediaSelection picker on it. |
 | `$nativeSubtitleRenditionsServed` | Whether the served playlist is the master. Only a reload signal and a diagnostic: whether a legible rendition reaches a wired external display is up to AVKit and cannot be observed from here. |

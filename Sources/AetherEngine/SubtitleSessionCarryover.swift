@@ -36,6 +36,8 @@ struct SubtitleSessionCarryover: Sendable, Equatable {
     /// against the reloaded table, which the seeded externals can grow or reorder; a diverging
     /// host-positional ordinal replays positionally like the #65 recovery.
     var reapplyOrdinalMatchesActiveTrack = false
+    /// AE#1052: the host's menu marker, restored before the replay so a marker comes back as one.
+    var nativeMarkerOrdinal: Int?
 }
 
 /// What the post-reload session must do to return to the pre-reload subtitle selection.
