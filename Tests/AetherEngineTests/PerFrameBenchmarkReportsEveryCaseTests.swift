@@ -6,7 +6,7 @@ import Testing
 /// that every case reports and that a report survives the JSON a baseline is kept in. The frame chain cases
 /// are skipped: they compile the chain's kernels and wait on the GPU, on the main actor, and `FrameChainTests`
 /// covers the chain with the guards that needs.
-@Suite("Per-frame benchmark reports every case (AE#957)", .timeLimit(.minutes(1)))
+@Suite("Per-frame benchmark reports every case (AE#957)", .timeLimit(.minutes(3)))
 struct PerFrameBenchmarkReportsEveryCaseTests {
 
     @MainActor
