@@ -32,7 +32,7 @@ struct StartAfterCuePrewarmTests {
 
     /// The engine's start sequence: open, index pass (seek to the middle, read, seek back to 0),
     /// then playback reads forward from 0 through the head and past it.
-    private func startSequence(notePlayback: Bool, readBytes: Int = 3 * 1024 * 1024) throws -> (ThrottledOriginServer, AVIOReader, Bool) {
+    private func startSequence(notePlayback: Bool, readBytes: Int) throws -> (ThrottledOriginServer, AVIOReader, Bool) {
         let server = try #require(ThrottledOriginServer(totalSize: 64 * 1024 * 1024, throttleUs: 1000, patternedBody: true))
         let reader = makeReader(server)
         try reader.open()
@@ -73,7 +73,10 @@ struct StartAfterCuePrewarmTests {
     @Test("without the note the same start detours, which is the 4 s the field trace paid",
           .timeLimit(.minutes(3)))
     func withoutNoteDetours() throws {
-        let (server, reader, ok) = try startSequence(notePlayback: false)
+        // Read past the head cap, as above: a slow runner can let the head fill beyond 3 MiB, and a
+        // read the head serves in full never misses, so it never detours either.
+        let (server, reader, ok) = try startSequence(notePlayback: false,
+                                                     readBytes: AVIOReader.headSpanMaxBytes + 1024 * 1024)
         defer { reader.markClosed(); reader.close(); server.stop() }
         #expect(ok)
         #expect(reader.detourResidentBlocksForTesting >= 1)
