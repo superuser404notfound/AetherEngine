@@ -20,6 +20,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A PGS set decoded while a seek goes out is no longer drawn at the landing (AE#1022, round 3).** A drain
+  batch planned before the seek, or a tick planned while it was out, still decoded around the departure. It
+  published a set whose clear was unread as open after the seek had closed the open sets, and the clock drew
+  it at the landing until the landing's reset closed it (retest over a reader capped at 10x the bitrate: the
+  set of 22 s on screen for 0.37 s at a 63 s landing). Such a batch is now dropped, and no tick is planned
+  until the seek lands. Not reproduced on the Mac, where these seeks land in a few milliseconds; covered by
+  `Issue1022LandingWindowTests`. Thanks to Desima-AP for the retest.
 - **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
   attaches no mastering display or content light level to the frames it decodes, so the software path sent
   HDR10 with none, and the television tone-mapped without knowing the master. The decoder now reads the
@@ -31,7 +38,9 @@ the public-API contract.
 - **HDR10 HEVC on the software path no longer copies every frame (#957).** VideoToolbox tagged a PQ BT.2020
   HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
   Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
-  them itself, and no frame is copied. Covered by `DecoderFormatCarriesStreamColourAndHDR10Tests`.
+  them itself, and no frame is copied. Values found only in a key frame (common for AV1) go into a new
+  description and session at that key frame, so those streams skip the copy too. Covered by
+  `DecoderFormatCarriesStreamColourAndHDR10Tests`.
 - **The software path's format description follows a change of HDR10 metadata (#957).** The renderer reused
   its format description while size, pixel format and colour tags stayed the same, so mastering display
   and content light level values that changed mid-stream never reached the display layer: it kept the

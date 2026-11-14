@@ -118,7 +118,13 @@ The SEI payloads are byte for byte what Core Video's attachments hold, so they a
 
 Frames that are not PQ, or have no values, get both keys removed, because a pool buffer keeps what its last use left on it.
 
-**The decoder's format description carries the same values (AE#957).** The owned copy costs about 7 ms per 4K frame on an A12 Apple TV, so the normalizer should only ever need it as a fallback. For HEVC, AV1 and VP9 the description VideoToolbox decodes with names the stream's colour, and the HDR10 values known at `open()`. VideoToolbox then attaches both itself and the frames match as decoded. Without the colour keys it tagged a PQ BT.2020 HEVC clip as BT.709, and every frame was copied. Values found later, in a key frame's SEI, still go on by copy.
+**The decoder's format description carries the same values (AE#957).** The owned copy costs about 7 ms per 4K frame on an A12 Apple TV, so the normalizer should only ever need it as a fallback. For HEVC, AV1 and VP9 the description VideoToolbox decodes with names the stream's colour, and the HDR10 values known at `open()`. VideoToolbox then attaches both itself and the frames match as decoded. Without the colour keys it tagged a PQ BT.2020 HEVC clip as BT.709, and every frame was copied.
+
+Values found later, in a key frame, go into a new description and session at that key frame, before it decodes, the way a VP9 size change does. Many AV1 HDR10 encodes carry them in-band only.
+
+- Usually that is the stream's first key frame, with nothing decoded before it, so nothing is lost.
+- On a later key frame (the values were only in its SEI), its leading pictures can be lost once, as after a seek.
+- If VideoToolbox refuses the new session, the old one stays and those frames go on by copy.
 
 At `close()` the decoder logs how each frame went: `output metadata over N frames: A as decoded, B in place, C copied, D copy failed`. Copies on every frame mean the description and the normalizer disagree. Numbers: [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957).
 

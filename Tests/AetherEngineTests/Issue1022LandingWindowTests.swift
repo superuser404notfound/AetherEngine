@@ -199,6 +199,84 @@ struct Issue1022LandingWindowTests {
         #expect(box.take()?.seconds == 80.1)
     }
 
+    // Round 3 (retest on 7.66.0): a set decoded around the departure was published after the
+    // seek had closed the open sets, and drawn at the landing over a slow reader.
+
+    @Test("a drain batch planned before a seek publishes nothing after it",
+          .timeLimit(.minutes(3)))
+    func batchPlannedBeforeASeekIsDropped() async throws {
+        let (engine, _, format) = try pgsEngine()
+        defer { avformat_free_context(format); engine.clearSubtitle() }
+        let drawnAtLanding = Box(false)
+        let observation = engine.$subtitleCues.dropFirst().sink { cues in
+            if cues.contains(where: { $0.startTime <= 63 && $0.endTime > 63 }) { drawnAtLanding.set(true) }
+        }
+        defer { observation.cancel() }
+
+        // The set at 22 s was read, its clear was not, and the selection's batch is decoding it.
+        engine.clock.sourceTime = 22.4
+        engine.selectSubtitleTrack(index: 0)
+        let stale = try #require(engine.subtitleDrainTickInFlight)
+        // The seek goes out. Its clock still reports the departure until the landing.
+        _ = engine.advanceSeekGeneration()
+        engine.isSeeking = true
+        engine.closeOpenEndedSubtitleCues(atSeekFrom: 22.4, to: 63)
+        await stale.value
+        while let rerun = engine.subtitleDrainTickInFlight { await rerun.value }
+        engine.requestSubtitleDrainTick()   // the loop's tick while the seek is out
+        while let rerun = engine.subtitleDrainTickInFlight { await rerun.value }
+        #expect(!drawnAtLanding.value, "the set of 22 s was published open after the closing ran")
+
+        engine.isSeeking = false
+        engine.clock.sourceTime = 63
+        engine.requestSubtitleDrainTick()
+        while let pending = engine.subtitleDrainTickInFlight { await pending.value }
+        #expect(!drawnAtLanding.value)
+        #expect(engine.subtitleDrainCursors[.primary] != nil, "the tick at the landing ran")
+    }
+
+    @Test("no drain tick is planned between a software seek's closing and its landing")
+    func noTickPlannedWhileTheSeekIsOut() throws {
+        let (engine, _, format) = try pgsEngine()
+        defer { avformat_free_context(format); engine.clearSubtitle() }
+        engine.subtitleDrainTargets[.primary] = 0
+        engine.clock.sourceTime = 21.5
+        _ = engine.advanceSeekGeneration()
+        engine.closeOpenEndedSubtitleCues(atSeekFrom: 21.5, to: 63)
+        engine.isSeeking = true
+        #expect(engine.prepareSubtitleDrainTick() == nil, "the clock still reports the departure")
+        engine.isSeeking = false
+        #expect(engine.prepareSubtitleDrainTick() != nil, "landed")
+        engine.isSeeking = true
+        _ = engine.advanceSeekGeneration()
+        #expect(engine.prepareSubtitleDrainTick() != nil,
+                "a seek that did not close at its departure (native, live edge) plans as before")
+    }
+
+    /// A PGS stream 0 with a display set at 22 s and nothing after it, drained by a real decoder.
+    private func pgsEngine() throws -> (AetherEngine, UnsafeMutablePointer<AVStream>,
+                                        UnsafeMutablePointer<AVFormatContext>) {
+        let format = try #require(avformat_alloc_context())
+        let stream = try #require(avformat_new_stream(format, nil))
+        stream.pointee.time_base = AVRational(num: 1, den: 90_000)
+        stream.pointee.codecpar.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
+        stream.pointee.codecpar.pointee.codec_id = AV_CODEC_ID_HDMV_PGS_SUBTITLE
+        let engine = try AetherEngine()
+        engine.loadedURL = URL(string: "https://example.invalid/movie.mkv")!
+        let store = SubtitlePacketStore()
+        engine.softwareSubtitlePacketStore = store
+        engine.subtitleDrainDecoderFactoryForTesting = { index in
+            index == 0 ? EmbeddedSubtitleDecoder(stream: stream, sourceVideoWidth: 1920,
+                                                 sourceVideoHeight: 1080) : nil
+        }
+        store.noteHarvestAnchor(.pump, at: 0)
+        store.harvestChunk(streamIndex: 0, ptsSeconds: 22, durationSeconds: 0, flags: 0,
+                           payload: SecondaryBitmapSubtitleTests.displaySet(x: 100, luminance: 235),
+                           assembleSplitDisplaySets: true)
+        store.noteHarvestReach(.pump, through: 22.5)
+        return (engine, stream, format)
+    }
+
     // MARK: - Engine gating
 
     @Test("zero reach keeps the prefetch alive for a bitmap track, in the landing role")

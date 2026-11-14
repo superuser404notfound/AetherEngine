@@ -419,6 +419,9 @@ extension AetherEngine {
     /// decode nothing (idle, no decoder), and hands back what the decode needs.
     func prepareSubtitleDrainTick() -> SubtitleDrainTickWork? {
         guard !subtitleDrainTargets.isEmpty else { return nil }
+        // AE#1022 round 3: nothing is planned between a software seek's closing and its landing.
+        // The loop's next tick after the landing is the reset that reconstructs it.
+        if isSeeking, subtitleDepartureClosedSeekGeneration == currentSeekGeneration { return nil }
         let sessionStore = activeSubtitlePacketStore
         sessionStore?.setProtectedStreams(Set(embeddedSubtitleDrainTargets.values))   // #166: re-assert protection
         let playhead = sourceTime
@@ -436,7 +439,7 @@ extension AetherEngine {
         let tickUptime = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
         let elapsed = subtitleDrainLastTickUptime.map { tickUptime - $0 } ?? 0
         subtitleDrainLastTickUptime = tickUptime
-        var work = SubtitleDrainTickWork(playhead: playhead)
+        var work = SubtitleDrainTickWork(playhead: playhead, seekGeneration: currentSeekGeneration)
         for (channel, streamIndex) in subtitleDrainTargets {
             // #921: a sidecar channel drains its own store, which needs no session at all.
             guard let store = subtitlePacketStore(for: channel) else { continue }
@@ -560,6 +563,15 @@ extension AetherEngine {
     /// while its batch decoded is skipped: its cursor did not move, so the next tick redoes it.
     func finishSubtitleDrainTick(_ work: SubtitleDrainTickWork,
                                  events decodedByChannel: [[EmbeddedSubtitleDecoder.SubtitleEvent?]]) {
+        // AE#1022 round 3: a batch planned before a seek was decoded around the departure. Applied
+        // after it, it republished a set whose clear was unread as open, after the seek had closed
+        // it, and that set was drawn at the landing until the landing's reset closed it again
+        // (retest: the set of 22 s on screen for 0.37 s at a 63 s landing over a slow reader). The
+        // cursors did not move, so the tick after the landing decodes what still matters.
+        guard work.seekGeneration == currentSeekGeneration else {
+            subtitleDrainTickRequested = true
+            return
+        }
         let playhead = work.playhead
         for (job, events) in zip(work.channels, decodedByChannel) {
             let channel = job.channel
@@ -1006,7 +1018,11 @@ extension AetherEngine {
     /// it (`insertCueSorted`), and one that really is the landing line comes back through the
     /// reconstruction. An open set after the landing is left alone, as is one ahead of a backward
     /// landing, which is an ordinary not-yet-closed set.
+    ///
+    /// Round 3: from here to the landing no drain tick may publish (see
+    /// `subtitleDepartureClosedSeekGeneration`), or it puts the closed sets back.
     func closeOpenEndedSubtitleCues(atSeekFrom departure: Double, to landing: Double) {
+        subtitleDepartureClosedSeekGeneration = currentSeekGeneration
         guard landing.isFinite else { return }
         for channel in [SubtitleChannel.primary, .secondary] {
             var cues = retainedSubtitleCues(for: channel)
@@ -3319,6 +3335,9 @@ struct SubtitleDrainChannelWork {
 
 struct SubtitleDrainTickWork {
     let playhead: Double
+    /// AE#1022 round 3: the seek generation the tick was planned under. A seek in between moved
+    /// the playhead and closed the open sets the batch is about to publish again.
+    var seekGeneration: UInt64 = 0
     var channels: [SubtitleDrainChannelWork] = []
     var prefetchNeedsReanchor = false
 
