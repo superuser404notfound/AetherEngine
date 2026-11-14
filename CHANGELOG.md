@@ -38,7 +38,9 @@ the public-API contract.
 - **HDR10 HEVC on the software path no longer copies every frame (#957).** VideoToolbox tagged a PQ BT.2020
   HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
   Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
-  them itself, and no frame is copied. Covered by `DecoderFormatCarriesStreamColourAndHDR10Tests`.
+  them itself, and no frame is copied. Values found only in a key frame (common for AV1) go into a new
+  description and session at that key frame, so those streams skip the copy too. Covered by
+  `DecoderFormatCarriesStreamColourAndHDR10Tests`.
 - **The software path's format description follows a change of HDR10 metadata (#957).** The renderer reused
   its format description while size, pixel format and colour tags stayed the same, so mastering display
   and content light level values that changed mid-stream never reached the display layer: it kept the

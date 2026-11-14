@@ -125,13 +125,15 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     private var pixelAspectRatio: AVRational?
 
     /// AE#957: the stream's HDR10 static metadata, re-applied to every PQ frame because VideoToolbox
-    /// attaches none (`HDR10StaticMetadataSEI`). Found at `open()` from the container or the `hvcC`, or
-    /// from the SEI of the first key frames, so `decode` writes it and the output callback reads it:
+    /// attaches none (`HDR10StaticMetadataSEI`). Found at `open()` from the container, the `hvcC` or the
+    /// `av1C`, or in the first key frames, so `decode` writes it and the output callback reads it:
     /// its own lock, since the output callback must not take `lock`.
     private let staticHDR10Lock = NSLock()
     private var staticHDR10 = HDR10StaticMetadataSEI.Values.none
     /// Key frames the in-band scan still reads; 0 once the values are complete or it gave up.
     private var staticHDR10KeyFramesLeft = 0
+    /// The HDR10 values the current format description carries. Guarded by `lock`, like the description.
+    private var describedHDR10 = HDR10StaticMetadataSEI.Values.none
 
     /// Protects `session` across the demux thread (decode), main thread (close/flush), and VT callback (delivery).
     private let lock = NSLock()
@@ -341,7 +343,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         codecName = configuration.codecName
         formatCodecType = configuration.codecType
         resolveStaticHDR10(codecpar: codecpar)
-        let extensions = Self.extensions(configuration.extensions, carrying: currentStaticHDR10())
+        describedHDR10 = currentStaticHDR10()
+        let extensions = Self.extensions(configuration.extensions, carrying: describedHDR10)
         formatExtensions = extensions
         if codecpar.pointee.codec_id == AV_CODEC_ID_VP9 {
             // Swift 6.2.3 is a proxy for the mobile declaration in stock Xcode 26.2 SDKs.
@@ -660,6 +663,11 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             UnsafeBufferPointer(start: data, count: Int(packet.pointee.size))) {
             adoptVP9FrameSize(size, epoch: epoch)
         }
+        // Before this key frame is wrapped: values it completes go into a new format description first.
+        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0, let data = packet.pointee.data, packet.pointee.size > 0,
+           let found = scanStaticHDR10(UnsafePointer(data), size: Int(packet.pointee.size)) {
+            describeStaticHDR10(found, epoch: epoch)
+        }
         lock.lock()
         // AE#492: see `SoftwareVideoDecoder.decode`. Same rule, same lock as `flush()`.
         if let epoch, epoch != currentEpoch { lock.unlock(); return }
@@ -740,10 +748,6 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             sampleBufferOut: &sampleBuffer
         )
         guard sbStatus == noErr, let sb = sampleBuffer else { return }
-
-        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
-            scanStaticHDR10(UnsafePointer(data), size: size)
-        }
 
         let hdr10PlusPayload = scansHDR10Plus
             ? HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: streamCodecID, framing: hdr10PlusFraming)
@@ -871,6 +875,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             self.session = nil
         }
         formatDescription = nil
+        describedHDR10 = .none
         lock.unlock()
 
         if let box = refConBox {
@@ -953,11 +958,13 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     /// A key frame's SEI (HEVC) or metadata OBUs (AV1), while the values are incomplete and key frames are
     /// left to read.
-    private func scanStaticHDR10(_ data: UnsafePointer<UInt8>, size: Int) {
+    /// Returns the values when this key frame ended the scan, nil while it goes on or once it is over.
+    @discardableResult
+    private func scanStaticHDR10(_ data: UnsafePointer<UInt8>, size: Int) -> HDR10StaticMetadataSEI.Values? {
         staticHDR10Lock.lock()
         let scanning = staticHDR10KeyFramesLeft > 0
         staticHDR10Lock.unlock()
-        guard scanning else { return }
+        guard scanning else { return nil }
         let found = streamCodecID == AV_CODEC_ID_AV1
             ? HDR10StaticMetadataSEI.scanAV1(data, size: size)
             : HDR10StaticMetadataSEI.scan(data, size: size, codec: .hevc, framing: hdr10PlusFraming)
@@ -967,10 +974,61 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let values = staticHDR10
         let done = staticHDR10KeyFramesLeft == 0
         staticHDR10Lock.unlock()
-        if done {
-            EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata from the stream's key frames: "
-                           + Self.describe(values), category: .swPlayback)
+        guard done else { return nil }
+        EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata from the stream's key frames: "
+                       + Self.describe(values), category: .swPlayback)
+        return values
+    }
+
+    /// Whether values the scan found must go into a new format description: they differ from what the
+    /// current one carries. Pure, for the tests.
+    static func needsNewDescription(found: HDR10StaticMetadataSEI.Values,
+                                    described: HDR10StaticMetadataSEI.Values) -> Bool {
+        !found.isEmpty && found != described
+    }
+
+    /// Values found in a key frame go into the format description too, before that key frame decodes: a
+    /// new description and session from it, the way `adoptVP9FrameSize` does. VideoToolbox then attaches
+    /// them itself, so the frames skip the owned copy (about 7 ms per 4K frame on an A12) for the rest of
+    /// the session, as with values known at open. Usually this is the stream's first key frame, with
+    /// nothing decoded before it. On a later one (the values were in its SEI only), that key frame's
+    /// leading pictures can be lost once, as after a seek. If VideoToolbox refuses, the old session stays
+    /// and the frames keep the copy.
+    private func describeStaticHDR10(_ values: HDR10StaticMetadataSEI.Values, epoch: UInt64?) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let epoch, epoch != currentEpoch { return }
+        guard Self.needsNewDescription(found: values, described: describedHDR10),
+              let old = session, !sessionLost, let refConBox else { return }
+        let extensions = Self.extensions(formatExtensions, carrying: values)
+        var fd: CMVideoFormatDescription?
+        let fdStatus = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: formatCodecType,
+            width: width,
+            height: height,
+            extensions: extensions,
+            formatDescriptionOut: &fd
+        )
+        guard fdStatus == noErr, let formatDesc = fd else {
+            EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: format description "
+                           + "failed (\(fdStatus)), frames keep the copy", category: .swPlayback)
+            return
         }
+        VTDecompressionSessionWaitForAsynchronousFrames(old)
+        let created = makeSession(formatDescription: formatDesc, refCon: refConBox)
+        guard let fresh = created.session else {
+            EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame: session refused "
+                           + "(\(created.status)), frames keep the copy", category: .swPlayback)
+            return
+        }
+        VTDecompressionSessionInvalidate(old)
+        session = fresh
+        formatDescription = formatDesc
+        formatExtensions = extensions
+        describedHDR10 = values
+        EngineLog.emit("[HardwareVideoDecoder] HDR10 values found in a key frame go into the format "
+                       + "description, session rebuilt", category: .swPlayback)
     }
 
     private func currentStaticHDR10() -> HDR10StaticMetadataSEI.Values {
