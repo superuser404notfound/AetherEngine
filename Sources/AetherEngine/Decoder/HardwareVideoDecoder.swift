@@ -558,6 +558,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     ) throws {
         self.onFrame = onFrame
         self.timeBase = timeBase
+        // No stream here to read HDR10 static metadata from: nothing is added, and nothing from an
+        // earlier `open(stream:)` of this instance carries over.
+        setStaticHDR10(.none, keyFramesToScan: 0)
 
         guard parameterSets.count >= 3 else {
             throw VideoDecoderError.noExtradata
@@ -882,6 +885,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                            category: .swPlayback)
         }
         outputMetadataNormalizer.reset()
+        setStaticHDR10(.none, keyFramesToScan: 0)
         onFrame = nil
     }
 
@@ -913,9 +917,13 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                            + (keyFrames > 0 ? ", scanning the first \(keyFrames) key frames" : ""),
                            category: .swPlayback)
         }
+        setStaticHDR10(values, keyFramesToScan: keyFrames)
+    }
+
+    private func setStaticHDR10(_ values: HDR10StaticMetadataSEI.Values, keyFramesToScan: Int) {
         staticHDR10Lock.lock()
         staticHDR10 = values
-        staticHDR10KeyFramesLeft = keyFrames
+        staticHDR10KeyFramesLeft = keyFramesToScan
         staticHDR10Lock.unlock()
     }
 

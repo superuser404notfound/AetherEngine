@@ -105,6 +105,8 @@ The risk this accepts: later frames could decode from composed pixels, which wou
 - then from the SEI in the `hvcC` (x265 writes it there);
 - then from the SEI of the first 3 key frames, for HEVC and H.264. Frames before the values are found go out without them.
 
+A key the frame already carries stays as it is. Only a missing key is filled, so a decoder that does attach its own values wins, and anything downstream of the decoder (a frame handler, a probe) can still set its own. The decoder clears its values at `close()`, and `open(parameterSets:)` (no stream to read them from) adds none.
+
 The SEI payloads are byte for byte what Core Video's attachments hold, so they are copied as they are. The television does read these attachments, see [measurements.md](measurements.md#hdr10-metadata-on-the-software-path-reaches-the-television-ae957).
 
 **The decoder's format description carries the same values (AE#957).** The owned copy costs about 7 ms per 4K frame on an A12 Apple TV, so the normalizer should only ever need it as a fallback. For HEVC, AV1 and VP9 the description VideoToolbox decodes with names the stream's colour, and the HDR10 values known at `open()`. VideoToolbox then attaches both itself and the frames match as decoded. Without the colour keys it tagged a PQ BT.2020 HEVC clip as BT.709, and every frame was copied. Values found later, in a key frame's SEI, still go on by copy.

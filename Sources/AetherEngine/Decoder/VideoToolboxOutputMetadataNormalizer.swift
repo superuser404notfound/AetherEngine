@@ -101,12 +101,15 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         pixelAspectRatio: AVRational?,
         hdr10: HDR10StaticMetadataSEI.Values
     ) {
-        // AE#957: VideoToolbox drops the stream's HDR10 static metadata; nil leaves a value alone.
-        if let masteringDisplay = hdr10.masteringDisplay {
+        // AE#957: the stream's HDR10 static metadata where the frame lacks it. A key the frame already
+        // carries is the decoder's own value and stays; only a missing one is filled.
+        if let masteringDisplay = hdr10.masteringDisplay,
+           propagatingAttachment(imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey) == nil {
             CVBufferSetAttachment(imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey,
                                   masteringDisplay as CFData, .shouldPropagate)
         }
-        if let contentLightLevel = hdr10.contentLightLevel {
+        if let contentLightLevel = hdr10.contentLightLevel,
+           propagatingAttachment(imageBuffer, kCVImageBufferContentLightLevelInfoKey) == nil {
             CVBufferSetAttachment(imageBuffer, kCVImageBufferContentLightLevelInfoKey,
                                   contentLightLevel as CFData, .shouldPropagate)
         }
@@ -145,6 +148,15 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         }
     }
 
+    /// Only a propagating attachment counts as a match: the subtitle compositor's copy carries
+    /// nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
+    private static func propagatingAttachment(_ imageBuffer: CVPixelBuffer, _ key: CFString) -> CFTypeRef? {
+        var mode = CVAttachmentMode.shouldPropagate
+        guard let value = CVBufferCopyAttachment(imageBuffer, key, &mode),
+              mode == .shouldPropagate else { return nil }
+        return value
+    }
+
     private static func outputMetadataMatches(
         _ imageBuffer: CVPixelBuffer,
         colorPrimaries: CFString?,
@@ -153,14 +165,7 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         pixelAspectRatio: AVRational?,
         hdr10: HDR10StaticMetadataSEI.Values
     ) -> Bool {
-        // Only a propagating attachment counts as a match: the subtitle compositor's copy carries
-        // nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
-        func attachment(_ key: CFString) -> CFTypeRef? {
-            var mode = CVAttachmentMode.shouldPropagate
-            guard let value = CVBufferCopyAttachment(imageBuffer, key, &mode),
-                  mode == .shouldPropagate else { return nil }
-            return value
-        }
+        func attachment(_ key: CFString) -> CFTypeRef? { propagatingAttachment(imageBuffer, key) }
 
         if let colorPrimaries,
            attachment(kCVImageBufferColorPrimariesKey) as? String != colorPrimaries as String {
@@ -174,12 +179,11 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
            attachment(kCVImageBufferYCbCrMatrixKey) as? String != yCbCrMatrix as String {
             return false
         }
-        if let masteringDisplay = hdr10.masteringDisplay,
-           attachment(kCVImageBufferMasteringDisplayColorVolumeKey) as? Data != masteringDisplay {
+        // Any HDR10 value the frame carries counts: it is not replaced, only a missing key is filled.
+        if hdr10.masteringDisplay != nil, attachment(kCVImageBufferMasteringDisplayColorVolumeKey) == nil {
             return false
         }
-        if let contentLightLevel = hdr10.contentLightLevel,
-           attachment(kCVImageBufferContentLightLevelInfoKey) as? Data != contentLightLevel {
+        if hdr10.contentLightLevel != nil, attachment(kCVImageBufferContentLightLevelInfoKey) == nil {
             return false
         }
         if let pixelAspectRatio {

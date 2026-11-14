@@ -168,4 +168,34 @@ struct SoftwarePathCarriesStreamHDR10MetadataTests {
             transferFunction: nil, yCbCrMatrix: nil, pixelAspectRatio: nil)
         #expect(untouched === plain)
     }
+
+    /// A value the frame already carries is the decoder's own and stays: only a missing key is filled, and a
+    /// frame with both keys is not copied, whatever values they hold.
+    @Test func issue957AFrameThatCarriesItsOwnValuesKeepsThem() throws {
+        let values = HDR10StaticMetadataSEI.Values(
+            masteringDisplay: Self.clip.masteringDisplayColorVolume, contentLightLevel: Self.clip.contentLightLevel)
+        let own = HDR10StaticMetadata(maxCLL: 4000, maxFALL: 1000, masteringPeakNits: 4000,
+                                      masteringMinNits: 0.005).masteringDisplayColorVolume
+        var created: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                            [kCVPixelBufferIOSurfacePropertiesKey: NSDictionary()] as NSDictionary, &created)
+        let frame = try #require(created)
+        CVBufferSetAttachment(frame, kCVImageBufferMasteringDisplayColorVolumeKey, own as CFData, .shouldPropagate)
+        let normalizer = VideoToolboxOutputMetadataNormalizer()
+        func normalize(modifiable: Bool) -> CVPixelBuffer {
+            normalizer.applyingOutputMetadata(to: frame, isModifiable: modifiable, colorPrimaries: nil,
+                transferFunction: nil, yCbCrMatrix: nil, pixelAspectRatio: nil, hdr10: values)
+        }
+
+        let inPlace = normalize(modifiable: true)
+        let mastering = CVBufferCopyAttachment(frame, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data
+        let lightLevel = CVBufferCopyAttachment(frame, kCVImageBufferContentLightLevelInfoKey, nil) as? Data
+        #expect(inPlace === frame)
+        #expect(mastering == own)
+        #expect(lightLevel == Self.clip.contentLightLevel)
+
+        // Both keys present now: a decoder-owned frame passes as it is, no copy.
+        let owned = normalize(modifiable: false)
+        #expect(owned === frame)
+    }
 }
