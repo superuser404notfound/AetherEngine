@@ -1,6 +1,7 @@
 import Foundation
 import CoreVideo
 import VideoToolbox
+import os
 import AetherLibavutil
 
 /// Supplies codec-declared display metadata without mutating immutable VideoToolbox output.
@@ -24,6 +25,26 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
     private var poolFormat: PoolFormat?
     private var loggedFailure = false
 
+    /// What happened to each frame since the last `takeOutcomes()`. The owned copy is the costly one
+    /// (a full-frame GPU transfer), so a session that copies every frame shows here. Its own lock: the
+    /// matching path takes no other.
+    struct Outcomes: Equatable, Sendable {
+        var asDecoded = 0
+        var inPlace = 0
+        var copied = 0
+        var copyFailed = 0
+        var total: Int { asDecoded + inPlace + copied + copyFailed }
+    }
+    private let outcomes = OSAllocatedUnfairLock(initialState: Outcomes())
+
+    /// The counts so far, and a fresh start.
+    func takeOutcomes() -> Outcomes {
+        outcomes.withLock { counts in
+            defer { counts = Outcomes() }
+            return counts
+        }
+    }
+
     func applyingOutputMetadata(
         to imageBuffer: CVPixelBuffer,
         isModifiable: Bool,
@@ -41,17 +62,21 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
             pixelAspectRatio: pixelAspectRatio,
             hdr10: hdr10
         ) {
+            outcomes.withLock { $0.asDecoded += 1 }
             return imageBuffer
         }
 
         let destination: CVPixelBuffer
         if isModifiable {
             destination = imageBuffer
+            outcomes.withLock { $0.inPlace += 1 }
         } else {
             guard let copiedBuffer = transferToOwnedBuffer(imageBuffer) else {
+                outcomes.withLock { $0.copyFailed += 1 }
                 logFailureOnce()
                 return imageBuffer
             }
+            outcomes.withLock { $0.copied += 1 }
             destination = copiedBuffer
             CVBufferRemoveAllAttachments(destination)
             CVBufferPropagateAttachments(imageBuffer, destination)

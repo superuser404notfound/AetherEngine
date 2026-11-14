@@ -8,6 +8,8 @@
 #   DEVICE=... SEQ=pulse ./run_tv.sh            no camera: a steady arm, then the metadata switching every
 #                                               3 s with and without the chain (about 2 min, watch by eye)
 #   DEVICE=... SEQ=cp ./run_tv.sh               the chain pulse alone, for filming: setup, then CP 30 s
+#   DEVICE=... SEQ=bench ./run_tv.sh            per-frame benchmark on the Apple TV, then 20 s of the software
+#                                               path for its output-metadata counts; BASELINE=<json> compares
 #   DEVICE=... SEQ=control ./run_tv.sh          the pulse's control: AVPlayer with the 1000 and the 4000
 #                                               nit clip, steady and alternating, then the engine's pulse
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
@@ -54,6 +56,8 @@ case "$SEQ" in
   pulse)
     # S first, so the steady look is fresh when the pulse arms start. 30 s is ten switches.
     ARMS="${SETUP_ARM}S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
+  bench)
+    ARMS="B|bench|$B/pattern_24.mp4|secs=0,S|software|$B/pattern_24.mp4|secs=20" ;;
   cp)
     # A pulse is its own reference, so CP alone answers for the engine's own buffers.
     ARMS="${SETUP_ARM}CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
@@ -63,7 +67,7 @@ case "$SEQ" in
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
-  *) echo "unknown SEQ=$SEQ (main|pulse|cp|control|pace)"; exit 1 ;;
+  *) echo "unknown SEQ=$SEQ (main|pulse|cp|control|bench|pace)"; exit 1 ;;
 esac
 # Only the clips this sequence plays have to exist.
 # avpulse also plays the clip's _m4000 twin.
@@ -109,4 +113,14 @@ xcrun devicectl device copy from --device "$DEVICE" --domain-type appDataContain
   >/dev/null 2>&1 || echo "(could not pull the app log)"
 echo "log: $LOG (+ ${LOG%.log}.app.log)"
 echo "--- what the engine attached and timed, and each arm's summary:"
-grep -h -E "\[HDR10Probe\]|summary" "${LOG%.log}.app.log" 2>/dev/null || grep -h -E "\[HDR10Probe\]|summary" "$LOG" || true
+grep -h -E "\[HDR10Probe\]|\[HDR10Bench\] [^j]|output metadata over|HDR10 static metadata|summary" "${LOG%.log}.app.log" 2>/dev/null \
+  || grep -h -E "\[HDR10Probe\]|summary" "$LOG" || true
+# The benchmark report as JSON, for `aetherctl bench --compare`.
+JSON=$(grep -h -o '\[HDR10Bench\] json .*' "${LOG%.log}.app.log" 2>/dev/null | head -1 | sed 's/^\[HDR10Bench\] json //')
+if [[ -n "$JSON" ]]; then
+  print -r -- "$JSON" > "bench_$(date +%Y%m%d_%H%M%S).json"
+  echo "benchmark report: bench_*.json (newest)"
+  if [[ -n "${BASELINE:-}" ]]; then
+    swift run --package-path "$ROOT/../.." aetherctl bench --compare "$BASELINE" "$(ls -t bench_*.json | head -1)"
+  fi
+fi

@@ -107,6 +107,10 @@ The risk this accepts: later frames could decode from composed pixels, which wou
 
 The SEI payloads are byte for byte what Core Video's attachments hold, so they are copied as they are. The television does read these attachments, see [measurements.md](measurements.md#hdr10-metadata-on-the-software-path-reaches-the-television-ae957).
 
+**The decoder's format description carries the same values (AE#957).** The owned copy costs about 7 ms per 4K frame on an A12 Apple TV, so the normalizer should only ever need it as a fallback. For HEVC, AV1 and VP9 the description VideoToolbox decodes with names the stream's colour, and the HDR10 values known at `open()`. VideoToolbox then attaches both itself and the frames match as decoded. Without the colour keys it tagged a PQ BT.2020 HEVC clip as BT.709, and every frame was copied. Values found later, in a key frame's SEI, still go on by copy.
+
+At `close()` the decoder logs how each frame went: `output metadata over N frames: A as decoded, B in place, C copied, D copy failed`. Copies on every frame mean the description and the normalizer disagree. Numbers: [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957); to time it on a device, [`aetherctl bench`](cli.md#bench).
+
 **AV1 Dolby Vision RPU path.** (The RPU is the per-frame Dolby Vision metadata.) This path reuses that owned output, or makes its own copy, before changing buffer and IOSurface metadata. If copying fails, it delivers the original without setting or clearing RPU keys, including when RPU attachment is disabled.
 
 ### Clock and transport

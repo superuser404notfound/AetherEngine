@@ -76,8 +76,10 @@ struct SoftwarePathCarriesStreamHDR10MetadataTests {
         record[0] = 1
         record[22] = 2
         let vps: [UInt8] = [32 << 1, 1, 0x0C]
-        record += [0x80 | 32, 0, 1, 0, UInt8(vps.count)] + vps
-        record += [39, 0, 1, UInt8(sei.count >> 8), UInt8(sei.count & 0xFF)] + sei
+        let vpsArray: [UInt8] = [0x80 | 32, 0, 1, 0, UInt8(vps.count)]
+        let seiArray: [UInt8] = [39, 0, 1, UInt8(sei.count >> 8), UInt8(sei.count & 0xFF)]
+        record += vpsArray + vps
+        record += seiArray + sei
         let found = record.withUnsafeBufferPointer {
             HDR10StaticMetadataSEI.scanHEVCConfigRecord($0.baseAddress!, size: $0.count)
         }

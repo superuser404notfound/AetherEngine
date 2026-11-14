@@ -19,8 +19,18 @@ the public-API contract.
   `pulse` and `chain+pulse` switch the values every 3 s on an unchanged picture, so the answer can be read by eye.
   `Probes/HDR10PassThrough` plays every mode on an Apple TV. Off by default; no public API. Covered by
   `HDR10PassThroughProbeTests`.
+- **`aetherctl bench` and `AetherEngine.runPerFrameBenchmarks` time the software path's per-frame work (#957).**
+  Latency regressions there had no number to catch them. The benchmark times the output metadata normalizer,
+  the renderer's sample buffer, the frame chain and the HDR10 SEI scan on a 4K P010 frame, saves the report as
+  JSON and fails against a baseline when a median grows past a tolerance. The HDR10 probe harness runs it on
+  an Apple TV (`SEQ=bench`).
 
 ### Fixed
+
+- **HDR10 HEVC on the software path no longer copies every frame (#957).** VideoToolbox tagged a PQ BT.2020
+  HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
+  Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
+  them itself, and no frame is copied. Covered by `SoftwarePathCarriesStreamHDR10MetadataTests`.
 
 - **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
   attaches no mastering display or content light level to the frames it decodes, so the software path sent

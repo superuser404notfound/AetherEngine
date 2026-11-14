@@ -156,6 +156,17 @@ eye, and only an HDMI analyser can.
 Film the moving bar and the frame counter; a stall or a jump is a dropped or repeated frame. Each arm's
 summary line reports `droppedFrames`.
 
+`SEQ=bench` needs no camera and nothing bright: about 1 minute.
+
+| arm | mode | what plays |
+|---|---|---|
+| B | `bench` | nothing; `AetherEngine.runPerFrameBenchmarks` on this Apple TV (the cases are in [docs/cli.md](../../docs/cli.md#bench)) |
+| S | `software` | 20 s of the software path, for the decoder's `output metadata over N frames` line |
+
+The report is saved as `runs/bench_<date>.json`. With `BASELINE=runs/bench_<older>.json` the script
+also runs `aetherctl bench --compare` against it and prints the verdict. In the S line, `copied` on
+every frame means each 4K frame costs a full copy (about 7 ms on an A12); it should read `as decoded`.
+
 After the run, the script pulls the app's log and prints the `[HDR10Probe]` lines (what the first
 frame carried before and after, what the format description built from it carries, GPU time per
 48-frame window, `chain built` once per picture size) and each arm's summary.

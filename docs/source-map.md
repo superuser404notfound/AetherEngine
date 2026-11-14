@@ -272,6 +272,7 @@ Notes:
 | `MallocBlockCensus.swift` | In-process census of live malloc blocks by size class (#220), so a step in resident memory can name the allocation instead of guessing it from a block count and a total. |
 | `MallocBlockCensusTrigger.swift` | Captures that census when memory jumps. Every recorded kill is flat and then steps inside a single 30 s memprobe sample, so a periodic sampler can never catch the allocation (#220). |
 | `ThreadCPUSampler.swift` | CPU time per thread group between two samples (consumed time, including ended threads): the `cpuprobe` line next to every memprobe. Public, so a host can profile its UI from a field log. |
+| `PerFrameBenchmark.swift` | `AetherEngine.runPerFrameBenchmarks` (AE#957): per-frame time of the software path's frame work. Backs `aetherctl bench`. |
 | `VMRegionCensus.swift` | Per-`user_tag` census of the dirty + swapped pages `phys_footprint` counts, as a delta against the session's first tick. Names the region a rising footprint rose in when every itemized bucket (heap census included) is flat, which is where AE#445 kept ending up. |
 | `SubtitleDeliveryStatement.swift` | Value and formatter for the #357 line. See note. |
 | `LogRedaction.swift` | Strips credentials (tokens in URL queries, auth headers) out of a line before `EngineLog` emits it. |
@@ -654,6 +655,7 @@ Every subcommand is listed with its flags in [docs/cli.md](cli.md#subcommands-at
 | `PlaybackCmd.swift` | `play`, including host-call drills, telemetry and verdicts. |
 | `PictureProbe.swift` | `play --picture-probe` (AE#418): which source frame AVPlayer presents at an item time. |
 | `SWDecode.swift` | `swdecode`. |
+| `BenchCmd.swift` | `bench`: prints a benchmark report, saves it, compares two. |
 | `SeekTest.swift` | `seektest`. |
 | `Extract.swift` | `extract`. |
 | `ScrubPreviewCmd.swift` | `scrubpreview`. |

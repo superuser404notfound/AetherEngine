@@ -340,7 +340,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let configuration = try VideoToolboxVideoFormat.make(stream: stream)
         codecName = configuration.codecName
         formatCodecType = configuration.codecType
-        formatExtensions = configuration.extensions
+        resolveStaticHDR10(codecpar: codecpar)
+        let extensions = Self.extensions(configuration.extensions, carrying: currentStaticHDR10())
+        formatExtensions = extensions
         if codecpar.pointee.codec_id == AV_CODEC_ID_VP9 {
             // Swift 6.2.3 is a proxy for the mobile declaration in stock Xcode 26.2 SDKs.
             // Custom compiler/SDK pairings are not covered; capability queries stay outside.
@@ -362,7 +364,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             codecType: configuration.codecType,
             width: width,
             height: height,
-            extensions: configuration.extensions,
+            extensions: extensions,
             formatDescriptionOut: &fd
         )
         guard fdStatus == noErr, let formatDesc = fd else {
@@ -389,7 +391,6 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         self.colorPrimaries = ColorAttachments.primaries(codecpar.pointee.color_primaries)
         self.colorTransfer = ColorAttachments.transfer(codecpar.pointee.color_trc)
         self.colorMatrix = ColorAttachments.matrix(codecpar.pointee.color_space)
-        resolveStaticHDR10(codecpar: codecpar)
         let pixelFormat: OSType = use10Bit
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -873,6 +874,13 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             box.release()
             refConBox = nil
         }
+        let outcomes = outputMetadataNormalizer.takeOutcomes()
+        if outcomes.total > 0 {
+            EngineLog.emit("[HardwareVideoDecoder] output metadata over \(outcomes.total) frames: "
+                           + "\(outcomes.asDecoded) as decoded, \(outcomes.inPlace) in place, "
+                           + "\(outcomes.copied) copied, \(outcomes.copyFailed) copy failed",
+                           category: .swPlayback)
+        }
         outputMetadataNormalizer.reset()
         onFrame = nil
     }
@@ -909,6 +917,21 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         staticHDR10 = values
         staticHDR10KeyFramesLeft = keyFrames
         staticHDR10Lock.unlock()
+    }
+
+    /// The values known at open, in the format description VideoToolbox decodes with: it then attaches
+    /// them to its own output, so the frames match and skip the owned copy (a full 4K frame transfer,
+    /// about 7 ms on an A12 Apple TV). Values found later, in a key frame's SEI, still need the copy.
+    static func extensions(_ base: NSDictionary?, carrying values: HDR10StaticMetadataSEI.Values) -> NSDictionary? {
+        guard !values.isEmpty else { return base }
+        let extensions = NSMutableDictionary(dictionary: base ?? [:])
+        if let masteringDisplay = values.masteringDisplay {
+            extensions[kCMFormatDescriptionExtension_MasteringDisplayColorVolume] = masteringDisplay as NSData
+        }
+        if let contentLightLevel = values.contentLightLevel {
+            extensions[kCMFormatDescriptionExtension_ContentLightLevelInfo] = contentLightLevel as NSData
+        }
+        return extensions
     }
 
     /// A key frame's SEI, while the values are incomplete and key frames are left to read.

@@ -14,6 +14,7 @@
 - Custom byte sources: [customio](#customio), [smbtest](#smbtest)
 - Live: [live](#live), [dvr](#dvr), [hlsfixture](#hlsfixture), [hlslive](#hlslive)
 - Dolby Vision: [dovitest](#dovitest), [feltest](#feltest), [dvsurvey](#dvsurvey), [eltype](#eltype), [elsurvey](#elsurvey), [elframe](#elframe), [felcurves](#felcurves), [dmpass](#dmpass)
+- Performance: [bench](#bench)
 - [Fixtures](#fixtures)
 
 ## Building with optional components
@@ -55,11 +56,12 @@ Most subcommands take a media source URL (`file://` or `http(s)://`). `live`, `d
 | Test the software decoder alone | [`swdecode`](#swdecode) | Decoder open, frame count and first-frame format, no render layer. |
 | Inspect a disc image | [`disc-inspect`](#disc-inspect), then `probe` | Recognition stages, titles and chapters. |
 | Pull stills or scrub previews | [`extract`](#extract), [`scrubpreview`](#scrubpreview) | `FrameExtractor` stills, and compositor or keyframe scrub previews. |
+| Check a change did not make frames slower | [`bench`](#bench) | Per-frame time of the software path's frame work, and a verdict against a saved baseline. |
 | Dolby Vision Profile 7 / FEL | [`eltype`](#eltype), [`dvsurvey`](#dvsurvey), [`feltest`](#feltest), [`dmpass`](#dmpass), [`play --fel`](#dolby-vision---fel---assert-dv) | FEL or MEL, metadata survey, the composer audit, metadata pass-through, and the live route. |
 
 ## Subcommands at a glance
 
-Twenty-nine subcommands plus the bare-URL `serve` alias.
+Thirty subcommands plus the bare-URL `serve` alias.
 
 | Subcommand | Purpose |
 |---|---|
@@ -92,6 +94,7 @@ Twenty-nine subcommands plus the bare-URL `serve` alias.
 | [`elframe <url>`](#elframe) | Write one FEL keyframe composed with and without its residual. |
 | [`felcurves <url> <out.rpu>`](#felcurves) | Fold a FEL source into per-scene Profile 8.1 curves. |
 | [`dmpass <url>`](#dmpass) | Check that the FEL route keeps the display-management metadata. |
+| [`bench`](#bench) | Time the software path's per-frame work and compare it with a baseline. |
 | `<url>` | Alias for `serve`. The alias takes no flags. |
 
 ```bash
@@ -2126,6 +2129,46 @@ swift run --traits DualLayerDolbyVision aetherctl dmpass --frames 120 --out /tmp
 | `AETHER_DM_PRINT=1` (or `hex`) | Echoes the per-frame `[dm-digest]` lines in `dmpass`. |
 | `AETHER_DM_DIGEST` = `1`, `log` or `hex` | Runs the same digest inside any host. `hex` adds both RPU byte strings to each line. |
 | `AETHER_DM_DIGEST_FILE` | Appends the JSON form to a file. |
+
+## bench
+
+Times the work the software path does around each decoded frame, and fails when a case got slower than a saved baseline. It calls `AetherEngine.runPerFrameBenchmarks`, which returns a `PerFrameBenchmarkReport` with one `PerFrameBenchmarkResult` per case. No source is needed: it builds a 4K P010 frame itself.
+
+**Usage:** `aetherctl bench [--iterations N] [--json out.json] [--baseline base.json] [--tolerance PCT]`, or `aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]`
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--iterations N` | Timed runs per case (10 to 100000), after 20 untimed ones. | 300 |
+| `--json PATH` | Writes the report as JSON, to keep as a baseline. | off |
+| `--baseline PATH` | Compares this run with a saved report. | off |
+| `--tolerance PCT` | How much slower a case's median may get before it counts as a regression. | 20 |
+| `--compare BASE NEW` | Compares two saved reports and runs nothing. This is how a report from the Apple TV harness is checked. | off |
+
+```bash
+swift run -c release aetherctl bench --json /tmp/base.json
+swift run -c release aetherctl bench --baseline /tmp/base.json
+```
+
+**Cases.** All times are microseconds of wall time per frame.
+
+| Case | What it times |
+|---|---|
+| `normalizer: frame already tagged` | The output metadata check on a frame that already carries everything. The usual case. |
+| `normalizer: tag in place` | Writing the attachments on a frame the decoder lets us change. |
+| `normalizer: owned copy` | Copying a frame the decoder still owns into a pool of our own, then tagging it. |
+| `renderer: sample buffer` | Wrapping a frame for the display layer, format description cache hit. |
+| `chain: pass-through, wall time` | The frame chain with one pass-through stage. Its GPU time is in the note. Needs OS 26 and real hardware. |
+| `sei: HDR10 scan of a 250 KB key frame` | The in-band scan for the HDR10 SEI. |
+
+**Verdict.** A case regresses when its median grows by more than the tolerance and by more than 50 us. Below that the same build moves between runs: in-place tagging measured 18 us, then 48 us, on the A12 Apple TV. Compare reports from the same device only; the tool prints a note when the device or picture size differ.
+
+| Exit | Meaning |
+|---|---|
+| 0 | No regression, or no baseline given. |
+| 1 | At least one regression, or a report could not be read or written. |
+| 64 | Bad arguments. |
+
+The same benchmark runs on an Apple TV in the HDR10 probe harness (`SEQ=bench`, see [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md)). Measured numbers are in [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957).
 
 ## Fixtures
 

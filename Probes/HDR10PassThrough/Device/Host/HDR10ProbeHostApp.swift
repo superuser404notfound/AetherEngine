@@ -26,6 +26,9 @@ import UIKit
 //   `chain+meta`, `pulse` and `chain+pulse`. The engine reads the variable at each load, so the harness
 //   sets it before each arm.
 //
+// - `bench`: `AetherEngine.runPerFrameBenchmarks` on this device, nothing played. Each result is logged as a
+//   `[HDR10Bench]` line and the whole report as one `[HDR10Bench] json` line, which `run_tv.sh` saves.
+//
 // The pulse arms need no camera: the picture stays the same and only the metadata switches every 3 s,
 // so a television that reads it tone-maps the bright patches brighter and dimmer every 3 s.
 
@@ -80,6 +83,7 @@ struct ProbeArm {
     var expectation: String {
         switch mode {
         case "setup": "HDR10 is on: set the TV's Dynamic Tone Mapping to Off now"
+        case "bench": "per-frame benchmark on this Apple TV, nothing plays"
         case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
         case "software", "chain": "the clip's metadata, attached by the decoder (1000 nit, MaxCLL 1000)"
         case "pulse", "chainpulse": "metadata switches every 3 s: do the bright patches pulse?"
@@ -94,7 +98,7 @@ struct ProbeArm {
     /// What the person in front of the television does during the arm. In a sequence with pulse arms
     /// the others are steady controls, watched by eye like the rest.
     func instruction(inPulseSequence: Bool) -> String {
-        if mode == "setup" { return "" }
+        if mode == "setup" || mode == "bench" { return "" }
         if pulses { return "watch the patches from 1000 to 10000 nit and the two squares" }
         return inPulseSequence ? "steady control: nothing changes here, remember how it looks"
                                : "photo from the same spot, exposure locked"
@@ -173,6 +177,8 @@ struct ProbeHarnessView: View {
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, loops: true, log: say)
             case "avplayer":
                 await host.playAVPlayer(arm.url, seconds: arm.seconds, log: say)
+            case "bench":
+                runBenchmark(log: say)
             case "avpulse":
                 await host.playAVPulse(arm.url, seconds: arm.seconds, log: say)
             case "native", "software", "meta", "chain", "chainmeta", "pulse", "chainpulse":
@@ -189,6 +195,19 @@ struct ProbeHarnessView: View {
         try? await Task.sleep(nanoseconds: 3_000_000_000)
         say("sequence done")
         exit(0)
+    }
+
+    @MainActor
+    private func runBenchmark(log: @Sendable (String) -> Void) {
+        let report = AetherEngine.runPerFrameBenchmarks()
+        for r in report.results {
+            log(String(format: "[HDR10Bench] %@: median %.1f us, p95 %.1f, p99 %.1f, max %.1f%@", r.name,
+                       r.medianMicroseconds, r.p95Microseconds, r.p99Microseconds, r.maxMicroseconds,
+                       r.note.map { " (\($0))" } ?? ""))
+        }
+        if let json = try? JSONEncoder().encode(report), let text = String(data: json, encoding: .utf8) {
+            log("[HDR10Bench] json " + text)
+        }
     }
 
     @MainActor

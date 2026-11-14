@@ -2272,6 +2272,11 @@ Both are per session, not a process-wide total. Two players with a 256 MiB cap c
 
 **Status fields.** `SessionCacheStatus` reports `hardLimitBytes`, `freeDiskReserveBytes`, `stagingBytes` and `rejectedDiskWrites`. `currentDiskBytes` is resident plus staging bytes, but staging is only counted while one of the two options is set, so with both off it equals the resident bytes. `diskAdmissionWaiting` is true while a writer waits for disk room. That is different from `producerParked`, which means the producer is waiting on the forward window.
 
+
+### Per-frame benchmark
+
+`AetherEngine.runPerFrameBenchmarks(iterations:width:height:)` times the software path's work around each decoded frame on the device it runs on, and returns a `PerFrameBenchmarkReport` (device, OS, picture size, one `PerFrameBenchmarkResult` per case with min, median, p95, p99 and max in microseconds). Both are `Codable`, so a report can be saved and compared with a later build. It plays nothing and needs no session; call it on the main actor, away from playback, because it keeps the CPU and GPU busy for a few seconds. The cases and the regression rule are in [cli.md › bench](cli.md#bench).
+
 ## Optional components
 
 Five parts of the engine are compiled only with their package trait, all off by default ([Installation › Optional components](installation.md#optional-components)). The options that ask for them stay in the API and do nothing without the trait. So a host compiles the same either way, and asks at run time whether a setting would do anything:
