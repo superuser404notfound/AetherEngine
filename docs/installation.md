@@ -14,7 +14,7 @@ How to add AetherEngine to an app, what it needs, and how to turn on the optiona
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.66.1")
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.67.0")
 ```
 
 Then link the `AetherEngine` product. Add `AetherEngineSMB` too if you want to play from SMB shares ([guide.md › SMB shares](guide.md#smb-shares)).
@@ -95,7 +95,7 @@ How each works and how close the fold gets to the composed picture: [Dolby Visio
 List the traits on the package dependency:
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.66.1",
+.package(url: "https://github.com/superuser404notfound/AetherEngine", from: "7.67.0",
          traits: ["TrueHDObjectAudio", "DTSXObjectAudio", "DolbyVisionFelCurves", "DolbyVisionStillReshaping"])
 ```
 
@@ -198,4 +198,4 @@ AetherEngine uses [Semantic Versioning](https://semver.org). The public API (eve
 | Minor | Adds public API or codec / format support |
 | Patch | Fixes bugs, no public API change |
 
-Teams that want to opt into minor versions explicitly pin `.upToNextMinor(from: "7.66.1")`.
+Teams that want to opt into minor versions explicitly pin `.upToNextMinor(from: "7.67.0")`.

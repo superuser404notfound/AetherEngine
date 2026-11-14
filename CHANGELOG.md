@@ -10,6 +10,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.67.0] - 2026-11-14
+
 ### Added
 
 - **`LoadOptions.rendersDTSXObjectAudio` keeps DTS:X on the channel bridge while TrueHD Atmos renders (#1060).**
