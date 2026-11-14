@@ -211,6 +211,13 @@ final class FelCurveLookahead {
     private func folds(for frames: [Frame]) -> [SceneFold?] {
         guard !frames.isEmpty else { return [] }
         let display = frames.indices.sorted { frames[$0].pts < frames[$1].pts }
+        // An undated picture can carry a scene change. Keep the stream's mapping for this GOP
+        // and start a fresh fit in the next one rather than carrying a curve across that boundary.
+        guard let spacing = Self.frameSpacing(forSortedTimestamps: display.map { frames[$0].pts }) else {
+            carried = nil
+            carriedValid = false
+            return Array(repeating: nil, count: frames.count)
+        }
         // A scene starts at a frame whose RPU raises scene_refresh_flag, and at the first frame shown at all.
         var starts: [Int] = display.filter { frames[$0].info?.sceneRefresh == true }
         if !starts.isEmpty { streamMarksScenes = true }
@@ -224,7 +231,7 @@ final class FelCurveLookahead {
 
         var fitted: [Int: SceneFold?] = [:]
         let needPictures = starts.filter { frames[$0].info?.carriesResidual == true && frames[$0].info?.luma != nil }
-        let decoded = needPictures.isEmpty ? [:] : decode(frames, wanted: Set(needPictures.map { frames[$0].pts }))
+        let decoded = needPictures.isEmpty ? [:] : decode(frames, wanted: Set(needPictures.map { frames[$0].pts }), spacing: spacing)
         for index in starts {
             guard let info = frames[index].info else {
                 fitted[index] = .some(nil)
@@ -267,12 +274,21 @@ final class FelCurveLookahead {
         let enhancement: CVPixelBuffer
     }
 
+    /// A missing time or unrepresentable gap cannot identify a scene's decoded pictures.
+    static func frameSpacing(forSortedTimestamps timestamps: [Int64]) -> Int64? {
+        guard timestamps.first != Int64.min else { return nil } // AV_NOPTS_VALUE
+        var minimum: Int64?
+        for (earlier, later) in zip(timestamps, timestamps.dropFirst()) where later > earlier {
+            let (gap, overflow) = later.subtractingReportingOverflow(earlier)
+            guard !overflow else { return nil }
+            minimum = min(minimum ?? gap, gap)
+        }
+        return minimum ?? 1
+    }
+
     /// Decodes both layers in decode order until every wanted picture has come out of both decoders.
-    private func decode(_ frames: [Frame], wanted: Set<Int64>) -> [Int64: PicturePair] {
+    private func decode(_ frames: [Frame], wanted: Set<Int64>, spacing: Int64) -> [Int64: PicturePair] {
         guard let base = openBaseDecoder() else { return [:] }
-        let sorted = frames.map(\.pts).sorted()
-        let gaps: [Int64] = zip(sorted, sorted.dropFirst()).map { $1 - $0 }.filter { $0 > 0 }
-        let spacing: Int64 = gaps.min() ?? 1
         pictures.begin(wanted: wanted, timeBase: timeBase, frameSpacing: spacing)
         defer { pictures.end() }
         let lastNeeded = frames.lastIndex { wanted.contains($0.pts) } ?? (frames.count - 1)
