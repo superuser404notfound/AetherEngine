@@ -8,7 +8,9 @@ Tone mapping to a panel's real peak only pays off if it does. tvOS has no `CAEDR
 `wantsExtendedDynamicRangeContent`, so the only lever is the attachments on the pixel buffer handed to
 `AVSampleBufferDisplayLayer`. Nobody has measured whether that layer forwards them to HDMI.
 
-**Verdict so far: engine side yes, television side not read yet.** See the results table below.
+**Verdict (2026-11-13, Apple TV 4K A12, tvOS 27.2, LG G4): yes.** The television follows HDR10 metadata
+the engine attaches, on VideoToolbox's buffers and on the engine's own (the chain), mid-stream, within
+about 2 s. Read from a filmed pulse, see the results below.
 
 ## How it tells whose metadata arrived
 
@@ -163,7 +165,7 @@ frame carried before and after, what the format description built from it carrie
 | date | Apple TV | tvOS | television | engine side | M vs S | CM vs C | pacing 24 / 60 |
 |---|---|---|---|---|---|---|---|
 | 2026-11-13 | 4K (2nd gen), A12 | 27.2 | LG OLED77G4 | M and CM carry 777 / 345 / 123 to the display layer; S and C none | not read (pattern too bright, photos auto-exposed) | not read | chain 10.5 ms mean, 13.9 ms max per 4K frame; 0 and 1 dropped frames in 25 s at 23.976 |
-| 2026-11-13 | same | 27.2 | same | `SEQ=control`, filmed (below) | SP pulses: the TV follows metadata on VideoToolbox's buffers | CP not run yet | SP 0 dropped frames in 30 s |
+| 2026-11-13 | same | 27.2 | same | `SEQ=control` and `SEQ=cp`, filmed (below) | SP pulses: the TV follows metadata on VideoToolbox's buffers | CP pulses: the TV follows metadata on the engine's own buffers | SP 0, CP 1 dropped frame in 30 s |
 
 **Read from a video, 2026-11-13.** The pulse is invisible by eye but measurable on film. An iPhone filmed
 `SEQ=control` with exposure locked low (AE/AF lock, then exposure down until the top patches are grey).
@@ -176,8 +178,9 @@ The raw 10-bit HLG luma of each patch was read per frame, and the ratio of the 4
 | P4 | clip, 4000 nit | 1.061 (a roll-off up to 4000) |
 | AP | AVPlayer, 1000 / 4000 every 6 s | follows the switches, +0.054, about 2 s behind them |
 | SP | engine `pulse`, 345 / 4000 every 3 s | follows the switches, +0.026, 1.75 s behind them; the same fit at other periods gives at most 0.009 |
+| CP | engine `chain+pulse` (`SEQ=cp`), the same switching | follows the switches, +0.033, swinging 1.00 to 1.06; the same fit at other periods gives at most 0.018 (19 s usable, the camera's exposure lock slipped) |
 
-So a metadata change the engine makes mid-stream on VideoToolbox's buffers reaches the LG G4, which
+So a metadata change the engine makes mid-stream, on VideoToolbox's buffers and on its own, reaches the LG G4, which
 takes about 2 s to settle into a new curve. Smaller than AP, because 3 s phases leave it little time to
 settle.
 

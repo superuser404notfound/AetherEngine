@@ -371,6 +371,14 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 
 The check: 240 frames of two real FEL clips were bit-identical with and without the copy. A long-GOP picture comparison on the Apple TV decoder is still open.
 
+### HDR10 metadata on the software path reaches the television (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2) into an LG OLED77G4 on 2026-11-13: mastering display and content light level attached to the buffers given to `AVSampleBufferDisplayLayer` reach the television, on VideoToolbox's buffers and on buffers the engine rendered itself.
+
+Current rule: [architecture-software.md › HDR10 pass-through probe](architecture-software.md#hdr10-pass-through-probe).
+
+The check: the probe's pulse modes switch the metadata every 3 s on an unchanged picture. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch follows each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. Numbers and method: [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md). Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path today sends none.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.

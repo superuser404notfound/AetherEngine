@@ -7,6 +7,7 @@
 #   DEVICE=... ./run_tv.sh --no-build           play only (app already installed)
 #   DEVICE=... SEQ=pulse ./run_tv.sh            no camera: a steady arm, then the metadata switching every
 #                                               3 s with and without the chain (about 2 min, watch by eye)
+#   DEVICE=... SEQ=cp ./run_tv.sh               the chain pulse alone, for filming: setup, then CP 30 s
 #   DEVICE=... SEQ=control ./run_tv.sh          the pulse's control: AVPlayer with the 1000 and the 4000
 #                                               nit clip, steady and alternating, then the engine's pulse
 #   DEVICE=... SEQ=pace ./run_tv.sh             frame pacing: software vs chain at 23.976 and 59.94
@@ -43,23 +44,26 @@ else
 fi
 B="http://$IP:$PORT"
 S="secs=$SECS"
-# SETUP (60 s, SETUP=0 to skip; main, pulse and control) plays the pattern on loop, so the television's HDR
+# SETUP (SETUP_SECS, default 60; SETUP=0 to skip; main, pulse, cp and control) plays the pattern on loop, so the television's HDR
 # picture settings, or a camera's exposure, can be set on it before anything is measured.
 SETUP_ARM=""
-[[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=60,"
+[[ "${SETUP:-1}" != 0 ]] && SETUP_ARM="SETUP|setup|$B/pattern_24.mp4|secs=${SETUP_SECS:-60},"
 case "$SEQ" in
   main)
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|$S,N|native|$B/pattern_24.mp4|$S,S|software|$B/pattern_24.mp4|$S,M|meta|$B/pattern_24.mp4|$S,C|chain|$B/pattern_24.mp4|$S,CM|chainmeta|$B/pattern_24.mp4|$S" ;;
   pulse)
     # S first, so the steady look is fresh when the pulse arms start. 30 s is ten switches.
     ARMS="${SETUP_ARM}S|software|$B/pattern_24.mp4|secs=15,SP|pulse|$B/pattern_24.mp4|secs=30,CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
+  cp)
+    # A pulse is its own reference, so CP alone answers for the engine's own buffers.
+    ARMS="${SETUP_ARM}CP|chainpulse|$B/pattern_24.mp4|secs=30" ;;
   control)
     # Does the television visibly follow HDR10 metadata at all? P and P4 differ only in metadata, AP
     # alternates them every 6 s through AVPlayer, SP is the engine's pulse for comparison.
     ARMS="${SETUP_ARM}P|avplayer|$B/pattern_24.mp4|secs=15,P4|avplayer|$B/pattern_24_m4000.mp4|secs=15,AP|avpulse|$B/pattern_24.mp4|secs=48,SP|pulse|$B/pattern_24.mp4|secs=30" ;;
   pace)
     ARMS="S24|software|$B/pattern_24.mp4|secs=25,C24|chain|$B/pattern_24.mp4|secs=25,S60|software|$B/pattern_60.mp4|secs=25,C60|chain|$B/pattern_60.mp4|secs=25" ;;
-  *) echo "unknown SEQ=$SEQ (main|pulse|control|pace)"; exit 1 ;;
+  *) echo "unknown SEQ=$SEQ (main|pulse|cp|control|pace)"; exit 1 ;;
 esac
 # Only the clips this sequence plays have to exist.
 # avpulse also plays the clip's _m4000 twin.
