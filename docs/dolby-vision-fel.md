@@ -891,6 +891,8 @@ With the `DolbyVisionFelCurves` trait (off by default), a Profile 7 FEL source o
 
 A scene without a residual (`disable_residual_flag`, MEL) or whose picture cannot be decoded keeps the stream's mapping as it is.
 
+A GOP with a picture that has neither a PTS nor a DTS keeps the stream's mapping for all of its frames, because its pictures cannot be matched to their decoded output. The fit starts afresh at the next GOP. Stream-copy cuts can begin this way (PR #1064).
+
 **Why luma only.** On the three titles below, the chroma residual adds nothing on top of the stream's own MMR chroma (identical Delta E to two decimals). Folding it into the MMR terms would amount to re-fitting MMR parameters, which the curve fold deliberately does not do.
 
 **What it cannot do.** A curve maps every pixel of a scene with the same value the same way. So the fold recovers the enhancement layer's global effect (brightness per tone) and none of its local detail (12-bit refinement, grain, texture), nor a residual whose size depends on colour as well as brightness.

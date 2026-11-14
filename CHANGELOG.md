@@ -12,6 +12,11 @@ the public-API contract.
 
 ### Fixed
 
+- **The FEL curve fold no longer crashes on a GOP with undated packets (#1064).** With `DolbyVisionFelCurves`
+  on, a stream-copy cut of a Profile 7 FEL file can start with packets that carry neither a PTS nor a DTS.
+  Measuring the frame spacing then subtracted `AV_NOPTS_VALUE` and trapped on the overflow. Such a GOP now keeps
+  the stream's mapping, and the next GOP fits afresh. A span too wide to subtract between two valid timestamps
+  is caught the same way. Thanks to orut34iop for the fix and the byte-identical control runs.
 - **An audio pick during a load no longer drops the Dolby Vision route (#1061).** A `selectAudioTrack` made as
   soon as `audioTracks` published landed inside the load's display handshake. Its rebuild replaced the load
   before the load had stored its panel answers, so a DV or HDR title went to the media playlist (HDR10 base
