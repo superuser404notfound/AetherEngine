@@ -187,6 +187,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// the decode thread afterwards, the same discipline `use10Bit` and the other open-time fields keep.
     private var containerColor = ColorDescription.unspecified
 
+    /// AE#957: the container's HDR10 static metadata (`mdcv` / `clli`, Matroska's colour metadata),
+    /// for a PQ stream. Written in `open` like `containerColor`.
+    private var containerHDR10 = HDR10StaticMetadataSEI.Values.none
+    /// The last values a decoded frame carried. libavcodec exports them only on some frames (HEVC on
+    /// the pictures whose access unit had the SEI), so they stay until a frame brings new ones. Updated
+    /// as each frame leaves the decoder; guarded by `lock`, like everything `emit` reads.
+    private var streamHDR10 = HDR10StaticMetadataSEI.Values.none
+
     /// Deinterlaced frames dropped for carrying no PTS (see the drop site in decode()). Guarded by `lock`.
     private var droppedUntimestampedFields = 0
 
@@ -291,6 +299,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         av_dict_free(&opts)
 
         containerColor = ColorDescription(codecpar: codecpar)
+        containerHDR10 = codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084
+            ? HDR10StaticMetadataSEI.fromCodedSideData(codecpar) : .none
         let bitsPerSample = codecpar.pointee.bits_per_raw_sample
         let isHDRTransfer = ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc)
         use10Bit = bitsPerSample > 8 || isHDRTransfer
@@ -394,6 +404,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             // consumer reads the frame, for the same reason the timestamp repair below runs here.
             ColorDescription.backfill(frame: f, container: containerColor)
             decodedFormatKey = DecodedFormatKey(pixelFormat: f.pointee.format, color: ColorDescription(frame: f))
+            // AE#957: every decoded frame, so the values a pre-roll frame (skipped, not emitted) carried still count.
+            if f.pointee.nb_side_data > 0 {
+                streamHDR10 = HDR10StaticMetadataSEI.fromFrameSideData(f).filling(from: streamHDR10)
+            }
 
             // #407: repair the frame's own timestamp BEFORE anything reads it. A frame that reaches
             // the renderer with no PTS is unschedulable and gets dropped there, so every consumer
@@ -636,6 +650,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             VTPixelTransferSessionInvalidate(session)
             transferSession = nil
         }
+        streamHDR10 = .none
         // Nil onFrame inside the lock: emit() reads it under the same lock; unsynchronized write is a data race.
         onFrame = nil
         onCacheTiming = nil
@@ -812,6 +827,33 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         CVBufferSetAttachment(pb, kCVImageBufferColorPrimariesKey, tags.primaries, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferTransferFunctionKey, tags.transfer, .shouldPropagate)
         CVBufferSetAttachment(pb, kCVImageBufferYCbCrMatrixKey, tags.matrix, .shouldPropagate)
+        attachHDR10(from: frame, to: pb)
+    }
+
+    /// AE#957: HDR10 static metadata (mastering display, content light level) for a PQ frame: the
+    /// latest a decoded frame carried (`streamHDR10`), else the container's. Without it the television
+    /// gets HDR10 with no static metadata, as it did from VideoToolbox's frames. Every other frame
+    /// has both keys removed, since a pool buffer comes back with what its last use left on it.
+    private func attachHDR10(from frame: UnsafeMutablePointer<AVFrame>, to pb: CVPixelBuffer) {
+        let values = frame.pointee.color_trc == AVCOL_TRC_SMPTE2084
+            ? streamHDR10.filling(from: containerHDR10) : .none
+        Self.setHDR10(values, on: pb)
+    }
+
+    /// Sets the keys `values` has and removes the others.
+    static func setHDR10(_ values: HDR10StaticMetadataSEI.Values, on pb: CVPixelBuffer) {
+        if let masteringDisplay = values.masteringDisplay {
+            CVBufferSetAttachment(pb, kCVImageBufferMasteringDisplayColorVolumeKey,
+                                  masteringDisplay as CFData, .shouldPropagate)
+        } else {
+            CVBufferRemoveAttachment(pb, kCVImageBufferMasteringDisplayColorVolumeKey)
+        }
+        if let contentLightLevel = values.contentLightLevel {
+            CVBufferSetAttachment(pb, kCVImageBufferContentLightLevelInfoKey,
+                                  contentLightLevel as CFData, .shouldPropagate)
+        } else {
+            CVBufferRemoveAttachment(pb, kCVImageBufferContentLightLevelInfoKey)
+        }
     }
 
     // MARK: - Pixel Aspect Ratio (anamorphic SD)

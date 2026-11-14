@@ -18,6 +18,26 @@ the public-API contract.
   full rendition for PiP, AirPlay and external displays, and `false` goes back to the marker. Thanks to Anquietas
   for the request.
 
+### Fixed
+
+- **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
+  attaches no mastering display or content light level to the frames it decodes, so the software path sent
+  HDR10 with none, and the television tone-mapped without knowing the master. The decoder now reads the
+  stream's values (from the container, the `hvcC` / `av1C`, or the SEI or AV1 metadata OBUs of the first key
+  frames) and attaches them to every frame. A frame that already carries its own keeps them. The libavcodec
+  decoder (dav1d AV1, VP9, H.264 High 10 from x264, HEVC Rext) sent none either; it now attaches the values
+  its frames carry, or the container's. Covered by `SoftwarePathCarriesStreamHDR10MetadataTests` and
+  `HDR10MetadataFromAV1AndDecodedFramesTests`.
+- **HDR10 HEVC on the software path no longer copies every frame (#957).** VideoToolbox tagged a PQ BT.2020
+  HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
+  Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
+  them itself, and no frame is copied. Covered by `DecoderFormatCarriesStreamColourAndHDR10Tests`.
+- **The software path's format description follows a change of HDR10 metadata (#957).** The renderer reused
+  its format description while size, pixel format and colour tags stayed the same, so mastering display
+  and content light level values that changed mid-stream never reached the display layer: it kept the
+  first frame's. The values are now part of the cache key. Covered by
+  `FormatDescriptionFollowsHDR10MetadataTests`.
+
 ## [7.66.1] - 2026-11-13
 
 ### Fixed

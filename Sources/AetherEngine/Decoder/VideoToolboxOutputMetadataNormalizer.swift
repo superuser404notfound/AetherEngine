@@ -1,6 +1,7 @@
 import Foundation
 import CoreVideo
 import VideoToolbox
+import os
 import AetherLibavutil
 
 /// Supplies codec-declared display metadata without mutating immutable VideoToolbox output.
@@ -24,32 +25,58 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
     private var poolFormat: PoolFormat?
     private var loggedFailure = false
 
+    /// What happened to each frame since the last `takeOutcomes()`. The owned copy is the costly one
+    /// (a full-frame GPU transfer), so a session that copies every frame shows here. Its own lock: the
+    /// matching path takes no other.
+    struct Outcomes: Equatable, Sendable {
+        var asDecoded = 0
+        var inPlace = 0
+        var copied = 0
+        var copyFailed = 0
+        var total: Int { asDecoded + inPlace + copied + copyFailed }
+    }
+    private let outcomes = OSAllocatedUnfairLock(initialState: Outcomes())
+
+    /// The counts so far, and a fresh start.
+    func takeOutcomes() -> Outcomes {
+        outcomes.withLock { counts in
+            defer { counts = Outcomes() }
+            return counts
+        }
+    }
+
     func applyingOutputMetadata(
         to imageBuffer: CVPixelBuffer,
         isModifiable: Bool,
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values = .none
     ) -> CVPixelBuffer {
         if Self.outputMetadataMatches(
             imageBuffer,
             colorPrimaries: colorPrimaries,
             transferFunction: transferFunction,
             yCbCrMatrix: yCbCrMatrix,
-            pixelAspectRatio: pixelAspectRatio
+            pixelAspectRatio: pixelAspectRatio,
+            hdr10: hdr10
         ) {
+            outcomes.withLock { $0.asDecoded += 1 }
             return imageBuffer
         }
 
         let destination: CVPixelBuffer
         if isModifiable {
             destination = imageBuffer
+            outcomes.withLock { $0.inPlace += 1 }
         } else {
             guard let copiedBuffer = transferToOwnedBuffer(imageBuffer) else {
+                outcomes.withLock { $0.copyFailed += 1 }
                 logFailureOnce()
                 return imageBuffer
             }
+            outcomes.withLock { $0.copied += 1 }
             destination = copiedBuffer
             CVBufferRemoveAllAttachments(destination)
             CVBufferPropagateAttachments(imageBuffer, destination)
@@ -60,7 +87,8 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
             colorPrimaries: colorPrimaries,
             transferFunction: transferFunction,
             yCbCrMatrix: yCbCrMatrix,
-            pixelAspectRatio: pixelAspectRatio
+            pixelAspectRatio: pixelAspectRatio,
+            hdr10: hdr10
         )
         return destination
     }
@@ -70,8 +98,21 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values
     ) {
+        // AE#957: the stream's HDR10 static metadata where the frame lacks it. A key the frame already
+        // carries is the decoder's own value and stays; only a missing one is filled.
+        if let masteringDisplay = hdr10.masteringDisplay,
+           propagatingAttachment(imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey) == nil {
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey,
+                                  masteringDisplay as CFData, .shouldPropagate)
+        }
+        if let contentLightLevel = hdr10.contentLightLevel,
+           propagatingAttachment(imageBuffer, kCVImageBufferContentLightLevelInfoKey) == nil {
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferContentLightLevelInfoKey,
+                                  contentLightLevel as CFData, .shouldPropagate)
+        }
         if let colorPrimaries {
             CVBufferSetAttachment(
                 imageBuffer,
@@ -107,21 +148,24 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         }
     }
 
+    /// Only a propagating attachment counts as a match: the subtitle compositor's copy carries
+    /// nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
+    private static func propagatingAttachment(_ imageBuffer: CVPixelBuffer, _ key: CFString) -> CFTypeRef? {
+        var mode = CVAttachmentMode.shouldPropagate
+        guard let value = CVBufferCopyAttachment(imageBuffer, key, &mode),
+              mode == .shouldPropagate else { return nil }
+        return value
+    }
+
     private static func outputMetadataMatches(
         _ imageBuffer: CVPixelBuffer,
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values
     ) -> Bool {
-        // Only a propagating attachment counts as a match: the subtitle compositor's copy carries
-        // nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
-        func attachment(_ key: CFString) -> CFTypeRef? {
-            var mode = CVAttachmentMode.shouldPropagate
-            guard let value = CVBufferCopyAttachment(imageBuffer, key, &mode),
-                  mode == .shouldPropagate else { return nil }
-            return value
-        }
+        func attachment(_ key: CFString) -> CFTypeRef? { propagatingAttachment(imageBuffer, key) }
 
         if let colorPrimaries,
            attachment(kCVImageBufferColorPrimariesKey) as? String != colorPrimaries as String {
@@ -133,6 +177,13 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         }
         if let yCbCrMatrix,
            attachment(kCVImageBufferYCbCrMatrixKey) as? String != yCbCrMatrix as String {
+            return false
+        }
+        // Any HDR10 value the frame carries counts: it is not replaced, only a missing key is filled.
+        if hdr10.masteringDisplay != nil, attachment(kCVImageBufferMasteringDisplayColorVolumeKey) == nil {
+            return false
+        }
+        if hdr10.contentLightLevel != nil, attachment(kCVImageBufferContentLightLevelInfoKey) == nil {
             return false
         }
         if let pixelAspectRatio {
