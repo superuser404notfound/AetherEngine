@@ -159,6 +159,28 @@ struct FrameChainTests {
         #expect(!narrow)
     }
 
+    /// AE#957: a stage that declares its output's colour volume sets the frames' HDR10 metadata, and a
+    /// stage after it that declares nothing keeps it. The chain's attach step writes it over the source's.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957AStagesDeclaredColorVolumeReachesTheOutput() throws {
+        let fitted = HDR10StaticMetadata(maxCLL: 800, maxFALL: 300, masteringPeakNits: 800, masteringMinNits: 0.0005)
+        let input = try ChainFrames.gradient(320, 180, tenBit: true)
+        let source = HDR10StaticMetadata(maxCLL: 4000, maxFALL: 1000, masteringPeakNits: 4000, masteringMinNits: 0.005)
+        CVBufferSetAttachment(input, kCVImageBufferContentLightLevelInfoKey, source.contentLightLevel as CFData,
+                              .shouldPropagate)
+        let plain = try chain(320, 180, stages: [PassThroughStage()])
+        #expect(plain.outputColorVolume == .unchanged)
+        let fitting = try chain(320, 180, stages: [DeclaringStage(.hdr10(fitted)), PassThroughStage()])
+        #expect(fitting.outputColorVolume == .hdr10(fitted))
+        let (out, _) = try fitting.process(input, picture: whole(320, 180))
+        fitting.attach(from: input, to: out)
+        let lightLevel = CVBufferCopyAttachment(out, kCVImageBufferContentLightLevelInfoKey, nil) as? Data
+        let mastering = CVBufferCopyAttachment(out, kCVImageBufferMasteringDisplayColorVolumeKey, nil) as? Data
+        #expect(lightLevel == fitted.contentLightLevel)
+        #expect(mastering == fitted.masteringDisplayColorVolume)
+    }
+
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
     func unsupportedFormatIsRefused() throws {
@@ -313,6 +335,17 @@ private final class LockedFlag: @unchecked Sendable {
 }
 
 /// 8-bit (420v) and 10-bit (x420) BT.709 video-range test frames. 10-bit samples sit in the high bits of 16.
+/// Hands its input on unchanged but declares a colour volume, as a tone mapper would.
+@available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+private final class DeclaringStage: FrameChainStage {
+    let outputColorVolume: FrameChainColorVolume
+    init(_ volume: FrameChainColorVolume) { outputColorVolume = volume }
+    func prepare(device: MTLDevice, kernels: FrameChainKernels, input: (Int, Int), finalTarget: (Int, Int)?) throws -> (Int, Int) {
+        input
+    }
+    func encode(_ encoder: MTLComputeCommandEncoder, input: MTLTexture) -> MTLTexture { input }
+}
+
 private enum ChainFrames {
     struct Failure: Error {}
 

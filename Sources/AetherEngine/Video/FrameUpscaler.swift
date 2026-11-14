@@ -780,12 +780,6 @@ private final class Stage {
     private var outputPools: [OSType: CVPixelBufferPool] = [:]
     private var cropPools: [OSType: CVPixelBufferPool] = [:]
 
-    static let droppedAttachmentKeys: Set<String> = [
-        kCVImageBufferCleanApertureKey as String, kCVImageBufferPreferredCleanApertureKey as String,
-        kCVImageBufferFieldCountKey as String, kCVImageBufferFieldDetailKey as String,
-        kCVImageBufferDisplayDimensionsKey as String,
-    ]
-
     /// `mlOnly` builds the degraded rung of `plan`: its ML pass, delivered at the ML output size. `restores`
     /// picks the line-art stage's top rung (restore pass and highlight clamp) for a `.lineArt` plan.
     init(plan: UpscalePlan, gpu: GPU, mlOnly: Bool = false, restores: Bool = true) throws {
@@ -958,12 +952,8 @@ private final class Stage {
     private func attach(to output: CVPixelBuffer, from original: CVPixelBuffer,
                         times: inout FrameUpscaler.StageTimes) -> CVPixelBuffer {
         let t0 = DispatchTime.now().uptimeNanoseconds
-        CVBufferRemoveAllAttachments(output)
-        if let attachments = CVBufferCopyAttachments(original, .shouldPropagate) as? [String: Any] {
-            // Geometry and field keys describe the input buffer, not this one.
-            let carried = attachments.filter { !Self.droppedAttachmentKeys.contains($0.key) }
-            CVBufferSetAttachments(output, carried as CFDictionary, .shouldPropagate)
-        }
+        // The chain's stages may declare a new colour volume; the other paths keep the source's.
+        FrameChainOutputAttachments.carry(from: original, to: output, volume: chain?.outputColorVolume ?? .unchanged)
         if let sourcePAR {
             // The ML-only rung keeps the source's pixel shape: the decoder's tag, else the plan's.
             let par = CVBufferCopyAttachment(original, kCVImageBufferPixelAspectRatioKey, nil)

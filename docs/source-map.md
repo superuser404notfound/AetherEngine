@@ -582,6 +582,7 @@ Notes:
 | `IFrameJPEGBuilder.swift` | AE#682: one keyframe as a Motion JPEG fragment, for sources whose own keyframes AVKit will not show. |
 | `IFramePayloadCache.swift` | AE#682: byte-capped on-disk cache of keyframe payloads read for the rendition. |
 | `FrameUpscaler.swift` | The per-frame upscale stage (#846): optional VT super resolution, then MetalFX, with overrun fallback. |
+| `FrameChainOutput.swift` | AE#957: `FrameChainColorVolume`, the colour volume a frame chain stage declares for its output, and the attachments a chain's output buffer carries (the source's, minus its geometry, with the declared HDR10 metadata). |
 | `UpscaleRouteDecision.swift` | Whether and how a load upscales: source geometry, the plan, and process-wide failure and cost memory. |
 
 ### `Video/FelCurves/`
@@ -602,7 +603,7 @@ The `Dovi*` files build only with the `DualLayerDolbyVision` trait.
 
 | File | What it does |
 | --- | --- |
-| `FrameChain.swift` | The GPU frame chain (AE#957, AE#1039): a decoded 8 or 10-bit 4:2:0 frame to half-float RGB, through a list of `FrameChainStage`s, and back to the input's format at the target size, in one command buffer. `PassThroughStage` and `LineArtStage` are its stages; `FrameUpscaler` runs it for the `.lineArt` plan. A chain of identity stages at its own size runs as one kernel without the RGB texture (four luma samples per access where the width allows). |
+| `FrameChain.swift` | The GPU frame chain (AE#957, AE#1039): a decoded 8 or 10-bit 4:2:0 frame to half-float RGB, through a list of `FrameChainStage`s, and back to the input's format at the target size, in one command buffer. `PassThroughStage` and `LineArtStage` are its stages; `FrameUpscaler` runs it for the `.lineArt` plan. A chain of identity stages at its own size runs as one kernel without the RGB texture (four luma samples per access where the width allows). Each stage declares its output's colour volume, and `attach` writes the frames' HDR10 metadata from it. |
 | `LineArtShaderSource.swift` | Generated (`Scripts/generate-line-art-shader.py`) from Anime4K's Upscale CNN x2 (S), MIT: four half-precision convolution kernels and the depth-to-space kernel, compiled at runtime. |
 | `UpscaleShaderSource.swift` | NV12 / RGBA kernels around MetalFX for the automatic upscale stage, and the Y'CbCr matrix from a buffer's tag. |
 | `DoviFelChromaFormat.swift` | Chroma sampling of the composed frame: 4:2:0 (the composition), 4:2:2 and 4:4:4 (experimental, `AETHER_FEL_CHROMA`), and each format's CoreVideo layout. |
