@@ -400,7 +400,7 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 
 **The fix.** The format description VideoToolbox decodes with now carries the stream's colour (as AV1 and VP9 already did) and its HDR10 values when they are known at open. VideoToolbox then attaches both to its own output: 486 of 486 frames matched as decoded, none copied.
 
-**The frame chain's RGB texture.** The two passes write a 66 MB half-float RGB texture per 4K frame and read it back. A chain of pass-through stages now runs as one kernel without it. The same device, same day:
+**The frame chain's RGB texture.** The two passes write a 66 MB half-float RGB texture per 4K frame and read it back. A chain of pass-through stages now runs as one kernel without it. A separate run on the same device and day, so the two-pass row differs a little from the table above:
 
 | Chain, 4K P010 | Wall median (us) | GPU median (us) |
 |---|---|---|
