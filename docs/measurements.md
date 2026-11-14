@@ -377,7 +377,7 @@ Measured on an Apple TV 4K (A12, tvOS 27.2) into an LG OLED77G4 on 2026-11-13: m
 
 Current rule: [architecture-software.md › VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
 
-The check: the metadata on an unchanged picture switched every 3 s between a 1000 and a 4000 nit set. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch followed each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. The method and numbers are in #957. Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path sent none.
+The check: the metadata on an unchanged picture switched every 3 s between a 1000 and a 4000 nit set. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch followed each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. Numbers and method: [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md), with the probe described in [architecture-software.md › HDR10 pass-through probe](architecture-software.md#hdr10-pass-through-probe). Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path sent none.
 
 ### Per-frame cost of the software path (AE#957)
 

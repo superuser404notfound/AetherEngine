@@ -1214,12 +1214,17 @@ final class SoftwarePlaybackHost {
 
     /// #846: `handler` wrapped in the upscale stage when a plan is set and a stage builds, else unchanged.
     /// Never for the dual-layer decoder (FEL sources are HDR and refused upstream).
+    /// AE#957: without a plan, `AETHER_HDR10_PROBE` wraps it in the HDR10 pass-through probe instead.
     func upscaledFrameHandler(
         _ handler: @escaping DecodedFrameHandler,
         decoder: any VideoDecodingPipeline,
         frameRate: Double?
     ) -> DecodedFrameHandler {
         frameUpscaler = nil
+        if upscalePlan == nil, !Self.isDualLayer(decoder), let settings = HDR10ProbeSettings.fromEnvironment() {
+            let probe = HDR10ProbeStage(settings: settings)
+            return UpscalingFrameHandler.wrap(handler) { probe.process($0, pts: $1) }
+        }
         guard let plan = upscalePlan, !Self.isDualLayer(decoder) else { return handler }
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
