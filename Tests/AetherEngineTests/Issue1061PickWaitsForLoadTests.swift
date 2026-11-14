@@ -40,6 +40,23 @@ struct Issue1061PickWaitsForLoadTests {
         #expect(engine.loadGeneration == generation)
     }
 
+    @Test("released by a stop even while the replaced load has not unwound")
+    func releasedByStopAlone() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        engine.stopInternal(resetDisplayCriteria: false)
+        let generation = engine.loadGeneration
+        engine.beginLoadInFlight(generation)
+        let waiter = Task { @MainActor in
+            await engine.awaitLoadInFlightSettled(pick: "test")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        engine.stopInternal(resetDisplayCriteria: false)
+        await waiter.value
+        #expect(engine.loadGeneration != generation)
+        engine.endLoadInFlight(generation)
+    }
+
     @Test("released when a stop and a newer load take over")
     func releasedBySupersede() async throws {
         let engine = try AetherEngine()

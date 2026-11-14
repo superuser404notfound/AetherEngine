@@ -2577,7 +2577,11 @@ public final class AetherEngine: ObservableObject {
     /// every suspension point. Without it, a load suspended at the probe/criteria/session-start could resume
     /// after a newer load, orphan the successor's producer+loopback server, and resurrect playback after
     /// dismissal. A superseded load throws CancellationError at the first checkpoint.
-    var loadGeneration: UInt64 = 0
+    var loadGeneration: UInt64 = 0 {
+        // AE#1061: a stop() or newer load releases a pick parked on the load it replaced at once, not
+        // only when that load gets round to unwinding.
+        didSet { resumeLoadSettleWaiters() }
+    }
 
     /// Separates cache lifecycle callbacks from superseding sessions.
     var sessionCacheStatusToken: UInt64 = 0
@@ -9335,7 +9339,8 @@ public final class AetherEngine: ObservableObject {
     /// as `audioSourceStreamIndex` and pays nothing.
     ///
     /// Returns as soon as the load the caller saw is no longer the one in flight: it returned, or a
-    /// stop() or newer load took over, which the caller's own generation guard then turns away.
+    /// stop() or newer load took over (both move the generation), which the caller's own generation
+    /// guard then turns away.
     func awaitLoadInFlightSettled(pick: String) async {
         guard loadInFlight else { return }
         let generation = loadGeneration
