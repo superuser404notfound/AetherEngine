@@ -61,7 +61,12 @@ struct APACEncodePipelineTests {
         let finished = pipeline.finish()
         got += finished.packets
         #expect(finished.errors.isEmpty)
-        #expect(got.map(\.data) == expected.map(\.data))
+        // Two encoders need not agree byte for byte (#1063), so the audio is compared decoded.
+        #expect(got.count == expected.count)
+        let snr = try APACTestDecoding.snr(
+            got.map(\.data), expected.map(\.data),
+            format: reference.formatDescription, layoutTag: Self.layout.channelLayoutTag)
+        #expect(snr > APACTestDecoding.sameEncodeSNR, "decoded \(snr) dB apart")
         #expect(got.map(\.pts) == got.indices.map { 96_000 + Int64($0) * 1024 })
     }
 
@@ -76,11 +81,17 @@ struct APACEncodePipelineTests {
         submit(pipeline, &buffer, chunks: 0..<10, origin: 480_000)
         let out = pipeline.finish()
 
-        let fresh = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+        let freshEncoder = try makeEncoder()
+        let fresh = APACEncodePipeline(encoder: freshEncoder, channels: Self.layout.channelCount,
                                        bufferFrames: Self.chunk)
         var freshBuffer = fresh.takeInitialBuffer()
         submit(fresh, &freshBuffer, chunks: 0..<10, origin: 480_000)
-        #expect(out.packets.map(\.data) == fresh.finish().packets.map(\.data), "the encoder really started over")
+        let freshPackets = fresh.finish().packets
+        #expect(out.packets.count == freshPackets.count)
+        let snr = try APACTestDecoding.snr(
+            out.packets.map(\.data), freshPackets.map(\.data),
+            format: freshEncoder.formatDescription, layoutTag: Self.layout.channelLayoutTag)
+        #expect(snr > APACTestDecoding.sameEncodeSNR, "the encoder really started over (\(snr) dB apart)")
         #expect(out.errors.isEmpty)
         #expect(out.packets.first?.pts == 480_000, "nothing from before the reset survives")
         #expect(out.packets.map(\.pts) == out.packets.indices.map { 480_000 + Int64($0) * 1024 })

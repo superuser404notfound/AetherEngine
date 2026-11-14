@@ -24,6 +24,11 @@ the public-API contract.
   `M_SQRT1_2`, the synchronous `AVMetadataItem.stringValue`, and a `weak var` that was never mutated. The audio
   menu now loads a rendition's title asynchronously and drops an answer whose item or selection changed while
   it waited. Thanks to YangHanqing for the report.
+- **The APAC tests no longer expect two encoders to write the same bytes (#1063).** On an M6 under macOS 27.0.1,
+  two encoders fed the same PCM wrote different packets on every run, while the decoded audio matched at a signal to error ratio of about
+  93 dB. Three tests compared the bytes and failed there. They now decode both runs and require a ratio above
+  60 dB; a swapped packet measures 12.7 dB and a repeated one 15.7 dB, so both still fail. Test
+  change only, the encoder settings are untouched. Thanks to YangHanqing for the report and the measurements.
 
 ## [7.67.0] - 2026-11-14
 

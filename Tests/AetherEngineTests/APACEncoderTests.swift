@@ -114,7 +114,12 @@ struct APACEncoderTests {
             actual += try large.flush()
             var expected = try sliced.encode(planes: planes, frameCount: frames)
             expected += try sliced.flush()
-            #expect(actual.map(\.data) == expected.map(\.data))
+            // Two encoders need not agree byte for byte (#1063), so the audio is compared decoded.
+            #expect(actual.count == expected.count)
+            let snr = try APACTestDecoding.snr(
+                actual.map(\.data), expected.map(\.data),
+                format: large.formatDescription, layoutTag: layout.channelLayoutTag)
+            #expect(snr > APACTestDecoding.sameEncodeSNR, "decoded \(snr) dB apart")
             let expectedCount = (frames + large.leadingFrames + 1023) / APACEncoder.framesPerPacket
             #expect(abs(actual.count - expectedCount) <= 1)
         }
