@@ -338,6 +338,12 @@ private func objectAudioRendering(_ flag: String?, format: String? = nil) -> Obj
     #if !(TrueHDObjectAudio || DTSXObjectAudio)
     print("[aetherctl] note: --atmos-bed renders nothing without the TrueHDObjectAudio / DTSXObjectAudio traits")
     #endif
+    #if DEBUG
+    // A debug build renders the bed about 5x slower than real time (Unfold: 18.8 s against 2.0 s), so
+    // AVPlayer waits for audio and `play` ends in "clock did not advance". Not an engine defect.
+    print("[aetherctl] note: a debug build renders the object bed below real time, so play may stall; "
+        + "build with -c release to judge playback")
+    #endif
     switch format {
     case nil, "apac": return .apac(layout)
     case "lpcm": return .lpcm(layout)
