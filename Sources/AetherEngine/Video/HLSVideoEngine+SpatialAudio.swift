@@ -66,6 +66,19 @@ extension HLSVideoEngine {
         return layout
     }
 
+    /// `rendering` as it applies to one codec: `.off` for DTS when the host kept DTS:X on the channel
+    /// bridge for this load (`LoadOptions.rendersDTSXObjectAudio`, AE#1060), unchanged otherwise.
+    static func objectAudioRendering(
+        _ rendering: ObjectAudioRendering, codecID: AVCodecID, rendersDTSX: Bool
+    ) -> ObjectAudioRendering {
+        codecID == AV_CODEC_ID_DTS && !rendersDTSX ? .off : rendering
+    }
+
+    /// This session's `objectAudioRendering` for a track of `codecID`.
+    func objectAudioRendering(for codecID: AVCodecID) -> ObjectAudioRendering {
+        Self.objectAudioRendering(objectAudioRendering, codecID: codecID, rendersDTSX: rendersDTSXObjectAudio)
+    }
+
     static func objectAudioSource(codecID: AVCodecID, profile: Int32) -> ObjectAudioSource? {
         switch (codecID, profile) {
         case (AV_CODEC_ID_TRUEHD, AV_PROFILE_TRUEHD_ATMOS):
@@ -207,12 +220,13 @@ extension HLSVideoEngine {
         audioLanguage: String?
     ) -> HLSSegmentProducer? {
         let par = audioStream.pointee.codecpar.pointee
+        let rendering = objectAudioRendering(for: par.codec_id)
         guard let layout = Self.spatialRenderingLayout(
-            rendering: objectAudioRendering, codecID: par.codec_id,
+            rendering: rendering, codecID: par.codec_id,
             profile: par.profile, sampleRate: par.sample_rate),
               let source = Self.objectAudioSource(codecID: par.codec_id, profile: par.profile)
         else {
-            if objectAudioRendering != .off,
+            if rendering != .off,
                let source = Self.objectAudioSource(codecID: par.codec_id, profile: par.profile),
                !source.isBuiltIn {
                 EngineLog.emit(
@@ -221,7 +235,7 @@ extension HLSVideoEngine {
                     category: .session
                 )
             } else if par.codec_id == AV_CODEC_ID_TRUEHD {
-                if objectAudioRendering != .off {
+                if rendering != .off {
                     EngineLog.emit(
                         "[HLSVideoEngine] object rendering requested but TrueHD is not 48 kHz Atmos "
                         + "(profile=\(par.profile) rate=\(par.sample_rate)); keeping the channel bridge",
@@ -237,7 +251,13 @@ extension HLSVideoEngine {
                         category: .session
                     )
                 }
-            } else if par.codec_id == AV_CODEC_ID_DTS, objectAudioRendering != .off {
+            } else if par.codec_id == AV_CODEC_ID_DTS, objectAudioRendering != .off, !rendersDTSXObjectAudio {
+                EngineLog.emit(
+                    "[HLSVideoEngine] DTS:X rendering is off for this load (rendersDTSXObjectAudio false); "
+                    + "keeping the channel bridge",
+                    category: .session
+                )
+            } else if par.codec_id == AV_CODEC_ID_DTS, rendering != .off {
                 // Lossy DTS has no DTS:X to render; only the lossless profiles reach the DTS:X decoder.
                 EngineLog.emit(
                     "[HLSVideoEngine] object rendering requested but DTS is not 48 kHz DTS-HD Master Audio "
@@ -247,7 +267,7 @@ extension HLSVideoEngine {
             }
             return nil
         }
-        if let asked = objectAudioRendering.layout, asked != layout {
+        if let asked = rendering.layout, asked != layout {
             EngineLog.emit(
                 "[HLSVideoEngine] DTS:X is rendered into \(layout.rawValue) instead of \(asked.rawValue), "
                 + "the smallest bed that carries its channels one to one",

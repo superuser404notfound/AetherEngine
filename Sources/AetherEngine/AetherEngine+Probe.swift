@@ -761,11 +761,16 @@ extension AetherEngine {
         override: Int32?,
         preferredLanguages: [String],
         prefersObjectAudio: Bool = false,
+        rendersDTSX: Bool = true,
         defaultIndex: Int32 = -1
     ) -> Int32? {
         // Explicit host override wins, but only when it names a real audio track (else fall through).
         if let override, tracks.contains(where: { $0.id == Int(override) }) {
             return override
+        }
+        // AE#1060: a load that keeps DTS:X on the channel bridge has no heights to prefer it for.
+        let isRenderableObjectAudio = { (track: TrackInfo) in
+            Self.isRenderableObjectAudio(track, includesDTSX: rendersDTSX)
         }
         // AE#919: within a language the programme mix wins over audio description and commentary, which a
         // file may list first. #731: with object rendering on, TrueHD Atmos and DTS:X keep their heights,
@@ -847,8 +852,8 @@ extension AetherEngine {
     nonisolated static let linksDTSXObjectDecoder = OptionalComponent.dtsxObjectAudio.isBuiltIn
 
     /// The tracks object rendering keeps the heights of.
-    nonisolated static func isRenderableObjectAudio(_ track: TrackInfo) -> Bool {
-        isRenderableTrueHDAtmos(track) || isRenderableDTSX(track)
+    nonisolated static func isRenderableObjectAudio(_ track: TrackInfo, includesDTSX: Bool = true) -> Bool {
+        isRenderableTrueHDAtmos(track) || (includesDTSX && isRenderableDTSX(track))
     }
 
     /// Resolve the subtitle track to auto-activate from `LoadOptions.preferredSubtitleLanguages`: within the

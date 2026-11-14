@@ -169,6 +169,8 @@ The [Works on](#shared-flags) column lists where it is accepted.
 
 `--atmos-bed <layout>` sets `LoadOptions.objectAudioRendering = .apac(layout)`. A TrueHD Atmos or DTS:X track is rendered into that bed and served as APAC. Layouts: `5.1.2`, `5.1.4`, `7.1.2`, `7.1.4` or `9.1.6` (#731, #744). DTS:X with a layout below 7.1.4 is rendered as 7.1.4. It renders only in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio` traits.
 
+`play --no-dtsx-objects` sets `LoadOptions.rendersDTSXObjectAudio = false`: TrueHD Atmos still renders into the `--atmos-bed` layout, and DTS keeps the channel bridge (#1060). The log then says `DTS:X rendering is off for this load`.
+
 - The master reads `CODECS="…,apac.31.03"` (up to 12 channels) or `apac.31.04` (16).
 - The log carries `TrueHD Atmos: objects rendered into …` (or `DTS:X: bed and heights routed one to one into …`) and the `[SpatialAudioBridge] bed levels` lines.
 - A DTS-HD MA track whose frames do not decode as DTS:X logs `DTS-HD MA track is not DTS:X this engine renders (…); keeping the channel bridge` instead.

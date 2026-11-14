@@ -992,6 +992,8 @@ DTS:X's standard presentation is a 7.1 bed and four fixed heights (the top front
 
 A smaller layout (5.1.2, 5.1.4, 7.1.2) renders DTS:X as 7.1.4 instead. The host can set the layout to match the room, and the receiver maps the 7.1.4 bed onto its own speakers, the same as it does with tvOS's own Atmos. Nothing is panned, and a chain that cannot take twelve channels gets the 7.1 it would have had from the channel bridge, since tvOS folds the bed itself.
 
+A host that wants TrueHD Atmos in the small layout but DTS:X on the 7.1 channel bridge sets `LoadOptions.rendersDTSXObjectAudio = false` (#1060). That holds for every DTS track of the load, so a file with both tracks plays either one without a reload.
+
 #### The alternate presentations
 
 Some streams use an alternate presentation (FFmpeg labels some "DTS-HD MA + DTS:X IMAX"; Trinnov's "Experience" trailer is another). They carry the same four fixed heights after one to five object channels, behind their own syncwords (`0xF14000D0`, `D1`, `D3`, `D4`).

@@ -17,6 +17,12 @@ extension SoftwarePlaybackHost {
         guard let stream = dem.stream(at: streamIndex), let par = stream.pointee.codecpar else {
             throw AudioDecoderError.noCodecParameters
         }
+        let rendering = HLSVideoEngine.objectAudioRendering(
+            objectAudioRendering, codecID: par.pointee.codec_id, rendersDTSX: rendersDTSXObjectAudio)
+        if rendering != objectAudioRendering, !isLive {
+            EngineLog.emit("[SWHost] audio: DTS:X rendering is off for this load (rendersDTSXObjectAudio false)",
+                           category: .swPlayback)
+        }
         func pcm() throws -> (producer: any SoftwareAudioProducing, route: SoftwareAtmosRoute) {
             let decoder = AudioDecoder()
             decoder.shaping = audioShaping
@@ -28,9 +34,9 @@ extension SoftwarePlaybackHost {
                            category: .swPlayback)
             return try pcm()
         }
-        guard objectAudioRendering != .off, !isLive else {
+        guard rendering != .off, !isLive else {
             if let note = Self.eac3PCMRouteNote(
-                codecID: par.pointee.codec_id, rendering: objectAudioRendering, isLive: isLive,
+                codecID: par.pointee.codec_id, rendering: rendering, isLive: isLive,
                 dualLayerRoute: decodesDualLayer) {
                 EngineLog.emit(note, category: .swPlayback)
             }
@@ -58,7 +64,7 @@ extension SoftwarePlaybackHost {
         // profile, which reads as "not Atmos" to the route; its own major sync says whether it is.
         // Peeked at the head of the file like the JOC check, and only when rendering is asked for.
         if HLSVideoEngine.needsTrueHDMajorSyncVerdict(
-            codecID: par.pointee.codec_id, profile: par.pointee.profile, rendering: objectAudioRendering) {
+            codecID: par.pointee.codec_id, profile: par.pointee.profile, rendering: rendering) {
             let peek = await BlockingWork.detached(priority: .userInitiated) {
                 HLSVideoEngine.trueHDMajorSyncVerdict(demuxer: dem, streamIndex: streamIndex)
             }.value
@@ -71,7 +77,7 @@ extension SoftwarePlaybackHost {
             codecID: par.pointee.codec_id, profile: par.pointee.profile,
             sampleRate: par.pointee.sample_rate, channels: par.pointee.ch_layout.nb_channels,
             framesPerPacket: par.pointee.frame_size, isLive: isLive,
-            rendering: objectAudioRendering, confirmedJOC: joc?.carriesJOC == true)
+            rendering: rendering, confirmedJOC: joc?.carriesJOC == true)
         switch route {
         case .pcm:
             if par.pointee.codec_id == AV_CODEC_ID_EAC3 {
@@ -79,7 +85,7 @@ extension SoftwarePlaybackHost {
                                category: .swPlayback)
             } else if let reason = SoftwareAtmosRoute.apacRefusal(
                 codecID: par.pointee.codec_id, profile: par.pointee.profile,
-                sampleRate: par.pointee.sample_rate, rendering: objectAudioRendering) {
+                sampleRate: par.pointee.sample_rate, rendering: rendering) {
                 EngineLog.emit("[SWHost] audio: stays PCM (\(reason))", category: .swPlayback)
             }
             return try pcm()

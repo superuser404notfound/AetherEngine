@@ -2392,6 +2392,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `audioOnly` | false | Lean audio pipeline, no video machinery. Also set automatically when the probe finds no video stream. |
 | `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot be stream-copied into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels, and FLAC for two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. |
 | `objectAudioRendering` | `.off` | TrueHD Atmos and DTS:X with heights (#731), in a build with the object-audio traits. See [`objectAudioRendering`](#objectaudiorendering). |
+| `rendersDTSXObjectAudio` | true | `false` keeps DTS:X on the channel bridge while `objectAudioRendering` still renders TrueHD Atmos (#1060). See [`objectAudioRendering`](#objectaudiorendering). |
 | `confirmAtmos` | false | Confirms JOC per track in the background, and republishes `audioTracks` as tracks are confirmed. Never on the start path; skipped for live and forward-only readers. |
 | `preferredAudioLanguages` | empty | Audio pick for the first frame, from the engine's single probe. Ordered BCP-47 / ISO 639 tags; region and script are normalized and rank within one preference (#590). An explicit `audioSourceStreamIndex` still wins. |
 | `audioShaping` | `AudioShaping()` | Start the session with audio shaping in force (AE#923). Same value `setAudioShaping(_:)` reads and writes. |
@@ -2582,7 +2583,7 @@ tvOS sends either form to an Atmos receiver as Dolby MAT, and iOS plays either a
 **Which sources.** At 48 kHz, on OS 26+, only these:
 
 - TrueHD that FFmpeg marks Atmos
-- DTS-HD Master Audio whose first frames decode as DTS:X in its standard presentation, whatever FFmpeg's label. DTS:X renders only into `.l714` or `.l916`.
+- DTS-HD Master Audio whose first frames decode as DTS:X, whatever FFmpeg's label. DTS:X renders into `.l714` or `.l916`, and a smaller layout gets `.l714` (the receiver maps it onto its speakers).
 
 Anything else, or any failure to start, keeps `audioBridgeMode` (on the software host, the PCM decode).
 
@@ -2595,6 +2596,13 @@ Anything else, or any failure to start, keeps `audioBridgeMode` (on the software
 
 - It never prefers across a language or dub, and never over an explicit `audioSourceStreamIndex`.
 - It only applies where the bed can be rendered: a VOD video session, on the loopback route or the software host, on OS 26 or later.
+
+**Keeping DTS:X on the bridge.** `rendersDTSXObjectAudio = false` keeps every DTS track of the load on `audioBridgeMode`, while TrueHD Atmos still renders into the asked layout (#1060).
+
+- Use it when TrueHD Atmos should go into a small bed (5.1.2, say) but DTS:X should stay on the 7.1 bridge instead of becoming 7.1.4.
+- It holds for the whole load, so a viewer switching between a TrueHD Atmos track and a DTS-HD MA track needs no reload, and the host does not have to know before the first frame whether a DTS-HD MA track carries X.
+- The automatic audio pick then does not prefer a DTS:X track.
+- The default, `true`, renders both codecs as before. A `reloadAtCurrentPosition(applying:)` can change it.
 
 See [formats.md](formats.md#truehd-atmos-with-heights) and [DTS:X](formats.md#dtsx-with-heights).
 

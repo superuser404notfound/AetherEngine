@@ -305,6 +305,8 @@ final class SoftwarePlaybackHost {
     /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
     /// the renderer as Atmos instead of as the PCM decode of their core.
     var objectAudioRendering: ObjectAudioRendering = .off
+    /// From `LoadOptions.rendersDTSXObjectAudio`: false keeps DTS on the PCM decode (AE#1060).
+    var rendersDTSXObjectAudio = true
 
     /// AE#923: the host's audio shaping. Active shaping keeps the track on the PCM decode, past both
     /// Atmos routes, and the decoder carries it. Set before the decoder opens.
