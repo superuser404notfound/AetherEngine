@@ -17,8 +17,19 @@ the public-API contract.
   OCR, so nothing is drawn over the host's own bitmap overlay. `setNativeSubtitleRendering(true)` turns it into a
   full rendition for PiP, AirPlay and external displays, and `false` goes back to the marker. Thanks to Anquietas
   for the request.
+- **`aetherctl bench` and `AetherEngine.runPerFrameBenchmarks` time the software path's per-frame work (#957).**
+  Latency regressions there had no number to catch them. The benchmark times the output metadata normalizer,
+  the renderer's sample buffer, the frame chain and the HDR10 SEI scan on a 4K P010 frame, saves the report as
+  JSON and fails against a baseline when a median grows past a tolerance. Covered by
+  `PerFrameBenchmarkReportsEveryCaseTests`.
 
 ### Fixed
+
+- **The frame chain's pass-through takes 2.7 ms per 4K frame instead of 10 (#957).** It turned each frame into
+  a 66 MB RGB texture and back, which kept an A12 Apple TV's GPU busy about 10 ms. A chain whose stages leave
+  the picture alone now runs as one kernel without that texture, moving four luma samples per access with
+  the colour arithmetic folded: 2.7 ms of GPU time and 4.0 ms in all, the same picture. Covered by
+  `FrameChainTests`.
 
 - **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
   attaches no mastering display or content light level to the frames it decodes, so the software path sent
