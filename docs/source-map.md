@@ -196,6 +196,7 @@ Notes:
 | `VideoToolboxVideoFormat.swift` | Builds the Core Media format description `HardwareVideoDecoder` needs, synthesizing VP9's `vpcC` from probed parameters. |
 | `VideoToolboxOutputMetadataNormalizer.swift` | Adds codec-declared colour metadata to VideoToolbox output that lacks it, through a pixel-transfer pool rather than mutating the frame. |
 | `ColorDescription.swift` | A stream's colour description merged from bitstream (VUI) and container (AE#499). |
+| `HDR10StaticMetadataSEI.swift` | AE#957: the stream's HDR10 static metadata (container side data, `hvcC` or key-frame SEI) in Core Video's byte layout, for the frames VideoToolbox leaves without it. |
 | `AlternativeTransferSEI.swift` | AE#839: reads the `alternative_transfer_characteristics` SEI that names HLG behind a backward-compatible VUI. |
 | `AV1DolbyVisionRPU.swift` | The Dolby Vision RPU from an AV1 T.35 metadata OBU (Profile 10), attached to decoded frames for the system's DV display management. |
 | `DualLayerRouteDecision.swift` | Whether a Profile 7 load takes the dual-layer route or stays native, and why. Pure, logged once per source. |

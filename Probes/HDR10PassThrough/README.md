@@ -117,9 +117,9 @@ screen, note the peak, MaxCLL and MaxFALL it shows).
 | SETUP | `setup` | the clip on loop, 60 s, nothing measured | the TV is in HDR10: set Dynamic Tone Mapping to Off now (`SETUP=0` skips it) |
 | P | `avplayer` | plain AVPlayer, Apple's own path | the clip's (the reference) |
 | N | `native` | the engine, native route | the clip's |
-| S | `software` | software path, probe `log`: VideoToolbox's buffer as decoded | none (VideoToolbox attaches none, see below) |
+| S | `software` | software path, probe `log`: VideoToolbox's buffer as decoded | the clip's, attached by the decoder (see below) |
 | M | `meta` | software path, the probe's values on VideoToolbox's buffer | the probe's |
-| C | `chain` | software path, `FrameChain` into a buffer of our own, attachments copied | none, as S |
+| C | `chain` | software path, `FrameChain` into a buffer of our own, attachments copied | the clip's, as S |
 | CM | `chainmeta` | both: our own buffer, the probe's values | the probe's |
 
 CM is the arm step 3 depends on: a buffer the engine rendered itself, with metadata the engine chose.
@@ -128,7 +128,7 @@ CM is the arm step 3 depends on: a buffer the engine rendered itself, with metad
 
 | arm | mode | what plays | HDR10 metadata the engine sends |
 |---|---|---|---|
-| S | `software` | 15 s, VideoToolbox's buffer as decoded | none: the steady control |
+| S | `software` | 15 s, VideoToolbox's buffer as decoded | the clip's: the steady control |
 | SP | `pulse` | 30 s, the probe's values on VideoToolbox's buffer | 777 nit / MaxCLL 345, then 4000 / 4000, switching every 3 s |
 | CP | `chainpulse` | 30 s, our own buffer from the chain | the same switching |
 
@@ -187,10 +187,11 @@ settle.
 Write the M and CM cells as `differ` or `alike` against S and C, from the photos, or as what an analyser
 showed (`777/345/123`, `none` for HDR10 with no static metadata). `SDR` if the television left HDR.
 
-**Found on the way:** on tvOS 27.2 (A12) VideoToolbox attaches no mastering display or content light
-level to the frames it decodes from this clip, though the stream carries both in SEI messages and in the
-`hvcC`. So the software path today sends HDR10 with no static metadata (the `[HDR10Probe] first frame`
-line of S shows `mdcv=- cll=-`). That is a gap of its own, whatever this check finds.
+**Found on the way, and fixed:** on tvOS 27.2 (A12) VideoToolbox attaches no mastering display or content
+light level to the frames it decodes from this clip, though the stream carries both in SEI messages and in
+the `hvcC`. The 2026-11-13 runs above were made before the fix, so S and C sent none there (the
+`[HDR10Probe] first frame` line showed `mdcv=- cll=-`). The decoder now attaches the stream's values, so S
+and C send the clip's 1000 nit / 1000 / 400.
 
 ## Reading it
 

@@ -81,7 +81,7 @@ struct ProbeArm {
         switch mode {
         case "setup": "HDR10 is on: set the TV's Dynamic Tone Mapping to Off now"
         case "meta", "chainmeta": "probe's metadata (777 nit, MaxCLL 345): compare with S and C"
-        case "software", "chain": "decoder's frames carry no HDR10 metadata: the TV's 'none' case"
+        case "software", "chain": "the clip's metadata, attached by the decoder (1000 nit, MaxCLL 1000)"
         case "pulse", "chainpulse": "metadata switches every 3 s: do the bright patches pulse?"
         case "avpulse": "Apple's player switches 1000 / 4000 nit metadata every 6 s: does it change?"
         case "avplayer" where url.lastPathComponent.contains("m4000"): "clip's metadata (4000 nit, MaxCLL 4000)"

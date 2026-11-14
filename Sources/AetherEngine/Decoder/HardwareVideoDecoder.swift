@@ -124,6 +124,15 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// #177 latch unnecessary, since one resolution cannot oscillate.
     private var pixelAspectRatio: AVRational?
 
+    /// AE#957: the stream's HDR10 static metadata, re-applied to every PQ frame because VideoToolbox
+    /// attaches none (`HDR10StaticMetadataSEI`). Found at `open()` from the container or the `hvcC`, or
+    /// from the SEI of the first key frames, so `decode` writes it and the output callback reads it:
+    /// its own lock, since the output callback must not take `lock`.
+    private let staticHDR10Lock = NSLock()
+    private var staticHDR10 = HDR10StaticMetadataSEI.Values.none
+    /// Key frames the in-band scan still reads; 0 once the values are complete or it gave up.
+    private var staticHDR10KeyFramesLeft = 0
+
     /// Protects `session` across the demux thread (decode), main thread (close/flush), and VT callback (delivery).
     private let lock = NSLock()
 
@@ -380,6 +389,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         self.colorPrimaries = ColorAttachments.primaries(codecpar.pointee.color_primaries)
         self.colorTransfer = ColorAttachments.transfer(codecpar.pointee.color_trc)
         self.colorMatrix = ColorAttachments.matrix(codecpar.pointee.color_space)
+        resolveStaticHDR10(codecpar: codecpar)
         let pixelFormat: OSType = use10Bit
             ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
             : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -727,6 +737,10 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         )
         guard sbStatus == noErr, let sb = sampleBuffer else { return }
 
+        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
+            scanStaticHDR10(UnsafePointer(data), size: size)
+        }
+
         let hdr10PlusPayload = scansHDR10Plus
             ? HDR10PlusMetadataScan.coreMediaPayload(packet, codecID: streamCodecID, framing: hdr10PlusFraming)
             : nil
@@ -867,6 +881,68 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         close()
     }
 
+    // MARK: - HDR10 static metadata (AE#957)
+
+    private func resolveStaticHDR10(codecpar: UnsafeMutablePointer<AVCodecParameters>) {
+        var values = HDR10StaticMetadataSEI.Values.none
+        var keyFrames = 0
+        var source = "none"
+        if codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084 {
+            values = HDR10StaticMetadataSEI.fromCodedSideData(codecpar)
+            if !values.isEmpty { source = "container" }
+            if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
+               let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+                let fromRecord = HDR10StaticMetadataSEI.scanHEVCConfigRecord(
+                    extradata, size: Int(codecpar.pointee.extradata_size))
+                if !fromRecord.isEmpty { source = values.isEmpty ? "hvcC" : source + "+hvcC" }
+                values = values.filling(from: fromRecord)
+            }
+            let scansInBand = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+                || codecpar.pointee.codec_id == AV_CODEC_ID_H264
+            keyFrames = values.isComplete || !scansInBand ? 0 : HDR10StaticMetadataSEI.keyFramesToScan
+            EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata: \(source) "
+                           + Self.describe(values)
+                           + (keyFrames > 0 ? ", scanning the first \(keyFrames) key frames" : ""),
+                           category: .swPlayback)
+        }
+        staticHDR10Lock.lock()
+        staticHDR10 = values
+        staticHDR10KeyFramesLeft = keyFrames
+        staticHDR10Lock.unlock()
+    }
+
+    /// A key frame's SEI, while the values are incomplete and key frames are left to read.
+    private func scanStaticHDR10(_ data: UnsafePointer<UInt8>, size: Int) {
+        staticHDR10Lock.lock()
+        let scanning = staticHDR10KeyFramesLeft > 0
+        staticHDR10Lock.unlock()
+        guard scanning else { return }
+        let found = HDR10StaticMetadataSEI.scan(
+            data, size: size, codec: streamCodecID == AV_CODEC_ID_H264 ? .h264 : .hevc,
+            framing: hdr10PlusFraming)
+        staticHDR10Lock.lock()
+        staticHDR10 = staticHDR10.filling(from: found)
+        staticHDR10KeyFramesLeft = staticHDR10.isComplete ? 0 : max(staticHDR10KeyFramesLeft - 1, 0)
+        let values = staticHDR10
+        let done = staticHDR10KeyFramesLeft == 0
+        staticHDR10Lock.unlock()
+        if done {
+            EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata from the stream's SEI: "
+                           + Self.describe(values), category: .swPlayback)
+        }
+    }
+
+    private func currentStaticHDR10() -> HDR10StaticMetadataSEI.Values {
+        staticHDR10Lock.lock()
+        defer { staticHDR10Lock.unlock() }
+        return staticHDR10
+    }
+
+    static func describe(_ values: HDR10StaticMetadataSEI.Values) -> String {
+        "mastering " + (HDR10StaticMetadata.describe(masteringDisplayColorVolume: values.masteringDisplay) ?? "-")
+            + ", MaxCLL/MaxFALL " + (HDR10StaticMetadata.describe(contentLightLevel: values.contentLightLevel) ?? "-")
+    }
+
     // MARK: - Pixel aspect ratio (#354)
 
     /// The ratio to attach, or nil when there is nothing to correct. Bitstream first, container
@@ -916,7 +992,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             colorPrimaries: colorPrimaries,
             transferFunction: colorTransfer,
             yCbCrMatrix: colorMatrix,
-            pixelAspectRatio: pixelAspectRatio)
+            pixelAspectRatio: pixelAspectRatio,
+            hdr10: currentStaticHDR10())
         if attachesAV1DolbyVisionRPU {
             // On VideoToolbox's own output buffer the attachment is set but never reaches the panel: viewed
             // on the built-in XDR display, switching the RPU off and on changed nothing, and neither did the

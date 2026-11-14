@@ -22,6 +22,11 @@ the public-API contract.
 
 ### Fixed
 
+- **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
+  attaches no mastering display or content light level to the frames it decodes, so the software path sent
+  HDR10 with none, and the television tone-mapped without knowing the master. The decoder now reads the
+  stream's values (from the container, the `hvcC`, or the SEI of the first key frames) and attaches them to
+  every frame. Covered by `SoftwarePathCarriesStreamHDR10MetadataTests`.
 - **The software path's format description follows a change of HDR10 metadata.** The renderer reused
   its format description while size, pixel format and colour tags stayed the same, so mastering display
   and content light level values that changed mid-stream never reached the display layer: it kept the

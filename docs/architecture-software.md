@@ -99,6 +99,14 @@ A VideoToolbox decode callback can keep its output image buffer as a reference p
 
 The risk this accepts: later frames could decode from composed pixels, which would show as drift until the next IDR (the next full keyframe). It is verified on the Mac only. A long-GOP picture comparison on the Apple TV decoder is still open ([measurements.md](measurements.md#dual-layer-in-place-output-metadata)).
 
+**HDR10 static metadata (AE#957).** VideoToolbox attaches no mastering display colour volume or content light level to the frames it decodes, though the stream carries both. The hardware decoder finds the stream's values at `open()` and the normalizer adds them with the colour attachments, under the same policy. `HDR10StaticMetadataSEI` reads them for a PQ stream:
+
+- from the container first (`mdcv` / `clli` boxes, Matroska colour metadata, both arrive as `codecpar` side data);
+- then from the SEI in the `hvcC` (x265 writes it there);
+- then from the SEI of the first 3 key frames, for HEVC and H.264. Frames before the values are found go out without them.
+
+The SEI payloads are byte for byte what Core Video's attachments hold, so they are copied as they are. The television does read these attachments, see [measurements.md](measurements.md#hdr10-metadata-on-the-software-path-reaches-the-television-ae957).
+
 **AV1 Dolby Vision RPU path.** (The RPU is the per-frame Dolby Vision metadata.) This path reuses that owned output, or makes its own copy, before changing buffer and IOSurface metadata. If copying fails, it delivers the original without setting or clearing RPU keys, including when RPU attachment is disabled.
 
 ### Clock and transport

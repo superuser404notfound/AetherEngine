@@ -377,7 +377,7 @@ Measured on an Apple TV 4K (A12, tvOS 27.2) into an LG OLED77G4 on 2026-11-13: m
 
 Current rule: [architecture-software.md › HDR10 pass-through probe](architecture-software.md#hdr10-pass-through-probe).
 
-The check: the probe's pulse modes switch the metadata every 3 s on an unchanged picture. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch follows each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. Numbers and method: [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md). Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path today sends none.
+The check: the probe's pulse modes switch the metadata every 3 s on an unchanged picture. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch follows each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. Numbers and method: [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md). Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path sent none. The decoder now attaches the stream's values ([VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata)).
 
 ### Software channel layout mismatch
 

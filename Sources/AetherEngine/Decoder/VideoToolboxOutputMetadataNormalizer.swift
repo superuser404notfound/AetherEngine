@@ -30,14 +30,16 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values = .none
     ) -> CVPixelBuffer {
         if Self.outputMetadataMatches(
             imageBuffer,
             colorPrimaries: colorPrimaries,
             transferFunction: transferFunction,
             yCbCrMatrix: yCbCrMatrix,
-            pixelAspectRatio: pixelAspectRatio
+            pixelAspectRatio: pixelAspectRatio,
+            hdr10: hdr10
         ) {
             return imageBuffer
         }
@@ -60,7 +62,8 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
             colorPrimaries: colorPrimaries,
             transferFunction: transferFunction,
             yCbCrMatrix: yCbCrMatrix,
-            pixelAspectRatio: pixelAspectRatio
+            pixelAspectRatio: pixelAspectRatio,
+            hdr10: hdr10
         )
         return destination
     }
@@ -70,8 +73,18 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values
     ) {
+        // AE#957: VideoToolbox drops the stream's HDR10 static metadata; nil leaves a value alone.
+        if let masteringDisplay = hdr10.masteringDisplay {
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferMasteringDisplayColorVolumeKey,
+                                  masteringDisplay as CFData, .shouldPropagate)
+        }
+        if let contentLightLevel = hdr10.contentLightLevel {
+            CVBufferSetAttachment(imageBuffer, kCVImageBufferContentLightLevelInfoKey,
+                                  contentLightLevel as CFData, .shouldPropagate)
+        }
         if let colorPrimaries {
             CVBufferSetAttachment(
                 imageBuffer,
@@ -112,7 +125,8 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         colorPrimaries: CFString?,
         transferFunction: CFString?,
         yCbCrMatrix: CFString?,
-        pixelAspectRatio: AVRational?
+        pixelAspectRatio: AVRational?,
+        hdr10: HDR10StaticMetadataSEI.Values
     ) -> Bool {
         // Only a propagating attachment counts as a match: the subtitle compositor's copy carries
         // nothing else, so a matching value marked `.shouldNotPropagate` would be lost there.
@@ -133,6 +147,14 @@ final class VideoToolboxOutputMetadataNormalizer: @unchecked Sendable {
         }
         if let yCbCrMatrix,
            attachment(kCVImageBufferYCbCrMatrixKey) as? String != yCbCrMatrix as String {
+            return false
+        }
+        if let masteringDisplay = hdr10.masteringDisplay,
+           attachment(kCVImageBufferMasteringDisplayColorVolumeKey) as? Data != masteringDisplay {
+            return false
+        }
+        if let contentLightLevel = hdr10.contentLightLevel,
+           attachment(kCVImageBufferContentLightLevelInfoKey) as? Data != contentLightLevel {
             return false
         }
         if let pixelAspectRatio {
