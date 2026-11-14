@@ -934,6 +934,7 @@ extension AetherEngine {
             undecodableAudioStreamIndices: undecodableLiveAudioStreamIndices,
             audioBridgeMode: audioBridgeMode,
             objectAudioRendering: loadedOptions.objectAudioRendering,
+            rendersDTSXObjectAudio: loadedOptions.rendersDTSXObjectAudio,
             foldsDolbyVisionFEL: loadedOptions.foldsDolbyVisionFEL,
             panelPresentsHDR: panelPresentsHDR,
             stereoPresentation: loadedOptions.stereoPresentation,
@@ -2098,6 +2099,7 @@ extension AetherEngine {
         host.upscalePlan = upscaleRebuild.plan
         host.elType = elType ?? sourceElType
         host.objectAudioRendering = loadedOptions.objectAudioRendering
+        host.rendersDTSXObjectAudio = loadedOptions.rendersDTSXObjectAudio
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         host.audioShaping = loadedOptions.audioShaping        // AE#923: likewise
         if isLive { host.liveEdgeCushionSeconds = loadedOptions.liveEdgeCushionSeconds }

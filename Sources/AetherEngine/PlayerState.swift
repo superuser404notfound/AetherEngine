@@ -670,6 +670,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// (`AetherEngine.OptionalComponent`).
     public var objectAudioRendering: ObjectAudioRendering
 
+    /// Whether `objectAudioRendering` applies to DTS:X. `true` (default) renders TrueHD Atmos and DTS:X
+    /// alike. `false` keeps every DTS track of this load on `audioBridgeMode`'s 7.1 channel decode while
+    /// TrueHD Atmos still renders into the asked layout, so one load covers a file that carries both, and
+    /// a switch between them needs no reload (AE#1060). Also stops the initial track pick from preferring
+    /// a DTS:X track for its heights.
+    public var rendersDTSXObjectAudio: Bool = true
+
     /// How a 3D source is presented where the system shows stereo (visionOS; elsewhere every source plays
     /// 2D as before). `.automatic` (default) keeps an MV-HEVC stream's second view and presents the frame
     /// packing a container declares; `.sideBySide` / `.overUnder` say what the file's name alone says (a
@@ -1188,6 +1195,7 @@ public struct LoadOptions: Sendable, Equatable {
         panelPresentsDolbyVision: Bool = false,
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         objectAudioRendering: ObjectAudioRendering = .off,
+        rendersDTSXObjectAudio: Bool = true,
         stereoPresentation: StereoPresentation = .automatic,
         isLive: Bool = false,
         audioOnly: Bool = false,
@@ -1258,6 +1266,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.panelPresentsDolbyVision = panelPresentsDolbyVision
         self.audioBridgeMode = audioBridgeMode
         self.objectAudioRendering = objectAudioRendering
+        self.rendersDTSXObjectAudio = rendersDTSXObjectAudio
         self.stereoPresentation = stereoPresentation
         self.isLive = isLive
         self.audioOnly = audioOnly

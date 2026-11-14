@@ -1169,6 +1169,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         undecodableAudioStreamIndices: Set<Int32> = [],
         audioBridgeMode: AudioBridgeMode = .surroundCompat,
         objectAudioRendering: ObjectAudioRendering = .off,
+        rendersDTSXObjectAudio: Bool = true,
         foldsDolbyVisionFEL: Bool = true,
         panelPresentsHDR: Bool = false,
         stereoPresentation: StereoPresentation = .automatic,
@@ -1234,6 +1235,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.undecodableAudioStreamIndices = undecodableAudioStreamIndices
         self.audioBridgeMode = audioBridgeMode
         self.objectAudioRendering = objectAudioRendering
+        self.rendersDTSXObjectAudio = rendersDTSXObjectAudio
         self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.panelPresentsHDRFlag = OSAllocatedUnfairLock(initialState: panelPresentsHDR)
         self.stereoPresentation = stereoPresentation
@@ -1421,6 +1423,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// TrueHD Atmos and DTS:X delivery (#731, see `ObjectAudioRendering`); consulted before `audioBridgeMode`.
     let objectAudioRendering: ObjectAudioRendering
+
+    /// From `LoadOptions.rendersDTSXObjectAudio`: false keeps DTS on the channel bridge (AE#1060).
+    let rendersDTSXObjectAudio: Bool
 
     /// From `LoadOptions.foldsDolbyVisionFEL`; handed to every producer this session builds.
     let foldsDolbyVisionFEL: Bool
@@ -2277,7 +2282,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                         ? "[HLSVideoEngine] audio: HE-AAC (profile=\(acpForHE.profile) frameSize=\(acpForHE.frame_size)), ADTS stream-copy would mis-signal SBR, bridging instead"
                         : "[HLSVideoEngine] audio: codec=\(compat) (bridge required), decoding + "
                           + (Self.spatialRenderingLayout(
-                                rendering: objectAudioRendering, codecID: acpForHE.codec_id,
+                                rendering: objectAudioRendering(for: acpForHE.codec_id), codecID: acpForHE.codec_id,
                                 profile: acpForHE.profile, sampleRate: acpForHE.sample_rate)
                              .map { layout in
                                  Self.objectAudioSource(codecID: acpForHE.codec_id, profile: acpForHE.profile) == .trueHDAtmos

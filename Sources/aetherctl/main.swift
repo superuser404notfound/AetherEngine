@@ -82,7 +82,7 @@ func printUsage() {
                  [--reload-applying <key>=<value>]... [--reload-applying-at <ms>]
                  [--drop-audio]
                  [--sequential-origin] [--declared-duration S]
-             [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto]]
+             [--max-concurrent-requests N] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto] [--no-dtsx-objects]]
                      [--audio-stats] [--host-calls play,extractor,setrate,pausestart,reloadlive,seekback,seekfar,pauseseek,pausereload,playreload,extplayreload,reloadnext,subsatload] <url>
                      (full load+play session smoke test; --fel opts into the Profile 7
                       FEL dual-layer route (off by default, as in the engine, and only in
@@ -993,6 +993,8 @@ if first == "play" {
     // #731: TrueHD Atmos or DTS:X rendered into a bed as APAC; the 1 Hz line then reports its objects.
     let playObjectAudio = objectAudioRendering(
         takeStringFlag("--atmos-bed", from: &rest), format: takeStringFlag("--bed-format", from: &rest))
+    // AE#1060: TrueHD Atmos renders, DTS keeps the 7.1 channel bridge.
+    let playRendersDTSX = !takeFlag("--no-dtsx-objects", from: &rest)
     let declaredDuration = takeDoubleFlag("--declared-duration", from: &rest)
     // #311: install the software frame-time observer and read the presentation timebase, so the
     // per-frame boundaries and the clock a host would pace an overlay against are both observable.
@@ -1231,6 +1233,7 @@ if first == "play" {
                  heldConnection: heldConnection,
                  progressiveSegments: progressiveSegments,
                  objectAudioRendering: playObjectAudio,
+                 rendersDTSX: playRendersDTSX,
                  declaredDuration: declaredDuration,
                  httpHeaders: playHeaders,
                  deinterlaceFieldRate: playFieldRate,
