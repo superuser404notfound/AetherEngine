@@ -19,6 +19,11 @@ the public-API contract.
   rebuilds as any later pick does, and the host's `load()` returns normally instead of throwing
   `CancellationError`. `selectTitle(id:)` waits the same way. A rebuild that still finds no load-time panel
   answer says so in the log. Thanks to andreiborisov for the report and the code trace.
+- **The engine builds without warnings under Xcode 27.2 again (#1062).** Six diagnostics in five files: a
+  main actor-isolated notification key read from a Sendable closure, `String(cString:)` on an array,
+  `M_SQRT1_2`, the synchronous `AVMetadataItem.stringValue`, and a `weak var` that was never mutated. The audio
+  menu now loads a rendition's title asynchronously and drops an answer whose item or selection changed while
+  it waited. Thanks to YangHanqing for the report.
 
 ## [7.67.0] - 2026-11-14
 
