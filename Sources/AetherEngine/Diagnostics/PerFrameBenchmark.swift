@@ -42,6 +42,9 @@ struct PerFrameBenchmark {
     let iterations: Int
     let width: Int
     let height: Int
+    /// False skips the frame chain cases, which compile the chain's kernels (minutes on a cold CI runner)
+    /// and wait on the GPU: for the unit test, which checks the case list and the report.
+    var includesChain = true
     static let warmup = 20
 
     /// The values the HDR10 probe clips carry, in Core Video's byte layout.
@@ -57,8 +60,13 @@ struct PerFrameBenchmark {
             results.append(normalizerInPlace(frame))
             results.append(normalizerOwnedCopy(frame))
             results.append(rendererSampleBuffer(frame))
-            results.append(chainPassThrough(frame, onePass: true))
-            results.append(chainPassThrough(frame, onePass: false))
+            if includesChain {
+                results.append(chainPassThrough(frame, onePass: true))
+                results.append(chainPassThrough(frame, onePass: false))
+            } else {
+                results.append(Self.skipped("chain: pass-through, wall time", "not requested"))
+                results.append(Self.skipped("chain: two passes through RGB, wall time", "not requested"))
+            }
         } else {
             results.append(Self.skipped("frames", "could not create a \(width)x\(height) P010 buffer"))
         }

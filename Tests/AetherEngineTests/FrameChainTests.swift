@@ -129,6 +129,24 @@ struct FrameChainTests {
         #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit), width \(width))")
     }
 
+    /// A picture that starts inside the frame (a crop): both one-kernel versions read from its origin and give
+    /// what the two passes give. x 4 keeps the wide kernel, x 2 takes the narrow one.
+    @Test(arguments: [false, true], [4, 2])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957OneKernelRoundTripHonoursThePictureOrigin(tenBit: Bool, originX: Int) throws {
+        let input = try ChainFrames.gradient(336, 200, tenBit: tenBit)
+        ChainFrames.paintLuma(input) { x, y in ((x / 5 + y / 7) % 8 == 0) ? 40 : 50 + (x + y) / 3 }
+        let picture = FrameUpscaler.PictureRegion(x: originX, y: 8, width: 320, height: 180)
+        let fused = try chain(320, 180, stages: [PassThroughStage()])
+        let twoPass = try chain(320, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
+        let wide = FrameChain.roundTripIsWide(targetWidth: 320, pictureX: originX)
+        #expect(wide == (originX == 4))
+        let (a, _) = try fused.process(input, picture: picture)
+        let (b, _) = try twoPass.process(input, picture: picture)
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit), origin x \(originX))")
+    }
+
     /// The wide kernel reads luma four samples at a time: a picture origin off those texels takes the narrow one.
     @Test
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)

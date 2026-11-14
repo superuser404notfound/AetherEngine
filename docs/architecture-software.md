@@ -103,7 +103,7 @@ The risk this accepts: later frames could decode from composed pixels, which wou
 
 - from the container first (`mdcv` / `clli` boxes, Matroska colour metadata, both arrive as `codecpar` side data);
 - then from the SEI in the `hvcC` (x265 writes it there);
-- then from the SEI of the first 3 key frames, for HEVC and H.264. Frames before the values are found go out without them.
+- then from the SEI of the first 3 key frames, for HEVC (this decoder opens no H.264). Frames before the values are found go out without them.
 
 A key the frame already carries stays as it is. Only a missing key is filled, so a decoder that does attach its own values wins, and anything downstream of the decoder (a frame handler, a probe) can still set its own. The decoder clears its values at `close()`, and `open(parameterSets:)` (no stream to read them from) adds none.
 

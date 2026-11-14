@@ -36,7 +36,6 @@ the public-API contract.
   HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
   Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
   them itself, and no frame is copied. Covered by `SoftwarePathCarriesStreamHDR10MetadataTests`.
-
 - **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
   attaches no mastering display or content light level to the frames it decodes, so the software path sent
   HDR10 with none, and the television tone-mapped without knowing the master. The decoder now reads the

@@ -909,8 +909,9 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 if !fromRecord.isEmpty { source = values.isEmpty ? "hvcC" : source + "+hvcC" }
                 values = values.filling(from: fromRecord)
             }
+            // HEVC only: this decoder opens no H.264 (VideoToolboxVideoFormat), and AV1 / VP9 carry
+            // HDR10 in their own metadata rather than in SEI.
             let scansInBand = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
-                || codecpar.pointee.codec_id == AV_CODEC_ID_H264
             keyFrames = values.isComplete || !scansInBand ? 0 : HDR10StaticMetadataSEI.keyFramesToScan
             EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata: \(source) "
                            + Self.describe(values)
@@ -949,8 +950,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         staticHDR10Lock.unlock()
         guard scanning else { return }
         let found = HDR10StaticMetadataSEI.scan(
-            data, size: size, codec: streamCodecID == AV_CODEC_ID_H264 ? .h264 : .hevc,
-            framing: hdr10PlusFraming)
+            data, size: size, codec: .hevc, framing: hdr10PlusFraming)
         staticHDR10Lock.lock()
         staticHDR10 = staticHDR10.filling(from: found)
         staticHDR10KeyFramesLeft = staticHDR10.isComplete ? 0 : max(staticHDR10KeyFramesLeft - 1, 0)
