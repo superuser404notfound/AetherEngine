@@ -99,6 +99,37 @@ A VideoToolbox decode callback can keep its output image buffer as a reference p
 
 The risk this accepts: later frames could decode from composed pixels, which would show as drift until the next IDR (the next full keyframe). It is verified on the Mac only. A long-GOP picture comparison on the Apple TV decoder is still open ([measurements.md](measurements.md#dual-layer-in-place-output-metadata)).
 
+**HDR10 static metadata (AE#957).** VideoToolbox attaches no mastering display colour volume or content light level to the frames it decodes, though the stream carries both. The hardware decoder finds the stream's values at `open()` and the normalizer adds them with the colour attachments, under the same policy. `HDR10StaticMetadataSEI` reads them for a PQ stream:
+
+- from the container first (`mdcv` / `clli` boxes, Matroska colour metadata, both arrive as `codecpar` side data);
+- then from the SEI in the `hvcC` (x265 writes it there), or the metadata OBUs in the `av1C`;
+- then from the first 3 key frames: the SEI for HEVC, the metadata OBUs (`HDR_MDCV`, `HDR_CLL`) for hardware AV1. This decoder opens no H.264, and VP9 has no in-band HDR10 metadata. Frames before the values are found go out without them.
+
+AV1's content light level has Core Video's layout. Its mastering display does not (red first, 0.16 fixed point chromaticity, 24.8 and 18.14 fixed point luminance), so it is converted.
+
+A key the frame already carries stays as it is. Only a missing key is filled, so a decoder that does attach its own values wins, and anything downstream of the decoder (a frame handler) can still set its own. The decoder clears its values at `close()`, and `open(parameterSets:)` (no stream to read them from) adds none.
+
+The SEI payloads are byte for byte what Core Video's attachments hold, so they are copied as they are. The television does read these attachments, see [measurements.md](measurements.md#hdr10-metadata-on-the-software-path-reaches-the-television-ae957).
+
+**The libavcodec decoder attaches the same keys (AE#957).** `SoftwareVideoDecoder` (dav1d AV1 without hardware decode, VP9 where VideoToolbox has none, H.264 High 10 / 4:2:2 / 4:4:4, interlaced H.264, HEVC Rext) builds its own buffers. On a PQ frame it attaches:
+
+- the values the latest decoded frame carried as side data (libavcodec exports them from the SEI, libdav1d from the metadata OBUs). They stay until a frame brings new ones, since HEVC carries them only on some frames;
+- otherwise the container's.
+
+Frames that are not PQ, or have no values, get both keys removed, because a pool buffer keeps what its last use left on it.
+
+**The decoder's format description carries the same values (AE#957).** The owned copy costs about 7 ms per 4K frame on an A12 Apple TV, so the normalizer should only ever need it as a fallback. For HEVC, AV1 and VP9 the description VideoToolbox decodes with names the stream's colour, and the HDR10 values known at `open()`. VideoToolbox then attaches both itself and the frames match as decoded. Without the colour keys it tagged a PQ BT.2020 HEVC clip as BT.709, and every frame was copied.
+
+Values found later, in a key frame, go into a new description and session at that key frame, before it decodes, the way a VP9 size change does. Many AV1 HDR10 encodes carry them in-band only.
+
+- Usually that is the stream's first key frame, with nothing decoded before it, so nothing is lost.
+- On a later key frame (the values were only in its SEI), its leading pictures can be lost once, as after a seek.
+- If VideoToolbox refuses the new session, the old one stays and those frames go on by copy.
+
+At `close()` the decoder logs how each frame went: `output metadata over N frames: A as decoded, B in place, C copied, D copy failed`. Copies on every frame mean the description and the normalizer disagree. Numbers: [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957).
+
+**The renderer's format description follows the HDR10 values.** `SampleBufferRenderer` reuses one format description while the frames look the same. Its cache key includes the frame's mastering display and content light level bytes, so a change of those values at the same size and colour gets a new description (`FormatDescriptionFollowsHDR10MetadataTests`).
+
 **AV1 Dolby Vision RPU path.** (The RPU is the per-frame Dolby Vision metadata.) This path reuses that owned output, or makes its own copy, before changing buffer and IOSurface metadata. If copying fails, it delivers the original without setting or clearing RPU keys, including when RPU attachment is disabled.
 
 ### Clock and transport

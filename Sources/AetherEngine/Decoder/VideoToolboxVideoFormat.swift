@@ -60,12 +60,16 @@ enum VideoToolboxVideoFormat {
             }
             let data = Data(bytes: extradata, count: Int(codecpar.pointee.extradata_size))
             let atoms: NSDictionary = ["hvcC": data]
+            let extensions = NSMutableDictionary(dictionary: [
+                kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms
+            ])
+            addColor(codecpar: codecpar, to: extensions)
             let bitDepth = codecpar.pointee.bits_per_raw_sample > 8
                 || ColorAttachments.isHDRTransfer(codecpar.pointee.color_trc) ? 10 : 8
             return Configuration(
                 codecName: "HEVC",
                 codecType: kCMVideoCodecType_HEVC,
-                extensions: [kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms],
+                extensions: extensions,
                 bitDepth: bitDepth
             )
 
@@ -127,7 +131,9 @@ enum VideoToolboxVideoFormat {
     /// (`ColorInfoGuessedBy`) and tags its output BT.709 SDR in the buffer's CGColorSpace and the
     /// IOSurface's colour space ID, under the PQ transfer the frame handler attaches afterwards, and a
     /// PQ source came out blown out. VP9 gets the same keys so its output cannot be tagged that way
-    /// either. HEVC carries its colour in the VUI of the hvcC's SPS and needs none of this.
+    /// either. HEVC too (AE#957): on an A12 Apple TV, tvOS 27.2, a PQ BT.2020 clip came out tagged
+    /// BT.709 the same way despite its VUI, so the output normalizer copied every 4K frame to retag
+    /// it (about 7 ms each).
     private static func addColor(
         codecpar: UnsafeMutablePointer<AVCodecParameters>,
         to extensions: NSMutableDictionary
