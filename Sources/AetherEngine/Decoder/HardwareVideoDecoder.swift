@@ -943,7 +943,8 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     /// The values known at open, in the format description VideoToolbox decodes with: it then attaches
     /// them to its own output, so the frames match and skip the owned copy (a full 4K frame transfer,
-    /// about 7 ms on an A12 Apple TV). Values found later, in a key frame's SEI, still need the copy.
+    /// about 7 ms on an A12 Apple TV). Values found later, in a key frame, go into a new description
+    /// (`describeStaticHDR10`); the copy is left only for when VideoToolbox refuses that session.
     static func extensions(_ base: NSDictionary?, carrying values: HDR10StaticMetadataSEI.Values) -> NSDictionary? {
         guard !values.isEmpty else { return base }
         let extensions = NSMutableDictionary(dictionary: base ?? [:])
