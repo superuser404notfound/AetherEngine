@@ -36,7 +36,7 @@ struct SoftwarePacketReadAheadParkTests {
     /// packets it read from the source before it parked.
     private func packetsReadBeforePark(
         forwardSeconds: Double, byteBudget: Int, reorderDepth: Int?,
-        lateTimestampAt: Int? = nil, holeAfter: Int? = nil
+        lateTimestampAt: Int? = nil, holeAfter: Int? = nil, spikeAt: Int? = nil
     ) throws -> Int {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("readahead-park-\(UUID().uuidString)", isDirectory: true)
@@ -53,6 +53,8 @@ struct SoftwarePacketReadAheadParkTests {
         ) { _ in
             let index = counter.next()
             if let lateTimestampAt, index == lateTimestampAt { return Self.packet(pts: 0) }
+            // AE#1053: one packet stamped 347 s ahead, then the original timeline again.
+            if let spikeAt, index == spikeAt { return Self.packet(pts: Int64(index - 1) * Self.holdTicks + 347_000) }
             let skew: Int64 = (holeAfter.map { index > $0 } ?? false) ? Self.holdTicks : 0
             return Self.packet(pts: Int64(index - 1) * Self.holdTicks + skew)
         }
@@ -105,6 +107,17 @@ struct SoftwarePacketReadAheadParkTests {
         // rule can never reach ten and only the reservoir measurement stops the producer.
         #expect(read < packetsInWindow + 100)
         #expect(read < packetsInBudget)
+    }
+
+    @Test("A timestamp spike is a seam, not a full reservoir (AE#1053)")
+    func timestampSpikeDoesNotParkEarly() throws {
+        let read = try packetsReadBeforePark(forwardSeconds: forwardSeconds,
+                                             byteBudget: byteBudget, reorderDepth: nil,
+                                             spikeAt: 50)
+        // Before the fix the spike read as a 347 s reservoir and parked the producer at packet 50,
+        // with four of its ten seconds unread.
+        #expect(read > packetsInWindow - 20)
+        #expect(read < packetsInWindow + 100)
     }
 
     @Test("The disk budget still bounds a window wider than the source")

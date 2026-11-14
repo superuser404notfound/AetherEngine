@@ -3244,11 +3244,8 @@ final class SoftwarePlaybackHost {
         recordingTap: @escaping @Sendable (UnsafeMutablePointer<AVPacket>) -> Void = { _ in },
         playedMedia: PlayedMediaLedger? = nil
     ) {
-        let discontinuityThresholdSeconds = 10.0
-        var prevRawVideoPtsSec = Double.nan
-        var frameIntervalSec = 0.0
-        var discontinuityOffsetSec = 0.0
-        var loggedSWDiscontinuity = false
+        var timelineFold = LiveTimelineFold()
+        var loggedSeamCount = 0
         var lastSeenExtradata: Data? = nil
         let replayReader = LiveReplayPacketReader(videoIndex: videoStreamIndex, audioIndex: audioStreamIndex,
             videoTimeBase: videoTimeBaseSeconds, audioTimeBase: audioTimeBaseSeconds)
@@ -3333,34 +3330,19 @@ final class SoftwarePlaybackHost {
                 packet.pointee.pts = packet.pointee.dts
             }
 
-            // Live PTS-discontinuity: same accrual as combined loop.
-            if streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Live PTS-discontinuity, per stream (AE#1053): same fold as the combined loop.
+            let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
+            if streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                packet.pointee.pts != Int64.min {
-                let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
-                if !prevRawVideoPtsSec.isNaN {
-                    let deltaSec = rawPtsSec - prevRawVideoPtsSec
-                    if abs(deltaSec) >= discontinuityThresholdSeconds {
-                        let expectedContinuation = prevRawVideoPtsSec
-                            + (frameIntervalSec > 0 ? frameIntervalSec : 0)
-                        discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
-                        if !loggedSWDiscontinuity {
-                            loggedSWDiscontinuity = true
-                            EngineLog.emit(
-                                "[SWHost] live PTS discontinuity (reader): prevPts="
-                                + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
-                                + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
-                                + "delta=\(String(format: "%.2f", deltaSec))s -> "
-                                + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)",
-                                category: .swPlayback
-                            )
-                        }
-                    } else if deltaSec > 0 {
-                        frameIntervalSec = deltaSec
-                    }
+                let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                if tbSec > 0, let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * tbSec),
+                   loggedSeamCount < LiveTimelineFold.loggedSeamCap {
+                    loggedSeamCount += 1
+                    EngineLog.emit(LiveTimelineFold.logLine(seam, number: loggedSeamCount, route: "reader"),
+                                   category: .swPlayback)
                 }
-                prevRawVideoPtsSec = rawPtsSec
             }
+            let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
             if discontinuityOffsetSec != 0 {
                 let tbSec = (streamIdx == videoStreamIndex)
                     ? videoTimeBaseSeconds : audioTimeBaseSeconds
@@ -3967,10 +3949,7 @@ final class SoftwarePlaybackHost {
         // into +92726 s, the renderer then waited 25 h for the frame's display time and died with
         // -12080). Seekable VOD keeps the fold off: its timeline is trusted, and a threshold-sized
         // jump there is a container seek artifact the native path also leaves alone.
-        let discontinuityThresholdSeconds = 10.0
-        var prevRawVideoPtsSec = Double.nan
-        var frameIntervalSec = 0.0
-        var discontinuityOffsetSec = 0.0
+        var timelineFold = LiveTimelineFold()
         var loggedSeamCount = 0
         let replayReader = isLive && directLiveSource == nil ? LiveReplayPacketReader(videoIndex: videoStreamIndex,
             audioIndex: audioStreamIndex, videoTimeBase: videoTimeBaseSeconds,
@@ -4414,17 +4393,13 @@ final class SoftwarePlaybackHost {
 
             let streamIdx = packet.pointee.stream_index
 
-            // Discontinuity runs before any timestamp read; offset applied to both streams.
-            if foldTimeline, streamIdx == videoStreamIndex, videoTimeBaseSeconds > 0,
+            // Discontinuity runs before any timestamp read. Each stream folds its own seams (AE#1053).
+            let foldStream: LiveTimelineFold.Stream = streamIdx == audioStreamIndex ? .audio : .video
+            if foldTimeline, streamIdx == videoStreamIndex || streamIdx == audioStreamIndex,
                packet.pointee.pts != Int64.min {
-                let rawPtsSec = Double(packet.pointee.pts) * videoTimeBaseSeconds
-                if !prevRawVideoPtsSec.isNaN {
-                    let deltaSec = rawPtsSec - prevRawVideoPtsSec
-                    if abs(deltaSec) >= discontinuityThresholdSeconds {
-                        // Accrue (jumpedPts - expectedContinuation) into offset; flush decoders at the seam.
-                        let expectedContinuation = prevRawVideoPtsSec
-                            + (frameIntervalSec > 0 ? frameIntervalSec : 0)
-                        discontinuityOffsetSec += (rawPtsSec - expectedContinuation)
+                let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
+                if tbSec > 0, let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * tbSec) {
+                    if seam.stream == .video {
                         // Feed the parked pre-seam tail to the decoder before the flush drops
                         // its reference chain; the seam packet itself parks after this block.
                         waitForRenderer(.drainAll)
@@ -4438,28 +4413,15 @@ final class SoftwarePlaybackHost {
                         epochBeforeRead = videoDecoder.feedEpoch
                         audioDecoder?.flush()
                         renderer.drainReorderBuffer()
-                        // Chunked archives seam every minute or two; log each seam (bounded by the
-                        // 10 s threshold to at most one line per 10 s of content) with a soft cap
-                        // so a pathological source cannot flood the log.
-                        if loggedSeamCount < 20 {
-                            loggedSeamCount += 1
-                            EngineLog.emit(
-                                "[SWHost] PTS discontinuity #\(loggedSeamCount): prevPts="
-                                + "\(String(format: "%.2f", prevRawVideoPtsSec))s "
-                                + "rawPts=\(String(format: "%.2f", rawPtsSec))s "
-                                + "delta=\(String(format: "%.2f", deltaSec))s -> "
-                                + "offset=\(String(format: "%.2f", discontinuityOffsetSec))s "
-                                + "(timeline held continuous)"
-                                + (loggedSeamCount == 20 ? " [further seams unlogged]" : ""),
-                                category: .swPlayback
-                            )
-                        }
-                    } else if deltaSec > 0 {
-                        frameIntervalSec = deltaSec
+                    }
+                    if loggedSeamCount < LiveTimelineFold.loggedSeamCap {
+                        loggedSeamCount += 1
+                        EngineLog.emit(LiveTimelineFold.logLine(seam, number: loggedSeamCount, route: "demux"),
+                                       category: .swPlayback)
                     }
                 }
-                prevRawVideoPtsSec = rawPtsSec
             }
+            let discontinuityOffsetSec = timelineFold.offsetSeconds(for: foldStream)
 
             // Apply discontinuity offset to timestamps in-place; converts seconds to stream TB ticks.
             if foldTimeline, discontinuityOffsetSec != 0 {
