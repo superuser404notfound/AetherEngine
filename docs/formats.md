@@ -954,6 +954,7 @@ Decoding the object presentation and encoding APAC each take about one core (a P
 - The queue inherits the producer's QoS.
 - A pool of three chunk buffers holds the producer at most two chunks ahead of the encoder.
 - The producer waits for the queue (`settle()`) before a keyframe advances its segment cutter or a write cuts the open segment. So every packet is routed as the encode in series routed it, and every segment carries the same audio, byte for byte. Those waits cost about 0.1 s of the sample's overlap.
+- `APACEncodePipelineTests` checks that against a second encoder fed in series. It compares decoded audio (signal to error ratio above 60 dB), not bytes: two encoder instances do not always write the same packets for the same PCM. On an M6 under macOS 27.0.1 they never did, and on an M1 they always did (#1063).
 
 #### What the session log says
 
