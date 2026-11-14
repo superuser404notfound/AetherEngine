@@ -25,6 +25,40 @@ public struct PerFrameBenchmarkReport: Codable, Sendable, Equatable {
     public let results: [PerFrameBenchmarkResult]
 }
 
+/// One case that got worse against a baseline report: slower beyond the tolerance, or ran in the baseline and
+/// not now (skipped or missing). A gate that let a case quietly stop running would pass exactly when the
+/// thing it times broke.
+public struct PerFrameBenchmarkRegression: Sendable, Equatable {
+    public let name: String
+    public let reason: String
+}
+
+extension PerFrameBenchmarkReport {
+    /// A case regresses when its median grows by more than `tolerance` (a fraction) and by more than this
+    /// many microseconds. On the A12 Apple TV the same build's in-place tagging measured 18 us in one run and
+    /// 48 us in the next (the thread on another core), and 50 us is 0.3% of a 59.94 fps frame.
+    public static let regressionFloorMicroseconds = 50.0
+
+    /// The cases that regressed against `baseline`, in the baseline's order. `aetherctl bench` fails on any.
+    public func regressions(against baseline: PerFrameBenchmarkReport, tolerance: Double) -> [PerFrameBenchmarkRegression] {
+        baseline.results.filter { $0.iterations > 0 }.compactMap { old in
+            guard let now = results.first(where: { $0.name == old.name }) else {
+                return PerFrameBenchmarkRegression(name: old.name, reason: "ran in the baseline, missing now")
+            }
+            guard now.iterations > 0 else {
+                return PerFrameBenchmarkRegression(
+                    name: old.name, reason: "ran in the baseline, skipped now: " + (now.note ?? "no reason given"))
+            }
+            let change = (now.medianMicroseconds - old.medianMicroseconds) / max(old.medianMicroseconds, 0.001)
+            guard change > tolerance,
+                  now.medianMicroseconds - old.medianMicroseconds > Self.regressionFloorMicroseconds else { return nil }
+            return PerFrameBenchmarkRegression(
+                name: old.name, reason: String(format: "median %.1f us, was %.1f (%+.0f%%)",
+                                               now.medianMicroseconds, old.medianMicroseconds, change * 100))
+        }
+    }
+}
+
 extension AetherEngine {
     /// Times the per-frame work the software path does around each decoded frame, at the given picture
     /// size (4K P010 by default): the output metadata normalizer's three outcomes, the renderer's sample

@@ -38,4 +38,33 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
         let decoded = try JSONDecoder().decode(PerFrameBenchmarkReport.self, from: JSONEncoder().encode(report))
         #expect(decoded == report)
     }
+
+    private static func report(_ cases: [(String, Int, Double)]) -> PerFrameBenchmarkReport {
+        PerFrameBenchmarkReport(device: "test", os: "test", width: 64, height: 64, results: cases.map { name, runs, median in
+            PerFrameBenchmarkResult(name: name, iterations: runs, minMicroseconds: median, medianMicroseconds: median,
+                                    p95Microseconds: median, p99Microseconds: median, maxMicroseconds: median,
+                                    note: runs == 0 ? "the frame chain needs OS 26" : nil)
+        })
+    }
+
+    /// A case that ran in the baseline and is skipped or missing now regresses: a broken chain reports
+    /// its cases as skipped, and the gate must not pass then.
+    @Test func issue957ACaseThatStoppedRunningIsARegression() {
+        let base = Self.report([("chain", 300, 4000), ("sei", 300, 12), ("copy", 300, 7000)])
+        let now = Self.report([("chain", 0, 0), ("sei", 300, 12)])
+        let found = now.regressions(against: base, tolerance: 0.2)
+        #expect(found.map(\.name) == ["chain", "copy"])
+        #expect(found.first?.reason.hasPrefix("ran in the baseline, skipped now") == true)
+        #expect(found.last?.reason == "ran in the baseline, missing now")
+    }
+
+    @Test func issue957ASlowerMedianRegressesOnlyPastBothBounds() {
+        let base = Self.report([("small", 300, 18), ("big", 300, 4000)])
+        // +167% but only +30 us: under the floor. +25% and +1000 us: a regression.
+        let now = Self.report([("small", 300, 48), ("big", 300, 5000)])
+        #expect(now.regressions(against: base, tolerance: 0.2).map(\.name) == ["big"])
+        #expect(now.regressions(against: base, tolerance: 0.3).isEmpty)
+        // A case new in this run, with no baseline, is not a regression.
+        #expect(Self.report([("new", 300, 1)]).regressions(against: Self.report([]), tolerance: 0.2).isEmpty)
+    }
 }

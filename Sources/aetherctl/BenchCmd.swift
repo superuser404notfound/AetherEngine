@@ -6,7 +6,7 @@ import AetherEngine
 /// Per-frame cost of the software path's work around each frame (`AetherEngine.runPerFrameBenchmarks`):
 /// prints the table, writes the report as JSON, and against a baseline report fails on a regression.
 /// `--compare base.json new.json` compares two reports without running anything, which is how numbers
-/// from the Apple TV harness are checked.
+/// saved on an Apple TV are checked.
 func runBench(iterations: Int, jsonPath: String?, baselinePath: String?, tolerance: Double,
               compare: (String, String)?) -> Int32 {
     if let compare {
@@ -34,17 +34,14 @@ func runBench(iterations: Int, jsonPath: String?, baselinePath: String?, toleran
     return compareBenchReports(base: base, new: report, tolerance: tolerance)
 }
 
-/// A case regresses when its median grows by more than `tolerance` (a fraction) and by more than this
-/// many microseconds. On the A12 Apple TV the same build's in-place tagging measured 18 us in one run and
-/// 48 us in the next (the thread on another core), and 50 us is 0.3% of a 59.94 fps frame.
-let benchAbsoluteFloorMicroseconds = 50.0
-
+/// The table against the baseline, then the verdict from `PerFrameBenchmarkReport.regressions`, which also
+/// counts a case that ran in the baseline and is skipped or missing now.
 func compareBenchReports(base: PerFrameBenchmarkReport, new: PerFrameBenchmarkReport, tolerance: Double) -> Int32 {
     if base.device != new.device || base.width != new.width || base.height != new.height {
         print("NOTE: baseline is \(base.device) \(base.width)x\(base.height), this run \(new.device) "
               + "\(new.width)x\(new.height); compare like with like")
     }
-    var regressions = 0
+    let regressions = new.regressions(against: base, tolerance: tolerance)
     print(benchColumn("case") + " " + benchNumber("base us") + " " + benchNumber("now us") + "  change")
     for result in new.results where result.iterations > 0 {
         guard let old = base.results.first(where: { $0.name == result.name }), old.iterations > 0 else {
@@ -52,16 +49,15 @@ func compareBenchReports(base: PerFrameBenchmarkReport, new: PerFrameBenchmarkRe
             continue
         }
         let change = (result.medianMicroseconds - old.medianMicroseconds) / max(old.medianMicroseconds, 0.001)
-        let regressed = change > tolerance
-            && result.medianMicroseconds - old.medianMicroseconds > benchAbsoluteFloorMicroseconds
-        if regressed { regressions += 1 }
+        let regressed = regressions.contains { $0.name == result.name }
         print(benchColumn(result.name) + " " + benchNumber(old.medianMicroseconds) + " "
               + benchNumber(result.medianMicroseconds) + String(format: "  %+.0f%%", change * 100)
               + (regressed ? "  REGRESSION" : ""))
     }
-    print(regressions == 0 ? "verdict: no regression beyond \(Int(tolerance * 100))%"
-                           : "verdict: \(regressions) regression(s) beyond \(Int(tolerance * 100))%")
-    return regressions == 0 ? 0 : 1
+    for regression in regressions { print("REGRESSION \(regression.name): \(regression.reason)") }
+    print(regressions.isEmpty ? "verdict: no regression beyond \(Int(tolerance * 100))%"
+                              : "verdict: \(regressions.count) regression(s)")
+    return regressions.isEmpty ? 0 : 1
 }
 
 func printBenchReport(_ report: PerFrameBenchmarkReport) {

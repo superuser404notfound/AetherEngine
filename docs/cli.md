@@ -2161,7 +2161,12 @@ swift run -c release aetherctl bench --baseline /tmp/base.json
 | `chain: two passes through RGB, wall time` | The same frame through the RGB texture, as every chain with a real stage runs. |
 | `sei: HDR10 scan of a 250 KB key frame` | The in-band scan for the HDR10 SEI. |
 
-**Verdict.** A case regresses when its median grows by more than the tolerance and by more than 50 us. Below that the same build moves between runs: in-place tagging measured 18 us, then 48 us, on the A12 Apple TV. Compare reports from the same device only; the tool prints a note when the device or picture size differ.
+**Verdict.** A case regresses when:
+
+- its median grows by more than the tolerance and by more than 50 us. Below that the same build moves between runs: in-place tagging measured 18 us, then 48 us, on the A12 Apple TV;
+- or it ran in the baseline and is skipped or missing now. A broken frame chain reports its cases as skipped, and that must not pass.
+
+Each regression is printed with its reason. Compare reports from the same device only; the tool prints a note when the device or picture size differ. The rule is `PerFrameBenchmarkReport.regressions(against:tolerance:)`.
 
 | Exit | Meaning |
 |---|---|

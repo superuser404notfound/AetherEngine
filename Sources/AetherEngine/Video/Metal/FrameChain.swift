@@ -11,8 +11,9 @@ import Metal
 /// When no stage needs the RGB picture (`FrameChainStage.isIdentity`) and the size stays, one kernel does
 /// the whole round trip with the same arithmetic and no RGB texture between the passes. At 4K that texture
 /// is 66 MB written and read back per frame, which kept an A12 Apple TV's GPU busy about 10 ms per frame.
+/// No playback path builds such a chain yet: line art changes the picture and the size.
 /// Where the width and the picture's x origin are multiples of 4 (`roundTripIsWide`), that kernel moves
-/// four luma samples per access and folds the colour arithmetic: 2.6 ms instead of 4.0 on the A12, where
+/// four luma samples per access and folds the colour arithmetic: 2.7 ms instead of 4.0 on the A12, where
 /// the arithmetic, not the memory or the sampler, set the time.
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 final class FrameChain {

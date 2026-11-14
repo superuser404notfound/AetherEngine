@@ -2274,7 +2274,7 @@ Both are per session, not a process-wide total. Two players with a 256 MiB cap c
 
 ### Per-frame benchmark
 
-`AetherEngine.runPerFrameBenchmarks(iterations:width:height:)` times the software path's work around each decoded frame on the device it runs on, and returns a `PerFrameBenchmarkReport` (device, OS, picture size, one `PerFrameBenchmarkResult` per case with min, median, p95, p99 and max in microseconds). Both are `Codable`, so a report can be saved and compared with a later build. It plays nothing and needs no session; call it on the main actor, away from playback, because it keeps the CPU and GPU busy for a few seconds. The cases and the regression rule are in [cli.md › bench](cli.md#bench).
+`AetherEngine.runPerFrameBenchmarks(iterations:width:height:)` times the software path's work around each decoded frame on the device it runs on, and returns a `PerFrameBenchmarkReport` (device, OS, picture size, one `PerFrameBenchmarkResult` per case with min, median, p95, p99 and max in microseconds). Both are `Codable`, so a report can be saved and compared with a later build: `report.regressions(against: baseline, tolerance: 0.2)` returns one `PerFrameBenchmarkRegression` (case `name`, `reason`) per case that got slower than the tolerance and `PerFrameBenchmarkReport.regressionFloorMicroseconds`, or that ran in the baseline and is skipped or missing now. It plays nothing and needs no session; call it on the main actor, away from playback, because it keeps the CPU and GPU busy for a few seconds. The cases and the regression rule are in [cli.md › bench](cli.md#bench).
 
 ## Optional components
 
