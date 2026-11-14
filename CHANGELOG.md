@@ -20,6 +20,13 @@ the public-API contract.
 
 ### Fixed
 
+- **A PGS set decoded while a seek goes out is no longer drawn at the landing (AE#1022, round 3).** A drain
+  batch planned before the seek, or a tick planned while it was out, still decoded around the departure. It
+  published a set whose clear was unread as open after the seek had closed the open sets, and the clock drew
+  it at the landing until the landing's reset closed it (retest over a reader capped at 10x the bitrate: the
+  set of 22 s on screen for 0.37 s at a 63 s landing). Such a batch is now dropped, and no tick is planned
+  until the seek lands. Not reproduced on the Mac, where these seeks land in a few milliseconds; covered by
+  `Issue1022LandingWindowTests`. Thanks to Desima-AP for the retest.
 - **HDR10 on the software path now reaches the television with its static metadata (#957).** VideoToolbox
   attaches no mastering display or content light level to the frames it decodes, so the software path sent
   HDR10 with none, and the television tone-mapped without knowing the master. The decoder now reads the
