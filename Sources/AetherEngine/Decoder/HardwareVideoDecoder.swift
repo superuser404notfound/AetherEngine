@@ -909,9 +909,17 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
                 if !fromRecord.isEmpty { source = values.isEmpty ? "hvcC" : source + "+hvcC" }
                 values = values.filling(from: fromRecord)
             }
-            // HEVC only: this decoder opens no H.264 (VideoToolboxVideoFormat), and AV1 / VP9 carry
-            // HDR10 in their own metadata rather than in SEI.
+            if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_AV1,
+               let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+                let fromRecord = HDR10StaticMetadataSEI.scanAV1ConfigRecord(
+                    extradata, size: Int(codecpar.pointee.extradata_size))
+                if !fromRecord.isEmpty { source = values.isEmpty ? "av1C" : source + "+av1C" }
+                values = values.filling(from: fromRecord)
+            }
+            // HEVC (SEI) and AV1 (metadata OBUs). This decoder opens no H.264 (VideoToolboxVideoFormat),
+            // and VP9 has no in-band HDR10 metadata.
             let scansInBand = codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+                || codecpar.pointee.codec_id == AV_CODEC_ID_AV1
             keyFrames = values.isComplete || !scansInBand ? 0 : HDR10StaticMetadataSEI.keyFramesToScan
             EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata: \(source) "
                            + Self.describe(values)
@@ -943,14 +951,16 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         return extensions
     }
 
-    /// A key frame's SEI, while the values are incomplete and key frames are left to read.
+    /// A key frame's SEI (HEVC) or metadata OBUs (AV1), while the values are incomplete and key frames are
+    /// left to read.
     private func scanStaticHDR10(_ data: UnsafePointer<UInt8>, size: Int) {
         staticHDR10Lock.lock()
         let scanning = staticHDR10KeyFramesLeft > 0
         staticHDR10Lock.unlock()
         guard scanning else { return }
-        let found = HDR10StaticMetadataSEI.scan(
-            data, size: size, codec: .hevc, framing: hdr10PlusFraming)
+        let found = streamCodecID == AV_CODEC_ID_AV1
+            ? HDR10StaticMetadataSEI.scanAV1(data, size: size)
+            : HDR10StaticMetadataSEI.scan(data, size: size, codec: .hevc, framing: hdr10PlusFraming)
         staticHDR10Lock.lock()
         staticHDR10 = staticHDR10.filling(from: found)
         staticHDR10KeyFramesLeft = staticHDR10.isComplete ? 0 : max(staticHDR10KeyFramesLeft - 1, 0)
@@ -958,7 +968,7 @@ final class HardwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         let done = staticHDR10KeyFramesLeft == 0
         staticHDR10Lock.unlock()
         if done {
-            EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata from the stream's SEI: "
+            EngineLog.emit("[HardwareVideoDecoder] HDR10 static metadata from the stream's key frames: "
                            + Self.describe(values), category: .swPlayback)
         }
     }

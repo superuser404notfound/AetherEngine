@@ -2,7 +2,8 @@ import Foundation
 import AetherLibavcodec
 import AetherLibavutil
 
-/// AE#957: a stream's HDR10 static metadata, for the frames the software path decodes.
+/// AE#957: a stream's HDR10 static metadata, for the frames the software path decodes. HEVC carries it
+/// in SEI, AV1 in metadata OBUs, and a decoded libavcodec frame as side data.
 ///
 /// VideoToolbox attaches no mastering display colour volume and no content light level to the frames
 /// it decodes, though the HEVC stream carries both (measured on tvOS 27.2, A12, with the SEI in every
@@ -109,6 +110,113 @@ enum HDR10StaticMetadataSEI {
             }
         }
         return found
+    }
+
+    /// A decoded frame's own values (libavcodec exports them from the SEI, and libdav1d from the AV1
+    /// metadata OBUs), in Core Video's byte layout.
+    static func fromFrameSideData(_ frame: UnsafePointer<AVFrame>) -> Values {
+        var found = Values.none
+        guard frame.pointee.nb_side_data > 0 else { return found }
+        if let item = av_frame_get_side_data(frame, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA),
+           let raw = item.pointee.data, item.pointee.size >= MemoryLayout<AVMasteringDisplayMetadata>.size {
+            found.masteringDisplay = masteringDisplay(
+                raw.withMemoryRebound(to: AVMasteringDisplayMetadata.self, capacity: 1) { $0.pointee })
+        }
+        if let item = av_frame_get_side_data(frame, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL),
+           let raw = item.pointee.data, item.pointee.size >= MemoryLayout<AVContentLightMetadata>.size {
+            let metadata = raw.withMemoryRebound(to: AVContentLightMetadata.self, capacity: 1) { $0.pointee }
+            found.contentLightLevel = contentLightLevel(maxCLL: metadata.MaxCLL, maxFALL: metadata.MaxFALL)
+        }
+        return found
+    }
+
+    // MARK: - AV1 metadata OBUs
+
+    static let av1MetadataOBUType: UInt8 = 5
+    static let av1MetadataTypeContentLightLevel = 1
+    static let av1MetadataTypeMasteringDisplay = 2
+
+    /// The HDR10 metadata OBUs in one AV1 temporal unit (FFmpeg's demuxed packets use the low-overhead
+    /// format, every OBU with its size). CLL is laid out as Core Video's attachment; MDCV is not (red
+    /// first, 0.16 fixed point chromaticity, 24.8 and 18.14 fixed point luminance), so it is converted.
+    static func scanAV1(_ data: UnsafePointer<UInt8>, size: Int) -> Values {
+        var found = Values.none
+        var offset = 0
+        while offset < size, !found.isComplete {
+            let header = data[offset]
+            offset += 1
+            guard header & 0x80 == 0 else { return found } // obu_forbidden_bit
+            let type = (header >> 3) & 15
+            if header & 4 != 0 { offset += 1 } // obu_extension_header
+            let payloadSize: Int
+            if header & 2 != 0 {
+                guard let declared = leb128(data, size: size, offset: &offset) else { return found }
+                payloadSize = declared
+            } else {
+                payloadSize = size - offset
+            }
+            guard offset <= size, payloadSize <= size - offset else { return found }
+            let end = offset + payloadSize
+            if type == av1MetadataOBUType {
+                var cursor = offset
+                if let metadataType = leb128(data, size: end, offset: &cursor) {
+                    let body = UnsafeBufferPointer(start: data + cursor, count: end - cursor)
+                    if metadataType == av1MetadataTypeContentLightLevel, found.contentLightLevel == nil,
+                       body.count >= contentLightLevelSize {
+                        found.contentLightLevel = Data(body.prefix(contentLightLevelSize))
+                    } else if metadataType == av1MetadataTypeMasteringDisplay, found.masteringDisplay == nil {
+                        found.masteringDisplay = av1MasteringDisplay(body)
+                    }
+                }
+            }
+            offset = end
+        }
+        return found
+    }
+
+    /// The configuration OBUs of an `av1C` record (after its 4-byte header), which may hold the metadata.
+    static func scanAV1ConfigRecord(_ record: UnsafePointer<UInt8>, size: Int) -> Values {
+        guard size > 4, record[0] == 0x81 else { return .none } // marker and version 1
+        return scanAV1(record + 4, size: size - 4)
+    }
+
+    /// `metadata_hdr_mdcv` (AV1 section 5.8.4) in Core Video's layout, or nil when it is short or out of range.
+    static func av1MasteringDisplay(_ body: UnsafeBufferPointer<UInt8>) -> Data? {
+        guard body.count >= masteringDisplaySize else { return nil }
+        func u16(_ at: Int) -> UInt32 { UInt32(body[at]) << 8 | UInt32(body[at + 1]) }
+        func u32(_ at: Int) -> UInt64 { UInt64(u16(at)) << 16 | UInt64(u16(at + 2)) }
+        // 0.16 fixed point to 0.00002 units, rounded; at most 50000, so it fits two bytes.
+        func chromaticity(_ at: Int) -> UInt32 { (u16(at) * 50_000 + 32_768) >> 16 }
+        // Red, green, blue in the OBU; green, blue, red in Core Video.
+        let order = [4, 8, 0, 12]
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(masteringDisplaySize)
+        for pair in order {
+            for value in [chromaticity(pair), chromaticity(pair + 2)] {
+                bytes += [UInt8(value >> 8), UInt8(value & 0xFF)]
+            }
+        }
+        // 24.8 and 18.14 fixed point nits to 0.0001 nit.
+        let peak = (u32(16) * 10_000 + 128) >> 8
+        let minimum = (u32(20) * 10_000 + 8_192) >> 14
+        for value in [peak, minimum] {
+            guard value <= UInt64(UInt32.max) else { return nil }
+            bytes += [UInt8(value >> 24), UInt8((value >> 16) & 0xFF), UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF)]
+        }
+        return Data(bytes)
+    }
+
+    /// AV1 leb128, read up to `size`; values are limited to 32 bits.
+    private static func leb128(_ data: UnsafePointer<UInt8>, size: Int, offset: inout Int) -> Int? {
+        var value: UInt64 = 0
+        for index in 0 ..< 8 {
+            guard offset < size else { return nil }
+            let byte = data[offset]
+            offset += 1
+            value |= UInt64(byte & 0x7F) << (index * 7)
+            if byte & 0x80 == 0 { return value <= UInt64(UInt32.max) ? Int(value) : nil }
+        }
+        return nil
     }
 
     /// FFmpeg's struct in Core Video's byte layout. nil unless it has both primaries and luminance, the

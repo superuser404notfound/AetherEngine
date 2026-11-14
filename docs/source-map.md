@@ -182,7 +182,7 @@ Notes:
 | `VideoRoutingPolicy.swift` | Pure dispatch rule by codec and field order. See note. |
 | `HardwareVideoDecoder.swift` | Software path: VideoToolbox hardware decoder (HEVC, VP9, AV1 Dolby Vision) for sources routed away from AVPlayer. |
 | `DualLayerVideoDecoder.swift` | Software path: Dolby Vision Profile 7 FEL (`DualLayerDolbyVision` trait). See note. |
-| `SoftwareVideoDecoder.swift` | Software path: libavcodec/dav1d → `CVPixelBuffer` (NV12 / P010), HDR10+ side data. 10-bit AV1 reaches P010 through `GPUFrameConverter`. |
+| `SoftwareVideoDecoder.swift` | Software path: libavcodec/dav1d → `CVPixelBuffer` (NV12 / P010), HDR10+ side data, HDR10 static metadata. 10-bit AV1 reaches P010 through `GPUFrameConverter`. |
 | `GPUFrameConverter.swift` | Software path: converts a 10-bit AV1 frame to P010 in one Metal pass and applies its film grain there (dav1d exports the grain instead of applying it). `sws_scale` stays the fallback. |
 | `AV1FilmGrain.swift` | The per-frame grain tables (templates, scaling functions, block offsets), computed on the CPU the way dav1d computes them. |
 | `AV1FilmGrainShaderSource.swift` | The Metal kernels: dav1d's per-pixel grain and the P010 write. |
@@ -196,7 +196,7 @@ Notes:
 | `VideoToolboxVideoFormat.swift` | Builds the Core Media format description `HardwareVideoDecoder` needs, synthesizing VP9's `vpcC` from probed parameters. |
 | `VideoToolboxOutputMetadataNormalizer.swift` | Adds codec-declared colour metadata to VideoToolbox output that lacks it, through a pixel-transfer pool rather than mutating the frame. |
 | `ColorDescription.swift` | A stream's colour description merged from bitstream (VUI) and container (AE#499). |
-| `HDR10StaticMetadataSEI.swift` | AE#957: the stream's HDR10 static metadata (container side data, `hvcC` or key-frame SEI) in Core Video's byte layout, for the frames VideoToolbox leaves without it. |
+| `HDR10StaticMetadataSEI.swift` | AE#957: the stream's HDR10 static metadata (container side data, `hvcC` / `av1C`, key-frame SEI or AV1 metadata OBUs, a decoded frame's side data) in Core Video's byte layout. |
 | `AlternativeTransferSEI.swift` | AE#839: reads the `alternative_transfer_characteristics` SEI that names HLG behind a backward-compatible VUI. |
 | `AV1DolbyVisionRPU.swift` | The Dolby Vision RPU from an AV1 T.35 metadata OBU (Profile 10), attached to decoded frames for the system's DV display management. |
 | `DualLayerRouteDecision.swift` | Whether a Profile 7 load takes the dual-layer route or stays native, and why. Pure, logged once per source. |
