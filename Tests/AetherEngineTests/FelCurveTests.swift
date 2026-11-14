@@ -25,6 +25,15 @@ struct FelCurveTests {
         nal.withUnsafeBufferPointer { DoviRpuGuard.parse($0.baseAddress!, $0.count) }
     }
 
+    @Test("FEL picture matching requires a usable GOP timeline")
+    func pictureTimestamps() {
+        // The first GOP of a stream-copy cut can have packets missing both PTS and DTS.
+        #expect(FelCurveLookahead.frameSpacing(forSortedTimestamps: [.min, .min, 0, 42, 125]) == nil)
+        #expect(FelCurveLookahead.frameSpacing(forSortedTimestamps: [.min + 1, .max]) == nil)
+        #expect(FelCurveLookahead.frameSpacing(forSortedTimestamps: [-41, 0, 0, 42]) == 41)
+        #expect(FelCurveLookahead.frameSpacing(forSortedTimestamps: [42, 42]) == 1)
+    }
+
     @Test("uniform pivots match the split Profile 7 streams use for luma")
     func uniformPivots() {
         #expect(FelCurve.uniform(pieces: 8) == [0, 128, 256, 384, 512, 640, 768, 896, 1023])
