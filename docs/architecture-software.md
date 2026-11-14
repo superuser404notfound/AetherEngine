@@ -126,7 +126,7 @@ Values found later, in a key frame, go into a new description and session at tha
 - On a later key frame (the values were only in its SEI), its leading pictures can be lost once, as after a seek.
 - If VideoToolbox refuses the new session, the old one stays and those frames go on by copy.
 
-At `close()` the decoder logs how each frame went: `output metadata over N frames: A as decoded, B in place, C copied, D copy failed`. Copies on every frame mean the description and the normalizer disagree. Numbers: [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957).
+At `close()` the decoder logs how each frame went: `output metadata over N frames: A as decoded, B in place, C copied, D copy failed`. Copies on every frame mean the description and the normalizer disagree. Numbers: [measurements.md](measurements.md#per-frame-cost-of-the-software-path-ae957); to time it on a device, [`aetherctl bench`](cli.md#bench).
 
 **The renderer's format description follows the HDR10 values.** `SampleBufferRenderer` reuses one format description while the frames look the same. Its cache key includes the frame's mastering display and content light level bytes, so a change of those values at the same size and colour gets a new description (`FormatDescriptionFollowsHDR10MetadataTests`).
 
@@ -271,6 +271,13 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 - If only the stage had put a URL VOD session on the software path, the session is then rebuilt on the native path (`upscaleDisableReturnsToNative`).
 
 `$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo).
+
+**The frame chain** (`FrameChain`, AE#957) is what the line-art scaler runs on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
+
+- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel with no RGB texture. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame. No playback path builds such a chain yet: line art changes the picture and the size, so it keeps the two passes. The one kernel is the fast path for chains that only convert, and the benchmark times it.
+- That kernel is `frameChainRoundTripWide` when the width and the picture's x origin are multiples of 4: it reads and writes four luma samples per texel and folds the colour arithmetic, 2.7 ms per 4K frame on the A12. Otherwise `frameChainRoundTrip`, one sample per access, 4.0 ms.
+- Every other chain keeps the two passes: a stage reads its neighbours from that texture.
+- Both paths give the same picture: luma unchanged, chroma within one code value.
 
 ### Dolby Vision Profile 7 FEL
 

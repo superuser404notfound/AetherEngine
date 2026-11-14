@@ -70,6 +70,8 @@ func printUsage() {
       aetherctl serve [--no-dv] [--force-dv] [--dv-base-layer] [--start-position S] [--iframes] [--atmos-bed 7.1.4 [--bed-format apac|lpcm|auto]] [--audio-index N] [--stereo auto|mono|sbs|ou] <url>
       aetherctl validate [--no-dv] [--force-dv] [--dv-base-layer] <url>
       aetherctl swdecode [--frames N] <url>
+      aetherctl bench [--iterations N] [--json out.json] [--baseline base.json] [--tolerance PCT]
+      aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]
       aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
@@ -648,6 +650,27 @@ if first == "felcurves" {
     exit(64)
 }
 #endif
+
+// Per-frame cost of the software path's frame work, against a baseline (AE#957).
+if first == "bench" {
+    var rest = Array(args.dropFirst(2))
+    let iterations = takeIntFlag("--iterations", in: 10...100_000, from: &rest) ?? 300
+    let jsonPath = takeStringFlag("--json", from: &rest)
+    let baseline = takeStringFlag("--baseline", from: &rest)
+    let tolerance = (takeDoubleFlag("--tolerance", in: 1...500, from: &rest) ?? 20) / 100
+    var compare: (String, String)?
+    if takeFlag("--compare", from: &rest) {
+        guard rest.count == 2 else {
+            print("Usage: aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]")
+            exit(64)
+        }
+        compare = (rest[0], rest[1])
+        rest.removeAll()
+    }
+    rejectStrayFlags(rest, subcommand: "bench")
+    exit(runBench(iterations: iterations, jsonPath: jsonPath, baselinePath: baseline, tolerance: tolerance,
+                  compare: compare))
+}
 
 // FEL / MEL for many sources at once: `label<TAB>url` lines on stdin.
 if first == "eltype" {

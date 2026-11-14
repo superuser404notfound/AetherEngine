@@ -22,12 +22,13 @@ private enum ChainGate {
 struct FrameChainTests {
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    private func chain(_ w: Int, _ h: Int, target: (Int, Int)? = nil, stages: [any FrameChainStage]) throws -> FrameChain {
+    private func chain(_ w: Int, _ h: Int, target: (Int, Int)? = nil, stages: [any FrameChainStage],
+                       fusesRoundTrip: Bool = true) throws -> FrameChain {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let queue = try #require(device.makeCommandQueue())
         let t = target ?? (w, h)
         return try FrameChain(device: device, queue: queue, sourceWidth: w, sourceHeight: h,
-                              targetWidth: t.0, targetHeight: t.1, stages: stages)
+                              targetWidth: t.0, targetHeight: t.1, stages: stages, fusesRoundTrip: fusesRoundTrip)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
@@ -104,6 +105,58 @@ struct FrameChainTests {
         #expect(!general.writesOutputDirectly)
         let diff = ChainFrames.maxDifference(a, b)
         #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c)")
+    }
+
+    /// AE#957: a chain whose stages leave the picture alone, at its own size, runs as one kernel with no
+    /// RGB texture. It must give what the two passes give, to within rounding: 320 wide takes the wide
+    /// kernel (four luma samples per texel), 322 the narrow one.
+    @Test(arguments: [false, true], [320, 322])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957OneKernelRoundTripMatchesTheTwoPasses(tenBit: Bool, width: Int) throws {
+        let input = try ChainFrames.gradient(width, 180, tenBit: tenBit)
+        ChainFrames.paintLuma(input) { x, y in ((x / 7 + y / 5) % 9 == 0) ? 30 : 60 + x / 2 }
+        let fused = try chain(width, 180, stages: [PassThroughStage(), PassThroughStage()])
+        let twoPass = try chain(width, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
+        let scaled = try chain(width, 180, target: (width * 2, 360), stages: [PassThroughStage()])
+        #expect(fused.isRoundTripOnly)
+        #expect(!twoPass.isRoundTripOnly)
+        #expect(!scaled.isRoundTripOnly)
+        let wide = FrameChain.roundTripIsWide(targetWidth: width, pictureX: 0)
+        #expect(wide == (width == 320))
+        let (a, _) = try fused.process(input, picture: whole(width, 180))
+        let (b, _) = try twoPass.process(input, picture: whole(width, 180))
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit), width \(width))")
+    }
+
+    /// A picture that starts inside the frame (a crop): both one-kernel versions read from its origin and give
+    /// what the two passes give. x 4 keeps the wide kernel, x 2 takes the narrow one.
+    @Test(arguments: [false, true], [4, 2])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957OneKernelRoundTripHonoursThePictureOrigin(tenBit: Bool, originX: Int) throws {
+        let input = try ChainFrames.gradient(336, 200, tenBit: tenBit)
+        ChainFrames.paintLuma(input) { x, y in ((x / 5 + y / 7) % 8 == 0) ? 40 : 50 + (x + y) / 3 }
+        let picture = FrameUpscaler.PictureRegion(x: originX, y: 8, width: 320, height: 180)
+        let fused = try chain(320, 180, stages: [PassThroughStage()])
+        let twoPass = try chain(320, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
+        let wide = FrameChain.roundTripIsWide(targetWidth: 320, pictureX: originX)
+        #expect(wide == (originX == 4))
+        let (a, _) = try fused.process(input, picture: picture)
+        let (b, _) = try twoPass.process(input, picture: picture)
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit), origin x \(originX))")
+    }
+
+    /// The wide kernel reads luma four samples at a time: a picture origin off those texels takes the narrow one.
+    @Test
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957TheWideRoundTripNeedsFourSampleAlignment() {
+        let aligned = FrameChain.roundTripIsWide(targetWidth: 3840, pictureX: 0)
+        let offset = FrameChain.roundTripIsWide(targetWidth: 1920, pictureX: 2)
+        let narrow = FrameChain.roundTripIsWide(targetWidth: 1918, pictureX: 0)
+        #expect(aligned)
+        #expect(!offset)
+        #expect(!narrow)
     }
 
     @Test

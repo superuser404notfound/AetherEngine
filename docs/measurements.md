@@ -381,7 +381,7 @@ The check: the metadata on an unchanged picture switched every 3 s between a 100
 
 ### Per-frame cost of the software path (AE#957)
 
-Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-13, 4K P010, 300 runs per case.
+Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-13 with `AetherEngine.runPerFrameBenchmarks`, 4K P010, 300 runs per case.
 
 Current rule: [architecture-software.md › VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
 
@@ -391,6 +391,7 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 | Normalizer, tag in place | 18 | 30 |
 | Normalizer, owned copy | 7193 | 7778 |
 | Renderer, sample buffer | 25 | 41 |
+| Frame chain, one pass-through stage, two passes through RGB | 11647 (GPU 10087) | 11908 |
 | HDR10 SEI scan, 250 KB key frame | 12 | 13 |
 
 **The owned copy is the cost that matters.** A frame lasts 41708 us at 23.976 fps and 16683 us at 59.94. Before the fix below, an HDR10 HEVC clip on the software path took the copy on every frame (489 of 489).
@@ -398,6 +399,31 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 **Why it copied.** VideoToolbox tagged its output BT.709 (`ColorInfoGuessedBy`) for a PQ BT.2020 HEVC clip whose VUI said otherwise, and carried no HDR10 static metadata. Both mismatched what the normalizer attaches, and the output buffers are not modifiable.
 
 **The fix.** The format description VideoToolbox decodes with now carries the stream's colour (as AV1 and VP9 already did) and its HDR10 values when they are known at open. VideoToolbox then attaches both to its own output: 486 of 486 frames matched as decoded, none copied.
+
+**The frame chain's RGB texture.** The two passes write a 66 MB half-float RGB texture per 4K frame and read it back. A chain of pass-through stages now runs as one kernel without it. The same device, same day:
+
+| Chain, 4K P010 | Wall median (us) | GPU median (us) |
+|---|---|---|
+| Two passes through RGB | 11426 | 9871 |
+| One kernel | 5341 | 3987 |
+| One kernel, wide texels, folded arithmetic | 3973 | 2675 |
+
+Luma is identical between all three, and chroma is within one code value.
+
+**What set the one kernel's time on the A12.** Variants of it, same frame and day (GPU median, us):
+
+| Variant | GPU |
+|---|---|
+| Copy only, one sample per access | 3456 |
+| Copy only, four luma samples per access | 1936 |
+| Four per access, chroma sampler but no arithmetic | 1956 |
+| Four per access, full arithmetic | 3970 |
+| The same, coefficients folded per thread | 2583 |
+| The same, chroma read by hand (9 texels) instead of sampled | 4587 |
+
+So the sampler is free, wide accesses halve the memory cost, and the arithmetic set the rest. Half precision arithmetic took 2606 but moved luma by up to 2 codes, so it is not used.
+
+**The time outside the GPU** (about 1.3 ms) is mostly the CPU slowing down while it waits for the command buffer. Spinning on the status instead of `waitUntilCompleted` cut the wall time by 0.8 ms, but holds a core busy for the whole GPU time, so the chain still waits.
 
 ### Software channel layout mismatch
 
