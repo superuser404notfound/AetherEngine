@@ -1918,6 +1918,7 @@ Two families: cache-backed stills from the active session (no second connection)
 | `scrubPreviewDrawsInView`, `showScrubPreview(atSeconds:in:)`, `AetherScrubPreviewView`, `ScrubPreviewPlacement` | The scrub preview for Dolby Vision without a displayable base layer. See [Scrub previews for Dolby Vision Profile 5](#scrub-previews-for-dolby-vision-profile-5). |
 | `scrubPreviewSourceGeneration` | A fresh `UUID` on every teardown, distinct across engine instances, so a host can fence a preview that resolved after its source went away. |
 | `clearResidentPreviewFrames()` | Cancels in-flight resident previews and drops their cached approximations; playback media is untouched. |
+| `releaseScrubPreviewDecoders()` | Closes every still decoder and returns once they are closed. Call it when a scrub ends. Cached stills stay. See [Memory while scrubbing](#memory-while-scrubbing). |
 
 1. **`scrubThumbnail`** works on single-connection sources where a second demuxer is refused (debrid / torrent links, IPTV accounts capped at one request). A native session decodes from its segment cache; a software session from its packet cache (VOD, AE#605) or its DVR packet ring (live, #544). A VOD target outside what is retained returns nil, not the nearest retained frame.
 2. **The two variants** also serve software sessions. The live one reads the DVR packet ring (#544). The VOD one reads the packet cache its seeks land in (AE#605), from keyframe to target, on the same axis `seek(to:)` takes.
@@ -1937,6 +1938,15 @@ Two families: cache-backed stills from the active session (no second connection)
 - `refined: false` stops at the first decoded frame (cached per segment at the same width). `true` decodes toward the target. `refined` in the result means that decode reached the target, not that the two times are equal.
 - Missing, cancelled, replaced or stale work returns nil.
 - Decode is bounded at 750 ms and 900 packets per request.
+
+### Memory while scrubbing
+
+A still decoder costs memory in proportion to the video's size. On an Apple TV 4K one VideoToolbox decoder for 4K HEVC 10-bit holds 100 to 160 MB of reference frames, a 1080p one a quarter of that (AE#1059).
+
+- The engine keeps up to six recent segments ready for stills. Their open decoders share a budget of six 1080p pictures, so a 1080p title keeps all six open and a 4K title keeps one. The others close down to their cached still, and a repeat request at the same width is still answered from that cache.
+- Before a decoder opens, the older ones close, so the budget holds at the peak and not only after it.
+- A resident segment's decoder closes by itself after 3 s without a request.
+- Call `releaseScrubPreviewDecoders()` when the scrub ends to close the rest at once.
 
 **The keyframe still ladder.** On a native VOD session, a position no resident segment covers is answered from the keyframe still ladder instead of nil. The ladder is a sparse set of keyframe stills the engine collects in the background.
 

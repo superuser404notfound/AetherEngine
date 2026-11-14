@@ -8,10 +8,66 @@ extension AetherEngine {
     /// warm; each extractor maps its segment file (audit SEG-2), so the entries hold clean
     /// file-backed pages rather than heap copies, and the bound remains fixed.
     nonisolated static let scrubThumbnailExtractorLimit = 6
+
+    /// How much decoded picture the open still decoders may cover between them, in coded pixels.
+    /// Six 1920x1088 decoders fit, so a 1080p source keeps its whole LRU warm. A 4K decoder holds
+    /// 100 to 160 MB of reference frames, and AE#1059 measured six of them at 750 MB on an Apple TV
+    /// 4K, so a 4K source keeps one open and the others close down to their cached stills.
+    nonisolated static let scrubDecoderPixelBudget = 6 * 1920 * 1088
+
     public func clearResidentPreviewFrames() {
         for entry in scrubThumbnailExtractors {
             Task { await entry.extractor.clearResidentPreviewCache() }
         }
+    }
+
+    /// Closes every scrub-still decoder now and returns once they are closed. Call it when the
+    /// scrub ends. The extractors and their cached stills stay, so the next request answers from
+    /// the cache or reopens its decoder. Playback is untouched (AE#1059).
+    public func releaseScrubPreviewDecoders() async {
+        let extractors = scrubThumbnailExtractors.map(\.extractor)
+        await withTaskGroup(of: Void.self) { group in
+            for extractor in extractors {
+                group.addTask { await extractor.releaseDecoder() }
+            }
+        }
+    }
+
+    /// Keeps the open decoders inside `scrubDecoderPixelBudget` before `incoming` decodes. The
+    /// newest entries keep theirs; `incoming` counts at the size it last decoded at, or at the
+    /// largest size any entry knows when it never opened, so the budget holds before the open
+    /// rather than after it. Closing waits for the decode queue of each released extractor.
+    func enforceScrubDecoderBudget(before incoming: FrameExtractor) async {
+        let entries = scrubThumbnailExtractors.map(\.extractor)
+        var largest = 0
+        var states: [(extractor: FrameExtractor, open: Int)] = []
+        for extractor in entries {
+            largest = max(largest, await extractor.knownDecoderPixelArea)
+            states.append((extractor, await extractor.openDecoderPixelArea))
+        }
+        let incomingKnown = await incoming.knownDecoderPixelArea
+        let released = Self.scrubDecodersToRelease(
+            newestLast: states.map { $0.extractor === incoming ? 0 : $0.open },
+            incomingArea: incomingKnown > 0 ? incomingKnown : largest)
+        guard !released.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            for index in released {
+                let extractor = states[index].extractor
+                group.addTask { await extractor.releaseDecoder() }
+            }
+        }
+    }
+
+    /// Indices into `newestLast` (open decoder areas, oldest first, 0 for a closed one) whose
+    /// decoders close so they fit the budget next to `incomingArea`. Newest first wins.
+    nonisolated static func scrubDecodersToRelease(newestLast areas: [Int], incomingArea: Int,
+                                                   budget: Int = scrubDecoderPixelBudget) -> [Int] {
+        var used = incomingArea
+        var released: [Int] = []
+        for index in areas.indices.reversed() where areas[index] > 0 {
+            if used + areas[index] > budget { released.append(index) } else { used += areas[index] }
+        }
+        return released
     }
 
     /// Timestamped production preview. All reads come from existing resident
@@ -70,6 +126,8 @@ extension AetherEngine {
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             trimScrubThumbnailExtractors()
         }
+        await enforceScrubDecoderBudget(before: extractor)
+        guard gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
         guard let frame = await extractor.residentPreview(rawTarget: live ? output : sourceTarget - carried,
                     refined: refined, maxWidth: maxWidth, isCancelled: isCancelled),
               gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
@@ -108,6 +166,8 @@ extension AetherEngine {
             scrubThumbnailExtractors.append((key, extractor))
             trimScrubThumbnailExtractors()
         }
+        await enforceScrubDecoderBudget(before: extractor)
+        guard gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
         guard let frame = await extractor.residentPreview(rawTarget: 0, refined: false, maxWidth: maxWidth,
                                                           isCancelled: isCancelled),
               gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
@@ -191,6 +251,8 @@ extension AetherEngine {
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             trimScrubThumbnailExtractors()
         }
+        await enforceScrubDecoderBudget(before: extractor)
+        guard loadGeneration == gen else { return nil }
         return await extractor.thumbnail(at: 0, maxWidth: maxWidth)
     }
 

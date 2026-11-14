@@ -44,13 +44,33 @@ public actor FrameExtractor {
     /// work instead of lazily reopening a closed context.
     private var isShutDown = false
 
-    private var idleInterval: Duration = .seconds(10)
+    private var idleInterval: Duration
+    /// Resident extractors close sooner: a scrub moves on within seconds, and each open 4K decoder
+    /// holds 100 to 160 MB (AE#1059). `releaseDecoder()` is the faster path the engine takes.
+    nonisolated static let residentIdleInterval: Duration = .seconds(3)
+    /// Coded pixel area of the decoder as of the last finished queue job, 0 while closed. Read by
+    /// the engine's scrub decoder budget.
+    private(set) var openDecoderPixelArea = 0
+    /// The area the source decoded at the last time it was open, kept across a close so the budget
+    /// can count a decoder before it reopens.
+    private(set) var knownDecoderPixelArea = 0
     private var idleTask: Task<Void, Never>?
     private var residentApproximation: (width: Int, frame: ScrubFrame)?
     nonisolated let residentIdentity: String?
     func clearResidentPreviewCache() {
         currentToken?.cancel()
         residentApproximation = nil
+    }
+
+    /// Closes the decoder and demuxer but keeps the cached stills, so a repeat request for this
+    /// segment still answers without a decode. The next decode reopens lazily. Queued behind any
+    /// decode in flight, which therefore finishes first.
+    func releaseDecoder() async {
+        guard !isShutDown, openDecoderPixelArea > 0 else { return }
+        idleTask?.cancel()
+        idleTask = nil
+        let context = self.context
+        await runOnQueue { context.close() }
     }
 
     /// Only used with a one-segment DataIOReader. No URL or provider fallback.
@@ -94,8 +114,10 @@ public actor FrameExtractor {
         return result
     }
 
-    private init(context: FrameDecodeContext, yieldWhile: (@Sendable () -> Bool)?, residentIdentity: String? = nil) {
+    private init(context: FrameDecodeContext, yieldWhile: (@Sendable () -> Bool)?, residentIdentity: String? = nil,
+                 idleInterval: Duration = .seconds(10)) {
         self.context = context
+        self.idleInterval = idleInterval
         self.residentIdentity = residentIdentity
         self.yieldWhile = yieldWhile
         self.cache = FrameCache(
@@ -139,7 +161,7 @@ public actor FrameExtractor {
          residentBudget: Duration = .milliseconds(750)) {
         self.init(context: FrameDecodeContext(reader: residentReader, formatHint: formatHint,
                                               residentBudget: residentBudget),
-                  yieldWhile: nil, residentIdentity: identity)
+                  yieldWhile: nil, residentIdentity: identity, idleInterval: Self.residentIdleInterval)
     }
 
     /// Yield decision for elective thumbnail/preview extraction. The disposable decode's demuxer pulls
@@ -361,11 +383,21 @@ public actor FrameExtractor {
 
     /// Run blocking work on the serial queue, awaiting the result without blocking the actor's executor.
     private func runOnQueue<T: Sendable>(_ work: @escaping @Sendable () -> T) async -> T {
-        await withCheckedContinuation { (continuation: CheckedContinuation<T, Never>) in
+        let context = self.context
+        let (result, area) = await withCheckedContinuation {
+            (continuation: CheckedContinuation<(T, Int), Never>) in
             decodeQueue.async {
-                continuation.resume(returning: work())
+                let result = work()
+                continuation.resume(returning: (result, context.openDecoderPixelArea))
             }
         }
+        noteDecoderArea(area)
+        return result
+    }
+
+    private func noteDecoderArea(_ area: Int) {
+        openDecoderPixelArea = area
+        if area > 0 { knownDecoderPixelArea = area }
     }
 
     /// Tests that wait for the idle close shorten it, so a starved runner does not spend the
@@ -393,6 +425,7 @@ public actor FrameExtractor {
     private func idleClose() {
         cache.clear()
         residentApproximation = nil
+        openDecoderPixelArea = 0
         let context = self.context
         // Fire-and-forget: best-effort, no caller awaits it; runOnQueue would block the actor for nothing.
         decodeQueue.async { context.close() }

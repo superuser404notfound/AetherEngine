@@ -51,6 +51,12 @@ final class FrameDecodeContext: @unchecked Sendable {
     /// this the thumbnail draws square-pixel and looks stretched. Defaults 1:1.
     private var streamSAR = AVRational(num: 1, den: 1)
     private(set) var isOpen = false
+    /// Coded width times height of the open decoder, 0 while closed. A decoder's memory scales with
+    /// it: one VideoToolbox context on 4K HEVC 10-bit holds 100 to 160 MB of reference frames (AE#1059).
+    var openDecoderPixelArea: Int {
+        guard isOpen, let codecContext else { return 0 }
+        return max(0, Int(codecContext.pointee.width)) * max(0, Int(codecContext.pointee.height))
+    }
     /// AE#499: the container's colour declaration, captured at open. `isHDR` below is read off
     /// exactly this, so a frame whose VUI says nothing has to inherit it or the two disagree: the gate
     /// switches tone mapping on from the container while zscale reads the frame and finds no path to
