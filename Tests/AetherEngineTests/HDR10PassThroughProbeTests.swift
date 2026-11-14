@@ -159,21 +159,6 @@ struct HDR10PassThroughProbeTests {
         #expect([0, n, 3 * n].map { stage.metadata(forFrame: $0, pts: .zero) }
                 == Array(repeating: .probeDefault, count: 3))
     }
-
-    @Test
-    func issue957CopiedAttachmentsLeaveTheGeometryKeysBehind() throws {
-        let input = try ProbeFrames.pq(64, 36, sourceCLL: Data([0x03, 0xE8, 0x01, 0x90]))
-        let aperture: [String: Any] = [kCVImageBufferCleanApertureWidthKey as String: 60,
-                                       kCVImageBufferCleanApertureHeightKey as String: 34]
-        CVBufferSetAttachment(input, kCVImageBufferCleanApertureKey, aperture as CFDictionary, .shouldPropagate)
-        let output = try ProbeFrames.pq(60, 34)
-        HDR10ProbeStage.copyAttachments(from: input, to: output)
-        #expect(CVBufferCopyAttachment(output, kCVImageBufferCleanApertureKey, nil) == nil)
-        #expect(CVBufferCopyAttachment(output, kCVImageBufferContentLightLevelInfoKey, nil) as? Data
-                == Data([0x03, 0xE8, 0x01, 0x90]))
-        #expect(CVBufferCopyAttachment(output, kCVImageBufferTransferFunctionKey, nil) as? String
-                == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String)
-    }
 }
 
 #if !targetEnvironment(simulator)

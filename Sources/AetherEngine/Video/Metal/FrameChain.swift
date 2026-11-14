@@ -85,9 +85,20 @@ final class FrameChain {
         return t
     }
 
+    /// The colour volume the chain's output fits in: the last stage that declares one sets it.
+    var outputColorVolume: FrameChainColorVolume {
+        FrameChainColorVolume.ofChain(stages.map(\.outputColorVolume))
+    }
+
+    /// Gives `output` the attachments of `input`, minus its geometry keys, with the HDR10 metadata of
+    /// `outputColorVolume`. Callers run it on every buffer `process` returns.
+    func attach(from input: CVPixelBuffer, to output: CVPixelBuffer) {
+        FrameChainOutputAttachments.carry(from: input, to: output, volume: outputColorVolume)
+    }
+
     /// `picture` is the region of `input` the chain scales (the clean aperture), with an even origin.
-    /// Returns a buffer of the input's format at the target size, attachments left to the caller, and
-    /// the command buffer's GPU time in milliseconds.
+    /// Returns a buffer of the input's format at the target size, its attachments not yet set (`attach`
+    /// replaces them), and the command buffer's GPU time in milliseconds.
     func process(_ input: CVPixelBuffer, picture: FrameUpscaler.PictureRegion) throws -> (CVPixelBuffer, Double) {
         let format = CVPixelBufferGetPixelFormatType(input)
         guard Self.supportedFormats.contains(format) else { throw Failure("pixel format \(format) not supported") }
@@ -211,11 +222,15 @@ protocol FrameChainStage: AnyObject {
     /// The last stage may write the output planes itself (the colour parameters are bound at buffer 0),
     /// which spares the chain a target-size RGB texture. False leaves the conversion to the chain.
     func encodeFinal(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, luma: MTLTexture, chroma: MTLTexture) -> Bool
+    /// The colour volume of what the stage outputs; the chain writes the frames' HDR10 metadata from it.
+    /// A stage that changes the picture's brightness or gamut must declare it.
+    var outputColorVolume: FrameChainColorVolume { get }
 }
 
 @available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
 extension FrameChainStage {
     var isIdentity: Bool { false }
+    var outputColorVolume: FrameChainColorVolume { .unchanged }
     func encodeFinal(_ encoder: MTLComputeCommandEncoder, input: MTLTexture, luma: MTLTexture, chroma: MTLTexture) -> Bool {
         false
     }

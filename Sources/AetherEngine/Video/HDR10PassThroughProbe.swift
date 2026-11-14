@@ -268,25 +268,12 @@ final class HDR10ProbeStage: @unchecked Sendable {
                 EngineLog.emit("[HDR10Probe] chain built for \(picture.width)x\(picture.height)", category: .swPlayback)
             }
             let (output, ms) = try built.process(input, picture: picture)
-            Self.copyAttachments(from: input, to: output)
+            built.attach(from: input, to: output)
             return .success((output, ms))
         } catch {
             return .failure(Note(message: "chain: \(error)", counts: true))
         }
         #endif
-    }
-
-    /// Everything the decoder attached, minus the keys that describe the input's geometry: the chain's
-    /// output is the picture region alone, so a clean aperture would crop it a second time.
-    static func copyAttachments(from input: CVPixelBuffer, to output: CVPixelBuffer) {
-        CVBufferRemoveAllAttachments(output)
-        guard let attachments = CVBufferCopyAttachments(input, .shouldPropagate) as? [String: Any] else { return }
-        let dropped: Set<String> = [
-            kCVImageBufferCleanApertureKey as String, kCVImageBufferPreferredCleanApertureKey as String,
-            kCVImageBufferFieldCountKey as String, kCVImageBufferFieldDetailKey as String,
-            kCVImageBufferDisplayDimensionsKey as String,
-        ]
-        CVBufferSetAttachments(output, attachments.filter { !dropped.contains($0.key) } as CFDictionary, .shouldPropagate)
     }
 
     private func notePassThrough(_ message: String) {
