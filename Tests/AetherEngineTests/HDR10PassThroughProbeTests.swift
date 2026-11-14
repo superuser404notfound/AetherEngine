@@ -60,7 +60,8 @@ struct HDR10PassThroughProbeTests {
     }
 
     @Test(arguments: ["maxcll=0", "maxcll=70000", "maxcll=100,maxfall=200", "peak=20000", "peak=0.5",
-                      "min=800", "min=-1", "colour=1", "maxcll", "maxcll=abc"])
+                      "min=800", "min=-1", "colour=1", "maxcll", "maxcll=abc",
+                      "maxcll=1e30", "maxfall=-1e30"])
     func issue957BadMetadataIsRefused(text: String) {
         guard case .failure = HDR10StaticMetadata.parse(text) else {
             Issue.record("'\(text)' parsed")

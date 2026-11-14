@@ -98,9 +98,14 @@ extension HDR10StaticMetadata {
             guard pair.count == 2, let value = Double(pair[1]), value.isFinite else {
                 return .failure(.init(message: "\(HDR10ProbeSettings.metadataVariable): cannot read '\(item)'"))
             }
+            // Int(_:) traps on a finite Double past Int's range (maxcll=1e30), so convert through exactly:.
+            let whole = Int(exactly: value.rounded(.towardZero))
             switch pair[0].lowercased() {
-            case "maxcll": result.maxCLL = Int(value)
-            case "maxfall": result.maxFALL = Int(value)
+            case "maxcll", "maxfall":
+                guard let whole else {
+                    return .failure(.init(message: "maxcll and maxfall must be 1...65535 with maxfall <= maxcll"))
+                }
+                if pair[0].lowercased() == "maxcll" { result.maxCLL = whole } else { result.maxFALL = whole }
             case "peak": result.masteringPeakNits = value
             case "min": result.masteringMinNits = value
             default:
