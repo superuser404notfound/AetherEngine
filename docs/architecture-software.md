@@ -357,7 +357,7 @@ Live sources, and VOD sources that cannot seek, jump their timestamps at program
 - Each jump logs one `[SWHost] PTS discontinuity #n (reader|demux, video|audio)` line, capped at 40 per session. `(adopted from the other stream)` marks the second stream of a splice.
 - The live read-ahead measures its reservoir on raw timestamps, upstream of the fold. A distance past any fill it could have built (forward window + 10 s) counts as a jump, not as a full reservoir, so a spike no longer parks the producer. The VOD cache keeps the old reading, because a cached seek back legitimately leaves more stored than the window.
 
-On the combined loop a video jump still waits for every parked video packet to reach the renderer before it flushes the decoder, and reads no audio meanwhile. On a 4 s audio lead that costs most of the lead once per jump (measured down to 0.33 s), then it refills.
+**Where the video decoder is flushed.** A video jump needs the decoder drained and flushed, after the pre-jump packets and before the first post-jump one. On the combined loop's parked route that first packet carries a mark, and the flush runs when it reaches the head of the parked queue. The loop keeps reading audio meanwhile. It used to wait on the spot for the whole parked queue (~3.5 s of video), read no audio, and lose most of a 4 s audio lead at every jump (down to 0.33 s, measured). With the mark, a spike and a +5000 s splice both keep the lead at its no-jump level (3.30 s and 3.09 s minimum against 3.37 s). The audio decoder is still flushed when the video jump is read.
 
 ### Software live replay admission and recovery
 

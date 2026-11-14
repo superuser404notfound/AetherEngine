@@ -4004,6 +4004,18 @@ final class SoftwarePlaybackHost {
         var diagAudioPtsSec = Double.nan
         var diagAudioPtsGeneration = parkedSeekGeneration
 
+        // AE#1053 follow-up: a video timestamp seam has been read, and the decoder still has to be
+        // drained and flushed before the next video packet goes in. On the parked route the mark moves
+        // onto that packet (`seamParkedPackets`), so everything parked ahead of it decodes first while
+        // this thread keeps reading audio.
+        var videoSeamPending = false
+        var seamParkedPackets = Set<UnsafeMutablePointer<AVPacket>>()
+        func applyVideoSeam() {
+            videoDecoder.drainForEndOfStream()
+            videoDecoder.flush()
+            renderer.drainReorderBuffer()
+        }
+
         func freeParkedVideo() {
             for p in parkedVideo {
                 av_packet_unref(p)
@@ -4011,6 +4023,11 @@ final class SoftwarePlaybackHost {
             }
             parkedVideo.removeAll()
             parkedVideoBytes = 0
+            // Freed pointers can come back from the allocator; a stale mark would flush on a stranger.
+            // Every caller (seek, background, recovery) flushes the decoder itself, so a pending seam
+            // goes with the packets.
+            seamParkedPackets.removeAll()
+            videoSeamPending = false
             keyframeLedger?.discardPending()
         }
 
@@ -4042,6 +4059,8 @@ final class SoftwarePlaybackHost {
             if seekGeneration() != parkedSeekGeneration { return }
             while let head = parkedVideo.first, mayDecodeVideoPacket(head),
                   !stopRequested(), !backgroundAudioOnly() {
+                // Before the epoch read: the seam's flush moves it, and this packet belongs after it.
+                if seamParkedPackets.remove(head) != nil { applyVideoSeam() }
                 // The epoch is read per packet, before the generation check below. A seek bumps the
                 // generation before it flushes the decoder, so an epoch read ahead of its flush is refused
                 // by the decoder and one read after it is behind a generation check that fails: either
@@ -4400,19 +4419,12 @@ final class SoftwarePlaybackHost {
                 let tbSec = foldStream == .video ? videoTimeBaseSeconds : audioTimeBaseSeconds
                 if tbSec > 0, let seam = timelineFold.observe(foldStream, rawSeconds: Double(packet.pointee.pts) * tbSec) {
                     if seam.stream == .video {
-                        // Feed the parked pre-seam tail to the decoder before the flush drops
-                        // its reference chain; the seam packet itself parks after this block.
-                        waitForRenderer(.drainAll)
-                        freeParkedVideo()
-                        videoDecoder.drainForEndOfStream()
-                        videoDecoder.flush()
-                        // AE#492: this flush is THIS thread's, made after the read and on behalf of
-                        // the packet in hand. Retiring that packet along with the seam it opens
-                        // would drop the first picture of every new segment, so the epoch moves with
-                        // it. A seek's flush comes from the other thread and is not re-read here.
-                        epochBeforeRead = videoDecoder.feedEpoch
+                        // The video decoder is flushed where the first post-seam packet reaches it, not
+                        // here: the parked pre-seam tail has to be decoded first, and waiting for it on
+                        // this thread read no audio for as long as the FIFO held (~3.5 s on a 4 s lead,
+                        // measured down to 0.33 s of audio lead at every seam). See `videoSeamPending`.
+                        videoSeamPending = true
                         audioDecoder?.flush()
-                        renderer.drainReorderBuffer()
                     }
                     if loggedSeamCount < LiveTimelineFold.loggedSeamCap {
                         loggedSeamCount += 1
@@ -4538,6 +4550,10 @@ final class SoftwarePlaybackHost {
                         parkedVideoBytes += bytes
                     }
                     noteVideoPacketParked(packet)
+                    if videoSeamPending {
+                        videoSeamPending = false
+                        seamParkedPackets.insert(packet)
+                    }
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
                     // requires a DECLARED audio track, not a producing one). The stream that
@@ -4600,6 +4616,11 @@ final class SoftwarePlaybackHost {
                     av_packet_unref(packet)
                     av_packet_free_safe(packet)
                     return false
+                }
+                // Lockstep route: nothing is parked, so the seam is applied right before its packet.
+                if videoSeamPending {
+                    videoSeamPending = false
+                    applyVideoSeam()
                 }
                 // A recovery flush can land during the wait. The packet in hand is still current, and the
                 // epoch read before the read would make the decoder refuse it; if it is the keyframe the

@@ -27,6 +27,11 @@ the public-API contract.
   its own jumps, and the second stream of a splice takes over the first one's offset to stay in sync. The
   live read-ahead also stopped reading a spike as a full reservoir. Reproduced and verified with `aetherctl`
   on a spiked TS served at real time. Thanks to l984-451 for the report and the full log.
+- **A timestamp jump no longer drains the audio lead on live software sessions without DVR (#1053 follow-up).**
+  At every video jump the combined loop waited for its whole parked video queue (~3.5 s) before flushing the
+  decoder and read no audio meanwhile, so a 4 s audio lead fell to 0.33 s. The flush now runs when the first
+  post-jump packet reaches the head of that queue, and audio keeps flowing (3.30 s minimum lead on the spike,
+  3.37 s with no jump at all).
 - **A PGS set decoded while a seek goes out is no longer drawn at the landing (AE#1022, round 3).** A drain
   batch planned before the seek, or a tick planned while it was out, still decoded around the departure. It
   published a set whose clear was unread as open after the seek had closed the open sets, and the clock drew
