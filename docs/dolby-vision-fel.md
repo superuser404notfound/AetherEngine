@@ -576,7 +576,7 @@ The composition is defined on the 4:2:0 sites, where the base layer's chroma sit
 
 #### In place
 
-When the decoded base-layer buffer allows it, the result is written into that buffer instead of a pool buffer. The output pool above is then not created unless a frame is refused for in-place (for example a luma MMR curve).
+When the decoded base-layer buffer allows it, the result is written into that buffer instead of a pool buffer. The output pool above is then not created unless a frame is refused for in-place (for example a luma MMR curve), or an in-place frame failed on the GPU (see *After a failure* below).
 
 It is used when all of these hold; anything else takes the pool path unchanged:
 
@@ -590,6 +590,7 @@ The in-place kernels are the pool kernels' bodies, with one `read_write` binding
 - *Why no scratch buffer.* The chroma kernel reads the base-layer luma around each chroma sample (other threads' pixels) but only its own chroma sample. The luma kernel reads only its own luma sample. So chroma runs first, while all the luma is still the decoded base layer, and each thread overwrites just the chroma sample it has read. Luma runs second, each thread overwriting just its own sample, and nothing reads luma any more. A serial encoder and a texture barrier between the passes make the second wait for the first. A luma MMR curve would read chroma in the luma pass, after chroma was overwritten, so such a frame uses the pool (no stream seen so far has one).
 - *Exclusive buffer.* The decoder hands the buffer to the composition when it pairs the frame, keeps no other reference that reads pixels, and delivers it to the renderer only from the completion. The composer refuses a second composition of a buffer while one is outstanding. That request is dropped and counted as lost; it does not take the pool path, which would read pixels the first one is still writing. The residual measurement (`AETHER_FEL_MEASURE`), which composes the base layer again from another queue, runs on the pool path.
 - *Failure.* A frame that cannot be set up is untouched and goes out as its base layer, as before. A command buffer that fails after it started leaves a mix of base layer and composed pixels in the buffer. That frame is dropped (`OrderedDelivery.skip` keeps its place in line), counted as a compose failure and as `inPlaceDropped` in the summary, and nothing retries it.
+- *After a failure.* The first such frame turns in-place off for the rest of the decoder's life, `flush()` included, and logs it once at the default level. Every later frame takes the pool path, so a frame that fails there goes out as its base layer with the mapping RPU instead of being dropped. The reason is AE#1055: on an Apple TV 4K (A12) one GPU fault was followed by tvOS refusing the process's GPU work. Every later in-place command buffer failed too, every frame was dropped, and the sound played on over a frozen picture. The pool costs memory again (§5.10), which the A12 handles (§4.7). The composer's refusal of a buffer that is already being composed reports the same result and turns in-place off as well; it is a guard that no stream has hit.
 - *Attachments.* The buffer already holds the base layer's attachments, which is what the pool path copies over. The attachments that do not propagate are removed, so the result carries the same set a pool buffer would. The Dolby Vision attachment is set on delivery as for any frame.
 
 #### Caches, pipelines and kernels
@@ -682,7 +683,7 @@ A closed decoder refuses `open` (single use) rather than being half reusable.
 |---|---|
 | Base-layer frames waiting for their EL | up to `maxDeadlineHoldFrames` = 6 with a render clock (K = 3 without one) → about 150 MB at 4K with the clock, 75 MB at K = 3. The 6 are reached only while a stretch of enhancement layers is missing; in normal playback a frame waits a few milliseconds. |
 | Enhancement-layer frames waiting | 10 → 62 MB |
-| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 14 + reserve 3 → 423 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR):** see below. |
+| Composed output buffers (in flight, pending, idle in pool) | allocation threshold 14 + reserve 3 → 423 MB, the reserve freed after a second unused. **None in place unless a frame is refused for in-place (e.g. luma MMR) or an in-place frame failed on the GPU:** see below. |
 
 **In-place memory.** In place, the composed frame is the decoded base-layer buffer, which VideoToolbox's own pool then keeps alive until the renderer lets go of it. The memory moves to the decoder's side rather than vanishing. Measured on a Mac, 4K, 200 s with 7 seeks, two runs each, our process plus the decoder service:
 
@@ -761,6 +762,7 @@ log stream --level debug --predicate 'subsystem == "de.superuser404.AetherEngine
 | I12 | A seek or a stop never waits for the GPU: `flush()` and `close()` release a feed parked on the backlog, a feed of the old epoch is refused at once, and a retired head leaves within a slice | `flushReleasesBacklogWaiter`, `closeReleasesTheFeedQuietly`, `staleFeedDoesNotWait`, `closedDecoderHeadLeavesWithinASlice` (all in `DualLayerGpuSlotWaitTests`) |
 | I13 | Process suspension cannot cause a stall verdict: it is a count of timed-out waits, not an elapsed time | `DualLayerGpuSlotWaitTests.aLateWaitIsOneTimedOutWait`, `progressWithinTheSlicesIsNotAStall` |
 | I14 | A stall that does not recover ends in a reported stop, never an endless base-layer fallback: `composerStalled` is reported once, outside every lock, after `maxComposeStallBypassFrames` frames in one stall or more than `maxComposeStallEpisodes` verdicts without a healthy stretch; packets are refused afterwards | `DualLayerGpuSlotWaitTests.endlessStallIsReported`, `repeatedStallsAreReported`, `healthyStretchResetsTheEpisodeCount` |
+| I15 | After an in-place frame fails on the GPU, every later frame of that decoder takes the pool path, so a failure shows the base layer instead of dropping the frame | `DoviFelInPlaceComposeTests.corruptFrameTurnsInPlaceOff` |
 
 ---
 
