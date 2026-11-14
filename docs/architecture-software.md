@@ -253,6 +253,12 @@ With `LoadOptions.upscalesLowResolutionVideo` (#846, AE#1039), `load()` asks `Up
 
 `$activeUpscale` publishes what runs. See [api.md, `upscalesLowResolutionVideo`](api.md#upscaleslowresolutionvideo).
 
+**The frame chain** (`FrameChain`, AE#957) is what the line-art scaler and the HDR10 probe run on. It turns the 4:2:0 frame into a half-float RGB texture, runs its stages, and turns the result back into the input's format at the target size, all in one command buffer.
+
+- A chain whose stages all leave the picture alone (`FrameChainStage.isIdentity`, today `PassThroughStage`) at its own size runs as one kernel, `frameChainRoundTrip`, with no RGB texture. On an A12 Apple TV the RGB texture cost most of the 10 ms the two passes took per 4K frame.
+- Every other chain keeps the two passes: a stage reads its neighbours from that texture.
+- Both paths give the same picture: luma unchanged, chroma within one code value.
+
 ### Dolby Vision Profile 7 FEL
 
 Profile 7 Dolby Vision (UHD Blu-ray) carries two video layers: a base layer, and an enhancement layer whose residual refines the picture. A FEL (full enhancement layer) carries real picture data in that residual.

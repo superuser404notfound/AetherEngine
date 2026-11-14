@@ -17,6 +17,7 @@ struct PerFrameBenchmarkReportsEveryCaseTests {
             "normalizer: owned copy",
             "renderer: sample buffer",
             "chain: pass-through, wall time",
+            "chain: two passes through RGB, wall time",
             "sei: HDR10 scan of a 250 KB key frame",
         ])
         // A case either ran with ordered numbers or was skipped with a reason.

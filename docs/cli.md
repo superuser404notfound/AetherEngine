@@ -2157,7 +2157,8 @@ swift run -c release aetherctl bench --baseline /tmp/base.json
 | `normalizer: tag in place` | Writing the attachments on a frame the decoder lets us change. |
 | `normalizer: owned copy` | Copying a frame the decoder still owns into a pool of our own, then tagging it. |
 | `renderer: sample buffer` | Wrapping a frame for the display layer, format description cache hit. |
-| `chain: pass-through, wall time` | The frame chain with one pass-through stage. Its GPU time is in the note. Needs OS 26 and real hardware. |
+| `chain: pass-through, wall time` | The frame chain with one pass-through stage, which runs as one kernel. Its GPU time is in the note. Needs OS 26 and real hardware. |
+| `chain: two passes through RGB, wall time` | The same frame through the RGB texture, as every chain with a real stage runs. |
 | `sei: HDR10 scan of a 250 KB key frame` | The in-band scan for the HDR10 SEI. |
 
 **Verdict.** A case regresses when its median grows by more than the tolerance and by more than 50 us. Below that the same build moves between runs: in-place tagging measured 18 us, then 48 us, on the A12 Apple TV. Compare reports from the same device only; the tool prints a note when the device or picture size differ.

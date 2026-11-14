@@ -57,7 +57,8 @@ struct PerFrameBenchmark {
             results.append(normalizerInPlace(frame))
             results.append(normalizerOwnedCopy(frame))
             results.append(rendererSampleBuffer(frame))
-            results.append(chainPassThrough(frame))
+            results.append(chainPassThrough(frame, onePass: true))
+            results.append(chainPassThrough(frame, onePass: false))
         } else {
             results.append(Self.skipped("frames", "could not create a \(width)x\(height) P010 buffer"))
         }
@@ -112,8 +113,10 @@ struct PerFrameBenchmark {
         }
     }
 
-    private func chainPassThrough(_ frame: CVPixelBuffer) -> PerFrameBenchmarkResult {
-        let name = "chain: pass-through, wall time"
+    /// The chain's colour round trip: as one kernel (what a chain of pass-through stages runs), and as the
+    /// two passes through the RGB texture that every other stage needs.
+    private func chainPassThrough(_ frame: CVPixelBuffer, onePass: Bool) -> PerFrameBenchmarkResult {
+        let name = onePass ? "chain: pass-through, wall time" : "chain: two passes through RGB, wall time"
         #if targetEnvironment(simulator)
         return Self.skipped(name, "the frame chain is not built for the simulator")
         #else
@@ -122,7 +125,8 @@ struct PerFrameBenchmark {
         }
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
               let chain = try? FrameChain(device: device, queue: queue, sourceWidth: width, sourceHeight: height,
-                                          targetWidth: width, targetHeight: height, stages: [PassThroughStage()])
+                                          targetWidth: width, targetHeight: height, stages: [PassThroughStage()],
+                                          fusesRoundTrip: onePass)
         else { return Self.skipped(name, "no Metal device or the chain could not be built") }
         let picture = FrameUpscaler.pictureRegion(of: frame)
         var gpu: [Double] = []

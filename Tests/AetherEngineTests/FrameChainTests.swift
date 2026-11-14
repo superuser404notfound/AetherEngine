@@ -22,12 +22,13 @@ private enum ChainGate {
 struct FrameChainTests {
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    private func chain(_ w: Int, _ h: Int, target: (Int, Int)? = nil, stages: [any FrameChainStage]) throws -> FrameChain {
+    private func chain(_ w: Int, _ h: Int, target: (Int, Int)? = nil, stages: [any FrameChainStage],
+                       fusesRoundTrip: Bool = true) throws -> FrameChain {
         let device = try #require(MTLCreateSystemDefaultDevice())
         let queue = try #require(device.makeCommandQueue())
         let t = target ?? (w, h)
         return try FrameChain(device: device, queue: queue, sourceWidth: w, sourceHeight: h,
-                              targetWidth: t.0, targetHeight: t.1, stages: stages)
+                              targetWidth: t.0, targetHeight: t.1, stages: stages, fusesRoundTrip: fusesRoundTrip)
     }
 
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
@@ -104,6 +105,25 @@ struct FrameChainTests {
         #expect(!general.writesOutputDirectly)
         let diff = ChainFrames.maxDifference(a, b)
         #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c)")
+    }
+
+    /// AE#957: a chain whose stages leave the picture alone, at its own size, runs as one kernel with no
+    /// RGB texture. It must give what the two passes give, to within rounding.
+    @Test(arguments: [false, true])
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    func issue957OneKernelRoundTripMatchesTheTwoPasses(tenBit: Bool) throws {
+        let input = try ChainFrames.gradient(320, 180, tenBit: tenBit)
+        ChainFrames.paintLuma(input) { x, y in ((x / 7 + y / 5) % 9 == 0) ? 30 : 60 + x / 2 }
+        let fused = try chain(320, 180, stages: [PassThroughStage(), PassThroughStage()])
+        let twoPass = try chain(320, 180, stages: [PassThroughStage()], fusesRoundTrip: false)
+        let scaled = try chain(320, 180, target: (640, 360), stages: [PassThroughStage()])
+        #expect(fused.isRoundTripOnly)
+        #expect(!twoPass.isRoundTripOnly)
+        #expect(!scaled.isRoundTripOnly)
+        let (a, _) = try fused.process(input, picture: whole(320, 180))
+        let (b, _) = try twoPass.process(input, picture: whole(320, 180))
+        let diff = ChainFrames.maxDifference(a, b)
+        #expect(diff.y <= 1 && diff.c <= 1, "Y \(diff.y), C \(diff.c) (tenBit \(tenBit))")
     }
 
     @Test

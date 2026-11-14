@@ -27,6 +27,10 @@ the public-API contract.
 
 ### Fixed
 
+- **The frame chain's pass-through takes 4 ms per 4K frame instead of 10 (#957).** It turned each frame into
+  a 66 MB RGB texture and back, which kept an A12 Apple TV's GPU busy about 10 ms. A chain whose stages leave
+  the picture alone now runs as one kernel without that texture: 4.0 ms of GPU time, the same picture.
+  Covered by `FrameChainTests`.
 - **HDR10 HEVC on the software path no longer copies every frame (#957).** VideoToolbox tagged a PQ BT.2020
   HEVC clip's frames BT.709, so the engine copied each 4K frame to retag it, about 7 ms per frame on an A12
   Apple TV. The format description now names the stream's colour and HDR10 values, VideoToolbox attaches
