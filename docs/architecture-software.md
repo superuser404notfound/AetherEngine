@@ -355,7 +355,7 @@ Live sources, and VOD sources that cannot seek, jump their timestamps at program
 - **Video and audio each find their own jumps** (AE#1053). An MPEG-TS splice does not move both streams at the same byte, so a fold keyed on video alone put the audio packets read between the two seams a whole jump off the clock. On a +347 s spike that left AC-3 queued 347 s ahead of the clock and the session silent until a retune.
 - When the second stream reaches a jump the first one already crossed, it takes over that stream's offset exactly, so a splice keeps the two in sync to the tick. The test is closeness: its own estimate within 1 s of the other stream's offset.
 - Each jump logs one `[SWHost] PTS discontinuity #n (reader|demux, video|audio)` line, capped at 40 per session. `(adopted from the other stream)` marks the second stream of a splice.
-- The live read-ahead measures its reservoir on raw timestamps, upstream of the fold. A distance past any fill it could have built (forward window + 10 s) counts as a jump, not as a full reservoir, so a spike no longer parks the producer.
+- The live read-ahead measures its reservoir on raw timestamps, upstream of the fold. A distance past any fill it could have built (forward window + 10 s) counts as a jump, not as a full reservoir, so a spike no longer parks the producer. The VOD cache keeps the old reading, because a cached seek back legitimately leaves more stored than the window.
 
 On the combined loop a video jump still waits for every parked video packet to reach the renderer before it flushes the decoder, and reads no audio meanwhile. On a 4 s audio lead that costs most of the lead once per jump (measured down to 0.33 s), then it refills.
 

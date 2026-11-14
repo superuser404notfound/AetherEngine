@@ -817,11 +817,14 @@ final class SoftwarePacketReadAhead: @unchecked Sendable {
     /// AE#1053: these are raw source timestamps, upstream of the live fold, so a PTS seam between the
     /// two packets reads as a reservoir the producer could never have built. A +347 s spike parked the
     /// producer until the consumer had eaten everything stored before it, and the audio lead drained
-    /// to 0.3 s on the way. A distance past any reachable fill is a seam, which nothing here can measure.
+    /// to 0.3 s on the way. On a forward-only source a distance past any reachable fill is a seam, which
+    /// nothing here can measure. A VOD cache keeps its history, so a cached seek back legitimately leaves
+    /// more stored than the window, and there the old reading stands.
     private func reservoirSecondsLocked() -> Double? {
         guard let stored = storedVideoSeconds else { return nil }
         let seconds = stored - (consumedVideoSeconds ?? sourceClock)
-        guard seconds.isFinite, abs(seconds) < forwardSeconds + LiveTimelineFold.thresholdSeconds else { return nil }
+        guard seconds.isFinite else { return nil }
+        if forwardOnly, abs(seconds) >= forwardSeconds + LiveTimelineFold.thresholdSeconds { return nil }
         return max(0, seconds)
     }
 
