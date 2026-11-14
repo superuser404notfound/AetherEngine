@@ -176,6 +176,8 @@ The [Works on](#shared-flags) column lists where it is accepted.
 - A DTS-HD MA track whose frames do not decode as DTS:X logs `DTS-HD MA track is not DTS:X this engine renders (…); keeping the channel bridge` instead.
 - On `play` the 1 Hz line adds `obj=<active>/<declared> up=<overhead> bed=<layout>`, and `hch=<n>` for height channels.
 
+**Use a release build** (`swift build -c release`) for anything that plays the bed. A debug build renders it about five times slower than real time, so `play` waits on audio and ends in `VERDICT: clock did not advance` although nothing is wrong. aetherctl prints a note when a debug build gets `--atmos-bed`.
+
 With `--bed-format lpcm` it sets `.lpcm(layout)` instead, which serves the bed as 24-bit PCM (`CODECS="…,ipcm"`, log `delivered as ipcm (lossless 24-bit PCM)`). With `--bed-format auto` it sets `.render(layout)`, the form a host should use: PCM, or APAC when the route plays over AirPlay.
 
 `--audio-index <n>` serves source stream `n`, the way a host's audio picker would. Example with Dolby's Unfold demo, whose TrueHD Atmos track is stream 1:
