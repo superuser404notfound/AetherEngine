@@ -409,7 +409,7 @@ Both refusals are thrown BEFORE any teardown, so a refused correction leaves the
 | --- | --- |
 | `AetherEngineError.loadIdentityNotCorrectable(fields:)` | the closure changed `isLive`, `audioOnly`, `nativeRemoteHLS`, `sequentialOrigin`, `heldSourceConnection`, `sharedOutputRole` or `sourceDiagnosticsContext`. Load the source again instead. See note 1. |
 | `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. Its `SessionReloadRefusal` says which (`.noActiveSession` / `.customSourceNotSeekable`); a correction can also throw the cases below. |
-| `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and the source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0). The software decoders pass that on as YCbCr, so the picture would render green/purple. |
+| `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and the source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5 or 20, AV1 Profile 10.0). The software decoders pass that on as YCbCr, so the picture would render green/purple. |
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` or `dualLayerRoute` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with; call `load()` again with the new option. |
 | `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.videoProcessingRouteNeedsFreshLoad)` | the correction turns `videoProcessing` on, or changes its target while it is on, for a custom `IOReader` session (#957). Call `load()` again with the new option. See note 2. |
@@ -514,7 +514,7 @@ A live H.264 / HEVC load never reaches that check. For those codecs it is VOD-on
 What to know:
 
 - **One-way.** `DecodePath` has `.automatic` and `.software`, and no `.native`. The engine only sends a route to software when the native path cannot serve it (AV1 without hardware decode, VP9, a forward-only source, MVC carriage). Forcing native there gives a black screen. A host's evidence can only ever be "this native session is not decoding".
-- **It does not override what the software path cannot represent.** A source whose only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0) still fails the load with `dolbyVisionUnplayableOnSoftwarePath`, instead of decoding as YCbCr and rendering green/purple. A demuxed-audio live source still fails instead of playing silent. An override picks which host serves the session, not what that host can do.
+- **It does not override what the software path cannot represent.** A source whose only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5 or 20, AV1 Profile 10.0) still fails the load with `dolbyVisionUnplayableOnSoftwarePath`, instead of decoding as YCbCr and rendering green/purple. A demuxed-audio live source still fails instead of playing silent. An override picks which host serves the session, not what that host can do.
 - **`nativeRemoteHLS` is a different route, with one exception.** There AVPlayer plays the remote playlist and the engine demuxes and decodes nothing, so usually there is no decode path to prefer. The engine logs that it ignored the preference, so it does not look applied. See the note on the exception below.
 - **An audio-only session honours it too.** With `audioOnly`, `.software` sends a codec AVPlayer could play (FLAC, ALAC, AAC, MP3, LPCM...) to the FFmpeg host (internal `AudioPlaybackHost`) instead of the AVPlayer audio host (internal `AudioAVPlayerHost`). The audio dispatch line in the log says the host asked for it. The cost is the system Now-Playing session: as for every audio-only source the FFmpeg host plays, `audioNowPlayingSession` is nil. A host that registers its transport commands on that session must drive Now Playing itself for such a session, through `MPNowPlayingInfoCenter.default()` and `MPRemoteCommandCenter.shared()`.
 - **A mid-play correction lands on both source shapes**, URL and custom `IOReader` alike. It moves the session at its own playhead, without a restart. On a source the software path cannot represent, the correction is refused before any teardown with `SessionReloadRefusal` `.softwarePathCannotRepresentSource` or `.demuxedAudioLiveIsNativeOnly`, so the session keeps playing.
@@ -2313,7 +2313,7 @@ Five parts of the engine are compiled only with their package trait, all off by 
 - It pauses on its own on a tvOS HDR10 panel without Dolby Vision.
 - See [dolby-vision-fel.md §7](dolby-vision-fel.md#7-curve-fold-on-the-native-route).
 
-**Without `DolbyVisionStillReshaping`**, a Profile 5 / 10.0 source yields no still instead of a wrong one. Its planes are IPT, which the standard path would read as YCbCr:
+**Without `DolbyVisionStillReshaping`**, a Profile 5 / 20 / 10.0 source yields no still instead of a wrong one. Its planes are IPT, which the standard path would read as YCbCr:
 
 - `scrubThumbnail`, `scrubPreviewFrame` and the extractor's stills return nil
 - `supportsCacheBackedStills` is false
@@ -2699,6 +2699,14 @@ How a 3D source is presented where the system shows stereo (visionOS; every othe
 - `.mono` plays 2D.
 - A stereo session declares `REQ-VIDEO-LAYOUT="CH-STEREO"` (EXT-X-VERSION 12), and a packed frame gets Apple's `vexu` in its sample entry.
 - Frame packing is signalled on HEVC only (AVPlayer refuses a packed H.264 init over HLS), so a packed H.264 frame plays 2D.
+- A stereo session that AVPlayer refuses at startup is rebuilt once in 2D, at the same position (`stereo: AVPlayer refused the 3D session at startup; rebuilding it in 2D` in the log). A `load()` still waiting follows the rebuild. The 2D session arms nothing, so it cannot loop.
+
+**Dolby Vision Profile 20** is Dolby Vision on MV-HEVC. Its base view is a Profile 5 base view with a Profile 5 RPU (the per-frame Dolby Vision metadata), and the second view sits in NAL units of its own layer.
+
+- In stereo it goes out as it is: `CODECS="dvh1.20.LL"`, the source's own record (profile 20, version 3.0), and `lhvC` in the init.
+- In 2D (every system but visionOS, or `.mono`) it is served as Profile 5: `CODECS="dvh1.05.LL"`, the record rewritten to profile 5. The second view stays in the samples and the decoder skips it.
+- The rewrite also sets the record's version to 1.0. VideoToolbox refuses a Profile 5 record that says 3.0 (`-12910`).
+- Not yet confirmed on a Vision Pro. The macOS 27 AVPlayer and the visionOS 27 simulator both refuse `dvh1.20` over HLS (`-12927` with `CH-STEREO`; macOS says `-11848` without it), while the same init and segments play as a local file on both. On such a refusal the session falls back to 2D (above), so the title still plays.
 - A tuning field: `reloadAtCurrentPosition(applying:)` carries a change.
 
 #### `dolbyVisionHandling`

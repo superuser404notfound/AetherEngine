@@ -1305,6 +1305,10 @@ final class MP4SegmentMuxer {
                 rec.pointee.dv_profile = profile
                 rec.pointee.dv_bl_signal_compatibility_id = blCompatibilityID
                 rec.pointee.el_present_flag = 0
+                // A Profile 20 source carries version 3.0, and VideoToolbox refuses a Profile 5 record
+                // that says so (-12910). Profiles 5 and 8 are version 1.0 records.
+                rec.pointee.dv_version_major = 1
+                rec.pointee.dv_version_minor = 0
             }
             return
         }

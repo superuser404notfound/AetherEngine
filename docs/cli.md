@@ -410,6 +410,7 @@ The log line says which it was: `[HLSVideoEngine] i-frame rendition: served segm
 The log's `[HLSVideoEngine] stereo:` line names what was chosen and why.
 
 - A stereo master carries `REQ-VIDEO-LAYOUT="CH-STEREO"` at `EXT-X-VERSION:12`.
+- A Dolby Vision Profile 20 source is served as `CODECS="dvh1.20.LL"` under `auto` and as `dvh1.05.LL` under `mono`. A Mac's AVPlayer refuses the `dvh1.20` master (`-12927`), so only the `mono` form plays there. The `serve` harness has no 2D fallback, unlike a full session.
 - A packed HEVC init carries a `vexu` with `eyes` and `pack`.
 - H.264 stays 2D, because AVPlayer refuses it packed over HLS.
 

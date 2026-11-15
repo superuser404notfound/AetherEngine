@@ -234,12 +234,13 @@ extension AetherEngine {
         return buffer
     }
 
-    /// Dolby Vision whose base layer has no displayable colour of its own: Profile 5, and AV1
+    /// Dolby Vision whose base layer has no displayable colour of its own: Profile 5 and 20, and AV1
     /// Profile 10, whose compatibility id is not known here (the reshaping path falls back to the
     /// base layer itself when it finds no RPU). Every other profile's base layer is HDR10, HLG or
     /// SDR and is held as the output vends it.
     nonisolated static func heldPictureNeedsReshaping(videoFormat: VideoFormat, dolbyVisionProfile: Int?) -> Bool {
-        videoFormat == .dolbyVision && (dolbyVisionProfile == 5 || dolbyVisionProfile == 10)
+        videoFormat == .dolbyVision
+            && (VideoRoutingPolicy.hevcDolbyVisionHasIPTBase(dolbyVisionProfile) || dolbyVisionProfile == 10)
     }
 
     nonisolated static func heldPictureIsHDR(_ format: VideoFormat) -> Bool {

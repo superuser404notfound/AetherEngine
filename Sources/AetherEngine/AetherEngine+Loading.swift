@@ -1890,6 +1890,18 @@ extension AetherEngine {
             }
             .store(in: &nativeCancellables)
 
+        // A 3D session refused at startup is rebuilt once in 2D (`fallBackToTwoDimensional`). Assigned on
+        // every mount, since a kept host still carries the previous session's flag.
+        host.armStereoRefusalFallback(session.stereoSignal != nil)
+        host.$pendingStereoRefusal
+            .compactMap { $0 }
+            .sink { [weak self] message in
+                self?.hop(for: generation) { [weak self] in
+                    await self?.fallBackToTwoDimensional(message, expectedGeneration: generation)
+                }
+            }
+            .store(in: &nativeCancellables)
+
         // #98: a display rejecting the served master fails the item at startup; reload the media
         // playlist in place instead of hard-failing. Gated + single-shot in fallBackToMediaPlaylist.
         host.$pendingDisplayRejection
