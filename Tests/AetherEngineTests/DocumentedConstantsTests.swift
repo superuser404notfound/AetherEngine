@@ -31,6 +31,11 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("Quarantine is bounded to 96 MiB and 10,000 packets", try documentation())
     }
 
+    func testEndedSwitchFlagGraceMatchesDocumentation() throws {
+        XCTAssertEqual(DisplayCriteriaController.endedSwitchFlagGraceMs, 1000)
+        assertDocumented("until one second after the recorded end", try documentation())
+    }
+
     func testSoftwarePositioningBudgetMatchesDocumentation() throws {
         XCTAssertEqual(SoftwarePlaybackHost.seekBudgetSeconds, 30)
         assertDocumented("**30 s positioning\nbudget**", try documentation())

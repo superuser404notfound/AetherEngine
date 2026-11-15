@@ -755,7 +755,9 @@ final class DisplayCriteriaController {
         return .running(startBeforeGateMs: startBeforeGateMs)
     }
 
-    /// AE#1067: how long a gate that found `.endedFlagStillSet` watches for a follow-on switch. The same
+    /// AE#1067: how long after the recorded end a gate that found `.endedFlagStillSet` watches for a
+    /// follow-on switch. Timed from the end, not from gate entry: a follow-on start comes right after the end
+    /// it follows, so a gate that opens late on a long item build owes it nothing extra. The same
     /// second Stage 1 gives an inbound dynamic-range switch (`StartGrace.full`). On the reporter's Apple TV
     /// 4K (3rd gen, tvOS 27.2.1) the flag stayed set for 8 s after modeSwitchEnd with the panel idle, so
     /// waiting for the flag is not an option.
@@ -1181,11 +1183,12 @@ final class DisplayCriteriaController {
             // AE#1067: Stage 2 would wait for a new end, and the switch on the record has posted its end
             // already. Watch for a follow-on start instead; only that one has an end still to come.
             let watchEntry = DispatchTime.now()
+            let watchFrom = gateSnapshot.endedAt ?? watchEntry.uptimeNanoseconds
             let suffix = Self.timingSuffix(startSignal: .preGateObserved, stage1Ms: 0, totalMs: 0,
                                            startBeforeGateMs: before, switchMs: measured)
             while true {
                 let verdict = Self.endedSwitchFlagWatch(
-                    elapsedMs: Self.elapsedMs(since: watchEntry),
+                    elapsedMs: Self.elapsedMs(fromNanos: watchFrom, toNanos: DispatchTime.now().uptimeNanoseconds),
                     newStart: observation.hasNewStart(since: gateSnapshot),
                     switchInProgress: displayManager.isDisplayModeSwitchInProgress)
                 switch verdict {
