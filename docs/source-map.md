@@ -49,6 +49,7 @@ Which file owns what, folder by folder. Paths are relative to `Sources/AetherEng
 | `AetherEngine+AudioMenu.swift` | AE#1049: names every audio track for the master's audio group and answers a pick in AVKit's audio menu with `selectAudioTrack`. |
 | `AetherEngine+AudibleReadback.swift` | Logs once per load what AVFoundation resolved from the audio the engine served (AE#458). Read-only: it never selects an option. |
 | `AetherEngine+ChannelCountChange.swift` | F4: follows a mid-play change of the route's output channel count and rewrites the renderer paths' channel preference. |
+| `AetherEngine+AirPlayInterlace.swift` | AE#1070: reloads a session the interlace rule routed when an AirPlay video receiver takes or leaves the route, so the receiver gets a picture. |
 | `AetherEngine+RouteRemoval.swift` | F3: pauses a renderer path when its audio route goes away (headphones unplugged), as AVPlayer does on its own. |
 | `AetherEngine+InterruptionGuard.swift` | F5: keeps a transport `play()` during an audio-session interruption from restarting a renderer path's clock. |
 | `AetherEngine+LiveAudioDrop.swift` | AE#641: a live channel whose audio the bridge builds but cannot decode plays video-only instead of stalling. |
@@ -207,7 +208,7 @@ Notes:
 
 Notes:
 
-- **`VideoRoutingPolicy.swift`.** AV1 is gated on hardware support. VP9 / VP8 / MPEG-4 / MPEG-2 / VC-1 always go software. Interlaced H.264 goes software so bwdif can deinterlace (#107; checked against decoded frames on VOD, #232). A second-stage gate routes H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext to software where VideoToolbox has no hardware decoder (#2).
+- **`VideoRoutingPolicy.swift`.** AV1 is gated on hardware support. VP9 / VP8 / MPEG-4 / MPEG-2 / VC-1 always go software. Interlaced H.264 goes software so bwdif can deinterlace (#107; checked against decoded frames on VOD, #232), except while an AirPlay receiver that shows video holds the route (AE#1070). A second-stage gate routes H.264 High 4:2:2 / 4:4:4 / 10 and HEVC Rext to software where VideoToolbox has no hardware decoder (#2).
 - **`DualLayerVideoDecoder.swift`.** Two `HardwareVideoDecoder`s (a base layer, typically 4K, and an enhancement layer, typically 1080p), paired by HEVC picture order with the packet's RPU, composed on Metal by `DoviFelComposer`, and delivered in decode order with the Profile 8.1 RPU attached per frame. See [dolby-vision-fel.md](dolby-vision-fel.md).
 - **`DeinterlaceHardwareWarmup.swift`.** Only potentially interlaced `.auto` loads start and await it. Progressive sources and forced-software deinterlace skip it. Same-title reloads keep even a decoded progressive verdict. The background selection snapshot keeps that decision for a custom-reader reopen, while URL reloads probe again. Actual disc-title changes re-evaluate the reopened metadata. A source declared progressive that later supplies interlaced frames still deinterlaces on demand, paying the cold graph build at that first frame.
 - **`PixelAspectPolicy.swift`.** Two gates. A ratio-magnitude gate (#177, live TS carrying 1088:1), which admits precise or unreduced ratios such as 759:712. A display-aspect gate judged against the frame the SAR applies to, since 2:1 is right on 960x1080 and wrong on 1920x1080 (#290).

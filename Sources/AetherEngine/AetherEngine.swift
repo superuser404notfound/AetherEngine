@@ -883,14 +883,21 @@ public final class AetherEngine: ObservableObject {
     /// because the picture is on the device anyway. The engine cannot learn this itself, so the value is
     /// whatever the host knows: the viewer's own choice (a "playing to a TV" control), or a host-owned
     /// `AVPlayer`'s `isExternalPlaybackActive`. Read at each load. On a URL source, `reloadAtCurrentPosition()`
-    /// decides again; a custom source keeps the route it loaded with until the next `load()`. Has no
-    /// effect off iOS.
+    /// decides again; a custom source keeps the route it loaded with until the next `load()`.
+    ///
+    /// AE#1070: interlaced H.264 follows the same rule (native while a video receiver holds the route, the
+    /// software deinterlacer otherwise), and for it the engine does not wait for the next load. A session
+    /// the interlace rule routed reloads at its position by itself when this value or the wireless route
+    /// changes. Has no effect off iOS.
     public func setAirPlayReceiverShowsVideo(_ shows: Bool) {
         guard airPlayReceiverShowsVideo != shows else { return }
         airPlayReceiverShowsVideo = shows
-        let effect = shows ? "a FEL source takes the native route" : "a FEL source keeps the dual-layer route"
-        EngineLog.emit("[AirPlay] host reports the receiver \(shows ? "shows" : "does not show") video: \(effect) at the next load",
+        let effect = shows
+            ? "a FEL source or interlaced H.264 takes the native route"
+            : "a FEL source keeps the dual-layer route, interlaced H.264 the software deinterlacer"
+        EngineLog.emit("[AirPlay] host reports the receiver \(shows ? "shows" : "does not show") video: \(effect)",
             category: .engine)
+        recheckInterlaceRouteForAirPlayReceiver()
     }
 
     /// Whether the dual-layer decision should yield to a receiver: a wireless AirPlay output holds the
@@ -2881,6 +2888,10 @@ public final class AetherEngine: ObservableObject {
     var lastDetectedVideoCodec: AVCodecID = AV_CODEC_ID_NONE
     /// Preserved through same-source reloads; cleared when the session stops.
     var lastRequiresDeinterlaceWarmup = false
+    /// AE#1070: set when the declared-interlace rule decided this session's route, to whether a video
+    /// receiver held the AirPlay route at that load (true: native, so the receiver gets a picture; false:
+    /// the software deinterlacer). nil when interlace had no say. Cleared in stopInternal.
+    var interlaceRouteReceiverAtLoad: Bool?
 
     /// In-flight probe demuxer. Registered before the detached open so stopInternal can markClosed() it:
     /// without this, player dismissal/channel zapping left the probe reconnecting through subsequent sessions.
@@ -6104,6 +6115,26 @@ public final class AetherEngine: ObservableObject {
             codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
             spsIndicatesInterlaced: spsIndicatesInterlaced)
         var frameSampleRefutesInterlace = false
+        // AE#1070: the software host draws into a local layer that no AirPlay receiver picks up, so a
+        // receiver showing video got the sound alone. When the interlace rule is the only reason for the
+        // software route and the host says the receiver shows video, a picture there wins over
+        // deinterlacing here: the native route hands the receiver the stream.
+        let declaredInterlaceRoutesSoftware = useSoftwarePath && !multiviewCarriage
+            && VideoRoutingPolicy.routesSoftwareForDeclaredInterlace(
+                codecID: detectedCodecID,
+                fieldOrder: detectedFieldOrder,
+                spsIndicatesInterlaced: spsIndicatesInterlaced)
+        interlaceRouteReceiverAtLoad = declaredInterlaceRoutesSoftware ? airPlayVideoReceiver : nil
+        if VideoRoutingPolicy.declaredInterlaceYieldsToAirPlayReceiver(
+            declaredInterlaceRoutesSoftware: declaredInterlaceRoutesSoftware,
+            airPlayVideoReceiver: airPlayVideoReceiver) {
+            useSoftwarePath = false
+            requiresDeinterlaceWarmup = false
+            EngineLog.emit(
+                "[AirPlay] AE#1070 interlaced H.264 with a video receiver on the wireless route: taking the "
+                + "native route so the receiver gets the picture, without this device's deinterlacer",
+                category: .engine)
+        }
         // #232: a declared interlaced field order is not evidence that any frame IS interlaced.
         // European 25 fps Blu-ray masters ship as 1080i25 (there is no 1080p25): interlaced carriage,
         // progressive pictures, and FFmpeg's parser reports TT for them off SEI pic_struct alone while
@@ -6139,6 +6170,7 @@ public final class AetherEngine: ObservableObject {
                 useSoftwarePath = false
                 requiresDeinterlaceWarmup = false
                 frameSampleRefutesInterlace = true
+                interlaceRouteReceiverAtLoad = nil
                 EngineLog.emit(
                     "[AetherEngine] declared interlaced (fieldOrder=\(detectedFieldOrder.rawValue)) but "
                     + "\(verdict); the deinterlacer would never engage, routing native for HW decode (#232)",
@@ -9118,6 +9150,7 @@ public final class AetherEngine: ObservableObject {
         activeAudioDecoder = nil
         lastDetectedVideoCodec = AV_CODEC_ID_NONE
         lastRequiresDeinterlaceWarmup = false
+        interlaceRouteReceiverAtLoad = nil
         playlistShiftSeconds = 0
         liveDisplayShiftSeconds = nil
         // AE#105 / AE#270: the display origin belongs to the session that published it. Clearing it here
@@ -9291,7 +9324,10 @@ public final class AetherEngine: ObservableObject {
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.recomputeAirPlayPictureStaysLocal() }
+            Task { @MainActor in
+                self?.recomputeAirPlayPictureStaysLocal()
+                self?.recheckInterlaceRouteForAirPlayReceiver()
+            }
         }
         lifecycleObservers.append(routeObserver)
         #endif

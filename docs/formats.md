@@ -281,6 +281,8 @@ On a seekable VOD source the engine first checks the declared field order agains
 - A flagged frame ends the sample at once (~29 ms on 1080i, ~100 ms for a full sample).
 - Live sources are never probed.
 
+**On an AirPlay receiver that shows video it plays natively (AE#1070).** The software host draws into a layer that stays on the device, so an Apple TV picked from the AirPlay button got the sound alone. While the host reports a video receiver on the wireless route (`setAirPlayReceiverShowsVideo(true)`), interlaced H.264 takes the native route and the receiver gets the stream as it is, without the device's deinterlacer. The engine reloads at the playhead when that changes mid-session, in both directions. See [AirPlay and the software host](api.md#airplay-and-the-software-host).
+
 #### High profiles without a hardware decoder
 
 H.264 High 4:2:2 / 4:4:4 / High-10 and HEVC Rext (4:2:2 / 4:4:4 / 12-bit), on hardware whose VideoToolbox has no decoder for the profile (Intel Macs, older Apple TV chips).

@@ -22,6 +22,11 @@ the public-API contract.
 
 ### Fixed
 
+- **Interlaced H.264 shows a picture on an Apple TV picked from the AirPlay button (#1070).** It plays on
+  the software path for deinterlacing, and that path's picture stays on the device, so the Apple TV only got
+  the sound. While the host reports a receiver that shows video (`setAirPlayReceiverShowsVideo(true)`), it
+  now takes the native route, and a session already playing reloads at its position when that changes.
+  The receiver gets the stream without the device's deinterlacer. Thanks to cdguy for the report and the sample.
 - **An HDR start no longer waits five seconds for a mode switch that has already ended (#1067).** When the
   play gate opened right after the panel's switch had ended, but tvOS still reported a switch in progress,
   the gate waited for a second end that never came and only gave up at its cap. It now proceeds after at

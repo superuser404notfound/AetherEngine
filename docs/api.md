@@ -1185,8 +1185,9 @@ It is per engine instance, so several engines at once can be told apart without 
 - The audio session reports every AirPlay output as the same port type, so the engine cannot tell a TV from a HomePod on its own. The default is false (audio-only or unknown).
 - A host has the same limit, so pass what it knows itself: the viewer's own choice (for example a "playing to a TV" control), or a host-owned `AVPlayer`'s `isExternalPlaybackActive`.
 - While true and a wireless route is active, a Profile 7 FEL source loads on the native route (8.1 where the display takes Dolby Vision, no enhancement layer), so the receiver gets a picture. The dual-layer route would draw into a layer no receiver picks up.
+- Interlaced H.264 does the same (AE#1070): native while a video receiver holds the route, so the receiver gets the stream without this device's deinterlacer, and the software deinterlacer otherwise. For it the engine does not wait for the next load. A session the interlace rule routed reloads at its position by itself when this value or the wireless route changes (VOD on a seekable URL source, or live). A host can therefore offer "show it on the TV" when `airPlayPictureStaysLocal` turns true and only call this setter.
 - Opt-in: nothing changes for a host that never calls it.
-- Read at each load. On a URL source, `reloadAtCurrentPosition()` decides again; a custom source keeps its route until the next `load()`.
+- Read at each load. For a FEL source, `reloadAtCurrentPosition()` on a URL source decides again; a custom source keeps its route until the next `load()`.
 - No effect off iOS.
 
 ### Source and format
