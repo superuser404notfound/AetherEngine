@@ -117,6 +117,18 @@ struct DolbyVisionProfile20Tests {
         #expect(AetherEngine.heldPictureNeedsReshaping(videoFormat: .dolbyVision, dolbyVisionProfile: 20))
     }
 
+    @MainActor
+    @Test("arming the 2D fallback is per mount and starts without a refusal")
+    func stereoFallbackArming() {
+        let host = NativeAVPlayerHost()
+        #expect(!host.stereoRefusalFallbackArmed)
+        host.armStereoRefusalFallback(true)
+        #expect(host.stereoRefusalFallbackArmed)
+        #expect(host.pendingStereoRefusal == nil)
+        host.armStereoRefusalFallback(false)
+        #expect(!host.stereoRefusalFallbackArmed)
+    }
+
     @Test("stills reshape a Profile 20 frame")
     func stillsReshape() {
         let par = P20Codecpar()

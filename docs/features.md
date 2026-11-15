@@ -44,7 +44,8 @@ The engine sends a format to hardware when the platform can decode it, and to it
 - **Upscaling (opt-in):** `LoadOptions.upscalesLowResolutionVideo` scales SDR video below 1080p up to the display. It uses VideoToolbox super resolution, then MetalFX, and needs OS 26. HDR, Dolby Vision and AirPlay keep their usual route, and the upscaling stage never stops playback. For animation, `upscaleScaler = .lineArt` runs a line-art network instead, which also takes 1080p. See [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo).
 - **Tone mapping (opt-in):** `LoadOptions.videoProcessing` maps an HDR10 title whose declared peak is above `targetPeakNits` down to that peak (BT.2390), and the frame tells the display the target, so it does not map a second time. It plays the title on the software path and needs OS 26. Dolby Vision, HDR10+, HLG and SDR keep their usual route. See [api.md › videoProcessing](api.md#videoprocessing).
 - **3D on visionOS:** an MV-HEVC second view and side-by-side or over-under frame packing (HEVC) play in stereo (`LoadOptions.stereoPresentation`). Other platforms play 2D. See [api.md › stereoPresentation](api.md#stereopresentation).
-- **Dolby Vision Profile 20** (Dolby Vision on MV-HEVC, Apple's 3D format) plays in stereo on visionOS. Every other system plays its base view in 2D as Profile 5, with correct colour. See [api.md › stereoPresentation](api.md#stereopresentation).
+- **Dolby Vision Profile 20** (Dolby Vision on MV-HEVC, Apple's 3D format) is offered in stereo on visionOS, which is not yet confirmed on a Vision Pro. Every other system plays its base view in 2D as Profile 5, with correct colour.
+- **A 3D session the system refuses** at startup falls back to 2D at the same position instead of failing. See [api.md › stereoPresentation](api.md#stereopresentation).
 
 ## HDR and Dolby Vision
 

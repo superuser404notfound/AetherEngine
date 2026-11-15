@@ -15,8 +15,10 @@ the public-API contract.
 - **Dolby Vision Profile 20 plays (Dolby Vision on MV-HEVC, Apple's 3D format).** Until now the load failed
   with `unsupported Dolby Vision profile 20.0`. In 2D the base view is served as Profile 5. Its RPU already
   is a Profile 5 RPU, so the colours come out right instead of green and purple. On visionOS the stereo session
-  keeps `dvh1.20` and the second view. Stills and scrub thumbnails reshape it like Profile 5. Thanks to
+  keeps `dvh1.20` and the second view, which is not yet confirmed on a Vision Pro. Stills and scrub thumbnails reshape it like Profile 5. Thanks to
   John Appleseed for the request and the sample.
+- **A 3D session AVPlayer refuses at startup falls back to 2D.** The session is rebuilt once with
+  `stereoPresentation = .mono` at the same position, instead of failing.
 
 ### Fixed
 

@@ -203,6 +203,20 @@ final class NativeAVPlayerHost {
     /// decoder instead. The engine's subscriber rebuilds the session on the software path at the
     /// carried position. Reset on each load.
     @Published private(set) var pendingSoftwarePathEscalation: SoftwarePathEscalation.Request?
+    /// A 3D session's startup failure, handed to the engine to rebuild the session in 2D instead of
+    /// surfacing it. Reset on each load.
+    @Published private(set) var pendingStereoRefusal: String?
+    /// Set per mount by the engine (`armStereoRefusalFallback`): this item presents a 3D source in
+    /// stereo, and a refusal of it at startup earns one 2D rebuild.
+    private(set) var stereoRefusalFallbackArmed = false
+
+    /// Arms the 2D fallback for this mount and drops a refusal the previous mount left behind. The
+    /// engine subscribes right after, and `@Published` hands a new subscriber the current value: the
+    /// 2D rebuild's own mount read its predecessor's refusal that way and rebuilt a second time.
+    func armStereoRefusalFallback(_ armed: Bool) {
+        stereoRefusalFallbackArmed = armed
+        pendingStereoRefusal = nil
+    }
 
     /// AetherEngine#168: dynamic range read back from the item's parsed video-track CMFormatDescription,
     /// so the probe-free `nativeRemoteHLS` bypass can report the real format instead of the `.sdr` default.
@@ -712,6 +726,7 @@ final class NativeAVPlayerHost {
         failure = nil
         pendingDisplayRejection = nil
         pendingSoftwarePathEscalation = nil
+        pendingStereoRefusal = nil
         lastSuppressedStartupFailure = nil
         isReady = false
         seekableEnd = 0
@@ -1258,6 +1273,19 @@ final class NativeAVPlayerHost {
                 pendingDisplayRejection = DisplayRejection(code: code,
                                                            message: desc,
                                                            domain: (item.error as NSError?)?.domain)
+                return
+            }
+            // A 3D session the system refuses at startup still has its 2D form. Measured with Dolby
+            // Vision Profile 20 over HLS: the macOS 27 and visionOS 27 simulator AVPlayers fail the stereo
+            // master with -12927 while the same init and segments play as a local file. Asked before the
+            // software path, which cannot present stereo either.
+            if stereoRefusalFallbackArmed {
+                stereoRefusalFallbackArmed = false
+                EngineLog.emit(
+                    "[NativeAVPlayerHost] #\(sessionID) startup .failed on a 3D session "
+                    + "(code=\(code.map(String.init) ?? "?")); handing it to the engine to rebuild in 2D: \(desc)",
+                    category: .engine)
+                pendingStereoRefusal = desc
                 return
             }
             // AE#561: a startup failure on the media itself (a segment Apple's parser refuses) is

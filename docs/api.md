@@ -2699,13 +2699,14 @@ How a 3D source is presented where the system shows stereo (visionOS; every othe
 - `.mono` plays 2D.
 - A stereo session declares `REQ-VIDEO-LAYOUT="CH-STEREO"` (EXT-X-VERSION 12), and a packed frame gets Apple's `vexu` in its sample entry.
 - Frame packing is signalled on HEVC only (AVPlayer refuses a packed H.264 init over HLS), so a packed H.264 frame plays 2D.
+- A stereo session that AVPlayer refuses at startup is rebuilt once in 2D, at the same position (`stereo: AVPlayer refused the 3D session at startup; rebuilding it in 2D` in the log). A `load()` still waiting follows the rebuild. The 2D session arms nothing, so it cannot loop.
 
 **Dolby Vision Profile 20** is Dolby Vision on MV-HEVC. Its base view is a Profile 5 base view with a Profile 5 RPU (the per-frame Dolby Vision metadata), and the second view sits in NAL units of its own layer.
 
 - In stereo it goes out as it is: `CODECS="dvh1.20.LL"`, the source's own record (profile 20, version 3.0), and `lhvC` in the init.
 - In 2D (every system but visionOS, or `.mono`) it is served as Profile 5: `CODECS="dvh1.05.LL"`, the record rewritten to profile 5. The second view stays in the samples and the decoder skips it.
 - The rewrite also sets the record's version to 1.0. VideoToolbox refuses a Profile 5 record that says 3.0 (`-12910`).
-- On macOS 27, AVPlayer refuses `dvh1.20` over HLS (`-12927` with `CH-STEREO`, `-11848` without), while the same init and segments play as a local file. So `aetherctl serve --stereo auto` cannot show the stereo route on a Mac.
+- Not yet confirmed on a Vision Pro. The macOS 27 AVPlayer and the visionOS 27 simulator both refuse `dvh1.20` over HLS (`-12927` with `CH-STEREO`; macOS says `-11848` without it), while the same init and segments play as a local file on both. On such a refusal the session falls back to 2D (above), so the title still plays.
 - A tuning field: `reloadAtCurrentPosition(applying:)` carries a change.
 
 #### `dolbyVisionHandling`
