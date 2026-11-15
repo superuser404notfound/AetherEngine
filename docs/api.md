@@ -412,13 +412,14 @@ Both refusals are thrown BEFORE any teardown, so a refused correction leaves the
 | `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and the source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5, AV1 Profile 10.0). The software decoders pass that on as YCbCr, so the picture would render green/purple. |
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` or `dualLayerRoute` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with; call `load()` again with the new option. |
 | `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
+| `AetherEngineError.sessionNotReloadable(.videoProcessingRouteNeedsFreshLoad)` | the correction turns `videoProcessing` on, or changes its target while it is on, for a custom `IOReader` session (#957). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path. The side-audio merge does not exist there, so it would play silent. |
 
 1. **Identity fields.** These name the session rather than tune it: each opens the source on a different pipeline or gives the session a different role. Changing one makes a different item, not a correction.
    - The engine writes `nativeRemoteHLS` and `sequentialOrigin` itself.
    - `heldSourceConnection` picks the transport when the source is opened, so a correction could not take effect (AE#377).
    - `sourceDiagnosticsContext` identifies the original load and its requests. Pass a different context to a fresh `load()`. A tuning correction that keeps the context is allowed.
-2. **Upscale route.** `load()` decides the route, and the in-place rebuild does not re-run it. Turning upscaling off is honoured in place: the rebuilt session stays on the software path, delivers frames as decoded and clears `$activeUpscale`. URL sources re-run `load()` and are not refused.
+2. **Upscale and picture processing routes.** `load()` decides the route, and the in-place rebuild does not re-run it. Turning upscaling off is honoured in place: the rebuilt session stays on the software path, delivers frames as decoded and clears `$activeUpscale`. Turning `videoProcessing` off works the same way and clears `$activeVideoProcessing`. URL sources re-run `load()` and are not refused.
 
 `SessionReloadRefusal` is a public enum that gains cases over time; switch over it with a `default:`.
 
@@ -1710,6 +1711,7 @@ If you need it, say so on the tracker instead of working around it.
 | `$softwarePiPSource` | `SoftwarePiPSource` for sample-buffer PiP on the software path. See [Picture in Picture on the software path](#picture-in-picture-on-the-software-path). |
 | `$softwareDisplaySize` | The rectangle the software path's picture is shown at: the coded size under the decoder's pixel aspect. It follows the stream (not latched), so a mid-stream resolution change reshapes it. nil on every other path. |
 | `$activeUpscale` | `UpscaleStatus?`: what the low-resolution upscale stage (`LoadOptions.upscalesLowResolutionVideo`, #846) does for this session. See [Upscale status](#upscale-status). |
+| `$activeVideoProcessing` | `VideoProcessingStatus?`: what the picture processing (`LoadOptions.videoProcessing`, #957) does for this session. See [Picture processing status](#picture-processing-status). |
 | `sourceVideoWidth`, `sourceVideoHeight`, `sourceVideoPixelAspectRatio` | The source's CODED size, and the multiplier that turns it into the presented one (`width * ratio`), read once from the probe. See note 1. |
 | `pictureInPictureActive` | Host-set. Keeps the pipeline and the loopback server alive across a background transition, and keeps the software path decoding video for the window. |
 | `needsForegroundVideoRestore` | True after the background policy actually released the video item. Before play, restore with `reloadAtCurrentPosition(applying:)` and choose the transport intent you want. False when video was retained, or after stop/load. |
@@ -1775,6 +1777,14 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
 - **Republished with `degraded` true** when the stage keeps overrunning its frame budget, and a VideoToolbox + MetalFX stage drops MetalFX. Frames then go out at the VideoToolbox output size (`targetSize`), with the source's pixel aspect ratio.
   - The overrun is remembered for the process. A stage built later, whose MetalFX output is at least that large at a frame interval at least as short, starts degraded from the outset, without MetalFX. (Without a VideoToolbox pass it starts with `disabledReason` set instead.) It logs `[Upscale] starting ML only: ...`.
 - **Republished with `disabledReason` set** if the stage cannot be built, or switches itself off: after repeated failures, or a sustained overrun when it has nothing left to drop. Frames are then delivered as decoded.
+
+### Picture processing status
+
+`$activeVideoProcessing` is published on the first processed frame, not when the load decides the route. nil while no processing runs, and cleared with the session.
+
+- It names the stages that run (`.toneMap`), the source peak the tone map starts from and which value set it (`sourcePeak`: `.mastering`, or `.maxCLL` when that is lower), and the target.
+- The source peak is the frame's own: a frame whose HDR10 metadata differs from the container's rebuilds the curve, logged as `[VideoProcessing] chain rebuilt ...`, and the status is republished with the new peak.
+- **Republished with `disabledReason` set** when the processing switches itself off (see [`videoProcessing`](#videoprocessing)). Frames are then delivered as decoded.
 
 ### Background behaviour
 
@@ -2446,6 +2456,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `escalatesToSoftwarePath` | `true` | Whether a failing native session may be rebuilt once on the software path (AE#561). `false` surfaces the failure as `.error` instead, for a host with its own fallback ladder (AE#629). Correctable. See the note below. |
 | `upscalesLowResolutionVideo` | false | Opt in to upscaling SDR video below 1080p to the display's native pixel size (#846). See [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo). |
 | `upscaleScaler` | `.automatic` | The scaler that upscale stage runs. `.lineArt` is a 2x line-art network for animation that also takes 1080p and 10-bit SDR (AE#1039). See [`upscaleScaler`](#upscalescaler). |
+| `videoProcessing` | nil | A `VideoProcessingOptions`: tone map HDR10 titles brighter than the display to its peak (#957). nil is off. See [`videoProcessing`](#videoprocessing). |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |
 | `deinterlaceFieldRate` | `.field` | A `DeinterlaceFieldRate`: the hardware deinterlacer emits one frame per field (25i to 50p) or one per frame. The software fallback always runs at frame rate: doubling a CPU bwdif is the wrong trade, and a fallback should not jump to a higher cost. |
 | `nativeVideoFrameDiagnostics` | false | Decoded-frame observation on SDR native loopback playback. See [Native video frame diagnostics and recovery](#native-video-frame-diagnostics-and-recovery). |
@@ -2856,6 +2867,54 @@ Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE
 
 **Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source. On a custom `IOReader` source, switching it while `upscalesLowResolutionVideo` stays on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`, because the in-place rebuild keeps the session's plan.
 
+#### `videoProcessing`
+
+Opt in to picture processing for HDR10 titles brighter than the display (#957). A `VideoProcessingOptions` with one field, `targetPeakNits`: the display's peak luminance. nil (the default) is off.
+
+**What it costs.** A processed title plays on `SoftwarePlaybackHost`, not AVPlayer:
+
+- no AVPlayer Picture in Picture; the host presents `softwarePiPSource` instead
+- less over AirPlay: the receiver gets the sound alone, the picture stays on this device (a wireless route at load is not processed, see below)
+- an E-AC-3 Atmos (JOC) track plays as its channel bed, without the objects, because on tvOS only AVPlayer emits them
+
+**What it does.** Every decoded frame runs a BT.2390 tone map in the PQ domain (see [Picture processing](architecture-software.md#picture-processing)):
+
+- from the source peak (MaxCLL when it is known and below the mastering peak, else the mastering peak) to `targetPeakNits`
+- below the knee nothing changes; above it, highlights roll off into the target's top instead of clipping
+- the frame goes out with HDR10 metadata that says the target (mastering peak, and MaxCLL / MaxFALL mapped by the same curve), so the display does not tone map it again
+- needs tvOS / iOS / macOS 26; on the A12 Apple TV a 4K frame costs about 5.3 ms, which fits 59.94 fps ([measurements](measurements.md#tone-map-at-4k60-on-the-a12-ae957))
+
+Status is published as `$activeVideoProcessing`.
+
+**Not taken** for these; they keep their usual route:
+
+- Dolby Vision (the native route keeps Apple's Dolby Vision)
+- a source that is not HDR10 (SDR, HLG)
+- HDR10+ found before the route is decided (see below for HDR10+ found later)
+- a display that does not take HDR10, or a panel the load routes as SDR
+- a source whose container (or `hvcC` / `av1C`) declares no mastering display and no MaxCLL
+- a source peak at or below the target, or a target below a third of the source peak on the PQ scale (about 5 nit for a 1000 nit source)
+- a source that is not 8 or 10-bit 4:2:0, or whose coded size is unknown
+- any wireless AirPlay route, and a demuxed-audio live stream (as for the upscaler)
+- an OS before 26
+- a title the processing switched itself off for earlier in the process (see below)
+
+The load logs one `[VideoProcessing] taken: <size>, tone map <source> nit (<mastering|maxCLL>) to <target> nit, knee at <knee> nit` / `[VideoProcessing] not taken (<reason>)` line either way.
+
+**It never stops playback.** A frame the stage cannot process is delivered as decoded.
+
+- **Passing through.** A frame that is not PQ or not 4:2:0, or whose own metadata gives no curve to the target, is delivered as decoded, logged once as `[VideoProcessing] passing frames through: ...`. That is no failure.
+- **Overrun.** The same frame budget and window as the upscaler (see [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo)). A sustained overrun switches it off; there is no lighter step to drop to.
+- **HDR10+.** HDR10+ metadata in a frame switches it off: the display applies HDR10+ to the picture it receives, which would then be mapped twice. The container does not declare HDR10+, so the load usually cannot see it before the first frames.
+- **Switching off.** Repeated failures, a sustained overrun or HDR10+ switch it off for the session (logged once as `[VideoProcessing] disabled: ...`, and published through `$activeVideoProcessing`).
+  - It stays off for the rest of the session, also across in-session rebuilds, and `$activeVideoProcessing` keeps its `disabledReason`.
+  - The title (size, declared metadata and target) is remembered for the process: with the source frame rate after an overrun or failures, at any rate after HDR10+. A later load it covers logs `[VideoProcessing] not taken (the processing disabled itself for this title earlier in this process)`.
+- **Timing log.** For the first ten 48-frame windows, it logs `[VideoProcessing] timing: ... ms mean over 48 frames at ... ms interval`.
+
+**Going back to native.** As for the upscaler: a URL VOD session that only the processing put on the software path reloads at the current position on the native path once it switches itself off (logged as `[VideoProcessing] processing disabled on a session it alone put on the software path: ...`). A custom `IOReader` source and a live session stay on the software path, with frames delivered as decoded.
+
+**Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()` and decides the route again. On a custom `IOReader` source, turning it off is honoured in place. Turning it on, or changing `targetPeakNits` while it is on, is refused with `SessionReloadRefusal.videoProcessingRouteNeedsFreshLoad`.
+
 #### `autoplay`
 
 `autoplay` describes THIS MOUNT and nothing after it. The rebuilds a session makes on its own (`reloadAtCurrentPosition`, an option correction, the AirPlay LAN swap, an audio-delay change) come back in the transport state the session is in, not in this one.
@@ -2890,6 +2949,10 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 | `AudioShapingState` | `.off`, `.applied`, `.unavailable`; see `$audioShapingState`. |
 | `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
 | `UpscaleScaler` | `.automatic` or `.lineArt`, the scaler `LoadOptions.upscaleScaler` selects. See [`upscaleScaler`](#upscalescaler). |
+| `VideoProcessingOptions` | `targetPeakNits`, the display's peak in nit. `LoadOptions.videoProcessing`; see [`videoProcessing`](#videoprocessing). |
+| `VideoProcessingStatus` | `stages` (`[VideoProcessingStage]`), `sourcePeakNits`, `sourcePeak` (a `ToneMapSourcePeak`), `targetPeakNits`, `disabledReason` (set when the processing switched itself off mid-session). See [Picture processing status](#picture-processing-status). |
+| `VideoProcessingStage` | `.toneMap`, the BT.2390 tone map. |
+| `ToneMapSourcePeak` | `.mastering` or `.maxCLL`: which of the source's values set the peak the tone map starts from. |
 | `AudioTapChannels` | `.downmix` (every channel summed) or `.dialogue` (the front-centre channel, falling back to the downmix on a source without one). |
 | `AudioTapBuffer` | `buffer` (`AVAudioPCMBuffer`), `sourceTime`, `discontinuity`, `channels` (what this buffer actually carries). Non-discontinuity buffers are strictly increasing and non-overlapping, which is what SpeechAnalyzer's input timeline requires. |
 | `LiveTelemetry` | The 1 Hz snapshot: bitrates, observed fps, dropped frames, cache and network bytes, A/V gap, RSS. |

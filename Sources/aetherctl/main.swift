@@ -72,7 +72,7 @@ func printUsage() {
       aetherctl swdecode [--frames N] <url>
       aetherctl bench [--iterations N] [--json out.json] [--baseline base.json] [--tolerance PCT]
       aetherctl bench --compare <base.json> <new.json> [--tolerance PCT]
-      aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
+      aetherctl play [--fel [--fel-output]] [--upscale [--line-art]] [--tone-map NITS] [--surface | --window] [--cycle-el SECONDS] [--dv-pin SPEC] [--seconds N] [--live] [--no-sw-escalation] [--standard-join] [--live-start-immediately] [--live-cushion SECONDS] [--dvr-window N] [--subs <codec-or-lang>]
                  [--assert-dv] [--dv-base-layer]
                  [--start-position S] [--switch-audio <index>[@ms]]
                  [--teletext-page N] [--switch-teletext-page <page|auto>[@ms]]
@@ -90,6 +90,8 @@ func printUsage() {
                       upscaling sub-1080p SDR video to the display (#846),
                       --line-art with the line-art scaler for animation, which
                       also takes 1080p and 10-bit SDR (AE#1039);
+                      --tone-map NITS opts into the picture processing,
+                      tone mapping HDR10 brighter than NITS to it (#957);
                       --surface (or --window) presents
                       into a window; --cycle-el S flips the FEL residual every S
                       seconds, which needs --fel and a surface; --subs activates the first
@@ -900,6 +902,15 @@ if first == "play" {
     // AE#1039: `LoadOptions.upscaleScaler = .lineArt`; implies --upscale.
     let playLineArt = takeFlag("--line-art", from: &rest)
     let playUpscale = takeFlag("--upscale", from: &rest) || playLineArt
+    // #957: `LoadOptions.videoProcessing` with this target peak; off by default as in the engine.
+    var playVideoProcessing: VideoProcessingOptions?
+    if let spec = takeStringFlag("--tone-map", from: &rest) {
+        guard let nits = Double(spec), nits.isFinite, nits > 0 else {
+            print("ERROR: --tone-map takes a target peak in nit above 0, got '\(spec)'")
+            exit(64)
+        }
+        playVideoProcessing = VideoProcessingOptions(targetPeakNits: nits)
+    }
     let playSurfaceFlag = takeFlag("--surface", from: &rest)
     let playWindowFlag = takeFlag("--window", from: &rest)
     let playAttachSurface = playSurfaceFlag || playWindowFlag
@@ -1251,6 +1262,7 @@ if first == "play" {
                  dualLayerRoute: playFelOutput ? .avPlayerOutput : .softwareHost,
                  upscalesLowResolutionVideo: playUpscale,
                  upscaleScaler: playLineArt ? .lineArt : .automatic,
+                 videoProcessing: playVideoProcessing,
                  attachSurface: playAttachSurface,
                  record: playRecord))
 }

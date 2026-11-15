@@ -97,13 +97,13 @@ The engine picks at load (`load(url:)` / `load(source:)`), in this order:
    - Everything else goes to the software host: AV1 without hardware decode, VP9, VP8, MPEG-4 Part 2, MPEG-2, VC-1, interlaced H.264 (for deinterlacing), profiles VideoToolbox cannot decode, and every other codec.
    - The full per-codec table, with the reason for each row, is in [formats.md, Software decode](formats.md#software-decode) and [Hardware decode](formats.md#hardware-decode).
 3. **How the source reaches AVPlayer.** Remote HLS can go to AVPlayer directly. HLS the engine reads itself feeds the loopback. MPEG-DASH becomes a virtual MP4 file. See [Native route variants](architecture-native.md#native-route-variants).
-4. **Optional stages**, all opt-in: low-resolution upscaling and Dolby Vision FEL composition (both can move a session onto the software path), the FEL curve fold, rendered object audio, the I-frame rendition and live recording. See [Optional video stages](architecture-software.md#optional-video-stages), [Audio routes and object audio](architecture-native.md#audio-routes-and-object-audio), [Trick play and scrub stills](architecture-native.md#trick-play-and-scrub-stills) and [Live recording](architecture-native.md#live-recording).
+4. **Optional stages**, all opt-in: low-resolution upscaling, picture processing (the HDR10 tone map) and Dolby Vision FEL composition (all three can move a session onto the software path), the FEL curve fold, rendered object audio, the I-frame rendition and live recording. See [Optional video stages](architecture-software.md#optional-video-stages), [Audio routes and object audio](architecture-native.md#audio-routes-and-object-audio), [Trick play and scrub stills](architecture-native.md#trick-play-and-scrub-stills) and [Live recording](architecture-native.md#live-recording).
 
 A few recoveries move a running session to another pipeline:
 
 - **Software escalation** (`SoftwarePathEscalation`): CoreMedia refuses the media mid-session, so the engine rebuilds the session on the software host.
 - **Remote HLS carriage fallback** (`RemoteHLSIngestFallback`): AVPlayer cannot play a remote HLS stream directly, so the engine reads it itself and serves it through the loopback.
-- **Return from the upscale route**: the upscaler gives up and the session goes back to native.
+- **Return from the upscale or picture processing route**: the stage gives up and the session goes back to native.
 
 `videoRoute` always reports the route actually running. The transitions are listed under [Effective video route](#effective-video-route-videoroute).
 

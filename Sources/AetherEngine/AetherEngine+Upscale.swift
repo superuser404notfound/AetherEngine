@@ -120,6 +120,7 @@ extension AetherEngine {
         else { return }
         guard upscaleNativeReturnOwed != loadGeneration else { return }
         upscaleNativeReturnOwed = loadGeneration
+        nativeReturnOwedBy = "[Upscale] stage"
         settleOwedUpscaleNativeReturn()
     }
 
@@ -140,14 +141,15 @@ extension AetherEngine {
         guard owed == loadGeneration else { upscaleNativeReturnOwed = nil; return }
         guard !loadInFlight, state == .playing || state == .paused else { return }
         upscaleNativeReturnOwed = nil
-        EngineLog.emit("[Upscale] stage disabled on a session it alone put on the software path: "
+        let by = nativeReturnOwedBy
+        EngineLog.emit("\(by) disabled on a session it alone put on the software path: "
                        + "reloading at the current position on the native path", category: .engine)
         Task { @MainActor [weak self] in
             guard let self, self.loadGeneration == owed else { return }
             do {
                 try await self.reloadAtCurrentPosition()
             } catch {
-                EngineLog.emit("[Upscale] native return failed: \(error)", category: .engine)
+                EngineLog.emit("\(by) native return failed: \(error)", category: .engine)
             }
         }
     }

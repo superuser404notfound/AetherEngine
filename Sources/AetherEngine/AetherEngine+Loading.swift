@@ -2097,6 +2097,10 @@ extension AetherEngine {
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
         host.upscalePlan = upscaleRebuild.plan
+        let processingRebuild = VideoProcessingRouteDecision.forRebuild(
+            sessionPlan: sourceVideoProcessingPlan, optionOn: loadedOptions.videoProcessing != nil,
+            disabled: sourceVideoProcessingDisabled)
+        host.videoProcessingPlan = processingRebuild.plan
         host.elType = elType ?? sourceElType
         host.objectAudioRendering = loadedOptions.objectAudioRendering
         host.rendersDTSXObjectAudio = loadedOptions.rendersDTSXObjectAudio
@@ -2316,6 +2320,8 @@ extension AetherEngine {
         #endif
         if let status = upscaleRebuild.status { activeUpscale = status }
         wireUpscaleStatus(from: host)
+        if let status = processingRebuild.status { activeVideoProcessing = status }
+        wireVideoProcessingStatus(from: host)
         // The audio route is settled by `load`: an object-audio one keeps the HDMI link in Atmos.
         followAtmosOutput()
     }

@@ -852,6 +852,21 @@ SDR video below 1080p is scaled up to the display's native size, with VideoToolb
 
 Details in [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo) and [upscaleScaler](api.md#upscalescaler).
 
+### Tone mapping HDR10 to the display's peak
+
+```swift
+LoadOptions(videoProcessing: VideoProcessingOptions(targetPeakNits: 600)) // the display's peak, in nit
+player.$activeVideoProcessing   // VideoProcessingStatus?: what runs, from which source peak; nil while nothing runs
+```
+
+An HDR10 title mastered brighter than the display is tone mapped to the display's peak (BT.2390), and the display is told so (#957). Below the knee the picture is unchanged.
+
+- **It moves the title onto the software path,** so that path's rules apply: PiP through `softwarePiPSource`, the picture stays on this device over AirPlay, and an E-AC-3 Atmos track plays as its channel bed.
+- **Some titles keep their usual route:** Dolby Vision, HDR10+, HLG and SDR, a title whose peak is at or below the target or that declares no metadata, and any AirPlay route. The load logs one `[VideoProcessing]` line saying why.
+- **It never stops playback.** Processing that falls behind, or a stream that turns out to carry HDR10+, switches itself off. `$activeVideoProcessing` then carries `disabledReason`.
+
+Details in [api.md › videoProcessing](api.md#videoprocessing).
+
 ### Subtitle offset reach
 
 ```swift

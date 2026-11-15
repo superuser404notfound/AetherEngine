@@ -91,6 +91,29 @@ enum HDR10StaticMetadataSEI {
         }
     }
 
+    /// What a PQ stream declares before its first packet, and where it was found: the container first,
+    /// then the SEI in the `hvcC` (HEVC) or the metadata OBUs in the `av1C` (AV1). `.none` and "none" for a
+    /// stream that is not PQ or declares nothing. The decoder starts from it, and the load's picture
+    /// processing decision reads it (#957).
+    static func declared(by codecpar: UnsafePointer<AVCodecParameters>) -> (values: Values, source: String) {
+        guard codecpar.pointee.color_trc == AVCOL_TRC_SMPTE2084 else { return (.none, "none") }
+        var values = fromCodedSideData(codecpar)
+        var source = values.isEmpty ? "none" : "container"
+        if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
+           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+            let fromRecord = scanHEVCConfigRecord(extradata, size: Int(codecpar.pointee.extradata_size))
+            if !fromRecord.isEmpty { source = values.isEmpty ? "hvcC" : source + "+hvcC" }
+            values = values.filling(from: fromRecord)
+        }
+        if !values.isComplete, codecpar.pointee.codec_id == AV_CODEC_ID_AV1,
+           let extradata = codecpar.pointee.extradata, codecpar.pointee.extradata_size > 0 {
+            let fromRecord = scanAV1ConfigRecord(extradata, size: Int(codecpar.pointee.extradata_size))
+            if !fromRecord.isEmpty { source = values.isEmpty ? "av1C" : source + "+av1C" }
+            values = values.filling(from: fromRecord)
+        }
+        return (values, source)
+    }
+
     /// The container's declaration, from the stream's coded side data.
     static func fromCodedSideData(_ codecpar: UnsafePointer<AVCodecParameters>) -> Values {
         var found = Values.none
