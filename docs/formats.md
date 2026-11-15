@@ -330,10 +330,21 @@ Some files carry timestamps or bitstreams that a player would show wrongly. The 
 | MP4 whose composition offsets are missing only in later regions (judder after a seek) | Streams the same slot repair per sequence | None | [architecture › MP4 with composition offsets missing only in later regions](architecture-native.md#mp4-with-composition-offsets-missing-only-in-later-regions), [regression and reproduction](notes/partial-composition-regression.md) |
 | H.264 VOD whose parameter sets change mid-file (audio, no picture) | Moves the session to the software path | Software decode | [Below](#h264-vod-with-changing-parameter-sets) |
 | A video sample whose NAL chain overruns it, or confirmed HEVC with an incomplete two-byte NAL header (AE#561, #960) | Cuts an overlong chain at its last complete NAL; removes incomplete HEVC headers while preserving valid NALs, dropping a sample with no complete header. A CoreMedia refusal that still happens rebuilds the session on the software path, once | None, or software decode | [architecture › A video sample whose NAL chain overruns it](architecture-native.md#a-video-sample-whose-nal-chain-overruns-it) |
+| HEVC coded 3840x2176 and cropped to 2160 by a conformance window, on tvOS. An Apple TV (AppleTV18,1, tvOS 27.2.1) restarts when its hardware decoder gets this SPS | Sets the window's offsets to zero in the init segment and in every in-band SPS (`HEVCConformanceCrop`). AVFoundation still presents 2160 lines | None, hardware decode stays | [Below](#hevc-coded-3840x2176-and-cropped-to-2160) |
 | 24p film stamped with 2:3 pulldown times, 50 and 33 ms per frame (Sodalite#236) | Puts each frame on its 24p slot on the native route (`PulldownCadenceRetimer`) | None | [architecture › 2:3 pulldown timing on 24p film](architecture-native.md#23-pulldown-timing-on-24p-film) |
 | A declared frame rate that is not a standard rate (mkvmerge writes the first frame's duration, so such a file declares 20 fps) | Measures the rate on the head packets the probe already queued and uses that (23.976 here) for the display switch, the master's `FRAME-RATE` and the frame grid | None | |
 
 On the pulldown clip, 587 of 606 frame steps came out at exactly 41.7 ms, where every step had been 50 or 33. Content that is not film (true 30p or 60p, constant-rate stretches) is untouched.
+
+#### HEVC coded 3840x2176 and cropped to 2160
+
+**The problem.** Some encoders pad a 2160-line picture to 2176 lines and crop the 16 extra lines with the SPS conformance window. On an Apple TV (AppleTV18,1, tvOS 27.2.1) the hardware decoder takes such a stream and the device restarts within about 160 ms of the first frame. An iPhone plays the same segments. The software path plays them on the Apple TV.
+
+**What was measured.** One variable was changed at a time on the device. The same pictures play once the window's offsets are zero. An ordinary x265 encode restarts the device as soon as it carries this window. The level, the HRD parameters, the timing SEI, the access unit delimiters and the coding tools make no difference.
+
+**What happens.** On tvOS the muxer rewrites the SPS so the window's four offsets are zero. This covers the configuration record in the init segment (an `hvcC` record or Annex-B parameter sets) and every in-band SPS in an Annex-B sample. The sample entry states the coded height. AVFoundation presents the picture at 2160 lines without the window, so no padding is visible.
+
+The repair is fail-closed. Only a 4:2:0 base-layer SPS of exactly 3840x2176 with a bottom crop of 16 lines and no other crop is rewritten. An in-band SPS inside a length-prefixed sample (an `hev1` source) is not rewritten.
 
 #### H.264 VOD with changing parameter sets
 

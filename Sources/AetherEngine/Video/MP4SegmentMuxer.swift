@@ -208,6 +208,11 @@ final class MP4SegmentMuxer {
     private var shortHEVCHeadersRemoved = 0
     /// Latched from `VideoConfig.convertsAnnexBSamples`.
     private let convertsAnnexBVideoSamples: Bool
+    #if os(tvOS)
+    /// The init segment's SPS lost its 2176-to-2160 padding crop (`HEVCConformanceCrop`), so in-band
+    /// copies must lose it too.
+    private let removesUHDPaddingCrop: Bool
+    #endif
     /// AE#561 harness switch: the sanitizer removes the only shape that reproduces a segment Apple's
     /// parser refuses, so the rung underneath it (the software-path escalation) would have nothing to
     /// be measured against. Read once from the environment, never set in a shipped configuration.
@@ -333,6 +338,12 @@ final class MP4SegmentMuxer {
         self.videoNALFraming = video.nalFramingLatch ?? NALFramingLatch()
         self.convertsAnnexBVideoSamples = video.convertsAnnexBSamples
         self.isHEVCVideo = video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC
+        #if os(tvOS)
+        removesUHDPaddingCrop = Self.cropFreeConfiguration(for: video) != nil
+        if removesUHDPaddingCrop {
+            EngineLog.emit("[MP4SegmentMuxer] 3840x2176 HEVC cropped to 2160: conformance window cleared in the init segment and in-band SPS (Apple TV hardware decode)", category: .session)
+        }
+        #endif
         // AE#561: the override, when there is one, is the record that reaches the sample entry. Both
         // carry the same width (the #19 rebuild keeps the source header's first 22 bytes), so this
         // only matters for a source whose own extradata is missing or Annex B.
@@ -632,6 +643,13 @@ final class MP4SegmentMuxer {
         if let extradata = video.extradataOverride {
             Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
         }
+        #if os(tvOS)
+        if let cropFree = Self.cropFreeConfiguration(for: video) {
+            Self.replaceExtradata(videoStream.pointee.codecpar, with: cropFree)
+            // The sample entry states the coded height, as in the stream that was verified on device.
+            videoStream.pointee.codecpar.pointee.height = 2176
+        }
+        #endif
         if video.stereo == .multiview {
             // movenc writes `lhvC` (the second layer's parameter sets, which the extradata carries after
             // the base layer's) only for a stream with this disposition, and a new stream has none. The
@@ -741,7 +759,11 @@ final class MP4SegmentMuxer {
         // Before the AE#561 sanitizer, which walks the sample as the length-prefixed chain the
         // record declares. A packet with no start code is written as it came.
         if convertsAnnexBVideoSamples, streamIndex == videoOutputStreamIndex {
+            #if os(tvOS)
+            _ = AnnexBSampleConverter.convertToLengthPrefixed(packet, removeUHDPaddingCrop: removesUHDPaddingCrop)
+            #else
             _ = AnnexBSampleConverter.convertToLengthPrefixed(packet)
+            #endif
         }
 
         // #64 mid-segment flush bound: cap libavformat's interleaver RAM on a very long segment
@@ -1363,6 +1385,22 @@ final class MP4SegmentMuxer {
     }
 
     /// Replace codecpar.extradata using av_malloc + AV_INPUT_BUFFER_PADDING_SIZE pad.
+    #if os(tvOS)
+    /// The video configuration with the 2176-to-2160 padding crop cleared, or nil when the track is
+    /// not HEVC of that geometry. Reads the override when there is one, the source extradata otherwise.
+    static func cropFreeConfiguration(for video: VideoConfig) -> [UInt8]? {
+        guard video.codecpar.pointee.codec_id == AV_CODEC_ID_HEVC else { return nil }
+        if let override = video.extradataOverride {
+            return HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: override)
+        }
+        guard let extradata = video.codecpar.pointee.extradata, video.codecpar.pointee.extradata_size > 0 else {
+            return nil
+        }
+        let bytes = [UInt8](UnsafeBufferPointer(start: extradata, count: Int(video.codecpar.pointee.extradata_size)))
+        return HEVCConformanceCrop.removingUHDPaddingCrop(fromConfiguration: bytes)
+    }
+    #endif
+
     private static func replaceExtradata(
         _ codecpar: UnsafeMutablePointer<AVCodecParameters>,
         with bytes: [UInt8]
