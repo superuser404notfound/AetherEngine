@@ -325,14 +325,18 @@ private struct PacedOpen {
         let url = URL(string: "http://127.0.0.1:\(origin.port)/live.ts")!
         let demuxer = Demuxer()
         defer { demuxer.close() }
-        // The close is armed on a GCD timer from the open's own thread, not polled from this task.
-        // In the nightly one-thread pool job the pool sat starved for two minutes, the poll ran only
-        // after the pass had already released at 3.5 s, and the test failed on a close never sent.
+        // The close is armed on a thread of its own from the open's progress callback, not polled from
+        // this task and not on a GCD global queue. In the nightly one-thread pool job the pool sat
+        // starved for two minutes and the poll ran after the pass had released at 3.5 s; on the CI
+        // runners a full run starved the global queue the same way, and the close came too late.
         if let closeDelay {
-            let delay = DispatchTimeInterval.milliseconds(Int(closeDelay / .milliseconds(1)))
+            let seconds = Double(closeDelay / .milliseconds(1)) / 1000
             demuxer.onOpenProgress = { [weak demuxer] stage in
                 guard stage == .containerOpened else { return }
-                DispatchQueue.global().asyncAfter(deadline: .now() + delay) { demuxer?.markClosed() }
+                Thread.detachNewThread {
+                    Thread.sleep(forTimeInterval: seconds)
+                    demuxer?.markClosed()
+                }
             }
         }
 
