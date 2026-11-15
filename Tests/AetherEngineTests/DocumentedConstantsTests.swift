@@ -219,6 +219,20 @@ final class DocumentedConstantsTests: XCTestCase {
         assertDocumented("by more than the tolerance and by more than 50 us", try documentation())
     }
 
+    /// docs/architecture-software.md and docs/cli.md quote the tone curve's knee, the probe's default target
+    /// and the bench's curve (AE#957).
+    func testToneMapNumbersMatchDocumentation() throws {
+        let docs = try documentation()
+        let curve = try XCTUnwrap(BT2390ToneCurve(sourcePeakNits: 1000, targetPeakNits: 600))
+        let knee = BT2390ToneCurve.nits(pq: curve.kneeStart * curve.sourcePeakPQ)
+        XCTAssertEqual(knee.rounded(), 464)
+        assertDocumented("A 1000 nit source to a 600 nit target starts rolling off at 464 nit", docs)
+        XCTAssertEqual(HDR10ProbeSettings.defaultTargetPeakNits, 600)
+        assertDocumented("`AETHER_HDR10_PROBE_TARGET` nit (600 by default)", docs)
+        XCTAssertEqual(PerFrameBenchmark.toneMapCurve, curve)
+        assertDocumented("a 1000 nit master to a 600 nit target", docs)
+    }
+
     // MARK: - Documentation corpus
 
     private static var repoRoot: URL {

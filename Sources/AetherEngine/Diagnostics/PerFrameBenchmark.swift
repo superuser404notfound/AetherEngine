@@ -95,11 +95,9 @@ struct PerFrameBenchmark {
             results.append(normalizerOwnedCopy(frame))
             results.append(rendererSampleBuffer(frame))
             if includesChain {
-                results.append(chainPassThrough(frame, onePass: true))
-                results.append(chainPassThrough(frame, onePass: false))
+                for chainCase in ChainCase.allCases { results.append(chain(frame, chainCase)) }
             } else {
-                results.append(Self.skipped("chain: pass-through, wall time", "not requested"))
-                results.append(Self.skipped("chain: two passes through RGB, wall time", "not requested"))
+                for chainCase in ChainCase.allCases { results.append(Self.skipped(chainCase.rawValue, "not requested")) }
             }
         } else {
             results.append(Self.skipped("frames", "could not create a \(width)x\(height) P010 buffer"))
@@ -155,20 +153,41 @@ struct PerFrameBenchmark {
         }
     }
 
-    /// The chain's colour round trip: as one kernel (what a chain of pass-through stages runs), and as the
-    /// two passes through the RGB texture that every other stage needs.
-    private func chainPassThrough(_ frame: CVPixelBuffer, onePass: Bool) -> PerFrameBenchmarkResult {
-        let name = onePass ? "chain: pass-through, wall time" : "chain: two passes through RGB, wall time"
+    /// The frame chain cases. The tone map runs the real BT.2390 kernel (no branch, so a flat frame costs
+    /// what a real one does), from `toneMapCurve`.
+    enum ChainCase: String, CaseIterable {
+        case passThrough = "chain: pass-through, wall time"
+        case twoPasses = "chain: two passes through RGB, wall time"
+        case toneMap = "chain: tone map, one kernel, wall time"
+        case toneMapTwoPasses = "chain: tone map, two passes, wall time"
+
+        /// The one-kernel cases: what a chain of identity stages and one fused stage runs.
+        var onePass: Bool { self == .passThrough || self == .toneMap }
+        var toneMaps: Bool { self == .toneMap || self == .toneMapTwoPasses }
+    }
+
+    /// The bench's tone map: the 1000 nit master of `hdr10` to a 600 nit target.
+    static let toneMapCurve = BT2390ToneCurve(sourcePeakNits: 1000, targetPeakNits: 600)!
+
+    /// The chain's colour round trip, and the same with the tone map: as one kernel, and as the two passes
+    /// through the RGB texture that every other stage needs.
+    private func chain(_ frame: CVPixelBuffer, _ chainCase: ChainCase) -> PerFrameBenchmarkResult {
+        let name = chainCase.rawValue
         #if targetEnvironment(simulator)
         return Self.skipped(name, "the frame chain is not built for the simulator")
         #else
         guard #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) else {
             return Self.skipped(name, "the frame chain needs OS 26")
         }
+        let stage: any FrameChainStage = chainCase.toneMaps
+            ? ToneMapStage(curve: Self.toneMapCurve,
+                           source: HDR10StaticMetadata(maxCLL: 1000, maxFALL: 400, masteringPeakNits: 1000,
+                                                       masteringMinNits: 0.005))
+            : PassThroughStage()
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
               let chain = try? FrameChain(device: device, queue: queue, sourceWidth: width, sourceHeight: height,
-                                          targetWidth: width, targetHeight: height, stages: [PassThroughStage()],
-                                          fusesRoundTrip: onePass)
+                                          targetWidth: width, targetHeight: height, stages: [stage],
+                                          fusesRoundTrip: chainCase.onePass)
         else { return Self.skipped(name, "no Metal device or the chain could not be built") }
         let picture = FrameUpscaler.pictureRegion(of: frame)
         var gpu: [Double] = []

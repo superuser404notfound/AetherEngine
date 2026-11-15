@@ -2163,6 +2163,8 @@ swift run -c release aetherctl bench --baseline /tmp/base.json
 | `renderer: sample buffer` | Wrapping a frame for the display layer, format description cache hit. |
 | `chain: pass-through, wall time` | The frame chain with one pass-through stage, which runs as one kernel. Its GPU time is in the note. Needs OS 26 and real hardware. |
 | `chain: two passes through RGB, wall time` | The same frame through the RGB texture, as every chain with a real stage runs. |
+| `chain: tone map, one kernel, wall time` | The frame chain with the BT.2390 tone-map stage, a 1000 nit master to a 600 nit target, run inside the one round-trip kernel. The real kernel, which costs the same on any picture. |
+| `chain: tone map, two passes, wall time` | The same tone map as its own pass between the two passes through RGB, as when it shares a chain with a stage that needs the texture. |
 | `sei: HDR10 scan of a 250 KB key frame` | The in-band scan for the HDR10 SEI. |
 
 **Verdict.** A case regresses when:
