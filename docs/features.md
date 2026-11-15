@@ -42,6 +42,7 @@ The engine sends a format to hardware when the platform can decode it, and to it
 - **Interlaced H.264** goes to software, because AVPlayer does not deinterlace. On VOD (on-demand files, not live) the engine checks the declared field order against decoded frames. Progressive video that is only packed as interlaced therefore keeps hardware decode.
 - **Deinterlacing** runs on the GPU (yadif_videotoolbox, Metal, field rate by default), with a CPU bwdif fallback.
 - **Upscaling (opt-in):** `LoadOptions.upscalesLowResolutionVideo` scales SDR video below 1080p up to the display. It uses VideoToolbox super resolution, then MetalFX, and needs OS 26. HDR, Dolby Vision and AirPlay keep their usual route, and the upscaling stage never stops playback. For animation, `upscaleScaler = .lineArt` runs a line-art network instead, which also takes 1080p. See [api.md › upscalesLowResolutionVideo](api.md#upscaleslowresolutionvideo).
+- **Tone mapping (opt-in):** `LoadOptions.videoProcessing` maps an HDR10 title whose declared peak is above `targetPeakNits` down to that peak (BT.2390), and the frame tells the display the target, so it does not map a second time. It plays the title on the software path and needs OS 26. Dolby Vision, HDR10+, HLG and SDR keep their usual route. See [api.md › videoProcessing](api.md#videoprocessing).
 - **3D on visionOS:** an MV-HEVC second view and side-by-side or over-under frame packing (HEVC) play in stereo (`LoadOptions.stereoPresentation`). Other platforms play 2D. See [api.md › stereoPresentation](api.md#stereopresentation).
 
 ## HDR and Dolby Vision
@@ -195,5 +196,5 @@ These are deliberate:
 - **No analytics or session reporting.** A 1 Hz `engine.diagnostics.liveTelemetry` surface exists for host UIs that show runtime stats locally. Nothing leaves the device.
 - **No playlist or queue.** Call `load(url:)` for the next item.
 - **No subtitle overlay.** The engine emits `SubtitleCue` (text or `CGImage`); your UI draws it.
-- **No custom renderer.** The picture goes through Apple's display stack (AVPlayerLayer or AVSampleBufferDisplayLayer). Metal runs only in opt-in stages (upscaling, the FEL composer) and in GPU deinterlacing.
+- **No custom renderer.** The picture goes through Apple's display stack (AVPlayerLayer or AVSampleBufferDisplayLayer). Metal runs only in opt-in stages (upscaling, tone mapping, the FEL composer) and in GPU deinterlacing.
 - **No third-party networking.** `URLSession` moves the bytes, so TLS, HTTP/3, proxies and MDM rules work for free.
