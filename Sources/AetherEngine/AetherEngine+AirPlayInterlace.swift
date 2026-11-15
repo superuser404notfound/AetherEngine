@@ -19,6 +19,20 @@ extension AetherEngine {
         return receiverAtLoad != receiverNow
     }
 
+    /// Only a session the interlace rule put on the software host because no video receiver was
+    /// reported moves; a FEL source or a codec with no native route stays where it is.
+    nonisolated static func airPlayPictureCanMoveToReceiver(
+        staysLocal: Bool, interlaceReceiverAtLoad: Bool?, reopensAtPosition: Bool
+    ) -> Bool {
+        staysLocal && interlaceReceiverAtLoad == false && reopensAtPosition
+    }
+
+    /// A URL source reopens at the playhead, a live one rejoins its edge. A forward-only VOD source would
+    /// restart from byte 0, and a custom source keeps its route until the next load.
+    var interlaceRouteReopensAtPosition: Bool {
+        !isCustomSource && loadedURL != nil && (loadedOptions.isLive || isSourceSeekable == true)
+    }
+
     func recheckInterlaceRouteForAirPlayReceiver() {
         #if os(iOS)
         let receiverNow = Self.airPlayVideoReceiverHoldsRoute(
@@ -28,13 +42,9 @@ extension AetherEngine {
         case .playing, .paused: !sessionPreservingReloadInFlight
         default: false
         }
-        // A URL source reopens at the playhead, a live one rejoins its edge. A forward-only VOD source
-        // would restart from byte 0, and a custom source keeps its route until the next load.
-        let reopens = !isCustomSource && loadedURL != nil
-            && (loadedOptions.isLive || isSourceSeekable == true)
         guard Self.interlaceRouteNeedsReload(
             receiverAtLoad: interlaceRouteReceiverAtLoad, receiverNow: receiverNow,
-            sessionSettled: settled, reopensAtPosition: reopens) else { return }
+            sessionSettled: settled, reopensAtPosition: interlaceRouteReopensAtPosition) else { return }
         // Written now so a burst of route notifications reloads once.
         interlaceRouteReceiverAtLoad = receiverNow
         EngineLog.emit(

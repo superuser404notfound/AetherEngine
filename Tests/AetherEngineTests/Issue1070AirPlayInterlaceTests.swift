@@ -43,6 +43,23 @@ struct Issue1070AirPlayInterlaceTests {
         }
     }
 
+    @Test("the host's 'show it on the TV' action is offered only where it moves the picture")
+    func canMoveToReceiver() {
+        #expect(AetherEngine.airPlayPictureCanMoveToReceiver(
+            staysLocal: true, interlaceReceiverAtLoad: false, reopensAtPosition: true))
+        // VP9, MPEG-2, a host-forced software path: interlace did not decide the route.
+        #expect(!AetherEngine.airPlayPictureCanMoveToReceiver(
+            staysLocal: true, interlaceReceiverAtLoad: nil, reopensAtPosition: true))
+        // Already on the native route for the receiver, or the picture is not local at all.
+        #expect(!AetherEngine.airPlayPictureCanMoveToReceiver(
+            staysLocal: true, interlaceReceiverAtLoad: true, reopensAtPosition: true))
+        #expect(!AetherEngine.airPlayPictureCanMoveToReceiver(
+            staysLocal: false, interlaceReceiverAtLoad: false, reopensAtPosition: true))
+        // Forward-only VOD or a custom source.
+        #expect(!AetherEngine.airPlayPictureCanMoveToReceiver(
+            staysLocal: true, interlaceReceiverAtLoad: false, reopensAtPosition: false))
+    }
+
     @Test("reload only on a real change of a settled, reopenable session the interlace rule routed")
     func reloadDecision() {
         // Viewer picks the Apple TV mid-session, then lets go again.

@@ -1165,6 +1165,7 @@ It is per engine instance, so several engines at once can be told apart without 
 | `$audioDelivery` | `AudioDelivery`: how the audio reaches the renderer, one of `.none`, `.noAudioInSource`, `.streamCopy`, `.bridged`, `.decoded`, `.droppedNoPipeline`, `.playerManaged`. A fallback ladder demotes on `.droppedNoPipeline` (AE#641). See [Reading whether the audio was delivered](#reading-whether-the-audio-was-delivered). |
 | `$currentAVPlayer`, `$currentAVPlayerItem` | The live AVFoundation objects, re-emitted on every reload. Both nil on `.software`, which renders into its own layer. A host that only hands `currentAVPlayer` to an `AVPlayerViewController` gets audio over an empty video plane on that route (#298). |
 | `$airPlayPictureStaysLocal` | iOS: true while a wireless AirPlay receiver holds the audio route but the session runs on the software host. See [AirPlay and the software host](#airplay-and-the-software-host). |
+| `$airPlayPictureCanMoveToReceiver` | iOS: true while the picture stays local and `setAirPlayReceiverShowsVideo(true)` would move it to the receiver. |
 | `setScreenMirrored(_:)` | iOS: tell the engine whether the screen is being mirrored. |
 | `setAirPlayReceiverShowsVideo(_:)` | iOS: tell the engine whether the AirPlay receiver on the audio route shows video. |
 
@@ -1177,6 +1178,11 @@ It is per engine instance, so several engines at once can be told apart without 
 
 - False on the native paths, where the receiver gets the stream, and everywhere off iOS.
 - False too while the host reports the screen as mirrored (`setScreenMirrored(_:)`), because the mirror carries the layer.
+
+**`$airPlayPictureCanMoveToReceiver`** (iOS, AE#1070) is true while `airPlayPictureStaysLocal` is true and `setAirPlayReceiverShowsVideo(true)` would move the picture to the receiver. Show a "show it on the TV" action exactly while it is true, and call that setter when the viewer taps it. The engine reloads at the playhead onto the native route, and both flags drop.
+
+- Today that covers interlaced H.264 on a URL source that can reopen at its position (seekable VOD, or live).
+- VP9, AV1 without hardware decode, MPEG-2, VC-1 and a host's `preferredDecodePath = .software` have no native route for it, so it stays false there.
 
 **`setScreenMirrored(_:)`** (iOS). Pass `true` for a mirror only, derived from `UITraitCollection.sceneCaptureState`; a screen recording also reads as captured there. A mirror carries the software host's layer to the receiver, so `airPlayPictureStaysLocal` reads false while it is on. No effect off iOS.
 

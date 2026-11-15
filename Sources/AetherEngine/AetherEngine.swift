@@ -849,6 +849,12 @@ public final class AetherEngine: ObservableObject {
     /// reports the screen as mirrored (`setScreenMirrored(_:)`), because the mirror carries the layer.
     @Published public internal(set) var airPlayPictureStaysLocal = false
 
+    /// AE#1070, iOS: true while `airPlayPictureStaysLocal` is true and `setAirPlayReceiverShowsVideo(true)`
+    /// would move the picture to the receiver. Today that is interlaced H.264 on a URL source that can
+    /// reopen at its position: the engine reloads it onto the native route by itself. A host can offer a
+    /// "show it on the TV" action exactly while this is true, without knowing the routing rules.
+    @Published public internal(set) var airPlayPictureCanMoveToReceiver = false
+
     nonisolated static func airPlayPictureStaysLocal(backend: PlaybackBackend,
                                                      wirelessAirPlayRoute: Bool,
                                                      screenMirrored: Bool = false) -> Bool {
@@ -912,6 +918,10 @@ public final class AetherEngine: ObservableObject {
         let next = Self.airPlayPictureStaysLocal(backend: playbackBackend,
                                                  wirelessAirPlayRoute: Self.isWirelessAirPlayRoute(),
                                                  screenMirrored: screenMirrored)
+        let canMove = Self.airPlayPictureCanMoveToReceiver(
+            staysLocal: next, interlaceReceiverAtLoad: interlaceRouteReceiverAtLoad,
+            reopensAtPosition: interlaceRouteReopensAtPosition)
+        if airPlayPictureCanMoveToReceiver != canMove { airPlayPictureCanMoveToReceiver = canMove }
         guard airPlayPictureStaysLocal != next else { return }
         airPlayPictureStaysLocal = next
         EngineLog.emit(
